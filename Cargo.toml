@@ -1,0 +1,71 @@
+[workspace]
+members = ["crates/*", "app"]
+resolver = "3"
+
+[workspace.package]
+authors = ["Eugen Guriev <gurievcreative@gmail.com>"]
+edition = "2024"
+version = "0.1.0"
+publish = false
+
+[workspace.dependencies]
+# Local crates.
+crook_usage = { path = "crates/crook_usage" }
+crookui = { path = "crates/crookui" }
+crookui_core = { path = "crates/crookui_core" }
+
+# --- Shared third-party dependencies -----------------------------------------
+#
+# Every dependency here builds on macOS, Linux and Windows with no system
+# library and no build script. That is a deliberate constraint: the moment one
+# of them needs `pkg-config` or a vendored toolchain, cross-platform CI stops
+# being free. See docs/architecture.md.
+
+anyhow = "1.0"
+async-executor = "1.14"
+async-task = "4.7"
+blocking = "1.7"
+bytemuck = { version = "1.25", features = ["derive"] }
+chrono = { version = "0.4", features = ["serde"] }
+cosmic-text = "0.19"
+dirs = "6.0"
+env_logger = "0.11"
+etagere = "0.3"
+futures-lite = "2.6"
+log = "0.4"
+parking_lot = "0.12"
+# Encoding an offscreen render so a human, or CI, can look at it: `--snapshot`,
+# the examples, and the renderer's own tests.
+png = "0.18"
+pollster = "0.4"
+rustc-hash = "2.1"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+smallvec = "1.15"
+swash = "0.2"
+thiserror = "2.0"
+# rustls only: no OpenSSL headers on Linux, no schannel quirks on Windows.
+ureq = { version = "3.4", default-features = false, features = ["rustls", "json"] }
+wgpu = { version = "30.0", default-features = false, features = [
+  "dx12",
+  "gles",
+  "metal",
+  "vulkan",
+  "wgsl",
+  "std",
+  "parking_lot",
+] }
+winit = "0.30"
+
+[profile.dev]
+# The renderer is unusably slow in a fully unoptimized build, but compiling the
+# workspace at opt-level 3 costs a minute per touch. Optimize dependencies only.
+opt-level = 0
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "debuginfo"

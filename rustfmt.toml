@@ -1,0 +1,5 @@
+edition = "2024"
+
+# The repository is checked out on three platforms; let the file on disk be the
+# same bytes on all of them.
+newline_style = "Unix"

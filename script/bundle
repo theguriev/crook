@@ -1,0 +1,112 @@
+#!/bin/sh
+#
+# Produce a release build of Crook for the host platform.
+#
+#   ./script/bundle                # build, into dist/<platform>/
+#   ./script/bundle --check-only   # type-check with release flags, build nothing
+#
+# --check-only is what CI runs on all three platforms. It compiles the workspace
+# with the exact profile and feature set a shipped build uses, which is the only
+# cheap way to catch a feature combination that compiles in debug and not in
+# release. It produces no artifacts.
+#
+# TODO: replace the build path below with cargo-dist (https://opensource.axo.dev/cargo-dist/).
+# It generates the release matrix and emits .tar.gz / .zip / .msi / .dmg / .deb / .rpm from a
+# manifest, which is the whole of what Warp spends 2,245 lines of shell and PowerShell on. If
+# a real macOS .app becomes necessary — it will, for the Dock icon and URL schemes — add
+# cargo-bundle for that one artifact and leave the rest to cargo-dist.
+
+set -eu
+
+cd "$(dirname "$0")/.."
+
+export PATH="$HOME/.cargo/bin:$PATH"
+
+CHECK_ONLY=0
+
+usage() {
+  cat <<'EOF'
+Usage: ./script/bundle [--check-only]
+
+  --check-only   Type-check the workspace with release flags; produce no artifacts.
+  -h, --help     Show this message.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --check-only)
+      CHECK_ONLY=1
+      shift
+      ;;
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "error: unknown argument '$1'" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+case "$(uname -s)" in
+  Darwin)
+    PLATFORM=macos
+    BIN_FILE=crook
+    ;;
+  Linux)
+    PLATFORM=linux
+    BIN_FILE=crook
+    ;;
+  MINGW* | MSYS* | CYGWIN*)
+    PLATFORM=windows
+    BIN_FILE=crook.exe
+    ;;
+  *)
+    echo "error: no bundle steps defined for $(uname -s)" >&2
+    exit 1
+    ;;
+esac
+
+# The one flag that distinguishes a shipped build: it detaches the console on
+# Windows. Package-qualified because the command below is workspace-wide.
+RELEASE_FEATURES="crook/release_bundle"
+
+if [ "$CHECK_ONLY" = 1 ]; then
+  echo "==> Type-checking $PLATFORM with release flags"
+  exec cargo check \
+    --locked \
+    --workspace \
+    --all-targets \
+    --profile release \
+    --features "$RELEASE_FEATURES"
+fi
+
+echo "==> Building $PLATFORM release binary"
+cargo build \
+  --locked \
+  --release \
+  -p crook \
+  --bin crook \
+  --features "$RELEASE_FEATURES"
+
+# `cargo build` honors CARGO_TARGET_DIR and a shared build.target-dir, so ask
+# Cargo where it put things rather than assuming ./target. The second sed undoes
+# JSON's backslash escaping, which is how Windows paths arrive.
+TARGET_DIR="$(cargo metadata --no-deps --format-version 1 |
+  sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' |
+  sed 's|\\\\|/|g')"
+BUILT="$TARGET_DIR/release/$BIN_FILE"
+
+if [ ! -f "$BUILT" ]; then
+  echo "error: expected a binary at $BUILT" >&2
+  exit 1
+fi
+
+OUT_DIR="dist/$PLATFORM"
+mkdir -p "$OUT_DIR"
+cp "$BUILT" "$OUT_DIR/$BIN_FILE"
+
+echo "==> $OUT_DIR/$BIN_FILE"

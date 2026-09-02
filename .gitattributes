@@ -1,0 +1,12 @@
+# The working tree is checked out on macOS, Linux and Windows, and `rustfmt.toml`
+# pins `newline_style = "Unix"`. Git for Windows defaults to `core.autocrlf=true`,
+# which would rewrite every file to CRLF on checkout — `cargo fmt --check` then
+# rejects every source file, and `script/bootstrap` becomes an unrunnable `sh`
+# script with a `\r` in its shebang. Normalising here is what makes the file on
+# disk the same bytes on all three.
+* text=auto eol=lf
+
+# Binary, and never to be normalised.
+*.png binary
+*.ttf binary
+*.otf binary

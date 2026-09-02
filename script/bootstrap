@@ -1,0 +1,114 @@
+#!/bin/sh
+#
+# Prepare this machine to build Crook.
+#
+# Crook has no build scripts and links no system library, so this installs very
+# little: a linker, and — on Linux — the shared objects winit and wgpu dlopen at
+# window-creation time. Where installing is not ours to do (the Windows MSVC
+# toolchain, macOS Command Line Tools), it prints the command and exits.
+#
+# Non-interactive by design, so CI can run it unmodified.
+
+set -eu
+
+cd "$(dirname "$0")/.."
+
+# rustup was installed with --no-modify-path on this machine, so the proxies are
+# not on a login shell's PATH.
+export PATH="$HOME/.cargo/bin:$PATH"
+
+as_root() {
+  if [ "$(id -u)" = 0 ]; then
+    "$@"
+  else
+    sudo "$@"
+  fi
+}
+
+# Debian package names, split by when they are needed. The runtime list is the
+# one that bites: the workspace compiles without it and then opens a black
+# window, or no window at all.
+APT_BUILD_PACKAGES="build-essential pkg-config"
+APT_RUNTIME_PACKAGES="libx11-6 libxcb1 libxi6 libxcursor1 libxkbcommon-x11-0 \
+libwayland-client0 libwayland-egl1 libegl1 libgl1 libgl1-mesa-dri \
+mesa-vulkan-drivers fontconfig"
+
+bootstrap_macos() {
+  if xcode-select --print-path >/dev/null 2>&1; then
+    echo "==> Xcode Command Line Tools: present"
+  else
+    echo "==> Installing Xcode Command Line Tools"
+    echo "    A system dialog will appear. Re-run ./script/bootstrap once it finishes."
+    xcode-select --install || true
+    exit 1
+  fi
+
+  # Warp needs full Xcode here, plus `xcodebuild -downloadComponent MetalToolchain`,
+  # because it compiles .metal shaders and Objective-C. Crook reaches Metal through
+  # wgpu, so the Command Line Tools are the whole macOS prerequisite.
+  echo "==> No full Xcode and no Metal Toolchain needed; wgpu ships shader translation."
+}
+
+bootstrap_linux() {
+  if ! command -v apt-get >/dev/null 2>&1; then
+    echo "==> Unrecognized distribution; install the equivalents of these packages:"
+    echo "    build:   $APT_BUILD_PACKAGES"
+    echo "    runtime: $APT_RUNTIME_PACKAGES"
+    echo "    Plus at least one installed font family."
+    return
+  fi
+
+  echo "==> Installing build and runtime dependencies"
+  as_root apt-get update
+  # shellcheck disable=SC2086 # deliberate word splitting: these are package lists
+  as_root apt-get install -y $APT_BUILD_PACKAGES $APT_RUNTIME_PACKAGES
+
+  # fontconfig is installed for its config files, which Crook's font stack parses
+  # in pure Rust to locate font directories. Nothing links libfontconfig, which is
+  # why libfontconfig1-dev is absent from the build list.
+  echo "==> Font directories come from fontconfig's config files; no library is linked."
+}
+
+bootstrap_windows() {
+  cat <<'EOF'
+==> Windows prerequisites cannot be installed from this script.
+
+The x86_64-pc-windows-msvc target needs the MSVC toolchain and the Windows SDK.
+Install Visual Studio Build Tools from an elevated PowerShell:
+
+  winget install --id Microsoft.VisualStudio.2022.BuildTools --override `
+    "--quiet --wait --add Microsoft.VisualStudio.Workload.VCTools --add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 --add Microsoft.VisualStudio.Component.Windows11SDK.22621"
+
+Nothing else is required: Crook takes no dependency that runs bindgen, cmake or
+protoc, so there is no LLVM, no libclang and no protoc to install.
+EOF
+}
+
+case "$(uname -s)" in
+  Darwin)
+    bootstrap_macos
+    ;;
+  Linux)
+    bootstrap_linux
+    ;;
+  MINGW* | MSYS* | CYGWIN*)
+    bootstrap_windows
+    ;;
+  *)
+    echo "error: no bootstrap steps defined for $(uname -s)" >&2
+    exit 1
+    ;;
+esac
+
+if ! command -v cargo >/dev/null 2>&1; then
+  echo "error: cargo not found. Install Rust from https://rustup.rs, then re-run." >&2
+  exit 1
+fi
+
+# The rustup proxies read rust-toolchain.toml and download the pinned toolchain on
+# first use, so asking for the version is enough to materialize it.
+echo "==> Rust toolchain"
+cargo --version
+rustc --version
+
+echo "==> Ready. Run ./script/run"

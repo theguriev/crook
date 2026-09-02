@@ -1,0 +1,122 @@
+name: Crook CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # Supersede in-flight runs for the same ref; the last push is the only one anyone reads.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Backtraces in test failures are worth the debug info; nothing else is.
+  RUSTFLAGS: -C debuginfo=line-tables-only
+  RUST_BACKTRACE: 1
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Checks (${{ matrix.name }})
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            runner: macos-latest
+            # `cargo metadata` writes the whole graph to stdout; each OS needs its own bit bucket.
+            null_device: /dev/null
+          - name: Linux
+            runner: ubuntu-latest
+            null_device: /dev/null
+          - name: Windows
+            runner: windows-latest
+            null_device: "NUL"
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      # Installs this platform's prerequisites and materializes the toolchain pinned in
+      # rust-toolchain.toml. Running the real script here keeps it honest: a bootstrap that
+      # rots is discovered by CI rather than by the next contributor.
+      - name: Bootstrap
+        shell: bash
+        run: ./script/bootstrap
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      # A Cargo.lock that disagrees with the manifests makes every `--locked` step below fail
+      # with a confusing error about an unrelated crate. Fail here instead, with a fix.
+      - name: Ensure Cargo.lock is up to date
+        shell: bash
+        run: |
+          cargo metadata --locked --format-version=1 > ${{ matrix.null_device }} \
+            || (echo "::error::Cargo.lock is out of date with Cargo.toml. Run 'cargo check' and commit the result." && exit 1)
+
+      - name: cargo fmt
+        shell: bash
+        run: cargo fmt --all --check
+
+      - name: cargo clippy
+        shell: bash
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: cargo check
+        shell: bash
+        run: cargo check --locked --workspace --all-targets
+
+      - name: cargo test
+        shell: bash
+        run: cargo test --locked --workspace
+
+  release-flags:
+    name: Release flags (${{ matrix.name }})
+    # Type-checks the workspace with the profile and feature set a shipped build uses. A
+    # feature combination that only breaks under `release_bundle` is otherwise discovered at
+    # release time; this finds it in a few minutes and produces no artifacts.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS
+            runner: macos-latest
+          - name: Linux
+            runner: ubuntu-latest
+          - name: Windows
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Bootstrap
+        shell: bash
+        run: ./script/bootstrap
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-release-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ runner.os }}-cargo-release-
+
+      - name: ./script/bundle --check-only
+        shell: bash
+        run: ./script/bundle --check-only

@@ -1,0 +1,15 @@
+# A terminal spawns processes constantly, and on Windows every one of them
+# flashes a console window unless it sets CREATE_NO_WINDOW. Route them through
+# `crook::process::command`, which sets it.
+#
+# Both keys are needed. `disallowed-types` catches a type annotation
+# (`let c: std::process::Command`); it does NOT catch `Command::new(..)` in
+# expression position, which is how the type is actually reached. Only
+# `disallowed-methods` catches that, and that is the form worth banning.
+disallowed-methods = [
+  { path = "std::process::Command::new", reason = "use crook::process::command, which sets CREATE_NO_WINDOW on Windows" },
+]
+
+disallowed-types = [
+  { path = "std::process::Command", reason = "use crook::process::command, which sets CREATE_NO_WINDOW on Windows" },
+]

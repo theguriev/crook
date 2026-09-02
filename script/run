@@ -1,0 +1,16 @@
+#!/bin/sh
+#
+# Build and run the dev-channel binary. Arguments are forwarded to it.
+#
+#   ./script/run
+#   ./script/run --some-flag
+
+set -eu
+
+cd "$(dirname "$0")/.."
+
+# rustup was installed with --no-modify-path on this machine, so the proxies are
+# not on a login shell's PATH.
+export PATH="$HOME/.cargo/bin:$PATH"
+
+exec cargo run -p crook --bin crook-dev -- "$@"
