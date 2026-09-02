@@ -1,7 +1,7 @@
 [package]
 name = "crook"
 description = "A terminal whose unit of work is an agent."
-license = "AGPL-3.0-only"
+license = "MIT"
 authors.workspace = true
 edition.workspace = true
 version.workspace = true

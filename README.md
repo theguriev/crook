@@ -123,7 +123,7 @@ release-only feature combination does not compile — cheaply, and without produ
 app/                  the `crook` library, plus two ~20-line channel binaries
 crates/crookui_core/  entities, handles, contexts, elements, layout, Scene   (MIT)
 crates/crookui/       winit windowing, wgpu renderer, cosmic-text font stack (MIT)
-crates/crook_usage/   Claude Code credentials and usage polling             (AGPL-3.0)
+crates/crook_usage/   Claude Code credentials and usage polling               (MIT)
 docs/architecture.md  the design, and the reasoning behind each divergence
 script/               bootstrap, run, bundle
 ```
@@ -145,17 +145,20 @@ linter.
 
 ## Licensing
 
-Crook mirrors Warp's split, because parts of Crook are ports of the parts of Warp that permit
-it.
+Crook is MIT throughout. The full text is in [`LICENSE-MIT`](LICENSE-MIT).
 
-| Crate | License |
-| --- | --- |
-| `crookui_core` | MIT |
-| `crookui` | MIT |
-| `crook_usage` | AGPL-3.0-only |
-| `crook` (`app/`) | AGPL-3.0-only |
+Warp is dual-licensed: its `warpui` and `warpui_core` crates are MIT, and everything else in
+that repository is AGPL-3.0. Crook stays clear of the AGPL half:
 
-Warp's `warpui` and `warpui_core` crates are MIT, and code and shaders from those two crates
-may be ported; `crookui` and `crookui_core` are where that ported material lives, under the
-same license it arrived with. Everything else in Warp is AGPL-3.0, so everything else in Crook
-is too. Full texts are in `LICENSE-MIT` and `LICENSE-AGPL`.
+- `crookui` and `crookui_core` port real code and shaders from Warp's two MIT crates. MIT
+  permits that and asks one thing in return — that the copyright notice travel with the code.
+  `LICENSE-MIT` therefore carries Denver Technologies' notice alongside this project's.
+- `crook_usage` descends from a Claude Code usage indicator written for a personal fork of
+  Warp and never contributed upstream. It is its author's own work, licensed here by that
+  author, and it borrows nothing from Warp beyond the shape of the surrounding app.
+- `app/` was written against a description of how Warp's tab strip and header behave, not by
+  copying either. Where its comments mention Warp they are recording a divergence — an
+  index-versus-identity bug not inherited, a public field not repeated.
+
+None of this is legal advice; it is a record of where each file came from, so that someone
+who needs to answer the question properly has the facts to work from.
