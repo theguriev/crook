@@ -151,7 +151,12 @@ impl Tab {
     }
 
     /// The session, for reporting the agent's progress into it.
-    pub fn session_mut(&mut self) -> &mut AgentSession {
+    ///
+    /// Crate-private on purpose: mutating a session changes what the tab bar
+    /// draws, so the only way in from outside is `Workspace::update_session`,
+    /// which notifies in the same call. A public accessor here would be an
+    /// invitation to change rendered state and not repaint.
+    pub(crate) fn session_mut(&mut self) -> &mut AgentSession {
         &mut self.session
     }
 
@@ -269,7 +274,9 @@ impl TabStrip {
     }
 
     /// The tab with this id, for reporting agent progress into it.
-    pub fn get_mut(&mut self, id: TabId) -> Option<&mut Tab> {
+    ///
+    /// Crate-private for the same reason as [`Tab::session_mut`].
+    pub(crate) fn get_mut(&mut self, id: TabId) -> Option<&mut Tab> {
         self.tabs.iter_mut().find(|tab| tab.id() == id)
     }
 
