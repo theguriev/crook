@@ -1,0 +1,28 @@
+[package]
+name = "crookui"
+description = "Crook's GPU front-end: winit windowing, wgpu renderer, cosmic-text font backend."
+license = "MIT"
+authors.workspace = true
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+crookui_core.workspace = true
+
+anyhow.workspace = true
+bytemuck.workspace = true
+cosmic-text.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+pollster.workspace = true
+rustc-hash.workspace = true
+swash.workspace = true
+wgpu.workspace = true
+winit.workspace = true
+
+[dev-dependencies]
+# The two examples: `scene_to_png` encodes the offscreen render, `window` turns
+# wgpu's own diagnostics into something a terminal shows.
+env_logger.workspace = true
+png.workspace = true
