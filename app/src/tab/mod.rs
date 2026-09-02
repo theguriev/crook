@@ -20,11 +20,21 @@
 //! which is how it grew four separately-written and mutually-inconsistent
 //! repairs of the active index. Here every mutation ends in one private
 //! helper that re-finds the active tab *by identity*.
+//!
+//! A tab holds a [`PaneGroup`] rather than a session, so the same two rules
+//! hold one level down: the `pane` module is the strip's shape again, over
+//! panes.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::settings::Granularity;
+
+mod pane;
+
 #[cfg(test)]
 mod tests;
+
+pub use pane::{Direction, Pane, PaneEffect, PaneGroup, PaneId, SplitAxis};
 
 /// A tab's identity, stable for as long as the tab exists.
 ///
@@ -73,18 +83,18 @@ impl AgentStatus {
     }
 }
 
-/// The agent session a tab is a window onto.
+/// The agent session a pane is a window onto.
 ///
-/// Warp's tab points at a `ViewHandle<PaneGroup>` — a split tree of terminal
-/// panes — which is why its tab struct has no title and every accessor threads
-/// a context. A Crook tab is exactly one agent, so the session is owned inline
+/// Warp's tab points at a `ViewHandle<PaneGroup>` whose panes hold views,
+/// which is why its tab struct has no title and every accessor threads a
+/// context. A Crook pane is exactly one agent, so the session is owned inline
 /// and read directly.
 ///
 /// It deliberately has no id of its own. Carrying one would mean carrying the
-/// invariant that it equals its tab's, and a session is reachable as `&mut`
+/// invariant that it equals its pane's, and a session is reachable as `&mut`
 /// from the agent-progress path — so the invariant would be one field
 /// assignment away from being false, and `index_of` would then resolve to the
-/// wrong tab. One identity, owned by [`Tab`], cannot disagree with itself.
+/// wrong pane. One identity, owned by [`Pane`], cannot disagree with itself.
 #[derive(Debug)]
 pub struct AgentSession {
     /// The name the session was created with. Never empty.
@@ -114,29 +124,36 @@ impl AgentSession {
     }
 }
 
-/// One tab: an identity and the session it shows.
+/// One tab: an identity and the panes it shows.
 ///
 /// Deliberately tiny. It owns no hover state, no drag state and no active
 /// flag — hover belongs to the view that renders it and is handed back each
 /// frame, and activeness belongs to the strip, so "two tabs are active" is not
-/// a representable state.
+/// a representable state. This is Warp's `TabData`, which is likewise a pane
+/// group and a handful of visual scraps.
 ///
 /// Both fields are private, and that is load-bearing rather than tidy: a
 /// public `id` is settable through the `&mut Tab` the agent-progress path
 /// hands out, and two tabs sharing an id makes `index_of` resolve a close to
 /// somebody else's tab.
+///
+/// It has no title of its own. Warp's has a `custom_title` a person can
+/// rename, and it takes a comment in `vertical_tabs.rs:3996` to explain when
+/// that title must be suppressed so every row of a group does not print the
+/// same string. Crook has no rename flow, so there is nothing to suppress and
+/// nothing to keep in step.
 #[derive(Debug)]
 pub struct Tab {
     id: TabId,
-    session: AgentSession,
+    panes: PaneGroup,
 }
 
 impl Tab {
-    /// A tab over a new session named `title`.
+    /// A tab over one new session named `title`.
     pub fn new(title: impl Into<String>) -> Self {
         Self {
             id: TabId::next(),
-            session: AgentSession::new(title),
+            panes: PaneGroup::new(title),
         }
     }
 
@@ -145,29 +162,36 @@ impl Tab {
         self.id
     }
 
-    /// The agent session behind it.
-    pub fn session(&self) -> &AgentSession {
-        &self.session
+    /// The panes it holds, in render order. Never empty.
+    pub fn panes(&self) -> &PaneGroup {
+        &self.panes
     }
 
-    /// The session, for reporting the agent's progress into it.
+    /// The panes, for splitting, closing and focusing them.
     ///
-    /// Crate-private on purpose: mutating a session changes what the tab bar
-    /// draws, so the only way in from outside is `Workspace::update_session`,
-    /// which notifies in the same call. A public accessor here would be an
-    /// invitation to change rendered state and not repaint.
-    pub(crate) fn session_mut(&mut self) -> &mut AgentSession {
-        &mut self.session
+    /// Crate-private for the same reason as [`Pane::session_mut`]: everything
+    /// here is drawn, so the way in from outside is `TabStrip::apply`.
+    pub(crate) fn panes_mut(&mut self) -> &mut PaneGroup {
+        &mut self.panes
     }
 
-    /// What to print in the tab bar.
+    /// What to print in the tab bar for the tab as a whole: the focused pane's
+    /// title.
+    ///
+    /// This one line *is* `Tabs` granularity. Warp's row in that mode names
+    /// the tab's focused pane and reads every field off it — title, status,
+    /// working directory, branch, PR link, diff stats. A tab-level aggregate
+    /// would be a different Warp feature (`VerticalTabsTabItemMode::Summary`,
+    /// which is flagged off) rather than this one.
     pub fn title(&self) -> &str {
-        self.session.display_title()
+        self.panes.focused().map_or("", Pane::title)
     }
 
-    /// What the agent is doing.
+    /// What the agent in the focused pane is doing.
     pub fn status(&self) -> AgentStatus {
-        self.session.status
+        self.panes
+            .focused()
+            .map_or_else(AgentStatus::default, Pane::status)
     }
 }
 
@@ -188,6 +212,16 @@ pub enum TabAction {
     MoveLeft,
     /// Move the active tab one slot towards the end.
     MoveRight,
+    /// Split the active tab's focused pane. Warp's
+    /// `PaneGroupAction::Add(Direction)`.
+    Split(Direction),
+    /// Close one pane. When it is its tab's last pane the tab closes, and when
+    /// that was the last tab the window does. Warp's `PaneGroupAction::Remove`
+    /// → `Event::Exited` → `Workspace::close_tab`.
+    ClosePane(PaneId),
+    /// Focus a pane, activating its tab. Warp's
+    /// `WorkspaceAction::FocusPane(PaneViewLocator)`.
+    FocusPane(PaneId),
 }
 
 /// What the shell must do after an action was applied.
@@ -226,10 +260,13 @@ pub struct TabStrip {
     /// to its right. Long-lived agent sessions make that the better answer;
     /// browsers pick the neighbour because their tabs are disposable.
     mru: Vec<TabId>,
-    /// How many tabs this strip has ever opened, which is what the next one is
-    /// named after. Naming from `len()` instead repeats a name as soon as a
-    /// tab in the middle is closed, and two agent sessions called "agent 3"
-    /// are indistinguishable in the bar *and* in the body panel's heading.
+    /// How many sessions this strip has ever opened, which is what the next
+    /// one is named after — a tab's, or a pane's within a tab. Naming from
+    /// `len()` instead repeats a name as soon as one in the middle is closed,
+    /// and two agent sessions called "agent 3" are indistinguishable in the
+    /// bar *and* in the body panel's heading. One counter for both, because in
+    /// `Panes` view a pane and a tab are the same kind of row and a name that
+    /// repeats across them is just as ambiguous.
     opened: u64,
 }
 
@@ -311,6 +348,72 @@ impl TabStrip {
         &self.mru
     }
 
+    /// Every pane in the window, in bar order, with the tab holding it.
+    pub fn panes(&self) -> impl Iterator<Item = (TabId, &Pane)> {
+        self.tabs
+            .iter()
+            .flat_map(|tab| tab.panes().iter().map(|pane| (tab.id(), pane)))
+    }
+
+    /// The pane with this id, wherever it is.
+    pub fn pane(&self, id: PaneId) -> Option<&Pane> {
+        self.tabs.iter().find_map(|tab| tab.panes().get(id))
+    }
+
+    /// The pane with this id, for reporting agent progress into it.
+    ///
+    /// Crate-private for the same reason as [`Pane::session_mut`]. This is the
+    /// agent-progress path now that a session belongs to a pane rather than to
+    /// a tab.
+    pub(crate) fn pane_mut(&mut self, id: PaneId) -> Option<&mut Pane> {
+        self.tabs
+            .iter_mut()
+            .find_map(|tab| tab.panes_mut().get_mut(id))
+    }
+
+    /// The tab holding this pane, if it is still open.
+    pub fn tab_of(&self, pane: PaneId) -> Option<TabId> {
+        self.tabs
+            .iter()
+            .find(|tab| tab.panes().get(pane).is_some())
+            .map(Tab::id)
+    }
+
+    /// The one pane a person is working in: the active tab's focused one.
+    pub fn focused_pane_id(&self) -> Option<PaneId> {
+        self.active().map(|tab| tab.panes().focused_id())
+    }
+
+    /// Every row the bar should draw at this granularity, as the tab it
+    /// belongs to and the pane it stands for.
+    ///
+    /// The direct port of Warp's `pane_ids_for_display_granularity`
+    /// (`app/src/workspace/view/vertical_tabs.rs:6460`), lifted from one tab
+    /// to the whole strip so the bar has a single thing to iterate. A row is a
+    /// pane in both modes; what changes is how many of a tab's panes get one.
+    pub fn rows(&self, granularity: Granularity) -> Vec<(TabId, PaneId)> {
+        let mut rows = Vec::with_capacity(self.tabs.len());
+
+        for tab in &self.tabs {
+            let panes = tab.panes();
+            match granularity {
+                Granularity::Panes => {
+                    rows.extend(panes.iter().map(|pane| (tab.id(), pane.id())));
+                }
+                // Warp falls back to the first pane, and so does this. It is
+                // unreachable — `repair` keeps the focused id resident — but a
+                // tab with no row at all would vanish from the bar with no way
+                // left to click it back.
+                Granularity::Tabs => {
+                    let pane = panes.focused().or_else(|| panes.iter().next());
+                    rows.extend(pane.map(|pane| (tab.id(), pane.id())));
+                }
+            }
+        }
+
+        rows
+    }
+
     /// Applies an action. The only way the strip changes.
     pub fn apply(&mut self, action: TabAction) -> TabEffect {
         match action {
@@ -330,17 +433,80 @@ impl TabStrip {
 
             TabAction::Close(id) => self.close(id),
 
-            TabAction::Select(id) => {
-                if self.active == id || self.get(id).is_none() {
-                    return TabEffect::Unchanged;
-                }
-                self.repair(Some(id));
-                TabEffect::Changed
-            }
+            TabAction::Select(id) => self.select(id),
 
             TabAction::MoveLeft => self.hop(-1),
             TabAction::MoveRight => self.hop(1),
+
+            TabAction::Split(direction) => {
+                // A split opens an agent session, so it is named out of the
+                // same counter a new tab is, and the counter only advances
+                // once there is a pane wearing the name.
+                let title = format!("agent {}", self.opened + 1);
+                let active = self.active;
+                let Some(tab) = self.get_mut(active) else {
+                    // Unreachable: `repair` keeps the active id resident.
+                    return TabEffect::Unchanged;
+                };
+
+                tab.panes_mut().split(direction, title);
+                self.opened += 1;
+                TabEffect::Changed
+            }
+
+            TabAction::ClosePane(id) => {
+                let Some(tab) = self.tab_holding_mut(id) else {
+                    return TabEffect::Unchanged;
+                };
+                let tab_id = tab.id();
+
+                match tab.panes_mut().close(id) {
+                    PaneEffect::Unchanged => TabEffect::Unchanged,
+                    PaneEffect::Changed => TabEffect::Changed,
+                    // The group refuses to empty itself exactly as the strip
+                    // does, so closing a tab's last pane is closing the tab —
+                    // and `close` is still the only place that knows the last
+                    // tab takes the window with it.
+                    PaneEffect::GroupEmptied => self.close(tab_id),
+                }
+            }
+
+            TabAction::FocusPane(id) => {
+                let Some(tab) = self.tab_holding_mut(id) else {
+                    return TabEffect::Unchanged;
+                };
+                let tab_id = tab.id();
+
+                // The pane first, its tab second. Warp's ordering, and its
+                // comment says why (`app/src/workspace/view.rs:5878`):
+                // activating the tab first re-focuses whichever pane already
+                // held input focus, and the pane that was asked for loses it
+                // again. Crook's panes hold no input focus yet, so the wrong
+                // order would look right today and break the day they do.
+                let focused = tab.panes_mut().focus(id);
+                let selected = self.select(tab_id);
+
+                if focused == PaneEffect::Changed || selected == TabEffect::Changed {
+                    TabEffect::Changed
+                } else {
+                    TabEffect::Unchanged
+                }
+            }
         }
+    }
+
+    fn select(&mut self, id: TabId) -> TabEffect {
+        if self.active == id || self.get(id).is_none() {
+            return TabEffect::Unchanged;
+        }
+        self.repair(Some(id));
+        TabEffect::Changed
+    }
+
+    fn tab_holding_mut(&mut self, pane: PaneId) -> Option<&mut Tab> {
+        self.tabs
+            .iter_mut()
+            .find(|tab| tab.panes().get(pane).is_some())
     }
 
     fn close(&mut self, id: TabId) -> TabEffect {

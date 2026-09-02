@@ -487,9 +487,12 @@ dependencies = [
  "crook_usage",
  "crookui",
  "crookui_core",
+ "dirs",
  "env_logger",
  "log",
  "png",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

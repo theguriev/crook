@@ -21,6 +21,26 @@ fn order(strip: &TabStrip) -> Vec<TabId> {
     strip.iter().map(Tab::id).collect()
 }
 
+/// The pane a tab is currently showing.
+fn focused_pane(strip: &TabStrip, tab: TabId) -> PaneId {
+    strip
+        .get(tab)
+        .expect("the tab is open")
+        .panes()
+        .focused_id()
+}
+
+/// Every pane a tab holds, in render order.
+fn panes_of(strip: &TabStrip, tab: TabId) -> Vec<PaneId> {
+    strip
+        .get(tab)
+        .expect("the tab is open")
+        .panes()
+        .iter()
+        .map(Pane::id)
+        .collect()
+}
+
 #[test]
 fn a_new_strip_has_one_tab_and_it_is_active() {
     let strip = TabStrip::new();
@@ -198,21 +218,23 @@ fn every_tab_a_strip_opens_gets_a_name_no_other_tab_has_had() {
 }
 
 #[test]
-fn reporting_progress_into_a_session_cannot_touch_its_tabs_identity() {
-    // `get_mut` is the documented agent-progress path, so whatever it hands
+fn reporting_progress_into_a_session_cannot_touch_its_panes_identity() {
+    // `pane_mut` is the documented agent-progress path, so whatever it hands
     // out is reachable from ordinary code. What it must not hand out is a
-    // settable `id`: two tabs sharing one makes `index_of` resolve a close to
-    // the wrong session, and a session carrying a second id of its own is one
-    // assignment away from disagreeing with its tab's.
+    // settable `id`: two panes sharing one makes every lookup resolve a close
+    // to the wrong session, and a session carrying a second id of its own is
+    // one assignment away from disagreeing with its pane's.
     let (mut strip, ids) = strip(3);
-    let tab = strip.get_mut(ids[1]).expect("still open");
+    let pane = focused_pane(&strip, ids[1]);
+    let session = strip.pane_mut(pane).expect("still open").session_mut();
 
-    tab.session_mut().title = "renamed".to_owned();
-    tab.session_mut().status = AgentStatus::Failed;
+    session.title = "renamed".to_owned();
+    session.status = AgentStatus::Failed;
 
     assert_eq!(order(&strip), ids);
     assert_eq!(strip.index_of(ids[1]), Some(1));
-    assert_eq!(strip.get(ids[1]).map(Tab::id), Some(ids[1]));
+    assert_eq!(strip.tab_of(pane), Some(ids[1]));
+    assert_eq!(strip.pane(pane).map(Pane::id), Some(pane));
 }
 
 #[test]
@@ -237,8 +259,9 @@ fn a_derived_title_replaces_the_one_the_session_was_created_with() {
     let id = strip.active_id();
     assert_eq!(strip.get(id).map(Tab::title), Some("agent 1"));
 
+    let pane = focused_pane(&strip, id);
     strip
-        .get_mut(id)
+        .pane_mut(pane)
         .expect("just created")
         .session_mut()
         .derived_title = Some("port the tab bar".to_owned());
@@ -283,4 +306,238 @@ fn the_mru_list_holds_every_open_tab_once_with_the_active_one_at_its_head() {
         );
         assert!(strip.active().is_some(), "after {action:?}");
     }
+}
+
+#[test]
+fn a_split_tab_draws_a_row_per_pane_and_still_a_single_row_per_tab() {
+    // The whole of "View as: Panes | Tabs", and the reason a tab had to be
+    // able to hold more than one session before the control could mean
+    // anything: with one pane per tab both modes return the same rows.
+    let (mut strip, ids) = strip(2);
+    strip.apply(TabAction::Select(ids[0]));
+
+    assert_eq!(
+        strip.rows(Granularity::Panes),
+        strip.rows(Granularity::Tabs),
+        "before any split the two views are the same bar"
+    );
+
+    strip.apply(TabAction::Split(Direction::Right));
+
+    assert_eq!(strip.rows(Granularity::Panes).len(), 3);
+    assert_eq!(strip.rows(Granularity::Tabs).len(), 2);
+    assert_eq!(
+        strip.rows(Granularity::Panes),
+        [
+            (ids[0], panes_of(&strip, ids[0])[0]),
+            (ids[0], panes_of(&strip, ids[0])[1]),
+            (ids[1], focused_pane(&strip, ids[1])),
+        ],
+        "rows come out in bar order, with a tab's panes in render order"
+    );
+}
+
+#[test]
+fn the_single_row_of_a_tab_names_whichever_pane_is_focused() {
+    // In `Tabs` view the row is a *pane*, not a summary of a tab, so it has to
+    // follow focus. A row that stayed on the first pane would be Warp's
+    // flagged-off `Summary` mode wearing the default mode's name.
+    let (mut strip, ids) = strip(2);
+    strip.apply(TabAction::Select(ids[0]));
+    strip.apply(TabAction::Split(Direction::Right));
+
+    let panes = panes_of(&strip, ids[0]);
+    assert_eq!(strip.rows(Granularity::Tabs)[0], (ids[0], panes[1]));
+
+    strip.apply(TabAction::FocusPane(panes[0]));
+
+    assert_eq!(strip.rows(Granularity::Tabs)[0], (ids[0], panes[0]));
+}
+
+#[test]
+fn exactly_one_row_in_the_whole_bar_is_the_selected_one() {
+    // Warp's `is_selected = is_active_tab && is_focused`. Ported as two
+    // independent highlights — an active-tab tint on every row of the active
+    // tab, plus a focused-pane marker — it gives a bar where three rows look
+    // chosen.
+    let (mut strip, ids) = strip(3);
+    strip.apply(TabAction::Select(ids[0]));
+    strip.apply(TabAction::Split(Direction::Right));
+    strip.apply(TabAction::Split(Direction::Down));
+    strip.apply(TabAction::Select(ids[1]));
+    strip.apply(TabAction::Split(Direction::Right));
+
+    for granularity in [Granularity::Panes, Granularity::Tabs] {
+        let selected: Vec<(TabId, PaneId)> = strip
+            .rows(granularity)
+            .into_iter()
+            .filter(|(tab, pane)| {
+                strip.is_active(*tab)
+                    && strip
+                        .get(*tab)
+                        .is_some_and(|open| open.panes().is_focused(*pane))
+            })
+            .collect();
+
+        assert_eq!(
+            selected,
+            [(ids[1], focused_pane(&strip, ids[1]))],
+            "{granularity:?} does not have exactly one selected row"
+        );
+    }
+}
+
+#[test]
+fn closing_a_tabs_last_pane_closes_the_tab_and_the_last_of_those_takes_the_window() {
+    // The rule the group and the strip share, stated once each: neither ever
+    // empties itself, so a close runs out through the tab and then out through
+    // the window.
+    let (mut strip, ids) = strip(2);
+    strip.apply(TabAction::Select(ids[0]));
+    strip.apply(TabAction::Split(Direction::Right));
+    let panes = panes_of(&strip, ids[0]);
+
+    assert_eq!(
+        strip.apply(TabAction::ClosePane(panes[1])),
+        TabEffect::Changed
+    );
+    assert_eq!(order(&strip), ids, "closing a pane closed its tab");
+
+    assert_eq!(
+        strip.apply(TabAction::ClosePane(panes[0])),
+        TabEffect::Changed
+    );
+    assert_eq!(
+        order(&strip),
+        [ids[1]],
+        "the tab did not go with its last pane"
+    );
+
+    let last = focused_pane(&strip, ids[1]);
+    assert_eq!(
+        strip.apply(TabAction::ClosePane(last)),
+        TabEffect::CloseWindow
+    );
+    assert_eq!(strip.len(), 1, "the strip emptied itself");
+    assert_eq!(panes_of(&strip, ids[1]), [last], "the group emptied itself");
+}
+
+#[test]
+fn a_group_that_collapses_back_to_one_pane_is_a_group_that_never_split() {
+    // Warp's `BranchRemoveResult::Collapse`: two panes down to one leaves a
+    // bare leaf, with no divider and no active-pane indicator. Here it falls
+    // out of `is_split` being derived from the count rather than stored — the
+    // flag Warp has to recompute on every add, close, move, hide and reveal.
+    let (mut strip, ids) = strip(1);
+    let tab = ids[0];
+    assert!(!strip.get(tab).expect("open").panes().is_split());
+
+    strip.apply(TabAction::Split(Direction::Down));
+    let panes = panes_of(&strip, tab);
+    assert!(strip.get(tab).expect("open").panes().is_split());
+
+    strip.apply(TabAction::ClosePane(panes[1]));
+
+    let group = strip.get(tab).expect("open").panes();
+    assert_eq!(group.len(), 1);
+    assert!(!group.is_split());
+    assert_eq!(group.focused_id(), panes[0]);
+    assert_eq!(group.mru(), [panes[0]]);
+}
+
+#[test]
+fn focusing_a_pane_in_another_tab_brings_that_tab_forward_with_it() {
+    // What a click on any row of the bar does. The pane is focused first and
+    // its tab activated second — Warp's ordering, because activating the tab
+    // first re-focuses whichever pane already held input focus.
+    let (mut strip, ids) = strip(2);
+    strip.apply(TabAction::Select(ids[0]));
+    strip.apply(TabAction::Split(Direction::Right));
+    let panes = panes_of(&strip, ids[0]);
+    strip.apply(TabAction::Select(ids[1]));
+
+    assert_eq!(
+        strip.apply(TabAction::FocusPane(panes[0])),
+        TabEffect::Changed
+    );
+
+    assert!(strip.is_active(ids[0]));
+    assert_eq!(focused_pane(&strip, ids[0]), panes[0]);
+}
+
+#[test]
+fn an_action_naming_a_pane_that_is_gone_changes_nothing() {
+    let (mut strip, ids) = strip(2);
+    strip.apply(TabAction::Select(ids[0]));
+    strip.apply(TabAction::Split(Direction::Right));
+    let panes = panes_of(&strip, ids[0]);
+    strip.apply(TabAction::ClosePane(panes[1]));
+
+    assert_eq!(
+        strip.apply(TabAction::ClosePane(panes[1])),
+        TabEffect::Unchanged,
+        "a second close of the same pane, as a stale click would send"
+    );
+    assert_eq!(
+        strip.apply(TabAction::FocusPane(panes[1])),
+        TabEffect::Unchanged
+    );
+    assert_eq!(
+        strip.apply(TabAction::FocusPane(panes[0])),
+        TabEffect::Unchanged,
+        "focusing the pane that is already focused, in the tab already active"
+    );
+    assert_eq!(strip.tab_of(panes[1]), None);
+}
+
+#[test]
+fn a_split_across_the_groups_axis_appends_along_it_rather_than_nesting() {
+    // A flat vector cannot hold Warp's perpendicular branch, so it does not
+    // pretend to: the first split fixes the axis, and a later direction across
+    // it keeps only its before-or-after sense.
+    let (mut strip, ids) = strip(1);
+    strip.apply(TabAction::Split(Direction::Down));
+    assert_eq!(
+        strip.get(ids[0]).expect("open").panes().axis(),
+        SplitAxis::Vertical
+    );
+
+    strip.apply(TabAction::Split(Direction::Left));
+
+    let group = strip.get(ids[0]).expect("open").panes();
+    assert_eq!(
+        group.axis(),
+        SplitAxis::Vertical,
+        "the axis moved under a pane"
+    );
+    assert_eq!(group.len(), 3);
+    assert_eq!(
+        group.index_of(group.focused_id()),
+        Some(1),
+        "a leading direction still inserts before the pane it was split off"
+    );
+}
+
+#[test]
+fn every_session_a_window_opens_gets_a_name_no_other_session_has_had() {
+    // A pane and a tab are the same kind of row in `Panes` view, so a name
+    // that repeats across them is exactly as ambiguous as one that repeats
+    // between two tabs — in the bar, and in the body panel's heading.
+    let (mut strip, ids) = strip(2);
+    strip.apply(TabAction::Select(ids[0]));
+    strip.apply(TabAction::Split(Direction::Right));
+    strip.apply(TabAction::New);
+    strip.apply(TabAction::Split(Direction::Down));
+
+    let names: Vec<&str> = strip.panes().map(|(_, pane)| pane.title()).collect();
+    let mut unique = names.clone();
+    unique.sort_unstable();
+    unique.dedup();
+
+    assert_eq!(
+        unique.len(),
+        names.len(),
+        "two sessions share a name: {names:?}"
+    );
+    assert_eq!(names.len(), 5);
 }

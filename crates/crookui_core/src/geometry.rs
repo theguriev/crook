@@ -251,14 +251,26 @@ impl RectF {
     }
 }
 
-/// The index of the [`crate::scene::Layer`] an element painted into.
+/// Which [`crate::scene::Layer`] an element painted into.
 ///
 /// Depth is not a number an element chooses; it is the order in which layers
 /// were started, so hit testing can ask "is any *later* layer covering me?".
-/// Warp additionally distinguishes overlay layers that sort after every normal
-/// one; Crook has no overlay-producing element, so a single counter suffices.
+/// Two counters rather than one, because a popup is emitted from wherever its
+/// trigger lives: a menu started inside the tab strip would otherwise be
+/// *below* the body painted after it. Overlay layers detach depth from
+/// emission order — every one of them paints, and hit-tests, above every
+/// normal layer in the frame.
+///
+/// `Normal` is declared first on purpose: the derived [`Ord`] is what makes
+/// `Normal(_) < Overlay(_)` for every pair of indices.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ZIndex(pub usize);
+pub enum ZIndex {
+    /// An index into `Scene::layers`.
+    Normal(usize),
+    /// An index into `Scene::overlay_layers`, which sorts after every
+    /// [`ZIndex::Normal`].
+    Overlay(usize),
+}
 
 /// A painted position, tagged with the layer it landed in.
 #[derive(Copy, Clone, Debug, PartialEq)]

@@ -443,7 +443,7 @@ fn a_clip_confines_what_its_child_paints_and_what_that_child_can_be_clicked_on()
     assert_eq!(scene.layer_count(), 2, "the clip is a layer of its own");
     assert_eq!(
         scene.visible_rect(
-            crate::geometry::Point::from_vec2f(vec2f(30., 0.), crate::geometry::ZIndex(1)),
+            crate::geometry::Point::from_vec2f(vec2f(30., 0.), crate::geometry::ZIndex::Normal(1)),
             vec2f(30., 20.)
         ),
         Some(RectF::new(vec2f(30., 0.), vec2f(10., 20.))),
@@ -462,6 +462,187 @@ fn a_clip_confines_what_its_child_paints_and_what_that_child_can_be_clicked_on()
 
     harness.press(vec2f(35., 10.), MouseButton::Left);
     harness.release(vec2f(35., 10.), MouseButton::Left);
+    harness.root.read(&harness.app, |view, _| {
+        assert_eq!(view.actions, [TestAction::Clicked]);
+    });
+}
+
+/// Hangs an overlay 10 in from the stack's upper-left, so it overlaps
+/// whatever the stack painted there.
+const OVER_THE_STACK: AnchorTo = AnchorTo {
+    parent: Corner::TopLeft,
+    child: Corner::TopLeft,
+    offset: vec2f(10., 10.),
+    keep_on_screen: false,
+};
+
+#[test]
+fn an_overlay_child_paints_last_however_early_it_was_added() {
+    // The overlay goes in *first*, so everything about the frame that follows
+    // is the layer jump rather than paint order: a menu is emitted wherever
+    // its trigger lives, which is usually before the content it must cover.
+    let mut harness = Harness::new(move |view| {
+        Stack::new()
+            .with_anchored_overlay_child(marker(50., 20.), OVER_THE_STACK)
+            .with_child(
+                Hoverable::new(view.mouse.clone(), |_| marker(100., 50.))
+                    .on_click(|_, ctx, _| ctx.dispatch_typed_action(TestAction::Clicked))
+                    .finish(),
+            )
+            .finish()
+    });
+
+    let scene = harness.build_scene(vec2f(200., 100.));
+    let bounds: Vec<_> = rects(&scene).iter().map(|rect| rect.bounds).collect();
+
+    assert_eq!(
+        bounds,
+        [
+            RectF::new(vec2f(0., 0.), vec2f(100., 50.)),
+            RectF::new(vec2f(10., 10.), vec2f(50., 20.)),
+        ],
+        "the overlay is drawn after the child added after it"
+    );
+
+    harness.press(vec2f(20., 20.), MouseButton::Left);
+    harness.release(vec2f(20., 20.), MouseButton::Left);
+    harness.root.read(&harness.app, |view, _| {
+        assert_eq!(
+            view.actions,
+            [],
+            "a click on the menu must not reach the button underneath it"
+        );
+    });
+
+    harness.press(vec2f(80., 40.), MouseButton::Left);
+    harness.release(vec2f(80., 40.), MouseButton::Left);
+    harness.root.read(&harness.app, |view, _| {
+        assert_eq!(view.actions, [TestAction::Clicked], "the rest still works");
+    });
+}
+
+#[test]
+fn an_anchored_child_is_laid_out_against_the_window_not_against_the_stack() {
+    // A 40 by 28 toolbar button with a menu hung under it. Handing the menu
+    // the stack's own constraint would lay it out 28 tall and squash every row
+    // of it into nothing.
+    let mut harness = Harness::new(|_| {
+        ConstrainedBox::new(
+            Stack::new()
+                .with_anchored_overlay_child(
+                    ConstrainedBox::new(
+                        Container::new(Empty::new().finish())
+                            .with_background_color(Color::WHITE)
+                            .finish(),
+                    )
+                    .with_width(50.)
+                    .with_height(80.)
+                    .finish(),
+                    AnchorTo::below(vec2f(0., 4.)),
+                )
+                .finish(),
+        )
+        .with_width(40.)
+        .with_height(28.)
+        .finish()
+    });
+
+    let scene = harness.build_scene(vec2f(200., 200.));
+
+    assert_eq!(
+        rects(&scene)[0].bounds,
+        RectF::new(vec2f(0., 32.), vec2f(50., 80.)),
+        "80 tall, and hung 4 below the button's bottom-left corner"
+    );
+}
+
+#[test]
+fn a_press_outside_a_dismiss_closes_it_and_one_on_it_does_not() {
+    let mut harness = Harness::new(move |view| {
+        Stack::new()
+            .with_child(
+                Hoverable::new(view.mouse.clone(), |_| marker(200., 100.))
+                    .on_click(|_, ctx, _| ctx.dispatch_typed_action(TestAction::Clicked))
+                    .finish(),
+            )
+            .with_anchored_overlay_child(
+                Dismiss::new(marker(50., 20.))
+                    .on_dismiss(|ctx, _| ctx.dispatch_typed_action(TestAction::Closed))
+                    .finish(),
+                OVER_THE_STACK,
+            )
+            .finish()
+    });
+    harness.build_scene(vec2f(200., 100.));
+
+    harness.press(vec2f(20., 20.), MouseButton::Left);
+    harness.root.read(&harness.app, |view, _| {
+        assert_eq!(
+            view.actions,
+            [],
+            "a press on the menu is not a press outside"
+        );
+    });
+
+    // Not modal, so the click that dismisses is also a click on the window.
+    harness.press(vec2f(150., 80.), MouseButton::Left);
+    harness.release(vec2f(150., 80.), MouseButton::Left);
+    harness.root.read(&harness.app, |view, _| {
+        assert_eq!(view.actions, [TestAction::Closed, TestAction::Clicked]);
+    });
+}
+
+#[test]
+fn a_modal_dismiss_keeps_the_click_that_closed_it_from_reaching_the_frame() {
+    let mut harness = Harness::new(move |view| {
+        Stack::new()
+            .with_child(
+                Hoverable::new(view.mouse.clone(), |_| marker(200., 100.))
+                    .on_click(|_, ctx, _| ctx.dispatch_typed_action(TestAction::Clicked))
+                    .finish(),
+            )
+            .with_anchored_overlay_child(
+                Dismiss::new(marker(50., 20.))
+                    .modal()
+                    .on_dismiss(|ctx, _| ctx.dispatch_typed_action(TestAction::Closed))
+                    .finish(),
+                OVER_THE_STACK,
+            )
+            .finish()
+    });
+    harness.build_scene(vec2f(200., 100.));
+
+    harness.press(vec2f(150., 80.), MouseButton::Left);
+    harness.release(vec2f(150., 80.), MouseButton::Left);
+    harness.root.read(&harness.app, |view, _| {
+        assert_eq!(
+            view.actions,
+            [TestAction::Closed],
+            "the button under the modal saw neither the press nor the release"
+        );
+    });
+}
+
+#[test]
+fn an_overlay_that_records_no_hit_rect_lets_clicks_through_to_what_it_covers() {
+    // The trap this whole mechanism has: occlusion is decided by hit rects,
+    // and only a Container draws one. A menu built out of bare labels floats
+    // above the frame and is invisible to every click that lands on it.
+    let family = FamilyId::new();
+    let mut harness = Harness::new(move |view| {
+        Stack::new()
+            .with_child(
+                Hoverable::new(view.mouse.clone(), |_| marker(100., 50.))
+                    .on_click(|_, ctx, _| ctx.dispatch_typed_action(TestAction::Clicked))
+                    .finish(),
+            )
+            .with_anchored_overlay_child(Text::new("Density", family, 10.).finish(), OVER_THE_STACK)
+            .finish()
+    });
+    harness.build_scene(vec2f(200., 100.));
+
+    harness.press(vec2f(20., 15.), MouseButton::Left);
+    harness.release(vec2f(20., 15.), MouseButton::Left);
     harness.root.read(&harness.app, |view, _| {
         assert_eq!(view.actions, [TestAction::Clicked]);
     });

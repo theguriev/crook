@@ -6,6 +6,12 @@
 //! each layer's clip bounds, and issues one instanced draw per primitive kind.
 //! That separation is what lets the element tree be tested without a device.
 //!
+//! There are two layer lists, not one. A layer started with
+//! [`Scene::start_overlay_layer`] joins the second, and the frame is the first
+//! list followed by the second — so a menu emitted halfway through the tree
+//! still paints, and hit-tests, above everything painted after it. There is no
+//! depth value and no sorting anywhere: paint order is z order is list order.
+//!
 //! Glyphs are stored as *references* ([`crate::fonts::GlyphKey`] plus a
 //! position), never as pixels. The renderer resolves them against its atlas.
 
@@ -18,6 +24,10 @@ pub struct Scene {
     scale_factor: f32,
     active_layer_index_stack: Vec<ZIndex>,
     layers: Vec<Layer>,
+
+    /// Painted, and hit-tested, after every layer in `layers`, whatever order
+    /// the two lists were built in.
+    overlay_layers: Vec<Layer>,
 }
 
 /// A clipping region, painted in one scissor rect.
@@ -38,6 +48,14 @@ pub struct Layer {
 
     /// Glyphs to draw, in paint order. Always painted after this layer's rects.
     pub glyphs: Vec<Glyph>,
+
+    /// Whether this layer is invisible to hit testing.
+    ///
+    /// Set it on a layer that exists only to paint *over* something that must
+    /// stay clickable — a hover tint drawn on top of a button, say. Without
+    /// it the tint would cover the button and the button would decline every
+    /// click that landed on it.
+    pub click_through: bool,
 }
 
 impl Layer {
@@ -455,8 +473,9 @@ impl Scene {
     pub fn new(scale_factor: f32) -> Self {
         Self {
             scale_factor,
-            active_layer_index_stack: vec![ZIndex(0)],
+            active_layer_index_stack: vec![ZIndex::Normal(0)],
             layers: vec![Layer::default()],
+            overlay_layers: Vec::new(),
         }
     }
 
@@ -474,35 +493,59 @@ impl Scene {
             .expect("the root layer is never popped")
     }
 
-    /// The topmost layer that exists so far.
+    /// The topmost layer that exists so far, on the same list as the active
+    /// one.
     ///
     /// An element that paints children into layers above its own hit-tests
     /// against this rather than [`Self::z_index`], so a click that landed on a
     /// child still reaches the parent that wrapped it.
     pub fn max_active_z_index(&self) -> ZIndex {
-        ZIndex(self.layers.len() - 1)
+        match self.z_index() {
+            ZIndex::Normal(_) => ZIndex::Normal(self.layers.len() - 1),
+            ZIndex::Overlay(_) => ZIndex::Overlay(
+                self.overlay_layers
+                    .len()
+                    .checked_sub(1)
+                    // The active layer being an overlay means one was pushed,
+                    // and layers are only ever deactivated, never removed.
+                    .expect("an overlay layer is active, so the overlay list cannot be empty"),
+            ),
+        }
     }
 
     /// Pushes a new layer and makes it active.
+    ///
+    /// The new layer joins whichever list the active one belongs to. That is
+    /// not an optimisation: it is what keeps a [`Clipped`] nested inside an
+    /// overlay from dropping the rest of that overlay's subtree back down
+    /// below every other overlay in the frame.
+    ///
+    /// [`Clipped`]: crate::elements::Clipped
     pub fn start_layer(&mut self, bounds: ClipBounds) {
-        let clip_bounds = match bounds {
-            ClipBounds::ActiveLayer => self.active_layer().clip_bounds,
-            ClipBounds::BoundedBy(bounds) => Some(bounds),
-            ClipBounds::BoundedByActiveLayerAnd(bounds) => match self.active_layer().clip_bounds {
-                // Non-overlapping clips must produce an empty rect rather than
-                // no clip at all, or the layer would paint over everything.
-                Some(active) => active.intersection(bounds).or(Some(RectF::default())),
-                None => Some(bounds),
-            },
-            ClipBounds::None => None,
-        };
+        let layer = self.create_layer(bounds);
+        match self.z_index() {
+            ZIndex::Normal(_) => self.push_normal_layer(layer),
+            ZIndex::Overlay(_) => self.push_overlay_layer(layer),
+        }
+    }
 
-        self.active_layer_index_stack
-            .push(ZIndex(self.layers.len()));
-        self.layers.push(Layer {
-            clip_bounds,
-            ..Default::default()
-        });
+    /// Pushes a new layer that paints above every non-overlay layer in the
+    /// frame, wherever in the tree it was started from, and makes it active.
+    ///
+    /// This is what a popup is: an overlay child of a
+    /// [`Stack`](crate::elements::Stack) starts one unclipped, so a menu
+    /// escapes both the z order and the scissor rect of the panel that spawned
+    /// it.
+    pub fn start_overlay_layer(&mut self, bounds: ClipBounds) {
+        let layer = self.create_layer(bounds);
+        self.push_overlay_layer(layer);
+    }
+
+    /// Makes the active layer invisible to hit testing.
+    ///
+    /// See [`Layer::click_through`] for when that is what you want.
+    pub fn set_active_layer_click_through(&mut self) {
+        self.active_layer().click_through = true;
     }
 
     /// Pops back to the enclosing layer.
@@ -571,42 +614,93 @@ impl Scene {
     /// Whether anything in a layer above `position`'s own covers it.
     ///
     /// This is the whole of hit testing: an element asks whether the point it
-    /// was clicked at is still visible from where it painted.
+    /// was clicked at is still visible from where it painted. Nothing tells an
+    /// element that a menu opened over it — it finds out by asking this.
     pub fn is_covered(&self, position: Point) -> bool {
-        self.layers
-            .get((position.z_index().0 + 1)..)
-            .into_iter()
-            .flatten()
-            .any(|layer| layer.contains_point(position.xy()))
+        let covers = |layer: &Layer| !layer.click_through && layer.contains_point(position.xy());
+        match position.z_index() {
+            // Every overlay layer is above every normal one, including the
+            // ones started before this point was painted.
+            ZIndex::Normal(index) => self
+                .layers
+                .get((index + 1)..)
+                .into_iter()
+                .flatten()
+                .chain(self.overlay_layers.iter())
+                .any(covers),
+            ZIndex::Overlay(index) => self
+                .overlay_layers
+                .get((index + 1)..)
+                .into_iter()
+                .flatten()
+                .any(covers),
+        }
     }
 
     /// The part of a rect that its own layer's clip leaves visible, or `None`
     /// when the clip hides it entirely.
     pub fn visible_rect(&self, origin: Point, size: Vector2F) -> Option<RectF> {
         let rect = RectF::new(origin.xy(), size);
-        match self
-            .layers
-            .get(origin.z_index().0)
-            .and_then(|l| l.clip_bounds)
-        {
+        let layer = match origin.z_index() {
+            ZIndex::Normal(index) => self.layers.get(index),
+            ZIndex::Overlay(index) => self.overlay_layers.get(index),
+        };
+        match layer.and_then(|layer| layer.clip_bounds) {
             Some(clip) => clip.intersection(rect),
             None => Some(rect),
         }
     }
 
     /// Every layer, bottom to top: paint order and z order are the same thing.
+    ///
+    /// Normal layers first, then overlay ones. The renderer walks this twice —
+    /// once to append instance data, once to draw index ranges into it — and
+    /// the two walks agree only because they are the same iterator.
     pub fn layers(&self) -> impl Iterator<Item = &Layer> {
-        self.layers.iter()
+        self.layers.iter().chain(self.overlay_layers.iter())
     }
 
-    /// How many layers this frame ended up with.
+    /// How many layers this frame ended up with, overlays included.
     pub fn layer_count(&self) -> usize {
-        self.layers.len()
+        self.layers.len() + self.overlay_layers.len()
+    }
+
+    fn create_layer(&mut self, bounds: ClipBounds) -> Layer {
+        let clip_bounds = match bounds {
+            ClipBounds::ActiveLayer => self.active_layer().clip_bounds,
+            ClipBounds::BoundedBy(bounds) => Some(bounds),
+            ClipBounds::BoundedByActiveLayerAnd(bounds) => match self.active_layer().clip_bounds {
+                // Non-overlapping clips must produce an empty rect rather than
+                // no clip at all, or the layer would paint over everything.
+                Some(active) => active.intersection(bounds).or(Some(RectF::default())),
+                None => Some(bounds),
+            },
+            ClipBounds::None => None,
+        };
+
+        Layer {
+            clip_bounds,
+            ..Default::default()
+        }
+    }
+
+    fn push_normal_layer(&mut self, layer: Layer) {
+        self.active_layer_index_stack
+            .push(ZIndex::Normal(self.layers.len()));
+        self.layers.push(layer);
+    }
+
+    fn push_overlay_layer(&mut self, layer: Layer) {
+        self.active_layer_index_stack
+            .push(ZIndex::Overlay(self.overlay_layers.len()));
+        self.overlay_layers.push(layer);
     }
 
     fn active_layer(&mut self) -> &mut Layer {
-        let ZIndex(index) = self.z_index();
-        &mut self.layers[index]
+        match self.z_index() {
+            ZIndex::Normal(index) => &mut self.layers[index],
+            ZIndex::Overlay(index) => &mut self.overlay_layers[index],
+        }
     }
 }
 
@@ -629,7 +723,7 @@ mod tests {
 
         assert!(scene.is_covered(below));
         assert!(
-            !scene.is_covered(Point::from_vec2f(vec2f(50., 50.), ZIndex(0))),
+            !scene.is_covered(Point::from_vec2f(vec2f(50., 50.), ZIndex::Normal(0))),
             "a point outside every rect is not covered"
         );
     }
@@ -657,6 +751,114 @@ mod tests {
         scene.start_layer(ClipBounds::None);
         scene.stop_layer();
 
-        assert!(!scene.is_covered(Point::from_vec2f(vec2f(5., 5.), ZIndex(0))));
+        assert!(!scene.is_covered(Point::from_vec2f(vec2f(5., 5.), ZIndex::Normal(0))));
+    }
+
+    #[test]
+    fn an_overlay_layer_covers_normal_layers_started_after_it() {
+        let mut scene = Scene::new(1.);
+        scene.start_overlay_layer(ClipBounds::None);
+        scene.draw_rect_with_hit_recording(RectF::new(vec2f(0., 0.), vec2f(10., 10.)));
+        scene.stop_layer();
+
+        // Started later, and still underneath: this is the whole point of the
+        // second list.
+        scene.start_layer(ClipBounds::None);
+        let later = Point::from_vec2f(vec2f(5., 5.), scene.z_index());
+        scene.stop_layer();
+
+        assert_eq!(scene.z_index(), ZIndex::Normal(0));
+        assert!(scene.is_covered(later));
+    }
+
+    #[test]
+    fn an_overlay_layer_is_covered_only_by_later_overlay_layers() {
+        let mut scene = Scene::new(1.);
+        scene.start_overlay_layer(ClipBounds::None);
+        let below = Point::from_vec2f(vec2f(5., 5.), scene.z_index());
+        scene.stop_layer();
+
+        scene.start_overlay_layer(ClipBounds::None);
+        let above = Point::from_vec2f(vec2f(5., 5.), scene.z_index());
+        scene.draw_rect_with_hit_recording(RectF::new(vec2f(0., 0.), vec2f(10., 10.)));
+        scene.stop_layer();
+
+        assert!(scene.is_covered(below));
+        assert!(!scene.is_covered(above), "a layer never covers itself");
+    }
+
+    #[test]
+    fn a_layer_started_inside_an_overlay_stays_in_the_overlay_list() {
+        let mut scene = Scene::new(1.);
+        let normal = Point::from_vec2f(vec2f(5., 5.), scene.z_index());
+
+        scene.start_overlay_layer(ClipBounds::None);
+        // A clip, a hover tint, anything that starts a layer while a popup is
+        // being painted: it must not fall back to normal depth, or the rest of
+        // the popup's subtree would paint under the window it floats over.
+        scene.start_layer(ClipBounds::ActiveLayer);
+        assert_eq!(scene.z_index(), ZIndex::Overlay(1));
+        scene.draw_rect_with_hit_recording(RectF::new(vec2f(0., 0.), vec2f(10., 10.)));
+        scene.stop_layer();
+        scene.stop_layer();
+
+        assert!(scene.is_covered(normal));
+    }
+
+    #[test]
+    fn a_click_through_layer_covers_nothing() {
+        let mut scene = Scene::new(1.);
+        let below = Point::from_vec2f(vec2f(5., 5.), scene.z_index());
+
+        scene.start_overlay_layer(ClipBounds::None);
+        scene.draw_rect_with_hit_recording(RectF::new(vec2f(0., 0.), vec2f(10., 10.)));
+        scene.set_active_layer_click_through();
+        scene.stop_layer();
+
+        assert!(!scene.is_covered(below));
+    }
+
+    #[test]
+    fn max_active_z_index_reports_the_top_of_the_active_list() {
+        let mut scene = Scene::new(1.);
+        scene.start_layer(ClipBounds::None);
+        scene.stop_layer();
+        assert_eq!(scene.max_active_z_index(), ZIndex::Normal(1));
+
+        scene.start_overlay_layer(ClipBounds::None);
+        scene.start_layer(ClipBounds::ActiveLayer);
+        scene.stop_layer();
+        assert_eq!(scene.max_active_z_index(), ZIndex::Overlay(1));
+        scene.stop_layer();
+
+        assert_eq!(
+            scene.max_active_z_index(),
+            ZIndex::Normal(1),
+            "back in a normal layer, the overlays above are not the ceiling"
+        );
+    }
+
+    #[test]
+    fn layers_hands_the_renderer_normal_layers_first_and_overlays_last() {
+        let mut scene = Scene::new(1.);
+        scene.start_overlay_layer(ClipBounds::None);
+        scene.draw_rect_without_hit_recording(RectF::new(vec2f(1., 0.), vec2f(1., 1.)));
+        scene.stop_layer();
+
+        // Started after the overlay, and drawn before it: the renderer appends
+        // instance data in exactly this order and draws index ranges into it,
+        // so this order *is* the frame.
+        scene.start_layer(ClipBounds::None);
+        scene.draw_rect_without_hit_recording(RectF::new(vec2f(0., 0.), vec2f(1., 1.)));
+        scene.stop_layer();
+
+        let origins: Vec<_> = scene
+            .layers()
+            .flat_map(|layer| layer.rects.iter())
+            .map(|rect| rect.bounds.origin())
+            .collect();
+
+        assert_eq!(origins, [vec2f(0., 0.), vec2f(1., 0.)]);
+        assert_eq!(scene.layer_count(), 3, "the root, one normal, one overlay");
     }
 }

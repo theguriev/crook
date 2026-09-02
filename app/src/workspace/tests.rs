@@ -21,7 +21,9 @@ use crookui_core::scene::{Radius, Rect, Scene};
 use crookui_core::text_layout::{Glyph, Line, Run};
 use crookui_core::{AddSingletonModel as _, App, Presenter, WindowId};
 
-use crate::tab::{AgentSession, AgentStatus, Tab, TabAction, TabId};
+use crate::settings::Granularity;
+use crate::tab::{AgentSession, AgentStatus, Direction, Pane, PaneId, Tab, TabAction, TabId};
+use crate::theme::THEME;
 use crate::usage_model::UsageModel;
 
 use super::{Fonts, QuitRequest, Workspace};
@@ -164,11 +166,21 @@ impl Harness {
     }
 
     /// Reports agent progress into a session, the way the agent runtime will.
-    fn update_session(&mut self, id: TabId, report: impl FnOnce(&mut AgentSession)) {
+    fn update_session(&mut self, id: PaneId, report: impl FnOnce(&mut AgentSession)) {
         let workspace = &self.workspace;
         self.app.update(|ctx| {
             workspace.update(ctx, |workspace, ctx| {
-                assert!(workspace.update_session(id, ctx, report), "no such tab");
+                assert!(workspace.update_session(id, ctx, report), "no such pane");
+            });
+        });
+    }
+
+    /// Switches what the bar draws a row for, the way the options menu will.
+    fn set_granularity(&mut self, granularity: Granularity) {
+        let workspace = &self.workspace;
+        self.app.update(|ctx| {
+            workspace.update(ctx, |workspace, ctx| {
+                workspace.set_granularity(granularity, ctx);
             });
         });
     }
@@ -188,6 +200,33 @@ impl Harness {
     fn active_id(&self) -> TabId {
         self.workspace
             .read(&self.app, |workspace, _| workspace.tabs().active_id())
+    }
+
+    /// Every pane in the window, in bar order.
+    fn pane_ids(&self) -> Vec<PaneId> {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace
+                .tabs()
+                .panes()
+                .map(|(_, pane)| pane.id())
+                .collect()
+        })
+    }
+
+    /// The panes of the active tab, in render order.
+    fn active_pane_ids(&self) -> Vec<PaneId> {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace
+                .tabs()
+                .active()
+                .map(|tab| tab.panes().iter().map(Pane::id).collect())
+                .unwrap_or_default()
+        })
+    }
+
+    fn focused_pane_id(&self) -> Option<PaneId> {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.tabs().focused_pane_id())
     }
 }
 
@@ -467,7 +506,7 @@ fn reporting_agent_progress_into_a_session_repaints_the_tab_that_shows_it() {
     // and an idle dot on screen — with nothing reporting an error — until some
     // unrelated click happened to rebuild the frame.
     let mut harness = Harness::new(2);
-    let id = harness.tab_ids()[0];
+    let id = harness.pane_ids()[0];
     let before = glyph_count(&harness.frame());
     assert!(!harness.needs_a_frame(), "the frame is up to date");
 
@@ -510,4 +549,178 @@ fn an_action_that_changes_nothing_does_not_ask_for_a_frame() {
 /// How many glyphs the frame draws, as a stand-in for "what it says".
 fn glyph_count(scene: &Scene) -> usize {
     scene.layers().map(|layer| layer.glyphs.len()).sum()
+}
+
+/// The chips drawn as the selected one, by their active fill.
+fn selected_chips(scene: &Scene) -> Vec<RectF> {
+    visible_rects(scene)
+        .filter(|(rect, _)| {
+            rect.corner_radius.get_top_left() == Radius::Pixels(8.)
+                && rect.background == Fill::Solid(THEME.tab_active)
+        })
+        .map(|(_, bounds)| bounds)
+        .collect()
+}
+
+/// The body's pane panels, by their rounded boxes.
+fn panel_boxes(scene: &Scene) -> Vec<RectF> {
+    rects_rounded_by(scene, Radius::Pixels(10.))
+}
+
+#[test]
+fn exactly_one_chip_in_the_whole_bar_is_drawn_as_the_selected_one() {
+    // Warp's `is_selected = is_active_tab && is_focused`, read off the pixels.
+    // Tinting every row of the active tab and marking the focused pane on top
+    // of that is the easy mistake, and it gives a bar where three chips look
+    // chosen.
+    let mut harness = Harness::new(2);
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    harness.dispatch_action(TabAction::Split(Direction::Down));
+
+    for granularity in [Granularity::Panes, Granularity::Tabs] {
+        harness.set_granularity(granularity);
+        let scene = harness.frame();
+
+        assert_eq!(
+            selected_chips(&scene).len(),
+            1,
+            "{granularity:?} draws more than one selected chip"
+        );
+    }
+}
+
+#[test]
+fn the_bar_draws_a_chip_per_pane_or_a_chip_per_tab_as_it_is_told() {
+    // The setting somebody can watch move. It only moves at all because a tab
+    // can now hold more than one pane.
+    let mut harness = Harness::new(2);
+    assert_eq!(tab_boxes(&harness.frame()).len(), 2);
+
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    assert_eq!(tab_boxes(&harness.frame()).len(), 3, "Panes view");
+
+    harness.set_granularity(Granularity::Tabs);
+    assert_eq!(tab_boxes(&harness.frame()).len(), 2, "Tabs view");
+}
+
+#[test]
+fn splitting_the_active_tab_puts_a_second_panel_in_its_body() {
+    let mut harness = Harness::new(1);
+    let before = panel_boxes(&harness.frame());
+    assert_eq!(before.len(), 1, "an unsplit tab is one panel");
+
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+
+    let after = panel_boxes(&harness.frame());
+    assert_eq!(after.len(), 2);
+    assert!(
+        after[0].max_x() <= after[1].min_x(),
+        "a horizontal split stacked its panels instead of putting them side by side"
+    );
+    assert!(
+        after[0].min_y() == after[1].min_y(),
+        "a horizontal split's panels do not start at the same height"
+    );
+}
+
+#[test]
+fn a_vertical_split_stacks_its_panels() {
+    let mut harness = Harness::new(1);
+
+    harness.dispatch_action(TabAction::Split(Direction::Down));
+
+    let panels = panel_boxes(&harness.frame());
+    assert_eq!(panels.len(), 2);
+    assert!(
+        panels[0].max_y() <= panels[1].min_y(),
+        "a vertical split put its panels side by side instead of stacking them"
+    );
+}
+
+#[test]
+fn clicking_a_panel_focuses_the_pane_it_draws() {
+    // Warp wraps every leaf of its tree in the same handler
+    // (`Activate(pane_id, ActivationReason::Click)`), which is what makes the
+    // body itself a way to choose which pane a keystroke goes to.
+    let mut harness = Harness::new(1);
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let panes = harness.active_pane_ids();
+    assert_eq!(
+        harness.focused_pane_id(),
+        Some(panes[1]),
+        "a split focuses the new pane"
+    );
+
+    let panels = panel_boxes(&harness.frame());
+    harness.click(center(panels[0]), MouseButton::Left);
+
+    assert_eq!(harness.focused_pane_id(), Some(panes[0]));
+    assert_eq!(
+        harness.active_pane_ids(),
+        panes,
+        "clicking a panel closed a pane"
+    );
+}
+
+#[test]
+fn clicking_a_chip_focuses_its_pane_and_brings_its_tab_forward() {
+    let mut harness = Harness::new(2);
+    let tabs = harness.tab_ids();
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let split = harness.active_pane_ids();
+    harness.dispatch_action(TabAction::Select(tabs[0]));
+
+    // The second tab's first pane: the third chip in bar order is the split
+    // tab's second pane, so the second chip is the one to aim at.
+    let chips = tab_boxes(&harness.frame());
+    assert_eq!(chips.len(), 3);
+    harness.click(
+        chips[1].origin() + vec2f(40., chips[1].height() / 2.),
+        MouseButton::Left,
+    );
+
+    assert_eq!(harness.active_id(), tabs[1]);
+    assert_eq!(harness.focused_pane_id(), Some(split[0]));
+}
+
+#[test]
+fn the_close_button_on_a_pane_chip_closes_the_pane_and_leaves_its_tab_open() {
+    let mut harness = Harness::new(1);
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let panes = harness.active_pane_ids();
+    let tabs = harness.tab_ids();
+
+    // Only the selected chip draws a close button until a pointer arrives,
+    // and a split focuses the new pane.
+    let buttons = close_boxes(&harness.frame());
+    assert_eq!(buttons.len(), 1);
+    harness.click(center(buttons[0]), MouseButton::Left);
+
+    assert_eq!(harness.active_pane_ids(), [panes[0]]);
+    assert_eq!(harness.tab_ids(), tabs, "closing a pane closed its tab");
+    assert_eq!(harness.quit_requests.get(), 0);
+
+    // And now the tab's last pane, which takes the tab, which takes the
+    // window: the rule lives in one place and runs all the way out.
+    harness.dispatch_action(TabAction::ClosePane(panes[0]));
+    assert_eq!(harness.quit_requests.get(), 1);
+}
+
+#[test]
+fn a_close_button_in_tabs_view_closes_the_whole_tab_it_stands_for() {
+    // The row is the tab there, so its button is the tab's — which is what
+    // Warp's tab-group header button does. Closing only the focused pane would
+    // leave the tab on the bar under a different name and look like nothing
+    // happened.
+    let mut harness = Harness::new(2);
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let tabs = harness.tab_ids();
+    harness.set_granularity(Granularity::Tabs);
+
+    let buttons = close_boxes(&harness.frame());
+    assert_eq!(buttons.len(), 1, "only the selected row draws one");
+    harness.click(center(buttons[0]), MouseButton::Left);
+
+    assert_eq!(harness.tab_ids(), [tabs[0]]);
+    assert_eq!(harness.pane_ids().len(), 1);
 }

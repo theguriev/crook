@@ -8,7 +8,8 @@ use crookui_core::event::{Keystroke, Modifiers};
 use crookui_core::fonts::FamilyId;
 use crookui_core::prelude::*;
 
-use crate::tab::{AgentSession, Tab, TabAction, TabEffect, TabId, TabStrip};
+use crate::settings::Granularity;
+use crate::tab::{AgentSession, Direction, PaneId, Tab, TabAction, TabEffect, TabId, TabStrip};
 use crate::theme::THEME;
 use crate::usage_model::UsageModel;
 
@@ -34,16 +35,23 @@ pub struct Fonts {
 /// same code path a real window gets.
 pub type QuitRequest = Rc<dyn Fn()>;
 
-/// What the mouse is doing to one tab, kept across renders.
+/// What the mouse is doing to one pane, kept across renders.
 ///
 /// The element tree is thrown away every time the view re-renders, so hover
 /// and press state cannot live in it. It lives here, keyed by identity, and is
 /// handed back to the elements each frame.
-pub(super) struct TabInteraction {
-    /// The tab itself.
-    pub(super) tab: MouseStateHandle,
-    /// Its close button.
+///
+/// Keyed by [`PaneId`] and not [`TabId`], because in `Panes` view one tab
+/// draws several chips: sharing one entry between them would light them all up
+/// together, and the close-button guard in the chip's click handler would
+/// swallow clicks meant for a sibling.
+pub(super) struct PaneInteraction {
+    /// The pane's chip in the bar.
+    pub(super) chip: MouseStateHandle,
+    /// That chip's close button.
     pub(super) close: MouseStateHandle,
+    /// The pane's panel in the body.
+    pub(super) body: MouseStateHandle,
 }
 
 /// The window's root view.
@@ -52,7 +60,8 @@ pub struct Workspace {
     fonts: Fonts,
     usage: ModelHandle<UsageModel>,
     chip: ViewHandle<UsageChip>,
-    interactions: HashMap<TabId, TabInteraction>,
+    interactions: HashMap<PaneId, PaneInteraction>,
+    granularity: Granularity,
     new_tab: MouseStateHandle,
     quit: QuitRequest,
 }
@@ -76,6 +85,7 @@ impl Workspace {
             usage,
             chip,
             interactions: HashMap::new(),
+            granularity: Granularity::default(),
             new_tab: MouseStateHandle::default(),
             quit,
         };
@@ -93,30 +103,54 @@ impl Workspace {
         self.fonts
     }
 
+    /// Whether the bar draws a row per pane or a row per tab.
+    pub fn granularity(&self) -> Granularity {
+        self.granularity
+    }
+
+    /// Changes what the bar draws a row for, and repaints if that moved
+    /// anything.
+    ///
+    /// The seam the "View as: Panes | Tabs" control drives. It lives on the
+    /// view rather than in the strip because it changes nothing about which
+    /// tabs and panes exist, only how many of them the bar names.
+    pub fn set_granularity(&mut self, granularity: Granularity, ctx: &mut ViewContext<Self>) {
+        if self.granularity == granularity {
+            return;
+        }
+        self.granularity = granularity;
+        ctx.notify();
+    }
+
     /// Starts the usage poll chain. Call once, after the window exists.
     pub fn start_usage_poll(&self, ctx: &mut ViewContext<Self>) {
         self.usage.update(ctx, |model, ctx| model.start(ctx));
     }
 
-    /// Reports the agent's progress into one session, and repaints the tab
-    /// that shows it. Returns whether the tab is still open.
+    /// Reports the agent's progress into one session, and repaints the chip
+    /// that shows it. Returns whether the pane is still open.
     ///
     /// A closure rather than a returned `&mut AgentSession`, because the
     /// repaint has to be part of the same call: a caller that renamed a
     /// session and did not notify would leave the old title on screen with
     /// nothing reporting an error, until some unrelated click happened to
     /// rebuild the frame.
+    ///
+    /// Addressed by [`PaneId`], because a session belongs to a pane. Taking a
+    /// [`TabId`] would mean writing into whichever pane of that tab happens to
+    /// be focused when the agent reports — a race between a person clicking
+    /// and a background task finishing.
     pub fn update_session(
         &mut self,
-        id: TabId,
+        id: PaneId,
         ctx: &mut ViewContext<Self>,
         report: impl FnOnce(&mut AgentSession),
     ) -> bool {
-        let Some(tab) = self.tabs.get_mut(id) else {
+        let Some(pane) = self.tabs.pane_mut(id) else {
             return false;
         };
 
-        report(tab.session_mut());
+        report(pane.session_mut());
         ctx.notify();
         true
     }
@@ -155,7 +189,11 @@ impl Workspace {
         let alt = keystroke.modifiers.alt;
         match (keystroke.key.as_str(), shift, alt) {
             ("t", false, false) => Some(TabAction::New),
-            ("w", false, false) => Some(TabAction::Close(self.tabs.active_id())),
+            // Warp's `pane_group:close_current_session`: the pane goes, and
+            // the tab only goes with it when it was the tab's last one.
+            ("w", false, false) => self.tabs.focused_pane_id().map(TabAction::ClosePane),
+            ("d", false, false) => Some(TabAction::Split(Direction::Right)),
+            ("d", true, false) => Some(TabAction::Split(Direction::Down)),
             ("left", true, false) => self.neighbour(-1).map(TabAction::Select),
             ("right", true, false) => self.neighbour(1).map(TabAction::Select),
             ("left", false, true) => Some(TabAction::MoveLeft),
@@ -172,7 +210,7 @@ impl Workspace {
         self.new_tab.clone()
     }
 
-    pub(super) fn interaction(&self, id: TabId) -> Option<&TabInteraction> {
+    pub(super) fn interaction(&self, id: PaneId) -> Option<&PaneInteraction> {
         self.interactions.get(&id)
     }
 
@@ -185,16 +223,18 @@ impl Workspace {
     }
 
     fn sync_interactions(&mut self) {
-        for tab in self.tabs.iter() {
+        let open: Vec<PaneId> = self.tabs.panes().map(|(_, pane)| pane.id()).collect();
+
+        for id in &open {
             self.interactions
-                .entry(tab.id())
-                .or_insert_with(|| TabInteraction {
-                    tab: MouseStateHandle::default(),
+                .entry(*id)
+                .or_insert_with(|| PaneInteraction {
+                    chip: MouseStateHandle::default(),
                     close: MouseStateHandle::default(),
+                    body: MouseStateHandle::default(),
                 });
         }
-        self.interactions
-            .retain(|id, _| self.tabs.get(*id).is_some());
+        self.interactions.retain(|id, _| open.contains(id));
     }
 }
 

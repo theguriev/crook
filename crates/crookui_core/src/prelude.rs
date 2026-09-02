@@ -10,8 +10,9 @@ pub use crate::core::{
 };
 pub use crate::element::{Element, ParentElement as _, SizeConstraint};
 pub use crate::elements::{
-    Align, ChildView, Clipped, ConstrainedBox, Container, CrossAxisAlignment, Empty, Expanded,
-    Flex, Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle, Shrinkable, Text,
+    Align, AnchorTo, ChildView, Clipped, ConstrainedBox, Container, Corner, CrossAxisAlignment,
+    Dismiss, Empty, Expanded, Flex, Hoverable, MainAxisAlignment, MainAxisSize, MouseStateHandle,
+    Shrinkable, Stack, Text,
 };
 pub use crate::geometry::{Color, RectF, Vector2F, vec2f};
 pub use crate::presenter::EventContext;

@@ -25,8 +25,10 @@
 //! `View::render`, layout and paint exactly as the window does, which is what
 //! makes it worth having in CI on a machine with no display.
 
+pub mod git;
 pub mod platform_insets;
 pub mod process;
+pub mod settings;
 pub mod tab;
 pub mod theme;
 pub mod usage_model;
@@ -49,7 +51,7 @@ use crookui_core::scene::Scene;
 use crookui_core::{AddSingletonModel as _, App, Presenter, WindowId};
 
 use crate::platform_insets::WindowChrome;
-use crate::tab::{AgentStatus, Tab, TabAction, TabId};
+use crate::tab::{AgentStatus, Direction, PaneId, Tab, TabAction};
 use crate::usage_model::UsageModel;
 use crate::workspace::{Fonts, QuitRequest, Workspace};
 
@@ -211,7 +213,9 @@ OPTIONS:
 
 KEYS:
     cmd/ctrl-t                 New agent tab
-    cmd/ctrl-w                 Close the active tab
+    cmd/ctrl-d                 Split the focused pane to the right
+    cmd/ctrl-shift-d           Split the focused pane downwards
+    cmd/ctrl-w                 Close the focused pane, and its tab with the last one
     cmd/ctrl-shift-left/right  Select the previous/next tab
     cmd/ctrl-alt-left/right    Move the active tab",
         version = env!("CARGO_PKG_VERSION")
@@ -298,29 +302,43 @@ fn write_snapshot(path: &std::path::Path) -> Result<()> {
 
 /// Fills the snapshot's strip with something worth looking at.
 ///
-/// A window opens on one tab; a rendering check wants the states one tab
-/// cannot show it — an unselected tab beside a selected one, and each status
-/// the dot has a colour for.
+/// A window opens on one tab holding one pane; a rendering check wants the
+/// states that cannot show it — an unselected row beside a selected one, each
+/// status the dot has a colour for, and a tab split into two panels so the
+/// body is not always a single box.
 fn seed_snapshot_tabs(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace>) {
     workspace.apply(TabAction::New, ctx);
     workspace.apply(TabAction::New, ctx);
 
-    let ids: Vec<TabId> = workspace.tabs().iter().map(Tab::id).collect();
+    let first_tab = workspace.tabs().iter().map(Tab::id).next();
+    if let Some(first) = first_tab {
+        workspace.apply(TabAction::Select(first), ctx);
+    }
+    workspace.apply(TabAction::Split(Direction::Right), ctx);
+
+    let panes: Vec<PaneId> = workspace
+        .tabs()
+        .panes()
+        .map(|(_, pane)| pane.id())
+        .collect();
     let sessions = [
         ("port the tab bar", AgentStatus::Running),
         ("write the usage chip", AgentStatus::NeedsInput),
         ("bisect the flaky test", AgentStatus::Failed),
+        ("read the recon notes", AgentStatus::Idle),
     ];
 
-    for (id, (title, status)) in ids.iter().zip(sessions) {
+    for (id, (title, status)) in panes.iter().zip(sessions) {
         workspace.update_session(*id, ctx, |session| {
             session.derived_title = Some(title.to_owned());
             session.status = status;
         });
     }
 
-    if let Some(first) = ids.first() {
-        workspace.apply(TabAction::Select(*first), ctx);
+    // The split tab's first pane: the body then shows two panels, one of them
+    // carrying the focused pane's accent border.
+    if let Some(first) = panes.first() {
+        workspace.apply(TabAction::FocusPane(*first), ctx);
     }
 }
 
