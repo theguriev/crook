@@ -1,0 +1,41 @@
+[package]
+name = "crook"
+description = "A terminal whose unit of work is an agent."
+license = "AGPL-3.0-only"
+authors.workspace = true
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+default-run = "crook-dev"
+# Everything lives in the lib; the bins are 20-line channel shims. Retrofitting
+# this layout after a main.rs exists means touching every module path, so it is
+# here from the first commit.
+autobins = false
+
+[lib]
+name = "crook"
+path = "src/lib.rs"
+
+[[bin]]
+name = "crook-dev"
+path = "src/bin/dev.rs"
+
+[[bin]]
+name = "crook"
+path = "src/bin/stable.rs"
+
+[features]
+default = []
+# Set for shipped builds: hides the console window on Windows.
+release_bundle = []
+
+[dependencies]
+crook_usage.workspace = true
+crookui.workspace = true
+crookui_core.workspace = true
+
+anyhow.workspace = true
+env_logger.workspace = true
+log.workspace = true
+# `--snapshot` writes a real frame to a file so a human, or CI, can look at it.
+png.workspace = true
