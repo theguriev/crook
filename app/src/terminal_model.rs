@@ -1032,9 +1032,12 @@ fn packed(size: TerminalSize) -> u32 {
 
 /// The terminal palette, in Crook's colours.
 ///
-/// The two that matter are the defaults: a grid whose background is the panel's
+/// The two that matter are the defaults: a grid whose background is the pane's
 /// own means an untouched screen costs no rectangles at all, and text that
 /// matches the rest of the window means a shell does not look pasted into it.
+/// The agreement runs the other way too — `body::pane_ground` paints the pane
+/// in whatever background the grid resolved — so a shell that sets its own with
+/// OSC 11 takes the padding around it along.
 /// Everything a program actually asks for — the sixteen ANSI colours, the cube,
 /// a `Color::Spec` — keeps the values every terminal agrees on.
 fn crook_palette() -> Palette {

@@ -18,7 +18,7 @@ use crookui_core::fonts::{FamilyId, FontId, LineStyle, StyleAndFont};
 use crookui_core::geometry::{RectF, Vector2F, vec2f};
 use crookui_core::platform::TextLayoutSystem;
 use crookui_core::prelude::*;
-use crookui_core::scene::{Radius, Rect, Scene};
+use crookui_core::scene::{CornerRadius, Radius, Rect, Scene};
 use crookui_core::text_layout::{Glyph, Line, Run};
 use crookui_core::{AddSingletonModel as _, App, Presenter, WindowId};
 
@@ -1085,19 +1085,45 @@ fn selected_chips(scene: &Scene) -> Vec<RectF> {
         .collect()
 }
 
-/// The body's panes, in render order, by the ground each of them paints.
+/// The body's panes, in render order.
 ///
-/// A pane has no chrome any more — no corner radius, no border, no margin —
-/// so what identifies one is its fill, and the only other thing painted in the
-/// window's ground is the window itself. That one starts at the origin and a
-/// pane never does: the header is above it in one layout and the tabs panel is
-/// beside it in the other.
+/// A pane has no chrome left to find it by — no corner radius, no border, no
+/// margin — and its fill is the terminal's own ground, which for a grid that
+/// has not been told otherwise is the same `surface` the header and the tabs
+/// panel are painted in. So it is found by what it is *not*: filled like a
+/// terminal, and neither bordered (the header's underline, the panel's right
+/// edge) nor rounded (the usage chip).
+///
+/// The one other thing that matches is the grid's own ground, painted inside
+/// the pane it belongs to, so a rect contained in another is dropped. Without
+/// that a shell test would count every pane twice.
 fn panel_boxes(scene: &Scene) -> Vec<RectF> {
-    visible_rects(scene)
-        .filter(|(rect, _)| rect.background == Fill::Solid(THEME.ground))
+    let candidates: Vec<RectF> = visible_rects(scene)
+        .filter(|(rect, _)| {
+            rect.background == Fill::Solid(THEME.surface)
+                && rect.border == Border::default()
+                && rect.corner_radius == CornerRadius::default()
+        })
         .map(|(_, bounds)| bounds)
-        .filter(|bounds| bounds.origin() != Vector2F::zero())
+        .collect();
+
+    candidates
+        .iter()
+        .filter(|bounds| {
+            !candidates
+                .iter()
+                .any(|other| other != *bounds && contains(*other, **bounds))
+        })
+        .copied()
         .collect()
+}
+
+/// Whether `outer` covers every corner of `inner`.
+fn contains(outer: RectF, inner: RectF) -> bool {
+    outer.min_x() <= inner.min_x()
+        && outer.min_y() <= inner.min_y()
+        && outer.max_x() >= inner.max_x()
+        && outer.max_y() >= inner.max_y()
 }
 
 #[test]
