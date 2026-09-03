@@ -1085,9 +1085,19 @@ fn selected_chips(scene: &Scene) -> Vec<RectF> {
         .collect()
 }
 
-/// The body's pane panels, by their rounded boxes.
+/// The body's panes, in render order, by the ground each of them paints.
+///
+/// A pane has no chrome any more — no corner radius, no border, no margin —
+/// so what identifies one is its fill, and the only other thing painted in the
+/// window's ground is the window itself. That one starts at the origin and a
+/// pane never does: the header is above it in one layout and the tabs panel is
+/// beside it in the other.
 fn panel_boxes(scene: &Scene) -> Vec<RectF> {
-    rects_rounded_by(scene, Radius::Pixels(10.))
+    visible_rects(scene)
+        .filter(|(rect, _)| rect.background == Fill::Solid(THEME.ground))
+        .map(|(_, bounds)| bounds)
+        .filter(|bounds| bounds.origin() != Vector2F::zero())
+        .collect()
 }
 
 #[test]
@@ -1143,6 +1153,55 @@ fn splitting_the_active_tab_puts_a_second_panel_in_its_body() {
     assert!(
         after[0].min_y() == after[1].min_y(),
         "a horizontal split's panels do not start at the same height"
+    );
+}
+
+#[test]
+fn a_pane_fills_its_share_of_the_body_and_not_just_the_cells_it_can_draw() {
+    // A grid measures to whole cells and stops short of the remainder. While
+    // every pane was a rounded card with a twelve-pixel gutter, that ragged
+    // edge was hidden; now that the panes meet the window's edges, a pane that
+    // sized itself to its content would leave a strip down the right and along
+    // the bottom that looks like the terminal and does not focus it when
+    // clicked.
+    let mut harness = Harness::new(1);
+    let panes = panel_boxes(&harness.frame());
+    assert_eq!(panes.len(), 1, "an unsplit tab is one pane");
+    let pane = panes[0];
+
+    assert_eq!(
+        pane.min_x(),
+        0.,
+        "the pane starts at the window's left edge"
+    );
+    assert_eq!(
+        pane.max_x(),
+        WINDOW.x(),
+        "the pane stops short of the window's right edge"
+    );
+    assert_eq!(
+        pane.max_y(),
+        WINDOW.y(),
+        "the pane stops short of the window's bottom edge"
+    );
+    assert!(
+        pane.min_y() > 0.,
+        "the pane should start below the header, not at the top of the window"
+    );
+
+    // And the whole of it is a click target, including the corner a grid of
+    // whole cells cannot reach.
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let panes = panel_boxes(&harness.frame());
+    let first = harness.active_pane_ids()[0];
+    harness.click(
+        panes[0].origin() + panes[0].size() - vec2f(2., 2.),
+        MouseButton::Left,
+    );
+    assert_eq!(
+        Some(first),
+        harness.focused_pane_id(),
+        "a click in the bottom-right corner of a pane did not focus it"
     );
 }
 
