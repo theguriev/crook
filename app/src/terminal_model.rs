@@ -126,9 +126,10 @@ const INITIAL_GRID: TerminalSize = TerminalSize::new(80, 24);
 
 /// Something one pane's shell did that the rest of the application cares about.
 ///
-/// Everything else a terminal reports — a bell, a clipboard write, a repaint —
-/// is either handled here or is not the workspace's business. These three are:
-/// two of them rename or relocate a session, and the third closes a pane.
+/// Everything else a terminal reports — a repaint, a query already answered —
+/// is either handled here or is not the workspace's business. These five are:
+/// two of them rename or relocate a session, one closes a pane, and the last
+/// two are the child asking for something only the window can give it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TerminalUpdate {
     /// The shell set a window title, or reset it. This is what makes a tab of
@@ -141,6 +142,19 @@ pub enum TerminalUpdate {
     /// The shell is gone. The pane should close, and with it its tab and the
     /// window if they were the last ones.
     Closed(PaneId),
+    /// The child asked for text to be put on the system clipboard with OSC 52.
+    ///
+    /// Only the window has a clipboard, so the terminal cannot answer this
+    /// itself. The reverse direction — a child *reading* the clipboard — is
+    /// refused in the emulator and never reaches here: answering it would hand
+    /// any program that can print to a pty the contents of the clipboard.
+    ClipboardStore(PaneId, String),
+    /// The bell rang.
+    ///
+    /// What to do with it is the workspace's to decide, because the answer is
+    /// about the tab strip rather than about the grid: a bell in a pane nobody
+    /// is looking at is the only interesting kind.
+    Bell(PaneId),
 }
 
 /// The finished blocks of one pane, as the surface holds them.
@@ -579,11 +593,16 @@ impl TerminalModel {
                 // The child asked the terminal to close. It is about to stop
                 // being readable anyway, so this is only ever early notice.
                 TerminalEvent::Exit => log::debug!("the shell in pane {pane:?} asked to close"),
-                TerminalEvent::Bell => log::trace!("bell in pane {pane:?}"),
-                // Nothing in Crook can reach a system clipboard yet, and
-                // silently dropping an OSC 52 is better than pretending.
-                TerminalEvent::ClipboardStore(_) => {
-                    log::debug!("pane {pane:?} asked to write the clipboard, which Crook cannot");
+                TerminalEvent::Bell => updates.push(TerminalUpdate::Bell(pane)),
+                // The clipboard belongs to the window, so this is carried up
+                // rather than answered here. An empty write is dropped: it is
+                // what a program clearing its own selection sends, and putting
+                // an empty string on the clipboard would silently destroy
+                // whatever the person had copied.
+                TerminalEvent::ClipboardStore(text) => {
+                    if !text.is_empty() {
+                        updates.push(TerminalUpdate::ClipboardStore(pane, text));
+                    }
                 }
                 // The enum is `#[non_exhaustive]`. A shell asking for something
                 // a later version of the emulator learned to report is not an

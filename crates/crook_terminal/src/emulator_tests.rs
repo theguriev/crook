@@ -210,6 +210,26 @@ fn test_the_bell_is_reported() {
 }
 
 #[test]
+fn test_an_osc_52_write_is_reported_and_a_read_is_not_answered() {
+    let mut emulator = emulator();
+    // `c` is the clipboard selection; the payload is base64, which alacritty
+    // decodes. "aGVsbG8=" is "hello".
+    emulator.advance(b"\x1b]52;c;aGVsbG8=\x07");
+
+    assert_eq!(
+        vec![TerminalEvent::ClipboardStore("hello".to_owned())],
+        emulator.take_events()
+    );
+
+    // A `?` payload asks the terminal to *send* the clipboard back. Answering
+    // it would hand any program that can print to a pty the contents of the
+    // clipboard, so it produces neither an event nor a reply.
+    emulator.advance(b"\x1b]52;c;?\x07");
+    assert!(emulator.take_events().is_empty());
+    assert!(emulator.take_replies().is_empty());
+}
+
+#[test]
 fn test_a_query_from_the_child_is_answered() {
     let mut emulator = emulator();
     // Device attributes: a program that gets no answer to this waits forever.

@@ -6294,3 +6294,102 @@ fn the_row_height_the_panel_scrolls_by_is_the_height_it_draws() {
         crate::workspace::theme_panel::ROW_HEIGHT
     );
 }
+
+/// The bell: what a shell asks for that only the tab strip can answer.
+///
+/// Driven through `apply_terminal_update`, which is the exact call the
+/// subscription in `Workspace::new` makes when a session's own thread reports
+/// something.
+mod the_bell {
+    use super::*;
+    use crate::terminal_model::TerminalUpdate;
+
+    /// Applies one update the way the model's subscription does.
+    fn report(harness: &mut Harness, update: TerminalUpdate) {
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(&update, ctx);
+        });
+    }
+
+    fn status_of(harness: &Harness, pane: PaneId) -> Option<AgentStatus> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tabs().pane(pane).and_then(Pane::status)
+        })
+    }
+
+    /// The pane of the tab that is *not* active.
+    fn background_of(harness: &Harness) -> PaneId {
+        let active = harness.focused_pane_id().expect("the window has a pane");
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| {
+                workspace
+                    .tabs()
+                    .panes()
+                    .map(|(_, pane)| pane.id())
+                    .find(|id| *id != active)
+            })
+            .expect("two tabs have two panes")
+    }
+
+    #[test]
+    fn a_bell_in_a_pane_nobody_is_looking_at_asks_for_attention() {
+        let mut harness = Harness::new(2);
+        let ringing = background_of(&harness);
+
+        assert_eq!(status_of(&harness, ringing), Some(AgentStatus::Idle));
+        report(&mut harness, TerminalUpdate::Bell(ringing));
+
+        assert_eq!(
+            status_of(&harness, ringing),
+            Some(AgentStatus::NeedsInput),
+            "a bell in a background pane is the one thing that says look here"
+        );
+    }
+
+    #[test]
+    fn a_bell_in_the_pane_with_the_keyboard_is_not_an_interruption() {
+        // Bash rings this on an ambiguous Tab completion. Painting somebody's
+        // own row amber while they type in it would be worse than silence.
+        let mut harness = Harness::new(1);
+        let focused = harness.focused_pane_id().expect("the window has a pane");
+
+        report(&mut harness, TerminalUpdate::Bell(focused));
+
+        assert_eq!(status_of(&harness, focused), Some(AgentStatus::Idle));
+    }
+
+    #[test]
+    fn looking_at_a_pane_is_what_quiets_it() {
+        let mut harness = Harness::new(2);
+        let ringing = background_of(&harness);
+
+        report(&mut harness, TerminalUpdate::Bell(ringing));
+        assert_eq!(status_of(&harness, ringing), Some(AgentStatus::NeedsInput));
+
+        harness.dispatch_action(TabAction::FocusPane(ringing));
+
+        assert_eq!(
+            status_of(&harness, ringing),
+            Some(AgentStatus::Idle),
+            "the bell was answered by looking at the pane that rang"
+        );
+    }
+
+    #[test]
+    fn a_failed_pane_is_not_quieted_by_being_looked_at() {
+        // Only the status a bell sets is cleared by attention. Failure is a
+        // fact about the work, and looking at it does not undo it.
+        let mut harness = Harness::new(2);
+        let failed = background_of(&harness);
+        harness.workspace_update(|workspace, ctx| {
+            workspace.update_session(failed, ctx, |session| {
+                session.status = AgentStatus::Failed;
+            });
+        });
+
+        harness.dispatch_action(TabAction::FocusPane(failed));
+
+        assert_eq!(status_of(&harness, failed), Some(AgentStatus::Failed));
+    }
+}

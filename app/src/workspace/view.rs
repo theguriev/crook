@@ -23,7 +23,9 @@ use crate::pane_selection::PaneSelection;
 use crate::pane_surface;
 use crate::platform_insets::{LayoutInsets, TabsPlacement, layout_insets};
 use crate::settings::{Density, GeneralOptions, Granularity, Layout, Settings, TabOptions};
-use crate::tab::{AgentSession, Direction, PaneId, Tab, TabAction, TabEffect, TabId, TabStrip};
+use crate::tab::{
+    AgentSession, AgentStatus, Direction, Pane, PaneId, Tab, TabAction, TabEffect, TabId, TabStrip,
+};
 use crate::terminal_font::CellFont;
 use crate::terminal_model::{BlockHistory, TerminalHandle, TerminalModel, TerminalUpdate};
 use crate::theme::creator::Draft;
@@ -1140,6 +1142,47 @@ impl Workspace {
         true
     }
 
+    /// Records that a pane's shell rang the bell.
+    ///
+    /// A bell is a program saying "look at me", so it becomes the one status
+    /// that means exactly that — and only in a pane nobody is looking at. The
+    /// pane with the keyboard is already being looked at, and a shell that
+    /// rings on every ambiguous Tab completion would otherwise paint its own
+    /// row amber while somebody typed in it.
+    ///
+    /// It is cleared by looking: [`Self::attend`] runs on every focus change.
+    fn ring(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) -> bool {
+        if self.tabs.focused_pane_id() == Some(pane) {
+            // Not "nothing to write into" — the pane is there and the bell was
+            // heard. Reporting `true` is what keeps this out of the log line
+            // that means a pane has gone.
+            return true;
+        }
+        self.update_session(pane, ctx, |session| {
+            session.status = AgentStatus::NeedsInput;
+        })
+    }
+
+    /// Clears the attention a bell asked for, now that the pane has it.
+    ///
+    /// Only [`AgentStatus::NeedsInput`] is cleared, and only ever back to
+    /// [`AgentStatus::Idle`]: a pane that failed stays failed until something
+    /// says otherwise, and looking at a running command does not stop it.
+    fn attend(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(pane) = self.tabs.focused_pane_id() else {
+            return;
+        };
+        let rang = self
+            .tabs
+            .pane(pane)
+            .and_then(Pane::session)
+            .is_some_and(|session| session.status == AgentStatus::NeedsInput);
+        if !rang {
+            return;
+        }
+        self.update_session(pane, ctx, |session| session.status = AgentStatus::Idle);
+    }
+
     /// Applies what a pane's shell did.
     ///
     /// A title and a working directory go into the session, which is what makes
@@ -1151,7 +1194,11 @@ impl Workspace {
     /// which is the same path `cmd-w` takes: the pane goes, its tab goes with
     /// it if it was the last pane, and the window goes if that was the last
     /// tab. There is deliberately no second way to close anything.
-    fn apply_terminal_update(&mut self, update: &TerminalUpdate, ctx: &mut ViewContext<Self>) {
+    pub(super) fn apply_terminal_update(
+        &mut self,
+        update: &TerminalUpdate,
+        ctx: &mut ViewContext<Self>,
+    ) {
         let reported = match update {
             TerminalUpdate::Title(pane, title) => {
                 let title = title.clone();
@@ -1169,6 +1216,16 @@ impl Workspace {
                 }
                 true
             }
+            // Straight onto the window's one clipboard, which is the same one
+            // `cmd-c` writes: a program that asked for its text to be copied
+            // means the clipboard a person will paste from, not a second one.
+            TerminalUpdate::ClipboardStore(_, text) => {
+                if !self.clipboard.write(text) {
+                    log::debug!("a shell asked to write the clipboard, and there is none");
+                }
+                true
+            }
+            TerminalUpdate::Bell(pane) => self.ring(*pane, ctx),
         };
 
         if !reported {
@@ -1199,6 +1256,11 @@ impl Workspace {
         self.sync_interactions();
         self.sync_git(ctx);
         self.sync_terminals(ctx);
+        // After the strip has moved, so "which pane is being looked at" is the
+        // answer for the state the frame is about to draw. Every action comes
+        // through here, which is what makes looking at a pane the one and only
+        // thing that quiets its bell.
+        self.attend(ctx);
 
         // An action that changed nothing repaints nothing: holding down
         // cmd-alt-left on the leftmost tab must not put the window on a
