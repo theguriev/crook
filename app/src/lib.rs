@@ -179,6 +179,14 @@ struct Overrides {
     menu: bool,
     /// Start with the first row's hover detail card up.
     hover: bool,
+    /// Start with the Themes panel open, and — with `creating` — on its
+    /// creator.
+    ///
+    /// A way to look at a frame, like `--menu` and `--hover`: the panel is a
+    /// surface, and a snapshot of it is a snapshot of the real thing.
+    themes: bool,
+    /// Start with the Themes panel making a theme.
+    creating: bool,
     /// Start in this theme rather than the saved one.
     ///
     /// Applied straight to the palette rather than through
@@ -307,6 +315,11 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 frames = Some(count.parse().context("`--frames` takes a number")?);
             }
             "--menu" => overrides.menu = true,
+            "--themes" => overrides.themes = true,
+            "--new-theme" => {
+                overrides.themes = true;
+                overrides.creating = true;
+            }
             "--theme" => {
                 let name = args.next().context("`--theme` needs a name")?;
                 overrides.theme = Some(name);
@@ -402,6 +415,8 @@ OPTIONS:
     --settings [PAGE]  Start with a settings tab open, on `appearance`,
                        `usage`, `keys` or `about`
     --theme <NAME>     Start in this theme rather than the saved one
+    --themes           Start with the Themes panel open
+    --new-theme        Start with the Themes panel making a theme
     --hover            Start with the first row's detail card up
     --layout <MODE>    Start with the tabs `vertical` or `horizontal` rather than as saved
     --granularity <M>  Start with rows standing for `panes` or `tabs` rather than as saved
@@ -523,6 +538,9 @@ fn apply_overrides(
     }
     if let Some(section) = overrides.settings {
         workspace.open_settings_page(section, ctx);
+    }
+    if overrides.themes {
+        workspace.open_theme_panel(overrides.creating, ctx);
     }
 }
 

@@ -15,7 +15,8 @@
 
 use crookui_core::prelude::*;
 
-use super::super::action::{OptionsAction, SettingsAction};
+use super::super::action::{OptionsAction, SettingsAction, ThemeAction};
+use super::super::theme_preview;
 use super::super::view::Workspace;
 use super::widgets::{self, Segment};
 use super::{Control, Section};
@@ -150,66 +151,50 @@ fn appearance(workspace: &Workspace) -> Box<dyn Element> {
     ])
 }
 
-/// The "Theme" category: one card per theme, and where to put more.
+/// The "Theme" category: which theme is in force, and the way to another.
 ///
-/// Warp's chooser is a panel of its own with a search box and a virtualised
-/// list, because it lists twenty-one built-ins and however many a person has
-/// collected. Crook's three-and-a-few fit on the page they are configured
-/// from, and a card that is chosen by clicking it needs no confirm step: the
-/// theme is applied, saved and on screen — including in every shell already
-/// running — before the pointer has moved.
+/// Warp's shape exactly. The settings page does not list themes — it shows
+/// *the* theme, as a live preview beside its name, and clicking the row opens
+/// the Themes panel. The reason is worth keeping: a list of themes on a
+/// settings page is a list you look at instead of your work, and the panel
+/// exists so that a theme is judged against a running shell rather than
+/// against a card.
 fn theme_category(workspace: &Workspace) -> Vec<Box<dyn Element>> {
     let ui = workspace.fonts().ui;
     let fonts = workspace.fonts();
     let state = workspace.settings_page();
-    let current = workspace.theme_name();
 
-    let mut rows: Vec<Box<dyn Element>> = state
-        .themes
-        .iter()
-        .enumerate()
-        .map(|(index, available)| {
-            let selected = available.name == current;
-            let card = widgets::theme_card(
-                available.theme,
-                selected,
-                Some(SettingsAction::SetTheme(index).into()),
-                state.control(Control::Theme(index)),
+    vec![
+        widgets::current_theme_row(
+            theme_preview::card(
+                crate::theme::theme(),
+                theme_preview::ROW_CARD,
+                false,
+                None,
+                state.control(Control::ThemeRow),
                 fonts,
-            );
-
-            widgets::theme_row(
-                card,
-                available.name.clone(),
-                // The one thing worth saying about a theme beside its name:
-                // whether it is one of Crook's own or one that will still be
-                // there after this build is replaced.
-                if available.from_file {
-                    "from your themes folder"
-                } else {
-                    "built in"
-                },
-                selected,
-                ui,
-            )
-        })
-        .collect();
-
-    rows.push(widgets::note(
-        "Themes are read from your themes folder in Warp's own file format, so a theme \
-         written for Warp works here unchanged. Drop a .yaml in and open this page again.",
-        ui,
-    ));
-    rows.push(widgets::fact(
-        "Themes folder",
-        crate::theme::user_themes_directory()
-            .map(|path| path.display().to_string())
-            .unwrap_or_else(|| "nowhere — this machine has no configuration directory".to_owned()),
-        true,
-        fonts,
-    ));
-
-    rows
+            ),
+            workspace.theme_name().to_owned(),
+            ThemeAction::OpenPanel.into(),
+            state.control(Control::ThemeRowButton),
+            ui,
+        ),
+        widgets::note(
+            "Themes are read from your themes folder in Warp's own file format, so a theme \
+             written for Warp works here unchanged. Drop a .yaml in and open the panel again.",
+            ui,
+        ),
+        widgets::fact(
+            "Themes folder",
+            crate::theme::user_themes_directory()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|| {
+                    "nowhere — this machine has no configuration directory".to_owned()
+                }),
+            true,
+            fonts,
+        ),
+    ]
 }
 
 /// The "Rows" category: which fact goes on which line, and which chips a row
@@ -527,6 +512,14 @@ fn about(workspace: &Workspace) -> Box<dyn Element> {
                      under the MIT licence. The rest of Warp is AGPL and none of it is here: what \
                      Crook took from those parts is architecture, read and rewritten, which is \
                      why this page can say MIT and mean it.",
+                    ui,
+                ),
+                widgets::note(
+                    "The bundled palettes named after Catppuccin, Everforest, Gruvbox, \
+                     Kanagawa, Nord, Rosé Pine and Tokyo Night belong to those projects, each \
+                     under its own licence. Their values were read from the theme files \
+                     Omarchy ships, which is MIT, from Basecamp; Matte Black and Osaka Jade \
+                     are Omarchy's own.",
                     ui,
                 ),
             ],

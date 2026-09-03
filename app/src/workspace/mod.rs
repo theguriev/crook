@@ -36,6 +36,8 @@ mod tab_bar;
 mod tab_options_menu;
 mod tabs_panel;
 mod terminal_element;
+mod theme_panel;
+mod theme_preview;
 mod usage_chip;
 mod view;
 
@@ -44,7 +46,7 @@ mod tests;
 
 use crate::theme::theme;
 
-pub use action::{OptionsAction, SettingsAction, WorkspaceAction};
+pub use action::{OptionsAction, SettingsAction, ThemeAction, WorkspaceAction};
 pub use input_element::CommandInput;
 pub use settings_page::Section;
 pub use terminal_element::TerminalElement;

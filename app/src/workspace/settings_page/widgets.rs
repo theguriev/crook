@@ -470,171 +470,81 @@ pub(super) fn text_button(
     with_command(control, command)
 }
 
-/// One theme, drawn as a miniature of what choosing it would do.
+/// The row that says which theme is in force, and opens the panel.
 ///
-/// Warp's preview card, and it is the cheapest good idea in that part of Warp:
-/// rather than a screenshot to keep up to date or a row of colour swatches
-/// that says nothing about how they combine, it draws a fake terminal in the
-/// theme — a line of text, two ANSI colours, a divider and a cursor. Five
-/// colours in a hundred by sixty pixels, always correct because it is drawn
-/// from the palette itself.
-///
-/// The card is painted in `theme`, not in the theme in force: every colour
-/// below comes from the parameter. That is the whole trick, and it is why this
-/// function is the one place in the settings page that does not call
-/// [`theme()`](crate::theme::theme).
-pub(super) fn theme_card(
-    card: crate::theme::Theme,
-    selected: bool,
-    command: Command,
+/// Warp's shape: the preview on the left, the name to its right, and the whole
+/// row is the button. Hovering draws the accent border Warp draws, because the
+/// row is the only control on the page that leads somewhere rather than
+/// changing something.
+pub(super) fn current_theme_row(
+    card: Box<dyn Element>,
+    name: String,
+    action: WorkspaceAction,
     state: MouseStateHandle,
-    fonts: super::super::view::Fonts,
+    ui: FamilyId,
 ) -> Box<dyn Element> {
-    /// Warp's card is 190x100. This one sits in a row beside its name rather
-    /// than above it, in a column 560 wide, so it is smaller — and the shape
-    /// is kept, because a preview that is not the shape of a window does not
-    /// look like one.
-    const WIDTH: f32 = 152.;
-    const HEIGHT: f32 = 80.;
-    /// The type inside a card, small enough that three lines fit.
-    const CARD_TEXT: f32 = 9.;
+    let mut card = Some(card);
+    let mut name = Some(name);
 
-    let enabled = command.is_some();
-
-    let control = Hoverable::new(state, move |mouse| {
-        // The one place the card reads the theme *in force* rather than the
-        // one it is drawing: an outline says which card the pointer is on and
-        // which one is chosen, and both of those are the page's language, not
-        // the previewed theme's.
-        let outline = if selected {
-            card.accent
-        } else if enabled && mouse.is_hovered() {
-            theme().text_muted
+    let row = Hoverable::new(state, move |mouse| {
+        let border = if mouse.is_hovered() {
+            theme().accent
         } else {
             theme().border
         };
 
-        // A shell that has just run `ls`: the command in the theme's own
-        // foreground, then a directory in its blue and an executable in its
-        // red, which is what a person actually looks at when they judge a
-        // terminal theme.
-        let line = |text: &'static str, color: Color| {
-            Text::new(text, fonts.monospace, CARD_TEXT)
-                .with_color(color)
-                .finish()
-        };
-
-        let grid = Flex::column()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_cross_axis_alignment(CrossAxisAlignment::Start)
-            .with_spacing(3.)
-            .with_child(line("$ ls", card.terminal.foreground))
-            .with_child(
-                Flex::row()
-                    .with_spacing(6.)
-                    .with_child(line("docs", card.terminal.normal[4]))
-                    .with_child(line("crook", card.terminal.normal[1]))
-                    .with_child(line("README", card.terminal.foreground))
-                    .finish(),
-            )
-            .with_child(Expanded::new(1., Empty::new().finish()).finish())
-            // The divider and the cursor: the input field, in miniature.
-            .with_child(
-                Container::new(
-                    Flex::row()
-                        .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                        .with_child(
-                            Container::new(
-                                ConstrainedBox::new(Empty::new().finish())
-                                    .with_width(2.)
-                                    .with_height(10.)
-                                    .finish(),
-                            )
-                            .with_background_color(card.accent)
-                            .finish(),
-                        )
-                        .finish(),
-                )
-                .with_border(Border::top(1.).with_border_color(card.border))
-                .with_padding(Padding {
-                    top: 5.,
-                    bottom: 1.,
-                    left: 0.,
-                    right: 0.,
-                })
-                .finish(),
-            )
-            .finish();
-
-        ConstrainedBox::new(
-            Container::new(grid)
-                .with_background_color(card.terminal.background)
-                .with_border(Border::all(if selected { 2. } else { 1. }).with_border_color(outline))
-                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
-                .with_uniform_padding(8.)
-                .finish(),
-        )
-        .with_width(WIDTH)
-        .with_height(HEIGHT)
-        .finish()
-    });
-
-    with_command(control, command)
-}
-
-/// One theme's row: its card, and what it is called.
-///
-/// Warp puts the preview on the left and the name to its right, and the
-/// selected one is marked on the card rather than beside it — which is why the
-/// name here is only a name.
-pub(super) fn theme_row(
-    card: Box<dyn Element>,
-    name: String,
-    origin: &'static str,
-    selected: bool,
-    ui: FamilyId,
-) -> Box<dyn Element> {
-    Container::new(
-        Flex::row()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_child(card)
-            .with_child(
-                Container::new(
-                    Flex::column()
-                        .with_main_axis_size(MainAxisSize::Min)
-                        .with_cross_axis_alignment(CrossAxisAlignment::Start)
-                        .with_child(
-                            Text::new(name, ui, LABEL_SIZE)
-                                .with_color(theme().text_primary)
-                                .with_style(if selected {
-                                    Properties {
+        Container::new(
+            Flex::row()
+                .with_main_axis_size(MainAxisSize::Max)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_child(card.take().unwrap_or_else(|| Empty::new().finish()))
+                .with_child(
+                    Container::new(
+                        Flex::column()
+                            .with_main_axis_size(MainAxisSize::Min)
+                            .with_cross_axis_alignment(CrossAxisAlignment::Start)
+                            .with_child(
+                                Text::new(name.take().unwrap_or_default(), ui, LABEL_SIZE)
+                                    .with_color(theme().text_primary)
+                                    .with_style(Properties {
                                         weight: Weight::Semibold,
                                         ..Properties::default()
-                                    }
-                                } else {
-                                    Properties::default()
-                                })
-                                .finish(),
-                        )
-                        .with_child(
-                            Container::new(
-                                Text::new(origin, ui, DESCRIPTION_SIZE)
-                                    .with_color(theme().text_muted)
+                                    })
                                     .finish(),
                             )
-                            .with_margin_top(3.)
+                            .with_child(
+                                Container::new(
+                                    Text::new("Choose another, or make one", ui, DESCRIPTION_SIZE)
+                                        .with_color(theme().text_muted)
+                                        .finish(),
+                                )
+                                .with_margin_top(3.)
+                                .finish(),
+                            )
                             .finish(),
-                        )
-                        .finish(),
+                    )
+                    .with_margin_left(14.)
+                    .finish(),
                 )
-                .with_margin_left(14.)
                 .finish(),
-            )
-            .finish(),
-    )
-    .with_margin_bottom(10.)
-    .finish()
+        )
+        .with_border(Border::all(1.).with_border_color(border))
+        // Ten rather than the eight this shape would otherwise take: a tab
+        // chip is rounded by eight, and the workspace tests find the tabs in a
+        // frame by exactly that radius. A settings row that answered to
+        // `tab_boxes` would not fail a test, it would quietly become one of
+        // the tabs those tests reason about.
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(10.)))
+        .with_uniform_padding(8.)
+        .finish()
+    })
+    .on_click(move |_, ctx, _| ctx.dispatch_typed_action(action))
+    .finish();
+
+    // The gap under the row goes *outside* the `Hoverable`: a margin inside it
+    // is part of the box the hit test is resolved against, so the row lit up —
+    // and opened the panel — from ten pixels below where it is drawn.
+    Container::new(row).with_margin_bottom(10.).finish()
 }
 
 /// A label and a value that cannot be edited, for the About page.

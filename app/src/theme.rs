@@ -19,21 +19,28 @@
 //! way every other model is. Crook's are not, so the current theme is a
 //! process-wide value behind a lock, read by copy.
 //!
-//! That is a trade with two things to be honest about. The lock is taken on
-//! every colour lookup — a few hundred per frame, uncontended, which is
-//! nanoseconds against a frame that shapes text and talks to a GPU. And a
-//! global is shared by a test binary's threads, so a test that changes the
-//! theme has to hold [`ThemeGuard`] rather than simply setting one.
+//! The value is **per-thread**, and that is not a compromise but the correct
+//! scope. Everything that reads a palette reads it while building a frame or
+//! while building the terminal palette a frame is drawn through, and both
+//! happen on the thread that owns the window; nothing on the background pool
+//! has ever asked for a colour. Meanwhile a test binary runs its tests on many
+//! threads against one process, so a process-wide theme would mean a test that
+//! chooses a light palette repainting the window of every test running beside
+//! it — which is a suite that fails one run in two for reasons that have
+//! nothing to do with the change being tested.
 
-use std::sync::RwLock;
+use std::cell::Cell;
+use std::path::{Path, PathBuf};
 
 use crookui_core::geometry::Color;
 
 mod builtin;
+pub mod creator;
 mod file;
+mod omarchy;
 
 pub use builtin::{BUILTIN, Builtin, DARK, builtin_named};
-pub use file::{ThemeFile, load_user_themes, user_themes_directory};
+pub use file::{ThemeFile, load_themes_in, load_user_themes, user_themes_directory, write_theme};
 
 /// A palette, in the roles the interface asks for.
 ///
@@ -173,7 +180,13 @@ impl Theme {
             tab_inactive: receded(background),
             border: composite(background, foreground, 12),
             text_primary: foreground,
-            text_muted: composite(background, foreground, 55),
+            // Further towards the text on a light palette than on a dark one.
+            // The eye is not symmetric about this: lightening dark text on a
+            // white ground loses contrast much faster than darkening light
+            // text on a black one, and 55% — which reads as "quieter" on a
+            // dark theme — falls to about 2.5:1 on a light one, under every
+            // threshold there is.
+            text_muted: composite(background, foreground, muted_mix(foreground)),
             accent,
             // The accent at 30%, which is `percent_of_255(30)` — enough to
             // pick a selected run out of a screenful, and translucent enough
@@ -186,7 +199,7 @@ impl Theme {
             // than as part of the palette — "critical" has to be red on every
             // theme — so they come from the theme's own ANSI colours, which is
             // where a theme says what it thinks red is.
-            usage_normal: composite(background, foreground, 55),
+            usage_normal: composite(background, foreground, muted_mix(foreground)),
             usage_elevated: terminal.normal[3],
             usage_high: terminal.bright[3],
             usage_critical: terminal.normal[1],
@@ -198,6 +211,11 @@ impl Theme {
             is_light: luminance(foreground) < 128,
         }
     }
+}
+
+/// How far muted text is mixed towards the text it is quieter than.
+const fn muted_mix(foreground: Color) -> u8 {
+    if luminance(foreground) < 128 { 72 } else { 62 }
 }
 
 /// How bright a colour reads, 0 to 255.
@@ -223,16 +241,50 @@ const fn luminance(color: Color) -> u8 {
 /// palette people actually write, so it steps the other way instead. Something
 /// has to separate the window from the panes on it.
 const fn receded(background: Color) -> Color {
-    let deeper = composite(background, Color::hex(0x000000), GROUND_PERCENT);
-    if deeper.r == background.r && deeper.g == background.g && deeper.b == background.b {
-        composite(background, Color::hex(0xffffff), GROUND_PERCENT)
+    // A *percentage* of a dark background is nothing: four per cent of #121212
+    // is one step in each channel, which is a well nobody can see. So the step
+    // has a floor in absolute terms, and the percentage only takes over on the
+    // light backgrounds where four per cent is more than the floor.
+    Color::rgb(
+        recede_channel(background.r),
+        recede_channel(background.g),
+        recede_channel(background.b),
+    )
+}
+
+/// One channel of [`receded`].
+///
+/// A free function rather than a closure because this runs in a `const fn`,
+/// and a closure cannot be called in one.
+const fn recede_channel(channel: u8) -> u8 {
+    let percentage = (channel as u16 * GROUND_PERCENT as u16) / 100;
+    let by = if percentage < GROUND_FLOOR as u16 {
+        GROUND_FLOOR as u16
     } else {
-        deeper
+        percentage
+    };
+
+    if (channel as u16) < by {
+        // Already at the bottom: step the other way instead. Something has to
+        // separate the window from the panes on it, and on a pure black theme
+        // the only available direction is lighter.
+        (channel as u16 + by) as u8
+    } else {
+        (channel as u16 - by) as u8
     }
 }
 
-/// How far the window's ground sits from the panes on it.
-const GROUND_PERCENT: u8 = 4;
+/// How far the window's ground sits from the panes on it, as a percentage of
+/// the background.
+const GROUND_PERCENT: u8 = 8;
+
+/// And never less than this, in absolute steps.
+///
+/// Eight per cent of a very dark background rounds to one or two steps out of
+/// 255 — the difference between a recess and a rendering artefact. Every
+/// bundled dark palette lands in exactly that region, so the floor is what
+/// makes the field a command is typed into visible at all on them.
+const GROUND_FLOOR: u8 = 9;
 
 /// `top` at `percent` over `bottom`, flattened.
 ///
@@ -265,53 +317,126 @@ const fn percent_of_255(percent: u8) -> u8 {
 }
 
 /// A theme somebody can choose, wherever it came from.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Available {
-    /// What the settings page calls it, and what the settings file stores.
+    /// What the chooser calls it, and what the settings file stores.
     pub name: String,
     /// The palette itself.
     pub theme: Theme,
-    /// Whether it came from a file rather than from the binary.
+    /// The file it was read from, for a built-in `None`.
     ///
-    /// The settings page says so, because it is the difference between a theme
-    /// that will still be there after a reinstall and one that will not.
-    pub from_file: bool,
+    /// Carried because a name is not an identity: two files can declare the
+    /// same `name:`, and the only thing that tells them apart — in the chooser,
+    /// and for anything that ever wants to open or remove one — is where they
+    /// came from.
+    pub path: Option<PathBuf>,
+}
+
+impl Available {
+    /// Whether this came from a file rather than from the binary.
+    pub fn from_file(&self) -> bool {
+        self.path.is_some()
+    }
 }
 
 /// Every theme that can be chosen: the built-in ones, then whatever is in the
-/// themes directory.
+/// user's themes directory.
 ///
 /// Read fresh each time rather than cached. Warp watches its themes directory
-/// and reloads on any change; this is the same effect at the one moment it
-/// matters — the settings page asks for the list when it draws — without a
+/// and reloads on any change; this is the same effect at the moments it
+/// matters — a surface that lists themes asks when it opens — without a
 /// watcher, a channel or a second thing that can be stale. A theme dropped in
-/// while Crook is running shows up the next time the page is opened.
-///
-/// A user theme whose name collides with a built-in wins: whoever wrote the
-/// file has said what they want that name to mean on this machine.
+/// while Crook is running shows up the next time the chooser is opened.
 pub fn available() -> Vec<Available> {
-    let mut themes: Vec<Available> = BUILTIN
-        .iter()
-        .map(|builtin| Available {
-            name: builtin.name.to_owned(),
-            theme: builtin.theme,
-            from_file: false,
-        })
-        .collect();
+    match user_themes_directory() {
+        Some(directory) => available_in(&directory),
+        None => builtins(),
+    }
+}
 
-    for file in load_user_themes() {
+/// The same, from a themes directory named outright.
+///
+/// The seam every test needs. Without it a test asserting "three themes" would
+/// be asserting something about the machine it runs on, and a test that
+/// *wrote* a theme would write into the themes folder of whoever ran it.
+pub fn available_in(directory: &Path) -> Vec<Available> {
+    let mut themes = builtins();
+
+    for file in load_themes_in(directory) {
         let entry = Available {
             name: file.name,
             theme: file.theme,
-            from_file: true,
+            path: Some(file.path),
         };
-        match themes.iter_mut().find(|theme| theme.name == entry.name) {
+
+        // A user theme replaces the built-in of the same name, in place: the
+        // person who wrote the file has said what that name means on this
+        // machine, and a list with two "Crook Dark" rows — one of them
+        // unreachable, since the settings file stores a name — would be worse
+        // than either.
+        //
+        // Two *files* with the same name are a different case and both are
+        // kept: see `disambiguate`.
+        match themes
+            .iter_mut()
+            .find(|theme| theme.name == entry.name && !theme.from_file())
+        {
             Some(existing) => *existing = entry,
             None => themes.push(entry),
         }
     }
 
+    disambiguate(&mut themes);
     themes
+}
+
+/// The themes that ship in the binary, as choosable entries.
+fn builtins() -> Vec<Available> {
+    BUILTIN
+        .iter()
+        .map(|builtin| Available {
+            name: builtin.name.to_owned(),
+            theme: builtin.theme,
+            path: None,
+        })
+        .collect()
+}
+
+/// Makes every name in the list unique, by the file each collision came from.
+///
+/// Two theme files can perfectly well declare the same `name:`, or derive the
+/// same name from two stems in two directories. Warp shows both rows with
+/// identical labels and tells them apart by path; Crook stores a *name* in its
+/// settings file, so two rows with one label would mean one of them could
+/// never be chosen twice in a row. The second and later ones are suffixed with
+/// the file's own stem, which is the thing a person can act on: it is what
+/// they would rename.
+fn disambiguate(themes: &mut [Available]) {
+    let mut seen: Vec<String> = Vec::new();
+
+    for entry in themes.iter_mut() {
+        if !seen.contains(&entry.name) {
+            seen.push(entry.name.clone());
+            continue;
+        }
+
+        let stem = entry
+            .path
+            .as_deref()
+            .and_then(Path::file_stem)
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("2")
+            .to_owned();
+        let mut candidate = format!("{} ({stem})", entry.name);
+        let mut serial = 2;
+        while seen.contains(&candidate) {
+            serial += 1;
+            candidate = format!("{} ({stem} {serial})", entry.name);
+        }
+
+        seen.push(candidate.clone());
+        entry.name = candidate;
+    }
 }
 
 /// The theme with this name, or `None` when nothing on this machine has it.
@@ -325,12 +450,17 @@ pub fn named(name: &str) -> Option<Theme> {
 /// The name of the theme a fresh install opens in.
 pub const DEFAULT_NAME: &str = BUILTIN[0].name;
 
+thread_local! {
+    /// The palette this thread draws in.
+    static CURRENT: Cell<Theme> = const { Cell::new(DARK) };
+}
+
 /// The palette in force, as a value.
 ///
-/// The one way a view gets a colour. Cheap: a read lock and a copy of a
-/// struct of colours.
+/// The one way a view gets a colour, and about as cheap as reading a field:
+/// a thread-local and a copy of a struct of colours.
 pub fn theme() -> Theme {
-    *current().read().expect("the theme lock was poisoned")
+    CURRENT.with(Cell::get)
 }
 
 /// Puts a palette in force. Everything drawn after this is drawn in it.
@@ -338,42 +468,24 @@ pub fn theme() -> Theme {
 /// Repainting is the caller's job — `Workspace::set_theme` notifies, because
 /// it is the view that knows a window is on screen to repaint.
 pub fn set_theme(theme: Theme) {
-    *current().write().expect("the theme lock was poisoned") = theme;
+    CURRENT.with(|current| current.set(theme));
 }
 
-/// The lock behind [`theme`].
-fn current() -> &'static RwLock<Theme> {
-    static CURRENT: RwLock<Theme> = RwLock::new(DARK);
-    &CURRENT
-}
-
-/// Holds the theme still for the length of a test.
+/// Puts a theme in force for the length of a test, and the default back after.
 ///
-/// A test binary runs its tests on many threads against this one global, so a
-/// test that changes the theme would change it under every other test running
-/// at that moment. Taking this makes those tests take turns, and puts the
-/// default back when the last one is done.
-///
-/// Only tests need it, which is why it is `cfg(test)`: nothing in a running
-/// Crook changes the theme from two places at once.
+/// No lock: the theme is per-thread and a test has its thread to itself, so
+/// nothing here can reach another test. What this is for is the *end* of a
+/// test — a thread is reused for the tests that follow, and one that left a
+/// light palette behind would hand it to them.
 #[cfg(test)]
-pub struct ThemeGuard {
-    /// The turn itself. Held and never read — dropping it is the whole point,
-    /// which is what the leading underscore says to the dead-code lint.
-    _turn: std::sync::MutexGuard<'static, ()>,
-}
+pub struct ThemeGuard;
 
 #[cfg(test)]
 impl ThemeGuard {
-    /// Takes the theme for this test, and sets it to `theme`.
+    /// Puts `theme` in force on this thread.
     pub fn new(theme: Theme) -> Self {
-        static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-        // A poisoned lock means another test panicked while holding it; the
-        // theme it left behind is about to be overwritten anyway.
-        let turn = TURN.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         set_theme(theme);
-        Self { _turn: turn }
+        Self
     }
 }
 

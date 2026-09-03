@@ -109,13 +109,22 @@ pub fn user_themes_directory() -> Option<PathBuf> {
 /// of a machine that has never written a theme, and an unparseable file is one
 /// theme fewer rather than an error anybody has to act on.
 pub fn load_user_themes() -> Vec<ThemeFile> {
-    let Some(directory) = user_themes_directory() else {
-        return Vec::new();
-    };
+    match user_themes_directory() {
+        Some(directory) => load_themes_in(&directory),
+        None => Vec::new(),
+    }
+}
 
+/// The same, from a directory named outright, sorted by name and then by path.
+///
+/// Sorted by *both* because a name does not identify a theme: two files can
+/// declare the same one, and a list whose order depended on `read_dir` would
+/// hand the same two themes to the chooser in a different order on every
+/// launch.
+pub fn load_themes_in(directory: &Path) -> Vec<ThemeFile> {
     let mut themes = Vec::new();
-    collect(&directory, 0, &mut themes);
-    themes.sort_by(|left, right| left.name.cmp(&right.name));
+    collect(directory, 0, &mut themes);
+    themes.sort_by(|left, right| left.name.cmp(&right.name).then(left.path.cmp(&right.path)));
     themes
 }
 
@@ -136,8 +145,14 @@ fn collect(directory: &Path, depth: usize, themes: &mut Vec<ThemeFile>) {
         }
     };
 
-    for entry in entries.flatten() {
-        let path = entry.path();
+    // Sorted, because `read_dir` is not: two theme files whose names collide
+    // must resolve the same way on every launch, and a list that reordered
+    // itself between two openings of the chooser would move rows under the
+    // pointer.
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+    paths.sort();
+
+    for path in paths {
         if path.is_dir() {
             collect(&path, depth + 1, themes);
             continue;
@@ -248,11 +263,20 @@ impl Document {
     fn parse(contents: &str) -> Result<Self> {
         let mut top = Vec::new();
         let mut nested = Vec::new();
-        let mut block: Option<String> = None;
-        // The indent the current block's keys sit at, so a block inside a
-        // block — `terminal_colors:` then `normal:` — is not mistaken for its
-        // parent's sibling.
-        let mut block_indent = 0;
+        // The blocks currently open, innermost last, as (indent, name). A
+        // *stack* rather than one current block, because a file can dedent:
+        // `terminal_colors:` opens one, `normal:` opens another inside it, and
+        // a key back at the outer indent belongs to the outer one. Treating
+        // that as an error — which the first version of this did — threw away
+        // the whole theme over a key it was going to ignore anyway.
+        let mut blocks: Vec<(usize, String)> = Vec::new();
+
+        // A file written on Windows, or exported by an editor that stamps one,
+        // starts with a byte-order mark. Left in place it becomes part of the
+        // first key's name, and since Warp writes its own themes with the keys
+        // in alphabetical order that key is `accent` — so the theme would be
+        // dropped for want of a colour it plainly declares.
+        let contents = contents.trim_start_matches('\u{feff}');
 
         for (number, line) in contents.lines().enumerate() {
             let trimmed = line.trim();
@@ -265,6 +289,9 @@ impl Document {
                 continue;
             }
 
+            // Tabs count as one column each. YAML forbids them for indentation
+            // and no theme file has ever used one; counting them as something
+            // keeps a file that does from collapsing into one flat block.
             let indent = line.len() - line.trim_start().len();
             let Some((key, value)) = trimmed.split_once(':') else {
                 bail!("line {} is not `key: value`: {trimmed:?}", number + 1);
@@ -273,28 +300,23 @@ impl Document {
             let key = key.trim().to_owned();
             let value = value_of(value);
 
-            if indent == 0 {
-                block = value.is_empty().then(|| key.clone());
-                block_indent = 0;
-                if !value.is_empty() {
-                    top.push((key, value));
-                }
+            // Close every block this line has dedented out of.
+            while blocks.last().is_some_and(|(opened, _)| indent <= *opened) {
+                blocks.pop();
+            }
+
+            if value.is_empty() {
+                // A key with no value opens a block, whatever depth it is at.
+                blocks.push((indent, key));
                 continue;
             }
 
-            match &block {
-                // A block of its own inside a block: `normal:` under
-                // `terminal_colors:`. The inner name is what the colours below
-                // it belong to, which is all this parser needs — no theme file
-                // has ever had two blocks with the same inner name.
-                Some(_) if value.is_empty() => {
-                    block = Some(key);
-                    block_indent = indent;
-                }
-                Some(current) if indent > block_indent => {
-                    nested.push((current.clone(), key, value));
-                }
-                _ => bail!("line {} is indented under nothing: {trimmed:?}", number + 1),
+            match blocks.last() {
+                Some((_, block)) => nested.push((block.clone(), key, value)),
+                None if indent == 0 => top.push((key, value)),
+                // Indented, with nothing open above it. A stray line rather
+                // than a theme.
+                None => bail!("line {} is indented under nothing: {trimmed:?}", number + 1),
             }
         }
 
@@ -311,20 +333,54 @@ impl Document {
 
     /// A required top-level colour.
     fn color(&self, key: &str) -> Result<Color> {
-        let value = self
-            .string(key)
-            .with_context(|| format!("the theme has no `{key}`"))?;
-        parse_hex(&value).with_context(|| format!("`{key}` is not a colour"))
+        self.optional_color(key)?
+            .with_context(|| format!("the theme has no `{key}`"))
     }
 
-    /// A top-level colour, if the file has one.
+    /// A top-level colour, if the file has one — flat or as a gradient.
+    ///
+    /// Warp lets `background`, `accent` and `cursor` each be a hex string
+    /// *or* a two-stop gradient, written as a block of `top:`/`bottom:` or
+    /// `left:`/`right:`. Crook's renderer paints flat fills, so a gradient is
+    /// collapsed to its midpoint — which is what Warp itself does whenever it
+    /// needs a single colour out of a gradient, for contrast maths and for
+    /// text.
+    ///
+    /// Refusing them instead would have been the quiet kind of wrong: the
+    /// themes with gradient backgrounds are the striking ones, the whole file
+    /// is skipped when one key fails, and the only trace is a line in a log
+    /// nobody reads. A theme that arrives half-right and looks it beats a
+    /// theme that silently is not there.
     fn optional_color(&self, key: &str) -> Result<Option<Color>> {
-        match self.string(key) {
-            Some(value) => parse_hex(&value)
+        if let Some(value) = self.string(key) {
+            return parse_hex(&value)
                 .map(Some)
-                .with_context(|| format!("`{key}` is not a colour")),
-            None => Ok(None),
+                .with_context(|| format!("`{key}` is not a colour"));
         }
+
+        for (first, second) in [("top", "bottom"), ("left", "right")] {
+            let (Some(first), Some(second)) = (self.nested(key, first), self.nested(key, second))
+            else {
+                continue;
+            };
+            let first = parse_hex(&first).with_context(|| {
+                format!("`{key}` is a gradient whose first stop is not a colour")
+            })?;
+            let second = parse_hex(&second).with_context(|| {
+                format!("`{key}` is a gradient whose second stop is not a colour")
+            })?;
+            return Ok(Some(midpoint(first, second)));
+        }
+
+        Ok(None)
+    }
+
+    /// A value inside a block, as a string.
+    fn nested(&self, block: &str, key: &str) -> Option<String> {
+        self.nested
+            .iter()
+            .find(|(in_block, name, _)| in_block == block && name == key)
+            .map(|(_, _, value)| value.clone())
     }
 
     /// The eight colours of a `normal` or `bright` block, in ANSI order.
@@ -344,6 +400,18 @@ impl Document {
     }
 }
 
+/// Half way between two colours.
+///
+/// What a two-stop gradient becomes on a renderer that paints flat fills.
+fn midpoint(first: Color, second: Color) -> Color {
+    let mix = |first: u8, second: u8| ((u16::from(first) + u16::from(second)) / 2) as u8;
+    Color::rgb(
+        mix(first.r, second.r),
+        mix(first.g, second.g),
+        mix(first.b, second.b),
+    )
+}
+
 /// What is to the right of a `key:`, with its quotes and any trailing comment
 /// taken off.
 ///
@@ -355,15 +423,35 @@ fn value_of(value: &str) -> String {
     let value = value.trim();
 
     for quote in ['"', '\''] {
-        if let Some(rest) = value.strip_prefix(quote) {
-            return match rest.split_once(quote) {
-                Some((inside, _)) => inside.to_owned(),
-                // An opening quote and no closing one. Taking the rest of the
-                // line is what every lenient parser does, and the value is
-                // about to be checked for being a colour anyway.
-                None => rest.to_owned(),
-            };
+        let Some(rest) = value.strip_prefix(quote) else {
+            continue;
+        };
+
+        // A doubled quote inside a quoted scalar is one literal quote — YAML's
+        // own escape, and the one a name like `it's mine` is written with.
+        // Scanning for it rather than splitting on the first quote is the
+        // difference between reading that name back and reading back `it`.
+        let mut inside = String::new();
+        let mut characters = rest.chars().peekable();
+        while let Some(character) = characters.next() {
+            if character != quote {
+                inside.push(character);
+                continue;
+            }
+            if characters.peek() == Some(&quote) {
+                characters.next();
+                inside.push(quote);
+                continue;
+            }
+            // The closing quote. Whatever follows on the line is a comment or
+            // nothing, and either way it is not part of the value.
+            return inside;
         }
+
+        // An opening quote and no closing one. Taking the rest of the line is
+        // what every lenient parser does, and the value is about to be checked
+        // for being a colour anyway.
+        return inside;
     }
 
     match value.split_once(" #") {
@@ -373,34 +461,140 @@ fn value_of(value: &str) -> String {
 }
 
 /// `#rrggbb` or `#rgb`, the two forms Warp's parser accepts.
+///
+/// Works over the *bytes* rather than the string, and that is not a
+/// micro-optimisation: `"#\u{e9}a"` is three bytes and two characters, so a
+/// length check that counted bytes and then sliced the string would split a
+/// character and panic. This is parsing a file somebody downloaded, on the
+/// startup path, in a function whose module promises that nothing here can
+/// cost a person their window — so it takes the one form of indexing that
+/// cannot panic on any input at all.
 fn parse_hex(value: &str) -> Result<Color> {
     let digits = value
         .strip_prefix('#')
-        .with_context(|| format!("{value:?} does not start with `#`"))?;
+        .with_context(|| format!("{value:?} does not start with `#`"))?
+        .as_bytes();
 
-    let component = |from: usize, to: usize| -> Result<u8> {
-        u8::from_str_radix(&digits[from..to], 16)
-            .with_context(|| format!("{value:?} is not a hex colour"))
+    let digit = |at: usize| -> Result<u8> {
+        // `from_str_radix` over one ASCII byte. A non-ASCII byte is not a hex
+        // digit and fails here rather than anywhere more interesting.
+        let text = std::str::from_utf8(&digits[at..=at])
+            .with_context(|| format!("{value:?} is not a hex colour"))?;
+        u8::from_str_radix(text, 16).with_context(|| format!("{value:?} is not a hex colour"))
     };
+    let component = |high: usize, low: usize| -> Result<u8> { Ok(digit(high)? * 16 + digit(low)?) };
 
     match digits.len() {
         6 => Ok(Color::rgb(
-            component(0, 2)?,
-            component(2, 4)?,
-            component(4, 6)?,
+            component(0, 1)?,
+            component(2, 3)?,
+            component(4, 5)?,
         )),
         // `#abc` means `#aabbcc`, which is what every hex colour parser on the
         // web does and what Warp's does too.
-        3 => {
-            let double = |from: usize| -> Result<u8> {
-                let digit = u8::from_str_radix(&digits[from..=from], 16)
-                    .with_context(|| format!("{value:?} is not a hex colour"))?;
-                Ok(digit * 17)
-            };
-            Ok(Color::rgb(double(0)?, double(1)?, double(2)?))
-        }
+        3 => Ok(Color::rgb(digit(0)? * 17, digit(1)? * 17, digit(2)? * 17)),
         _ => bail!("{value:?} is not three or six hex digits"),
     }
+}
+
+/// Writes `theme` into `directory` as a theme file, and says where it went.
+///
+/// The inverse of everything above, and it exists for one reason: a theme
+/// somebody makes in the application has to become a *file*, in the same
+/// format as the ones they can download, in the folder the settings page
+/// already points at. A theme that lived only in the settings file would be a
+/// theme they could not share, edit, copy to another machine or keep after
+/// reinstalling.
+///
+/// The name is written into the file as `name:` verbatim and *separately*
+/// sanitised into a file name — see [`file_stem`]. A file whose name is
+/// already taken gets a serial rather than overwriting: nothing here should be
+/// able to destroy a theme somebody wrote by hand.
+pub fn write_theme(directory: &Path, name: &str, theme: &Theme) -> Result<PathBuf> {
+    fs::create_dir_all(directory)
+        .with_context(|| format!("could not create {}", directory.display()))?;
+
+    let stem = file_stem(name);
+    let mut path = directory.join(format!("{stem}.yaml"));
+    let mut serial = 2;
+    while path.exists() {
+        path = directory.join(format!("{stem}_{serial}.yaml"));
+        serial += 1;
+    }
+
+    fs::write(&path, emit(name, theme))
+        .with_context(|| format!("could not write {}", path.display()))?;
+    Ok(path)
+}
+
+/// A theme name as a file name that cannot be anything else.
+///
+/// Warp writes `<name>.yaml` with the name exactly as typed and no
+/// sanitisation at all — a name with a slash in it lands somewhere else
+/// entirely, and one with `..` in it lands somewhere much worse. Here the stem
+/// keeps letters, digits and single underscores and nothing else, so a stem
+/// can never contain a separator, a `.`, or a leading dash; an empty result
+/// falls back to `theme`.
+fn file_stem(name: &str) -> String {
+    let mut stem = String::new();
+    for character in name.chars() {
+        if character.is_ascii_alphanumeric() {
+            stem.extend(character.to_lowercase());
+        } else if !stem.ends_with('_') {
+            stem.push('_');
+        }
+    }
+
+    let stem = stem.trim_matches('_');
+    if stem.is_empty() {
+        "theme".to_owned()
+    } else {
+        stem.to_owned()
+    }
+}
+
+/// One theme as the text of a theme file.
+///
+/// Warp's key order — background, accent, foreground, cursor, then the two
+/// eight-colour blocks — and Warp's spelling of a colour: a quoted, lower-case,
+/// six-digit hex string. Quoted because `#` starts a comment in YAML and an
+/// unquoted colour would be read back as nothing at all.
+fn emit(name: &str, theme: &Theme) -> String {
+    let hex = |color: Color| format!("'#{:02x}{:02x}{:02x}'", color.r, color.g, color.b);
+    let colors = theme.terminal;
+
+    // Single-quoted, with any quote doubled — YAML's own escape inside a
+    // single-quoted scalar — and with anything that would end the line turned
+    // into a space. A name is the one field here a person could type, and a
+    // newline in one produces a file this very module cannot read back.
+    let name: String = name
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .replace('\'', "''");
+
+    let mut text = String::new();
+    text.push_str(&format!("name: '{name}'\n"));
+    text.push_str(&format!("background: {}\n", hex(colors.background)));
+    text.push_str(&format!("accent: {}\n", hex(theme.accent)));
+    text.push_str(&format!("foreground: {}\n", hex(colors.foreground)));
+    text.push_str(&format!("cursor: {}\n", hex(colors.cursor)));
+    text.push_str("terminal_colors:\n");
+
+    for (block, eight) in [("normal", colors.normal), ("bright", colors.bright)] {
+        text.push_str(&format!("  {block}:\n"));
+        for (name, color) in ANSI_NAMES.iter().zip(eight) {
+            text.push_str(&format!("    {name}: {}\n", hex(color)));
+        }
+    }
+
+    text
 }
 
 #[cfg(test)]
