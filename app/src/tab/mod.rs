@@ -188,22 +188,26 @@ impl AgentSession {
 /// hands out, and two tabs sharing an id makes `index_of` resolve a close to
 /// somebody else's tab.
 ///
-/// It has no title of its own. Warp's has a `custom_title` a person can
-/// rename, and it takes a comment in `vertical_tabs.rs:3996` to explain when
-/// that title must be suppressed so every row of a group does not print the
-/// same string. Crook has no rename flow, so there is nothing to suppress and
-/// nothing to keep in step.
+/// The name is the tab's own and is fixed at birth. Warp's `custom_title` is
+/// a rename a person performs, which Crook has no flow for; what a tab needs
+/// even without one is a name that does not move as focus moves inside it,
+/// because the panel's group header is what names a tab whose rows name its
+/// panes. Deriving that header from the focused pane would rewrite the heading
+/// every time someone clicked a row underneath it.
 #[derive(Debug)]
 pub struct Tab {
     id: TabId,
+    name: String,
     panes: PaneGroup,
 }
 
 impl Tab {
     /// A tab over one new session named `title`.
     pub fn new(title: impl Into<String>) -> Self {
+        let title = title.into();
         Self {
             id: TabId::next(),
+            name: title.clone(),
             panes: PaneGroup::new(title),
         }
     }
@@ -211,6 +215,17 @@ impl Tab {
     /// This tab's identity, for as long as it is open.
     pub fn id(&self) -> TabId {
         self.id
+    }
+
+    /// What the tab is called, whatever its panes are called.
+    ///
+    /// The name of the session it was opened for, which stays put when that
+    /// session is split away, closed, or renamed by its agent. Warp's
+    /// `should_show_tab_group_header` puts this above a tab's rows exactly
+    /// when the rows cannot speak for the tab — for Crook, when the tab holds
+    /// more than one pane.
+    pub fn name(&self) -> &str {
+        &self.name
     }
 
     /// The panes it holds, in render order. Never empty.

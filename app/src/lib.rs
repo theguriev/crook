@@ -52,10 +52,10 @@ use crookui_core::scene::Scene;
 use crookui_core::{AddSingletonModel as _, App, Presenter, WindowId};
 
 use crate::platform_insets::WindowChrome;
-use crate::settings::{Density, Settings};
+use crate::settings::{Density, Granularity, Layout, Settings};
 use crate::tab::{AgentStatus, Direction, PaneId, Tab, TabAction};
 use crate::usage_model::UsageModel;
-use crate::workspace::{Fonts, QuitRequest, Workspace, WorkspaceAction};
+use crate::workspace::{Fonts, QuitRequest, Workspace};
 
 /// The window Crook opens, in logical pixels.
 const WINDOW_SIZE: Vector2F = vec2f(1024., 640.);
@@ -129,16 +129,20 @@ enum Startup {
 ///
 /// These exist so a snapshot can show a state a fresh install is not in — a
 /// menu is not much of a rendering check while it is closed, and neither is a
-/// hover card nobody is hovering. `density` is handed to
-/// [`Workspace::override_density`], which puts it in front of the renderer
-/// without letting it into the settings the next menu click saves, so asking
-/// for one does not change the options of whoever asked.
+/// hover card nobody is hovering. The three option overrides are handed to the
+/// matching `Workspace::override_*` method, which puts a value in front of the
+/// renderer without letting it into the settings the next menu click saves, so
+/// asking for one does not change the options of whoever asked.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 struct Overrides {
     /// Start with the tab options menu open.
     menu: bool,
     /// Start with the first row's hover detail card up.
     hover: bool,
+    /// Start in this layout rather than the saved one.
+    layout: Option<Layout>,
+    /// Start with rows standing for this rather than for the saved one.
+    granularity: Option<Granularity>,
     /// Start in this density rather than the saved one.
     density: Option<Density>,
 }
@@ -223,6 +227,22 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                     other => bail!("`--density` takes compact or expanded, not {other}"),
                 });
             }
+            "--granularity" => {
+                let mode = args.next().context("`--granularity` needs a mode")?;
+                overrides.granularity = Some(match mode.as_str() {
+                    "panes" => Granularity::Panes,
+                    "tabs" => Granularity::Tabs,
+                    other => bail!("`--granularity` takes panes or tabs, not {other}"),
+                });
+            }
+            "--layout" => {
+                let mode = args.next().context("`--layout` needs a mode")?;
+                overrides.layout = Some(match mode.as_str() {
+                    "vertical" => Layout::Vertical,
+                    "horizontal" => Layout::Horizontal,
+                    other => bail!("`--layout` takes vertical or horizontal, not {other}"),
+                });
+            }
             other => bail!("unrecognised argument {other}; try --help"),
         }
     }
@@ -245,12 +265,15 @@ OPTIONS:
     --frames <N>       Draw N frames, then exit; for running unattended
     --menu             Start with the tab options menu open
     --hover            Start with the first row's detail card up
+    --layout <MODE>    Start with the tabs `vertical` or `horizontal` rather than as saved
+    --granularity <M>  Start with rows standing for `panes` or `tabs` rather than as saved
     --density <MODE>   Start in `compact` or `expanded` density rather than the saved one
     -h, --help         Print this message
     -V, --version      Print the version and channel
 
 KEYS:
     cmd/ctrl-t                 New agent tab
+    cmd/ctrl-b                 Move the tabs between the side panel and the header strip
     cmd/ctrl-d                 Split the focused pane to the right
     cmd/ctrl-shift-d           Split the focused pane downwards
     cmd/ctrl-w                 Close the focused pane, and its tab with the last one
@@ -295,11 +318,12 @@ fn resolve_fonts(font_db: &CosmicFontDb) -> Result<Fonts> {
 
 /// Puts the workspace into the state the command line asked to start in.
 ///
-/// Density first, because the other two are read against it: the hover card is
-/// armed on the first row of a strip whose row heights the density decides.
+/// The options first, because the last two are read against them: the hover
+/// card is armed on the first row of a list whose rows the granularity decides
+/// and whose heights the density decides.
 ///
-/// The density goes to [`Workspace::override_density`] rather than into the
-/// [`Settings`] the workspace was built from. Folding it into the settings is
+/// Each option goes to its `Workspace::override_*` method rather than into the
+/// [`Settings`] the workspace was built from. Folding them into the settings is
 /// the obvious arrangement and it is wrong: a menu click saves the *whole*
 /// options snapshot, so the first click of the run would write the override to
 /// the file and `--density expanded` — a way to look at a frame — would become
@@ -309,6 +333,12 @@ fn apply_overrides(
     overrides: Overrides,
     ctx: &mut ViewContext<Workspace>,
 ) {
+    if let Some(layout) = overrides.layout {
+        workspace.override_layout(layout, ctx);
+    }
+    if let Some(granularity) = overrides.granularity {
+        workspace.override_granularity(granularity, ctx);
+    }
     if let Some(density) = overrides.density {
         workspace.override_density(density, ctx);
     }
@@ -582,7 +612,7 @@ impl Shell {
         // element under the pointer to start the chain from.
         let chain = [self.workspace.id()];
         self.app
-            .dispatch_typed_action(self.window_id, &chain, &WorkspaceAction::Tab(action));
+            .dispatch_typed_action(self.window_id, &chain, &action);
         true
     }
 }
@@ -679,12 +709,24 @@ mod tests {
     #[test]
     fn the_startup_overrides_reach_both_kinds_of_run() {
         assert_eq!(
-            parse(&["--menu", "--hover", "--density", "expanded"]).expect("valid"),
+            parse(&[
+                "--menu",
+                "--hover",
+                "--layout",
+                "horizontal",
+                "--granularity",
+                "tabs",
+                "--density",
+                "expanded"
+            ])
+            .expect("valid"),
             Startup::Window {
                 frames: None,
                 overrides: Overrides {
                     menu: true,
                     hover: true,
+                    layout: Some(Layout::Horizontal),
+                    granularity: Some(Granularity::Tabs),
                     density: Some(Density::Expanded)
                 }
             }
@@ -695,13 +737,46 @@ mod tests {
                 path: PathBuf::from("/tmp/frame.png"),
                 overrides: Overrides {
                     menu: true,
-                    hover: false,
-                    density: None
+                    ..Overrides::default()
                 }
             }
         );
         assert!(parse(&["--density", "cosy"]).is_err());
         assert!(parse(&["--density"]).is_err());
+        assert!(parse(&["--layout", "diagonal"]).is_err());
+        assert!(parse(&["--layout"]).is_err());
+        assert!(parse(&["--granularity", "sessions"]).is_err());
+        assert!(parse(&["--granularity"]).is_err());
+    }
+
+    #[test]
+    fn every_option_and_key_the_help_names_is_one_the_parser_or_a_binding_knows() {
+        // A flag documented and never parsed, or parsed and never documented,
+        // is the kind of drift nobody notices until somebody types it.
+        let help = help_text();
+
+        for flag in [
+            "--snapshot",
+            "--frames",
+            "--menu",
+            "--hover",
+            "--layout",
+            "--granularity",
+            "--density",
+        ] {
+            assert!(help.contains(flag), "{flag} is not in --help");
+            // Either it parses, or it complains about the value it is missing.
+            // What it must never do is call itself unrecognised.
+            let complaint = parse(&[flag]).err().map(|error| error.to_string());
+            assert!(
+                !complaint.is_some_and(|complaint| complaint.contains("unrecognised")),
+                "--help documents {flag}, which the parser has never heard of"
+            );
+        }
+
+        // The layout binding is the one KEYS entry that is not a tab action,
+        // so it is the one that can quietly stop being dispatched.
+        assert!(help.contains("cmd/ctrl-b"));
     }
 
     /// Whether a pool of `workers` can still run a task once

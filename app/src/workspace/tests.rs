@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crookui_core::event::{Event, Modifiers, MouseButton};
+use crookui_core::event::{Event, Keystroke, Modifiers, MouseButton};
 use crookui_core::executor::{Background, LocalQueue};
 use crookui_core::fonts::{FamilyId, FontId, LineStyle, StyleAndFont};
 use crookui_core::geometry::{RectF, Vector2F, vec2f};
@@ -23,13 +23,14 @@ use crookui_core::text_layout::{Glyph, Line, Run};
 use crookui_core::{AddSingletonModel as _, App, Presenter, WindowId};
 
 use crate::git::{DiffStats, GitFacts, Head};
-use crate::settings::{Density, Granularity, PrimaryInfo, Settings, Subtitle, TabOptions};
+use crate::settings::{Density, Granularity, Layout, PrimaryInfo, Settings, Subtitle, TabOptions};
 use crate::tab::{AgentSession, AgentStatus, Direction, Pane, PaneId, Tab, TabAction, TabId};
 use crate::theme::THEME;
 use crate::usage_model::UsageModel;
 
 use super::{
-    Fonts, OptionsAction, QuitRequest, Workspace, WorkspaceAction, tab_bar, tab_options_menu,
+    Fonts, OptionsAction, QuitRequest, Workspace, WorkspaceAction, controls, tab_options_menu,
+    tabs_panel,
 };
 
 /// Big enough that two tabs both reach their maximum width, so the geometry
@@ -82,6 +83,20 @@ impl TextLayoutSystem for StubShaper {
     }
 }
 
+/// Settings that live only as long as the test, holding `layout`.
+///
+/// Written into the settings rather than set on the workspace afterwards, so
+/// that `saved_options` and `options` agree from the first frame — a harness
+/// whose file disagreed with its screen would make every override test lie.
+fn ephemeral_settings(layout: Layout) -> Settings {
+    let mut settings = Settings::ephemeral();
+    settings.set_tab_options(TabOptions {
+        layout,
+        ..TabOptions::default()
+    });
+    settings
+}
+
 struct Harness {
     app: App,
     presenter: Presenter,
@@ -91,12 +106,22 @@ struct Harness {
 }
 
 impl Harness {
-    /// A window with `tabs` tabs, the last of which is active, and one frame
-    /// already drawn so there is something to hit-test against.
+    /// A window with `tabs` tabs in the horizontal strip, the last of which is
+    /// active, and one frame already drawn so there is something to hit-test
+    /// against.
+    ///
+    /// The layout is asked for rather than inherited, because it is *not* the
+    /// one Crook opens in: the default is the panel, and everything below this
+    /// point is about the strip. [`Harness::panel`] is the other half.
     ///
     /// Ephemeral: a test run must not read, and must not rewrite, the tab
     /// options of whoever is running it.
     fn new(tabs: usize) -> Self {
+        Self::with_settings(tabs, ephemeral_settings(Layout::Horizontal))
+    }
+
+    /// The same, in the layout Crook actually opens in.
+    fn panel(tabs: usize) -> Self {
         Self::with_settings(tabs, Settings::ephemeral())
     }
 
@@ -138,13 +163,31 @@ impl Harness {
     }
 
     fn frame(&mut self) -> Rc<Scene> {
+        self.frame_sized(WINDOW)
+    }
+
+    /// The same, in a window of another size.
+    ///
+    /// The window is a parameter of the frame rather than of the harness
+    /// because it is a parameter of `build_scene`: nothing in the workspace
+    /// remembers how big the last one was, so a test can draw a wide frame and
+    /// a narrow one against the same state.
+    fn frame_sized(&mut self, window: Vector2F) -> Rc<Scene> {
         let window_id = self.window_id;
         let presenter = &mut self.presenter;
         self.app.update(|ctx| {
             let invalidation = ctx.take_all_invalidations_for_window(window_id);
             presenter.invalidate(invalidation, ctx);
-            presenter.build_scene(WINDOW, 1., ctx)
+            presenter.build_scene(window, 1., ctx)
         })
+    }
+
+    /// Arms the first row's detail card, the way `--hover` does.
+    fn hover_first_row(&mut self) {
+        let workspace = &self.workspace;
+        self.app.update(|ctx| {
+            workspace.update(ctx, |workspace, ctx| workspace.hover_first_row(ctx));
+        });
     }
 
     fn dispatch_action(&mut self, action: TabAction) {
@@ -210,6 +253,26 @@ impl Harness {
     fn options(&self) -> TabOptions {
         self.workspace
             .read(&self.app, |workspace, _| workspace.options())
+    }
+
+    /// Moves the tabs between the panel and the strip, the way the keybinding
+    /// does.
+    fn toggle_layout(&mut self) {
+        self.dispatch_option(OptionsAction::ToggleLayout);
+    }
+
+    /// Starts in a layout the command line asked for, the way `--layout` does.
+    fn override_layout(&mut self, layout: Layout) {
+        let workspace = &self.workspace;
+        self.app.update(|ctx| {
+            workspace.update(ctx, |workspace, ctx| workspace.override_layout(layout, ctx));
+        });
+    }
+
+    /// Where this layout says the window's own controls land.
+    fn window_insets(&self) -> crate::platform_insets::LayoutInsets {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.window_insets())
     }
 
     /// Starts in a density the command line asked for, the way `--density`
@@ -1449,12 +1512,12 @@ fn clicking_a_density_segment_changes_how_much_of_a_row_there_is() {
 fn the_gear_says_what_it_does_while_the_pointer_is_on_it_and_the_menu_is_down() {
     let mut harness = Harness::seeded();
     let gear = gear_box(&harness.frame());
-    assert!(!frame_text(&harness.frame()).contains(tab_bar::GEAR_TOOLTIP));
+    assert!(!frame_text(&harness.frame()).contains(controls::GEAR_TOOLTIP));
 
     harness.move_to(center(gear));
     let hovered = harness.frame();
     assert!(
-        frame_text(&hovered).contains(tab_bar::GEAR_TOOLTIP),
+        frame_text(&hovered).contains(controls::GEAR_TOOLTIP),
         "hovering the gear named nothing; the only way to find out what it \
          does is to click it"
     );
@@ -1467,7 +1530,7 @@ fn the_gear_says_what_it_does_while_the_pointer_is_on_it_and_the_menu_is_down() 
     // tooltip left there would sit between the gear and its own menu.
     harness.dispatch_option(OptionsAction::TogglePopup);
     assert!(
-        !frame_text(&harness.frame()).contains(tab_bar::GEAR_TOOLTIP),
+        !frame_text(&harness.frame()).contains(controls::GEAR_TOOLTIP),
         "the tooltip stayed up under the menu it opened"
     );
 }
@@ -1749,4 +1812,915 @@ fn every_show_toggle_carries_its_own_check() {
     harness.click(center(rows[4]), MouseButton::Left);
     assert!(!harness.options().show_diff_stats);
     assert_eq!(checked_rows(&harness.frame()), vec![0, 3, 5]);
+}
+
+// --- the vertical tabs panel -------------------------------------------------
+
+/// The panel's own box, by its ground and its width.
+///
+/// The header is painted in the same colour, so the width and the left edge
+/// are what tell them apart — and in the vertical layout the header starts
+/// beside the panel rather than above it, so their boxes never overlap.
+fn panel_box(scene: &Scene) -> RectF {
+    let boxes: Vec<RectF> = visible_rects(scene)
+        .filter(|(rect, _)| {
+            rect.background == Fill::Solid(THEME.surface)
+                && (rect.bounds.width() - tabs_panel::PANEL_WIDTH).abs() < 0.5
+                && rect.bounds.min_x() < 1.
+        })
+        .map(|(_, bounds)| bounds)
+        .collect();
+
+    assert_eq!(boxes.len(), 1, "exactly one tabs panel per frame");
+    boxes[0]
+}
+
+/// Every row the panel painted, as (what it drew, what the clip left).
+///
+/// A row is the only 4px-rounded box inside the panel wider than a button: the
+/// gear is 20 across, a close button 16, and the hover card hangs outside the
+/// panel entirely.
+fn panel_row_rects(scene: &Scene) -> Vec<(RectF, RectF)> {
+    let panel = panel_box(scene);
+    let mut rows: Vec<(RectF, RectF)> = visible_rects(scene)
+        .filter(|(rect, _)| {
+            rect.corner_radius.get_top_left() == Radius::Pixels(4.)
+                && rect.bounds.width() > 100.
+                && rect.bounds.min_x() >= panel.min_x()
+                && rect.bounds.max_x() <= panel.max_x()
+        })
+        .map(|(rect, visible)| (rect.bounds, visible))
+        .collect();
+    rows.sort_by(|left, right| left.0.min_y().total_cmp(&right.0.min_y()));
+    rows
+}
+
+/// The rows a person can actually see and click.
+fn panel_rows(scene: &Scene) -> Vec<RectF> {
+    panel_row_rects(scene)
+        .into_iter()
+        .filter(|(painted, visible)| (visible.height() - painted.height()).abs() < 0.5)
+        .map(|(painted, _)| painted)
+        .collect()
+}
+
+/// What the panel says, without the header or the body beside it.
+fn panel_text(scene: &Scene) -> String {
+    let panel = panel_box(scene);
+    text_where(scene, |position| position.x() < panel.max_x())
+}
+
+/// The rows carrying the selected row's 1px outline.
+fn selected_panel_rows(scene: &Scene) -> Vec<RectF> {
+    let panel = panel_box(scene);
+    visible_rects(scene)
+        .filter(|(rect, _)| {
+            rect.border.color == Fill::Solid(THEME.overlay_3)
+                && rect.bounds.width() > 100.
+                && rect.bounds.max_x() <= panel.max_x()
+        })
+        .map(|(_, bounds)| bounds)
+        .collect()
+}
+
+impl Harness {
+    /// A panel with one seeded row and the frame already drawn.
+    fn seeded_panel() -> Self {
+        let mut harness = Self::panel(1);
+        let pane = harness.pane_ids()[0];
+        harness.seed(pane, Some(seeded_diff()));
+        harness.frame();
+        harness
+    }
+
+    /// The panel's rows, at these options.
+    fn panel_rows_with(&mut self, options: TabOptions) -> Vec<RectF> {
+        self.set_options(options);
+        panel_rows(&self.frame())
+    }
+}
+
+#[test]
+fn a_fresh_workspace_opens_with_the_tabs_in_a_panel() {
+    // The one place Crook's defaults are not Warp's, asserted through the
+    // pixels rather than through the settings struct: a default that never
+    // reached the renderer would still pass `settings.rs`'s test.
+    let mut harness = Harness::panel(2);
+    let scene = harness.frame();
+
+    assert_eq!(Layout::Vertical, harness.options().layout);
+    assert_eq!(
+        0.,
+        panel_box(&scene).min_x(),
+        "the panel is not at the edge"
+    );
+    assert_eq!(panel_rows(&scene).len(), 2, "one row per tab");
+    assert!(
+        tab_boxes(&scene).is_empty(),
+        "the header drew tab items while the panel was up; the two layouts \
+         are mutually exclusive and both would be taking the same clicks"
+    );
+}
+
+#[test]
+fn the_panel_draws_a_row_per_pane_or_a_row_per_tab_as_it_is_told() {
+    // Warp's `pane_ids_for_display_granularity`, seen from the front. It is a
+    // real difference now that a tab holds a pane group: `Tabs` silently drops
+    // every pane but the focused one, with no count and no expander.
+    let mut harness = Harness::panel(2);
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    assert_eq!(harness.pane_ids().len(), 3);
+
+    assert_eq!(panel_rows(&harness.frame()).len(), 3, "a row per pane");
+
+    harness.set_granularity(Granularity::Tabs);
+    assert_eq!(panel_rows(&harness.frame()).len(), 2, "a row per tab");
+}
+
+#[test]
+fn a_split_tab_names_itself_above_its_rows_in_panes_and_nowhere_else() {
+    // Warp's `should_show_tab_group_header`. Its first two clauses are
+    // permanently false in Crook, so what is left is the third — and a header
+    // above every single-pane tab would just repeat the row under it.
+    let mut harness = Harness::panel(2);
+    let names = harness.workspace.read(&harness.app, |workspace, _| {
+        workspace
+            .tabs()
+            .iter()
+            .map(|tab| tab.name().to_owned())
+            .collect::<Vec<_>>()
+    });
+    // The tab's name is also its first pane's session title, so a row prints
+    // it too. Renaming the session — which is what an agent does the moment it
+    // has called its work something — leaves the name to the header alone.
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.derived_title = Some(TITLE.to_owned());
+    });
+
+    assert!(
+        !panel_text(&harness.frame()).contains(&names[0]),
+        "a single-pane tab drew a header repeating what its only row already \
+         says"
+    );
+
+    harness.dispatch_action(TabAction::Select(harness.tab_ids()[0]));
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    assert!(
+        panel_text(&harness.frame()).contains(&names[0]),
+        "a tab holding two panes drew no header, so neither row says which \
+         tab it belongs to"
+    );
+
+    harness.set_granularity(Granularity::Tabs);
+    assert!(
+        !panel_text(&harness.frame()).contains(&names[0]),
+        "Tabs granularity drew a group header, which is what \
+         `uses_outer_group_container == false` exists to suppress"
+    );
+}
+
+#[test]
+fn panes_granularity_insets_and_separates_its_tabs_and_tabs_granularity_spaces_them() {
+    // The chrome inverts between the granularities, and getting only the row
+    // count right leaves the panel looking wrong in both.
+    let mut harness = Harness::panel(3);
+
+    let panes = panel_rows(&harness.frame());
+    let panes_gaps: Vec<f32> = panes
+        .windows(2)
+        .map(|two| two[1].min_y() - two[0].max_y())
+        .collect();
+
+    harness.set_granularity(Granularity::Tabs);
+    let tabs = panel_rows(&harness.frame());
+    let tabs_gaps: Vec<f32> = tabs
+        .windows(2)
+        .map(|two| two[1].min_y() - two[0].max_y())
+        .collect();
+
+    // Panes: 8px of the tab's own bottom padding, a hairline, and 8px of the
+    // next tab's top padding — no gap in the list column at all.
+    for gap in &panes_gaps {
+        assert!(
+            (*gap - 17.).abs() < 0.5,
+            "Panes put {gap} between two tabs, not 8 + 1 + 8"
+        );
+    }
+    // Tabs: the list column's own 4px spacing and nothing else.
+    for gap in &tabs_gaps {
+        assert!(
+            (*gap - 4.).abs() < 0.5,
+            "Tabs put {gap} between two tabs, not the column's 4px spacing"
+        );
+    }
+    // A row is the same width in both — Warp pads each `Panes` tab by 8 and
+    // the whole `Tabs` column by 8, which lands in the same place. What
+    // differs is the box behind it: in `Panes` the lift belongs to the tab and
+    // covers the header, the inset and every row it holds; in `Tabs` the tab
+    // *is* its row and the two boxes coincide.
+    assert_eq!(tabs[0].width(), panes[0].width());
+    let active_row = *tabs.last().expect("three tabs, three rows");
+    let lifted = lifted_tab_box(&harness.frame());
+    assert!(
+        (lifted.min_x() - active_row.min_x()).abs() < 0.01
+            && (lifted.min_y() - active_row.min_y()).abs() < 0.01
+            && (lifted.width() - active_row.width()).abs() < 0.01
+            && (lifted.height() - active_row.height()).abs() < 0.01,
+        "a Tabs tab drew {lifted:?} around a row of {active_row:?}, so it is \
+         not the bare container the mode calls for"
+    );
+
+    harness.set_granularity(Granularity::Panes);
+    let lifted = lifted_tab_box(&harness.frame());
+    let row = *panel_rows(&harness.frame())
+        .last()
+        .expect("three tabs, three rows");
+    assert!(
+        lifted.width() > row.width() && lifted.height() > row.height(),
+        "a Panes tab's container is {lifted:?} and its only row {row:?}, so \
+         the outer group container is not there"
+    );
+}
+
+/// The active tab's lifted container, by its ground.
+fn lifted_tab_box(scene: &Scene) -> RectF {
+    let panel = panel_box(scene);
+    let boxes: Vec<RectF> = visible_rects(scene)
+        .filter(|(rect, _)| {
+            rect.background == Fill::Solid(THEME.overlay_1)
+                && rect.bounds.width() > 100.
+                && rect.bounds.max_x() <= panel.max_x()
+        })
+        .map(|(_, bounds)| bounds)
+        .collect();
+
+    assert_eq!(boxes.len(), 1, "exactly one tab is active");
+    boxes[0]
+}
+
+#[test]
+fn each_density_gives_a_panel_row_the_height_its_lines_add_up_to() {
+    // Warp's arithmetic at a 1.2 line-height ratio, plus the 8px padding on
+    // all four sides and the 1px border Crook keeps in every state so the list
+    // does not move when the selection does.
+    let mut harness = Harness::seeded_panel();
+    let options = harness.options();
+
+    for granularity in [Granularity::Panes, Granularity::Tabs] {
+        let compact = harness.panel_rows_with(TabOptions {
+            granularity,
+            density: Density::Compact,
+            ..options
+        });
+        // max(24, 12*1.2 + 1 + 10*1.2) + 16 + 2.
+        assert!(
+            (compact[0].height() - 45.4).abs() < 0.1,
+            "{granularity:?}/Compact is {} tall, not 45.4",
+            compact[0].height()
+        );
+        assert!(
+            chip_boxes(&harness.frame()).is_empty(),
+            "{granularity:?}/Compact drew a chip, which is exactly why the \
+             menu hides the two Show toggles there"
+        );
+
+        let expanded = harness.panel_rows_with(TabOptions {
+            granularity,
+            density: Density::Expanded,
+            ..options
+        });
+        // max(24, 12*1.2 + 2 + 12*1.2 + 2 + 14) + 16 + 2.
+        assert!(
+            (expanded[0].height() - 64.8).abs() < 0.1,
+            "{granularity:?}/Expanded is {} tall, not 64.8",
+            expanded[0].height()
+        );
+        assert_eq!(
+            chip_boxes(&harness.frame()).len(),
+            1,
+            "{granularity:?}/Expanded drew no diff chip for a repository with \
+             changes"
+        );
+    }
+}
+
+#[test]
+fn a_compact_row_with_nothing_to_put_underneath_loses_the_line_rather_than_blanking_it() {
+    let mut harness = Harness::seeded_panel();
+    let pane = harness.pane_ids()[0];
+    // No directory means no branch lookup either, so "Additional metadata"
+    // has nothing at all to print.
+    harness.update_session(pane, |session| session.working_directory = None);
+
+    let rows = panel_rows(&harness.frame());
+    // The 24px icon is the floor once the second line has gone.
+    assert!(
+        (rows[0].height() - 42.).abs() < 0.1,
+        "a subtitle-less row is {} tall, not the icon plus the padding",
+        rows[0].height()
+    );
+}
+
+#[test]
+fn an_expanded_row_is_the_same_height_whether_or_not_it_has_chips() {
+    // The metadata line is pinned to 14px on purpose: letting it size to
+    // content means every arriving diff stat reflows the whole list.
+    let mut harness = Harness::seeded_panel();
+    let options = TabOptions {
+        density: Density::Expanded,
+        ..harness.options()
+    };
+
+    let with_chips = harness.panel_rows_with(options)[0].height();
+    let without = harness.panel_rows_with(TabOptions {
+        show_diff_stats: false,
+        show_pr_link: false,
+        ..options
+    })[0]
+        .height();
+
+    assert_eq!(with_chips, without, "turning the chips off resized the row");
+}
+
+/// Far more tabs than 608px of list can hold.
+const OVERFLOWING: usize = 40;
+
+#[test]
+fn a_list_longer_than_the_panel_is_clipped_instead_of_painting_over_the_body() {
+    // Crook has no scrollable element, so this is a ceiling rather than a
+    // scroll bar — and the ceiling has to be a clip, because an unclipped row
+    // is drawn *and* hit-tested over whatever it spilled onto. The module docs
+    // say what the ceiling costs; this says that it exists.
+    let mut harness = Harness::panel(OVERFLOWING);
+    let scene = harness.frame();
+    let panel = panel_box(&scene);
+
+    let painted = panel_row_rects(&scene);
+    let visible = panel_rows(&scene);
+
+    assert!(
+        visible.len() < OVERFLOWING,
+        "all {OVERFLOWING} rows fit, so this test is no longer measuring the \
+         ceiling it names"
+    );
+    // The number `tabs_panel`'s module docs quote, asserted so the figure
+    // written down there cannot quietly stop being true. The stub shaper is
+    // deterministic — every glyph is half its font size and every line is
+    // 1.2x — so this is arithmetic, not a font's opinion.
+    assert_eq!(
+        visible.len(),
+        9,
+        "the default combination fits {} tabs, and the module docs say nine",
+        visible.len()
+    );
+    for (_, on_screen) in &painted {
+        assert!(
+            on_screen.max_y() <= panel.max_y() + 0.5,
+            "a row reaches {} and the panel ends at {}",
+            on_screen.max_y(),
+            panel.max_y()
+        );
+        assert!(
+            on_screen.max_x() <= panel.max_x() + 0.5,
+            "a row reaches past the panel and into the body"
+        );
+    }
+
+    // And what the ceiling actually costs: clicking every row the panel shows
+    // reaches fewer tabs than there are. The rest have no mouse target at all
+    // — the clip narrows the rect a hit test is resolved against, so a row
+    // past it is neither drawn nor clickable — and reaching them means the
+    // keyboard, or a scrolling element that does not exist yet.
+    let mut reachable: Vec<TabId> = Vec::new();
+    for row in &visible {
+        harness.click(
+            row.origin() + vec2f(40., row.height() / 2.),
+            MouseButton::Left,
+        );
+        let active = harness.active_id();
+        if !reachable.contains(&active) {
+            reachable.push(active);
+        }
+    }
+
+    assert_eq!(
+        reachable.len(),
+        visible.len(),
+        "clicking {} rows reached {} tabs, so two rows share a target",
+        visible.len(),
+        reachable.len()
+    );
+    assert!(
+        reachable.len() < OVERFLOWING,
+        "every tab was reachable, so there is no ceiling to describe"
+    );
+
+    // The other extreme, and the other figure the docs quote.
+    harness.set_options(TabOptions {
+        density: Density::Expanded,
+        ..harness.options()
+    });
+    assert_eq!(
+        panel_rows(&harness.frame()).len(),
+        7,
+        "Panes/Expanded fits a different number than the module docs say"
+    );
+}
+
+#[test]
+fn exactly_one_row_in_the_panel_is_drawn_as_the_selected_one() {
+    // `is_selected = is_active_tab && is_focused`, a conjunction. In Panes the
+    // active tab's container is lifted while only its focused pane's row is
+    // selected, and painting every row of that tab as selected would lose the
+    // distinction the mode exists for.
+    let mut harness = Harness::panel(2);
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    harness.dispatch_action(TabAction::Split(Direction::Down));
+
+    let scene = harness.frame();
+    assert_eq!(
+        panel_rows(&scene).len(),
+        4,
+        "three panes in one tab, plus one"
+    );
+    assert_eq!(
+        selected_panel_rows(&scene).len(),
+        1,
+        "the active tab drew {} selected rows",
+        selected_panel_rows(&scene).len()
+    );
+}
+
+#[test]
+fn clicking_a_panel_row_focuses_the_pane_it_stands_for() {
+    let mut harness = Harness::panel(3);
+    let ids = harness.tab_ids();
+    let panes = harness.pane_ids();
+    let rows = panel_rows(&harness.frame());
+    assert_eq!(rows.len(), 3);
+
+    // Left of centre, well clear of the close button's slot.
+    harness.click(
+        rows[0].origin() + vec2f(40., rows[0].height() / 2.),
+        MouseButton::Left,
+    );
+
+    assert_eq!(harness.active_id(), ids[0]);
+    assert_eq!(harness.focused_pane_id(), Some(panes[0]));
+    assert_eq!(harness.tab_ids(), ids, "selecting closed something");
+}
+
+#[test]
+fn a_panel_rows_close_button_closes_the_pane_it_names() {
+    let mut harness = Harness::panel(1);
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let panes = harness.pane_ids();
+
+    let buttons = close_boxes(&harness.frame());
+    assert_eq!(buttons.len(), 1, "only the selected row draws one at rest");
+    harness.click(center(buttons[0]), MouseButton::Left);
+
+    assert_eq!(harness.pane_ids().len(), 1, "the pane did not close");
+    assert_eq!(harness.tab_ids().len(), 1, "closing a pane closed its tab");
+    assert!(!harness.pane_ids().contains(&panes[1]));
+}
+
+#[test]
+fn the_options_menu_opens_from_the_panel_and_stays_inside_it() {
+    // The whole of why the anchor is a parameter: the strip's gear hangs its
+    // menu from the left edge, and the same rule in a 248px column would open
+    // a 200px menu across the body.
+    let mut harness = Harness::seeded_panel();
+    let panel = panel_box(&harness.frame());
+
+    let gear = gear_box(&harness.frame());
+    assert!(
+        panel.contains_point(center(gear)),
+        "the gear is not in the panel"
+    );
+    harness.click(center(gear), MouseButton::Left);
+    assert!(harness.is_menu_open());
+
+    let menu = menu_box(&harness.frame());
+    assert!(
+        menu.min_x() >= panel.min_x() && menu.max_x() <= panel.max_x() + 0.5,
+        "the menu spans {} to {} and the panel {} to {}",
+        menu.min_x(),
+        menu.max_x(),
+        panel.min_x(),
+        panel.max_x()
+    );
+    assert!(
+        menu.min_y() >= gear.max_y(),
+        "the menu opened over its own gear"
+    );
+}
+
+#[test]
+fn the_hover_card_opens_beside_a_panel_row_rather_than_below_it() {
+    // Below a panel row is where the next rows are. Warp opens its sidecar on
+    // the side away from the panel for exactly that reason.
+    let mut harness = Harness::seeded_panel();
+    let rows = panel_rows(&harness.frame());
+    let panel = panel_box(&harness.frame());
+
+    harness.move_to(center(rows[0]));
+    let scene = harness.frame();
+    let cards = detail_cards(&scene);
+
+    assert_eq!(cards.len(), 1, "hovering a row opened no card");
+    assert!(
+        cards[0].min_x() >= panel.max_x(),
+        "the card starts at {} and the panel ends at {}",
+        cards[0].min_x(),
+        panel.max_x()
+    );
+    assert!(
+        cards[0].min_y() < rows[0].max_y(),
+        "the card was hung below the row, over the rows underneath it"
+    );
+}
+
+// --- moving the tabs between the two layouts ---------------------------------
+
+#[test]
+fn the_layout_keybinding_moves_the_tabs_and_the_gear_with_them() {
+    let mut harness = Harness::panel(2);
+    let panel_gear = gear_box(&harness.frame());
+    assert!(panel_box(&harness.frame()).contains_point(center(panel_gear)));
+
+    harness.toggle_layout();
+
+    let scene = harness.frame();
+    assert_eq!(Layout::Horizontal, harness.options().layout);
+    assert_eq!(tab_boxes(&scene).len(), 2, "the strip drew no tabs");
+    assert!(
+        visible_rects(&scene).all(|(rect, _)| (rect.bounds.width() - tabs_panel::PANEL_WIDTH)
+            .abs()
+            > 0.5
+            || rect.background != Fill::Solid(THEME.surface)),
+        "the panel is still painted beside the strip"
+    );
+    // The gear went with the tabs: it is now at the far end of the header
+    // rather than at the top of a panel that no longer exists.
+    assert!(gear_box(&scene).min_x() > tabs_panel::PANEL_WIDTH);
+
+    harness.toggle_layout();
+    assert_eq!(Layout::Vertical, harness.options().layout);
+    assert!(tab_boxes(&harness.frame()).is_empty());
+}
+
+#[test]
+fn the_sidebar_chord_is_what_moves_the_tabs() {
+    let harness = Harness::panel(1);
+    let chord = if cfg!(target_os = "macos") {
+        Modifiers {
+            cmd: true,
+            ..Modifiers::default()
+        }
+    } else {
+        Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        }
+    };
+
+    let action = harness.workspace.read(&harness.app, |workspace, _| {
+        workspace.action_for(&Keystroke::new("b", chord))
+    });
+
+    assert_eq!(
+        Some(WorkspaceAction::Options(OptionsAction::ToggleLayout)),
+        action,
+        "cmd/ctrl-b is in --help's KEYS list and is bound to nothing"
+    );
+}
+
+#[test]
+fn the_layout_the_command_line_asked_for_is_never_written_to_the_settings_file() {
+    // `--layout horizontal` is a way to look at a frame. The file says
+    // vertical, and a menu click — which saves the *whole* options snapshot —
+    // must not carry the override into it.
+    let scratch = Scratch::new();
+    let mut harness = Harness::with_settings(1, scratch.settings());
+    assert_eq!(Layout::Vertical, harness.saved_options().layout);
+
+    harness.override_layout(Layout::Horizontal);
+    assert_eq!(
+        Layout::Horizontal,
+        harness.options().layout,
+        "the override never reached the renderer"
+    );
+    assert_eq!(tab_boxes(&harness.frame()).len(), 1, "the strip is not up");
+
+    harness.dispatch_option(OptionsAction::ToggleShowDetailsOnHover);
+
+    let written = scratch.written_containing("\"show_details_on_hover\": false");
+    assert!(
+        written.contains("\"layout\": \"vertical\""),
+        "the command line's layout reached the settings file, so the next \
+         launch with no flags opens horizontal; the file says {written}"
+    );
+    assert_eq!(Layout::Vertical, harness.saved_options().layout);
+}
+
+#[test]
+fn choosing_the_layout_ends_the_override_the_way_choosing_a_density_does() {
+    let scratch = Scratch::new();
+    let mut harness = Harness::with_settings(1, scratch.settings());
+    harness.override_layout(Layout::Horizontal);
+
+    // The toggle always moves the value, so unlike the density there is no
+    // "already on screen" case — what has to happen is that the save carries
+    // the new layout rather than reaching back for the file's.
+    harness.toggle_layout();
+    assert_eq!(Layout::Vertical, harness.options().layout);
+    harness.toggle_layout();
+
+    scratch.written_containing("\"layout\": \"horizontal\"");
+    assert_eq!(harness.options(), harness.saved_options());
+}
+
+#[test]
+fn the_layout_decides_which_element_owes_the_window_controls() {
+    // The reservation follows the two top corners of the window, and which
+    // element owns each corner is what the layout changes. `platform_insets`
+    // holds the per-platform table; this is the one line that picks a column
+    // out of it, and it is invisible on a natively decorated window — which is
+    // every window Crook opens today.
+    use crate::platform_insets::{TabsPlacement, layout_insets};
+
+    let mut harness = Harness::panel(1);
+    assert_eq!(
+        layout_insets(TabsPlacement::LeftPanel, crate::WINDOW_CHROME, false),
+        harness.window_insets()
+    );
+
+    harness.toggle_layout();
+    assert_eq!(
+        layout_insets(TabsPlacement::Header, crate::WINDOW_CHROME, false),
+        harness.window_insets()
+    );
+}
+
+#[test]
+fn moving_the_tabs_makes_every_control_forget_the_pointer() {
+    // The whole element tree is replaced, so nothing the pointer was on ever
+    // sees a hover-out. Left alone, a row hovered in the panel comes back
+    // hovered in the strip with the pointer nowhere near it — and its close
+    // button then swallows the row's next click.
+    let mut harness = Harness::seeded_panel();
+    let rows = panel_rows(&harness.frame());
+    harness.move_to(center(rows[0]));
+    assert_eq!(detail_cards(&harness.frame()).len(), 1, "no card to lose");
+
+    harness.toggle_layout();
+
+    let scene = harness.frame();
+    assert!(
+        detail_cards(&scene).is_empty(),
+        "a card the pointer opened in the panel is still up in the strip"
+    );
+    assert_eq!(
+        close_boxes(&scene).len(),
+        1,
+        "a row other than the selected one still believes it is hovered"
+    );
+}
+
+// --- what the adversarial review found -------------------------------------
+
+/// The `overlay_2` hairlines inside `card`, which are what divide its sections.
+fn card_dividers(scene: &Scene, card: RectF) -> Vec<RectF> {
+    visible_rects(scene)
+        .filter(|(rect, _)| {
+            rect.background == Fill::Solid(THEME.overlay_2)
+                && (rect.bounds.height() - 1.).abs() < 0.01
+                && card.contains_point(rect.bounds.origin())
+        })
+        .map(|(_, bounds)| bounds)
+        .collect()
+}
+
+#[test]
+fn the_gear_tooltip_is_a_label_beside_the_gear_and_not_a_bar_down_the_window() {
+    // An anchored overlay child is laid out against the whole window, and
+    // `Align` returns `constraint.max` on every finite axis — so an `Align`
+    // inside the tooltip measured 88 by the window's *height*: an 88px bar
+    // from the top of the window to the bottom, straight down the tab list,
+    // with the label stranded in the middle of it and every element under it
+    // reporting itself covered.
+    let mut harness = Harness::seeded_panel();
+    let scene = harness.frame();
+    let gear = gear_box(&scene);
+    let plus = new_tab_box(&scene);
+    let row = panel_rows(&scene)[0];
+
+    harness.move_to(center(gear));
+    let scene = harness.frame();
+    let tooltips = detail_cards(&scene);
+    assert_eq!(tooltips.len(), 1, "hovering the gear named nothing");
+    let tooltip = tooltips[0];
+
+    assert!(
+        tooltip.height() < 2. * gear.height(),
+        "the tooltip is {tooltip:?}, which is a bar rather than a label"
+    );
+    assert!(
+        tooltip.min_y() >= gear.max_y(),
+        "the tooltip at {tooltip:?} is not below the gear at {gear:?}"
+    );
+    // It floats over the top of the list while it is up, which is what a
+    // tooltip does. What it must not do is run past it: the bar reached the
+    // bottom of the window and covered every row on the way.
+    assert!(
+        tooltip.max_y() < row.max_y(),
+        "the tooltip at {tooltip:?} outlasts the row at {row:?} it is drawn          over"
+    );
+    assert!(
+        tooltip
+            .intersection(plus)
+            .is_none_or(|overlap| overlap.is_empty()),
+        "the tooltip at {tooltip:?} covers the new-tab button at {plus:?}"
+    );
+}
+
+#[test]
+fn the_hover_card_never_slides_back_over_the_row_that_opened_it() {
+    // A 320px card beside a 248px panel needs 559px of window, and the window
+    // can be dragged to 480. Slid back to fit, the card lands on its own row:
+    // the row stops hit-testing as hovered, so the card is torn down and
+    // re-armed frame after frame, and the close button under it is
+    // unreachable. Warp narrows its sidecar and then lets it clip off the
+    // window edge rather than move back across the panel.
+    const NARROW: Vector2F = vec2f(480., 640.);
+
+    let mut harness = Harness::seeded_panel();
+    let scene = harness.frame_sized(NARROW);
+    let row = panel_rows(&scene)[0];
+
+    harness.move_to(center(row));
+    let scene = harness.frame_sized(NARROW);
+    let cards = detail_cards(&scene);
+    assert_eq!(cards.len(), 1, "hovering a row opened no card");
+    assert!(
+        cards[0].min_x() >= row.max_x(),
+        "the card at {:?} was slid back over the row at {row:?} in a {}px \
+         window",
+        cards[0],
+        NARROW.x()
+    );
+
+    // Still hovered, which is the consequence rather than the geometry: the
+    // pointer has not moved and the card is still up on the next frame.
+    let scene = harness.frame_sized(NARROW);
+    assert_eq!(
+        detail_cards(&scene).len(),
+        1,
+        "the card took the pointer off its own row and tore itself down"
+    );
+}
+
+#[test]
+fn a_tabs_view_card_describes_every_pane_of_the_tab_it_stands_for() {
+    // `Tabs` granularity drops a tab's other panes from the list entirely —
+    // no count, no expander — so Warp's sidecar target follows the
+    // granularity: one section per visible pane, and this is the only place
+    // those panes surface.
+    let mut harness = Harness::panel(1);
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let panes = harness.active_pane_ids();
+    assert_eq!(panes.len(), 2, "the split opened no second pane");
+    for pane in &panes {
+        harness.seed(*pane, Some(seeded_diff()));
+    }
+
+    let row = panel_rows(&harness.frame())[0];
+    harness.move_to(center(row));
+    let scene = harness.frame();
+    let one_pane = detail_cards(&scene)[0];
+    assert!(
+        card_dividers(&scene, one_pane).is_empty(),
+        "a Panes card is one pane and needs no divider"
+    );
+
+    harness.set_granularity(Granularity::Tabs);
+    let rows = panel_rows(&harness.frame());
+    assert_eq!(rows.len(), 1, "Tabs drew more than one row for one tab");
+    harness.move_to(center(rows[0]));
+    let scene = harness.frame();
+    let whole_tab = detail_cards(&scene)[0];
+
+    assert_eq!(
+        card_dividers(&scene, whole_tab).len(),
+        1,
+        "the card for a two-pane tab has no hairline in it, so it is still \
+         describing one pane"
+    );
+    // A card is its 1px border, then its sections with a hairline between
+    // them: a one-section card is `2 + section`, and a two-section card is
+    // `2 + section + 1 + section`.
+    let section = one_pane.height() - 2.;
+    assert!(
+        (whole_tab.height() - (2. + 2. * section + 1.)).abs() < 0.5,
+        "the tab's card is {whole_tab:?} and one pane's is {one_pane:?}, which \
+         is not two sections and a hairline"
+    );
+}
+
+#[test]
+fn clicking_a_split_tabs_heading_selects_it_without_moving_the_focus_inside_it() {
+    // Warp's `render_group_header` dispatches `ActivateTab`. Its *container*
+    // takes right-clicks and middle-clicks and no left-click at all, which is
+    // why the 8px inset and the gaps between rows stay inert here too.
+    let mut harness = Harness::panel(2);
+    let tabs = harness.tab_ids();
+    harness.dispatch_action(TabAction::Select(tabs[0]));
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let split_panes = harness.active_pane_ids();
+    harness.dispatch_action(TabAction::Select(tabs[1]));
+
+    let scene = harness.frame();
+    let rows = panel_rows(&scene);
+    assert_eq!(rows.len(), 3, "two tabs, three panes, three rows");
+    assert_eq!(harness.active_id(), tabs[1]);
+
+    // The heading's own band: its bottom padding is what separates it from the
+    // first row, and the body's top padding is zero when it is there.
+    let heading = vec2f(rows[0].min_x() + 10., rows[0].min_y() - 2.);
+    harness.click(heading, MouseButton::Left);
+
+    assert_eq!(
+        harness.active_id(),
+        tabs[0],
+        "clicking the heading of a split tab left the other tab active, so \
+         the only way to reach it with a mouse is to click one of its rows"
+    );
+    assert_eq!(
+        harness.focused_pane_id(),
+        Some(split_panes[1]),
+        "the heading re-targeted which pane is focused; that is what a row \
+         does, and the two signals are meant to stay separate"
+    );
+}
+
+#[test]
+fn a_row_armed_before_the_menu_opened_puts_no_card_over_the_menus_underlay() {
+    // The gear moved into the control bar, which paints *before* the list, so
+    // a card opened from a row afterwards lands in a later overlay layer than
+    // the menu — and covers the modal underlay whose whole job is to catch the
+    // press that dismisses. `--menu --hover` applies the two in that order.
+    let mut harness = Harness::seeded_panel();
+    let row = panel_rows(&harness.frame())[0];
+
+    harness.dispatch_option(OptionsAction::TogglePopup);
+    harness.hover_first_row();
+
+    let scene = harness.frame();
+    assert!(harness.is_menu_open(), "the menu did not open");
+    assert!(
+        detail_cards(&scene).is_empty(),
+        "a card is up under the menu that froze the window"
+    );
+
+    // Where the card would have been, which is outside the menu and so a
+    // dismiss.
+    let beside = vec2f(row.max_x() + 100., center(row).y());
+    assert!(!menu_box(&scene).contains_point(beside));
+    harness.click(beside, MouseButton::Left);
+    assert!(
+        !harness.is_menu_open(),
+        "a click outside the menu did not close it, so something painted \
+         after it swallowed the press"
+    );
+}
+
+#[test]
+fn choosing_one_option_does_not_carry_another_command_line_override_into_the_file() {
+    // `persisted` is the single place an override is stripped out of a save,
+    // and the early-save branch is the one write path that can skip it. It is
+    // also permanent if it does: the flag stays set, so every later save reads
+    // the poisoned value back out of the file and writes it again.
+    let scratch = Scratch::new();
+    let mut harness = Harness::with_settings(1, scratch.settings());
+    harness.override_layout(Layout::Horizontal);
+    harness.override_density(Density::Expanded);
+
+    // The density that is already on screen: the one click that takes the
+    // early-save branch, and the case that branch exists for.
+    harness.dispatch_option(OptionsAction::SetDensity(Density::Expanded));
+
+    let written = scratch.written_containing("\"view_mode\": \"expanded\"");
+    assert!(
+        written.contains("\"layout\": \"vertical\""),
+        "choosing a density adopted `--layout horizontal` as well, so the \
+         next launch with no flags opens in the strip; the file holds {written}"
+    );
+    assert_eq!(Layout::Vertical, harness.saved_options().layout);
+    assert_eq!(
+        Layout::Horizontal,
+        harness.options().layout,
+        "the save changed what is on screen"
+    );
 }

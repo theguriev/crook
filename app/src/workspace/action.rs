@@ -72,4 +72,13 @@ pub enum OptionsAction {
     ToggleShowDiffStats,
     /// "Show details on hover".
     ToggleShowDetailsOnHover,
+    /// Move the tabs between the panel and the strip.
+    ///
+    /// A toggle rather than a `SetLayout(Layout)`, because there are exactly
+    /// two layouts and the only thing that sends this is a keystroke that
+    /// means "the other one". The menu has no control for it: Warp keeps
+    /// `use_vertical_tabs` in its settings window rather than in this popup,
+    /// and a popup that could move itself out from under the pointer is a
+    /// worse place for it.
+    ToggleLayout,
 }

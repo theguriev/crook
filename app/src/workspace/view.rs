@@ -1,7 +1,7 @@
 //! [`Workspace`]: the state behind the window, and the one place it changes.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use crookui_core::elements::MouseStateHandle;
@@ -9,16 +9,18 @@ use crookui_core::event::{Keystroke, Modifiers};
 use crookui_core::fonts::FamilyId;
 use crookui_core::prelude::*;
 
+use crate::WINDOW_CHROME;
 use crate::git::GitFacts;
 use crate::git_model::GitModel;
-use crate::settings::{Density, Settings, TabOptions};
+use crate::platform_insets::{LayoutInsets, TabsPlacement, layout_insets};
+use crate::settings::{Density, Granularity, Layout, Settings, TabOptions};
 use crate::tab::{AgentSession, Direction, PaneId, Tab, TabAction, TabEffect, TabId, TabStrip};
 use crate::theme::THEME;
 use crate::usage_model::UsageModel;
 
 use super::action::{OptionsAction, WorkspaceAction};
 use super::usage_chip::UsageChip;
-use super::{body, header_toolbar};
+use super::{body, header_toolbar, tabs_panel};
 
 /// The two font families the interface is set in, resolved once at startup.
 ///
@@ -56,6 +58,19 @@ pub(super) struct PaneInteraction {
     pub(super) close: MouseStateHandle,
     /// The pane's panel in the body.
     pub(super) body: MouseStateHandle,
+}
+
+/// What the mouse is doing to one tab's chrome in the panel.
+///
+/// Tab-level rather than pane-level: in `Panes` granularity one tab draws
+/// several rows, and the container lifts while the pointer is over any of
+/// them. One entry for several rows, not one per row.
+#[derive(Default)]
+pub(super) struct TabInteraction {
+    /// The box around all of the tab's rows.
+    pub(super) container: MouseStateHandle,
+    /// The tab's name above them, which only a split tab draws.
+    pub(super) header: MouseStateHandle,
 }
 
 /// The options menu: whether it is up, and what the mouse is doing to each of
@@ -101,6 +116,71 @@ pub(super) struct MenuState {
     pub(super) details_on_hover: MouseStateHandle,
 }
 
+/// Which options the command line put on screen without adopting them.
+///
+/// An override is a way to look at a frame, so it must never become what the
+/// next launch does — and every menu click writes the *whole* options snapshot
+/// back, so "never saved" cannot be arranged by simply not saving it once.
+/// [`Workspace::persisted`] is what keeps the promise, and this is what it
+/// reads: one flag per option a flag can set, cleared the moment a person
+/// chooses that option for themselves.
+///
+/// One struct rather than three booleans on [`Workspace`], because the three
+/// obey the same three rules and the second and third were added by copying
+/// the first. A fourth overridable option adds a field here and nothing else.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+struct Overridden {
+    density: bool,
+    granularity: bool,
+    layout: bool,
+}
+
+impl Overridden {
+    /// Only the density.
+    const DENSITY: Self = Self {
+        density: true,
+        granularity: false,
+        layout: false,
+    };
+    /// Only the granularity.
+    const GRANULARITY: Self = Self {
+        density: false,
+        granularity: true,
+        layout: false,
+    };
+    /// Only the layout.
+    const LAYOUT: Self = Self {
+        density: false,
+        granularity: false,
+        layout: true,
+    };
+
+    /// Whether nothing at all is overridden.
+    fn is_empty(self) -> bool {
+        self == Self::default()
+    }
+
+    /// Marks every flag `also` marks, leaving the rest alone.
+    fn mark(&mut self, also: Self) {
+        self.density |= also.density;
+        self.granularity |= also.granularity;
+        self.layout |= also.layout;
+    }
+
+    /// Clears every flag `chosen` marks, and says whether that changed
+    /// anything.
+    ///
+    /// The answer is what tells [`Workspace::apply_option`] that a click it is
+    /// about to discard as a no-op was in fact a choice worth saving.
+    fn clear(&mut self, chosen: Self) -> bool {
+        let before = *self;
+        self.density &= !chosen.density;
+        self.granularity &= !chosen.granularity;
+        self.layout &= !chosen.layout;
+        *self != before
+    }
+}
+
 /// The window's root view.
 pub struct Workspace {
     tabs: TabStrip,
@@ -109,23 +189,31 @@ pub struct Workspace {
     chip: ViewHandle<UsageChip>,
     git: ModelHandle<GitModel>,
     interactions: HashMap<PaneId, PaneInteraction>,
+    /// What the mouse is doing to each tab's chrome in the panel.
+    ///
+    /// Keyed by [`TabId`] and separate from [`Self::interactions`] because it
+    /// is a tab-level affordance: in `Panes` granularity the container lifts
+    /// while the pointer is over *any* of the tab's rows, which is one piece
+    /// of state for several rows rather than one per row.
+    tab_chrome: HashMap<TabId, TabInteraction>,
     settings: Settings,
     /// The options, kept beside [`Self::settings`] rather than read out of it
     /// on every access. A renderer reads this dozens of times per frame and
     /// wants a `Copy` snapshot, not a borrow of the thing a save is cloning.
     options: TabOptions,
-    /// Whether [`Self::options`]'s density came from the command line rather
-    /// than from the file.
-    ///
-    /// An override is a way to look at a frame, so it must not become what the
-    /// next launch does — and every menu click writes the *whole* options
-    /// snapshot back, so "never saved" cannot be arranged by simply not saving
-    /// it once. [`Self::persisted`] is what keeps the promise; clicking a
-    /// density in the menu is a real choice and clears this.
-    density_is_overridden: bool,
+    /// Which of [`Self::options`] came from the command line rather than from
+    /// the file. See [`Overridden`].
+    overridden: Overridden,
     menu: MenuState,
     /// The row the pointer is on, if the detail card is armed.
     hovered_row: Option<PaneId>,
+    /// The home directory, resolved once.
+    ///
+    /// Every row abbreviates its working directory against it, and
+    /// `std::env::home_dir` is a `getpwuid_r` fallback on Unix and a shell-API
+    /// call on Windows — a syscall per row per frame if it is asked on the
+    /// render path. It does not change while the process runs.
+    home: Option<PathBuf>,
     new_tab: MouseStateHandle,
     quit: QuitRequest,
 }
@@ -163,11 +251,13 @@ impl Workspace {
             chip,
             git,
             interactions: HashMap::new(),
+            tab_chrome: HashMap::new(),
             settings,
             options,
-            density_is_overridden: false,
+            overridden: Overridden::default(),
             menu: MenuState::default(),
             hovered_row: None,
+            home: std::env::home_dir(),
             new_tab: MouseStateHandle::default(),
             quit,
         };
@@ -229,10 +319,23 @@ impl Workspace {
             return;
         }
 
-        // A density that actually moved is a choice somebody made, and it ends
-        // the command line's override: from here on the file learns it.
-        if options.density != self.options.density {
-            self.density_is_overridden = false;
+        // An option that actually moved is a choice somebody made, and it ends
+        // the command line's override of that option: from here on the file
+        // learns it.
+        self.overridden.clear(Overridden {
+            density: options.density != self.options.density,
+            granularity: options.granularity != self.options.granularity,
+            layout: options.layout != self.options.layout,
+        });
+
+        if options.layout != self.options.layout {
+            // The whole window is about to be rebuilt somewhere else, so every
+            // control the pointer was on is about to stop existing without
+            // ever seeing a hover-out. Left alone, a row that was hovered in
+            // the strip comes back hovered in the panel with the pointer
+            // nowhere near it — the same trap the close button and the info
+            // dot each close for themselves.
+            self.forget_hover_state();
         }
 
         self.options = options;
@@ -259,32 +362,112 @@ impl Workspace {
     /// The density goes into [`Self::options`], where every renderer reads it,
     /// and never into [`Self::settings`], which is what gets written. That is
     /// only half the promise: every menu click writes the *whole* options
-    /// snapshot back, so [`Self::density_is_overridden`] is what keeps the
-    /// override out of the saves that follow.
+    /// snapshot back, so [`Overridden`] is what keeps the override out of the
+    /// saves that follow.
     pub fn override_density(&mut self, density: Density, ctx: &mut ViewContext<Self>) {
-        if self.options.density == density {
+        self.override_with(ctx, Overridden::DENSITY, |options| {
+            options.density = density
+        });
+    }
+
+    /// Starts in a granularity the command line asked for, without adopting
+    /// it. The same contract as [`Self::override_density`].
+    pub fn override_granularity(&mut self, granularity: Granularity, ctx: &mut ViewContext<Self>) {
+        self.override_with(ctx, Overridden::GRANULARITY, |options| {
+            options.granularity = granularity
+        });
+    }
+
+    /// Starts in a layout the command line asked for, without adopting it.
+    ///
+    /// The same contract again, and the one that matters most: `--layout
+    /// horizontal` is how somebody looks at the strip once, and it must not
+    /// quietly become the layout their next launch opens in.
+    pub fn override_layout(&mut self, layout: Layout, ctx: &mut ViewContext<Self>) {
+        self.override_with(ctx, Overridden::LAYOUT, |options| options.layout = layout);
+    }
+
+    /// Puts one option on screen and records that the file did not ask for it.
+    fn override_with(
+        &mut self,
+        ctx: &mut ViewContext<Self>,
+        flag: Overridden,
+        set: impl FnOnce(&mut TabOptions),
+    ) {
+        let mut options = self.options;
+        set(&mut options);
+        if options == self.options {
             // Already what the file says. Nothing to keep out of it, and
             // claiming an override here would suppress a later real choice.
             return;
         }
-        self.options.density = density;
-        self.density_is_overridden = true;
+
+        if options.layout != self.options.layout {
+            self.forget_hover_state();
+        }
+        self.options = options;
+        self.overridden.mark(flag);
         ctx.notify();
     }
 
     /// The options as the file should hold them.
     ///
-    /// Everything the menu wrote, with an overridden density replaced by the
-    /// one already on disk — which [`Self::override_density`] never touched,
+    /// Everything the menu wrote, with every overridden option replaced by the
+    /// value already on disk — which the `override_*` methods never touched,
     /// precisely so there is something to put back here.
     fn persisted(&self) -> TabOptions {
-        if !self.density_is_overridden {
+        if self.overridden.is_empty() {
             return self.options;
         }
-        TabOptions {
-            density: self.settings.tab_options().density,
-            ..self.options
+
+        let saved = self.settings.tab_options();
+        let mut options = self.options;
+        if self.overridden.density {
+            options.density = saved.density;
         }
+        if self.overridden.granularity {
+            options.granularity = saved.granularity;
+        }
+        if self.overridden.layout {
+            options.layout = saved.layout;
+        }
+        options
+    }
+
+    /// Where the window's own controls land, given where the tabs are.
+    ///
+    /// The one call a renderer makes about window chrome. It answers "how
+    /// much" and "which element owes it" together, so no view can get the
+    /// second half right on the platform it was written on and wrong on the
+    /// other two.
+    ///
+    /// Fullscreen is `false` because the windowing layer exposes no way to
+    /// enter it and no way to ask — and under native chrome the answer is the
+    /// same either way.
+    pub(super) fn window_insets(&self) -> LayoutInsets {
+        let placement = match self.options.layout {
+            Layout::Vertical => TabsPlacement::LeftPanel,
+            Layout::Horizontal => TabsPlacement::Header,
+        };
+        layout_insets(placement, WINDOW_CHROME, false)
+    }
+
+    /// Drops every mouse state the frame about to be replaced was holding.
+    ///
+    /// Called when the layout changes, which is the one edit that throws away
+    /// the whole element tree rather than a row of it.
+    fn forget_hover_state(&mut self) {
+        self.hovered_row = None;
+        for interaction in self.interactions.values() {
+            interaction.chip.lock().reset_interaction_state();
+            interaction.close.lock().reset_interaction_state();
+            interaction.body.lock().reset_interaction_state();
+        }
+        for chrome in self.tab_chrome.values() {
+            chrome.container.lock().reset_interaction_state();
+            chrome.header.lock().reset_interaction_state();
+        }
+        self.new_tab.lock().reset_interaction_state();
     }
 
     /// Opens the options menu, for a run that was asked to start with it up.
@@ -379,31 +562,41 @@ impl Workspace {
         effect
     }
 
-    /// The tab action a keystroke means, if it means one.
+    /// What a keystroke means, if it means anything.
     ///
     /// Bindings produce exactly the values the mouse produces — there is no
     /// second code path for the keyboard, which is what stops a shortcut from
-    /// drifting away from the button beside it.
-    pub fn action_for(&self, keystroke: &Keystroke) -> Option<TabAction> {
+    /// drifting away from the button beside it. That is also why this returns
+    /// a [`WorkspaceAction`] rather than a [`TabAction`]: one binding moves
+    /// the tabs themselves rather than a tab, and giving it its own dispatch
+    /// path would be exactly the second code path.
+    pub fn action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
         if !is_platform_chord(keystroke.modifiers) {
             return None;
         }
 
         let shift = keystroke.modifiers.shift;
         let alt = keystroke.modifiers.alt;
-        match (keystroke.key.as_str(), shift, alt) {
-            ("t", false, false) => Some(TabAction::New),
+        let tab = match (keystroke.key.as_str(), shift, alt) {
+            ("t", false, false) => TabAction::New,
             // Warp's `pane_group:close_current_session`: the pane goes, and
             // the tab only goes with it when it was the tab's last one.
-            ("w", false, false) => self.tabs.focused_pane_id().map(TabAction::ClosePane),
-            ("d", false, false) => Some(TabAction::Split(Direction::Right)),
-            ("d", true, false) => Some(TabAction::Split(Direction::Down)),
-            ("left", true, false) => self.neighbour(-1).map(TabAction::Select),
-            ("right", true, false) => self.neighbour(1).map(TabAction::Select),
-            ("left", false, true) => Some(TabAction::MoveLeft),
-            ("right", false, true) => Some(TabAction::MoveRight),
-            _ => None,
-        }
+            ("w", false, false) => TabAction::ClosePane(self.tabs.focused_pane_id()?),
+            ("d", false, false) => TabAction::Split(Direction::Right),
+            ("d", true, false) => TabAction::Split(Direction::Down),
+            ("left", true, false) => TabAction::Select(self.neighbour(-1)?),
+            ("right", true, false) => TabAction::Select(self.neighbour(1)?),
+            ("left", false, true) => TabAction::MoveLeft,
+            ("right", false, true) => TabAction::MoveRight,
+            // The sidebar chord every editor uses for the same gesture: move
+            // the list of things you are working on out of the way, or back.
+            ("b", false, false) => {
+                return Some(WorkspaceAction::Options(OptionsAction::ToggleLayout));
+            }
+            _ => return None,
+        };
+
+        Some(WorkspaceAction::Tab(tab))
     }
 
     pub(super) fn chip(&self) -> &ViewHandle<UsageChip> {
@@ -422,9 +615,27 @@ impl Workspace {
         self.interactions.get(&id)
     }
 
+    /// What the mouse is doing to one tab's chrome in the panel.
+    pub(super) fn tab_chrome(&self, id: TabId) -> Option<&TabInteraction> {
+        self.tab_chrome.get(&id)
+    }
+
     /// Whether this row should be showing its detail card.
+    ///
+    /// Never while the options menu is up. Warp tears its sidecar down when
+    /// the row's tab opens a menu, and here it also keeps an invariant the
+    /// overlay layers depend on: the menu is anchored inside the control bar,
+    /// which paints *before* the list, so a card opened from a row afterwards
+    /// would land in a later overlay layer and cover the menu's own modal
+    /// underlay — the press that should dismiss the menu would be swallowed by
+    /// the card instead.
     pub(super) fn shows_details_for(&self, pane: PaneId) -> bool {
-        self.options.show_details_on_hover && self.hovered_row == Some(pane)
+        self.options.show_details_on_hover && !self.menu.open && self.hovered_row == Some(pane)
+    }
+
+    /// The home directory every row abbreviates its path against.
+    pub(super) fn home(&self) -> Option<&Path> {
+        self.home.as_deref()
     }
 
     /// What is known about the repository a session sits in.
@@ -450,6 +661,14 @@ impl Workspace {
     }
 
     fn sync_interactions(&mut self) {
+        let tabs: Vec<TabId> = self.tabs.iter().map(Tab::id).collect();
+        for id in &tabs {
+            self.tab_chrome.entry(*id).or_default();
+        }
+        // A closed tab's entry would otherwise outlive it, and the next tab to
+        // reuse nothing at all would still be paying for the map.
+        self.tab_chrome.retain(|id, _| tabs.contains(id));
+
         let open: Vec<PaneId> = self.tabs.panes().map(|(_, pane)| pane.id()).collect();
 
         for id in &open {
@@ -488,11 +707,15 @@ impl Workspace {
     /// Applies one option, or opens and closes the menu.
     fn apply_option(&mut self, action: OptionsAction, ctx: &mut ViewContext<Self>) {
         let mut options = self.options;
-        // Clicking a density is a real choice even when it names the density
+        // Choosing an option is a real choice even when it names the value
         // already on screen, which is the one case `set_options` cannot see:
         // `--density expanded` followed by a click on "Expanded" changes no
         // value, and without this the file would go on saying Compact.
-        let adopts_density = matches!(action, OptionsAction::SetDensity(_));
+        let chosen = Overridden {
+            density: matches!(action, OptionsAction::SetDensity(_)),
+            granularity: matches!(action, OptionsAction::SetGranularity(_)),
+            layout: matches!(action, OptionsAction::ToggleLayout),
+        };
 
         match action {
             OptionsAction::TogglePopup => {
@@ -517,18 +740,23 @@ impl Workspace {
             OptionsAction::ToggleShowDetailsOnHover => {
                 options.show_details_on_hover = !options.show_details_on_hover;
             }
+            OptionsAction::ToggleLayout => options.layout = options.layout.toggled(),
         }
 
-        if adopts_density && self.density_is_overridden {
-            self.density_is_overridden = false;
-            if options == self.options {
-                // `set_options` would return before writing anything, and the
-                // choice would be lost. One save, here, and nothing repaints
-                // because nothing on screen moved.
-                self.settings.set_tab_options(options);
-                self.save_settings(ctx);
-                return;
-            }
+        if self.overridden.clear(chosen) && options == self.options {
+            // `set_options` would return before writing anything, and the
+            // choice would be lost. One save, here, and nothing repaints
+            // because nothing on screen moved.
+            //
+            // Through [`Self::persisted`] like every other write, and for the
+            // same reason: `clear` above ended the override on the option that
+            // was just chosen, and every *other* command-line override is
+            // still in force. Writing `options` verbatim would adopt those
+            // into the file, permanently — the flag stays set, so every later
+            // save reads the poisoned value back out and writes it again.
+            self.settings.set_tab_options(self.persisted());
+            self.save_settings(ctx);
+            return;
         }
 
         // Deliberately not closing the menu. Warp's popup is a persistent
@@ -617,15 +845,32 @@ impl View for Workspace {
     }
 
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
-        Container::new(
-            Flex::column()
+        // The header and the body, which sit one above the other in both
+        // layouts. What changes is whether the header holds the tabs.
+        let stacked = Flex::column()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_child(header_toolbar::render(self, app))
+            .with_child(Expanded::new(1., body::render(self)).finish())
+            .finish();
+
+        let content = match self.options.layout {
+            Layout::Horizontal => stacked,
+            // The panel is the full height of the window and the header starts
+            // beside it, not above it. That is what puts the panel's control
+            // bar in the window's top-left corner — where a client-decorated
+            // macOS window draws its traffic lights — and it is why
+            // `window_insets` has a `panel_left` at all.
+            Layout::Vertical => Flex::row()
                 .with_main_axis_size(MainAxisSize::Max)
-                .with_child(header_toolbar::render(self, app))
-                .with_child(Expanded::new(1., body::render(self)).finish())
+                .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                .with_child(tabs_panel::render(self, app))
+                .with_child(Expanded::new(1., stacked).finish())
                 .finish(),
-        )
-        .with_background_color(THEME.ground)
-        .finish()
+        };
+
+        Container::new(content)
+            .with_background_color(THEME.ground)
+            .finish()
     }
 }
 

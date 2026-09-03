@@ -474,6 +474,7 @@ const OVER_THE_STACK: AnchorTo = AnchorTo {
     child: Corner::TopLeft,
     offset: vec2f(10., 10.),
     keep_on_screen: false,
+    keep_clear_of_parent: false,
 };
 
 #[test]

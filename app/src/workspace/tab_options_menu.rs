@@ -7,6 +7,14 @@
 //! Warp's; the two places Crook deliberately differs are marked where they
 //! happen.
 //!
+//! One menu serves both layouts. What differs is only which corner it hangs
+//! off, and that is [`controls::gear_button`](super::controls)'s parameter
+//! rather than a second copy of this file: the strip's gear aligns the left
+//! edges and the panel's the right ones, because a 200px menu hung leftwards
+//! off a 248px column opens across the body. Warp has two of these functions
+//! and they have drifted; there is nothing in the popup itself that knows
+//! where it is.
+//!
 //! # Three rules the popup only half-works without
 //!
 //! **The root is a [`Container`] with a background.** A container is the only
@@ -573,6 +581,7 @@ fn info_icon(info: &InfoNote, ui: FamilyId) -> Box<dyn Element> {
                 child: Corner::BottomLeft,
                 offset: vec2f(-(NOTE_WIDTH - INFO_DOT_SIZE) / 2., -4.),
                 keep_on_screen: true,
+                keep_clear_of_parent: false,
             },
         );
         stack.finish()

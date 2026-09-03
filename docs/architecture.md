@@ -482,14 +482,24 @@ Windows 10 1809 floor in the installer. This touches: a new model per tab holdin
 mattering for real. It is also the point at which the text subsystem's design pays off or does
 not.
 
-**Tab groups, pinning, vertical tabs, tear-off.** Each of these converts index arithmetic into
+**Tab groups, pinning, tear-off.** Each of these converts index arithmetic into
 range arithmetic. Groups add a "cannot cross the group boundary" branch to every move and a
 "prune the empty group" branch to every close. Pinning splits the tab vector into two implicit
-regions that every insertion has to clamp against. Vertical tabs are a second renderer.
-Cross-window drag — ghost slots, detached placeholders, collapsed source slots, a drag-preview
+regions that every insertion has to clamp against. Cross-window drag — ghost slots, detached placeholders, collapsed source slots, a drag-preview
 window — is the single largest source of complexity in Warp's tab code. Crook v1 has a `Vec`
 of tabs, an active index, and an MRU list; the close and hop index fixups are ported verbatim
 because that is where tab bugs actually live, and they are unit-tested with no window.
+
+Vertical tabs turned out to be the cheapest of the four and shipped as the default: they are a
+second renderer over the same `TabStrip::rows`, not a second model, so `app/src/workspace/`
+holds `tab_bar` and `tabs_panel` as mutually exclusive halves and `row_content` holds the one
+copy of Warp's which-fact-goes-on-which-line table that both read. What it cost that the
+estimate above did not name was the window-control reservation — with a panel down the left
+edge the top-left corner belongs to the panel rather than to the header, so
+`platform_insets::TabsPlacement` divides one answer between two elements — and a ceiling:
+`crookui_core` has no scrollable element, so the list is `Clipped` and roughly nine tabs fit a
+640px window. That ceiling is written down in the module and asserted in a test rather than
+papered over.
 
 **Settings.** Warp's settings stack — a `define_settings_group!` macro, a settings-value
 crate, `schemars` schemas, TOML path routing, cloud sync, per-platform gating — exists to
