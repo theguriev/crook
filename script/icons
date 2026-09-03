@@ -1,0 +1,401 @@
+#!/usr/bin/env python3
+"""Regenerate `crates/crookui_core/src/icons/data.rs` from Lucide's own SVGs.
+
+    ./script/icons
+
+Downloads the pinned `lucide-static` tarball from the npm registry, converts
+every icon in ICONS below to the four path commands the rasterizer
+understands — move, line, cubic, close — and writes one Rust file.
+
+Why a generator rather than an SVG parser in the binary: the icons never change
+at runtime, so parsing them at runtime would be work done on every launch to
+produce a constant. Arcs and shorthands are resolved here for the same reason —
+`data.rs` holds absolute cubics and lines and nothing else, which is why the
+rasterizer is 200 lines with no arc code in it.
+
+To add an icon: put it in ICONS, run this, and add the call site. Nothing else
+in the tree names Lucide.
+"""
+
+import math
+import io
+import re
+import tarfile
+import urllib.request
+import xml.etree.ElementTree as ElementTree
+from pathlib import Path
+
+# Pinned, so the same checkout regenerates the same file. Bump deliberately.
+VERSION = "1.40.0"
+
+REGISTRY = f"https://registry.npmjs.org/lucide-static/-/lucide-static-{VERSION}.tgz"
+
+OUTPUT = Path(__file__).resolve().parent.parent / "crates/crookui_core/src/icons/data.rs"
+
+# Rust variant -> Lucide name, and what Crook draws with it. The comment
+# becomes the variant's doc line, so it is the one place a reader finds out
+# where an icon is used without grepping.
+ICONS = [
+    ("Check", "check", "The mark on a chosen row of the gear menu and of the settings page."),
+    ("GitBranch", "git-branch", "The mark that says a line is a branch and not a path."),
+    ("Info", "info", "The dot beside a setting that has a note attached."),
+    ("LayoutGrid", "layout-grid", "The Expanded density, in the gear menu's segmented control."),
+    ("Menu", "menu", "The Compact density, in the same control. Warp draws `Menu01` here."),
+    ("Plus", "plus", "New tab, and new theme."),
+    ("Settings", "settings", "The gear that opens the options menu."),
+    ("X", "x", "Close: a tab, a panel row, the Themes panel."),
+]
+
+SVG_NS = "{http://www.w3.org/2000/svg}"
+
+# One SVG number, or one command letter.
+TOKENS = re.compile(r"[-+]?(?:\d*\.\d+|\d+\.?)(?:[eE][-+]?\d+)?|[A-Za-z]")
+
+# How many arguments each path command takes, per repetition.
+ARITY = {
+    "M": 2, "L": 2, "H": 1, "V": 1, "C": 6, "S": 4,
+    "Q": 4, "T": 4, "A": 7, "Z": 0,
+}
+
+# The circle-to-cubic constant: the control-point distance, as a fraction of
+# the radius, that makes a cubic match a quarter circle to within 0.02%.
+KAPPA = 4.0 / 3.0 * (math.sqrt(2.0) - 1.0)
+
+
+class Path:
+    """Absolute moves, lines and cubics, built up from anything SVG allows."""
+
+    def __init__(self):
+        self.segments = []
+        self.point = (0.0, 0.0)
+        self.start = (0.0, 0.0)
+        # The reflection S and T need, or None when the last command was not a
+        # curve of the matching kind.
+        self.cubic_control = None
+        self.quadratic_control = None
+
+    def move(self, x, y):
+        self.segments.append(("move", (x, y)))
+        self.point = self.start = (x, y)
+        self.cubic_control = self.quadratic_control = None
+
+    def line(self, x, y):
+        self.segments.append(("line", (x, y)))
+        self.point = (x, y)
+        self.cubic_control = self.quadratic_control = None
+
+    def cubic(self, x1, y1, x2, y2, x, y):
+        self.segments.append(("cubic", (x1, y1, x2, y2, x, y)))
+        self.point = (x, y)
+        self.cubic_control = (x2, y2)
+        self.quadratic_control = None
+
+    def quadratic(self, qx, qy, x, y):
+        x0, y0 = self.point
+        self.cubic(
+            x0 + 2.0 / 3.0 * (qx - x0), y0 + 2.0 / 3.0 * (qy - y0),
+            x + 2.0 / 3.0 * (qx - x), y + 2.0 / 3.0 * (qy - y),
+            x, y,
+        )
+        self.quadratic_control = (qx, qy)
+
+    def close(self):
+        self.segments.append(("close", ()))
+        self.point = self.start
+        self.cubic_control = self.quadratic_control = None
+
+
+def parse_path(path, d):
+    """Runs one `d` attribute into `path`."""
+    tokens = TOKENS.findall(d)
+    index = 0
+    command = None
+    while index < len(tokens):
+        if tokens[index].isalpha():
+            command = tokens[index]
+            index += 1
+        elif command is None:
+            raise ValueError(f"path data starts with a number: {d}")
+        elif command in ("M", "m"):
+            # A repeated moveto is a lineto, which is what makes `M0 0 1 1` a
+            # line rather than two subpaths.
+            command = "L" if command == "M" else "l"
+
+        upper = command.upper()
+        relative = command.islower()
+        count = ARITY[upper]
+        args = [float(token) for token in tokens[index:index + count]]
+        if len(args) != count:
+            raise ValueError(f"{command} wants {count} arguments in: {d}")
+        index += count
+
+        x0, y0 = path.point
+        if upper == "M":
+            path.move(args[0] + x0 * relative, args[1] + y0 * relative)
+        elif upper == "L":
+            path.line(args[0] + x0 * relative, args[1] + y0 * relative)
+        elif upper == "H":
+            path.line(args[0] + x0 * relative, y0)
+        elif upper == "V":
+            path.line(x0, args[0] + y0 * relative)
+        elif upper == "C":
+            offsets = [x0, y0] * 3 if relative else [0.0] * 6
+            path.cubic(*[a + o for a, o in zip(args, offsets)])
+        elif upper == "S":
+            reflected = path.cubic_control or (x0, y0)
+            offsets = [x0, y0] * 2 if relative else [0.0] * 4
+            x2, y2, x, y = [a + o for a, o in zip(args, offsets)]
+            path.cubic(2 * x0 - reflected[0], 2 * y0 - reflected[1], x2, y2, x, y)
+        elif upper == "Q":
+            offsets = [x0, y0] * 2 if relative else [0.0] * 4
+            path.quadratic(*[a + o for a, o in zip(args, offsets)])
+        elif upper == "T":
+            reflected = path.quadratic_control or (x0, y0)
+            offsets = [x0, y0] if relative else [0.0, 0.0]
+            x, y = [a + o for a, o in zip(args[:2], offsets)]
+            path.quadratic(2 * x0 - reflected[0], 2 * y0 - reflected[1], x, y)
+        elif upper == "A":
+            rx, ry, rotation, large, sweep, x, y = args
+            if relative:
+                x, y = x + x0, y + y0
+            arc(path, rx, ry, rotation, large, sweep, x, y)
+        elif upper == "Z":
+            path.close()
+
+
+def arc(path, rx, ry, rotation, large, sweep, x, y):
+    """An elliptical arc, as up to four cubics.
+
+    The endpoint-to-centre conversion is the one in the SVG specification's
+    implementation notes, F.6.5 and F.6.6, and the per-quadrant cubic is the
+    standard tangent-matching approximation.
+    """
+    x0, y0 = path.point
+    if rx == 0 or ry == 0 or (x0, y0) == (x, y):
+        path.line(x, y)
+        return
+
+    phi = math.radians(rotation)
+    cos_phi, sin_phi = math.cos(phi), math.sin(phi)
+    rx, ry = abs(rx), abs(ry)
+
+    dx, dy = (x0 - x) / 2.0, (y0 - y) / 2.0
+    x1 = cos_phi * dx + sin_phi * dy
+    y1 = -sin_phi * dx + cos_phi * dy
+
+    # An ellipse too small to reach both endpoints is scaled up until it does,
+    # which the specification requires rather than treating as an error.
+    oversize = x1 * x1 / (rx * rx) + y1 * y1 / (ry * ry)
+    if oversize > 1:
+        rx *= math.sqrt(oversize)
+        ry *= math.sqrt(oversize)
+
+    denominator = rx * rx * y1 * y1 + ry * ry * x1 * x1
+    numerator = rx * rx * ry * ry - denominator
+    factor = math.sqrt(max(0.0, numerator / denominator))
+    if bool(large) == bool(sweep):
+        factor = -factor
+    cx1 = factor * rx * y1 / ry
+    cy1 = -factor * ry * x1 / rx
+    cx = cos_phi * cx1 - sin_phi * cy1 + (x0 + x) / 2.0
+    cy = sin_phi * cx1 + cos_phi * cy1 + (y0 + y) / 2.0
+
+    def angle(ux, uy, vx, vy):
+        dot = ux * vx + uy * vy
+        length = math.hypot(ux, uy) * math.hypot(vx, vy)
+        theta = math.acos(max(-1.0, min(1.0, dot / length)))
+        return -theta if ux * vy - uy * vx < 0 else theta
+
+    start = angle(1.0, 0.0, (x1 - cx1) / rx, (y1 - cy1) / ry)
+    sweep_angle = angle(
+        (x1 - cx1) / rx, (y1 - cy1) / ry,
+        (-x1 - cx1) / rx, (-y1 - cy1) / ry,
+    )
+    if not sweep and sweep_angle > 0:
+        sweep_angle -= 2 * math.pi
+    elif sweep and sweep_angle < 0:
+        sweep_angle += 2 * math.pi
+
+    steps = max(1, math.ceil(abs(sweep_angle) / (math.pi / 2) - 1e-9))
+    delta = sweep_angle / steps
+    alpha = math.sin(delta) * (math.sqrt(4 + 3 * math.tan(delta / 2) ** 2) - 1) / 3
+
+    def point_at(theta):
+        return (
+            cx + rx * cos_phi * math.cos(theta) - ry * sin_phi * math.sin(theta),
+            cy + rx * sin_phi * math.cos(theta) + ry * cos_phi * math.sin(theta),
+        )
+
+    def tangent_at(theta):
+        return (
+            -rx * cos_phi * math.sin(theta) - ry * sin_phi * math.cos(theta),
+            -rx * sin_phi * math.sin(theta) + ry * cos_phi * math.cos(theta),
+        )
+
+    for step in range(steps):
+        t1 = start + step * delta
+        t2 = t1 + delta
+        p1x, p1y = point_at(t1)
+        p2x, p2y = point_at(t2)
+        d1x, d1y = tangent_at(t1)
+        d2x, d2y = tangent_at(t2)
+        path.cubic(
+            p1x + alpha * d1x, p1y + alpha * d1y,
+            p2x - alpha * d2x, p2y - alpha * d2y,
+            p2x, p2y,
+        )
+
+
+def shape(path, element):
+    """Whatever this SVG element is, as path commands.
+
+    The current point resets first: each element of an SVG starts at the
+    origin, so a `<path>` whose data opens with a relative `m` is relative to
+    (0, 0) and not to wherever the element before it ended.
+    """
+    path.point = path.start = (0.0, 0.0)
+    path.cubic_control = path.quadratic_control = None
+    tag = element.tag.replace(SVG_NS, "")
+    get = lambda name, default=0.0: float(element.get(name, default))
+
+    if tag == "path":
+        parse_path(path, element.get("d", ""))
+    elif tag == "line":
+        path.move(get("x1"), get("y1"))
+        path.line(get("x2"), get("y2"))
+    elif tag in ("polyline", "polygon"):
+        numbers = [float(n) for n in re.findall(r"[-+]?[0-9]*\.?[0-9]+", element.get("points", ""))]
+        points = list(zip(numbers[0::2], numbers[1::2]))
+        path.move(*points[0])
+        for point in points[1:]:
+            path.line(*point)
+        if tag == "polygon":
+            path.close()
+    elif tag in ("circle", "ellipse"):
+        cx, cy = get("cx"), get("cy")
+        rx = get("r") or get("rx")
+        ry = get("r") or get("ry")
+        path.move(cx + rx, cy)
+        # Four quadrants, clockwise on screen. Which way round does not matter:
+        # the rasterizer normalizes every contour's winding.
+        for sx, sy in ((1, 1), (-1, 1), (-1, -1), (1, -1)):
+            ax, ay = (cx + rx * sx, cy) if sy * sx > 0 else (cx, cy + ry * sy)
+            bx, by = (cx, cy + ry * sy) if sy * sx > 0 else (cx + rx * sx, cy)
+            if sx * sy > 0:
+                path.cubic(ax, ay + ry * KAPPA * sy, bx + rx * KAPPA * sx, by, bx, by)
+            else:
+                path.cubic(ax + rx * KAPPA * sx, ay, bx, by + ry * KAPPA * sy, bx, by)
+        path.close()
+    elif tag == "rect":
+        x, y, w, h = get("x"), get("y"), get("width"), get("height")
+        rx = get("rx", element.get("ry", 0.0))
+        ry = get("ry", element.get("rx", 0.0))
+        rx, ry = min(rx, w / 2), min(ry, h / 2)
+        if rx <= 0 or ry <= 0:
+            path.move(x, y)
+            path.line(x + w, y)
+            path.line(x + w, y + h)
+            path.line(x, y + h)
+            path.close()
+        else:
+            path.move(x + rx, y)
+            path.line(x + w - rx, y)
+            path.cubic(x + w - rx + rx * KAPPA, y, x + w, y + ry - ry * KAPPA, x + w, y + ry)
+            path.line(x + w, y + h - ry)
+            path.cubic(x + w, y + h - ry + ry * KAPPA, x + w - rx + rx * KAPPA, y + h, x + w - rx, y + h)
+            path.line(x + rx, y + h)
+            path.cubic(x + rx - rx * KAPPA, y + h, x, y + h - ry + ry * KAPPA, x, y + h - ry)
+            path.line(x, y + ry)
+            path.cubic(x, y + ry - ry * KAPPA, x + rx - rx * KAPPA, y, x + rx, y)
+            path.close()
+    else:
+        raise ValueError(f"no rule for <{tag}>; add one")
+
+
+def number(value):
+    """A float as short Rust source, and never in a form Rust reads as an int."""
+    text = f"{value:.4f}".rstrip("0")
+    return text + "0" if text.endswith(".") else text
+
+
+def main():
+    with urllib.request.urlopen(REGISTRY, timeout=60) as response:
+        archive = tarfile.open(fileobj=io.BytesIO(response.read()), mode="r:gz")
+
+    lines = [
+        "//! The icons themselves: Lucide's geometry, as absolute path commands.",
+        "//!",
+        f"//! Generated by `script/icons` from lucide-static {VERSION}, which is",
+        "//! ISC-licensed — see `LICENSE-ISC-lucide`. Do not edit: add an icon to",
+        "//! the script's list and run it.",
+        "//!",
+        "//! Every icon is drawn inside a 24 x 24 box with a 2-unit stroke, round",
+        "//! caps and round joins, and no fill. Arcs, shorthands and the `circle`,",
+        "//! `rect`, `line` and `polyline` elements are all resolved into moves,",
+        "//! lines and cubics here, so the rasterizer needs no SVG in it.",
+        "",
+        "use super::Segment::{self, Close, Cubic, Line, Move};",
+        "",
+    ]
+
+    variants = []
+    for variant, name, purpose in ICONS:
+        source = archive.extractfile(f"package/icons/{name}.svg").read().decode("utf-8")
+        root = ElementTree.fromstring(source)
+
+        path = Path()
+        for element in root:
+            shape(path, element)
+
+        constant = re.sub(r"(?<!^)(?=[A-Z])", "_", variant).upper()
+        variants.append((variant, name, purpose, constant))
+
+        lines.append(f"/// Lucide's `{name}`.")
+        lines.append(f"pub(super) static {constant}: &[Segment] = &[")
+        for kind, args in path.segments:
+            rendered = ", ".join(number(a) for a in args)
+            lines.append({
+                "move": f"    Move({rendered}),",
+                "line": f"    Line({rendered}),",
+                "cubic": f"    Cubic({rendered}),",
+                "close": "    Close,",
+            }[kind])
+        lines.append("];")
+        lines.append("")
+
+    lines.append("/// Every icon, its Lucide name, and its geometry.")
+    lines.append("///")
+    lines.append("/// One table rather than three `match`es, because the three answers are")
+    lines.append("/// three columns of the same row and a test walks it end to end.")
+    lines.append("pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [")
+    for variant, name, _, constant in variants:
+        lines.append(f'    (Lucide::{variant}, "{name}", {constant}),')
+    lines.append("];")
+    lines.append("")
+    lines.append("/// How many there are.")
+    lines.append(f"pub const ICONS: usize = {len(variants)};")
+    lines.append("")
+    lines.append("/// The icons Crook draws, from Lucide.")
+    lines.append("///")
+    lines.append("/// Generated: the variants and the geometry come from the same list, so")
+    lines.append("/// an icon cannot be named without being drawable.")
+    lines.append("#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]")
+    lines.append("pub enum Lucide {")
+    for variant, name, purpose, _ in variants:
+        lines.append(f"    /// {purpose}")
+        lines.append(f"    ///")
+        lines.append(f"    /// Lucide's [`{name}`](https://lucide.dev/icons/{name}).")
+        lines.append(f"    {variant},")
+    lines.append("}")
+    lines.append("")
+
+    OUTPUT.write_text("\n".join(lines) + "\n")
+    print(f"wrote {OUTPUT} — {len(variants)} icons from lucide-static {VERSION}")
+
+    license_text = archive.extractfile("package/LICENSE").read().decode("utf-8")
+    (OUTPUT.parents[4] / "LICENSE-ISC-lucide").write_text(license_text)
+    print("wrote LICENSE-ISC-lucide")
+
+
+if __name__ == "__main__":
+    main()

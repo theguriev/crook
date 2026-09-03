@@ -11,8 +11,9 @@
 //! the callbacks collapse into a `&dyn FontDb` and an [`AtlasContext`].
 
 use anyhow::Result;
-use crookui_core::fonts::{GlyphKey, RasterBounds, RasterFormat, SubpixelAlignment};
+use crookui_core::fonts::{Canvas, GlyphKey, RasterBounds, RasterFormat, SubpixelAlignment};
 use crookui_core::geometry::Vector2F;
+use crookui_core::icons::{self, IconKey, Lucide};
 use crookui_core::platform::FontDb;
 use rustc_hash::FxHashMap;
 
@@ -48,6 +49,20 @@ pub struct GlyphTextureOffset {
     pub is_emoji: bool,
 }
 
+/// Where one cached icon mask landed.
+///
+/// Smaller than [`GlyphTextureOffset`] by exactly the fields a glyph needs and
+/// an icon does not: an icon is positioned by the square it was asked to fill,
+/// not by a baseline, and it is never a colour bitmap.
+#[derive(Copy, Clone, Debug)]
+pub struct IconTextureOffset {
+    /// Which atlas holds it.
+    pub texture_id: TextureId,
+
+    /// Where in that atlas, in both UV and pixel space.
+    pub allocated_region: atlas::AllocatedRegion,
+}
+
 /// A permanent map from glyph reference to atlas region.
 ///
 /// Nothing is ever evicted. Crook has no glyph-rendering configuration to
@@ -56,6 +71,7 @@ pub struct GlyphTextureOffset {
 pub struct GlyphCache {
     textures: Vec<AtlasTexture>,
     cache: FxHashMap<GlyphCacheKey, Option<GlyphTextureOffset>>,
+    icons: FxHashMap<IconCacheKey, Option<IconTextureOffset>>,
     atlas_manager: atlas::Manager,
 }
 
@@ -71,12 +87,29 @@ struct GlyphCacheKey {
     subpixel_alignment: SubpixelAlignment,
 }
 
+/// What one icon mask is cached under: an icon, a device size and a stroke.
+///
+/// Whole device pixels rather than a logical size and a scale factor, because
+/// two windows on two monitors that arrive at the same physical size want the
+/// same mask. There is no subpixel bucket: an icon is snapped to the pixel
+/// grid on both axes, so there is only ever one alignment to rasterize.
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+struct IconCacheKey {
+    icon: Lucide,
+    pixels: u32,
+
+    /// The stroke width's bit pattern, for the reason `scale_factor` above is
+    /// one: an `f32` is not `Eq`.
+    stroke_width: u32,
+}
+
 impl GlyphCache {
     /// An empty cache with no atlas textures allocated yet.
     pub fn new() -> Self {
         Self {
             textures: Vec::new(),
             cache: FxHashMap::default(),
+            icons: FxHashMap::default(),
             atlas_manager: atlas::Manager::new(ATLAS_SIZE),
         }
     }
@@ -128,7 +161,7 @@ impl GlyphCache {
             self.textures
                 .resize_with(index + 1, || AtlasTexture::new(ATLAS_SIZE, atlas));
         }
-        self.textures[index].insert_glyph(offset.allocated_region, &glyph, atlas.queue);
+        self.textures[index].insert(offset.allocated_region, &glyph.canvas, atlas.queue);
 
         let placed = GlyphTextureOffset {
             texture_id: offset.texture_id,
@@ -139,6 +172,84 @@ impl GlyphCache {
         self.cache.insert(cache_key, Some(placed));
 
         Ok(Some(placed))
+    }
+
+    /// Where to find an icon, rasterizing and uploading it on a miss.
+    ///
+    /// `Ok(None)` means the icon rounded to nothing — a zero-sized square —
+    /// and should be skipped. Everything else about this mirrors
+    /// [`Self::get`]: same atlas, same textures, same never-evicted map. The
+    /// only thing an icon does differently is where its pixels come from, and
+    /// that is one call.
+    pub fn get_icon(
+        &mut self,
+        icon_key: IconKey,
+        scale_factor: f32,
+        atlas: &AtlasContext<'_>,
+    ) -> Result<Option<IconTextureOffset>> {
+        let pixels = (icon_key.size * scale_factor).round().max(0.) as u32;
+        let cache_key = IconCacheKey {
+            icon: icon_key.icon,
+            pixels,
+            stroke_width: icon_key.stroke_width.to_bits(),
+        };
+
+        if let Some(cached) = self.icons.get(&cache_key) {
+            return Ok(*cached);
+        }
+
+        if pixels == 0 {
+            self.icons.insert(cache_key, None);
+            return Ok(None);
+        }
+
+        let mask = icons::rasterize(icon_key.icon, pixels, icon_key.stroke_width);
+        let canvas = widen(&mask);
+
+        let offset = self.atlas_manager.insert(canvas.size)?;
+        let index = offset.texture_id.as_index();
+        if index >= self.textures.len() {
+            self.textures
+                .resize_with(index + 1, || AtlasTexture::new(ATLAS_SIZE, atlas));
+        }
+        self.textures[index].insert(offset.allocated_region, &canvas, atlas.queue);
+
+        let placed = IconTextureOffset {
+            texture_id: offset.texture_id,
+            allocated_region: offset.allocated_region,
+        };
+        self.icons.insert(cache_key, Some(placed));
+
+        Ok(Some(placed))
+    }
+}
+
+/// An A8 coverage mask as the RGBA the atlas is made of.
+///
+/// The coverage byte is replicated into all four channels rather than put in
+/// alpha alone, because the glyph shader reads a mask's coverage out of *red*
+/// — one texture and one pipeline serve masks and colour emoji alike, and the
+/// shader tells them apart with a flag rather than a second sampler. The same
+/// widening happens to a glyph inside the font backend; it happens here for an
+/// icon because here is where an icon becomes pixels.
+fn widen(mask: &Canvas) -> Canvas {
+    let (width, height) = mask.size;
+    let row_stride = width as usize * RasterFormat::Rgba32.bytes_per_pixel() as usize;
+    let mut pixels = vec![0u8; row_stride * height as usize];
+
+    for row in 0..height as usize {
+        let source = &mask.pixels[row * mask.row_stride..][..width as usize];
+        let target = &mut pixels[row * row_stride..][..row_stride];
+        for (pixel, coverage) in target.chunks_exact_mut(4).zip(source) {
+            pixel.fill(*coverage);
+        }
+    }
+
+    Canvas {
+        pixels,
+        size: mask.size,
+        row_stride,
+        format: RasterFormat::Rgba32,
     }
 }
 
@@ -274,6 +385,83 @@ mod tests {
             font_id: FontId(0),
             font_size: 14.,
         }
+    }
+
+    #[test]
+    fn an_icon_shares_the_atlas_with_the_glyphs_and_is_cached_beside_them() {
+        let Some((resources, layout, sampler)) = device() else {
+            log::warn!("skipping the icon cache test: no usable GPU adapter");
+            return;
+        };
+        let atlas = AtlasContext {
+            device: &resources.device,
+            queue: &resources.queue,
+            bind_group_layout: &layout,
+            sampler: &sampler,
+        };
+
+        let font_db = CountingGlyphs::new(24);
+        let mut cache = GlyphCache::new();
+        let glyph = cache
+            .get(
+                key(1),
+                2.,
+                SubpixelAlignment::new(Vector2F::zero()),
+                &font_db,
+                &atlas,
+            )
+            .unwrap()
+            .expect("glyph 1 has pixels");
+
+        let icon_key = IconKey::new(Lucide::X, 16.);
+        let first = cache
+            .get_icon(icon_key, 2., &atlas)
+            .unwrap()
+            .expect("an icon with a size has pixels");
+        let second = cache
+            .get_icon(icon_key, 2., &atlas)
+            .unwrap()
+            .expect("an icon with a size has pixels");
+
+        assert_eq!(
+            first.texture_id, glyph.texture_id,
+            "an icon is a mask like any other and belongs in the same atlas"
+        );
+        assert_ne!(
+            first.allocated_region.pixel_region.x, glyph.allocated_region.pixel_region.x,
+            "and in a region of its own"
+        );
+        assert_eq!(
+            first.allocated_region.pixel_region, second.allocated_region.pixel_region,
+            "the second lookup rasterized the icon again instead of reading the cache"
+        );
+        assert_eq!(
+            first.allocated_region.pixel_region.width, 32,
+            "a 16px icon on a 2x scale is a 32px mask"
+        );
+    }
+
+    #[test]
+    fn an_icon_with_no_pixels_in_it_is_cached_as_nothing() {
+        let Some((resources, layout, sampler)) = device() else {
+            log::warn!("skipping the icon cache test: no usable GPU adapter");
+            return;
+        };
+        let atlas = AtlasContext {
+            device: &resources.device,
+            queue: &resources.queue,
+            bind_group_layout: &layout,
+            sampler: &sampler,
+        };
+
+        let mut cache = GlyphCache::new();
+        let squeezed = IconKey::new(Lucide::Check, 0.2);
+
+        // A quarter of a pixel rounds to none, and an atlas region of zero
+        // width is an error rather than an empty draw — so the answer has to
+        // be "skip this one", the way a space is skipped.
+        assert!(cache.get_icon(squeezed, 1., &atlas).unwrap().is_none());
+        assert!(cache.get_icon(squeezed, 1., &atlas).unwrap().is_none());
     }
 
     #[test]

@@ -17,6 +17,7 @@
 
 use crate::fonts::{FontId, GlyphId, GlyphKey};
 use crate::geometry::{Color, Point, RectF, Vector2F, ZIndex};
+use crate::icons::IconKey;
 
 /// One frame's worth of draw commands.
 #[derive(Clone)]
@@ -48,6 +49,11 @@ pub struct Layer {
 
     /// Glyphs to draw, in paint order. Always painted after this layer's rects.
     pub glyphs: Vec<Glyph>,
+
+    /// Icons to draw, in paint order. Painted after this layer's glyphs, which
+    /// matters only in the layer that draws one over the other and there is
+    /// none: an icon sits beside a label, never on it.
+    pub icons: Vec<Icon>,
 
     /// Whether this layer is invisible to hit testing.
     ///
@@ -129,6 +135,21 @@ pub struct Glyph {
     /// Left edge on the baseline, in logical pixels.
     pub position: Vector2F,
     /// Tint for monochrome glyphs; ignored for color ones.
+    pub color: Color,
+}
+
+/// One icon, filling a square.
+///
+/// The square is where it goes; the mask is rasterized to fit it and tinted
+/// with `color`, exactly as a monochrome glyph is. An icon records no hit
+/// rect for the same reason a glyph does not — wrap it to make it clickable.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Icon {
+    /// Which icon, at which size and stroke.
+    pub icon_key: IconKey,
+    /// Where it goes, in logical pixels. Square by construction.
+    pub bounds: RectF,
+    /// What to tint the mask with.
     pub color: Color,
 }
 
@@ -609,6 +630,26 @@ impl Scene {
             color,
         });
         layer.glyphs.last_mut().expect("just pushed")
+    }
+
+    /// Adds an icon, filling the square `bounds`.
+    ///
+    /// The size the mask is rasterized at comes from the key rather than from
+    /// `bounds`, so an icon squeezed by a tight constraint is drawn at the
+    /// size it asked for and centred, rather than stretched.
+    pub fn draw_icon(&mut self, icon_key: IconKey, bounds: RectF, color: Color) -> &mut Icon {
+        debug_assert!(
+            bounds.origin().is_finite() && bounds.size().is_finite(),
+            "an icon reached the scene with a non-finite coordinate: {bounds:?}"
+        );
+
+        let layer = self.active_layer();
+        layer.icons.push(Icon {
+            icon_key,
+            bounds,
+            color,
+        });
+        layer.icons.last_mut().expect("just pushed")
     }
 
     /// Whether anything in a layer above `position`'s own covers it.

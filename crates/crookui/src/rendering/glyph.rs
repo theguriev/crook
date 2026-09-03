@@ -10,7 +10,7 @@
 
 use std::mem;
 
-use crookui_core::fonts::{RasterizedGlyph, SubpixelAlignment};
+use crookui_core::fonts::{Canvas, SubpixelAlignment};
 use crookui_core::geometry::vec2f;
 use crookui_core::platform::FontDb;
 use crookui_core::scene::Layer;
@@ -87,13 +87,12 @@ impl AtlasTexture {
         }
     }
 
-    /// Uploads a rasterized glyph into `region`.
-    pub fn insert_glyph(
-        &mut self,
-        region: AllocatedRegion,
-        glyph: &RasterizedGlyph,
-        queue: &wgpu::Queue,
-    ) {
+    /// Uploads one rasterized bitmap into `region`.
+    ///
+    /// A glyph, a colour emoji or an icon: by the time anything reaches here
+    /// it is pixels in the atlas's own format, and the atlas does not care
+    /// which of the three it was.
+    pub fn insert(&mut self, region: AllocatedRegion, canvas: &Canvas, queue: &wgpu::Queue) {
         queue.write_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.texture,
@@ -105,12 +104,12 @@ impl AtlasTexture {
                 },
                 aspect: wgpu::TextureAspect::All,
             },
-            &glyph.canvas.pixels,
+            &canvas.pixels,
             wgpu::TexelCopyBufferLayout {
                 offset: 0,
                 // The rasterizer is free to pad its rows, so the stride it
                 // reports is the authority, not width times four.
-                bytes_per_row: Some(glyph.canvas.row_stride as u32),
+                bytes_per_row: Some(canvas.row_stride as u32),
                 rows_per_image: None,
             },
             wgpu::Extent3d {
@@ -258,7 +257,7 @@ impl Pipeline {
         font_db: &dyn FontDb,
         per_frame_state: &mut PerFrameState,
     ) -> Option<LayerState> {
-        if layer.glyphs.is_empty() {
+        if layer.glyphs.is_empty() && layer.icons.is_empty() {
             return None;
         }
 
@@ -314,6 +313,46 @@ impl Pipeline {
                 uv_bounds: rect_to_array(placed.allocated_region.uv_region),
                 color: glyph.color.to_f32_array(),
                 is_emoji: placed.is_emoji as i32,
+            };
+
+            match batches
+                .iter_mut()
+                .find(|(texture_id, _)| *texture_id == placed.texture_id)
+            {
+                Some((_, instances)) => instances.push(instance),
+                None => batches.push((placed.texture_id, vec![instance])),
+            }
+        }
+
+        // Icons after glyphs, into the same batches: an icon is a mask in the
+        // same atlas, drawn by the same shader with the same tint, and the
+        // only thing it does differently is that it is placed by its box
+        // rather than by a baseline and snapped to whole pixels on both axes.
+        for icon in &layer.icons {
+            let placed = match self
+                .glyph_cache
+                .get_icon(icon.icon_key, scale_factor, &atlas)
+            {
+                Ok(Some(placed)) => placed,
+                Ok(None) => continue,
+                Err(error) => {
+                    log::warn!("could not place icon {:?}: {error:#}", icon.icon_key);
+                    continue;
+                }
+            };
+
+            let position = icon.bounds.origin() * scale_factor;
+            let region = placed.allocated_region.pixel_region;
+            let instance = GlyphInstanceData {
+                bounds: [
+                    position.x().round(),
+                    position.y().round(),
+                    region.width as f32,
+                    region.height as f32,
+                ],
+                uv_bounds: rect_to_array(placed.allocated_region.uv_region),
+                color: icon.color.to_f32_array(),
+                is_emoji: false as i32,
             };
 
             match batches
