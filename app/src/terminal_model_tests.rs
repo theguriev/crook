@@ -74,8 +74,8 @@ fn the_grid_is_drawn_on_the_panel_it_sits_in() {
     // A default cell whose background matched nothing would make an empty
     // screen thousands of rectangles instead of none.
     let palette = crook_palette();
-    assert_eq!(palette.background, rgb(THEME.surface));
-    assert_eq!(palette.foreground, rgb(THEME.text_primary));
+    assert_eq!(palette.background, rgb(theme().surface));
+    assert_eq!(palette.foreground, rgb(theme().text_primary));
     assert_eq!(
         palette.ansi[1],
         Palette::default().ansi[1],
@@ -83,7 +83,7 @@ fn the_grid_is_drawn_on_the_panel_it_sits_in() {
     );
     // Dim text resolves through this slot, so a palette that left it at the
     // default would hold a grey Crook does not use back by two thirds.
-    assert_eq!(palette.dim_foreground, rgb(THEME.text_muted));
+    assert_eq!(palette.dim_foreground, rgb(theme().text_muted));
 }
 
 #[test]

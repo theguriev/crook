@@ -234,6 +234,22 @@ impl Terminal {
         self.emulator.size()
     }
 
+    /// Repaints the grid in a new palette.
+    ///
+    /// What applying a theme to a shell that is already running comes down to.
+    /// The child is not told and does not need to be: a palette is how the
+    /// *renderer* resolves the colours a program asked for by name or by
+    /// number, so every cell already on screen is re-resolved and everything
+    /// the program writes next lands in the new colours too.
+    ///
+    /// The overrides a program set for itself with OSC 4, 10, 11 and 12 are
+    /// not touched, and that is the contract those escapes carry: a program
+    /// that asked for a specific background keeps it until it resets it,
+    /// whatever the theme underneath has become.
+    pub fn set_palette(&mut self, palette: Palette) {
+        self.emulator.set_palette(palette);
+    }
+
     /// Moves the viewport through the scrollback: a positive `delta` moves it
     /// back into history, a negative one towards the live output.
     pub fn scroll_lines(&mut self, delta: i32) {

@@ -48,7 +48,7 @@ use crookui_core::prelude::*;
 
 use crate::settings::{Density, Granularity, PrimaryInfo, resolve_subtitle, subtitle_options_for};
 use crate::tab::TabAction;
-use crate::theme::THEME;
+use crate::theme::theme;
 
 use super::action::{OptionsAction, WorkspaceAction};
 use super::view::Workspace;
@@ -252,8 +252,8 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
         // ground instead. Rendering a shadow into nothing would be worse.
         Container::new(column.finish())
             .with_vertical_padding(8.)
-            .with_background_color(THEME.surface_raised)
-            .with_border(Border::all(1.).with_border_color(THEME.overlay_1))
+            .with_background_color(theme().surface_raised)
+            .with_border(Border::all(1.).with_border_color(theme().overlay_1))
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(POPUP_RADIUS)))
             .finish(),
     )
@@ -271,7 +271,7 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
 fn settings_row(state: MouseStateHandle, ui: FamilyId) -> Box<dyn Element> {
     Hoverable::new(state, move |mouse| {
         let background = if mouse.is_hovered() {
-            THEME.overlay_1
+            theme().overlay_1
         } else {
             Color::TRANSPARENT
         };
@@ -291,7 +291,7 @@ fn settings_row(state: MouseStateHandle, ui: FamilyId) -> Box<dyn Element> {
                 )
                 .with_child(
                     Text::new("Settings\u{2026}", ui, LABEL_SIZE)
-                        .with_color(THEME.text_primary)
+                        .with_color(theme().text_primary)
                         .finish(),
                 )
                 .finish(),
@@ -311,7 +311,7 @@ fn settings_row(state: MouseStateHandle, ui: FamilyId) -> Box<dyn Element> {
 fn header(label: &'static str, ui: FamilyId) -> Box<dyn Element> {
     Container::new(
         Text::new(label, ui, LABEL_SIZE)
-            .with_color(THEME.text_muted)
+            .with_color(theme().text_muted)
             .finish(),
     )
     .with_horizontal_padding(ROW_INSET)
@@ -328,7 +328,7 @@ fn divider() -> Box<dyn Element> {
     Container::new(
         ConstrainedBox::new(
             Container::new(Empty::new().finish())
-                .with_background_color(THEME.overlay_2)
+                .with_background_color(theme().overlay_2)
                 .finish(),
         )
         .with_height(1.)
@@ -352,7 +352,7 @@ fn segmented_track(left: Box<dyn Element>, right: Box<dyn Element>) -> Box<dyn E
                 .finish(),
         )
         .with_uniform_padding(4.)
-        .with_background_color(THEME.overlay_2)
+        .with_background_color(theme().overlay_2)
         .with_corner_radius(CornerRadius::with_all(Radius::Pixels(POPUP_RADIUS)))
         .finish(),
     )
@@ -365,9 +365,9 @@ fn segmented_track(left: Box<dyn Element>, right: Box<dyn Element>) -> Box<dyn E
 /// icon segments change when they are selected.
 fn segment_background(is_selected: bool, is_hovered: bool) -> Color {
     if is_selected {
-        THEME.overlay_3
+        theme().overlay_3
     } else if is_hovered {
-        THEME.overlay_1
+        theme().overlay_1
     } else {
         Color::TRANSPARENT
     }
@@ -401,9 +401,9 @@ fn text_segment(
         segment_pill(
             Text::new(label, ui, SEGMENT_LABEL_SIZE)
                 .with_color(if is_selected {
-                    THEME.text_primary
+                    theme().text_primary
                 } else {
-                    THEME.text_muted
+                    theme().text_muted
                 })
                 .finish(),
             is_selected,
@@ -456,7 +456,7 @@ fn list_icon() -> Box<dyn Element> {
         rules.add_child(
             ConstrainedBox::new(
                 Container::new(Empty::new().finish())
-                    .with_background_color(THEME.text_muted)
+                    .with_background_color(theme().text_muted)
                     .with_corner_radius(CornerRadius::with_all(Radius::Pixels(1.)))
                     .finish(),
             )
@@ -473,7 +473,7 @@ fn grid_icon() -> Box<dyn Element> {
     let cell = || {
         ConstrainedBox::new(
             Container::new(Empty::new().finish())
-                .with_background_color(THEME.text_muted)
+                .with_background_color(theme().text_muted)
                 .with_corner_radius(CornerRadius::with_all(Radius::Pixels(2.)))
                 .finish(),
         )
@@ -537,7 +537,7 @@ fn check_row(
         let check: Box<dyn Element> = if is_checked {
             Align::new(
                 Text::new("\u{2713}", ui, LABEL_SIZE)
-                    .with_color(THEME.text_primary)
+                    .with_color(theme().text_primary)
                     .finish(),
             )
             .finish()
@@ -558,7 +558,7 @@ fn check_row(
         );
         row.add_child(
             Text::new(label, ui, LABEL_SIZE)
-                .with_color(THEME.text_primary)
+                .with_color(theme().text_primary)
                 .finish(),
         );
         if let Some(info) = info {
@@ -576,7 +576,7 @@ fn check_row(
             // because the background covers the inset padding and the column
             // stretches its children.
             .with_background_color(if mouse.is_hovered() {
-                THEME.overlay_1
+                theme().overlay_1
             } else {
                 Color::TRANSPARENT
             })
@@ -599,12 +599,12 @@ fn info_icon(info: &InfoNote, ui: FamilyId) -> Box<dyn Element> {
             Container::new(
                 Align::new(
                     Text::new("i", ui, 9.)
-                        .with_color(THEME.surface_raised)
+                        .with_color(theme().surface_raised)
                         .finish(),
                 )
                 .finish(),
             )
-            .with_background_color(THEME.text_muted)
+            .with_background_color(theme().text_muted)
             .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
             .finish(),
         )
@@ -661,15 +661,15 @@ fn note_panel(text: &str, ui: FamilyId) -> Box<dyn Element> {
     for line in wrap(text, NOTE_LINE_CHARS) {
         column.add_child(
             Text::new(line, ui, 11.)
-                .with_color(THEME.text_primary)
+                .with_color(theme().text_primary)
                 .finish(),
         );
     }
 
     ConstrainedBox::new(
         Container::new(Clipped::new(column.finish()).finish())
-            .with_background_color(THEME.surface_raised)
-            .with_border(Border::all(1.).with_border_color(THEME.overlay_2))
+            .with_background_color(theme().surface_raised)
+            .with_border(Border::all(1.).with_border_color(theme().overlay_2))
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
             .with_padding(Padding {
                 top: 4.,

@@ -39,7 +39,7 @@ use crookui_core::elements::{MouseStateHandle, Padding};
 use crookui_core::fonts::{FamilyId, Properties, Weight};
 use crookui_core::prelude::*;
 
-use crate::theme::THEME;
+use crate::theme::theme;
 
 use super::super::action::WorkspaceAction;
 use super::super::wrap;
@@ -91,7 +91,7 @@ pub(super) type Command = Option<WorkspaceAction>;
 pub(super) fn page_title(title: &'static str, ui: FamilyId) -> Box<dyn Element> {
     Container::new(
         Text::new(title, ui, TITLE_SIZE)
-            .with_color(THEME.text_primary)
+            .with_color(theme().text_primary)
             .with_style(Properties {
                 weight: Weight::Semibold,
                 ..Properties::default()
@@ -127,7 +127,7 @@ pub(super) fn category(
                     .with_height(1.)
                     .finish(),
             )
-            .with_background_color(THEME.border)
+            .with_background_color(theme().border)
             .with_margin_top(6.)
             .with_margin_bottom(18.)
             .finish(),
@@ -137,7 +137,7 @@ pub(super) fn category(
     column.add_child(
         Container::new(
             Text::new(title, ui, CATEGORY_SIZE)
-                .with_color(THEME.text_muted)
+                .with_color(theme().text_muted)
                 .with_style(Properties {
                     weight: Weight::Semibold,
                     ..Properties::default()
@@ -194,9 +194,9 @@ pub(super) fn row(
 fn label_text(label: &'static str, enabled: bool, ui: FamilyId) -> Box<dyn Element> {
     Text::new(label, ui, LABEL_SIZE)
         .with_color(if enabled {
-            THEME.text_primary
+            theme().text_primary
         } else {
-            THEME.text_muted
+            theme().text_muted
         })
         .finish()
 }
@@ -205,7 +205,7 @@ fn label_text(label: &'static str, enabled: bool, ui: FamilyId) -> Box<dyn Eleme
 fn description_text(description: &'static str, ui: FamilyId) -> Box<dyn Element> {
     Container::new(
         Text::new(description, ui, DESCRIPTION_SIZE)
-            .with_color(THEME.text_muted)
+            .with_color(theme().text_muted)
             .finish(),
     )
     .with_margin_top(4.)
@@ -262,15 +262,15 @@ pub(super) fn switch(on: bool, command: Command, state: MouseStateHandle) -> Box
 
     let control = Hoverable::new(state, move |mouse| {
         let track = match (on, enabled) {
-            (true, true) => THEME.accent,
-            (true, false) => THEME.overlay_3,
-            (false, true) if mouse.is_hovered() => THEME.overlay_3,
-            (false, _) => THEME.overlay_2,
+            (true, true) => theme().accent,
+            (true, false) => theme().overlay_3,
+            (false, true) if mouse.is_hovered() => theme().overlay_3,
+            (false, _) => theme().overlay_2,
         };
         let knob = if enabled {
-            THEME.text_primary
+            theme().text_primary
         } else {
-            THEME.text_muted
+            theme().text_muted
         };
 
         let mut row = Flex::row()
@@ -331,11 +331,11 @@ pub(super) fn segmented(segments: Vec<Segment>, ui: FamilyId) -> Box<dyn Element
 
         let pill = Hoverable::new(segment.state, move |mouse| {
             let (background, color) = if selected {
-                (THEME.overlay_3, THEME.text_primary)
+                (theme().overlay_3, theme().text_primary)
             } else if enabled && mouse.is_hovered() {
-                (THEME.overlay_2, THEME.text_primary)
+                (theme().overlay_2, theme().text_primary)
             } else {
-                (Color::TRANSPARENT, THEME.text_muted)
+                (Color::TRANSPARENT, theme().text_muted)
             };
 
             Container::new(Text::new(label, ui, LABEL_SIZE).with_color(color).finish())
@@ -354,7 +354,7 @@ pub(super) fn segmented(segments: Vec<Segment>, ui: FamilyId) -> Box<dyn Element
     }
 
     Container::new(row.finish())
-        .with_background_color(THEME.overlay_2)
+        .with_background_color(theme().overlay_2)
         .with_uniform_padding(2.)
         .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CONTROL_RADIUS)))
         .finish()
@@ -377,14 +377,14 @@ pub(super) fn choice(
 
     let control = Hoverable::new(state, move |mouse| {
         let background = if enabled && mouse.is_hovered() {
-            THEME.overlay_1
+            theme().overlay_1
         } else {
             Color::TRANSPARENT
         };
         let color = if enabled {
-            THEME.text_primary
+            theme().text_primary
         } else {
-            THEME.text_muted
+            theme().text_muted
         };
 
         Container::new(
@@ -400,7 +400,7 @@ pub(super) fn choice(
                     // by a pixel as the pointer moves down the list.
                     Text::new("\u{2713}", ui, LABEL_SIZE)
                         .with_color(if selected {
-                            THEME.accent
+                            theme().accent
                         } else {
                             Color::TRANSPARENT
                         })
@@ -439,11 +439,11 @@ pub(super) fn text_button(
 
     let control = Hoverable::new(state, move |mouse| {
         let (background, color) = if !enabled {
-            (Color::TRANSPARENT, THEME.text_muted)
+            (Color::TRANSPARENT, theme().text_muted)
         } else if mouse.is_hovered() {
-            (THEME.overlay_2, THEME.text_primary)
+            (theme().overlay_2, theme().text_primary)
         } else {
-            (Color::TRANSPARENT, THEME.text_primary)
+            (Color::TRANSPARENT, theme().text_primary)
         };
 
         Container::new(
@@ -459,7 +459,7 @@ pub(super) fn text_button(
         })
         .with_background_color(background)
         .with_border(Border::all(1.).with_border_color(if enabled {
-            THEME.border
+            theme().border
         } else {
             Color::TRANSPARENT
         }))
@@ -468,6 +468,173 @@ pub(super) fn text_button(
     });
 
     with_command(control, command)
+}
+
+/// One theme, drawn as a miniature of what choosing it would do.
+///
+/// Warp's preview card, and it is the cheapest good idea in that part of Warp:
+/// rather than a screenshot to keep up to date or a row of colour swatches
+/// that says nothing about how they combine, it draws a fake terminal in the
+/// theme — a line of text, two ANSI colours, a divider and a cursor. Five
+/// colours in a hundred by sixty pixels, always correct because it is drawn
+/// from the palette itself.
+///
+/// The card is painted in `theme`, not in the theme in force: every colour
+/// below comes from the parameter. That is the whole trick, and it is why this
+/// function is the one place in the settings page that does not call
+/// [`theme()`](crate::theme::theme).
+pub(super) fn theme_card(
+    card: crate::theme::Theme,
+    selected: bool,
+    command: Command,
+    state: MouseStateHandle,
+    fonts: super::super::view::Fonts,
+) -> Box<dyn Element> {
+    /// Warp's card is 190x100. This one sits in a row beside its name rather
+    /// than above it, in a column 560 wide, so it is smaller — and the shape
+    /// is kept, because a preview that is not the shape of a window does not
+    /// look like one.
+    const WIDTH: f32 = 152.;
+    const HEIGHT: f32 = 80.;
+    /// The type inside a card, small enough that three lines fit.
+    const CARD_TEXT: f32 = 9.;
+
+    let enabled = command.is_some();
+
+    let control = Hoverable::new(state, move |mouse| {
+        // The one place the card reads the theme *in force* rather than the
+        // one it is drawing: an outline says which card the pointer is on and
+        // which one is chosen, and both of those are the page's language, not
+        // the previewed theme's.
+        let outline = if selected {
+            card.accent
+        } else if enabled && mouse.is_hovered() {
+            theme().text_muted
+        } else {
+            theme().border
+        };
+
+        // A shell that has just run `ls`: the command in the theme's own
+        // foreground, then a directory in its blue and an executable in its
+        // red, which is what a person actually looks at when they judge a
+        // terminal theme.
+        let line = |text: &'static str, color: Color| {
+            Text::new(text, fonts.monospace, CARD_TEXT)
+                .with_color(color)
+                .finish()
+        };
+
+        let grid = Flex::column()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Start)
+            .with_spacing(3.)
+            .with_child(line("$ ls", card.terminal.foreground))
+            .with_child(
+                Flex::row()
+                    .with_spacing(6.)
+                    .with_child(line("docs", card.terminal.normal[4]))
+                    .with_child(line("crook", card.terminal.normal[1]))
+                    .with_child(line("README", card.terminal.foreground))
+                    .finish(),
+            )
+            .with_child(Expanded::new(1., Empty::new().finish()).finish())
+            // The divider and the cursor: the input field, in miniature.
+            .with_child(
+                Container::new(
+                    Flex::row()
+                        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                        .with_child(
+                            Container::new(
+                                ConstrainedBox::new(Empty::new().finish())
+                                    .with_width(2.)
+                                    .with_height(10.)
+                                    .finish(),
+                            )
+                            .with_background_color(card.accent)
+                            .finish(),
+                        )
+                        .finish(),
+                )
+                .with_border(Border::top(1.).with_border_color(card.border))
+                .with_padding(Padding {
+                    top: 5.,
+                    bottom: 1.,
+                    left: 0.,
+                    right: 0.,
+                })
+                .finish(),
+            )
+            .finish();
+
+        ConstrainedBox::new(
+            Container::new(grid)
+                .with_background_color(card.terminal.background)
+                .with_border(Border::all(if selected { 2. } else { 1. }).with_border_color(outline))
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
+                .with_uniform_padding(8.)
+                .finish(),
+        )
+        .with_width(WIDTH)
+        .with_height(HEIGHT)
+        .finish()
+    });
+
+    with_command(control, command)
+}
+
+/// One theme's row: its card, and what it is called.
+///
+/// Warp puts the preview on the left and the name to its right, and the
+/// selected one is marked on the card rather than beside it — which is why the
+/// name here is only a name.
+pub(super) fn theme_row(
+    card: Box<dyn Element>,
+    name: String,
+    origin: &'static str,
+    selected: bool,
+    ui: FamilyId,
+) -> Box<dyn Element> {
+    Container::new(
+        Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(card)
+            .with_child(
+                Container::new(
+                    Flex::column()
+                        .with_main_axis_size(MainAxisSize::Min)
+                        .with_cross_axis_alignment(CrossAxisAlignment::Start)
+                        .with_child(
+                            Text::new(name, ui, LABEL_SIZE)
+                                .with_color(theme().text_primary)
+                                .with_style(if selected {
+                                    Properties {
+                                        weight: Weight::Semibold,
+                                        ..Properties::default()
+                                    }
+                                } else {
+                                    Properties::default()
+                                })
+                                .finish(),
+                        )
+                        .with_child(
+                            Container::new(
+                                Text::new(origin, ui, DESCRIPTION_SIZE)
+                                    .with_color(theme().text_muted)
+                                    .finish(),
+                            )
+                            .with_margin_top(3.)
+                            .finish(),
+                        )
+                        .finish(),
+                )
+                .with_margin_left(14.)
+                .finish(),
+            )
+            .finish(),
+    )
+    .with_margin_bottom(10.)
+    .finish()
 }
 
 /// A label and a value that cannot be edited, for the About page.
@@ -489,13 +656,13 @@ pub(super) fn fact(
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_child(
                 Text::new(label, fonts.ui, LABEL_SIZE)
-                    .with_color(THEME.text_muted)
+                    .with_color(theme().text_muted)
                     .finish(),
             )
             .with_child(Expanded::new(1., Empty::new().finish()).finish())
             .with_child(
                 Text::new(value, family, if monospace { 10.5 } else { LABEL_SIZE })
-                    .with_color(THEME.text_primary)
+                    .with_color(theme().text_primary)
                     .finish(),
             )
             .finish(),
@@ -523,7 +690,7 @@ pub(super) fn note(text: &'static str, ui: FamilyId) -> Box<dyn Element> {
     for line in wrap(text, NOTE_LINE_CHARS) {
         column.add_child(
             Text::new(line, ui, DESCRIPTION_SIZE)
-                .with_color(THEME.text_muted)
+                .with_color(theme().text_muted)
                 .with_line_height_ratio(1.45)
                 .finish(),
         );

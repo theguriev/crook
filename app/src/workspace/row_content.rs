@@ -30,7 +30,7 @@ use crookui_core::prelude::*;
 use crate::git::{self, DiffStats, GitFacts, Head};
 use crate::settings::{Granularity, PrimaryInfo, Subtitle, TabOptions, resolve_subtitle};
 use crate::tab::{AgentSession, Pane, PaneId, SETTINGS_TITLE, Tab};
-use crate::theme::THEME;
+use crate::theme::theme;
 
 /// The height a metadata line is pinned to, whether or not it has chips in it.
 ///
@@ -314,7 +314,7 @@ impl Chips {
         if let Some(label) = self.pull_request.clone() {
             row.add_child(pill(
                 Text::new(label, ui, 10.)
-                    .with_color(THEME.text_muted)
+                    .with_color(theme().text_muted)
                     .finish(),
             ));
         }
@@ -336,7 +336,7 @@ fn pill(content: Box<dyn Element>) -> Box<dyn Element> {
             bottom: 1.,
             right: 4.,
         })
-        .with_background_color(THEME.overlay_1)
+        .with_background_color(theme().overlay_1)
         .with_corner_radius(CornerRadius::with_all(Radius::Pixels(3.)))
         .finish()
 }
@@ -351,11 +351,11 @@ fn diff_chip(diff: DiffStats, ui: FamilyId) -> Box<dyn Element> {
         }
 
         let color = if token.starts_with('+') {
-            THEME.diff_added
+            theme().diff_added
         } else if token.starts_with('-') {
-            THEME.diff_removed
+            theme().diff_removed
         } else {
-            THEME.text_muted
+            theme().text_muted
         };
         row.add_child(
             Text::new(token, ui, 10.)
@@ -464,8 +464,8 @@ pub(super) fn detail_card(
 
     ConstrainedBox::new(
         Container::new(column.finish())
-            .with_background_color(THEME.surface_raised)
-            .with_border(Border::all(1.).with_border_color(THEME.overlay_2))
+            .with_background_color(theme().surface_raised)
+            .with_border(Border::all(1.).with_border_color(theme().overlay_2))
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
             .finish(),
     )
@@ -504,7 +504,7 @@ pub(super) fn detail_panes(tab: &Tab, pane: PaneId, granularity: Granularity) ->
 fn section_divider() -> Box<dyn Element> {
     ConstrainedBox::new(
         Container::new(Empty::new().finish())
-            .with_background_color(THEME.overlay_2)
+            .with_background_color(theme().overlay_2)
             .finish(),
     )
     .with_height(1.)
@@ -529,7 +529,7 @@ fn detail_section(
         .with_spacing(4.)
         .with_child(
             Text::new(session.display_title().to_owned(), ui, 12.)
-                .with_color(THEME.text_primary)
+                .with_color(theme().text_primary)
                 .finish(),
         );
 
@@ -537,7 +537,7 @@ fn detail_section(
         let friendly = git::user_friendly_path(directory, home);
         column.add_child(
             Text::new(git::truncate_start(&friendly, CARD_PATH_CHARS), ui, 12.)
-                .with_color(THEME.text_muted)
+                .with_color(theme().text_muted)
                 .finish(),
         );
     }
@@ -545,7 +545,7 @@ fn detail_section(
     if let Some(branch) = facts.and_then(|facts| facts.branch.as_ref()) {
         column.add_child(RowLine::branch(branch.label()).render(
             12.,
-            THEME.text_muted,
+            theme().text_muted,
             Weight::Normal,
             ui,
         ));
@@ -557,7 +557,7 @@ fn detail_section(
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
         .with_child(
             Text::new(format!("agent \u{b7} {}", status.label()), ui, 10.)
-                .with_color(THEME.text_muted)
+                .with_color(theme().text_muted)
                 .finish(),
         );
     if let Some(chips) = Chips::everything(session, facts).render(ui) {
@@ -588,7 +588,7 @@ pub(super) fn metadata_line(
     // Shrinkable, so the text clips before it ever squeezes a chip.
     row.add_child(match left {
         Some(left) => {
-            Shrinkable::new(1., left.render(10., THEME.text_muted, Weight::Normal, ui)).finish()
+            Shrinkable::new(1., left.render(10., theme().text_muted, Weight::Normal, ui)).finish()
         }
         None => Empty::new().finish(),
     });

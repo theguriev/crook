@@ -62,7 +62,7 @@ use crookui_core::elements::MouseStateHandle;
 
 use crate::settings::Granularity;
 use crate::tab::{PaneId, Tab, TabAction, TabId};
-use crate::theme::THEME;
+use crate::theme::theme;
 
 use super::action::WorkspaceAction;
 use super::controls;
@@ -123,15 +123,15 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
                     Expanded::new(
                         1.,
                         Scrollable::new(workspace.panel_scroll(), list(workspace, app))
-                            .with_scrollbar(THEME.overlay_3)
+                            .with_scrollbar(theme().overlay_3)
                             .finish(),
                     )
                     .finish(),
                 )
                 .finish(),
         )
-        .with_background_color(THEME.surface)
-        .with_border(Border::right(1.).with_border_color(THEME.border))
+        .with_background_color(theme().surface)
+        .with_border(Border::right(1.).with_border_color(theme().border))
         .finish(),
     )
     .with_width(PANEL_WIDTH)
@@ -312,14 +312,14 @@ fn panes_tab(
     Hoverable::new(chrome.container.clone(), move |mouse| {
         Container::new(column)
             .with_background_color(if is_active || mouse.is_hovered() {
-                THEME.overlay_1
+                theme().overlay_1
             } else {
                 Color::TRANSPARENT
             })
             .with_border(
                 Border::new(1.)
                     .with_sides(true, false, is_last, false)
-                    .with_border_color(THEME.overlay_1),
+                    .with_border_color(theme().overlay_1),
             )
             .finish()
     })
@@ -363,7 +363,7 @@ fn tabs_tab(
     Hoverable::new(chrome.container.clone(), move |mouse| {
         Container::new(rows)
             .with_background_color(if is_active || mouse.is_hovered() {
-                THEME.overlay_1
+                theme().overlay_1
             } else {
                 Color::TRANSPARENT
             })
@@ -404,9 +404,9 @@ fn group_header(
         Container::new(
             Text::new(name, ui, GROUP_HEADER_SIZE)
                 .with_color(if mouse.is_hovered() {
-                    THEME.text_primary
+                    theme().text_primary
                 } else {
-                    THEME.text_muted
+                    theme().text_muted
                 })
                 .finish(),
         )
@@ -424,7 +424,7 @@ fn group_header(
 fn empty_state(ui: FamilyId) -> Box<dyn Element> {
     Container::new(
         Text::new("No tabs open", ui, 12.)
-            .with_color(THEME.text_muted)
+            .with_color(theme().text_muted)
             .finish(),
     )
     .with_uniform_padding(EMPTY_STATE_PADDING)

@@ -17,7 +17,7 @@ use crookui_core::fonts::FamilyId;
 use crookui_core::prelude::*;
 
 use crate::tab::TabAction;
-use crate::theme::THEME;
+use crate::theme::theme;
 
 use super::action::{OptionsAction, WorkspaceAction};
 use super::tab_options_menu;
@@ -68,11 +68,11 @@ pub(super) fn gear_button(workspace: &Workspace, menu_anchor: AnchorTo) -> Box<d
         // its `Hoverable` never fires and a second click closes the menu
         // through the dismiss path instead of toggling it twice.
         let (glyph, background) = if is_open {
-            (THEME.text_primary, THEME.overlay_3)
+            (theme().text_primary, theme().overlay_3)
         } else if state.is_hovered() {
-            (THEME.text_muted, THEME.overlay_2)
+            (theme().text_muted, theme().overlay_2)
         } else {
-            (THEME.text_muted, Color::TRANSPARENT)
+            (theme().text_muted, Color::TRANSPARENT)
         };
 
         let button = Container::new(
@@ -162,13 +162,13 @@ fn gear_tooltip(ui: FamilyId) -> Box<dyn Element> {
                 .with_main_axis_alignment(MainAxisAlignment::Center)
                 .with_child(
                     Text::new(GEAR_TOOLTIP, ui, 11.)
-                        .with_color(THEME.text_primary)
+                        .with_color(theme().text_primary)
                         .finish(),
                 )
                 .finish(),
         )
-        .with_background_color(THEME.surface_raised)
-        .with_border(Border::all(1.).with_border_color(THEME.overlay_2))
+        .with_background_color(theme().surface_raised)
+        .with_border(Border::all(1.).with_border_color(theme().overlay_2))
         .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
         .with_padding(Padding {
             top: 4.,
@@ -193,16 +193,16 @@ pub(super) fn new_tab_button(workspace: &Workspace) -> Box<dyn Element> {
                 Align::new(
                     Text::new("+", ui, 16.)
                         .with_color(if hovered {
-                            THEME.text_primary
+                            theme().text_primary
                         } else {
-                            THEME.text_muted
+                            theme().text_muted
                         })
                         .finish(),
                 )
                 .finish(),
             )
             .with_background_color(if hovered {
-                THEME.tab_active
+                theme().tab_active
             } else {
                 Color::TRANSPARENT
             })

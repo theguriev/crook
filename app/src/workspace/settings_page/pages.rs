@@ -144,9 +144,72 @@ fn appearance(workspace: &Workspace) -> Box<dyn Element> {
     );
 
     page(vec![
-        widgets::category("Tabs", true, vec![placement, granularity, density], ui),
+        widgets::category("Theme", true, theme_category(workspace), ui),
+        widgets::category("Tabs", false, vec![placement, granularity, density], ui),
         widgets::category("Rows", false, rows_category(workspace), ui),
     ])
+}
+
+/// The "Theme" category: one card per theme, and where to put more.
+///
+/// Warp's chooser is a panel of its own with a search box and a virtualised
+/// list, because it lists twenty-one built-ins and however many a person has
+/// collected. Crook's three-and-a-few fit on the page they are configured
+/// from, and a card that is chosen by clicking it needs no confirm step: the
+/// theme is applied, saved and on screen — including in every shell already
+/// running — before the pointer has moved.
+fn theme_category(workspace: &Workspace) -> Vec<Box<dyn Element>> {
+    let ui = workspace.fonts().ui;
+    let fonts = workspace.fonts();
+    let state = workspace.settings_page();
+    let current = workspace.theme_name();
+
+    let mut rows: Vec<Box<dyn Element>> = state
+        .themes
+        .iter()
+        .enumerate()
+        .map(|(index, available)| {
+            let selected = available.name == current;
+            let card = widgets::theme_card(
+                available.theme,
+                selected,
+                Some(SettingsAction::SetTheme(index).into()),
+                state.control(Control::Theme(index)),
+                fonts,
+            );
+
+            widgets::theme_row(
+                card,
+                available.name.clone(),
+                // The one thing worth saying about a theme beside its name:
+                // whether it is one of Crook's own or one that will still be
+                // there after this build is replaced.
+                if available.from_file {
+                    "from your themes folder"
+                } else {
+                    "built in"
+                },
+                selected,
+                ui,
+            )
+        })
+        .collect();
+
+    rows.push(widgets::note(
+        "Themes are read from your themes folder in Warp's own file format, so a theme \
+         written for Warp works here unchanged. Drop a .yaml in and open this page again.",
+        ui,
+    ));
+    rows.push(widgets::fact(
+        "Themes folder",
+        crate::theme::user_themes_directory()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "nowhere — this machine has no configuration directory".to_owned()),
+        true,
+        fonts,
+    ));
+
+    rows
 }
 
 /// The "Rows" category: which fact goes on which line, and which chips a row

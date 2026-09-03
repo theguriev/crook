@@ -13,7 +13,7 @@ use crookui_core::elements::{MouseStateHandle, Padding};
 use crookui_core::fonts::{Properties, Weight};
 use crookui_core::prelude::*;
 
-use crate::theme::THEME;
+use crate::theme::theme;
 use crate::usage_model::{UsageModel, UsageProblem};
 
 use super::view::Fonts;
@@ -56,14 +56,14 @@ fn pill_label(snapshot: Option<&ClaudeUsageSnapshot>, problem: Option<UsageProbl
 /// has to be visibly not a fresh one.
 fn pill_color(snapshot: Option<&ClaudeUsageSnapshot>, problem: Option<UsageProblem>) -> Color {
     if problem.is_some() {
-        return THEME.text_muted;
+        return theme().text_muted;
     }
 
     match snapshot.map(ClaudeUsageSnapshot::level) {
-        None | Some(ClaudeUsageLevel::Normal) => THEME.usage_normal,
-        Some(ClaudeUsageLevel::Elevated) => THEME.usage_elevated,
-        Some(ClaudeUsageLevel::High) => THEME.usage_high,
-        Some(ClaudeUsageLevel::Critical) => THEME.usage_critical,
+        None | Some(ClaudeUsageLevel::Normal) => theme().usage_normal,
+        Some(ClaudeUsageLevel::Elevated) => theme().usage_elevated,
+        Some(ClaudeUsageLevel::High) => theme().usage_high,
+        Some(ClaudeUsageLevel::Critical) => theme().usage_critical,
     }
 }
 
@@ -113,27 +113,27 @@ impl View for UsageChip {
         // Only a person's own click lights the border. A background poll that
         // did this would put the header on a repaint timer for no one.
         let outline = if model.is_busy_for_user() {
-            THEME.accent
+            theme().accent
         } else {
-            THEME.border
+            theme().border
         };
 
         let ui = self.fonts.ui;
 
         Hoverable::new(self.mouse.clone(), move |state| {
             let background = if state.is_clicked() {
-                THEME.ground
+                theme().ground
             } else if state.is_hovered() {
-                THEME.tab_active
+                theme().tab_active
             } else {
-                THEME.surface
+                theme().surface
             };
 
             let content = Flex::row()
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
                 .with_child(
                     Text::new("claude", ui, 10.5)
-                        .with_color(THEME.text_muted)
+                        .with_color(theme().text_muted)
                         .finish(),
                 )
                 .with_child(
@@ -197,13 +197,16 @@ mod tests {
     #[test]
     fn a_chip_with_nothing_to_report_yet_says_so() {
         assert_eq!(pill_label(None, None), UNREAD_LABEL);
-        assert_eq!(pill_color(None, None), THEME.usage_normal);
+        assert_eq!(pill_color(None, None), theme().usage_normal);
     }
 
     #[test]
     fn a_reading_is_printed_in_the_colour_of_its_band() {
         assert_eq!(pill_label(Some(&snapshot(42.4)), None), "42%");
-        assert_eq!(pill_color(Some(&snapshot(97.)), None), THEME.usage_critical);
+        assert_eq!(
+            pill_color(Some(&snapshot(97.)), None),
+            theme().usage_critical
+        );
     }
 
     #[test]
@@ -217,7 +220,7 @@ mod tests {
         );
         assert_eq!(
             pill_color(Some(&last), Some(UsageProblem::Unreachable)),
-            THEME.text_muted,
+            theme().text_muted,
             "but it has to stop reading as current"
         );
     }

@@ -25,7 +25,7 @@ use crookui_core::elements::Padding;
 use crookui_core::prelude::*;
 
 use crate::settings::Layout;
-use crate::theme::THEME;
+use crate::theme::theme;
 
 use super::tab_bar;
 use super::view::Workspace;
@@ -74,8 +74,8 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
             })
             .finish(),
     )
-    .with_background_color(THEME.surface)
-    .with_border(Border::bottom(1.).with_border_color(THEME.border))
+    .with_background_color(theme().surface)
+    .with_border(Border::bottom(1.).with_border_color(theme().border))
     .with_padding(Padding {
         top: 6.,
         left: insets.header_left + 8.,

@@ -58,7 +58,7 @@ use crate::input_keys::{self, Platform, Route};
 use crate::pane_input::PaneInput;
 use crate::terminal_font::{CellFont, CellMetrics};
 use crate::terminal_model::TerminalHandle;
-use crate::theme::THEME;
+use crate::theme::theme;
 
 /// The mark at the left of the field.
 ///
@@ -593,9 +593,9 @@ fn paint_input(
     let left = origin.x() + PROMPT_COLUMNS as f32 * metrics.width;
 
     let prompt = if focused {
-        THEME.accent
+        theme().accent
     } else {
-        THEME.text_muted
+        theme().text_muted
     };
     paint_character(
         PROMPT,
@@ -621,9 +621,9 @@ fn paint_input(
             // sits on, or it disappears into the fill — the same trick the grid
             // plays with a block cursor.
             let ink = if caret == Some((row, column)) {
-                THEME.ground
+                theme().ground
             } else {
-                THEME.text_primary
+                theme().text_primary
             };
 
             // Every character of a cluster shares one pen: a combining mark
@@ -646,7 +646,7 @@ fn paint_input(
                 ),
                 vec2f(metrics.width, metrics.height),
             ))
-            .with_background(THEME.accent);
+            .with_background(theme().accent);
     }
 }
 
@@ -676,7 +676,7 @@ fn paint_selection(
             vec2f(left + from as f32 * metrics.width, top),
             vec2f((to - from) as f32 * metrics.width, metrics.height),
         ))
-        .with_background(THEME.accent.with_alpha(SELECTION_ALPHA));
+        .with_background(theme().accent.with_alpha(SELECTION_ALPHA));
 }
 
 /// Draws one character at a pen position, in whichever face can draw it.

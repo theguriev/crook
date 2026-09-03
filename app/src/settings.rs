@@ -52,6 +52,9 @@ const CONFIG_DIRECTORY: &str = "crook";
 /// The one file in it.
 const SETTINGS_FILE: &str = "settings.json";
 
+/// The key the chosen theme's name is stored under.
+const THEME_KEY: &str = "theme";
+
 /// What one row of the tab strip stands for — the menu's "View as".
 ///
 /// Warp's `VerticalTabsDisplayGranularity`, under
@@ -334,6 +337,18 @@ pub struct Settings {
     tab_options: TabOptions,
     /// The options that are not the tab strip's, resolved the same way.
     general: GeneralOptions,
+    /// The name of the theme to open in.
+    ///
+    /// A name rather than the palette itself, and that is the whole design: a
+    /// theme lives in the binary or in a file of its own, and the settings
+    /// remember which one was chosen. A settings file that carried the colours
+    /// would go stale the moment the theme file it was copied from changed,
+    /// and a theme that had been deleted would go on being applied from a copy
+    /// nobody could find.
+    ///
+    /// A [`String`], which is why it is here rather than in [`GeneralOptions`]:
+    /// that one is `Copy`, and a renderer reads it dozens of times a frame.
+    theme: String,
 }
 
 impl Settings {
@@ -349,6 +364,7 @@ impl Settings {
                 document: Map::new(),
                 tab_options: TabOptions::default(),
                 general: GeneralOptions::default(),
+                theme: crate::theme::DEFAULT_NAME.to_owned(),
             };
         };
 
@@ -366,6 +382,7 @@ impl Settings {
             document: Map::new(),
             tab_options: TabOptions::default(),
             general: GeneralOptions::default(),
+            theme: crate::theme::DEFAULT_NAME.to_owned(),
         }
     }
 
@@ -385,12 +402,22 @@ impl Settings {
         // the usage chip down with it.
         let tab_options = parse_group(&document, &path, "tab options");
         let general = parse_group(&document, &path, "general options");
+        // Not through `parse_group`: a theme name is one string rather than a
+        // group of typed options, and a file naming a theme this machine does
+        // not have is not a parse failure — the name is kept, and the theme
+        // falls back to the default until whatever wrote it is put back.
+        let theme = document
+            .get(THEME_KEY)
+            .and_then(Value::as_str)
+            .unwrap_or(crate::theme::DEFAULT_NAME)
+            .to_owned();
 
         Self {
             path: Some(path),
             document,
             tab_options,
             general,
+            theme,
         }
     }
 
@@ -410,6 +437,16 @@ impl Settings {
     /// value should outlive the process.
     pub fn set_tab_options(&mut self, tab_options: TabOptions) {
         self.tab_options = tab_options;
+    }
+
+    /// The name of the theme to open in.
+    pub fn theme(&self) -> &str {
+        &self.theme
+    }
+
+    /// Records which theme was chosen. Touches no file.
+    pub fn set_theme(&mut self, name: impl Into<String>) {
+        self.theme = name.into();
     }
 
     /// The options that are not the tab strip's.
@@ -476,6 +513,7 @@ impl Settings {
         let mut document = self.document.clone();
         document.extend(owned_keys(self.tab_options, "tab options")?);
         document.extend(owned_keys(self.general, "general options")?);
+        document.insert(THEME_KEY.to_owned(), Value::String(self.theme.clone()));
         Ok(document)
     }
 }
@@ -767,6 +805,9 @@ mod tests {
                 // Crook's own, and the one key in the file with no Warp
                 // spelling to match: Warp has no usage chip.
                 "show_usage_chip",
+                // The chosen theme's name, which is a string rather than an
+                // option with a type: see `Settings::theme`.
+                "theme",
                 "view_mode",
             ],
             written.keys().collect::<Vec<_>>()
@@ -914,9 +955,9 @@ mod tests {
         let written: Map<String, Value> =
             serde_json::from_str(&contents).expect("the file should be a JSON object");
 
-        // Eight tab options and one general one, and nothing else: the 8KB
-        // key the file started with is gone.
-        assert_eq!(9, written.len());
+        // Eight tab options, one general one and the theme's name, and
+        // nothing else: the 8KB key the file started with is gone.
+        assert_eq!(10, written.len());
         assert!(!contents.contains("padding"));
         assert_eq!(
             everything_flipped(),
