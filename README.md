@@ -252,6 +252,14 @@ that repository is AGPL-3.0. Crook stays clear of the AGPL half:
   scrollback and the escape-sequence parser. Nothing in it comes from Warp, whose terminal
   lives in the AGPL half of that repository.
 
+- The icons are **[Lucide](https://lucide.dev)**, whose licence is ISC — permissive, and
+  compatible with MIT redistribution. Their geometry is vendored into
+  `crates/crookui_core/src/icons/data.rs` by `script/icons`, which pins a version of the
+  `lucide-static` package and rewrites its SVGs as path commands; the licence that came with
+  it is [`LICENSE-ISC-lucide`](LICENSE-ISC-lucide), and it names Feather (MIT) for the icons
+  Lucide inherited from it. Nothing else about the icons is anyone else's: the rasterizer
+  that turns those commands into pixels is Crook's own.
+
 [Alacritty](https://github.com/alacritty/alacritty) is a fast, cross-platform terminal
 emulator by Joe Wilm and the Alacritty contributors, released under the Apache License 2.0.
 Crook uses its `alacritty_terminal` crate — the emulator without the window — and would be a

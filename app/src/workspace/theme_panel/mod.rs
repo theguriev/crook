@@ -71,6 +71,9 @@ const HEADER_HEIGHT: f32 = 32.;
 /// The panel's own inset.
 const PANEL_PADDING: f32 = 12.;
 
+/// The close and create icons, inside their 20px buttons.
+const ICON_SIZE: f32 = 12.;
+
 /// The title, which is Warp's word for this panel.
 const TITLE: &str = "Themes";
 
@@ -100,7 +103,7 @@ pub(super) enum Mode {
 /// per control could not be written down.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) enum Control {
-    /// The × in the corner.
+    /// The close button in the corner.
     Close,
     /// The `+` beside the title.
     Create,
@@ -209,7 +212,7 @@ fn header(workspace: &Workspace) -> Box<dyn Element> {
             .with_child(Expanded::new(1., Empty::new().finish()).finish())
             .with_child(icon_button(
                 workspace,
-                "\u{2715}",
+                Lucide::X,
                 Control::Close,
                 ThemeAction::ClosePanel,
             ))
@@ -242,7 +245,7 @@ fn title_row(workspace: &Workspace, ui: crookui_core::fonts::FamilyId) -> Box<dy
     if !creating {
         row.add_child(icon_button(
             workspace,
-            "\u{FF0B}",
+            Lucide::Plus,
             Control::Create,
             ThemeAction::StartCreating,
         ));
@@ -275,14 +278,13 @@ fn hint(mode: Mode, ui: crookui_core::fonts::FamilyId) -> Box<dyn Element> {
         .finish()
 }
 
-/// A square button carrying one glyph.
+/// A square button carrying one icon.
 fn icon_button(
     workspace: &Workspace,
-    glyph: &'static str,
+    icon: Lucide,
     control: Control,
     action: ThemeAction,
 ) -> Box<dyn Element> {
-    let ui = workspace.fonts().ui;
     let state = workspace.theme_panel().control(control);
 
     Hoverable::new(state, move |mouse| {
@@ -294,7 +296,7 @@ fn icon_button(
 
         Container::new(
             ConstrainedBox::new(
-                Align::new(Text::new(glyph, ui, 12.).with_color(color).finish()).finish(),
+                Align::new(Icon::new(icon, ICON_SIZE).with_color(color).finish()).finish(),
             )
             .with_width(20.)
             .with_height(20.)

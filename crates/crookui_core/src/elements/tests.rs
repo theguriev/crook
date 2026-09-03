@@ -16,6 +16,7 @@ use crate::element::{Element, ParentElement};
 use crate::event::{Event, Modifiers, MouseButton, ScrollDelta};
 use crate::fonts::{FamilyId, FontId, LineStyle, StyleAndFont};
 use crate::geometry::{Color, RectF, Vector2F, vec2f};
+use crate::icons::Lucide;
 use crate::platform::TextLayoutSystem;
 use crate::presenter::Presenter;
 use crate::scene::{Border, Rect, Scene};
@@ -369,6 +370,59 @@ fn text_wider_than_its_box_is_cut_off_rather_than_wrapped() {
     let glyph_count = scene.layers().flat_map(|layer| layer.glyphs.iter()).count();
 
     assert_eq!(glyph_count, 2, "only whole glyphs inside the box are drawn");
+}
+
+#[test]
+fn an_icon_fills_the_square_it_asked_for() {
+    let mut harness = Harness::new(|_| {
+        Flex::row()
+            .with_child(Icon::new(Lucide::X, 16.).with_color(Color::WHITE).finish())
+            .finish()
+    });
+
+    let scene = harness.build_scene(vec2f(100., 50.));
+    let icons: Vec<_> = scene
+        .layers()
+        .flat_map(|layer| layer.icons.iter())
+        .collect();
+
+    assert_eq!(icons.len(), 1);
+    assert_eq!(
+        icons[0].bounds,
+        RectF::new(Vector2F::zero(), vec2f(16., 16.))
+    );
+    assert_eq!(icons[0].icon_key.icon, Lucide::X);
+    assert_eq!(icons[0].icon_key.size, 16.);
+}
+
+#[test]
+fn an_icon_squeezed_by_its_parent_is_centred_rather_than_stretched() {
+    // The rasterizer draws a square, so a squeezed icon has to become a
+    // smaller square: stretching it would ask for a mask that no longer
+    // matches Lucide's proportions, and cropping it would cut the stroke.
+    let mut harness = Harness::new(|_| {
+        ConstrainedBox::new(Icon::new(Lucide::Settings, 24.).finish())
+            .with_width(10.)
+            .with_height(24.)
+            .finish()
+    });
+
+    let scene = harness.build_scene(vec2f(100., 50.));
+    let icon = scene
+        .layers()
+        .flat_map(|layer| layer.icons.iter())
+        .next()
+        .expect("the icon should have painted");
+
+    assert_eq!(
+        icon.bounds,
+        RectF::new(vec2f(0., 7.), vec2f(10., 10.)),
+        "a 10 x 24 box holds a 10 x 10 icon, centred"
+    );
+    assert_eq!(
+        icon.icon_key.size, 10.,
+        "and the mask is rasterized at the size it is drawn at"
+    );
 }
 
 #[test]

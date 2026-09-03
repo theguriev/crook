@@ -28,7 +28,8 @@
 //! * [`element`] and [`elements`] — the render tree and its primitives.
 //! * [`presenter`] — the layout, paint and event walks.
 //! * [`scene`] — what a frame compiles down to.
-//! * [`geometry`], [`fonts`], [`text_layout`], [`event`] — the vocabulary.
+//! * [`geometry`], [`fonts`], [`icons`], [`text_layout`], [`event`] — the
+//!   vocabulary.
 //! * [`platform`] — what a renderer must implement.
 //! * [`executor`] — the two executors the app runs on.
 
@@ -40,6 +41,7 @@ pub mod event;
 pub mod executor;
 pub mod fonts;
 pub mod geometry;
+pub mod icons;
 pub mod platform;
 pub mod prelude;
 pub mod presenter;

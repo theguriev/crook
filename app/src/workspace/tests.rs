@@ -990,19 +990,16 @@ fn menu_segment_boxes(scene: &Scene) -> Vec<RectF> {
     segments
 }
 
-/// The info dot on "Show: PR link", by its round box.
+/// The info dot on "Show: PR link", by the icon it is.
 fn info_dot_box(scene: &Scene) -> RectF {
-    let popup = menu_box(scene);
-    let dots: Vec<RectF> = visible_rects(scene)
-        .filter(|(rect, _)| {
-            rect.corner_radius.get_top_left() == Radius::Percentage(50.)
-                && (rect.bounds.width() - tab_options_menu::INFO_DOT_SIZE).abs() < 0.5
-        })
-        .map(|(_, bounds)| bounds)
-        .filter(|bounds| popup.contains_point(center(*bounds)))
-        .collect();
+    let dots = icons_in(scene, menu_box(scene), Lucide::Info);
 
     assert_eq!(dots.len(), 1, "exactly one info dot in the popup");
+    assert!(
+        (dots[0].width() - tab_options_menu::INFO_DOT_SIZE).abs() < 0.5,
+        "the info dot is {} wide",
+        dots[0].width()
+    );
     dots[0]
 }
 
@@ -1022,25 +1019,40 @@ fn checked_rows(scene: &Scene) -> Vec<usize> {
     menu_option_boxes(scene)
         .into_iter()
         .enumerate()
-        .filter(|(_, row)| row_text(scene, *row).contains('\u{2713}'))
+        .filter(|(_, row)| !icons_in(scene, *row, Lucide::Check).is_empty())
         .map(|(index, _)| index)
         .collect()
 }
 
-/// What one option row says, check glyph included.
-fn row_text(scene: &Scene, row: RectF) -> String {
-    text_where(scene, |position| {
-        row.contains_point(position) || row.contains_point(position - vec2f(0., 1.))
-    })
+/// Every icon the frame draws, in paint order.
+fn icons_of(scene: &Scene) -> Vec<Lucide> {
+    scene
+        .layers()
+        .flat_map(|layer| layer.icons.iter())
+        .map(|drawn| drawn.icon_key.icon)
+        .collect()
 }
 
-/// Where a row's label starts: the leftmost glyph that is not the check.
+/// Every icon of one kind painted inside `bounds`.
+fn icons_in(scene: &Scene, bounds: RectF, icon: Lucide) -> Vec<RectF> {
+    scene
+        .layers()
+        .flat_map(|layer| layer.icons.iter())
+        .filter(|drawn| drawn.icon_key.icon == icon)
+        .filter(|drawn| bounds.contains_point(center(drawn.bounds)))
+        .map(|drawn| drawn.bounds)
+        .collect()
+}
+
+/// Where a row's label starts: its leftmost glyph.
+///
+/// Every glyph in the row is part of the label now — the check beside it is an
+/// icon rather than a codepoint, so it is not in this list to be filtered out.
 fn row_label_x(scene: &Scene, row: RectF) -> f32 {
     scene
         .layers()
         .flat_map(|layer| layer.glyphs.iter())
         .filter(|glyph| row.contains_point(glyph.position))
-        .filter(|glyph| glyph.glyph_key.glyph_id != u32::from('\u{2713}'))
         .map(|glyph| glyph.position.x())
         .fold(f32::INFINITY, f32::min)
 }
@@ -2336,6 +2348,109 @@ fn choosing_a_different_density_ends_the_override_too() {
     harness.dispatch_option(OptionsAction::ToggleShowPrLink);
     assert_eq!(Density::Expanded, harness.saved_options().density);
     scratch.written_containing("\"view_mode\": \"expanded\"");
+}
+
+#[test]
+fn every_mark_in_the_chrome_is_an_icon_rather_than_a_codepoint() {
+    // The rule this file exists to keep: a mark is geometry Crook ships, not a
+    // character it hopes the machine has a font for. The codepoints below are
+    // the ones that used to be drawn here, and a `Text` carrying any of them
+    // is a mark that will be a different shape on somebody else's machine —
+    // or, for the gear, a colour emoji.
+    let mut harness = Harness::seeded();
+    harness.open_settings_page();
+    let scene = harness.frame();
+
+    let drawn = icons_of(&scene);
+    for expected in [Lucide::Settings, Lucide::Plus, Lucide::X, Lucide::GitBranch] {
+        assert!(
+            drawn.contains(&expected),
+            "the strip draws no {expected:?}, only {drawn:?}"
+        );
+    }
+
+    let text = frame_text(&scene);
+    for codepoint in ['\u{00d7}', '\u{2715}', '\u{2699}', '\u{2713}', '\u{FF0B}'] {
+        assert!(
+            !text.contains(codepoint),
+            "{codepoint:?} is still being drawn as text"
+        );
+    }
+}
+
+#[test]
+fn the_settings_row_is_marked_with_a_gear_in_both_layouts() {
+    // A gear where an agent's status dot goes, in the strip and in the panel:
+    // the row stands for the page the gear button opens, so it carries that
+    // button's own icon. See
+    // [`the_settings_row_leads_with_a_gear_and_says_nothing_a_session_would`]
+    // for the other half of that row — what it declines to say.
+    let mut strip = Harness::new(1);
+    strip.open_settings_page();
+    let scene = strip.frame();
+    let last_tab = tab_boxes(&scene)
+        .into_iter()
+        .max_by(|left, right| left.min_x().total_cmp(&right.min_x()))
+        .expect("the strip draws the settings tab");
+    assert_eq!(
+        icons_in(&scene, last_tab, Lucide::Settings).len(),
+        1,
+        "the settings tab carries no gear in the strip"
+    );
+
+    let mut panel = Harness::panel(1);
+    panel.open_settings_page();
+    let scene = panel.frame();
+    let last_row = *panel_rows(&scene)
+        .last()
+        .expect("the panel draws the settings row");
+    assert_eq!(
+        icons_in(&scene, last_row, Lucide::Settings).len(),
+        1,
+        "the settings row carries no gear in the panel"
+    );
+}
+
+#[test]
+fn a_branch_leads_with_the_branch_icon() {
+    // The subtitle under a seeded row is its branch, and what says it is a
+    // branch rather than a path is the mark in front of it. Warp draws
+    // `UiIcon::GitBranch` there; this used to draw three rectangles.
+    let mut harness = Harness::seeded();
+    let scene = harness.frame();
+    let row = tab_boxes(&scene)[0];
+
+    let marks = icons_in(&scene, row, Lucide::GitBranch);
+    assert_eq!(marks.len(), 1, "the row draws no branch mark");
+
+    let branch_x = scene
+        .layers()
+        .flat_map(|layer| layer.glyphs.iter())
+        .filter(|glyph| row.contains_point(glyph.position))
+        .filter(|glyph| glyph.position.y() > marks[0].min_y())
+        .map(|glyph| glyph.position.x())
+        .fold(f32::INFINITY, f32::min);
+
+    assert!(
+        marks[0].max_x() <= branch_x,
+        "the mark at {:?} is not in front of the branch at {branch_x}",
+        marks[0]
+    );
+}
+
+#[test]
+fn the_density_control_shows_one_icon_per_density() {
+    let mut harness = Harness::seeded();
+    harness.dispatch_option(OptionsAction::TogglePopup);
+    let scene = harness.frame();
+
+    let menu = menu_box(&scene);
+    assert_eq!(icons_in(&scene, menu, Lucide::Menu).len(), 1, "Compact");
+    assert_eq!(
+        icons_in(&scene, menu, Lucide::LayoutGrid).len(),
+        1,
+        "Expanded"
+    );
 }
 
 #[test]
