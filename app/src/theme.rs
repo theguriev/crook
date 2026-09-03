@@ -25,6 +25,7 @@
 //! global is shared by a test binary's threads, so a test that changes the
 //! theme has to hold [`ThemeGuard`] rather than simply setting one.
 
+use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 
 use crookui_core::geometry::Color;
@@ -33,7 +34,7 @@ mod builtin;
 mod file;
 
 pub use builtin::{BUILTIN, Builtin, DARK, builtin_named};
-pub use file::{ThemeFile, load_user_themes, user_themes_directory};
+pub use file::{ThemeFile, load_themes_in, load_user_themes, user_themes_directory};
 
 /// A palette, in the roles the interface asks for.
 ///
@@ -247,53 +248,126 @@ const fn percent_of_255(percent: u8) -> u8 {
 }
 
 /// A theme somebody can choose, wherever it came from.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Available {
-    /// What the settings page calls it, and what the settings file stores.
+    /// What the chooser calls it, and what the settings file stores.
     pub name: String,
     /// The palette itself.
     pub theme: Theme,
-    /// Whether it came from a file rather than from the binary.
+    /// The file it was read from, for a built-in `None`.
     ///
-    /// The settings page says so, because it is the difference between a theme
-    /// that will still be there after a reinstall and one that will not.
-    pub from_file: bool,
+    /// Carried because a name is not an identity: two files can declare the
+    /// same `name:`, and the only thing that tells them apart — in the chooser,
+    /// and for anything that ever wants to open or remove one — is where they
+    /// came from.
+    pub path: Option<PathBuf>,
+}
+
+impl Available {
+    /// Whether this came from a file rather than from the binary.
+    pub fn from_file(&self) -> bool {
+        self.path.is_some()
+    }
 }
 
 /// Every theme that can be chosen: the built-in ones, then whatever is in the
-/// themes directory.
+/// user's themes directory.
 ///
 /// Read fresh each time rather than cached. Warp watches its themes directory
-/// and reloads on any change; this is the same effect at the one moment it
-/// matters — the settings page asks for the list when it draws — without a
+/// and reloads on any change; this is the same effect at the moments it
+/// matters — a surface that lists themes asks when it opens — without a
 /// watcher, a channel or a second thing that can be stale. A theme dropped in
-/// while Crook is running shows up the next time the page is opened.
-///
-/// A user theme whose name collides with a built-in wins: whoever wrote the
-/// file has said what they want that name to mean on this machine.
+/// while Crook is running shows up the next time the chooser is opened.
 pub fn available() -> Vec<Available> {
-    let mut themes: Vec<Available> = BUILTIN
-        .iter()
-        .map(|builtin| Available {
-            name: builtin.name.to_owned(),
-            theme: builtin.theme,
-            from_file: false,
-        })
-        .collect();
+    match user_themes_directory() {
+        Some(directory) => available_in(&directory),
+        None => builtins(),
+    }
+}
 
-    for file in load_user_themes() {
+/// The same, from a themes directory named outright.
+///
+/// The seam every test needs. Without it a test asserting "three themes" would
+/// be asserting something about the machine it runs on, and a test that
+/// *wrote* a theme would write into the themes folder of whoever ran it.
+pub fn available_in(directory: &Path) -> Vec<Available> {
+    let mut themes = builtins();
+
+    for file in load_themes_in(directory) {
         let entry = Available {
             name: file.name,
             theme: file.theme,
-            from_file: true,
+            path: Some(file.path),
         };
-        match themes.iter_mut().find(|theme| theme.name == entry.name) {
+
+        // A user theme replaces the built-in of the same name, in place: the
+        // person who wrote the file has said what that name means on this
+        // machine, and a list with two "Crook Dark" rows — one of them
+        // unreachable, since the settings file stores a name — would be worse
+        // than either.
+        //
+        // Two *files* with the same name are a different case and both are
+        // kept: see `disambiguate`.
+        match themes
+            .iter_mut()
+            .find(|theme| theme.name == entry.name && !theme.from_file())
+        {
             Some(existing) => *existing = entry,
             None => themes.push(entry),
         }
     }
 
+    disambiguate(&mut themes);
     themes
+}
+
+/// The themes that ship in the binary, as choosable entries.
+fn builtins() -> Vec<Available> {
+    BUILTIN
+        .iter()
+        .map(|builtin| Available {
+            name: builtin.name.to_owned(),
+            theme: builtin.theme,
+            path: None,
+        })
+        .collect()
+}
+
+/// Makes every name in the list unique, by the file each collision came from.
+///
+/// Two theme files can perfectly well declare the same `name:`, or derive the
+/// same name from two stems in two directories. Warp shows both rows with
+/// identical labels and tells them apart by path; Crook stores a *name* in its
+/// settings file, so two rows with one label would mean one of them could
+/// never be chosen twice in a row. The second and later ones are suffixed with
+/// the file's own stem, which is the thing a person can act on: it is what
+/// they would rename.
+fn disambiguate(themes: &mut [Available]) {
+    let mut seen: Vec<String> = Vec::new();
+
+    for entry in themes.iter_mut() {
+        if !seen.contains(&entry.name) {
+            seen.push(entry.name.clone());
+            continue;
+        }
+
+        let stem = entry
+            .path
+            .as_deref()
+            .and_then(Path::file_stem)
+            .and_then(std::ffi::OsStr::to_str)
+            .unwrap_or("2")
+            .to_owned();
+        let mut candidate = format!("{} ({stem})", entry.name);
+        let mut serial = 2;
+        while seen.contains(&candidate) {
+            serial += 1;
+            candidate = format!("{} ({stem} {serial})", entry.name);
+        }
+
+        seen.push(candidate.clone());
+        entry.name = candidate;
+    }
 }
 
 /// The theme with this name, or `None` when nothing on this machine has it.

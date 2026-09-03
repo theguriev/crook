@@ -109,13 +109,22 @@ pub fn user_themes_directory() -> Option<PathBuf> {
 /// of a machine that has never written a theme, and an unparseable file is one
 /// theme fewer rather than an error anybody has to act on.
 pub fn load_user_themes() -> Vec<ThemeFile> {
-    let Some(directory) = user_themes_directory() else {
-        return Vec::new();
-    };
+    match user_themes_directory() {
+        Some(directory) => load_themes_in(&directory),
+        None => Vec::new(),
+    }
+}
 
+/// The same, from a directory named outright, sorted by name and then by path.
+///
+/// Sorted by *both* because a name does not identify a theme: two files can
+/// declare the same one, and a list whose order depended on `read_dir` would
+/// hand the same two themes to the chooser in a different order on every
+/// launch.
+pub fn load_themes_in(directory: &Path) -> Vec<ThemeFile> {
     let mut themes = Vec::new();
-    collect(&directory, 0, &mut themes);
-    themes.sort_by(|left, right| left.name.cmp(&right.name));
+    collect(directory, 0, &mut themes);
+    themes.sort_by(|left, right| left.name.cmp(&right.name).then(left.path.cmp(&right.path)));
     themes
 }
 
@@ -136,8 +145,14 @@ fn collect(directory: &Path, depth: usize, themes: &mut Vec<ThemeFile>) {
         }
     };
 
-    for entry in entries.flatten() {
-        let path = entry.path();
+    // Sorted, because `read_dir` is not: two theme files whose names collide
+    // must resolve the same way on every launch, and a list that reordered
+    // itself between two openings of the chooser would move rows under the
+    // pointer.
+    let mut paths: Vec<PathBuf> = entries.flatten().map(|entry| entry.path()).collect();
+    paths.sort();
+
+    for path in paths {
         if path.is_dir() {
             collect(&path, depth + 1, themes);
             continue;
@@ -311,20 +326,53 @@ impl Document {
 
     /// A required top-level colour.
     fn color(&self, key: &str) -> Result<Color> {
-        let value = self
-            .string(key)
-            .with_context(|| format!("the theme has no `{key}`"))?;
-        parse_hex(&value).with_context(|| format!("`{key}` is not a colour"))
+        self.optional_color(key)?
+            .with_context(|| format!("the theme has no `{key}`"))
     }
 
-    /// A top-level colour, if the file has one.
+    /// A top-level colour, if the file has one — flat or as a gradient.
+    ///
+    /// Warp lets `background`, `accent` and `cursor` each be a hex string
+    /// *or* a two-stop gradient, written as a block of `top:`/`bottom:` or
+    /// `left:`/`right:`. Crook's renderer paints flat fills, so a gradient is
+    /// collapsed to its midpoint — which is what Warp itself does whenever it
+    /// needs a single colour out of a gradient, for contrast maths and for
+    /// text.
+    ///
+    /// Refusing them instead would have been the quiet kind of wrong: the
+    /// themes with gradient backgrounds are the striking ones, the whole file
+    /// is skipped when one key fails, and the only trace is a line in a log
+    /// nobody reads. A theme that arrives half-right and looks it beats a
+    /// theme that silently is not there.
     fn optional_color(&self, key: &str) -> Result<Option<Color>> {
-        match self.string(key) {
-            Some(value) => parse_hex(&value)
+        if let Some(value) = self.string(key) {
+            return parse_hex(&value)
                 .map(Some)
-                .with_context(|| format!("`{key}` is not a colour")),
-            None => Ok(None),
+                .with_context(|| format!("`{key}` is not a colour"));
         }
+
+        for (first, second) in [("top", "bottom"), ("left", "right")] {
+            let (Some(first), Some(second)) = (self.nested(key, first), self.nested(key, second))
+            else {
+                continue;
+            };
+            let first = parse_hex(&first)
+                .with_context(|| format!("`{key}` is a gradient whose first stop is not a colour"))?;
+            let second = parse_hex(&second).with_context(|| {
+                format!("`{key}` is a gradient whose second stop is not a colour")
+            })?;
+            return Ok(Some(midpoint(first, second)));
+        }
+
+        Ok(None)
+    }
+
+    /// A value inside a block, as a string.
+    fn nested(&self, block: &str, key: &str) -> Option<String> {
+        self.nested
+            .iter()
+            .find(|(in_block, name, _)| in_block == block && name == key)
+            .map(|(_, _, value)| value.clone())
     }
 
     /// The eight colours of a `normal` or `bright` block, in ANSI order.
@@ -342,6 +390,18 @@ impl Document {
         }
         Ok(colors)
     }
+}
+
+/// Half way between two colours.
+///
+/// What a two-stop gradient becomes on a renderer that paints flat fills.
+fn midpoint(first: Color, second: Color) -> Color {
+    let mix = |first: u8, second: u8| ((u16::from(first) + u16::from(second)) / 2) as u8;
+    Color::rgb(
+        mix(first.r, second.r),
+        mix(first.g, second.g),
+        mix(first.b, second.b),
+    )
 }
 
 /// What is to the right of a `key:`, with its quotes and any trailing comment
@@ -373,32 +433,42 @@ fn value_of(value: &str) -> String {
 }
 
 /// `#rrggbb` or `#rgb`, the two forms Warp's parser accepts.
+///
+/// Works over the *bytes* rather than the string, and that is not a
+/// micro-optimisation: `"#\u{e9}a"` is three bytes and two characters, so a
+/// length check that counted bytes and then sliced the string would split a
+/// character and panic. This is parsing a file somebody downloaded, on the
+/// startup path, in a function whose module promises that nothing here can
+/// cost a person their window — so it takes the one form of indexing that
+/// cannot panic on any input at all.
 fn parse_hex(value: &str) -> Result<Color> {
     let digits = value
         .strip_prefix('#')
-        .with_context(|| format!("{value:?} does not start with `#`"))?;
+        .with_context(|| format!("{value:?} does not start with `#`"))?
+        .as_bytes();
 
-    let component = |from: usize, to: usize| -> Result<u8> {
-        u8::from_str_radix(&digits[from..to], 16)
-            .with_context(|| format!("{value:?} is not a hex colour"))
+    let digit = |at: usize| -> Result<u8> {
+        // `from_str_radix` over one ASCII byte. A non-ASCII byte is not a hex
+        // digit and fails here rather than anywhere more interesting.
+        let text = std::str::from_utf8(&digits[at..=at])
+            .with_context(|| format!("{value:?} is not a hex colour"))?;
+        u8::from_str_radix(text, 16).with_context(|| format!("{value:?} is not a hex colour"))
     };
+    let component = |high: usize, low: usize| -> Result<u8> { Ok(digit(high)? * 16 + digit(low)?) };
 
     match digits.len() {
         6 => Ok(Color::rgb(
-            component(0, 2)?,
-            component(2, 4)?,
-            component(4, 6)?,
+            component(0, 1)?,
+            component(2, 3)?,
+            component(4, 5)?,
         )),
         // `#abc` means `#aabbcc`, which is what every hex colour parser on the
         // web does and what Warp's does too.
-        3 => {
-            let double = |from: usize| -> Result<u8> {
-                let digit = u8::from_str_radix(&digits[from..=from], 16)
-                    .with_context(|| format!("{value:?} is not a hex colour"))?;
-                Ok(digit * 17)
-            };
-            Ok(Color::rgb(double(0)?, double(1)?, double(2)?))
-        }
+        3 => Ok(Color::rgb(
+            digit(0)? * 17,
+            digit(1)? * 17,
+            digit(2)? * 17,
+        )),
         _ => bail!("{value:?} is not three or six hex digits"),
     }
 }

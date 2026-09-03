@@ -259,3 +259,116 @@ fn a_directory_of_themes_is_walked_into_its_subdirectories() {
 
     let _ = fs::remove_dir_all(&root);
 }
+
+#[test]
+fn a_colour_that_is_not_ascii_is_refused_rather_than_splitting_a_character() {
+    // `#éa` is three bytes and two characters. A parser that checked the byte
+    // length and then sliced the string would take the three-digit branch and
+    // panic in the middle of the `é` — on the startup path, over a file
+    // somebody downloaded, in a module that promises nothing here can cost a
+    // person their window.
+    assert!(parse_hex("#\u{e9}a").is_err());
+    assert!(parse_hex("#\u{e9}").is_err());
+    assert!(parse_hex("#\u{1f600}\u{1f600}").is_err());
+    assert!(parse_hex("#00ff\u{e9}").is_err());
+
+    // And the whole file, since that is the path a downloaded theme takes.
+    let hostile = SOLARIZED.replace("\"#002b36\"", "\"#\u{e9}a\"");
+    assert!(parse(&hostile).is_err());
+}
+
+#[test]
+fn a_gradient_is_flattened_to_its_midpoint_rather_than_losing_the_theme() {
+    // Warp lets background, accent and cursor each be a two-stop gradient.
+    // Crook paints flat fills, and the choice is between collapsing the
+    // gradient and dropping the whole theme with one line in a log — which,
+    // for the themes with the most striking backgrounds, is the quiet kind of
+    // wrong.
+    let gradient = SOLARIZED
+        .replace(
+            "background: \"#002b36\"",
+            "background:\n  top: \"#000000\"\n  bottom: \"#202020\"",
+        )
+        .replace(
+            "accent: \"#cb4b16\"",
+            "accent:\n  left: \"#ff0000\"\n  right: \"#0000ff\"",
+        );
+
+    let parsed = parse(&gradient).expect("a gradient theme should load");
+    assert_eq!(
+        parsed.theme.terminal.background,
+        Color::hex(0x101010),
+        "the background is not half way between its two stops"
+    );
+    assert_eq!(parsed.theme.accent, Color::hex(0x7f007f));
+}
+
+#[test]
+fn a_gradient_whose_stops_are_not_colours_says_so() {
+    let broken = SOLARIZED.replace(
+        "background: \"#002b36\"",
+        "background:\n  top: \"not a colour\"\n  bottom: \"#202020\"",
+    );
+
+    let error = format!("{:#}", parse(&broken).expect_err("a bad stop is an error"));
+    assert!(
+        error.contains("background") && error.contains("gradient"),
+        "the error does not say which key failed and why: {error}"
+    );
+}
+
+#[test]
+fn two_files_of_the_same_name_are_two_themes_in_a_stable_order() {
+    // A name is not an identity: two files can declare the same one. Warp
+    // shows both and tells them apart by path; Crook stores a name in its
+    // settings file, so both are shown and the second is renamed after the
+    // file it came from — the thing a person can actually act on.
+    let root = std::env::temp_dir().join(format!("crook-collide-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("second")).expect("the scratch directory should be creatable");
+
+    fs::write(root.join("one.yaml"), SOLARIZED).expect("writable");
+    fs::write(root.join("second").join("two.yaml"), SOLARIZED).expect("writable");
+
+    let first = crate::theme::available_in(&root);
+    let again = crate::theme::available_in(&root);
+    let names: Vec<&str> = first.iter().map(|theme| theme.name.as_str()).collect();
+
+    assert!(
+        names.contains(&"Solarized Dark") && names.contains(&"Solarized Dark (two)"),
+        "the two files did not both survive: {names:?}"
+    );
+    assert_eq!(first, again, "the same directory listed itself differently twice");
+
+    let _ = fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_user_theme_takes_the_name_of_a_built_in_rather_than_sitting_beside_it() {
+    // The settings file stores a name, so two rows with one label would mean
+    // one of them could never be chosen. A file that claims a built-in's name
+    // replaces it in place.
+    let root = std::env::temp_dir().join(format!("crook-override-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).expect("the scratch directory should be creatable");
+    fs::write(
+        root.join("mine.yaml"),
+        SOLARIZED.replace("name: Solarized Dark", "name: Crook Dark"),
+    )
+    .expect("writable");
+
+    let themes = crate::theme::available_in(&root);
+    let dark: Vec<&crate::theme::Available> = themes
+        .iter()
+        .filter(|theme| theme.name == "Crook Dark")
+        .collect();
+
+    assert_eq!(dark.len(), 1, "the built-in was not replaced but joined");
+    assert!(dark[0].from_file(), "the file did not win");
+    assert_eq!(
+        themes[0].name, "Crook Dark",
+        "the replacement did not keep the built-in's place in the list"
+    );
+
+    let _ = fs::remove_dir_all(&root);
+}

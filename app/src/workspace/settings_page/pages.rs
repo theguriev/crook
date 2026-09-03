@@ -184,7 +184,7 @@ fn theme_category(workspace: &Workspace) -> Vec<Box<dyn Element>> {
                 // The one thing worth saying about a theme beside its name:
                 // whether it is one of Crook's own or one that will still be
                 // there after this build is replaced.
-                if available.from_file {
+                if available.from_file() {
                     "from your themes folder"
                 } else {
                     "built in"
