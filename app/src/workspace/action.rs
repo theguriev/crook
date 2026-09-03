@@ -65,8 +65,9 @@ impl From<SettingsAction> for WorkspaceAction {
 /// already dispatches, so the two surfaces cannot drift apart. What is left is
 /// this — three actions, none of which is "open" or "close": the page is a
 /// pane, so opening it is [`TabAction::OpenSettings`] and closing it is
-/// closing a pane, through the same close button, middle click and
-/// `cmd/ctrl-w` as every other pane in the window.
+/// closing a pane, through the same close button, middle click and close
+/// chord — `cmd-w`, `ctrl-shift-w` off macOS — as every other pane in the
+/// window.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SettingsAction {
     /// Show a different page of the settings in the pane already holding

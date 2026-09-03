@@ -85,7 +85,7 @@ impl Direction {
 /// that is Warp's design and it is the better one: settings open the way a
 /// shell opens, in a tab of their own, listed in the strip beside the work
 /// they configure, splittable next to it, closed by the same close button and
-/// the same `cmd/ctrl-w`.
+/// the same close chord — `cmd-w`, or `ctrl-shift-w` off macOS.
 ///
 /// The cost is this enum, and it is paid honestly rather than hidden behind a
 /// session with empty fields: everything that reads a pane now says what it
@@ -99,8 +99,9 @@ impl Direction {
 /// can be tested with no window and no process.
 #[derive(Debug)]
 pub enum PaneContent {
-    /// One session: what a tab opened with `cmd/ctrl-t` holds, and what the
-    /// shell in that tab reports its title and working directory into.
+    /// One session: what a tab opened with `cmd-t` (`ctrl-shift-t` off macOS)
+    /// holds, and what the shell in that tab reports its title and working
+    /// directory into.
     Agent(AgentSession),
     /// The settings page. There is at most one in a window — `TabStrip::apply`
     /// navigates to the existing one rather than opening a second — and it

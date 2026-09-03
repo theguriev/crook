@@ -270,6 +270,38 @@ fn an_expanded_spacer_pushes_the_next_child_to_the_far_edge() {
 }
 
 #[test]
+fn a_column_asked_not_to_overflow_lays_no_child_out_past_its_end() {
+    // A child that is not flexible is measured free along the main axis, so
+    // one that asks for more than the column has is given it, laid out past
+    // the bottom edge and painted over whatever comes after — including the
+    // window's own end. That is the default, and a list with a clip below it
+    // depends on it; a column that *is* the space says so instead.
+    let mut harness = Harness::new(|_| {
+        Flex::column()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_no_overflow()
+            .with_child(marker(20., 400.))
+            .with_child(marker(30., 400.))
+            .finish()
+    });
+
+    let scene = harness.build_scene(vec2f(100., 50.));
+    let bounds: Vec<_> = rects(&scene).iter().map(|rect| rect.bounds).collect();
+
+    assert_eq!(
+        bounds[0],
+        RectF::new(Vector2F::zero(), vec2f(20., 50.)),
+        "the first child took the column and no more"
+    );
+    assert_eq!(
+        bounds[1],
+        RectF::new(vec2f(0., 50.), vec2f(30., 0.)),
+        "and the second was measured against what was left of it, which was \
+         nothing"
+    );
+}
+
+#[test]
 fn a_container_grows_by_its_padding_and_border() {
     let mut harness = Harness::new(|_| {
         Container::new(marker(10., 10.))

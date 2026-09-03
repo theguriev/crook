@@ -186,6 +186,14 @@ impl CellFont {
         self.0.metrics
     }
 
+    /// The face plain text is drawn in.
+    ///
+    /// What the command input asks for: a field is not a grid, so it has no
+    /// [`CellFlags`] to resolve, and every cell of it is regular weight.
+    pub fn regular(&self) -> FontId {
+        self.face(CellFlags::NONE)
+    }
+
     /// The face a cell with these attributes is drawn in.
     ///
     /// Underline and strikeout are rules the grid draws itself, and every other

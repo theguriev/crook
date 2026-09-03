@@ -29,6 +29,7 @@ mod action;
 mod body;
 mod controls;
 mod header_toolbar;
+mod input_element;
 mod row_content;
 mod settings_page;
 mod tab_bar;
@@ -44,6 +45,7 @@ mod tests;
 use crate::theme::THEME;
 
 pub use action::{OptionsAction, SettingsAction, WorkspaceAction};
+pub use input_element::CommandInput;
 pub use settings_page::Section;
 pub use terminal_element::TerminalElement;
 pub use usage_chip::{UsageChip, UsageChipAction};

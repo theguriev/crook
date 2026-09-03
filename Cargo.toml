@@ -24,6 +24,9 @@ crookui_core = { path = "crates/crookui_core" }
 
 alacritty_terminal = "0.26"
 anyhow = "1.0"
+# Text only: the default features pull in `image` for clipboard images, which
+# nothing here puts on a clipboard.
+arboard = { version = "3.6", default-features = false }
 async-executor = "1.14"
 async-task = "4.7"
 blocking = "1.7"
@@ -47,6 +50,11 @@ serde_json = "1.0"
 smallvec = "1.15"
 swash = "0.2"
 thiserror = "2.0"
+unicode-segmentation = "1.13"
+# The same East Asian width table the terminal emulator lays its grid out with,
+# so the input field gives a CJK filename the two columns the shell will echo it
+# back in.
+unicode-width = "0.2"
 # rustls only: no OpenSSL headers on Linux, no schannel quirks on Windows.
 ureq = { version = "3.4", default-features = false, features = ["rustls", "json"] }
 wgpu = { version = "30.0", default-features = false, features = [

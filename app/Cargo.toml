@@ -36,10 +36,13 @@ crookui.workspace = true
 crookui_core.workspace = true
 
 anyhow.workspace = true
+arboard.workspace = true
 # The settings file lives in the platform's configuration directory.
 dirs.workspace = true
 env_logger.workspace = true
 log.workspace = true
+unicode-segmentation.workspace = true
+unicode-width.workspace = true
 # `--snapshot` writes a real frame to a file so a human, or CI, can look at it.
 png.workspace = true
 serde.workspace = true

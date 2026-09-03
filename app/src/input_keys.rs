@@ -1,0 +1,1033 @@
+//! Where a keystroke stops being the input field's and becomes the shell's.
+//!
+//! [`crate::terminal_keys`] is the other half of this line: it says what a key
+//! *encodes* as once it has been decided that the shell should have it. This
+//! module makes that decision, and it makes it in one place — [`route`] — so
+//! that the whole policy can be read at once.
+//!
+//! Crook's own chords are here too, in [`binding`], for a reason the field
+//! made unavoidable: a chord the window consumes never reaches [`route`], so
+//! two tables written in two files can quietly take the same keys away from
+//! each other. Side by side they can be tested against each other instead, and
+//! [`tests::no_binding_takes_a_chord_the_field_needs`] is that test.
+//!
+//! # The platform split
+//!
+//! Everything below the routing rule is a keymap, and a keymap is where the
+//! platforms genuinely differ:
+//!
+//! * **macOS** takes its bindings from Cocoa. Word movement is Alt-Left and
+//!   Alt-Right, the ends of a line are Cmd-Left and Cmd-Right, the ends of the
+//!   text are Cmd-Up and Cmd-Down, and the clipboard is on Command. Control is
+//!   left to the emacs bindings every macOS text field also has — Ctrl-A,
+//!   Ctrl-E, Ctrl-K — which are the ones a terminal person already has in
+//!   their fingers. Crook's own chords are Command's, which is where a macOS
+//!   application's chords live and where nothing the field wants can be.
+//! * **Everywhere else** word movement is Ctrl-Left and Ctrl-Right, the ends
+//!   of a line are Home and End, and the ends of the text are Ctrl-Home and
+//!   Ctrl-End. Crook's own chords are Ctrl-*Shift*, because plain Ctrl-letter
+//!   belongs to the tty: Ctrl-C interrupts, Ctrl-D ends input and Ctrl-W
+//!   erases a word, and an application that took them would be an application
+//!   nobody could run a program in. Every terminal emulator on Linux arrived
+//!   at the same arrangement.
+//!
+//! The one place the keymap is decided by something other than convention is
+//! Ctrl-C and Ctrl-Z off macOS. They are the signal keys — see [`route`] — so
+//! the clipboard cannot have them, and copy and undo take the Shift variants.
+//!
+//! The platform is a *parameter* rather than a `cfg!` inside the mapping,
+//! because a keymap that can only be tested on the machine it was written on
+//! is a keymap with one half untested.
+
+use crookui_core::event::{Keystroke, Modifiers};
+
+use crate::editor::Motion;
+
+/// Which keymap to read a keystroke against.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Platform {
+    /// macOS, where the command key carries the application chords.
+    Mac,
+    /// Linux and Windows, where Control-Shift does.
+    Other,
+}
+
+impl Platform {
+    /// The keymap this build is for.
+    pub fn current() -> Self {
+        if cfg!(target_os = "macos") {
+            Self::Mac
+        } else {
+            Self::Other
+        }
+    }
+}
+
+/// What the pane a keystroke arrived at is doing.
+///
+/// Everything [`route`] needs to know beyond the keystroke itself, which is
+/// two facts: who owns the screen, and whether there is a line being composed
+/// at all.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Pane {
+    /// Whether the program on the far end has taken the whole screen.
+    pub alt_screen: bool,
+    /// Whether the field is empty. What makes Ctrl-D an end of input rather
+    /// than a delete — see [`route`].
+    pub line_is_empty: bool,
+}
+
+/// What the input field should do about a keystroke.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Intent {
+    /// Type this text at the caret.
+    Insert(String),
+    /// Break the line without sending it: a multi-line command.
+    Newline,
+    /// Send the line to the shell.
+    Submit,
+    /// Delete backwards by a grapheme cluster.
+    Backspace,
+    /// Delete forwards by a grapheme cluster.
+    DeleteForward,
+    /// Delete back to the start of the previous word.
+    DeleteWordLeft,
+    /// Delete forward to the end of the next word.
+    DeleteWordRight,
+    /// Delete back to the start of the line.
+    DeleteToLineStart,
+    /// Delete forward to the end of the line.
+    DeleteToLineEnd,
+    /// Move the caret, dropping any selection.
+    Move(Motion),
+    /// Move the head of the selection, leaving its anchor.
+    Extend(Motion),
+    /// The bare Up key: a line up, or the previous command.
+    HistoryUp,
+    /// The bare Down key: a line down, or the next command.
+    HistoryDown,
+    /// Select the whole line.
+    SelectAll,
+    /// Copy the selection to the system clipboard.
+    Copy,
+    /// Cut the selection to the system clipboard.
+    Cut,
+    /// Insert what is on the system clipboard.
+    Paste,
+    /// Step back one edit.
+    Undo,
+    /// Step forward one undone edit.
+    Redo,
+}
+
+/// Where a keystroke goes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Route {
+    /// Straight to the pty, encoded by [`crate::terminal_keys`].
+    Raw,
+    /// To the pty, *and* the half-written line goes with it: Ctrl-C.
+    ///
+    /// The one gesture whose entire meaning is "forget this". The shell prints
+    /// `^C` and a fresh prompt, and a field still holding the abandoned line
+    /// above that prompt would be the interrupt only pretending to have
+    /// worked.
+    Interrupt,
+    /// To the input field's editor.
+    Edit(Intent),
+    /// Nowhere. Nothing is typed and nothing is sent.
+    Ignored,
+}
+
+impl Route {
+    /// Whether the pty gets this keystroke.
+    pub fn reaches_the_shell(&self) -> bool {
+        matches!(self, Self::Raw | Self::Interrupt)
+    }
+}
+
+/// One of Crook's own bindings: a chord the window acts on before any pane
+/// sees it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Binding {
+    /// Open a tab.
+    NewTab,
+    /// Close the focused pane, and its tab with the last one.
+    ClosePane,
+    /// Split the focused pane to the right.
+    SplitRight,
+    /// Split the focused pane downwards.
+    SplitDown,
+    /// Select the tab before the active one.
+    PreviousTab,
+    /// Select the tab after the active one.
+    NextTab,
+    /// Move the active tab one place towards the start.
+    MoveTabLeft,
+    /// Move the active tab one place towards the end.
+    MoveTabRight,
+    /// Move the tabs between the side panel and the header strip.
+    ToggleLayout,
+    /// Open the settings page.
+    OpenSettings,
+}
+
+/// **The whole keyboard policy of a pane, in one function.**
+///
+/// 1. Crook's own bindings never reach here. `Workspace::action_for` consumes
+///    what [`binding`] names, in the window delegate, before any element sees
+///    the event — which is what makes `cmd-t` open a tab everywhere rather
+///    than typing a `t`.
+/// 2. **The alt screen belongs to the program.** vim, `top` and `less` drive
+///    every cell of the screen and read every key themselves, so on the alt
+///    screen everything goes raw to the pty — and the input field is not even
+///    drawn. See [`shows_input`].
+/// 3. **The signal keys always reach the shell.** Ctrl-C interrupts and
+///    abandons the line with it, Ctrl-Z suspends, and Ctrl-D ends the input —
+///    but only on an empty line, exactly as it does in a shell. The field
+///    holds the line the shell's own reader used to hold, so a Ctrl-D typed
+///    out of habit over a half-written command has to be the delete it is in
+///    every line editor rather than an end of file that closes the pane.
+/// 4. Everything else on the normal screen belongs to the input field, and a
+///    keystroke the keymap has no meaning for does nothing at all rather than
+///    leaking into the shell.
+pub fn route(keystroke: &Keystroke, chars: &str, pane: Pane, platform: Platform) -> Route {
+    if pane.alt_screen {
+        return Route::Raw;
+    }
+    match signal(keystroke) {
+        Some(Signal::Interrupt) => return Route::Interrupt,
+        Some(Signal::Suspend) => return Route::Raw,
+        // The one signal the field can outrank, and only by holding a line for
+        // it to delete a character out of.
+        Some(Signal::EndOfInput) if pane.line_is_empty => return Route::Raw,
+        Some(Signal::EndOfInput) => return Route::Edit(Intent::DeleteForward),
+        None => {}
+    }
+    match intent(keystroke, chars, platform) {
+        Some(intent) => Route::Edit(intent),
+        None => Route::Ignored,
+    }
+}
+
+/// Whether a pane showing this screen draws an input field.
+///
+/// The visible half of rule 2 in [`route`]: a program that has taken the whole
+/// screen is not reading a line, so there is no line to compose.
+pub fn shows_input(alt_screen: bool) -> bool {
+    !alt_screen
+}
+
+/// Whether this is one of the three keys that interrupt, end and suspend.
+///
+/// Rule 3 seen from the outside, for the one caller that has to apply it
+/// without routing anything: a pane with a modal menu over it takes no typing
+/// at all, and still cannot be allowed to stop a running command from being
+/// interrupted.
+pub fn is_signal(keystroke: &Keystroke) -> bool {
+    signal(keystroke).is_some()
+}
+
+/// Which of Crook's own bindings this chord is, if it is one.
+///
+/// Consumed by the window delegate, so nothing here ever reaches [`route`] —
+/// which is exactly why the two tables live in one file.
+pub fn binding(keystroke: &Keystroke, platform: Platform) -> Option<Binding> {
+    let modifiers = keystroke.modifiers;
+    let key = keystroke.key.as_str();
+    match platform {
+        Platform::Mac => {
+            if !modifiers.cmd {
+                return None;
+            }
+            match (key, modifiers.shift, modifiers.alt, modifiers.ctrl) {
+                ("t", false, false, false) => Some(Binding::NewTab),
+                ("w", false, false, false) => Some(Binding::ClosePane),
+                ("d", false, false, false) => Some(Binding::SplitRight),
+                ("d", true, false, false) => Some(Binding::SplitDown),
+                ("b", false, false, false) => Some(Binding::ToggleLayout),
+                (",", false, false, false) => Some(Binding::OpenSettings),
+                // Not Cmd-Shift-arrow, which every macOS text field spends on
+                // selecting to the end of a line — the field needs it more
+                // than the tabs do, and Cmd-Alt-arrow is where a Mac browser
+                // keeps its tabs anyway.
+                ("left", false, true, false) => Some(Binding::PreviousTab),
+                ("right", false, true, false) => Some(Binding::NextTab),
+                ("left", false, false, true) => Some(Binding::MoveTabLeft),
+                ("right", false, false, true) => Some(Binding::MoveTabRight),
+                _ => None,
+            }
+        }
+        Platform::Other => {
+            if !modifiers.ctrl || modifiers.cmd || modifiers.alt {
+                return None;
+            }
+            match (key, modifiers.shift) {
+                ("t", true) => Some(Binding::NewTab),
+                ("w", true) => Some(Binding::ClosePane),
+                ("d", true) => Some(Binding::SplitRight),
+                // Not Ctrl-Shift-D with a Shift already spent: the split pair
+                // takes the two keys next to each other instead.
+                ("e", true) => Some(Binding::SplitDown),
+                ("b", true) => Some(Binding::ToggleLayout),
+                // Ctrl-comma without a Shift: the settings chord is the same
+                // on every platform, and unlike the tab bindings above it has
+                // no field gesture to stay out of the way of.
+                (",", false) => Some(Binding::OpenSettings),
+                // The tab chord of every browser and every terminal on Linux
+                // and Windows, and it leaves Ctrl-Shift-arrow to the field,
+                // where it selects by word.
+                ("pageup", false) => Some(Binding::PreviousTab),
+                ("pagedown", false) => Some(Binding::NextTab),
+                ("pageup", true) => Some(Binding::MoveTabLeft),
+                ("pagedown", true) => Some(Binding::MoveTabRight),
+                _ => None,
+            }
+        }
+    }
+}
+
+/// One of the three keys the tty reserves.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Signal {
+    /// Ctrl-C: interrupt the foreground command.
+    Interrupt,
+    /// Ctrl-D: end of input.
+    EndOfInput,
+    /// Ctrl-Z: suspend the foreground command.
+    Suspend,
+}
+
+/// Which signal a keystroke is, if it is one.
+///
+/// Shift is excluded because off macOS the Shift variants are the clipboard's
+/// — that is the whole reason they are.
+fn signal(keystroke: &Keystroke) -> Option<Signal> {
+    let modifiers = keystroke.modifiers;
+    if !modifiers.ctrl || modifiers.cmd || modifiers.alt || modifiers.shift {
+        return None;
+    }
+    match keystroke.key.as_str() {
+        "c" => Some(Signal::Interrupt),
+        "d" => Some(Signal::EndOfInput),
+        "z" => Some(Signal::Suspend),
+        _ => None,
+    }
+}
+
+/// What the editor should do about a keystroke, or `None` for one it has no
+/// meaning for.
+fn intent(keystroke: &Keystroke, chars: &str, platform: Platform) -> Option<Intent> {
+    let modifiers = keystroke.modifiers;
+    if let Some(intent) = named_intent(&keystroke.key, modifiers, platform) {
+        return Some(intent);
+    }
+    if let Some(intent) = chord_intent(&keystroke.key, modifiers, platform) {
+        return Some(intent);
+    }
+    typed_intent(&keystroke.key, modifiers, chars, platform)
+}
+
+/// What the keys that have a name rather than a character do.
+fn named_intent(key: &str, modifiers: Modifiers, platform: Platform) -> Option<Intent> {
+    match key {
+        // Shift-Enter is the only way to get a second line into a command, so
+        // it is the one that must not be sent.
+        "enter" if modifiers.shift => Some(Intent::Newline),
+        "enter" if plain(modifiers) => Some(Intent::Submit),
+
+        "backspace" => Some(match () {
+            _ if line_chord(modifiers, platform) => Intent::DeleteToLineStart,
+            _ if modifiers.alt || modifiers.ctrl => Intent::DeleteWordLeft,
+            _ if modifiers.cmd => return None,
+            _ => Intent::Backspace,
+        }),
+        "delete" => Some(match () {
+            _ if line_chord(modifiers, platform) => Intent::DeleteToLineEnd,
+            _ if modifiers.alt || modifiers.ctrl => Intent::DeleteWordRight,
+            _ if modifiers.cmd => return None,
+            _ => Intent::DeleteForward,
+        }),
+
+        "left" | "right" => {
+            let forward = key == "right";
+            let motion = if word_chord(modifiers, platform) {
+                pick(forward, Motion::WordRight, Motion::WordLeft)
+            } else if line_chord(modifiers, platform) {
+                pick(forward, Motion::LineEnd, Motion::LineStart)
+            } else if plain(modifiers) {
+                pick(forward, Motion::Right, Motion::Left)
+            } else {
+                return None;
+            };
+            Some(movement(motion, modifiers))
+        }
+
+        "up" | "down" => {
+            let forward = key == "down";
+            if buffer_chord(modifiers, platform) {
+                return Some(movement(
+                    pick(forward, Motion::BufferEnd, Motion::BufferStart),
+                    modifiers,
+                ));
+            }
+            if !plain(modifiers) {
+                return None;
+            }
+            // The bare arrows reach for the history, and only from the first
+            // and last lines — which is the editor's rule, not this one's.
+            Some(match (modifiers.shift, forward) {
+                (true, true) => Intent::Extend(Motion::Down),
+                (true, false) => Intent::Extend(Motion::Up),
+                (false, true) => Intent::HistoryDown,
+                (false, false) => Intent::HistoryUp,
+            })
+        }
+
+        "home" | "end" => {
+            let forward = key == "end";
+            let motion = if buffer_chord(modifiers, platform) {
+                pick(forward, Motion::BufferEnd, Motion::BufferStart)
+            } else if plain(modifiers) {
+                pick(forward, Motion::LineEnd, Motion::LineStart)
+            } else {
+                return None;
+            };
+            Some(movement(motion, modifiers))
+        }
+
+        _ => None,
+    }
+}
+
+/// What the platform's application chords do.
+fn chord_intent(key: &str, modifiers: Modifiers, platform: Platform) -> Option<Intent> {
+    let shift = modifiers.shift;
+    match platform {
+        Platform::Mac => {
+            if modifiers.cmd && !modifiers.ctrl && !modifiers.alt {
+                return match (key, shift) {
+                    ("a", false) => Some(Intent::SelectAll),
+                    ("c", false) => Some(Intent::Copy),
+                    ("x", false) => Some(Intent::Cut),
+                    ("v", false) => Some(Intent::Paste),
+                    ("z", false) => Some(Intent::Undo),
+                    ("z", true) => Some(Intent::Redo),
+                    _ => None,
+                };
+            }
+            // Cocoa's own emacs bindings, which every macOS text field honours
+            // and every shell's line editor honoured before it.
+            if modifiers.ctrl && !modifiers.cmd && !modifiers.alt && !shift {
+                return emacs_intent(key);
+            }
+            None
+        }
+        Platform::Other => {
+            if !modifiers.ctrl || modifiers.cmd || modifiers.alt {
+                return None;
+            }
+            match (key, shift) {
+                ("a", _) => Some(Intent::SelectAll),
+                // Ctrl-C is SIGINT and Ctrl-Z is SIGTSTP, so copy and undo
+                // take the Shift variants — the same arrangement every
+                // terminal emulator on Linux arrived at.
+                ("c", true) => Some(Intent::Copy),
+                ("z", true) => Some(Intent::Undo),
+                ("x", _) => Some(Intent::Cut),
+                ("v", _) => Some(Intent::Paste),
+                ("y", _) => Some(Intent::Redo),
+                _ if shift => None,
+                _ => emacs_intent(key),
+            }
+        }
+    }
+}
+
+/// The readline bindings both platforms honour, on Control.
+///
+/// Ctrl-W is here rather than in a table of its own because it is the reason
+/// the werase character exists: it is what a terminal person presses to take
+/// back the last word, and off macOS it used to close the pane instead.
+fn emacs_intent(key: &str) -> Option<Intent> {
+    match key {
+        "a" => Some(Intent::Move(Motion::LineStart)),
+        "e" => Some(Intent::Move(Motion::LineEnd)),
+        "k" => Some(Intent::DeleteToLineEnd),
+        "u" => Some(Intent::DeleteToLineStart),
+        "w" => Some(Intent::DeleteWordLeft),
+        _ => None,
+    }
+}
+
+/// The text a key press produces, when it produces any.
+///
+/// On macOS Alt is a *composing* modifier — Alt-O types `ø` — and the platform
+/// has already applied it to `chars`, so it is let through there and nowhere
+/// else: on X11, Wayland and Windows the text of Alt-F is still `f`, and
+/// typing an `f` is the one thing readline's Alt-F must not do. Control and
+/// Command never type on either platform: a key held with either is a chord
+/// that the tables above have already had their chance at.
+fn typed_intent(
+    key: &str,
+    modifiers: Modifiers,
+    chars: &str,
+    platform: Platform,
+) -> Option<Intent> {
+    if modifiers.ctrl || modifiers.cmd || (modifiers.alt && platform == Platform::Other) {
+        return None;
+    }
+
+    // The space bar is reported by name; every other typing key is reported by
+    // the text it produced.
+    let typed = if key == "space" && chars.is_empty() {
+        " "
+    } else {
+        chars
+    };
+
+    // Tab, Escape and Backspace all produce text, and all of it is a control
+    // character that would go into the line as an unprintable cell.
+    let types = !typed.is_empty() && !typed.chars().any(char::is_control);
+    types.then(|| Intent::Insert(typed.to_owned()))
+}
+
+/// A movement, extending the selection when Shift is held.
+fn movement(motion: Motion, modifiers: Modifiers) -> Intent {
+    if modifiers.shift {
+        Intent::Extend(motion)
+    } else {
+        Intent::Move(motion)
+    }
+}
+
+/// One of two values, by direction. Reads better at the call site than a
+/// two-armed `if` inside an expression.
+fn pick<T>(forward: bool, ahead: T, behind: T) -> T {
+    if forward { ahead } else { behind }
+}
+
+/// Whether nothing but Shift is held.
+fn plain(modifiers: Modifiers) -> bool {
+    !modifiers.ctrl && !modifiers.cmd && !modifiers.alt
+}
+
+/// Whether these modifiers mean "by word" on this platform.
+fn word_chord(modifiers: Modifiers, platform: Platform) -> bool {
+    match platform {
+        Platform::Mac => modifiers.alt && !modifiers.cmd && !modifiers.ctrl,
+        Platform::Other => modifiers.ctrl && !modifiers.cmd && !modifiers.alt,
+    }
+}
+
+/// Whether these modifiers mean "to the end of the line" on this platform.
+///
+/// Nothing off macOS: there the ends of a line are Home and End, and a
+/// Ctrl-Left that also meant "line start" would take word movement away.
+fn line_chord(modifiers: Modifiers, platform: Platform) -> bool {
+    platform == Platform::Mac && modifiers.cmd && !modifiers.ctrl && !modifiers.alt
+}
+
+/// Whether these modifiers mean "to the end of the text" on this platform.
+fn buffer_chord(modifiers: Modifiers, platform: Platform) -> bool {
+    match platform {
+        Platform::Mac => modifiers.cmd && !modifiers.ctrl && !modifiers.alt,
+        Platform::Other => modifiers.ctrl && !modifiers.cmd && !modifiers.alt,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn keystroke(key: &str, modifiers: Modifiers) -> Keystroke {
+        Keystroke::new(key, modifiers)
+    }
+
+    fn none() -> Modifiers {
+        Modifiers::default()
+    }
+
+    fn shift() -> Modifiers {
+        Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        }
+    }
+
+    fn ctrl() -> Modifiers {
+        Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        }
+    }
+
+    fn ctrl_shift() -> Modifiers {
+        Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Modifiers::default()
+        }
+    }
+
+    fn cmd() -> Modifiers {
+        Modifiers {
+            cmd: true,
+            ..Modifiers::default()
+        }
+    }
+
+    fn cmd_shift() -> Modifiers {
+        Modifiers {
+            shift: true,
+            ..cmd()
+        }
+    }
+
+    fn cmd_alt() -> Modifiers {
+        Modifiers { alt: true, ..cmd() }
+    }
+
+    fn alt() -> Modifiers {
+        Modifiers {
+            alt: true,
+            ..Modifiers::default()
+        }
+    }
+
+    /// A pane on the normal screen with a line half written in its field.
+    fn composing() -> Pane {
+        Pane {
+            alt_screen: false,
+            line_is_empty: false,
+        }
+    }
+
+    /// A pane on the normal screen whose field is empty.
+    fn empty() -> Pane {
+        Pane {
+            alt_screen: false,
+            line_is_empty: true,
+        }
+    }
+
+    /// What the editor is asked to do with this key on this platform.
+    fn edit(key: &str, modifiers: Modifiers, platform: Platform) -> Option<Intent> {
+        match route(&keystroke(key, modifiers), "", composing(), platform) {
+            Route::Edit(intent) => Some(intent),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn the_alt_screen_takes_every_key_before_the_editor_sees_one() {
+        // vim is reading the arrows, and a field that swallowed them would
+        // leave the cursor stuck in the corner.
+        let vim = Pane {
+            alt_screen: true,
+            line_is_empty: true,
+        };
+        for platform in [Platform::Mac, Platform::Other] {
+            for (key, modifiers) in [("left", none()), ("a", none()), ("enter", none())] {
+                assert_eq!(
+                    route(&keystroke(key, modifiers), "a", vim, platform),
+                    Route::Raw,
+                    "{key} was taken from a full-screen program"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_signal_keys_reach_the_shell_from_either_screen() {
+        // The rule a running command depends on: `ctrl-c` interrupts it
+        // whatever the field is doing.
+        for platform in [Platform::Mac, Platform::Other] {
+            assert_eq!(
+                route(&keystroke("c", ctrl()), "", composing(), platform),
+                Route::Interrupt
+            );
+            assert_eq!(
+                route(&keystroke("z", ctrl()), "", composing(), platform),
+                Route::Raw
+            );
+            assert_eq!(
+                route(&keystroke("d", ctrl()), "", empty(), platform),
+                Route::Raw
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_c_takes_the_half_written_line_with_it() {
+        // Not `Raw`: the shell prints `^C` and a fresh prompt, and a field
+        // still holding the abandoned command would be a lie about what just
+        // happened.
+        for platform in [Platform::Mac, Platform::Other] {
+            assert_eq!(
+                route(&keystroke("c", ctrl()), "", composing(), platform),
+                Route::Interrupt
+            );
+            assert!(
+                Route::Interrupt.reaches_the_shell(),
+                "and the shell hears it"
+            );
+        }
+    }
+
+    #[test]
+    fn ctrl_d_ends_the_input_only_on_an_empty_line() {
+        // The shell's own reader has nothing in it any more — the line lives
+        // in the field — so an unconditional Ctrl-D would be an end of file
+        // every time, and the pane would close under somebody's fingers.
+        for platform in [Platform::Mac, Platform::Other] {
+            assert_eq!(
+                route(&keystroke("d", ctrl()), "", empty(), platform),
+                Route::Raw,
+                "an empty line is where Ctrl-D means end of file"
+            );
+            assert_eq!(
+                route(&keystroke("d", ctrl()), "", composing(), platform),
+                Route::Edit(Intent::DeleteForward),
+                "and over a written line it is the delete every line editor has"
+            );
+        }
+    }
+
+    #[test]
+    fn typing_goes_into_the_field_rather_than_the_pty() {
+        for platform in [Platform::Mac, Platform::Other] {
+            assert_eq!(
+                route(&keystroke("a", none()), "a", composing(), platform),
+                Route::Edit(Intent::Insert("a".to_owned()))
+            );
+            assert_eq!(
+                route(&keystroke("a", shift()), "A", composing(), platform),
+                Route::Edit(Intent::Insert("A".to_owned())),
+                "the platform already applied the layout, and its text is the truth"
+            );
+            assert_eq!(
+                route(&keystroke("space", none()), " ", composing(), platform),
+                Route::Edit(Intent::Insert(" ".to_owned()))
+            );
+        }
+    }
+
+    #[test]
+    fn alt_composes_a_character_on_macos_and_types_nothing_anywhere_else() {
+        // winit reports the text of Alt-F as `f` on X11, Wayland and Windows,
+        // where Alt is not a composing modifier at all — and typing an `f` is
+        // the one thing readline's Alt-F must not do.
+        assert_eq!(
+            route(&keystroke("o", alt()), "\u{f8}", composing(), Platform::Mac),
+            Route::Edit(Intent::Insert("\u{f8}".to_owned())),
+            "macOS applied the modifier and handed over the character it made"
+        );
+        assert_eq!(
+            route(&keystroke("f", alt()), "f", composing(), Platform::Other),
+            Route::Ignored
+        );
+    }
+
+    #[test]
+    fn a_key_that_produces_only_a_control_character_types_nothing() {
+        // Tab and Escape both produce text, and neither has a cell to sit in.
+        for platform in [Platform::Mac, Platform::Other] {
+            assert_eq!(
+                route(&keystroke("tab", none()), "\t", composing(), platform),
+                Route::Ignored
+            );
+            assert_eq!(
+                route(
+                    &keystroke("escape", none()),
+                    "\u{1b}",
+                    composing(),
+                    platform
+                ),
+                Route::Ignored
+            );
+            assert_eq!(
+                route(&keystroke("f5", none()), "", composing(), platform),
+                Route::Ignored
+            );
+        }
+    }
+
+    #[test]
+    fn enter_sends_the_line_and_shift_enter_lengthens_it() {
+        for platform in [Platform::Mac, Platform::Other] {
+            assert_eq!(edit("enter", none(), platform), Some(Intent::Submit));
+            assert_eq!(edit("enter", shift(), platform), Some(Intent::Newline));
+        }
+    }
+
+    #[test]
+    fn word_movement_is_alt_on_macos_and_control_everywhere_else() {
+        assert_eq!(
+            edit("left", alt(), Platform::Mac),
+            Some(Intent::Move(Motion::WordLeft))
+        );
+        assert_eq!(
+            edit("right", ctrl(), Platform::Other),
+            Some(Intent::Move(Motion::WordRight))
+        );
+        // And each platform's word chord is the other's nothing-in-particular.
+        assert_eq!(edit("left", ctrl(), Platform::Mac), None);
+        assert_eq!(edit("left", alt(), Platform::Other), None);
+    }
+
+    #[test]
+    fn the_ends_of_a_line_are_the_command_key_on_macos_and_home_and_end_elsewhere() {
+        assert_eq!(
+            edit("left", cmd(), Platform::Mac),
+            Some(Intent::Move(Motion::LineStart))
+        );
+        assert_eq!(
+            edit("end", none(), Platform::Other),
+            Some(Intent::Move(Motion::LineEnd))
+        );
+        assert_eq!(
+            edit("home", none(), Platform::Mac),
+            Some(Intent::Move(Motion::LineStart)),
+            "a Mac keyboard with a Home key still has one"
+        );
+    }
+
+    #[test]
+    fn the_ends_of_the_text_are_the_platform_chord_with_a_vertical_key() {
+        assert_eq!(
+            edit("up", cmd(), Platform::Mac),
+            Some(Intent::Move(Motion::BufferStart))
+        );
+        assert_eq!(
+            edit("end", ctrl(), Platform::Other),
+            Some(Intent::Move(Motion::BufferEnd))
+        );
+    }
+
+    #[test]
+    fn shift_extends_whatever_the_movement_was() {
+        let shifted_word = Modifiers {
+            shift: true,
+            ..alt()
+        };
+        assert_eq!(
+            edit("left", shifted_word, Platform::Mac),
+            Some(Intent::Extend(Motion::WordLeft))
+        );
+        assert_eq!(
+            edit("up", shift(), Platform::Other),
+            Some(Intent::Extend(Motion::Up)),
+            "shift-up extends by a line and never reaches for the history"
+        );
+    }
+
+    #[test]
+    fn the_selection_chords_a_text_field_lives_on_are_the_fields() {
+        // Both platforms' most-used selection gesture, and on both of them it
+        // used to switch tabs instead.
+        assert_eq!(
+            edit("left", cmd_shift(), Platform::Mac),
+            Some(Intent::Extend(Motion::LineStart))
+        );
+        assert_eq!(
+            edit("right", cmd_shift(), Platform::Mac),
+            Some(Intent::Extend(Motion::LineEnd))
+        );
+        assert_eq!(
+            edit("left", ctrl_shift(), Platform::Other),
+            Some(Intent::Extend(Motion::WordLeft))
+        );
+        assert_eq!(
+            edit("right", ctrl_shift(), Platform::Other),
+            Some(Intent::Extend(Motion::WordRight))
+        );
+    }
+
+    #[test]
+    fn the_bare_arrows_walk_the_history() {
+        for platform in [Platform::Mac, Platform::Other] {
+            assert_eq!(edit("up", none(), platform), Some(Intent::HistoryUp));
+            assert_eq!(edit("down", none(), platform), Some(Intent::HistoryDown));
+        }
+    }
+
+    #[test]
+    fn the_clipboard_is_on_command_on_macos() {
+        assert_eq!(edit("a", cmd(), Platform::Mac), Some(Intent::SelectAll));
+        assert_eq!(edit("c", cmd(), Platform::Mac), Some(Intent::Copy));
+        assert_eq!(edit("x", cmd(), Platform::Mac), Some(Intent::Cut));
+        assert_eq!(edit("v", cmd(), Platform::Mac), Some(Intent::Paste));
+        assert_eq!(edit("z", cmd(), Platform::Mac), Some(Intent::Undo));
+        assert_eq!(edit("z", cmd_shift(), Platform::Mac), Some(Intent::Redo));
+    }
+
+    #[test]
+    fn off_macos_copy_and_undo_take_the_shift_variants_the_signal_keys_left_them() {
+        // The one place the keymap is decided by the routing rule rather than
+        // by convention: `ctrl-c` cannot be copy, because it has to interrupt.
+        assert_eq!(edit("c", ctrl(), Platform::Other), None, "ctrl-c went raw");
+        assert_eq!(edit("c", ctrl_shift(), Platform::Other), Some(Intent::Copy));
+        assert_eq!(edit("z", ctrl(), Platform::Other), None, "ctrl-z went raw");
+        assert_eq!(edit("z", ctrl_shift(), Platform::Other), Some(Intent::Undo));
+        assert_eq!(edit("y", ctrl(), Platform::Other), Some(Intent::Redo));
+
+        // And the two that were never signals keep the plain chord.
+        assert_eq!(edit("a", ctrl(), Platform::Other), Some(Intent::SelectAll));
+        assert_eq!(edit("v", ctrl(), Platform::Other), Some(Intent::Paste));
+        assert_eq!(edit("x", ctrl(), Platform::Other), Some(Intent::Cut));
+    }
+
+    #[test]
+    fn the_emacs_bindings_are_control_on_both_platforms() {
+        assert_eq!(
+            edit("a", ctrl(), Platform::Mac),
+            Some(Intent::Move(Motion::LineStart)),
+            "on macOS the clipboard is on Command, so Control is free for these"
+        );
+        for platform in [Platform::Mac, Platform::Other] {
+            assert_eq!(
+                edit("e", ctrl(), platform),
+                Some(Intent::Move(Motion::LineEnd))
+            );
+            assert_eq!(edit("k", ctrl(), platform), Some(Intent::DeleteToLineEnd));
+            assert_eq!(edit("u", ctrl(), platform), Some(Intent::DeleteToLineStart));
+            assert_eq!(
+                edit("w", ctrl(), platform),
+                Some(Intent::DeleteWordLeft),
+                "the werase character, which off macOS used to close the pane"
+            );
+        }
+    }
+
+    #[test]
+    fn deleting_by_word_and_by_line_follows_the_same_split_as_moving() {
+        assert_eq!(
+            edit("backspace", alt(), Platform::Mac),
+            Some(Intent::DeleteWordLeft)
+        );
+        assert_eq!(
+            edit("backspace", cmd(), Platform::Mac),
+            Some(Intent::DeleteToLineStart)
+        );
+        assert_eq!(
+            edit("backspace", ctrl(), Platform::Other),
+            Some(Intent::DeleteWordLeft)
+        );
+        assert_eq!(
+            edit("delete", ctrl(), Platform::Other),
+            Some(Intent::DeleteWordRight)
+        );
+        for platform in [Platform::Mac, Platform::Other] {
+            assert_eq!(edit("backspace", none(), platform), Some(Intent::Backspace));
+            assert_eq!(
+                edit("delete", none(), platform),
+                Some(Intent::DeleteForward)
+            );
+        }
+    }
+
+    #[test]
+    fn the_field_is_drawn_on_the_normal_screen_and_nowhere_else() {
+        assert!(shows_input(false));
+        assert!(!shows_input(true));
+    }
+
+    /// Every chord Crook keeps for itself, per platform.
+    fn bindings(platform: Platform) -> Vec<(&'static str, Modifiers)> {
+        match platform {
+            Platform::Mac => vec![
+                ("t", cmd()),
+                ("w", cmd()),
+                ("d", cmd()),
+                ("d", cmd_shift()),
+                ("b", cmd()),
+                (",", cmd()),
+                ("left", cmd_alt()),
+                ("right", cmd_alt()),
+                (
+                    "left",
+                    Modifiers {
+                        ctrl: true,
+                        ..cmd()
+                    },
+                ),
+                (
+                    "right",
+                    Modifiers {
+                        ctrl: true,
+                        ..cmd()
+                    },
+                ),
+            ],
+            Platform::Other => vec![
+                ("t", ctrl_shift()),
+                ("w", ctrl_shift()),
+                ("d", ctrl_shift()),
+                ("e", ctrl_shift()),
+                ("b", ctrl_shift()),
+                (",", ctrl()),
+                ("pageup", ctrl()),
+                ("pagedown", ctrl()),
+                ("pageup", ctrl_shift()),
+                ("pagedown", ctrl_shift()),
+            ],
+        }
+    }
+
+    #[test]
+    fn the_window_takes_the_same_chords_the_help_text_lists() {
+        assert_eq!(
+            binding(&keystroke("t", cmd()), Platform::Mac),
+            Some(Binding::NewTab)
+        );
+        assert_eq!(
+            binding(&keystroke("t", ctrl_shift()), Platform::Other),
+            Some(Binding::NewTab)
+        );
+        assert_eq!(
+            binding(&keystroke("left", cmd_alt()), Platform::Mac),
+            Some(Binding::PreviousTab)
+        );
+        assert_eq!(
+            binding(&keystroke("pagedown", ctrl()), Platform::Other),
+            Some(Binding::NextTab)
+        );
+        for platform in [Platform::Mac, Platform::Other] {
+            for (key, modifiers) in bindings(platform) {
+                assert!(
+                    binding(&keystroke(key, modifiers), platform).is_some(),
+                    "{key} with {modifiers:?} is bound to nothing on {platform:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn no_binding_takes_a_chord_the_field_needs() {
+        // The failure this file exists to make impossible: a binding consumed
+        // in the window delegate never reaches `route`, so a chord in both
+        // tables is a chord the field can never have — silently.
+        for platform in [Platform::Mac, Platform::Other] {
+            for (key, modifiers) in bindings(platform) {
+                assert_eq!(
+                    route(&keystroke(key, modifiers), "", composing(), platform),
+                    Route::Ignored,
+                    "{key} with {modifiers:?} is both a binding and the field's on {platform:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_tty_keeps_the_plain_control_chords_off_macos() {
+        // Ctrl-D has to be able to end an input and Ctrl-C to interrupt, so
+        // off macOS nothing of Crook's own can live on a bare Ctrl-letter.
+        for key in ["c", "d", "z", "w", "t", "b"] {
+            assert_eq!(
+                binding(&keystroke(key, ctrl()), Platform::Other),
+                None,
+                "ctrl-{key} is Crook's, and the tty cannot have it"
+            );
+        }
+    }
+}

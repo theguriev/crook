@@ -9,13 +9,13 @@
 //!
 //! # Why a thread and not the background pool
 //!
-//! The two poll chains each hold one pool worker across a `recv_timeout`, and
-//! [`crate::PARKED_WORKERS`] is sized for exactly two. A pty read blocks for as
-//! long as the shell is quiet, so a pane on the pool would park a worker for the
-//! life of the session: four panes would take the whole pool and the settings
-//! save a click was waiting on would never run. Each terminal gets an OS thread
-//! of its own instead, and reaches the main thread through [`Wake`] — a future
-//! the reader wakes, which is the same mechanism a completed pool task
+//! The chains that wait on a timer each hold one pool worker while they do, and
+//! [`crate::PARKED_WORKERS`] is sized for exactly those. A pty read blocks for
+//! as long as the shell is quiet, so a pane on the pool would park a worker for
+//! the life of the session: four panes would take the whole pool and the
+//! settings save a click was waiting on would never run. Each terminal gets an
+//! OS thread of its own instead, and reaches the main thread through [`Wake`] —
+//! a future the reader wakes, which is the same mechanism a completed pool task
 //! already uses to come home.
 //!
 //! # The throttle
@@ -565,6 +565,25 @@ impl TerminalHandle {
                 Ok(sent) => sent,
                 Err(error) => {
                     log::debug!("could not send a key to a shell: {error}");
+                    false
+                }
+            }
+        })
+    }
+
+    /// Writes text to the shell as if it had been typed, returning whether it
+    /// reached the pty.
+    ///
+    /// What the input field sends a finished command line with. The pty buffers
+    /// it, so a line composed before the shell has finished starting is read
+    /// when the shell gets there.
+    pub fn write(&self, text: &str) -> bool {
+        self.drive(|terminal| {
+            terminal.scroll_to_bottom();
+            match terminal.write(text.as_bytes()) {
+                Ok(()) => true,
+                Err(error) => {
+                    log::warn!("could not send a line to a shell: {error}");
                     false
                 }
             }

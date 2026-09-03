@@ -45,9 +45,10 @@
 //!
 //! [`Scrollable`] keeps the half of [`Clipped`] that mattered — a row that
 //! overflows is neither painted over the body nor hit-tested there — and adds
-//! the wheel. What it does not add is auto-scroll: selecting a tab with
-//! `cmd/ctrl-shift-left/right` moves the selection whether or not the row is
-//! on screen, and does not bring it into view. Warp scrolls to its selected
+//! the wheel. What it does not add is auto-scroll: selecting a tab from the
+//! keyboard — `cmd-alt-left/right` on macOS, `ctrl-pageup/pagedown` off it —
+//! moves the selection whether or not the row is on screen, and does not bring
+//! it into view. Warp scrolls to its selected
 //! tab, which needs a scrollable that can be told "make this child visible",
 //! and that means an element that knows where its children ended up. It is a
 //! real gap and it is written down here rather than faked with a guess at the
