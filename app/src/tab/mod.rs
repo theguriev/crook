@@ -25,6 +25,7 @@
 //! hold one level down: the `pane` module is the strip's shape again, over
 //! panes.
 
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::settings::Granularity;
@@ -105,15 +106,39 @@ pub struct AgentSession {
     pub derived_title: Option<String>,
     /// What the agent is doing right now.
     pub status: AgentStatus,
+    /// Where the agent is working.
+    ///
+    /// Seeded from the process's own directory, because that is where a
+    /// session started from Crook actually runs and there is nothing else true
+    /// to say yet. An agent runtime that chooses a directory sets this, and
+    /// every git fact a row shows is looked up by it.
+    ///
+    /// `None` only when the process has no readable working directory at all —
+    /// a directory deleted out from under it — in which case a row falls back
+    /// to the session title.
+    pub working_directory: Option<PathBuf>,
+    /// The pull request this session's work belongs to, as a URL.
+    ///
+    /// **Nothing populates this yet, and that is deliberate.** Warp's PR link
+    /// comes out of `gh pr view` — a subprocess with a five-second timeout, an
+    /// authentication state and a whole failure taxonomy — and Crook has no
+    /// forge integration to put behind it. The field exists so the row and the
+    /// "Show: PR link" toggle are written against real data rather than a
+    /// placeholder: the toggle governs whether the slot appears *when there is
+    /// a link*, and today there never is. The menu says so on screen rather
+    /// than leaving a dead chip to be discovered.
+    pub pull_request: Option<String>,
 }
 
 impl AgentSession {
-    /// A fresh idle session named `title`.
+    /// A fresh idle session named `title`, working where Crook is.
     pub fn new(title: impl Into<String>) -> Self {
         Self {
             title: title.into(),
             derived_title: None,
             status: AgentStatus::default(),
+            working_directory: std::env::current_dir().ok(),
+            pull_request: None,
         }
     }
 
@@ -121,6 +146,32 @@ impl AgentSession {
     /// the name the session was created with until it has one.
     pub fn display_title(&self) -> &str {
         self.derived_title.as_deref().unwrap_or(&self.title)
+    }
+
+    /// What a pull-request chip says: `PR #123`, or the raw URL when the number
+    /// cannot be read out of it.
+    ///
+    /// Warp's `github_pr_display_text_from_url`, rule for rule — split on
+    /// `/pull/`, take everything up to the next delimiter, require it to be a
+    /// positive run of digits. Showing the URL when that fails beats showing
+    /// nothing: a link nobody can label is still a link somebody can follow.
+    pub fn pull_request_label(&self) -> Option<String> {
+        let url = self.pull_request.as_deref()?.trim();
+        if url.is_empty() {
+            return None;
+        }
+
+        let number = url
+            .rsplit_once("/pull/")
+            .map(|(_, tail)| tail.split(['/', '?', '#']).next().unwrap_or_default())
+            .filter(|number| !number.is_empty())
+            .filter(|number| number.bytes().all(|byte| byte.is_ascii_digit()))
+            .filter(|number| number.parse::<u64>().is_ok_and(|number| number > 0));
+
+        Some(match number {
+            Some(number) => format!("PR #{number}"),
+            None => url.to_owned(),
+        })
     }
 }
 

@@ -548,3 +548,41 @@ fn truncation_marks_the_cut_and_never_exceeds_the_budget() {
     // Counted in characters, so a multi-byte name is not cut mid-character.
     assert_eq!(truncate_end("caf\u{e9}-refactor", 5), "caf\u{e9}\u{2026}");
 }
+
+#[test]
+fn a_path_is_truncated_from_the_front_so_the_tail_survives() {
+    // The direction is the point: a row that clipped the tail would print
+    // `~/work/cr\u{2026}`, which says nothing about where the session is.
+    assert_eq!(truncate_start("~/work/crook", 20), "~/work/crook");
+    assert_eq!(
+        truncate_start("~/work/crook/app/src", 12),
+        "\u{2026}ook/app/src"
+    );
+    assert_eq!(truncate_start("~/work/crook", 0), "");
+    assert_eq!(truncate_start("caf\u{e9}-refactor", 5), "\u{2026}ctor");
+}
+
+#[test]
+fn a_working_directory_under_home_is_printed_with_a_tilde() {
+    let home = Path::new("/Users/eugen");
+
+    assert_eq!(
+        user_friendly_path(Path::new("/Users/eugen/work/crook"), Some(home)),
+        "~/work/crook"
+    );
+    assert_eq!(user_friendly_path(home, Some(home)), "~");
+    assert_eq!(
+        user_friendly_path(Path::new("/opt/crook"), Some(home)),
+        "/opt/crook"
+    );
+    // A sibling whose name merely starts with the home directory's is not
+    // under it, and abbreviating it would name a directory that is not there.
+    assert_eq!(
+        user_friendly_path(Path::new("/Users/eugene/work"), Some(home)),
+        "/Users/eugene/work"
+    );
+    assert_eq!(
+        user_friendly_path(Path::new("/Users/eugen/work"), None),
+        "/Users/eugen/work"
+    );
+}

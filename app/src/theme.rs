@@ -19,6 +19,21 @@ pub struct Theme {
     pub ground: Color,
     /// Raised surfaces: the header, the content panel, a hovered control.
     pub surface: Color,
+    /// The ground of something that floats over the whole window — the tab
+    /// options menu, the hover detail card.
+    ///
+    /// Warp derives this (`neutral_1`: the background composited with the
+    /// foreground at 5% and flattened) because its popup has to read over any
+    /// terminal theme a person has loaded. Crook has one palette, so the
+    /// composite is precomputed. It is opaque on purpose: a translucent menu
+    /// with a tab strip showing through it is unreadable at 12px.
+    pub surface_raised: Color,
+    /// The foreground at 5%. A hovered menu row.
+    pub overlay_1: Color,
+    /// The foreground at 10%. A segmented control's track, a menu divider.
+    pub overlay_2: Color,
+    /// The foreground at 15%. The selected pill inside a segmented control.
+    pub overlay_3: Color,
     /// The selected tab's fill.
     pub tab_active: Color,
     /// An unselected tab's fill.
@@ -39,12 +54,23 @@ pub struct Theme {
     pub usage_high: Color,
     /// Session usage above 95%.
     pub usage_critical: Color,
+    /// Added lines, in a row's diff-stats chip.
+    pub diff_added: Color,
+    /// Removed lines, in a row's diff-stats chip.
+    pub diff_removed: Color,
 }
 
 /// The palette every view reads.
 pub const THEME: Theme = Theme {
     ground: Color::hex(0x14_16_1a),
     surface: Color::hex(0x1a_1d_24),
+    surface_raised: Color::hex(0x1c_1e_23),
+    // The three rungs of Warp's `fg_overlay` ladder, resolved against
+    // `text_primary` rather than against whatever foreground a loaded theme
+    // has. The alphas are Warp's 5%, 10% and 15% of 255, rounded down.
+    overlay_1: Color::hex(0xe8_eb_f0).with_alpha(12),
+    overlay_2: Color::hex(0xe8_eb_f0).with_alpha(25),
+    overlay_3: Color::hex(0xe8_eb_f0).with_alpha(38),
     tab_active: Color::hex(0x1f_24_30),
     tab_inactive: Color::hex(0x17_1a_20),
     border: Color::hex(0x25_2a_34),
@@ -57,4 +83,6 @@ pub const THEME: Theme = Theme {
     usage_elevated: Color::hex(0xe0_b3_41),
     usage_high: Color::hex(0xe5_8a_2e),
     usage_critical: Color::hex(0xe5_48_4b),
+    diff_added: Color::hex(0x4c_c3_8a),
+    diff_removed: Color::hex(0xe5_6a_6d),
 };

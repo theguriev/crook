@@ -1,17 +1,18 @@
 //! The tab strip's options, and the file that makes them outlive a launch.
 //!
-//! Five things the options menu writes — what a row stands for, how tall it
-//! is, what its title says, which chips it carries, and whether hovering it
-//! opens a detail card — plus their home on disk. The defaults are Warp's,
-//! value for value, because the menu is Warp's: a Crook that opened with
-//! different ones would be a different feature wearing the same labels.
+//! Six things the options menu writes — what a row stands for, how tall it is,
+//! what its title says, what its second line says, which chips it carries, and
+//! whether hovering it opens a detail card — plus their home on disk. The
+//! defaults are Warp's, value for value, because the menu is Warp's: a Crook
+//! that opened with different ones would be a different feature wearing the
+//! same labels.
 //!
 //! # Why JSON, and why one file
 //!
 //! Warp stores these in the user's TOML under `appearance.vertical_tabs.*`,
 //! reached through a settings-schema system that gives every key a type, a
 //! default, a migration path and a cloud-sync policy. Crook has none of that,
-//! and six keys do not earn it. JSON is what `serde_json` — already in the
+//! and seven keys do not earn it. JSON is what `serde_json` — already in the
 //! workspace for the usage client — reads and writes with no further
 //! dependency and no schema, and it is the format in which "keep the keys this
 //! build did not recognise" is a [`Map`] rather than a parser. The leaf key
@@ -96,6 +97,92 @@ pub enum PrimaryInfo {
     Branch,
 }
 
+impl PrimaryInfo {
+    /// What the menu calls this, verbatim from Warp.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Command => "Command / Conversation",
+            Self::WorkingDirectory => "Working Directory",
+            Self::Branch => "Branch",
+        }
+    }
+}
+
+/// What a `Compact` row's second line says — the menu's "Additional metadata".
+///
+/// Warp's `VerticalTabsCompactSubtitle`, under
+/// `appearance.vertical_tabs.compact_subtitle`. It names the same three facts
+/// [`PrimaryInfo`] does, because the second line is whichever of them the title
+/// did not take — see [`resolve_subtitle`] for what happens when a stored value
+/// collides with the title's.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Subtitle {
+    /// The git branch, falling back to the working directory, falling back to
+    /// nothing at all.
+    #[default]
+    Branch,
+    /// The working directory, or nothing when there is none.
+    WorkingDirectory,
+    /// What the session is doing — the same text the title shows under
+    /// [`PrimaryInfo::Command`].
+    Command,
+}
+
+impl Subtitle {
+    /// What the menu calls this, verbatim from Warp.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Branch => "Branch",
+            Self::WorkingDirectory => "Working Directory",
+            Self::Command => "Command / Conversation",
+        }
+    }
+}
+
+/// The subtitle a row actually shows, given what the title is showing.
+///
+/// Warp's `resolve_compact_subtitle`, and it is a *read-time* rule: a stored
+/// subtitle that names the same fact as the title is replaced here and the
+/// correction is never written back. So changing "Pane title as" can silently
+/// change what the second line says, and the file on disk can legitimately
+/// disagree with the screen. Normalising on write instead would lose the user's
+/// choice the moment they moved the title through the colliding value and back.
+pub fn resolve_subtitle(primary: PrimaryInfo, preference: Subtitle) -> Subtitle {
+    let collides = matches!(
+        (primary, preference),
+        (PrimaryInfo::Command, Subtitle::Command)
+            | (PrimaryInfo::WorkingDirectory, Subtitle::WorkingDirectory)
+            | (PrimaryInfo::Branch, Subtitle::Branch)
+    );
+
+    if collides {
+        default_subtitle(primary)
+    } else {
+        preference
+    }
+}
+
+/// The subtitle to fall back to when the stored one collides with the title.
+pub fn default_subtitle(primary: PrimaryInfo) -> Subtitle {
+    match primary {
+        PrimaryInfo::Command | PrimaryInfo::WorkingDirectory => Subtitle::Branch,
+        PrimaryInfo::Branch => Subtitle::Command,
+    }
+}
+
+/// The two subtitles the menu offers, in Warp's order.
+///
+/// Only ever the two facts the title is not already showing, which is why the
+/// menu can never be made to print the same string twice in one row.
+pub fn subtitle_options_for(primary: PrimaryInfo) -> [Subtitle; 2] {
+    match primary {
+        PrimaryInfo::Command => [Subtitle::Branch, Subtitle::WorkingDirectory],
+        PrimaryInfo::WorkingDirectory => [Subtitle::Branch, Subtitle::Command],
+        PrimaryInfo::Branch => [Subtitle::Command, Subtitle::WorkingDirectory],
+    }
+}
+
 /// Everything the tab strip's options menu writes.
 ///
 /// [`Copy`], so a renderer reads a snapshot of the whole menu by value and no
@@ -114,6 +201,11 @@ pub struct TabOptions {
     pub density: Density,
     /// "Pane title as".
     pub primary_info: PrimaryInfo,
+    /// "Additional metadata" — what a `Compact` row's second line says. Read
+    /// through [`resolve_subtitle`], never directly, or a row will print the
+    /// same fact twice.
+    #[serde(rename = "compact_subtitle")]
+    pub subtitle: Subtitle,
     /// "Show: PR link" — the chip linking to the pull request for the branch.
     pub show_pr_link: bool,
     /// "Show: Diff stats" — the chip counting added and removed lines.
@@ -124,7 +216,8 @@ pub struct TabOptions {
 }
 
 impl Default for TabOptions {
-    /// Warp's defaults: `Panes`, `Compact`, `Command`, and every "Show" on.
+    /// Warp's defaults: `Panes`, `Compact`, `Command`, `Branch`, and every
+    /// "Show" on.
     ///
     /// The three booleans are why this is written out rather than derived —
     /// `bool`'s default is `false`, and Warp's is `true` for all three.
@@ -133,6 +226,7 @@ impl Default for TabOptions {
             granularity: Granularity::default(),
             density: Density::default(),
             primary_info: PrimaryInfo::default(),
+            subtitle: Subtitle::default(),
             show_pr_link: true,
             show_diff_stats: true,
             show_details_on_hover: true,
@@ -176,6 +270,19 @@ impl Settings {
         };
 
         Self::load(path)
+    }
+
+    /// Settings that live only as long as the process.
+    ///
+    /// Nothing to read and nowhere to write, which is what a test and a
+    /// headless snapshot both want: a run that neither depends on the options
+    /// of whoever started it nor changes them.
+    pub fn ephemeral() -> Self {
+        Self {
+            path: None,
+            document: Map::new(),
+            tab_options: TabOptions::default(),
+        }
     }
 
     /// Reads the settings file at `path`, defaulting past anything unusable.
@@ -471,6 +578,7 @@ mod tests {
             granularity: Granularity::Tabs,
             density: Density::Expanded,
             primary_info: PrimaryInfo::Branch,
+            subtitle: Subtitle::Command,
             show_pr_link: false,
             show_diff_stats: false,
             show_details_on_hover: false,
@@ -484,6 +592,7 @@ mod tests {
         assert_eq!(Granularity::Panes, options.granularity);
         assert_eq!(Density::Compact, options.density);
         assert_eq!(PrimaryInfo::Command, options.primary_info);
+        assert_eq!(Subtitle::Branch, options.subtitle);
         assert!(options.show_pr_link);
         assert!(options.show_diff_stats);
         assert!(options.show_details_on_hover);
@@ -516,6 +625,7 @@ mod tests {
 
         assert_eq!(
             vec![
+                "compact_subtitle",
                 "display_granularity",
                 "primary_info",
                 "show_details_on_hover",
@@ -667,7 +777,7 @@ mod tests {
         let written: Map<String, Value> =
             serde_json::from_str(&contents).expect("the file should be a JSON object");
 
-        assert_eq!(6, written.len());
+        assert_eq!(7, written.len());
         assert!(!contents.contains("padding"));
         assert_eq!(
             everything_flipped(),
@@ -688,14 +798,83 @@ mod tests {
 
     #[test]
     fn test_settings_with_nowhere_to_save_say_so_instead_of_panicking() {
-        let settings = Settings {
-            path: None,
-            document: Map::new(),
-            tab_options: TabOptions::default(),
-        };
+        let settings = Settings::ephemeral();
 
         assert!(settings.path().is_none());
+        assert_eq!(TabOptions::default(), settings.tab_options());
         assert!(settings.save_blocking().is_err());
+    }
+
+    #[test]
+    fn test_a_subtitle_that_repeats_the_title_falls_back_instead() {
+        // The whole point of the rule: no row ever prints the same fact twice.
+        assert_eq!(
+            Subtitle::Branch,
+            resolve_subtitle(PrimaryInfo::Command, Subtitle::Command)
+        );
+        assert_eq!(
+            Subtitle::Branch,
+            resolve_subtitle(PrimaryInfo::WorkingDirectory, Subtitle::WorkingDirectory)
+        );
+        assert_eq!(
+            Subtitle::Command,
+            resolve_subtitle(PrimaryInfo::Branch, Subtitle::Branch)
+        );
+    }
+
+    #[test]
+    fn test_a_subtitle_that_does_not_repeat_the_title_is_left_alone() {
+        for primary in [
+            PrimaryInfo::Command,
+            PrimaryInfo::WorkingDirectory,
+            PrimaryInfo::Branch,
+        ] {
+            for subtitle in subtitle_options_for(primary) {
+                assert_eq!(
+                    subtitle,
+                    resolve_subtitle(primary, subtitle),
+                    "{primary:?} rewrote a subtitle it does not collide with"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_the_menu_only_ever_offers_the_two_facts_the_title_is_not_showing() {
+        assert_eq!(
+            [Subtitle::Branch, Subtitle::WorkingDirectory],
+            subtitle_options_for(PrimaryInfo::Command)
+        );
+        assert_eq!(
+            [Subtitle::Branch, Subtitle::Command],
+            subtitle_options_for(PrimaryInfo::WorkingDirectory)
+        );
+        assert_eq!(
+            [Subtitle::Command, Subtitle::WorkingDirectory],
+            subtitle_options_for(PrimaryInfo::Branch)
+        );
+    }
+
+    #[test]
+    fn test_the_correction_is_never_written_back() {
+        // Warp resolves at read time and stores the preference untouched, so
+        // moving the title through a colliding value and back has to give the
+        // subtitle the user actually chose.
+        let mut options = TabOptions {
+            primary_info: PrimaryInfo::WorkingDirectory,
+            subtitle: Subtitle::WorkingDirectory,
+            ..TabOptions::default()
+        };
+        assert_eq!(
+            Subtitle::Branch,
+            resolve_subtitle(options.primary_info, options.subtitle)
+        );
+
+        options.primary_info = PrimaryInfo::Command;
+        assert_eq!(
+            Subtitle::WorkingDirectory,
+            resolve_subtitle(options.primary_info, options.subtitle)
+        );
     }
 
     #[test]

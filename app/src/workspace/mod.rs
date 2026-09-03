@@ -7,19 +7,26 @@
 //! out of sync with the strip it draws.
 //!
 //! The one exception is [`UsageChip`], which *is* a view. It has its own
-//! action type, which is what keeps [`Workspace`]'s action enum about tabs and
-//! only tabs, and it observes the usage model itself so a reading that lands
+//! action type, and it observes the usage model itself so a reading that lands
 //! repaints a pill rather than the whole header.
+//!
+//! [`Workspace`]'s own action type is [`WorkspaceAction`], which carries the
+//! strip's vocabulary and the options menu's side by side. A view handles
+//! exactly one action type, and keeping the menu out of `TabAction` is what
+//! lets the tab model stay a thing that can be tested with no window.
 
+mod action;
 mod body;
 mod header_toolbar;
 mod tab_bar;
+mod tab_options_menu;
 mod usage_chip;
 mod view;
 
 #[cfg(test)]
 mod tests;
 
+pub use action::{OptionsAction, WorkspaceAction};
 pub use usage_chip::{UsageChip, UsageChipAction};
 pub use view::{Fonts, QuitRequest, Workspace};
 

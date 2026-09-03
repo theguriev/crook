@@ -88,11 +88,19 @@ impl LocalQueue {
     /// again could make more progress.
     pub fn run_until_parked(&self) -> usize {
         let mut ran = 0;
-        while let Some(runnable) = self.runnables.lock().pop_front() {
+        loop {
+            // `let … else` rather than `while let`, so the guard is dropped at
+            // the end of *this statement* rather than at the end of the loop
+            // body. A `while let` holds it across `run()`, and a task that
+            // schedules another foreground task — which is what every
+            // self-rescheduling poll chain does from its own completion —
+            // then deadlocks on [`Self::push`].
+            let Some(runnable) = self.runnables.lock().pop_front() else {
+                return ran;
+            };
             runnable.run();
             ran += 1;
         }
-        ran
     }
 
     /// Blocks the current thread on `future`, running queued tasks whenever it
@@ -176,8 +184,20 @@ impl Background {
 
 impl Drop for Background {
     fn drop(&mut self) {
-        self.shared.is_shutting_down.store(true, Ordering::Release);
+        {
+            // Under the lock, and that is the whole of it. A worker holds this
+            // mutex from the moment it reads the flag until `wait` atomically
+            // releases it and parks, so taking it here means the flag can only
+            // be set while every worker is either parked — and so will be woken
+            // — or not yet looking. Setting it outside the lock leaves the
+            // window in between: `notify_all` reaches nobody, the worker parks
+            // a moment later against a flag that is already true, and the
+            // `join` below never returns.
+            let _shutting_down = self.shared.runnables.lock();
+            self.shared.is_shutting_down.store(true, Ordering::Release);
+        }
         self.shared.ready.notify_all();
+
         for worker in self.workers.drain(..) {
             // A worker only blocks on the condvar, so this cannot deadlock —
             // but a task that blocks forever would hold shutdown up, which is
@@ -215,8 +235,40 @@ impl BackgroundShared {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+    use std::sync::mpsc;
+    use std::time::Duration;
 
     use super::*;
+
+    /// How long the shutdown test waits before calling it a hang.
+    ///
+    /// Generous, because it is competing with every other test in the binary
+    /// for cores; the failure it is looking for is unbounded, not slow.
+    const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
+
+    #[test]
+    fn a_pool_dropped_before_its_workers_park_still_shuts_them_down() {
+        // The lost wake-up. A worker reads the shutdown flag, finds it false,
+        // and is about to park; the flag is set and `notify_all` fires in that
+        // instant, reaching nobody; the worker then sleeps forever against a
+        // flag that is already true and `join` never returns. Creating and
+        // dropping a pool immediately is what makes the window as wide as it
+        // gets, and several workers is what makes hitting it likely.
+        //
+        // Run on a thread of its own so the failure is a failing test rather
+        // than a test binary that hangs.
+        let (shut_down, finished) = mpsc::channel();
+        std::thread::spawn(move || {
+            for _ in 0..200 {
+                drop(Background::new(4));
+            }
+            let _ = shut_down.send(());
+        });
+
+        finished
+            .recv_timeout(SHUTDOWN_TIMEOUT)
+            .expect("dropping a pool hung joining a worker that never woke");
+    }
 
     #[test]
     fn foreground_tasks_run_on_the_queue_that_scheduled_them() {
@@ -233,6 +285,33 @@ mod tests {
         queue.run_until_parked();
         assert!(ran.get());
         queue.block_on(task);
+    }
+
+    #[test]
+    fn a_task_that_schedules_another_does_not_deadlock_the_queue() {
+        // Every self-rescheduling poll chain does this: the cycle's completion
+        // callback spawns the next cycle. A queue that held its lock across a
+        // task's run would deadlock on the very first one.
+        let queue = LocalQueue::new();
+        let foreground = queue.foreground();
+        let ran = Rc::new(Cell::new(0));
+
+        let spawn_one = {
+            let ran = ran.clone();
+            let queue_foreground = foreground.clone();
+            foreground.spawn(async move {
+                ran.set(ran.get() + 1);
+                let ran = ran.clone();
+                queue_foreground
+                    .spawn(async move { ran.set(ran.get() + 1) })
+                    .detach();
+            })
+        };
+        spawn_one.detach();
+
+        // Both, in one pump: the second was made ready by the first.
+        assert_eq!(queue.run_until_parked(), 2);
+        assert_eq!(ran.get(), 2);
     }
 
     #[test]

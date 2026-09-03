@@ -26,6 +26,7 @@
 //! makes it worth having in CI on a machine with no display.
 
 pub mod git;
+pub mod git_model;
 pub mod platform_insets;
 pub mod process;
 pub mod settings;
@@ -51,9 +52,10 @@ use crookui_core::scene::Scene;
 use crookui_core::{AddSingletonModel as _, App, Presenter, WindowId};
 
 use crate::platform_insets::WindowChrome;
+use crate::settings::{Density, Settings};
 use crate::tab::{AgentStatus, Direction, PaneId, Tab, TabAction};
 use crate::usage_model::UsageModel;
-use crate::workspace::{Fonts, QuitRequest, Workspace};
+use crate::workspace::{Fonts, QuitRequest, Workspace, WorkspaceAction};
 
 /// The window Crook opens, in logical pixels.
 const WINDOW_SIZE: Vector2F = vec2f(1024., 640.);
@@ -109,14 +111,36 @@ enum Startup {
     Window {
         /// Exit after this many frames, so the binary is runnable unattended.
         frames: Option<u32>,
+        /// What the command line asked to start differently.
+        overrides: Overrides,
     },
     /// Render one frame to a PNG and exit.
     Snapshot {
         /// Where to write it.
         path: PathBuf,
+        /// What the command line asked to start differently.
+        overrides: Overrides,
     },
     /// The argument was answered on stdout; there is nothing left to do.
     Answered,
+}
+
+/// Startup state a run was asked for rather than loaded.
+///
+/// These exist so a snapshot can show a state a fresh install is not in — a
+/// menu is not much of a rendering check while it is closed, and neither is a
+/// hover card nobody is hovering. `density` is handed to
+/// [`Workspace::override_density`], which puts it in front of the renderer
+/// without letting it into the settings the next menu click saves, so asking
+/// for one does not change the options of whoever asked.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+struct Overrides {
+    /// Start with the tab options menu open.
+    menu: bool,
+    /// Start with the first row's hover detail card up.
+    hover: bool,
+    /// Start in this density rather than the saved one.
+    density: Option<Density>,
 }
 
 /// Runs Crook.
@@ -129,8 +153,8 @@ pub fn run(channel: Channel) -> Result<()> {
 
     match parse_args(channel, std::env::args().skip(1))? {
         Startup::Answered => Ok(()),
-        Startup::Snapshot { path } => write_snapshot(&path),
-        Startup::Window { frames } => open_window(channel, frames),
+        Startup::Snapshot { path, overrides } => write_snapshot(&path, overrides),
+        Startup::Window { frames, overrides } => open_window(channel, frames, overrides),
     }
 }
 
@@ -169,6 +193,7 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
     let mut args = args.peekable();
     let mut frames = None;
     let mut snapshot = None;
+    let mut overrides = Overrides::default();
 
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -188,13 +213,23 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 let count = args.next().context("`--frames` needs a count")?;
                 frames = Some(count.parse().context("`--frames` takes a number")?);
             }
+            "--menu" => overrides.menu = true,
+            "--hover" => overrides.hover = true,
+            "--density" => {
+                let mode = args.next().context("`--density` needs a mode")?;
+                overrides.density = Some(match mode.as_str() {
+                    "compact" => Density::Compact,
+                    "expanded" => Density::Expanded,
+                    other => bail!("`--density` takes compact or expanded, not {other}"),
+                });
+            }
             other => bail!("unrecognised argument {other}; try --help"),
         }
     }
 
     match snapshot {
-        Some(path) => Ok(Startup::Snapshot { path }),
-        None => Ok(Startup::Window { frames }),
+        Some(path) => Ok(Startup::Snapshot { path, overrides }),
+        None => Ok(Startup::Window { frames, overrides }),
     }
 }
 
@@ -208,6 +243,9 @@ USAGE:
 OPTIONS:
     --snapshot <PATH>  Render one frame of the real view tree to a PNG and exit
     --frames <N>       Draw N frames, then exit; for running unattended
+    --menu             Start with the tab options menu open
+    --hover            Start with the first row's detail card up
+    --density <MODE>   Start in `compact` or `expanded` density rather than the saved one
     -h, --help         Print this message
     -V, --version      Print the version and channel
 
@@ -222,11 +260,26 @@ KEYS:
     )
 }
 
-/// One worker is parked on the usage poll's timer between readings, so the
-/// pool needs a second one to have anything left over for real work.
+/// How many workers are parked on a timer at any moment.
+///
+/// Two: the usage poll between readings, and the git gather between cycles.
+/// Both are one background task for the whole cycle — the wait *and* the work
+/// — so each holds its worker across a `recv_timeout` rather than yielding it,
+/// and neither is ever counted as idle. Raise this when a third such chain
+/// appears, and see the test at the bottom of this file for what happens if it
+/// is not raised.
+const PARKED_WORKERS: usize = 2;
+
+/// A pool with a worker left over once both poll chains are asleep.
+///
+/// The floor is not a round number, it is [`PARKED_WORKERS`] plus one. On a
+/// two-core machine a pool the size of the chains has nothing left to run a
+/// settings save on, and a save is the one background task a click is waiting
+/// for: it would sit in the queue until one of the timers expired, up to
+/// fifteen seconds, and be discarded outright if the window closed first.
 fn background_pool() -> Arc<Background> {
     let cores = std::thread::available_parallelism().map_or(1, |count| count.get());
-    Arc::new(Background::new(cores.max(2)))
+    Arc::new(Background::new(cores.max(PARKED_WORKERS + 1)))
 }
 
 fn resolve_fonts(font_db: &CosmicFontDb) -> Result<Fonts> {
@@ -240,12 +293,42 @@ fn resolve_fonts(font_db: &CosmicFontDb) -> Result<Fonts> {
     })
 }
 
-fn open_window(channel: Channel, frames: Option<u32>) -> Result<()> {
+/// Puts the workspace into the state the command line asked to start in.
+///
+/// Density first, because the other two are read against it: the hover card is
+/// armed on the first row of a strip whose row heights the density decides.
+///
+/// The density goes to [`Workspace::override_density`] rather than into the
+/// [`Settings`] the workspace was built from. Folding it into the settings is
+/// the obvious arrangement and it is wrong: a menu click saves the *whole*
+/// options snapshot, so the first click of the run would write the override to
+/// the file and `--density expanded` — a way to look at a frame — would become
+/// what every later launch does.
+fn apply_overrides(
+    workspace: &mut Workspace,
+    overrides: Overrides,
+    ctx: &mut ViewContext<Workspace>,
+) {
+    if let Some(density) = overrides.density {
+        workspace.override_density(density, ctx);
+    }
+    if overrides.menu {
+        workspace.open_options_menu(ctx);
+    }
+    if overrides.hover {
+        workspace.hover_first_row(ctx);
+    }
+}
+
+fn open_window(channel: Channel, frames: Option<u32>, overrides: Overrides) -> Result<()> {
     // Everything fallible happens before the event loop takes over, because
     // the delegate is built inside a closure that cannot report an error.
     let font_db = CosmicFontDb::new().context("no usable system fonts")?;
     let fonts = resolve_fonts(&font_db)?;
     let text_layout: Arc<dyn TextLayoutSystem> = Arc::new(font_db.text_layout());
+    // Blocking, and deliberately: one small file, read once, before there is a
+    // window to stall.
+    let settings = Settings::for_user();
 
     let options = WindowOptions {
         title: channel.window_title(),
@@ -255,25 +338,40 @@ fn open_window(channel: Channel, frames: Option<u32>) -> Result<()> {
     };
 
     crookui::run(options, Box::new(font_db), move |platform| {
-        Box::new(Shell::new(platform, fonts, text_layout, frames))
+        Box::new(Shell::new(
+            platform,
+            fonts,
+            settings.clone(),
+            text_layout.clone(),
+            frames,
+            overrides,
+        ))
     })
 }
 
 /// Renders one frame of the real view tree and writes it to `path`.
-fn write_snapshot(path: &std::path::Path) -> Result<()> {
+fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
     let font_db = CosmicFontDb::new().context("no usable system fonts")?;
     let fonts = resolve_fonts(&font_db)?;
     let text_layout: Arc<dyn TextLayoutSystem> = Arc::new(font_db.text_layout());
 
     // A local queue stands in for the event loop. Nothing is spawned onto it:
-    // the usage poll is deliberately not started, so the frame is the same on
-    // a build machine with no Claude Code session and no network.
+    // neither the usage poll nor the git gather is started, so the frame is the
+    // same on a build machine with no Claude Code session, no network and no
+    // repository — and it uses ephemeral settings, so it is also the same
+    // whatever options the person running it happens to have.
     let mut app = App::new(LocalQueue::new().foreground(), background_pool());
     app.update(|ctx| ctx.add_singleton_model(UsageModel::new));
 
     let quit: QuitRequest = Rc::new(|| {});
-    let (window_id, workspace) = app.add_window(|ctx| Workspace::new(fonts, quit, ctx));
-    app.update(|ctx| workspace.update(ctx, seed_snapshot_tabs));
+    let settings = Settings::ephemeral();
+    let (window_id, workspace) = app.add_window(|ctx| Workspace::new(fonts, settings, quit, ctx));
+    app.update(|ctx| {
+        workspace.update(ctx, |workspace, ctx| {
+            seed_snapshot_tabs(workspace, ctx);
+            apply_overrides(workspace, overrides, ctx);
+        });
+    });
 
     let mut presenter = Presenter::new(window_id, text_layout);
     let scene = app.update(|ctx| {
@@ -302,11 +400,58 @@ fn write_snapshot(path: &std::path::Path) -> Result<()> {
 
 /// Fills the snapshot's strip with something worth looking at.
 ///
-/// A window opens on one tab holding one pane; a rendering check wants the
-/// states that cannot show it — an unselected row beside a selected one, each
-/// status the dot has a colour for, and a tab split into two panels so the
-/// body is not always a single box.
+/// A window opens on one tab holding one pane in the directory Crook was
+/// started from; a rendering check wants the states that cannot show — an
+/// unselected row beside a selected one, each status the dot has a colour for,
+/// a tab split into two panels, and four different repositories so that every
+/// "Pane title as" mode has something distinct to print.
+///
+/// The git facts are recorded rather than read. The snapshot never starts the
+/// gather chain — it must render the same frame on a machine with no `git` and
+/// no checkout — and a frame with no branch on any row would not show what the
+/// options actually do.
 fn seed_snapshot_tabs(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace>) {
+    /// One seeded session: its name, what its agent is doing, where it works,
+    /// and what git says about there.
+    struct Seeded {
+        title: &'static str,
+        status: AgentStatus,
+        directory: &'static str,
+        branch: &'static str,
+        diff: Option<(u32, u32, u32)>,
+    }
+
+    let seeded = [
+        Seeded {
+            title: "port the tab bar",
+            status: AgentStatus::Running,
+            directory: "app/src/workspace",
+            branch: "eugen/tab-options",
+            diff: Some((6, 214, 37)),
+        },
+        Seeded {
+            title: "write the usage chip",
+            status: AgentStatus::NeedsInput,
+            directory: "crates/crook_usage/src",
+            branch: "main",
+            diff: Some((1, 12, 0)),
+        },
+        Seeded {
+            title: "bisect the flaky test",
+            status: AgentStatus::Failed,
+            directory: "crates/crookui/src/rendering",
+            branch: "eugen/atlas-repro",
+            diff: None,
+        },
+        Seeded {
+            title: "read the recon notes",
+            status: AgentStatus::Idle,
+            directory: "docs",
+            branch: "main",
+            diff: None,
+        },
+    ];
+
     workspace.apply(TabAction::New, ctx);
     workspace.apply(TabAction::New, ctx);
 
@@ -321,18 +466,33 @@ fn seed_snapshot_tabs(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace
         .panes()
         .map(|(_, pane)| pane.id())
         .collect();
-    let sessions = [
-        ("port the tab bar", AgentStatus::Running),
-        ("write the usage chip", AgentStatus::NeedsInput),
-        ("bisect the flaky test", AgentStatus::Failed),
-        ("read the recon notes", AgentStatus::Idle),
-    ];
 
-    for (id, (title, status)) in panes.iter().zip(sessions) {
+    let root = std::env::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/"))
+        .join("work")
+        .join("crook");
+
+    for (id, seed) in panes.iter().zip(seeded) {
+        let directory = root.join(seed.directory);
+        let facts = git::GitFacts {
+            branch: Some(git::Head::Branch(seed.branch.to_owned())),
+            diff: seed.diff.map(
+                |(files_changed, lines_added, lines_removed)| git::DiffStats {
+                    files_changed,
+                    lines_added,
+                    lines_removed,
+                },
+            ),
+        };
+
         workspace.update_session(*id, ctx, |session| {
-            session.derived_title = Some(title.to_owned());
-            session.status = status;
+            session.derived_title = Some(seed.title.to_owned());
+            session.status = seed.status;
+            session.working_directory = Some(directory.clone());
         });
+        workspace
+            .git()
+            .update(ctx, |model, ctx| model.record(directory, facts, ctx));
     }
 
     // The split tab's first pane: the body then shows two panels, one of them
@@ -360,8 +520,10 @@ impl Shell {
     fn new(
         platform: &Platform,
         fonts: Fonts,
+        settings: Settings,
         text_layout: Arc<dyn TextLayoutSystem>,
         frame_budget: Option<u32>,
+        overrides: Overrides,
     ) -> Self {
         let mut app = App::new(platform.foreground.clone(), background_pool());
         app.update(|ctx| ctx.add_singleton_model(UsageModel::new));
@@ -374,9 +536,18 @@ impl Shell {
             Rc::new(move || proxy.exit())
         };
 
-        let (window_id, workspace) = app.add_window(|ctx| Workspace::new(fonts, quit, ctx));
+        let (window_id, workspace) =
+            app.add_window(|ctx| Workspace::new(fonts, settings, quit, ctx));
         app.update(|ctx| {
-            workspace.update(ctx, |workspace, ctx| workspace.start_usage_poll(ctx));
+            workspace.update(ctx, |workspace, ctx| {
+                // Before the polls, not after: `start_git_poll` decides
+                // whether to pay for `git diff` from the density it finds, and
+                // a density the command line asked for has to be in place by
+                // then or the first cycle gathers the wrong half.
+                apply_overrides(workspace, overrides, ctx);
+                workspace.start_usage_poll(ctx);
+                workspace.start_git_poll(ctx);
+            });
         });
 
         // The only thing that makes a frame happen: a view said it changed.
@@ -411,7 +582,7 @@ impl Shell {
         // element under the pointer to start the chain from.
         let chain = [self.workspace.id()];
         self.app
-            .dispatch_typed_action(self.window_id, &chain, &action);
+            .dispatch_typed_action(self.window_id, &chain, &WorkspaceAction::Tab(action));
         true
     }
 }
@@ -475,7 +646,10 @@ mod tests {
     fn no_arguments_opens_a_window_that_runs_until_it_is_closed() {
         assert_eq!(
             parse(&[]).expect("no arguments is valid"),
-            Startup::Window { frames: None }
+            Startup::Window {
+                frames: None,
+                overrides: Overrides::default()
+            }
         );
     }
 
@@ -483,7 +657,10 @@ mod tests {
     fn frames_bounds_the_run() {
         assert_eq!(
             parse(&["--frames", "3"]).expect("a count is valid"),
-            Startup::Window { frames: Some(3) }
+            Startup::Window {
+                frames: Some(3),
+                overrides: Overrides::default()
+            }
         );
     }
 
@@ -493,8 +670,93 @@ mod tests {
             parse(&["--frames", "3", "--snapshot", "/tmp/frame.png"])
                 .expect("both are valid together"),
             Startup::Snapshot {
-                path: PathBuf::from("/tmp/frame.png")
+                path: PathBuf::from("/tmp/frame.png"),
+                overrides: Overrides::default()
             }
+        );
+    }
+
+    #[test]
+    fn the_startup_overrides_reach_both_kinds_of_run() {
+        assert_eq!(
+            parse(&["--menu", "--hover", "--density", "expanded"]).expect("valid"),
+            Startup::Window {
+                frames: None,
+                overrides: Overrides {
+                    menu: true,
+                    hover: true,
+                    density: Some(Density::Expanded)
+                }
+            }
+        );
+        assert_eq!(
+            parse(&["--snapshot", "/tmp/frame.png", "--menu"]).expect("valid"),
+            Startup::Snapshot {
+                path: PathBuf::from("/tmp/frame.png"),
+                overrides: Overrides {
+                    menu: true,
+                    hover: false,
+                    density: None
+                }
+            }
+        );
+        assert!(parse(&["--density", "cosy"]).is_err());
+        assert!(parse(&["--density"]).is_err());
+    }
+
+    /// Whether a pool of `workers` can still run a task once
+    /// [`PARKED_WORKERS`] of them are parked on a timer.
+    ///
+    /// The parked tasks report that they are *running* before they park, so
+    /// the answer never depends on how quickly the pool picked them up.
+    fn a_worker_is_left_over(workers: usize, patience: std::time::Duration) -> bool {
+        use std::sync::mpsc;
+
+        let pool = Background::new(workers);
+        let mut releases = Vec::new();
+
+        for _ in 0..PARKED_WORKERS {
+            let (release, parked) = mpsc::channel::<()>();
+            let (started, running) = mpsc::channel();
+            releases.push(release);
+            pool.spawn(async move {
+                let _ = started.send(());
+                // Stands in for a poll chain's `recv_timeout`: the worker is
+                // held for the whole wait rather than handed back.
+                let _ = parked.recv();
+            })
+            .detach();
+            running
+                .recv_timeout(std::time::Duration::from_secs(30))
+                .expect("a parked task never reached a worker");
+        }
+
+        let (done, finished) = mpsc::channel();
+        pool.spawn(async move {
+            let _ = done.send(());
+        })
+        .detach();
+
+        let ran = finished.recv_timeout(patience).is_ok();
+        // Closing the channels lets the parked tasks return, so dropping the
+        // pool joins its workers instead of hanging on them.
+        drop(releases);
+        ran
+    }
+
+    #[test]
+    fn the_pool_keeps_a_worker_free_of_the_chains_that_park_on_timers() {
+        // The whole of why `background_pool`'s floor is not the core count.
+        // On a two-core machine the old `max(2)` gave the two poll chains the
+        // entire pool, and the settings save a click had just asked for sat in
+        // the queue behind a fifteen-second sleep.
+        assert!(
+            !a_worker_is_left_over(PARKED_WORKERS, std::time::Duration::from_millis(500)),
+            "a pool the size of the poll chains had a worker to spare, so              this test is no longer describing the machinery it names"
+        );
+        assert!(
+            a_worker_is_left_over(PARKED_WORKERS + 1, std::time::Duration::from_secs(30)),
+            "one worker per parked chain plus one was not enough to run a              settings save"
         );
     }
 

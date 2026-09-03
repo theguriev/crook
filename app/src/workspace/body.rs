@@ -17,6 +17,7 @@ use crookui_core::prelude::*;
 use crate::tab::{Pane, SplitAxis, TabAction};
 use crate::theme::THEME;
 
+use super::action::WorkspaceAction;
 use super::view::Workspace;
 
 pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
@@ -141,7 +142,9 @@ fn panel(workspace: &Workspace, pane: &Pane, state: PaneState) -> Box<dyn Elemen
     // `Activate(pane_id, ActivationReason::Click)`. On an unsplit tab this
     // re-focuses the pane that is already focused, which is a no-op that costs
     // no frame.
-    .on_click(move |_, ctx, _| ctx.dispatch_typed_action(TabAction::FocusPane(id)))
+    .on_click(move |_, ctx, _| {
+        ctx.dispatch_typed_action(WorkspaceAction::Tab(TabAction::FocusPane(id)));
+    })
     .finish()
 }
 

@@ -90,6 +90,35 @@ pub fn branch_label(branch: Option<&str>, fallback: &str) -> (String, bool) {
     }
 }
 
+/// A working directory as a row prints it: `$HOME` replaced by `~`.
+///
+/// Warp's `warp_util::path::user_friendly_path`, and it does exactly one thing
+/// — no shortening of middle components, no basename-only mode.
+/// `~/work/crook/app/src` stays `~/work/crook/app/src`, and it is
+/// [`truncate_start`] that decides what survives a narrow row.
+///
+/// The prefix only counts when the next character is a separator, so a sibling
+/// directory named `/Users/euge` beside `/Users/eugen` is not silently
+/// reprinted as `~n`.
+pub fn user_friendly_path(path: &Path, home: Option<&Path>) -> String {
+    let display = path.to_string_lossy().into_owned();
+    let Some(home) = home.map(|home| home.to_string_lossy().into_owned()) else {
+        return display;
+    };
+    if home.is_empty() {
+        return display;
+    }
+
+    let Some(rest) = display.strip_prefix(&home) else {
+        return display;
+    };
+    match rest.chars().next() {
+        None => "~".to_owned(),
+        Some(separator) if std::path::is_separator(separator) => format!("~{rest}"),
+        Some(_) => display,
+    }
+}
+
 /// Shortens `text` to `max_chars`, marking the cut with a trailing ellipsis.
 ///
 /// Warp does not do this. Its branch label is `Shrinkable` plus
@@ -111,5 +140,30 @@ pub fn truncate_end(text: &str, max_chars: usize) -> String {
 
     let mut truncated: String = text.chars().take(max_chars - 1).collect();
     truncated.push('\u{2026}');
+    truncated
+}
+
+/// Shortens `text` to `max_chars` by cutting the *front*, marking the cut with
+/// a leading ellipsis.
+///
+/// The direction is the whole point, and it is the single most visible thing a
+/// port of this gets wrong. Warp clips a working directory with
+/// `ClipConfig::start()` and a title or a branch with `ClipConfig::ellipsis()`,
+/// so a narrow row reads `…/crook/app/src` and never `~/work/cro…`. The tail of
+/// a path is the part that says where you are.
+///
+/// Like [`truncate_end`], this is a stand-in for a clip config the renderer
+/// does not have yet, and should go the day it grows one.
+pub fn truncate_start(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
+    let count = text.chars().count();
+    if count <= max_chars {
+        return text.to_owned();
+    }
+
+    let mut truncated = String::from('\u{2026}');
+    truncated.extend(text.chars().skip(count - (max_chars - 1)));
     truncated
 }

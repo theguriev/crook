@@ -23,7 +23,7 @@ const CHIP_GUTTER: f32 = 12.;
 /// against.
 const CHIP_LIFT: f32 = 5.;
 
-pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
+pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
     // Crook's window is decorated by the window manager, so the controls are
     // in a bar of their own above this row and nothing here has to move out of
     // their way. The call is kept rather than the answer hard-coded: the day
@@ -37,7 +37,7 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
         Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::End)
-            .with_child(Expanded::new(1., tab_bar::render(workspace)).finish())
+            .with_child(Expanded::new(1., tab_bar::render(workspace, app)).finish())
             .with_child(
                 Container::new(ChildView::new(workspace.chip()).finish())
                     .with_margin_left(CHIP_GUTTER)
