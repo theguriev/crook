@@ -23,11 +23,13 @@ Two features, and the page that configures them:
 - **A Claude Code usage chip** in the header, showing how much of the current session's token
   budget is spent and when it resets. It reads the session Claude Code already stores locally
   (`~/.claude/.credentials.json`, plus the macOS Keychain) and polls the usage endpoint.
-- **A settings page** — `cmd/ctrl-,`, or the gear menu's last entry — over four pages:
-  Appearance, Usage, Keys and About. Every option on it is one the application actually
-  reads; there is nothing on that page that does not do something. Changes apply on the
-  click and are written to `<config>/crook/settings.json`, which is the same eight keys the
-  gear menu writes plus one.
+- **A settings page**, which opens the way a session does: `cmd/ctrl-,` — or the gear menu's
+  last entry — puts it in a **tab of its own**, listed in the strip beside the work it
+  configures, splittable next to that work, and closed by the same × and the same
+  `cmd/ctrl-w` as any other pane. Four pages: Appearance, Usage, Keys and About. Every option
+  on it is one the application actually reads; there is nothing there that does not do
+  something. Changes apply on the click and are written to `<config>/crook/settings.json`,
+  which is the same eight keys the gear menu writes plus one.
 
 Everything else is out of scope on purpose. There is no PTY, no terminal emulation, no
 keymap system, no persistence and no telemetry. The list of what is absent — and what adding

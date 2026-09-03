@@ -1,29 +1,38 @@
-//! The settings page: a card over the window, with a rail of pages down its
-//! left edge.
+//! The settings page: the rail of pages, and the page it has selected.
 //!
-//! # Why a card and not a pane
+//! # A pane, like Warp's
 //!
-//! Warp's settings are a *pane*: the same machinery a terminal session runs
-//! in, so settings can be split beside the thing being configured, dragged,
-//! maximised, and kept — one per window — with its scroll position and search
-//! query intact across a close and a reopen. It is the best idea in that part
-//! of Warp and it is the one thing here that deliberately does not copy it.
+//! Settings are not a modal here. They are a **pane** — the same thing an
+//! agent session lives in — which means they open in a tab of their own, sit
+//! in the strip beside the work they configure, can be split next to it, and
+//! close with the same close button, the same middle click and the same
+//! `cmd/ctrl-w` as anything else. That is Warp's design
+//! (`app/src/pane_group/pane/settings_pane.rs`, plus the per-window manager
+//! that keeps at most one of them), and it is the best idea in that part of
+//! Warp: the thing you are configuring stays on screen while you configure it.
 //!
-//! The reason is Crook's premise. A tab is one agent's workspace and a pane is
-//! one agent session; the tabs panel lists panes, gives each a status dot, a
-//! branch and a working directory, and the whole strip is a list of what is
-//! being worked on. A settings pane would have to be a second kind of pane —
-//! one with no session, no directory, no status — and every row renderer,
-//! every granularity rule and every git lookup in `row_content` would grow a
-//! "unless it is the settings one" branch. That is a real cost paid so that
-//! settings can be split beside a terminal Crook does not have yet.
+//! What it cost is written down where it is paid: [`PaneContent`] is now an
+//! enum, [`Pane::session`] and [`Pane::status`] return `Option`s, and the two
+//! row renderers each carry one branch for a row that stands for something
+//! other than an agent. That is the whole bill.
 //!
-//! So it is a modal card, dismissed by clicking outside it, by the close
-//! button, or with Escape. What it keeps from Warp is everything that is not
-//! about being a pane: the rail of pages, the category headings with a rule
-//! between them, the row anatomy, apply-on-click with no Save button, the
-//! reset button that doubles as the modified indicator, and inert rows drawn
-//! greyed rather than dropped.
+//! [`PaneContent`]: crate::tab::PaneContent
+//! [`Pane::session`]: crate::tab::Pane::session
+//! [`Pane::status`]: crate::tab::Pane::status
+//!
+//! # What the pane draws
+//!
+//! A rail down the left edge and a page beside it, which is Warp's layout: the
+//! rail is a fixed column with a right border, and the content is top-centred
+//! against a maximum width so a wide pane does not stretch a row of settings
+//! across a metre of screen. The page's own chrome is the panel's — the fill,
+//! the border that says which pane is focused, the corner radius — so this
+//! file paints no background of its own and the rail is a border rather than a
+//! second surface.
+//!
+//! There is no close button in the corner and no Escape binding. Both would be
+//! a second way to do what the row's close button and `cmd/ctrl-w` already do
+//! to every pane, and a settings pane is not special enough to have its own.
 //!
 //! # What it does not have
 //!
@@ -45,7 +54,6 @@ mod widgets;
 use std::collections::HashMap;
 
 use crookui_core::elements::{MouseStateHandle, Padding};
-use crookui_core::fonts::{Properties, Weight};
 use crookui_core::prelude::*;
 
 use crate::settings::{Density, Granularity, Layout, PrimaryInfo, Subtitle};
@@ -54,13 +62,13 @@ use crate::theme::THEME;
 use super::action::{SettingsAction, WorkspaceAction};
 use super::view::Workspace;
 
-/// The card's size, when the window has room for it.
+/// The widest the content column is allowed to get, before it is centred in
+/// whatever is left.
 ///
-/// A window smaller than this gets a card the size of the window instead —
-/// [`ConstrainedBox`] clamps a fixed size against the parent's maximum — so
-/// there is no window in which the page hangs off the edge of the screen.
-const CARD_WIDTH: f32 = 720.;
-const CARD_HEIGHT: f32 = 480.;
+/// Warp's is 800 against a 12px body; this is that, scaled to a pane that also
+/// has a 160px rail in front of it. Past it a row's label and its control end
+/// up so far apart that the eye loses which control belongs to which row.
+const CONTENT_MAX_WIDTH: f32 = 560.;
 
 /// The rail down the left edge.
 ///
@@ -80,12 +88,6 @@ const CONTENT_PADDING: f32 = 20.;
 /// content's padding; without this the two share the same twenty pixels and
 /// the thumb crosses every segmented control on the page.
 const SCROLLBAR_GUTTER: f32 = 12.;
-
-/// The card's corner radius, matching the body panel's.
-const CARD_RADIUS: f32 = 10.;
-
-/// The size of the close button's glyph slot.
-const CLOSE_BUTTON_SIZE: f32 = 20.;
 
 /// One page of the settings, and one row of the rail.
 ///
@@ -137,8 +139,6 @@ impl Section {
 pub(super) enum Control {
     /// A row of the rail.
     Section(Section),
-    /// The × in the corner.
-    Close,
     /// One half of "Tab placement".
     Layout(Layout),
     /// One half of "View as".
@@ -164,16 +164,21 @@ pub(super) enum Control {
     ResetTabOptions,
 }
 
-/// Whether the page is up, which page it is on, and what the mouse is doing to
-/// each of its controls.
+/// Which page the rail has selected, and what the mouse is doing to each of
+/// its controls.
+///
+/// Whether the page is *open* is not here: the settings pane's existence is
+/// that answer, and a flag beside it would be a second copy of it to keep
+/// true. What is here outlives the pane on purpose — closing the tab and
+/// opening it again comes back to the page you were on, scrolled where you
+/// left it, which is what Warp's per-window pane manager buys by holding its
+/// view handle across a close.
 #[derive(Default)]
 pub(super) struct SettingsState {
-    /// Whether the card is on screen.
-    pub(super) open: bool,
-    /// Which page the rail has selected. Not persisted: where somebody was
-    /// last time they changed a setting is not a preference, and a settings
-    /// file that recorded it would rewrite itself on a click that changed
-    /// nothing.
+    /// Which page the rail has selected. Not persisted to disk: where somebody
+    /// was last time they changed a setting is not a preference, and a
+    /// settings file that recorded it would rewrite itself on a click that
+    /// changed nothing.
     pub(super) section: Section,
     /// How far the content column has been scrolled.
     pub(super) scroll: ScrollStateHandle,
@@ -212,55 +217,28 @@ impl SettingsState {
     }
 }
 
-/// The whole card, ready to be handed to a [`Dismiss`].
+/// The whole page: the rail, and the page it has selected.
 pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
-    Align::new(
-        ConstrainedBox::new(
-            Container::new(
-                Flex::row()
-                    .with_main_axis_size(MainAxisSize::Max)
-                    .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-                    .with_child(rail(workspace))
-                    .with_child(Expanded::new(1., content(workspace, app)).finish())
-                    .finish(),
-            )
-            .with_background_color(THEME.surface_raised)
-            .with_border(Border::all(1.).with_border_color(THEME.border))
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CARD_RADIUS)))
-            .finish(),
-        )
-        .with_width(CARD_WIDTH)
-        .with_height(CARD_HEIGHT)
-        .finish(),
-    )
-    .finish()
+    Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_child(rail(workspace))
+        .with_child(Expanded::new(1., content(workspace, app)).finish())
+        .finish()
 }
 
-/// The rail: a heading, the four pages, and what this build is.
+/// The rail: the four pages, and what this build is.
+///
+/// No background of its own — the panel behind it already painted one — and a
+/// right border instead, which is what Warp's rail is too. A filled rail
+/// inside a rounded panel would also have to know the panel's corner radius to
+/// avoid painting square into it.
 fn rail(workspace: &Workspace) -> Box<dyn Element> {
     let ui = workspace.fonts().ui;
 
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Max)
-        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_child(
-            Container::new(
-                Text::new("Settings", ui, widgets::LABEL_SIZE)
-                    .with_color(THEME.text_muted)
-                    .with_style(Properties {
-                        weight: Weight::Semibold,
-                        ..Properties::default()
-                    })
-                    .finish(),
-            )
-            .with_padding(Padding {
-                top: 4.,
-                bottom: 12.,
-                left: 10.,
-                right: 10.,
-            })
-            .finish(),
-        );
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
 
     for section in Section::ALL {
         column.add_child(rail_row(workspace, section, ui));
@@ -273,7 +251,7 @@ fn rail(workspace: &Workspace) -> Box<dyn Element> {
         Container::new(
             Text::new(
                 format!(
-                    "crook {} · {}",
+                    "crook {} \u{b7} {}",
                     env!("CARGO_PKG_VERSION"),
                     workspace.channel()
                 ),
@@ -294,7 +272,6 @@ fn rail(workspace: &Workspace) -> Box<dyn Element> {
 
     ConstrainedBox::new(
         Container::new(column.finish())
-            .with_background_color(THEME.surface)
             .with_border(Border::right(1.).with_border_color(THEME.border))
             .with_uniform_padding(12.)
             .finish(),
@@ -347,37 +324,26 @@ fn rail_row(
     .finish()
 }
 
-/// The right-hand column: a fixed header, then the page itself, scrolling.
+/// The right-hand column: a fixed heading, then the page itself, scrolling.
 ///
-/// Warp keeps the page title inside the scroll area, because a pane has no
-/// chrome to put it in and the pane header already names the pane. A card has
-/// chrome — it has to carry a close button somewhere — so the title shares
-/// that row and stays put while the page moves under it.
+/// Warp keeps the page title inside the scroll area. Here it is above it and
+/// stays put, because a pane that can be a hundred pixels tall should not have
+/// to scroll to find out which page it is on.
 fn content(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
     let settings = workspace.settings_page();
     let ui = workspace.fonts().ui;
-
-    let header = Flex::row()
-        .with_main_axis_size(MainAxisSize::Max)
-        .with_cross_axis_alignment(CrossAxisAlignment::Center)
-        .with_child(widgets::page_title(settings.section.label(), ui))
-        .with_child(Expanded::new(1., Empty::new().finish()).finish())
-        .with_child(close_button(workspace))
-        .finish();
 
     Container::new(
         Flex::column()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_child(header)
+            .with_child(centred(widgets::page_title(settings.section.label(), ui)))
             .with_child(
                 Expanded::new(
                     1.,
                     Scrollable::new(
                         settings.scroll.clone(),
-                        Container::new(pages::render(workspace, settings.section, app))
-                            .with_margin_right(SCROLLBAR_GUTTER)
-                            .finish(),
+                        centred(pages::render(workspace, settings.section, app)),
                     )
                     .with_scrollbar(THEME.overlay_3)
                     .finish(),
@@ -391,40 +357,40 @@ fn content(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
         bottom: CONTENT_PADDING,
         left: CONTENT_PADDING,
         // The gutter makes up the rest of it: the content still stops
-        // `CONTENT_PADDING` from the card's edge, and the thumb lives in the
+        // `CONTENT_PADDING` from the panel's edge, and the thumb lives in the
         // difference.
         right: CONTENT_PADDING - SCROLLBAR_GUTTER,
     })
     .finish()
 }
 
-/// The × that closes the card.
-fn close_button(workspace: &Workspace) -> Box<dyn Element> {
-    let ui = workspace.fonts().ui;
-    let state = workspace.settings_page().control(Control::Close);
-
-    Hoverable::new(state, move |mouse| {
-        let (background, color) = if mouse.is_hovered() {
-            (THEME.overlay_2, THEME.text_primary)
-        } else {
-            (Color::TRANSPARENT, THEME.text_muted)
-        };
-
-        Container::new(
+/// `child`, capped at [`CONTENT_MAX_WIDTH`] and centred in whatever is left.
+///
+/// A row of two flexible spacers rather than an [`Align`], because this goes
+/// inside a [`Scrollable`] — which measures its child against an unbounded
+/// height — and `Align` takes every finite axis it is offered, so it would
+/// report a height of infinity and there would be nothing to scroll. A flex
+/// row hugs its children's height, which is the half of `Align` this wanted.
+fn centred(child: Box<dyn Element>) -> Box<dyn Element> {
+    Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Start)
+        .with_child(Expanded::new(1., Empty::new().finish()).finish())
+        .with_child(
             ConstrainedBox::new(
-                Align::new(Text::new("\u{2715}", ui, 12.).with_color(color).finish()).finish(),
+                // A stretching column around the child, so that what is
+                // centred is the *column* and not the child's own text: a
+                // heading handed straight to the row above would measure to
+                // its word and end up centred over the settings it names.
+                Flex::column()
+                    .with_main_axis_size(MainAxisSize::Min)
+                    .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                    .with_child(child)
+                    .finish(),
             )
-            .with_width(CLOSE_BUTTON_SIZE)
-            .with_height(CLOSE_BUTTON_SIZE)
+            .with_max_width(CONTENT_MAX_WIDTH)
             .finish(),
         )
-        .with_background_color(background)
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
-        .with_margin_bottom(16.)
+        .with_child(Expanded::new(1., Empty::new().finish()).finish())
         .finish()
-    })
-    .on_click(|_, ctx, _| {
-        ctx.dispatch_typed_action(WorkspaceAction::Settings(SettingsAction::Close));
-    })
-    .finish()
 }

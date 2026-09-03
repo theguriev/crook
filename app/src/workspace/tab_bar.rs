@@ -54,7 +54,7 @@ use super::row_content::{
     metadata_line,
 };
 use super::view::Workspace;
-use super::{CLOSE_BUTTON_SIZE, STATUS_DOT_SIZE, TAB_MAX_WIDTH, controls};
+use super::{CLOSE_BUTTON_SIZE, GEAR_GLYPH, STATUS_DOT_SIZE, TAB_MAX_WIDTH, controls};
 
 /// The whole strip, the button that opens another tab, and the options menu.
 pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
@@ -105,8 +105,11 @@ fn render_row(
         return Empty::new().finish();
     };
 
+    // `None` for the settings pane, which is the one row in the strip that
+    // stands for something other than an agent: no session to read, no
+    // repository to look up, and a gear where the status dot goes.
     let session = pane_data.session();
-    let git = workspace.git_facts(session, app);
+    let git = session.and_then(|session| workspace.git_facts(session, app));
     let status = pane_data.status();
     // Resolved once on the workspace rather than here: it is the same answer
     // for every string every row prints, and asking for it is a syscall.
@@ -123,13 +126,16 @@ fn render_row(
         Granularity::Tabs => TabAction::Close(tab),
     };
 
-    let facts = RowFacts::resolve(session, git, home, ROW_PATH_CHARS);
+    let facts = match session {
+        Some(session) => RowFacts::resolve(session, git, home, ROW_PATH_CHARS),
+        None => RowFacts::settings(),
+    };
     let text = RowText::resolve(&facts, options);
     // Chips exist only in Expanded: Compact has no metadata line to hang one
     // on, which is exactly why the menu hides their toggles there.
-    let chips = match options.density {
-        Density::Compact => Chips::default(),
-        Density::Expanded => Chips::resolve(session, git, options),
+    let chips = match (session, options.density) {
+        (Some(session), Density::Expanded) => Chips::resolve(session, git, options),
+        _ => Chips::default(),
     };
 
     let close_state = interaction.close.clone();
@@ -177,7 +183,7 @@ fn render_row(
                     // The panel, whose leading mark *is* the 24px disc, aligns
                     // the way Warp does.
                     .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                    .with_child(status_dot(status))
+                    .with_child(status_dot(status, ui))
                     .with_child(Expanded::new(1., text.render(&chips, is_selected, ui)).finish())
                     .with_child(close_slot(close_action, close_state, show_close, ui))
                     .finish(),
@@ -228,9 +234,13 @@ fn render_row(
         let sections: Vec<DetailSection<'_>> = detail_panes(tab_data, pane, options.granularity)
             .into_iter()
             .map(|pane| DetailSection {
-                session: pane.session(),
-                facts: workspace.git_facts(pane.session(), app),
-                status: pane.status(),
+                // `detail_panes` has already dropped the settings pane, so
+                // every pane here has a session and a status.
+                session: pane.session().expect("a card section without a session"),
+                facts: pane
+                    .session()
+                    .and_then(|session| workspace.git_facts(session, app)),
+                status: pane.status().unwrap_or_default(),
             })
             .collect();
         stack.add_anchored_overlay_child(
@@ -318,21 +328,48 @@ impl RowText {
     }
 }
 
-/// The agent's status, as the one coloured thing on an unselected row.
-fn status_dot(status: AgentStatus) -> Box<dyn Element> {
-    Container::new(
-        ConstrainedBox::new(
-            Container::new(Empty::new().finish())
-                .with_background_color(super::status_color(status))
-                .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
+/// The agent's status, as the one coloured thing on an unselected row — or, on
+/// the settings row, a gear in the same slot.
+///
+/// The slot is the same width either way, so a settings row's text starts
+/// where every other row's does. What is in it is a mark of a different *kind*
+/// rather than a fifth colour: the settings pane is not an agent in a fifth
+/// state, and a grey dot beside it would say it was idle.
+fn status_dot(status: Option<AgentStatus>, ui: FamilyId) -> Box<dyn Element> {
+    /// The gap between the dot and the title.
+    const DOT_GAP: f32 = 7.;
+    /// The gear's size. Bigger than the dot it stands in for, because a 7px
+    /// gear is a smudge.
+    const GEAR_SIZE: f32 = 11.;
+
+    let (mark, gap): (Box<dyn Element>, f32) = match status {
+        Some(status) => (
+            ConstrainedBox::new(
+                Container::new(Empty::new().finish())
+                    .with_background_color(super::status_color(status))
+                    .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
+                    .finish(),
+            )
+            .with_width(STATUS_DOT_SIZE)
+            .with_height(STATUS_DOT_SIZE)
+            .finish(),
+            DOT_GAP,
+        ),
+        // The gear gets its own width and a narrower gap, so that the slot and
+        // the gap still add up to the dot's — every row's title starts at the
+        // same x whichever mark is in front of it. Constraining an 11px glyph
+        // to the dot's 7px slot instead would drop it: `Text` cuts a glyph
+        // that does not fit rather than shrinking it, so the mark would
+        // silently not be drawn at all.
+        None => (
+            Text::new(GEAR_GLYPH, ui, GEAR_SIZE)
+                .with_color(THEME.text_muted)
                 .finish(),
-        )
-        .with_width(STATUS_DOT_SIZE)
-        .with_height(STATUS_DOT_SIZE)
-        .finish(),
-    )
-    .with_margin_right(7.)
-    .finish()
+            STATUS_DOT_SIZE + DOT_GAP - GEAR_SIZE,
+        ),
+    };
+
+    Container::new(mark).with_margin_right(gap).finish()
 }
 
 /// A fixed square, holding the close button or holding nothing.

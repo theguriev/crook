@@ -21,7 +21,7 @@ use crate::{Channel, WINDOW_CHROME};
 use super::action::{OptionsAction, SettingsAction, WorkspaceAction};
 use super::settings_page::{Section, SettingsState};
 use super::usage_chip::UsageChip;
-use super::{body, header_toolbar, settings_page, tabs_panel};
+use super::{body, header_toolbar, tabs_panel};
 
 /// The two font families the interface is set in, resolved once at startup.
 ///
@@ -372,25 +372,42 @@ impl Workspace {
         &self.page
     }
 
+    /// Which page of the settings the rail has selected.
+    ///
+    /// Public for the snapshot path and the tests: which page is showing is
+    /// not something a renderer asks for — it reads
+    /// [`Self::settings_page`] — and it is the one piece of the page's state
+    /// worth asserting from outside.
+    pub fn settings_section(&self) -> Section {
+        self.page.section
+    }
+
     /// How far the tabs panel's list has been scrolled.
     pub(super) fn panel_scroll(&self) -> ScrollStateHandle {
         self.panel_scroll.clone()
     }
 
-    /// Whether the settings page is up.
+    /// Whether the settings page is open — which is to say, whether a pane is
+    /// holding it.
+    ///
+    /// Asked of the strip rather than of a flag beside it: the pane *is* the
+    /// page, and a second answer kept here would be one more thing to keep
+    /// true through every close.
     pub fn is_settings_page_open(&self) -> bool {
-        self.page.open
+        self.tabs.settings_pane().is_some()
     }
 
     /// Opens the settings page at `section`, for a run that was asked to start
     /// on it.
     ///
-    /// The same path a click takes, so a snapshot of the page is a snapshot of
-    /// the real thing rather than of a second code path.
+    /// The same two steps a click on the menu entry and a click on the rail
+    /// take, in that order, so a snapshot of the page is a snapshot of the
+    /// real thing rather than of a second code path.
     pub fn open_settings_page(&mut self, section: Section, ctx: &mut ViewContext<Self>) {
         self.apply_settings(SettingsAction::Select(section), ctx);
-        if !self.page.open {
-            self.apply_settings(SettingsAction::Toggle, ctx);
+        if self.apply(TabAction::OpenSettings, ctx) == TabEffect::CloseWindow {
+            // Unreachable: opening a tab never empties the strip.
+            (self.quit)();
         }
     }
 
@@ -667,7 +684,14 @@ impl Workspace {
             return false;
         };
 
-        report(pane.session_mut());
+        // `None` when the pane holds the settings page rather than a session.
+        // A report addressed to it is a report for a session that has been
+        // closed, and it fails the same way: nothing written, `false`
+        // returned.
+        let Some(session) = pane.session_mut() else {
+            return false;
+        };
+        report(session);
         // A report can move the session somewhere else, and the git facts a
         // row shows are looked up by directory.
         self.sync_git(ctx);
@@ -705,17 +729,6 @@ impl Workspace {
     /// the tabs themselves rather than a tab, and giving it its own dispatch
     /// path would be exactly the second code path.
     pub fn action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
-        // Escape, before the chord test, because it is not one. It means
-        // "close the settings page" and nothing else — a bare Escape with the
-        // page down is left unhandled rather than swallowed, so that the day
-        // something else wants it, this is not already in the way.
-        if keystroke.is_bare("escape") {
-            return self
-                .page
-                .open
-                .then_some(WorkspaceAction::Settings(SettingsAction::Close));
-        }
-
         if !is_platform_chord(keystroke.modifiers) {
             return None;
         }
@@ -739,10 +752,12 @@ impl Workspace {
                 return Some(WorkspaceAction::Options(OptionsAction::ToggleLayout));
             }
             // The binding every application on all three platforms uses for
-            // this, and the one Warp binds `ShowSettings` to.
-            (",", false, false) => {
-                return Some(WorkspaceAction::Settings(SettingsAction::Toggle));
-            }
+            // this, and the one Warp binds `ShowSettings` to. A tab action
+            // rather than a settings one, because what it opens is a tab —
+            // and because a second press must navigate to the page rather
+            // than toggle it away, which is what `OpenSettings` does and a
+            // toggle could not.
+            (",", false, false) => TabAction::OpenSettings,
             _ => return None,
         };
 
@@ -780,7 +795,13 @@ impl Workspace {
     /// underlay — the press that should dismiss the menu would be swallowed by
     /// the card instead.
     pub(super) fn shows_details_for(&self, pane: PaneId) -> bool {
-        self.options.show_details_on_hover && !self.menu.open && self.hovered_row == Some(pane)
+        self.options.show_details_on_hover
+            && !self.menu.open
+            && self.hovered_row == Some(pane)
+            // The card says what a row had no room for, and the settings row
+            // has nothing behind its one line. `detail_panes` drops the pane
+            // as well; without this the card would still open, empty.
+            && self.tabs.pane(pane).is_some_and(|pane| !pane.is_settings())
     }
 
     /// The home directory every row abbreviates its path against.
@@ -848,7 +869,7 @@ impl Workspace {
         let directories: Vec<PathBuf> = self
             .tabs
             .panes()
-            .filter_map(|(_, pane)| pane.session().working_directory.clone())
+            .filter_map(|(_, pane)| pane.session()?.working_directory.clone())
             .collect();
         self.git
             .update(ctx, |model, ctx| model.track(directories, ctx));
@@ -919,22 +940,16 @@ impl Workspace {
         self.set_options(options, ctx);
     }
 
-    /// Opens the settings page, closes it, or does one of the two things only
-    /// it can do.
+    /// Switches the page the rail has selected, or does one of the two things
+    /// only the settings page can do.
     ///
-    /// Every other control on the page dispatches an [`OptionsAction`] and
-    /// lands in [`Self::apply_option`] beside the gear menu's clicks, which is
-    /// why this handles five actions rather than fifteen.
+    /// Opening and closing are not here: those are [`TabAction::OpenSettings`]
+    /// and the ordinary close of a pane, because the page is a pane. Every
+    /// other control on it dispatches an [`OptionsAction`] and lands in
+    /// [`Self::apply_option`] beside the gear menu's clicks, which is why this
+    /// handles three actions rather than fifteen.
     fn apply_settings(&mut self, action: SettingsAction, ctx: &mut ViewContext<Self>) {
         match action {
-            SettingsAction::Toggle => {
-                if self.page.open {
-                    self.close_settings_page(ctx);
-                } else {
-                    self.open_page(ctx);
-                }
-            }
-            SettingsAction::Close => self.close_settings_page(ctx),
             SettingsAction::Select(section) => {
                 if self.page.section == section {
                     return;
@@ -963,29 +978,20 @@ impl Workspace {
         }
     }
 
-    /// Puts the page up, and takes down everything it would otherwise cover.
-    fn open_page(&mut self, ctx: &mut ViewContext<Self>) {
-        self.page.open = true;
-
-        // The page is modal, so anything already floating over the window is
-        // now frozen underneath it — visible, unclickable, and unable to
-        // receive the hover-out that would take it down.
-        self.menu.open = false;
-        self.menu.forget_hover_state();
-        self.hovered_row = None;
-        self.forget_hover_state();
-
-        ctx.notify();
-    }
-
-    /// Takes the page down, if it is up.
-    fn close_settings_page(&mut self, ctx: &mut ViewContext<Self>) {
-        if !self.page.open {
+    /// Takes the options menu down, and forgets what the mouse was doing to
+    /// it.
+    ///
+    /// Called when something other than the gear closes it — today, its own
+    /// "Settings…" entry, which navigates away from the strip the menu is
+    /// about. Every row is about to stop existing without seeing a hover-out,
+    /// and the next time the menu opens the row the pointer happened to be on
+    /// would come back lit.
+    fn close_menu(&mut self) {
+        if !self.menu.open {
             return;
         }
-        self.page.open = false;
-        self.page.forget_hover_state();
-        ctx.notify();
+        self.menu.open = false;
+        self.menu.forget_hover_state();
     }
 
     /// Arms or disarms the detail card.
@@ -1073,7 +1079,7 @@ impl View for Workspace {
         let stacked = Flex::column()
             .with_main_axis_size(MainAxisSize::Max)
             .with_child(header_toolbar::render(self, app))
-            .with_child(Expanded::new(1., body::render(self)).finish())
+            .with_child(Expanded::new(1., body::render(self, app)).finish())
             .finish();
 
         let content = match self.options.layout {
@@ -1091,38 +1097,8 @@ impl View for Workspace {
                 .finish(),
         };
 
-        let window = Container::new(content)
+        Container::new(content)
             .with_background_color(THEME.ground)
-            .finish();
-
-        if !self.page.open {
-            return window;
-        }
-
-        // Three ordinary stack children, painted bottom to top: the window,
-        // a scrim over it, and the modal the page lives in.
-        //
-        // The scrim is a sibling *below* the `Dismiss` rather than a child of
-        // it, and that is not a stylistic choice. A `Container` is the only
-        // element that paints a fill, and every container records a hit rect;
-        // one painted inside the modal would cover the whole window in the
-        // layer above the dismiss underlay, so every press outside the card
-        // would be "covered" and clicking away would stop closing the page.
-        Stack::new()
-            .with_child(window)
-            .with_child(
-                Container::new(Align::new(Empty::new().finish()).finish())
-                    .with_background_color(THEME.scrim)
-                    .finish(),
-            )
-            .with_child(
-                Dismiss::new(settings_page::render(self, app))
-                    .modal()
-                    .on_dismiss(|ctx, _| {
-                        ctx.dispatch_typed_action(WorkspaceAction::Settings(SettingsAction::Close));
-                    })
-                    .finish(),
-            )
             .finish()
     }
 }
@@ -1133,6 +1109,12 @@ impl TypedActionView for Workspace {
     fn handle_action(&mut self, action: &WorkspaceAction, ctx: &mut ViewContext<Self>) {
         match *action {
             WorkspaceAction::Tab(action) => {
+                // The one tab action the options menu itself dispatches, and
+                // the menu's job is done the moment it does: it is a popup
+                // about the strip, and this puts a page over the body.
+                if action == TabAction::OpenSettings {
+                    self.close_menu();
+                }
                 if self.apply(action, ctx) == TabEffect::CloseWindow {
                     (self.quit)();
                 }

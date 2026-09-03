@@ -59,6 +59,14 @@ pub(crate) const CLOSE_BUTTON_SIZE: f32 = 16.;
 /// The dot that carries the agent's status.
 pub(crate) const STATUS_DOT_SIZE: f32 = 7.;
 
+/// The mark a settings row leads with, where a session's row carries its
+/// status.
+///
+/// One constant for the strip, the panel and the gear button, because they are
+/// the same symbol standing for the same thing and three copies of a codepoint
+/// is how two of them end up different.
+pub(crate) const GEAR_GLYPH: &str = "\u{2699}";
+
 /// Breaks `text` into lines of at most `max_chars` characters each.
 ///
 /// A word longer than the budget gets a line of its own and overflows it,

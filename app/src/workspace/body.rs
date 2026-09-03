@@ -18,9 +18,10 @@ use crate::tab::{Pane, SplitAxis, TabAction};
 use crate::theme::THEME;
 
 use super::action::WorkspaceAction;
+use super::settings_page;
 use super::view::Workspace;
 
-pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
+pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
     let Some(tab) = workspace.tabs().active() else {
         return Empty::new().finish();
     };
@@ -44,10 +45,63 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
             is_focused: panes.is_focused(pane.id()),
             is_split: panes.is_split(),
         };
-        layout.add_child(Expanded::new(1., panel(workspace, pane, state)).finish());
+        layout.add_child(Expanded::new(1., panel(workspace, pane, state, app)).finish());
     }
 
     layout.finish()
+}
+
+/// What one agent session's panel says.
+///
+/// The placeholder v1 has always drawn: a heading, what the agent is doing,
+/// and the command that is not being run. It moved out of `panel` when the
+/// settings page arrived, because the shell around it is shared and the
+/// content is not.
+fn session_content(workspace: &Workspace, pane: &Pane) -> Box<dyn Element> {
+    let fonts = workspace.fonts();
+    let title = pane.title().to_owned();
+    let command = format!("$ crook run --agent {title}");
+    // `unwrap_or_default` is unreachable — `panel` sends every settings pane
+    // down the other branch — and it is here rather than an `expect` because a
+    // panel is not worth a panic.
+    let status = pane.status().unwrap_or_default();
+
+    Flex::column()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_spacing(9.)
+        .with_child(
+            Text::new(title, fonts.ui, 16.)
+                .with_color(THEME.text_primary)
+                .with_style(Properties {
+                    weight: Weight::Semibold,
+                    ..Default::default()
+                })
+                .finish(),
+        )
+        .with_child(
+            Text::new(
+                format!("agent session \u{b7} {}", status.label()),
+                fonts.ui,
+                12.,
+            )
+            .with_color(THEME.text_muted)
+            .finish(),
+        )
+        .with_child(
+            Text::new(command, fonts.monospace, 12.5)
+                .with_color(THEME.text_muted)
+                .finish(),
+        )
+        .with_child(
+            Text::new(
+                "# placeholder: v1 renders a session, it does not run one",
+                fonts.monospace,
+                12.5,
+            )
+            .with_color(THEME.text_muted.with_alpha(120))
+            .finish(),
+        )
+        .finish()
 }
 
 /// What a panel is drawn as. Warp's `SplitPaneState`, which is likewise
@@ -59,14 +113,27 @@ struct PaneState {
     is_split: bool,
 }
 
-/// One pane's panel: what it is called, what its agent is doing, and a click
-/// target that focuses it.
-fn panel(workspace: &Workspace, pane: &Pane, state: PaneState) -> Box<dyn Element> {
-    let fonts = workspace.fonts();
+/// One pane's panel: what it is in, and a click target that focuses it.
+///
+/// The shell — the fill, the border that says which pane is focused, the
+/// radius, the margin — is the same whatever the pane holds. What differs is
+/// the content and the padding around it: a session gets its heading and its
+/// placeholder inset by 16, and the settings page gets the panel's whole
+/// inside, because its own rail has to reach the panel's edges the way Warp's
+/// reaches its pane's.
+fn panel(
+    workspace: &Workspace,
+    pane: &Pane,
+    state: PaneState,
+    app: &AppContext,
+) -> Box<dyn Element> {
     let id = pane.id();
-    let title = pane.title().to_owned();
-    let command = format!("$ crook run --agent {title}");
-    let status = pane.status();
+    let is_settings = pane.is_settings();
+    let content = if is_settings {
+        settings_page::render(workspace, app)
+    } else {
+        session_content(workspace, pane)
+    };
     let PaneState {
         is_focused,
         is_split,
@@ -77,6 +144,11 @@ fn panel(workspace: &Workspace, pane: &Pane, state: PaneState) -> Box<dyn Elemen
         log::error!("pane {id:?} has no interaction state and its panel was skipped");
         return Empty::new().finish();
     };
+
+    // Built before the closure, because a `Box<dyn Element>` can only be
+    // moved into it once — the closure runs on every render of the frame it
+    // belongs to, but the tree it returns is built exactly once per render.
+    let mut content = Some(content);
 
     Hoverable::new(interaction.body.clone(), move |mouse| {
         // An unsplit tab has nothing to distinguish its one pane from, so it
@@ -93,50 +165,13 @@ fn panel(workspace: &Workspace, pane: &Pane, state: PaneState) -> Box<dyn Elemen
             (THEME.ground, THEME.border)
         };
 
-        Container::new(
-            Flex::column()
-                .with_main_axis_size(MainAxisSize::Max)
-                .with_spacing(9.)
-                .with_child(
-                    Text::new(title, fonts.ui, 16.)
-                        .with_color(THEME.text_primary)
-                        .with_style(Properties {
-                            weight: Weight::Semibold,
-                            ..Default::default()
-                        })
-                        .finish(),
-                )
-                .with_child(
-                    Text::new(
-                        format!("agent session \u{b7} {}", status.label()),
-                        fonts.ui,
-                        12.,
-                    )
-                    .with_color(THEME.text_muted)
-                    .finish(),
-                )
-                .with_child(
-                    Text::new(command, fonts.monospace, 12.5)
-                        .with_color(THEME.text_muted)
-                        .finish(),
-                )
-                .with_child(
-                    Text::new(
-                        "# placeholder: v1 renders a session, it does not run one",
-                        fonts.monospace,
-                        12.5,
-                    )
-                    .with_color(THEME.text_muted.with_alpha(120))
-                    .finish(),
-                )
-                .finish(),
-        )
-        .with_background_color(fill)
-        .with_border(Border::all(1.).with_border_color(border))
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(10.)))
-        .with_uniform_margin(12.)
-        .with_uniform_padding(16.)
-        .finish()
+        Container::new(content.take().unwrap_or_else(|| Empty::new().finish()))
+            .with_background_color(fill)
+            .with_border(Border::all(1.).with_border_color(border))
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(10.)))
+            .with_uniform_margin(12.)
+            .with_uniform_padding(if is_settings { 0. } else { 16. })
+            .finish()
     })
     // Warp wraps every leaf of its tree in the same handler, dispatching
     // `Activate(pane_id, ActivationReason::Click)`. On an unsplit tab this

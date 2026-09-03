@@ -330,7 +330,12 @@ fn keys(workspace: &Workspace) -> Box<dyn Element> {
             vec![
                 binding("Move the tabs panel", format!("{CHORD}-b")),
                 binding("Open these settings", format!("{CHORD}-,")),
-                binding("Close them again", "escape".to_owned()),
+                widgets::note(
+                    "These settings are a pane, like a session is, so they close the way every \
+                     pane does and have no key of their own for it. Pressing the binding again \
+                     brings this tab forward rather than closing it.",
+                    ui,
+                ),
                 widgets::note(
                     "The bindings are fixed. Warp has editable keymaps with context predicates; \
                      Crook reads input directly, and the keyboard produces exactly the values the \

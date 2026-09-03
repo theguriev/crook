@@ -28,14 +28,6 @@ pub struct Theme {
     /// composite is precomputed. It is opaque on purpose: a translucent menu
     /// with a tab strip showing through it is unreadable at 12px.
     pub surface_raised: Color,
-    /// What the window is dimmed with while a modal is over it.
-    ///
-    /// The one colour here that is not a surface, a line or a piece of text:
-    /// it is the ground seen through the settings page's underlay. Dark rather
-    /// than light, and only just opaque enough to read as "that half is not
-    /// live" — a heavier scrim on a dark palette turns the window black and
-    /// the card starts to look like the whole application.
-    pub scrim: Color,
     /// The foreground at 5%. A hovered menu row.
     pub overlay_1: Color,
     /// The foreground at 10%. A segmented control's track, a menu divider.
@@ -73,7 +65,6 @@ pub const THEME: Theme = Theme {
     ground: Color::hex(0x14_16_1a),
     surface: Color::hex(0x1a_1d_24),
     surface_raised: Color::hex(0x1c_1e_23),
-    scrim: Color::hex(0x00_00_00).with_alpha(120),
     // The three rungs of Warp's `fg_overlay` ladder, resolved against
     // `text_primary` rather than against whatever foreground a loaded theme
     // has. The alphas are Warp's 5%, 10% and 15% of 255, rounded down.

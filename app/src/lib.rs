@@ -139,11 +139,13 @@ struct Overrides {
     menu: bool,
     /// Start with the first row's hover detail card up.
     hover: bool,
-    /// Start with the settings page open on this section.
+    /// Start with a settings tab open, on this page of it.
     ///
     /// Unlike the three option overrides below it, this one has nothing to
     /// keep out of the settings file: which page of the settings somebody is
-    /// looking at is not an option and is never written down.
+    /// looking at is not an option and is never written down. It does put an
+    /// extra tab in the strip, which is the point — a snapshot of the
+    /// settings page is a snapshot of a window with the settings open in it.
     settings: Option<Section>,
     /// Start in this layout rather than the saved one.
     layout: Option<Layout>,
@@ -290,7 +292,7 @@ OPTIONS:
     --snapshot <PATH>  Render one frame of the real view tree to a PNG and exit
     --frames <N>       Draw N frames, then exit; for running unattended
     --menu             Start with the tab options menu open
-    --settings [PAGE]  Start with the settings page open, on `appearance`,
+    --settings [PAGE]  Start with a settings tab open, on `appearance`,
                        `usage`, `keys` or `about`
     --hover            Start with the first row's detail card up
     --layout <MODE>    Start with the tabs `vertical` or `horizontal` rather than as saved
@@ -302,7 +304,7 @@ OPTIONS:
 KEYS:
     cmd/ctrl-t                 New agent tab
     cmd/ctrl-b                 Move the tabs between the side panel and the header strip
-    cmd/ctrl-,                 Open the settings page; escape closes it
+    cmd/ctrl-,                 Open the settings tab, or bring it forward
     cmd/ctrl-d                 Split the focused pane to the right
     cmd/ctrl-shift-d           Split the focused pane downwards
     cmd/ctrl-w                 Close the focused pane, and its tab with the last one

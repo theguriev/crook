@@ -511,16 +511,28 @@ generated JSON Schema — exists to serve roughly 800 settings. Crook has nine, 
 structs in one JSON file, read once at startup and written back whole. That is correct at nine
 and the migration to something larger is a day; doing it in the other order is a month.
 
-What the page itself took from Warp is the *presentation*, not the plumbing: a rail of pages,
-category headings with a rule between them, label-left/control-right rows with a description
-line, apply-on-click with no Save button, a reset button that doubles as the modified
-indicator, and inert rows drawn greyed rather than dropped. What it deliberately did not take
-is Warp's best idea in that area — settings as a **pane**, splittable beside the thing being
-configured — because a pane in Crook is an agent session, and a second kind of pane would put
-an "unless it is the settings one" branch in every row renderer, granularity rule and git
-lookup. It is a modal card instead. The other omission is search: Warp filters the rail and
-the content together from one field, per widget, with match counts; that needs a text input,
-and `crookui_core` has none.
+What the page took from Warp is the *presentation* and the *shape*, not the plumbing. The
+presentation: a rail of pages, category headings with a rule between them,
+label-left/control-right rows with a description line, apply-on-click with no Save button, a
+reset button that doubles as the modified indicator, and inert rows drawn greyed rather than
+dropped. The shape is the more interesting half — settings are a **pane**, the same thing an
+agent session lives in, so they open in a tab of their own, sit in the strip beside the work
+they configure, split next to it, and close with the same ×, the same middle click and the
+same `cmd/ctrl-w` as everything else. Warp's `settings_pane.rs` plus its one-per-window pane
+manager; `TabAction::OpenSettings` is both halves of that manager, navigating to the existing
+pane or opening a tab for it.
+
+That shape has a price and it is worth naming, because the first draft of this page was a
+modal card specifically to avoid it. `PaneContent` is now an enum, `Pane::session` and
+`Pane::status` return `Option`s, and each of the two row renderers carries one branch for a
+row that stands for something other than an agent — a gear where the status dot goes, and one
+line where the fact table would have resolved three. `RowFacts::settings` is where that line
+is decided, once, for both layouts: without it the "Pane title as: Branch" arm falls back to
+the command and the compact subtitle *is* the command, so the row would read "Settings" over
+"Settings". The enum is also what a PTY pane will be, and nothing would have to move for it.
+
+The omission is search: Warp filters the rail and the content together from one field, per
+widget, with match counts; that needs a text input, and `crookui_core` has none.
 
 **Keymaps.** Warp has editable bindings, fixed bindings, context predicates, and a
 user-remappable keymap. Crook reads input directly. The half worth keeping is already kept:
@@ -555,7 +567,7 @@ platforms, and treat a build script as the cost it is.
 | Packaging | 2,245 lines of shell and PowerShell | a release binary today, `cargo-dist` next |
 | Autotracking | `Tracked<T>` dependency capture | explicit `ctx.notify()` |
 | Settings | ~800, with a macro DSL and cloud sync | 9, two `serde` structs in one JSON file |
-| Settings UI | a pane, 16 pages, search over ~800 widgets | a modal card, 4 pages, no search |
+| Settings UI | a pane, 16 pages, search over ~800 widgets | a pane, 4 pages, no search |
 
 The through-line: Crook keeps every *architectural* idea from Warp and rejects almost every
 *build-system* one. The architecture is what makes a GPU terminal tractable in Rust. The build

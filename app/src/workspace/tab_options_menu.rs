@@ -47,9 +47,10 @@ use crookui_core::fonts::FamilyId;
 use crookui_core::prelude::*;
 
 use crate::settings::{Density, Granularity, PrimaryInfo, resolve_subtitle, subtitle_options_for};
+use crate::tab::TabAction;
 use crate::theme::THEME;
 
-use super::action::{OptionsAction, SettingsAction, WorkspaceAction};
+use super::action::{OptionsAction, WorkspaceAction};
 use super::view::Workspace;
 use super::wrap;
 
@@ -238,7 +239,9 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
     // Warp opens its settings from the application menu bar and from
     // `cmd-,`; this popup has no such row. Crook has no menu bar at all, so
     // the one menu it does have carries the entry — otherwise the settings
-    // page would be reachable only by a keystroke nobody was told about.
+    // page would be reachable only by a keystroke nobody was told about. It
+    // opens a tab, so it is a `TabAction`, and the workspace takes the menu
+    // down as it applies it.
     column.add_child(divider());
     column.add_child(settings_row(menu.settings.clone(), ui));
 
@@ -299,7 +302,7 @@ fn settings_row(state: MouseStateHandle, ui: FamilyId) -> Box<dyn Element> {
         .finish()
     })
     .on_click(|_, ctx, _| {
-        ctx.dispatch_typed_action(WorkspaceAction::Settings(SettingsAction::Toggle));
+        ctx.dispatch_typed_action(WorkspaceAction::Tab(TabAction::OpenSettings));
     })
     .finish()
 }

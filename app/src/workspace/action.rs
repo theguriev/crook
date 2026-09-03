@@ -62,20 +62,15 @@ impl From<SettingsAction> for WorkspaceAction {
 ///
 /// The split is deliberate and it is the page's whole design: every control
 /// that changes a tab option dispatches the [`OptionsAction`] the gear menu
-/// already dispatches, so the two surfaces cannot drift apart. What is left —
-/// which page is showing, whether the page is up at all, and the two things
-/// only the page can do — is this.
+/// already dispatches, so the two surfaces cannot drift apart. What is left is
+/// this — three actions, none of which is "open" or "close": the page is a
+/// pane, so opening it is [`TabAction::OpenSettings`] and closing it is
+/// closing a pane, through the same close button, middle click and
+/// `cmd/ctrl-w` as every other pane in the window.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SettingsAction {
-    /// Open the page, or close it. The keystroke and the menu's own entry both
-    /// send this.
-    Toggle,
-    /// Close it, whatever it was doing. Sent by the dismiss underlay, by the
-    /// close button and by Escape — three gestures that mean "close", never
-    /// "toggle", because a toggle from a dismiss would reopen the page the
-    /// click outside it just closed.
-    Close,
-    /// Show a different page in the same window.
+    /// Show a different page of the settings in the pane already holding
+    /// them.
     Select(Section),
     /// "Show the usage chip", which is also what starts and stops the poll.
     ToggleUsageChip,

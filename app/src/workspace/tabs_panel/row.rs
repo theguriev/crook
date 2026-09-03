@@ -47,7 +47,7 @@ use super::super::row_content::{
     Chips, DetailSection, PANEL_PATH_CHARS, RowFacts, detail_card, detail_panes, metadata_line,
 };
 use super::super::view::Workspace;
-use super::super::{CLOSE_BUTTON_SIZE, status_color};
+use super::super::{CLOSE_BUTTON_SIZE, GEAR_GLYPH, status_color};
 
 /// Warp's `VERTICAL_TABS_ICON_SIZE`. The same in both densities.
 const ICON_SIZE: f32 = 24.;
@@ -118,8 +118,10 @@ pub(super) fn render(
         return Empty::new().finish();
     };
 
+    // `None` for the settings pane: see the strip's row, which resolves the
+    // same three the same way.
     let session = pane_data.session();
-    let git = workspace.git_facts(session, app);
+    let git = session.and_then(|session| workspace.git_facts(session, app));
     let status = pane_data.status();
     let home = workspace.home();
 
@@ -137,13 +139,16 @@ pub(super) fn render(
         Granularity::Tabs => TabAction::Close(tab),
     };
 
-    let facts = RowFacts::resolve(session, git, home, PANEL_PATH_CHARS);
-    let chips = match options.density {
+    let facts = match session {
+        Some(session) => RowFacts::resolve(session, git, home, PANEL_PATH_CHARS),
+        None => RowFacts::settings(),
+    };
+    let chips = match (session, options.density) {
         // Warp's `render_compact_pane_row` never calls
         // `render_terminal_right_badges`, which is exactly why the menu hides
         // the two "Show" toggles in this density.
-        Density::Compact => Chips::default(),
-        Density::Expanded => Chips::resolve(session, git, options),
+        (Some(session), Density::Expanded) => Chips::resolve(session, git, options),
+        _ => Chips::default(),
     };
     let body = match options.density {
         Density::Compact => compact_column(&facts, options, ui),
@@ -174,7 +179,7 @@ pub(super) fn render(
                 } else {
                     CrossAxisAlignment::Center
                 })
-                .with_child(status_disc(status))
+                .with_child(status_disc(status, ui))
                 .with_child(Expanded::new(1., body.column).finish())
                 .with_child(close_slot(
                     close_action,
@@ -211,9 +216,12 @@ pub(super) fn render(
     let sections: Vec<DetailSection<'_>> = detail_panes(tab_data, pane, options.granularity)
         .into_iter()
         .map(|pane| DetailSection {
-            session: pane.session(),
-            facts: workspace.git_facts(pane.session(), app),
-            status: pane.status(),
+            // `detail_panes` has already dropped the settings pane.
+            session: pane.session().expect("a card section without a session"),
+            facts: pane
+                .session()
+                .and_then(|session| workspace.git_facts(session, app)),
+            status: pane.status().unwrap_or_default(),
         })
         .collect();
 
@@ -373,28 +381,34 @@ fn row_shell(content: Box<dyn Element>, is_selected: bool, is_hovered: bool) -> 
 }
 
 /// The 24px leading mark: a status-coloured disc, centred in its reserved box.
-fn status_disc(status: AgentStatus) -> Box<dyn Element> {
+fn status_disc(status: Option<AgentStatus>, ui: FamilyId) -> Box<dyn Element> {
     let diameter = ICON_SIZE * DISC_RATIO;
 
-    ConstrainedBox::new(
-        Align::new(
-            ConstrainedBox::new(
-                Container::new(Empty::new().finish())
-                    .with_background_color(status_color(status))
-                    .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
-                    .finish(),
-            )
-            .with_width(diameter)
-            .with_height(diameter)
-            .finish(),
+    let mark: Box<dyn Element> = match status {
+        Some(status) => ConstrainedBox::new(
+            Container::new(Empty::new().finish())
+                .with_background_color(status_color(status))
+                .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
+                .finish(),
         )
+        .with_width(diameter)
+        .with_height(diameter)
         .finish(),
-    )
-    // Reserved whole, in both densities, so every row's text starts at the
-    // same x however tall the row is.
-    .with_width(ICON_SIZE)
-    .with_height(ICON_SIZE)
-    .finish()
+        // The settings row's mark: a gear where an agent's status disc goes,
+        // at the disc's own diameter so the row's text starts where every
+        // other row's does. See the strip's `status_dot` for why this is a
+        // different kind of mark rather than a fifth status colour.
+        None => Text::new(GEAR_GLYPH, ui, diameter * 0.8)
+            .with_color(THEME.text_muted)
+            .finish(),
+    };
+
+    ConstrainedBox::new(Align::new(mark).finish())
+        // Reserved whole, in both densities, so every row's text starts at the
+        // same x however tall the row is.
+        .with_width(ICON_SIZE)
+        .with_height(ICON_SIZE)
+        .finish()
 }
 
 /// A fixed square, holding the close button or holding nothing.

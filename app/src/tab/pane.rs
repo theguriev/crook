@@ -78,7 +78,40 @@ impl Direction {
     }
 }
 
-/// One pane: an identity, and the agent session it shows.
+/// What a pane is showing.
+///
+/// A pane used to be an agent session and nothing else, and for the first two
+/// features it was. The settings page is the second thing a pane can be, and
+/// it is a *pane* rather than a modal because that is Warp's design and it is
+/// the better one: settings open like a session opens, in a tab of their own,
+/// listed in the strip beside the work they configure, splittable next to it,
+/// closed by the same close button and the same `cmd/ctrl-w`.
+///
+/// The cost is this enum, and it is paid honestly rather than hidden behind a
+/// session with empty fields: everything that reads a pane now says what it
+/// does when there is no session to read — [`Pane::session`] returns an
+/// `Option`, [`Pane::status`] returns an `Option`, and the row renderers draw
+/// a gear and one line instead of resolving a fact table that has nothing in
+/// it.
+///
+/// A third variant is what a PTY pane would be, and nothing here would have to
+/// move for it.
+#[derive(Debug)]
+pub enum PaneContent {
+    /// One agent session: what a tab opened with `cmd/ctrl-t` holds.
+    Agent(AgentSession),
+    /// The settings page. There is at most one in a window — `TabStrip::apply`
+    /// navigates to the existing one rather than opening a second — and it
+    /// holds no state of its own: which page the rail has selected and how far
+    /// it is scrolled are the view's, keyed by nothing, which is what makes
+    /// them survive closing the tab and opening it again.
+    Settings,
+}
+
+/// What the strip and the panel call the settings pane.
+pub const SETTINGS_TITLE: &str = "Settings";
+
+/// One pane: an identity, and what it shows.
 ///
 /// Both fields are private for the reason [`Tab`](super::Tab)'s are: a public
 /// `id` is settable through the `&mut Pane` the agent-progress path hands out,
@@ -87,7 +120,7 @@ impl Direction {
 #[derive(Debug)]
 pub struct Pane {
     id: PaneId,
-    session: AgentSession,
+    content: PaneContent,
 }
 
 impl Pane {
@@ -95,7 +128,15 @@ impl Pane {
     pub fn new(title: impl Into<String>) -> Self {
         Self {
             id: PaneId::next(),
-            session: AgentSession::new(title),
+            content: PaneContent::Agent(AgentSession::new(title)),
+        }
+    }
+
+    /// A pane showing the settings page.
+    pub fn settings() -> Self {
+        Self {
+            id: PaneId::next(),
+            content: PaneContent::Settings,
         }
     }
 
@@ -104,28 +145,57 @@ impl Pane {
         self.id
     }
 
-    /// The agent session behind it.
-    pub fn session(&self) -> &AgentSession {
-        &self.session
+    /// What it is showing.
+    pub fn content(&self) -> &PaneContent {
+        &self.content
+    }
+
+    /// The agent session behind it, or `None` for the settings pane.
+    pub fn session(&self) -> Option<&AgentSession> {
+        match &self.content {
+            PaneContent::Agent(session) => Some(session),
+            PaneContent::Settings => None,
+        }
+    }
+
+    /// Whether this is the settings pane.
+    pub fn is_settings(&self) -> bool {
+        matches!(self.content, PaneContent::Settings)
     }
 
     /// The session, for reporting the agent's progress into it.
     ///
     /// Crate-private on purpose: mutating a session changes what the tab bar
     /// draws, so the only way in from outside is `Workspace::update_session`,
-    /// which notifies in the same call.
-    pub(crate) fn session_mut(&mut self) -> &mut AgentSession {
-        &mut self.session
+    /// which notifies in the same call. `None` for the settings pane, which is
+    /// what makes a report addressed to a pane that has been replaced by one
+    /// fail rather than land somewhere.
+    pub(crate) fn session_mut(&mut self) -> Option<&mut AgentSession> {
+        match &mut self.content {
+            PaneContent::Agent(session) => Some(session),
+            PaneContent::Settings => None,
+        }
     }
 
     /// What to print for this pane, in the bar and in its panel.
     pub fn title(&self) -> &str {
-        self.session.display_title()
+        match &self.content {
+            PaneContent::Agent(session) => session.display_title(),
+            PaneContent::Settings => SETTINGS_TITLE,
+        }
     }
 
-    /// What the agent in it is doing.
-    pub fn status(&self) -> AgentStatus {
-        self.session.status
+    /// What the agent in it is doing, or `None` when there is no agent.
+    ///
+    /// The settings pane is not idle, not running and not failed; it is not an
+    /// agent. An `Option` rather than an `Idle` default because the two look
+    /// different on screen — a status dot against a gear — and a default here
+    /// would put a grey dot beside the settings row and call it accurate.
+    pub fn status(&self) -> Option<AgentStatus> {
+        match &self.content {
+            PaneContent::Agent(session) => Some(session.status),
+            PaneContent::Settings => None,
+        }
     }
 }
 
@@ -168,7 +238,16 @@ pub struct PaneGroup {
 impl PaneGroup {
     /// A group of one pane, over a new session named `title`.
     pub fn new(title: impl Into<String>) -> Self {
-        let pane = Pane::new(title);
+        Self::of(Pane::new(title))
+    }
+
+    /// A group of one pane, showing the settings page.
+    pub fn settings() -> Self {
+        Self::of(Pane::settings())
+    }
+
+    /// A group of exactly one pane, focused.
+    fn of(pane: Pane) -> Self {
         let id = pane.id();
         Self {
             panes: vec![pane],

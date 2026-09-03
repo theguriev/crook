@@ -300,10 +300,21 @@ impl Harness {
             .read(&self.app, |workspace, _| workspace.is_options_menu_open())
     }
 
-    /// Opens the settings page, or closes it — the keystroke's action, sent
-    /// the way the menu entry sends it.
-    fn toggle_settings_page(&mut self) {
-        self.dispatch_workspace_action(WorkspaceAction::Settings(SettingsAction::Toggle));
+    /// Opens the settings tab, or brings it forward — the keystroke's action,
+    /// sent the way the gear menu's entry sends it.
+    fn open_settings_page(&mut self) {
+        self.dispatch_action(TabAction::OpenSettings);
+    }
+
+    /// Which page of the settings the rail has selected.
+    fn settings_section(&self) -> Section {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.settings_section())
+    }
+
+    /// Shows a different page, the way a click on the rail does.
+    fn select_settings_section(&mut self, section: Section) {
+        self.dispatch_workspace_action(WorkspaceAction::Settings(SettingsAction::Select(section)));
     }
 
     fn is_settings_page_open(&self) -> bool {
@@ -331,7 +342,7 @@ impl Harness {
     /// page" without depending on how tall the page happens to be: the offset
     /// clamps, and one more click changes nothing.
     fn scroll_settings_page(&mut self, lines: f32) {
-        let position = center(settings_card_box(&self.frame()));
+        let position = center(settings_pane_box(&self.frame()));
         self.dispatch(Event::ScrollWheel {
             position,
             delta: ScrollDelta::Lines(vec2f(0., lines)),
@@ -368,7 +379,7 @@ impl Harness {
             workspace
                 .tabs()
                 .pane(pane)
-                .and_then(|pane| pane.session().working_directory.clone())
+                .and_then(|pane| pane.session()?.working_directory.clone())
                 .expect("every seeded session has a working directory")
         });
         let facts = GitFacts {
@@ -2847,31 +2858,28 @@ fn platform_chord() -> Modifiers {
     }
 }
 
-/// The settings card, by its ground.
+/// The settings pane's panel.
 ///
-/// Radius and fill together: the body's panels are rounded by the same ten
-/// pixels and the options popup is painted in the same raised surface, but
-/// nothing else in a frame is both.
-fn settings_card_box(scene: &Scene) -> RectF {
-    let boxes: Vec<RectF> = visible_rects(scene)
-        .filter(|(rect, _)| {
-            rect.corner_radius.get_top_left() == Radius::Pixels(10.)
-                && rect.background == Fill::Solid(THEME.surface_raised)
-        })
-        .map(|(_, bounds)| bounds)
-        .collect();
-
-    assert_eq!(boxes.len(), 1, "exactly one settings card per frame");
-    boxes[0]
+/// The settings page is a pane, so it has no chrome of its own: what bounds it
+/// is the body panel every pane gets. In a window whose active tab is the
+/// settings tab there is exactly one panel, and this is it.
+fn settings_pane_box(scene: &Scene) -> RectF {
+    let panels = panel_boxes(scene);
+    assert_eq!(
+        panels.len(),
+        1,
+        "the settings tab holds one pane, so its body has one panel"
+    );
+    panels[0]
 }
 
 /// The card's switches, top to bottom, by the round track they are painted on.
 fn settings_switch_boxes(scene: &Scene) -> Vec<RectF> {
-    let card = settings_card_box(scene);
+    let pane = settings_pane_box(scene);
     let mut switches: Vec<RectF> = visible_rects(scene)
         .filter(|(rect, _)| rect.corner_radius.get_top_left() == Radius::Percentage(50.))
         .map(|(_, bounds)| bounds)
-        .filter(|bounds| card.contains_point(center(*bounds)) && (bounds.width() - 28.).abs() < 0.5)
+        .filter(|bounds| pane.contains_point(center(*bounds)) && (bounds.width() - 28.).abs() < 0.5)
         .collect();
     switches.sort_by(|left, right| left.min_y().total_cmp(&right.min_y()));
     switches
@@ -2882,13 +2890,13 @@ fn settings_switch_boxes(scene: &Scene) -> Vec<RectF> {
 /// Found by their rounded box *and* by being in the rail's column, because the
 /// page beside them rounds its one button by the same six pixels.
 fn settings_rail_boxes(scene: &Scene) -> Vec<RectF> {
-    let card = settings_card_box(scene);
+    let pane = settings_pane_box(scene);
     let mut rows: Vec<RectF> = visible_rects(scene)
         .filter(|(rect, _)| rect.corner_radius.get_top_left() == Radius::Pixels(6.))
         .map(|(_, bounds)| bounds)
         .filter(|bounds| {
-            card.contains_point(center(*bounds))
-                && center(*bounds).x() < card.min_x() + settings_page::RAIL_WIDTH
+            pane.contains_point(center(*bounds))
+                && center(*bounds).x() < pane.min_x() + settings_page::RAIL_WIDTH
         })
         .collect();
     rows.sort_by(|left, right| left.min_y().total_cmp(&right.min_y()));
@@ -2900,7 +2908,7 @@ fn settings_rail_boxes(scene: &Scene) -> Vec<RectF> {
 /// `None` while the button is drawn in its disabled state, which is exactly
 /// what "there is nothing to reset" looks like: the outline is what goes.
 fn settings_button_box(scene: &Scene) -> Option<RectF> {
-    let card = settings_card_box(scene);
+    let pane = settings_pane_box(scene);
     visible_rects(scene)
         // By the border's *colour*: a disabled button keeps its stroke and
         // paints it in nothing at all, which is the whole of how the reset
@@ -2911,38 +2919,85 @@ fn settings_button_box(scene: &Scene) -> Option<RectF> {
         })
         .map(|(_, bounds)| bounds)
         .find(|bounds| {
-            card.contains_point(center(*bounds))
-                && center(*bounds).x() > card.min_x() + settings_page::RAIL_WIDTH
+            pane.contains_point(center(*bounds))
+                && center(*bounds).x() > pane.min_x() + settings_page::RAIL_WIDTH
         })
 }
 
 #[test]
-fn the_settings_page_opens_on_the_platform_chord_and_escape_closes_it() {
-    let mut harness = Harness::panel(1);
+fn the_settings_page_opens_in_a_tab_and_the_binding_brings_that_tab_forward() {
+    // Warp's `open_settings_pane`: one settings pane per window. A second
+    // press is a navigation to it, never a second page and never a toggle —
+    // which is also why the keystroke resolves to a `TabAction` rather than to
+    // anything the settings page owns.
+    let mut harness = Harness::new(2);
+    let before = harness.tab_ids();
     assert!(!harness.is_settings_page_open());
 
-    // Escape with the page down is left for whatever wants it next.
-    assert_eq!(None, harness.action_for("escape", Modifiers::default()));
-
+    assert_eq!(
+        Some(WorkspaceAction::Tab(TabAction::OpenSettings)),
+        harness.action_for(",", platform_chord())
+    );
     assert!(harness.press_key(",", platform_chord()));
-    assert!(harness.is_settings_page_open());
 
-    assert!(harness.press_key("escape", Modifiers::default()));
+    let with_settings = harness.tab_ids();
+    assert_eq!(with_settings.len(), before.len() + 1, "no tab was opened");
+    assert!(harness.is_settings_page_open());
+    let settings_tab = harness.active_id();
     assert!(
-        !harness.is_settings_page_open(),
-        "escape did not take the page down"
+        !before.contains(&settings_tab),
+        "the settings page went into a tab that already existed"
+    );
+    assert!(
+        frame_text(&harness.frame()).contains("Settings"),
+        "the strip does not say which tab it is"
+    );
+
+    // Somewhere else, then back: the same tab, brought forward.
+    harness.dispatch_action(TabAction::Select(before[0]));
+    assert!(harness.press_key(",", platform_chord()));
+    assert_eq!(settings_tab, harness.active_id());
+    assert_eq!(
+        with_settings,
+        harness.tab_ids(),
+        "the binding opened a second settings tab"
     );
 }
 
 #[test]
-fn opening_the_settings_page_takes_the_options_menu_down_with_it() {
-    // The page is modal, so a menu left open underneath would be visible,
-    // unclickable, and unable to receive the hover-out that closes it.
+fn the_settings_pane_closes_the_way_every_other_pane_does() {
+    // No close button of its own and no Escape binding: the row's ×, a middle
+    // click and `cmd/ctrl-w` already close a pane, and the settings pane is
+    // not special enough to have a fourth way.
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    let settings_tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the settings pane is focused");
+
+    assert_eq!(None, harness.action_for("escape", Modifiers::default()));
+
+    harness.dispatch_action(TabAction::ClosePane(pane));
+    assert!(
+        !harness.is_settings_page_open(),
+        "closing the pane left the page open"
+    );
+    assert!(
+        !harness.tab_ids().contains(&settings_tab),
+        "the settings pane was the tab's last one, so the tab should have gone with it"
+    );
+}
+
+#[test]
+fn opening_the_settings_page_from_the_gear_menu_takes_the_menu_down() {
+    // The popup is a menu about the strip. It stays up through every option
+    // click on purpose, but this entry navigates away from what it is about.
     let mut harness = Harness::seeded();
     harness.dispatch_option(OptionsAction::TogglePopup);
     assert!(harness.is_menu_open());
 
-    harness.toggle_settings_page();
+    harness.open_settings_page();
     assert!(harness.is_settings_page_open());
     assert!(
         !harness.is_menu_open(),
@@ -2951,15 +3006,57 @@ fn opening_the_settings_page_takes_the_options_menu_down_with_it() {
 }
 
 #[test]
-fn the_rail_switches_pages_and_the_card_shows_the_one_it_names() {
-    let mut harness = Harness::seeded();
-    harness.toggle_settings_page();
+fn the_settings_row_leads_with_a_gear_and_says_nothing_a_session_would() {
+    // The row stands for something that is not an agent: no status colour, no
+    // working directory, no branch. The last of those is a trap the fact table
+    // walks straight into — with "Pane title as: Branch" every arm falls back
+    // to the command, and the compact subtitle *is* the command, so a row
+    // built through it would read "Settings" over "Settings".
+    let mut harness = Harness::new(1);
+    harness.dispatch_option(OptionsAction::SetPrimaryInfo(PrimaryInfo::Branch));
+    harness.open_settings_page();
+
+    let scene = harness.frame();
+    let settings_row = tab_boxes(&scene)
+        .into_iter()
+        .max_by(|left, right| left.min_x().total_cmp(&right.min_x()))
+        .expect("the strip draws the settings tab");
+    let text = text_where(&scene, |position| {
+        settings_row.contains_point(position + vec2f(0., -4.))
+    });
+
+    assert_eq!(
+        text.matches("Settings").count(),
+        1,
+        "the settings row prints its name {} times: {text:?}",
+        text.matches("Settings").count()
+    );
+
+    // No status dot: every colour a dot can be is an agent state, and the
+    // settings pane is not an agent in a fifth one.
+    let dots: Vec<RectF> = visible_rects(&scene)
+        .filter(|(rect, _)| {
+            rect.corner_radius.get_top_left() == Radius::Percentage(50.)
+                && (rect.bounds.width() - super::STATUS_DOT_SIZE).abs() < 0.5
+        })
+        .map(|(_, bounds)| bounds)
+        .filter(|bounds| settings_row.contains_point(center(*bounds)))
+        .collect();
+    assert!(dots.is_empty(), "the settings row drew a status dot");
+}
+
+#[test]
+fn the_rail_switches_pages_and_the_pane_shows_the_one_it_names() {
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
 
     let rail = settings_rail_boxes(&harness.frame());
     assert_eq!(rail.len(), 4, "four pages in the rail");
 
     // The third: Keys.
     harness.click(center(rail[2]), MouseButton::Left);
+    assert_eq!(Section::Keys, harness.settings_section());
+
     let text = frame_text(&harness.frame());
     assert!(
         text.contains("Tabs and panes"),
@@ -2972,11 +3069,35 @@ fn the_rail_switches_pages_and_the_card_shows_the_one_it_names() {
 }
 
 #[test]
-fn a_switch_on_the_page_writes_the_option_the_gear_menu_writes() {
-    let mut harness = Harness::seeded();
-    harness.toggle_settings_page();
+fn the_page_and_the_scroll_position_outlive_the_tab_they_were_in() {
+    // What Warp's per-window pane manager buys by holding its view handle
+    // through a close: coming back to settings comes back to where you were.
+    // Here the state is the workspace's rather than the pane's, which is the
+    // same guarantee with nothing to keep alive.
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.select_settings_section(Section::About);
+    let pane = harness
+        .focused_pane_id()
+        .expect("the settings pane is focused");
 
-    // The page is taller than the card and the switches are at the bottom of
+    harness.dispatch_action(TabAction::ClosePane(pane));
+    assert!(!harness.is_settings_page_open());
+
+    harness.open_settings_page();
+    assert_eq!(
+        Section::About,
+        harness.settings_section(),
+        "reopening the settings went back to the first page"
+    );
+}
+
+#[test]
+fn a_switch_on_the_page_writes_the_option_the_gear_menu_writes() {
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+
+    // The page is taller than the pane and the switches are at the bottom of
     // it. Scrolling past the end lands on the last pixel of content, which is
     // what makes this independent of how tall the page happens to be.
     harness.scroll_settings_page(-100.);
@@ -3006,9 +3127,9 @@ fn a_switch_the_density_has_made_inert_is_drawn_and_does_nothing() {
     // Warp's third way with an irrelevant setting, and the one the page takes:
     // the row stays, greyed, with no handler. The gear menu takes the other —
     // it drops the two rows entirely — and both are right for their surface.
-    let mut harness = Harness::seeded();
+    let mut harness = Harness::new(1);
     assert_eq!(Density::Compact, harness.options().density);
-    harness.toggle_settings_page();
+    harness.open_settings_page();
     harness.scroll_settings_page(-100.);
 
     let switches = settings_switch_boxes(&harness.frame());
@@ -3024,12 +3145,12 @@ fn a_switch_the_density_has_made_inert_is_drawn_and_does_nothing() {
 
 #[test]
 fn the_reset_button_puts_every_tab_option_back_and_then_goes_quiet() {
-    let mut harness = Harness::seeded();
+    let mut harness = Harness::new(1);
     harness.dispatch_option(OptionsAction::SetPrimaryInfo(PrimaryInfo::Branch));
     harness.dispatch_option(OptionsAction::ToggleShowDiffStats);
     assert_ne!(TabOptions::default(), harness.options());
 
-    harness.toggle_settings_page();
+    harness.open_settings_page();
     harness.scroll_settings_page(-100.);
 
     let button = settings_button_box(&harness.frame()).expect("the reset button should be drawn");
@@ -3052,17 +3173,15 @@ fn the_reset_button_puts_every_tab_option_back_and_then_goes_quiet() {
 
 #[test]
 fn turning_the_usage_chip_off_takes_the_pill_out_of_the_header_and_stops_the_poll() {
-    let mut harness = Harness::seeded();
+    let mut harness = Harness::new(1);
     assert!(harness.general().show_usage_chip);
     assert!(
         frame_text(&harness.frame()).contains("claude"),
         "the chip should be in the header to start with"
     );
 
-    harness.toggle_settings_page();
-    harness.dispatch_workspace_action(WorkspaceAction::Settings(SettingsAction::Select(
-        Section::Usage,
-    )));
+    harness.open_settings_page();
+    harness.select_settings_section(Section::Usage);
 
     let switches = settings_switch_boxes(&harness.frame());
     assert_eq!(switches.len(), 1, "one switch on the usage page");
@@ -3073,8 +3192,6 @@ fn turning_the_usage_chip_off_takes_the_pill_out_of_the_header_and_stops_the_pol
         !harness.usage_is_wanted(),
         "a hidden chip must not go on polling"
     );
-
-    harness.toggle_settings_page();
     assert!(
         !frame_text(&harness.frame()).contains("claude"),
         "the chip is still in the header"
@@ -3082,45 +3199,24 @@ fn turning_the_usage_chip_off_takes_the_pill_out_of_the_header_and_stops_the_pol
 }
 
 #[test]
-fn a_click_outside_the_card_closes_the_page_and_one_on_it_does_not() {
-    let mut harness = Harness::seeded();
-    harness.toggle_settings_page();
+fn a_settings_pane_can_be_split_beside_a_session() {
+    // The reason it is a pane at all: Warp's settings can sit next to the
+    // thing being configured. Nothing here special-cases the split — a split
+    // opens an agent session beside whatever pane was focused, and the
+    // settings pane is a pane.
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.dispatch_action(TabAction::Split(Direction::Right));
 
-    let card = settings_card_box(&harness.frame());
-    harness.click(center(card), MouseButton::Left);
+    let panes = harness.active_pane_ids();
+    assert_eq!(panes.len(), 2, "the settings tab did not split");
     assert!(
         harness.is_settings_page_open(),
-        "a click on the card's own background closed it"
+        "splitting took the settings page away"
     );
-
-    // The card is centred, so the window's top-left corner is outside it.
-    harness.click(vec2f(4., 4.), MouseButton::Left);
-    assert!(
-        !harness.is_settings_page_open(),
-        "a click outside the card left it up"
-    );
-}
-
-#[test]
-fn the_window_under_the_settings_page_is_frozen_while_it_is_up() {
-    let mut harness = Harness::new(3);
-    let scene = harness.frame();
-    let tabs = tab_boxes(&scene);
-    let first = harness.tab_ids()[0];
-    let active_before = harness.active_id();
-    assert_ne!(first, active_before, "the last tab starts active");
-
-    harness.toggle_settings_page();
-    harness.frame();
-    harness.click(center(tabs[0]), MouseButton::Left);
-
     assert_eq!(
-        active_before,
-        harness.active_id(),
-        "a click that should have been swallowed by the modal selected a tab"
-    );
-    assert!(
-        !harness.is_settings_page_open(),
-        "the click outside the card should also have dismissed the page"
+        panel_boxes(&harness.frame()).len(),
+        2,
+        "the body should draw the settings page and the session side by side"
     );
 }
