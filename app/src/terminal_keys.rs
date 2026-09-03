@@ -1,29 +1,17 @@
-//! Where a keystroke stops being Crook's and becomes the shell's.
+//! What a keystroke the shell is getting encodes as.
 //!
-//! **The line is the Command key.** Command on macOS, Super/Windows elsewhere,
-//! is the platform's "this is an application command" modifier, and nothing
-//! carrying it is ever typed into a shell: `cmd-t` opens a tab, and `cmd-k`,
-//! which Crook does not bind, does nothing at all rather than typing a `k`.
-//! Control is the opposite — `ctrl-c`, `ctrl-d` and `ctrl-z` *are* the terminal,
-//! so Control always reaches it.
+//! **The other half of [`crate::input_keys`], and only the other half.**
+//! Whether the shell gets a keystroke at all is decided there, in one function,
+//! against the pane it arrived at; by the time anything here runs, that has
+//! been settled and the only question left is which bytes go down the pty.
+//! Nothing in this module knows what is bound, which screen is up or what is in
+//! the input field, and it must not learn: two modules answering the same
+//! question is how they come to answer it differently.
 //!
-//! Two consequences worth stating plainly:
-//!
-//! * On Linux and Windows, where Crook's own bindings are Control chords,
-//!   `ctrl-t`, `ctrl-w`, `ctrl-d` and `ctrl-b` are taken by the application and
-//!   never reach the shell. That is deliberate — they are the bindings the help
-//!   text documents — and it is the whole of what the shell loses.
-//! * Everything else with Control set is encoded and sent. `ctrl-d` on macOS
-//!   ends a shell; on Linux it splits a pane.
-//!
-//! The keys Crook *does* bind are consumed before an element ever sees the
-//! event: [`Workspace::action_for`] runs in the window delegate, and only a
-//! keystroke it declined is dispatched into the tree where the focused pane's
-//! [`TerminalElement`] picks it up. So this function never has to know which
-//! chords are bound — only which modifier means "not for the shell".
-//!
-//! [`Workspace::action_for`]: crate::workspace::Workspace::action_for
-//! [`TerminalElement`]: crate::workspace::TerminalElement
+//! So this is a table. A named key becomes a [`Key`]; a typed character
+//! becomes itself, carrying whatever the platform's layout made of it; the
+//! modifiers come along so that the emulator can apply the terminal's own
+//! encodings to them.
 
 use crook_terminal::{Key, Modifiers};
 use crookui_core::event::Keystroke;

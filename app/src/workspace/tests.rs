@@ -477,6 +477,68 @@ impl Harness {
         });
     }
 
+    /// Puts text in a pane's field without sending it, the way `--type` does.
+    fn type_field(&mut self, pane: PaneId, text: &str) {
+        let workspace = &self.workspace;
+        self.app.update(|ctx| {
+            workspace.update(ctx, |workspace, ctx| {
+                workspace.type_into_input(pane, text, ctx);
+            });
+        });
+    }
+
+    /// Pumps the queue for `patience`, for an assertion about something that
+    /// must *not* happen.
+    ///
+    /// A `wait_for` proves an event arrived; only a wait with no condition can
+    /// prove one did not, and it has to be long enough that a pty echo would
+    /// have come back if it were coming.
+    fn settle(&mut self, patience: std::time::Duration) {
+        let deadline = std::time::Instant::now() + patience;
+        while std::time::Instant::now() < deadline {
+            self.queue.run_until_parked();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    /// What is in a pane's input field, unsent.
+    fn field_text(&self, pane: PaneId) -> String {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace
+                .input(pane)
+                .map(|input| input.editor().text().to_owned())
+                .unwrap_or_default()
+        })
+    }
+
+    /// Where the caret is in a pane's input field.
+    fn field_caret(&self, pane: PaneId) -> usize {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace
+                .input(pane)
+                .map_or(0, |input| input.editor().caret())
+        })
+    }
+
+    /// What is selected in a pane's input field.
+    fn field_selection(&self, pane: PaneId) -> String {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace
+                .input(pane)
+                .map(|input| input.editor().selected_text().to_owned())
+                .unwrap_or_default()
+        })
+    }
+
+    /// Whether a pane's shell has taken the whole screen.
+    fn alt_screen(&self, pane: PaneId) -> bool {
+        self.workspace.read(&self.app, |workspace, app| {
+            workspace
+                .terminal(pane, app)
+                .is_some_and(|(_, snapshot)| snapshot.alt_screen)
+        })
+    }
+
     /// What a pane's shell is showing.
     fn terminal_text(&self, pane: PaneId) -> String {
         self.workspace
@@ -561,7 +623,33 @@ impl Harness {
 const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// The modifier that means "this is an application command" on this platform.
+///
+/// Command on macOS and Control-*Shift* everywhere else, which is the shape
+/// the tty forces: a bare `ctrl-d` off macOS has to be able to end an input,
+/// so nothing of Crook's own can live on one. See [`crate::input_keys`].
 fn platform_chord() -> Modifiers {
+    if cfg!(target_os = "macos") {
+        Modifiers {
+            cmd: true,
+            ..Default::default()
+        }
+    } else {
+        Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Default::default()
+        }
+    }
+}
+
+/// The chord that opens the settings, which is not the one the tab bindings
+/// use.
+///
+/// `input_keys` spends Ctrl-Shift on the tabs everywhere but macOS, precisely
+/// so the field keeps plain Ctrl — and the settings chord is the exception it
+/// names: the same `cmd-,` / `ctrl-,` every application has, with no Shift,
+/// because it has no field gesture to stay out of the way of.
+fn settings_chord() -> Modifiers {
     if cfg!(target_os = "macos") {
         Modifiers {
             cmd: true,
@@ -590,6 +678,11 @@ fn close_boxes(scene: &Scene) -> Vec<RectF> {
         .into_iter()
         .filter(|bounds| bounds.width() <= super::CLOSE_BUTTON_SIZE + 0.5)
         .collect()
+}
+
+/// The input fields that are currently drawn, by their rounded boxes.
+fn field_boxes(scene: &Scene) -> Vec<RectF> {
+    rects_rounded_by(scene, Radius::Pixels(crate::workspace::body::FIELD_RADIUS))
 }
 
 /// The button that opens another tab, by its rounded box.
@@ -1092,7 +1185,8 @@ fn selected_chips(scene: &Scene) -> Vec<RectF> {
 /// has not been told otherwise is the same `surface` the header and the tabs
 /// panel are painted in. So it is found by what it is *not*: filled like a
 /// terminal, and neither bordered (the header's underline, the panel's right
-/// edge) nor rounded (the usage chip).
+/// edge) nor rounded (the usage chip, and the well a pane composes its next
+/// command in — see [`field_boxes`] for that one).
 ///
 /// The one other thing that matches is the grid's own ground, painted inside
 /// the pane it belongs to, so a rect contained in another is dropped. Without
@@ -2710,26 +2804,14 @@ fn the_layout_keybinding_moves_the_tabs_and_the_gear_with_them() {
 #[test]
 fn the_sidebar_chord_is_what_moves_the_tabs() {
     let harness = Harness::panel(1);
-    let chord = if cfg!(target_os = "macos") {
-        Modifiers {
-            cmd: true,
-            ..Modifiers::default()
-        }
-    } else {
-        Modifiers {
-            ctrl: true,
-            ..Modifiers::default()
-        }
-    };
-
     let action = harness.workspace.read(&harness.app, |workspace, _| {
-        workspace.action_for(&Keystroke::new("b", chord))
+        workspace.action_for(&Keystroke::new("b", platform_chord()))
     });
 
     assert_eq!(
         Some(WorkspaceAction::Options(OptionsAction::ToggleLayout)),
         action,
-        "cmd/ctrl-b is in --help's KEYS list and is bound to nothing"
+        "the sidebar chord is in --help's KEYS list and is bound to nothing"
     );
 }
 
@@ -3139,9 +3221,9 @@ fn the_settings_page_opens_in_a_tab_and_the_binding_brings_that_tab_forward() {
 
     assert_eq!(
         Some(WorkspaceAction::Tab(TabAction::OpenSettings)),
-        harness.action_for(",", platform_chord())
+        harness.action_for(",", settings_chord())
     );
-    assert!(harness.press_key(",", platform_chord()));
+    assert!(harness.press_key(",", settings_chord()));
 
     let with_settings = harness.tab_ids();
     assert_eq!(with_settings.len(), before.len() + 1, "no tab was opened");
@@ -3158,7 +3240,7 @@ fn the_settings_page_opens_in_a_tab_and_the_binding_brings_that_tab_forward() {
 
     // Somewhere else, then back: the same tab, brought forward.
     harness.dispatch_action(TabAction::Select(before[0]));
-    assert!(harness.press_key(",", platform_chord()));
+    assert!(harness.press_key(",", settings_chord()));
     assert_eq!(settings_tab, harness.active_id());
     assert_eq!(
         with_settings,
@@ -3170,8 +3252,9 @@ fn the_settings_page_opens_in_a_tab_and_the_binding_brings_that_tab_forward() {
 #[test]
 fn the_settings_pane_closes_the_way_every_other_pane_does() {
     // No close button of its own and no Escape binding: the row's ×, a middle
-    // click and `cmd/ctrl-w` already close a pane, and the settings pane is
-    // not special enough to have a fourth way.
+    // click and the close chord (`cmd-w`, `ctrl-shift-w` off macOS) already
+    // close a pane, and the settings pane is not special enough to have a
+    // fourth way.
     let mut harness = Harness::new(1);
     harness.open_settings_page();
     let settings_tab = harness.active_id();
@@ -3426,13 +3509,23 @@ fn a_settings_pane_can_be_split_beside_a_session() {
 
 /// The shell in a pane, driven through the real workspace.
 ///
-/// These four are the only tests in this file that start a process. They are
-/// worth the cost: everything between a shell writing a byte and a tab knowing
-/// about it — a reader thread, a wake, a model, a subscription, a session, the
-/// git model's directory list — has no meaning without one at the end of it,
-/// and a double would only assert that the double was called.
+/// These are the only tests in this file that start a process. They are worth
+/// the cost: everything between a shell writing a byte and a tab knowing about
+/// it — a reader thread, a wake, a model, a subscription, a session, the git
+/// model's directory list — has no meaning without one at the end of it, and a
+/// double would only assert that the double was called. The same goes for the
+/// field: what it is for is reaching a shell.
 mod shells {
+    use std::time::Duration;
+
     use super::*;
+
+    /// How long the field is watched for keystrokes leaking into the pty.
+    ///
+    /// A pty echoes what is written to it as fast as the kernel can hand it
+    /// back, so anything that has not arrived in a tenth of a second was never
+    /// sent. Doubled, because a loaded build machine is not a fast one.
+    const NO_LEAK_PATIENCE: Duration = Duration::from_millis(200);
 
     /// The pane every test here works in.
     fn one_shell(harness: &mut Harness) -> Option<PaneId> {
@@ -3442,36 +3535,219 @@ mod shells {
         harness.focused_pane_id()
     }
 
-    #[test]
-    fn typing_into_the_focused_pane_reaches_its_shell() {
-        // The keyboard path end to end: a key press the bindings declined, into
-        // the element tree, into the focused pane's pty, and back out as
-        // characters on the grid.
-        let mut harness = Harness::panel(1);
-        let Some(pane) = one_shell(&mut harness) else {
-            return;
-        };
-        harness.frame();
-
-        for character in "echo typed-it".chars() {
+    /// Types `text` a key at a time, the way a person does.
+    fn type_line(harness: &mut Harness, text: &str) {
+        for character in text.chars() {
             harness.press(
                 &character.to_lowercase().to_string(),
                 Modifiers::default(),
                 &character.to_string(),
             );
         }
-        harness.press("enter", Modifiers::default(), "\r");
+    }
 
-        harness.wait_for("the shell never echoed what was typed at it", |harness| {
+    #[test]
+    fn a_command_typed_into_the_field_reaches_the_shell_when_it_is_sent() {
+        // **The whole feature, end to end.** Keys the bindings declined go into
+        // the field and nowhere else; the pty hears nothing at all until Enter;
+        // and then the shell echoes the line and runs it, so the grid above
+        // shows prompt, command and output exactly as it always did.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+
+        type_line(&mut harness, "echo typed-it");
+        assert_eq!(harness.field_text(pane), "echo typed-it");
+
+        harness.settle(NO_LEAK_PATIENCE);
+        assert!(
+            !harness.terminal_text(pane).contains("typed-it"),
+            "the keystrokes reached the pty as well as the field"
+        );
+
+        harness.press("enter", Modifiers::default(), "\r");
+        assert_eq!(
+            harness.field_text(pane),
+            "",
+            "a sent line leaves the field, for the next one"
+        );
+        harness.wait_for("the shell never ran what the field sent it", |harness| {
             harness.terminal_text(pane).contains("typed-it")
         });
     }
 
     #[test]
-    fn a_binding_opens_a_tab_instead_of_typing_a_letter_into_the_shell() {
+    fn a_sent_line_can_be_recalled_from_the_history_and_sent_again() {
+        // Per pane, and it is the field's own history rather than the shell's:
+        // the shell never saw the line until it was sent, so it has nothing to
+        // recall it with.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+
+        type_line(&mut harness, "echo recalled");
+        harness.press("enter", Modifiers::default(), "\r");
+        harness.press("up", Modifiers::default(), "");
+
+        assert_eq!(harness.field_text(pane), "echo recalled");
+        assert_eq!(harness.field_caret(pane), "echo recalled".len());
+    }
+
+    #[test]
+    fn the_signal_keys_reach_the_shell_while_the_field_has_the_rest() {
+        // Rule three of the routing policy, against a real pty: a command that
+        // is already running has to stay interruptible, whatever is half
+        // written in the field.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+
+        // The marker is printed by the command rather than named in it, so
+        // finding it in the grid is evidence the shell *ran* the line rather
+        // than evidence the tty echoed it.
+        harness.type_into(pane, "printf 'g%s\\n' o; sleep 30\n");
+        harness.wait_for("the shell never started the command", |harness| {
+            harness.terminal_text(pane).contains("go")
+        });
+
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        harness.press("c", ctrl, "c");
+
+        // A shell still waiting on `sleep 30` cannot run this, so the marker
+        // arriving at all is the interrupt having landed.
+        harness.type_into(pane, "printf 'ba%s\\n' ck\n");
+        harness.wait_for("ctrl-c never reached the shell", |harness| {
+            harness.terminal_text(pane).contains("back")
+        });
+    }
+
+    #[test]
+    fn a_program_that_takes_the_screen_takes_the_keys_and_the_field_goes_away() {
+        // Rule two: vim, `top` and `less` drive every cell and read every key,
+        // so there is no line to compose and nowhere to compose it.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        assert_eq!(
+            field_boxes(&harness.frame()).len(),
+            1,
+            "a pane on the normal screen draws a field"
+        );
+
+        // The escape every full-screen program starts with.
+        harness.type_into(pane, "printf '\\033[?1049h'\n");
+        harness.wait_for("the shell never took the alt screen", |harness| {
+            harness.alt_screen(pane)
+        });
+
+        assert!(
+            field_boxes(&harness.frame()).is_empty(),
+            "the field outlived the screen it belongs to"
+        );
+        type_line(&mut harness, "q");
+        assert_eq!(
+            harness.field_text(pane),
+            "",
+            "a key was typed into a field nobody can see"
+        );
+    }
+
+    #[test]
+    fn the_settings_pane_is_the_one_pane_that_gets_no_field() {
+        // Where the two halves of the body meet. A split settings tab draws
+        // both kinds of pane in the same frame: the session keeps the field it
+        // composes into, and the settings page — no shell, and every control on
+        // it a click — has nothing under it to type in.
+        let mut harness = Harness::new(1);
+        harness.open_settings_page();
+        harness.dispatch_action(TabAction::Split(Direction::Right));
+        if !harness.start_terminals() {
+            return;
+        }
+
+        assert_eq!(
+            harness.active_pane_ids().len(),
+            2,
+            "the settings page and the session should be side by side"
+        );
+        // The settings page's own controls share the field's corner radius, so
+        // the fill is what tells a field from a switch: the field is the well
+        // in the pane's own ground, and nothing on the settings page is.
+        let scene = harness.frame();
+        let fields: Vec<RectF> = visible_rects(&scene)
+            .filter(|(rect, _)| {
+                rect.corner_radius.get_top_left()
+                    == Radius::Pixels(crate::workspace::body::FIELD_RADIUS)
+                    && rect.background == Fill::Solid(THEME.ground)
+            })
+            .map(|(_, bounds)| bounds)
+            .collect();
+        assert_eq!(
+            fields.len(),
+            1,
+            "either the settings pane was given a field or the session lost one"
+        );
+    }
+
+    #[test]
+    fn clicking_in_the_field_puts_the_caret_where_it_was_aimed() {
+        // The mouse path through the real tree: a press at a point, hit-tested
+        // against what was painted, landing on the boundary nearest it.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.type_field(pane, "echo hello");
+
+        let scene = harness.frame();
+        let field = field_boxes(&scene)[0];
+        let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
+        // Inside the border and the padding, then past the prompt.
+        let text_left =
+            field.min_x() + 1. + crate::workspace::body::FIELD_PADDING + cell.width * 2.;
+        let middle = field.min_y() + 1. + crate::workspace::body::FIELD_PADDING + cell.height * 0.5;
+
+        harness.click(
+            vec2f(text_left + cell.width * 5., middle),
+            MouseButton::Left,
+        );
+        assert_eq!(harness.field_caret(pane), 5, "the boundary before `hello`");
+
+        harness.click(
+            vec2f(text_left + cell.width * 5.6, middle),
+            MouseButton::Left,
+        );
+        assert_eq!(
+            harness.field_caret(pane),
+            6,
+            "past the middle of a cell is the boundary after it"
+        );
+
+        // And a double click takes the word under it.
+        harness.dispatch(Event::MouseDown {
+            button: MouseButton::Left,
+            position: vec2f(text_left + cell.width * 6., middle),
+            modifiers: Modifiers::default(),
+            click_count: 2,
+        });
+        assert_eq!(harness.field_selection(pane), "hello");
+    }
+
+    #[test]
+    fn a_binding_opens_a_tab_instead_of_typing_a_letter_into_the_field() {
         // The line this whole feature turns on. `cmd-t` — `ctrl-t` off macOS —
-        // is Crook's, and a grid that swallowed it would leave the window with
-        // no way to open a tab; a grid that let it through *as well* would put
+        // is Crook's, and a field that swallowed it would leave the window with
+        // no way to open a tab; a field that let it through *as well* would put
         // a stray `t` in somebody's command line.
         let mut harness = Harness::panel(1);
         let Some(pane) = one_shell(&mut harness) else {
@@ -3479,21 +3755,46 @@ mod shells {
         };
         harness.frame();
 
-        // A letter either side of the chord, so the claim is about what landed
-        // *between* them rather than about a `t` somewhere in a prompt this
-        // test does not control.
         assert_eq!(harness.tab_ids().len(), 1);
         harness.press("q", Modifiers::default(), "q");
         harness.press("t", platform_chord(), "t");
-        harness.press("q", Modifiers::default(), "q");
 
         assert_eq!(harness.tab_ids().len(), 2, "the binding did not open a tab");
-        harness.wait_for("the shell never echoed what was typed at it", |harness| {
-            harness.terminal_text(pane).contains("qq")
-        });
-        assert!(
-            !harness.terminal_text(pane).contains("qtq"),
-            "the binding was typed into the shell as well as opening a tab"
+        assert_eq!(
+            harness.field_text(pane),
+            "q",
+            "the binding was typed into the field as well as opening a tab"
+        );
+    }
+
+    #[test]
+    fn a_split_gives_the_new_pane_a_field_of_its_own() {
+        // Two panes of one tab are two places to work: what is half written in
+        // one of them has nothing to do with the other, and neither has the
+        // other's history.
+        let mut harness = Harness::panel(1);
+        let Some(first) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+        type_line(&mut harness, "first");
+
+        harness.dispatch_action(TabAction::Split(Direction::Right));
+        harness.frame();
+        let second = harness.focused_pane_id().expect("the split focused a pane");
+        assert_ne!(first, second);
+
+        type_line(&mut harness, "second");
+        assert_eq!(harness.field_text(second), "second");
+        assert_eq!(
+            harness.field_text(first),
+            "first",
+            "the split pane took the line the other one was composing"
+        );
+        assert_eq!(
+            field_boxes(&harness.frame()).len(),
+            2,
+            "each panel draws its own field"
         );
     }
 
@@ -3567,5 +3868,244 @@ mod shells {
         harness.wait_for("the shell exited and its window stayed open", |harness| {
             harness.quit_requests() > 0
         });
+    }
+
+    /// The modifier that interrupts, ends and suspends.
+    fn ctrl() -> Modifiers {
+        Modifiers {
+            ctrl: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn ctrl_c_interrupts_the_shell_and_takes_the_half_written_line_with_it() {
+        // The gesture whose entire meaning is "forget this". The shell prints
+        // `^C` and a fresh prompt, and a field still holding `rm -rf` above
+        // that prompt would be the interrupt only pretending to have worked.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+
+        harness.type_into(pane, "printf 'g%s\\n' o; sleep 30\n");
+        harness.wait_for("the shell never started the command", |harness| {
+            harness.terminal_text(pane).contains("go")
+        });
+
+        type_line(&mut harness, "rm -rf important");
+        assert_eq!(harness.field_text(pane), "rm -rf important");
+
+        harness.press("c", ctrl(), "c");
+        assert_eq!(
+            harness.field_text(pane),
+            "",
+            "the abandoned line outlived the interrupt that abandoned it"
+        );
+
+        // And the interrupt still landed: a shell waiting on `sleep 30` cannot
+        // run this.
+        harness.type_into(pane, "printf 'ba%s\\n' ck\n");
+        harness.wait_for("ctrl-c never reached the shell", |harness| {
+            harness.terminal_text(pane).contains("back")
+        });
+    }
+
+    #[test]
+    fn ctrl_d_over_a_written_line_deletes_a_character_rather_than_closing_the_pane() {
+        // The shell's own reader is empty now — the line lives in the field —
+        // so an unconditional Ctrl-D would be an end of file every time, and
+        // the pane would close under the fingers of anybody who pressed it out
+        // of habit.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+
+        type_line(&mut harness, "echo hi");
+        harness.press("home", Modifiers::default(), "");
+        harness.press("d", ctrl(), "d");
+
+        assert_eq!(harness.field_text(pane), "cho hi");
+        harness.settle(NO_LEAK_PATIENCE);
+        assert_eq!(
+            harness.quit_requests(),
+            0,
+            "the shell read an end of file and the window went with it"
+        );
+    }
+
+    #[test]
+    fn ctrl_d_on_an_empty_line_still_ends_the_shell() {
+        // The other half of the same rule, and the reason the first half
+        // cannot simply swallow the key: an empty line is where Ctrl-D means
+        // what it has always meant.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+        assert_eq!(harness.field_text(pane), "");
+
+        harness.press("d", ctrl(), "d");
+        harness.wait_for("the shell never read an end of file", |harness| {
+            harness.quit_requests() > 0
+        });
+    }
+
+    #[test]
+    fn a_pane_that_closed_hands_the_keyboard_to_the_one_that_is_left() {
+        // A keystroke can arrive between a pane closing and the next frame,
+        // and the tree it arrives in is the one built *before* the close: it
+        // still holds the closed pane's field, still marked as the listening
+        // one. Those keys used to land in an editor nothing could draw or read
+        // back — and Enter would have written the line to a shell that had
+        // already ended.
+        let mut harness = Harness::panel(1);
+        let Some(first) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+
+        harness.dispatch_action(TabAction::Split(Direction::Right));
+        harness.frame();
+        let second = harness.focused_pane_id().expect("the split focused a pane");
+        assert_ne!(first, second);
+
+        // No frame between the close and the keys, which is the whole case.
+        harness.dispatch_action(TabAction::ClosePane(second));
+        type_line(&mut harness, "kept");
+
+        assert_eq!(
+            harness.field_text(first),
+            "kept",
+            "the keys went into the pane that had just closed"
+        );
+    }
+
+    #[test]
+    fn the_options_menu_cannot_stop_a_running_command_from_being_interrupted() {
+        // The menu is modal and takes the typing away, which is right. What it
+        // must not take away is the one key a terminal cannot live without:
+        // the menu does not close on Escape, so an uninterruptible command
+        // would leave somebody hunting for the mouse.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+
+        harness.type_into(pane, "printf 'g%s\\n' o; sleep 30\n");
+        harness.wait_for("the shell never started the command", |harness| {
+            harness.terminal_text(pane).contains("go")
+        });
+
+        harness.dispatch_option(OptionsAction::TogglePopup);
+        harness.frame();
+        harness.press("q", Modifiers::default(), "q");
+        assert_eq!(
+            harness.field_text(pane),
+            "",
+            "the modal menu was typed through"
+        );
+
+        harness.press("c", ctrl(), "c");
+        harness.type_into(pane, "printf 'ba%s\\n' ck\n");
+        harness.wait_for("ctrl-c never reached the shell", |harness| {
+            harness.terminal_text(pane).contains("back")
+        });
+    }
+
+    #[test]
+    fn the_selection_chord_selects_in_the_field_instead_of_switching_tabs() {
+        // Both platforms' most-used selection gesture, and on both of them the
+        // tab bindings used to eat it: there was no way to select to the end
+        // of a line at all.
+        let mut harness = Harness::panel(2);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+        let active = harness.active_id();
+
+        type_line(&mut harness, "echo hello");
+        let chord = Modifiers {
+            shift: true,
+            ..platform_chord()
+        };
+        harness.press("left", chord, "");
+
+        // macOS selects to the start of the line; everywhere else the same
+        // chord is the one that selects by word.
+        let expected = if cfg!(target_os = "macos") {
+            "echo hello"
+        } else {
+            "hello"
+        };
+        assert_eq!(harness.field_selection(pane), expected);
+        assert_eq!(harness.active_id(), active, "the tab moved instead");
+    }
+
+    #[test]
+    fn only_the_field_draws_a_caret_while_the_field_has_the_keys() {
+        // Two filled block cursors in one pane — the shell's at its prompt and
+        // the field's under it — say nothing about which of them is listening,
+        // and the steady one is the wrong one.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.type_field(pane, "echo hello");
+
+        let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
+        let scene = harness.frame();
+        let carets: Vec<_> = visible_rects(&scene)
+            .filter(|(rect, bounds)| {
+                rect.background == Fill::Solid(THEME.accent)
+                    && (bounds.width() - cell.width).abs() < 0.5
+                    && (bounds.height() - cell.height).abs() < 0.5
+            })
+            .collect();
+        assert_eq!(carets.len(), 1, "one caret, in the field");
+
+        assert!(
+            visible_rects(&scene).any(|(rect, bounds)| {
+                rect.background == Fill::None
+                    && rect.border.width > 0.
+                    && (bounds.width() - cell.width).abs() < 0.5
+            }),
+            "the shell's own cursor is not drawn at all, hollow or otherwise"
+        );
+    }
+
+    #[test]
+    fn a_field_too_tall_for_its_pane_gives_way_instead_of_painting_over_it() {
+        // The field grows downwards into the grid. In a short window a
+        // six-line command used to be laid out past the panel it sits in —
+        // over the border, over the pane below and off the bottom of the
+        // window — with the grid above squeezed to no rows at all.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.type_field(pane, "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight");
+
+        let scene = harness.frame_sized(vec2f(600., 200.));
+        let panel = panel_boxes(&scene)[0];
+        let field = field_boxes(&scene)[0];
+        let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
+
+        assert!(
+            field.max_y() <= panel.max_y() + 0.5,
+            "the field reaches {} and the panel ends at {}",
+            field.max_y(),
+            panel.max_y()
+        );
+        assert!(
+            field.min_y() - panel.min_y() >= cell.height,
+            "the grid was squeezed to nothing to make room for the field"
+        );
     }
 }

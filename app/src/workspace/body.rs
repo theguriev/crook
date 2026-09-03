@@ -14,6 +14,20 @@
 //! back to one pane is indistinguishable from one that never split — no
 //! divider, `in_split_pane == false`.
 //!
+//! # The field
+//!
+//! Under the grid, and only on the normal screen, is the pane's command input:
+//! a bordered box that reads as a text field, where the next command is
+//! composed before any of it reaches the shell. It grows downwards as the line
+//! wraps or gains lines and the grid gives up the space, which is why it is a
+//! plain child of the column and the grid is the flexible one.
+//!
+//! Whether it is drawn at all is [`input_keys::shows_input`], the visible half
+//! of the rule [`input_keys::route`] states: a program that has taken the alt
+//! screen is not reading a line, so there is no line to compose and every key
+//! goes to it instead. The settings page is the other pane without one: it has
+//! no shell to send a line to, and every control on it is a click.
+//!
 //! # When there is no terminal
 //!
 //! Two cases, and they are told apart on purpose. A run that never started the
@@ -27,13 +41,16 @@ use crook_terminal::Snapshot;
 use crookui_core::fonts::{Properties, Weight};
 use crookui_core::prelude::*;
 
-use crate::tab::{Pane, SplitAxis, TabAction};
+use crate::input_keys;
+use crate::tab::{Pane, PaneId, SplitAxis, TabAction};
+use crate::terminal_font::CellFont;
 use crate::terminal_model::TerminalHandle;
 use crate::theme::THEME;
 
 use super::action::WorkspaceAction;
+use super::input_element::CommandInput;
 use super::settings_page;
-use super::terminal_element::{TerminalElement, color};
+use super::terminal_element::{Keys, TerminalElement, color};
 use super::view::Workspace;
 
 /// The gap between a pane's edge and the grid inside it.
@@ -49,6 +66,15 @@ const GRID_PADDING: f32 = 8.;
 /// easier to grab — Warp pads its divider by four on each side for exactly
 /// that and only when the thin one is in use.
 const DIVIDER_THICKNESS: f32 = 1.;
+
+/// How round the input field's box is.
+///
+/// Tighter than the panel around it, which is what makes it read as something
+/// inside the panel rather than as a second panel.
+pub(super) const FIELD_RADIUS: f32 = 6.;
+
+/// The gap between the field's border and the line being composed.
+pub(super) const FIELD_PADDING: f32 = 6.;
 
 pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
     let Some(tab) = workspace.tabs().active() else {
@@ -141,18 +167,25 @@ fn panel(
     // **Where the keyboard line is drawn.** A pane takes typing only when it is
     // the focused one *and* nothing is floating over the window: the options
     // menu is modal, and a shell that swallowed the keys while it was up would
-    // make the menu unusable. Everything upstream of this — the bindings the
-    // help text lists — was already consumed by `Workspace::action_for` in the
-    // window delegate, so nothing here has to know which chords those are.
+    // make the menu unusable. What the menu cannot take away is the three keys
+    // that interrupt, end and suspend — see [`Keys::Signals`]. Everything
+    // upstream of this — the bindings the help text lists — was already
+    // consumed by `Workspace::action_for` in the window delegate, so nothing
+    // here has to know which chords those are.
     //
     // The settings page is not in that argument: it is a pane with no shell,
     // and every control on it is a click. There is nothing to give the
-    // keyboard to.
+    // keyboard to, and nothing to compose a line for either, so it is the one
+    // pane that is drawn without a grid and without a field.
     let content = if is_settings {
         settings_page::render(workspace, app)
     } else {
-        let accepts_input = is_focused && !workspace.is_options_menu_open();
-        grid(workspace, pane, terminal, accepts_input, app)
+        let keys = match (is_focused, workspace.is_options_menu_open()) {
+            (false, _) => Keys::None,
+            (true, true) => Keys::Signals,
+            (true, false) => Keys::All,
+        };
+        contents(workspace, pane, terminal, keys, app)
     };
 
     // The `Hoverable` is here for its click handler alone — nothing about a
@@ -186,7 +219,7 @@ fn panel(
 /// What is painted behind a pane, and therefore what its padding is made of.
 ///
 /// The shell's own background, whatever the shell has made of it. That matters
-/// more than it looks: `crook_palette` starts a grid on the panel's colour
+/// more than it looks: `crook_palette` starts a grid on the pane's colour
 /// precisely so an untouched screen and the pane around it are one surface,
 /// and a pane painted in anything else turns [`GRID_PADDING`] into a visible
 /// frame around the grid — which is exactly what a rounded card was, minus the
@@ -200,27 +233,108 @@ fn pane_ground(terminal: Option<&(TerminalHandle, Arc<Snapshot>)>) -> Color {
     terminal.map_or(THEME.surface, |(_, snapshot)| color(snapshot.background))
 }
 
-/// The pane's grid, or an explanation of why it has none.
-fn grid(
+/// The pane's grid and the field under it, or an explanation of why it has
+/// neither.
+///
+/// The terminal is passed in rather than looked up again: `panel` has already
+/// asked for it, because the pane is painted in the background this same
+/// snapshot resolved.
+fn contents(
     workspace: &Workspace,
     pane: &Pane,
     terminal: Option<(TerminalHandle, Arc<Snapshot>)>,
-    accepts_input: bool,
+    keys: Keys,
     app: &AppContext,
 ) -> Box<dyn Element> {
     let font = workspace.cell_font().clone();
 
-    if let Some((handle, snapshot)) = terminal {
-        return TerminalElement::new(snapshot, font)
-            .with_terminal(handle, accepts_input)
-            .finish();
+    let Some((handle, snapshot)) = terminal else {
+        let reason = workspace.terminal_failure(pane.id(), app).map_or_else(
+            || "no shell is running in this pane".to_owned(),
+            |failure| format!("the shell could not be started: {failure}"),
+        );
+        return notice(workspace, pane, reason);
+    };
+
+    let alt_screen = snapshot.alt_screen;
+    let mut grid = TerminalElement::new(snapshot, font.clone()).with_terminal(handle.clone(), keys);
+    // The grid reads the field's line to tell an end of input from a delete,
+    // so it is given the field even on the screen that does not draw one.
+    if let Some(input) = workspace.input(pane.id()) {
+        grid = grid.with_input(input.clone());
+    }
+    let grid = grid.finish();
+    if !input_keys::shows_input(alt_screen) {
+        return grid;
     }
 
-    let reason = workspace.terminal_failure(pane.id(), app).map_or_else(
-        || "no shell is running in this pane".to_owned(),
-        |failure| format!("the shell could not be started: {failure}"),
-    );
-    notice(workspace, pane, reason)
+    // The grid is the flexible one and the field is not, so the field is
+    // measured first and the grid divides what is left. That is the whole of
+    // "the grid gives up the space rather than the field overflowing".
+    Flex::column()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        // The panel *is* the room there is. A field grown past it — a six-line
+        // command in a pane on a laptop — would be drawn over the panel's own
+        // border and over the pane below it, with the grid squeezed to nothing
+        // above it, so the field is measured again against what is left
+        // instead. Its own ceiling is the other half of this: see `row_budget`.
+        .with_no_overflow()
+        .with_child(Expanded::new(1., grid).finish())
+        .with_child(field(
+            workspace,
+            pane.id(),
+            handle,
+            font,
+            FieldState {
+                focused: keys == Keys::All,
+                alt_screen,
+            },
+        ))
+        .finish()
+}
+
+/// What the field is drawn as: whether it has the keys, and which screen the
+/// pane is on.
+#[derive(Copy, Clone)]
+struct FieldState {
+    focused: bool,
+    alt_screen: bool,
+}
+
+/// The pane's command input, in the box that makes it read as a text field.
+fn field(
+    workspace: &Workspace,
+    pane: PaneId,
+    handle: TerminalHandle,
+    font: CellFont,
+    state: FieldState,
+) -> Box<dyn Element> {
+    let Some(input) = workspace.input(pane) else {
+        // Unreachable: an open pane always has one, for the same reason it
+        // always has its mouse state.
+        log::error!("pane {pane:?} has no input state and its field was skipped");
+        return Empty::new().finish();
+    };
+
+    let composing = CommandInput::new(input.clone(), font, workspace.clipboard().clone())
+        .with_terminal(handle, state.focused, state.alt_screen)
+        .finish();
+
+    // Darker than the panel it sits in rather than lighter, which is what a
+    // text field looks like on a dark ground: a well to type into.
+    let border = if state.focused {
+        THEME.accent
+    } else {
+        THEME.border
+    };
+    Container::new(composing)
+        .with_background_color(THEME.ground)
+        .with_border(Border::all(1.).with_border_color(border))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(FIELD_RADIUS)))
+        .with_margin_top(GRID_PADDING)
+        .with_uniform_padding(FIELD_PADDING)
+        .finish()
 }
 
 /// What a panel with no grid says.

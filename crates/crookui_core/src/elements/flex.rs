@@ -42,6 +42,9 @@ pub struct Flex {
     main_axis_size: MainAxisSize,
     main_axis_alignment: MainAxisAlignment,
     cross_axis_alignment: CrossAxisAlignment,
+    /// Whether children that do not fit are measured again against what is
+    /// left. See [`Flex::with_no_overflow`].
+    bound_children: bool,
     size: Option<Vector2F>,
     origin: Option<Point>,
     layout_state: Option<LayoutState>,
@@ -138,6 +141,7 @@ impl Flex {
             main_axis_size: MainAxisSize::Min,
             main_axis_alignment: MainAxisAlignment::Start,
             cross_axis_alignment: CrossAxisAlignment::Start,
+            bound_children: false,
             size: None,
             origin: None,
             layout_state: None,
@@ -163,6 +167,27 @@ impl Flex {
     /// Sets how much room the flex takes along its main axis.
     pub fn with_main_axis_size(mut self, main_axis_size: MainAxisSize) -> Self {
         self.main_axis_size = main_axis_size;
+        self
+    }
+
+    /// Keeps every child inside the flex, even when what they ask for adds up
+    /// to more than it has.
+    ///
+    /// Children that are not flexible are normally measured free along the
+    /// main axis, and one that asks for more than there is gets it: it is laid
+    /// out past the end of the flex and painted over whatever is there, and
+    /// the flexible children are left with nothing to divide. That is the
+    /// right default — a list longer than the space it is drawn in is a real
+    /// shape, and the tabs panel clips one — but it is wrong wherever the flex
+    /// *is* the space: a pane's column, where the input field must give way to
+    /// the grid rather than be drawn over the panel's border and off the
+    /// bottom of the window.
+    ///
+    /// With this set, an overflowing flex measures those children again
+    /// against what is left, in order, so the shortfall lands on the last of
+    /// them.
+    pub fn with_no_overflow(mut self) -> Self {
+        self.bound_children = true;
         self
     }
 
@@ -219,22 +244,47 @@ impl Element for Flex {
 
         // Pass one: measure everything that is not flexible, each free along
         // the main axis and bounded across it.
+        let inflexible = if self.cross_axis_alignment == CrossAxisAlignment::Stretch {
+            SizeConstraint::tight_on_cross_axis(self.axis, constraint)
+        } else {
+            SizeConstraint::child_constraint_along_axis(self.axis, constraint)
+        };
         for child in &mut self.children {
             if let Some(parent_data) = Self::child_flex(child.as_ref()) {
                 total_flex += parent_data.flex;
                 continue;
             }
 
-            let child_constraint = if self.cross_axis_alignment == CrossAxisAlignment::Stretch {
-                SizeConstraint::tight_on_cross_axis(self.axis, constraint)
-            } else {
-                SizeConstraint::child_constraint_along_axis(self.axis, constraint)
-            };
-
-            let size = child.layout(child_constraint, ctx, app);
+            let size = child.layout(inflexible, ctx, app);
             fixed_space += size.along(self.axis);
             if size.along(cross_axis).is_finite() {
                 cross_axis_max = cross_axis_max.max(size.along(cross_axis));
+            }
+        }
+
+        // What [`Self::with_no_overflow`] asks for, and only when there is an
+        // overflow to take back: the children that are not flexible are
+        // measured a second time against what there actually is, in order, so
+        // the shortfall is taken from the last of them.
+        //
+        // Never otherwise, and never at all without being asked. Measuring a
+        // child free along the main axis is also how an element says "as much
+        // as there is" — [`Empty`] answers an unbounded axis with all of it —
+        // and re-measuring one against a real number would turn that answer
+        // into a real height.
+        let bound = constraint.max_along(self.axis);
+        if self.bound_children && bound.is_finite() && fixed_space > bound {
+            fixed_space = self.spacing * self.children.len().saturating_sub(1) as f32;
+            for child in &mut self.children {
+                if Self::child_flex(child.as_ref()).is_some() {
+                    continue;
+                }
+                let room = (bound - fixed_space).max(0.);
+                let size = child.layout(with_room(inflexible, self.axis, room), ctx, app);
+                fixed_space += size.along(self.axis);
+                if size.along(cross_axis).is_finite() {
+                    cross_axis_max = cross_axis_max.max(size.along(cross_axis));
+                }
             }
         }
 
@@ -410,6 +460,15 @@ impl Flex {
             }
         }
     }
+}
+
+/// `constraint` with `room` along `axis`.
+fn with_room(mut constraint: SizeConstraint, axis: Axis, room: f32) -> SizeConstraint {
+    match axis {
+        Axis::Horizontal => constraint.max.set_x(room),
+        Axis::Vertical => constraint.max.set_y(room),
+    }
+    constraint
 }
 
 fn report_infinite_main_axis(constraint: SizeConstraint, axis: Axis, message: &str) {

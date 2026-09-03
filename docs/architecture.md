@@ -533,19 +533,98 @@ build a snapshot, and publishes the `Arc` into a slot of its own; painting clone
 and walks owned data. Layout — which asks "did the grid move?" on every single frame —
 answers from an atomic before it ever asks for the lock.
 
+### The command line is an input field
+
+A pane's next command is composed in a bordered box under its grid — an ordinary GUI text
+input, with a caret you can click, selection by drag, word and line movement, undo, the
+system clipboard, and a history on the arrows — and only reaches the pty when Enter sends it,
+as `line + "\n"`. The shell then echoes and runs it, so the grid above shows prompt, command
+and output exactly as it did when every keystroke went straight through.
+
+**Why not leave the shell to do the line editing?** Because it cannot do it as a GUI. The
+line lives in the child's own reader, so there is nothing on this side to hit-test, select,
+or paste into; a click can only be turned into an approximation of arrow keys, and a
+selection into nothing at all. Warp made the same call, and it is the one place where a
+terminal has to stop being a glass teletype.
+
+The model is in `app/src/editor/`, and nothing in it draws, touches a clipboard or knows what
+a keystroke is: positions are byte offsets on grapheme boundaries, movements arrive as an
+already-resolved `Motion`, and clipboard text goes in and out as a `String`. That is what
+makes the whole behaviour of the input — every movement from every position, undo grouping,
+history, grapheme-aware deletion — testable in microseconds with no window, no GPU and no
+fonts. `app/src/pane_input.rs` is the per-pane state the element tree is rebuilt around;
+`app/src/workspace/input_element.rs` draws it on the grid's own cell metrics.
+
 ### Where the keyboard line is drawn
 
-**At the Command key.** Nothing carrying Command or Super is ever typed into a shell, so
-`cmd-t` opens a tab and an unbound `cmd-k` does nothing rather than typing a `k`. Control is
-the opposite and always reaches the shell; the four Control chords Crook binds on Linux and
-Windows are the whole of what the shell loses there. A pane takes typing only when it is
-focused *and* nothing is floating over the window.
+**One function: `input_keys::route`.** Four rules, in order.
+
+1. **Crook's own chords never arrive.** The window delegate consumes what `input_keys::binding`
+   names before any element sees the event, which is what makes `cmd-t` open a tab everywhere
+   rather than typing a `t`.
+2. **The alt screen belongs to the program.** vim, `top` and `less` drive every cell and read
+   every key themselves, so on the alt screen every key goes raw to the pty — and the field is
+   not drawn at all. `Snapshot::alt_screen` is the whole test. This is the honest line between
+   "a shell reading a line" and "a program driving the screen": it needs no shell integration,
+   no prompt marks and no heuristics, and it is a fact the emulator already knows.
+3. **The signal keys reach the shell.** `ctrl-c` interrupts — and throws the half-written line
+   away with it, because that is what the gesture means — `ctrl-z` suspends, and `ctrl-d` ends
+   the input, but only when the field is empty. The field now holds the line the shell's own
+   reader used to hold, so an unconditional `ctrl-d` would be an end of file every time; over
+   a written line it is the delete-forward it is in every line editor. A modal menu over the
+   window takes the typing away and leaves these three, because a running command has to stay
+   interruptible.
+4. **Everything else on the normal screen is the field's**, and a key the keymap has no
+   meaning for does nothing rather than leaking into the shell.
+
+**Which chords are Crook's** is the other half of the same file, and it lives there rather
+than in the workspace for a reason the field made unavoidable: a binding consumed in the
+delegate never reaches `route`, so two tables in two modules can silently take the same key
+away from each other. Side by side, a test asserts that no chord is in both.
+
+The two platforms differ, and not by taste:
+
+- **macOS** puts Crook's chords on Command, where a Mac application's chords live and where
+  nothing the field wants can be. Tab selection is `cmd-alt-left/right` rather than
+  `cmd-shift-left/right`, because the latter is how every macOS text field selects to the end
+  of a line.
+- **Linux and Windows** put them on Control-**Shift**. A bare `ctrl-letter` belongs to the
+  tty: `ctrl-c` interrupts, `ctrl-d` ends input, `ctrl-w` erases a word. Tab selection is
+  `ctrl-pageup/pagedown`, which leaves `ctrl-shift-left/right` to the field, where it selects
+  by word. Copy and undo are `ctrl-shift-c` and `ctrl-shift-z` for the same reason every
+  terminal emulator on Linux arrived at.
+
+The platform is a parameter of the keymap rather than a `cfg!` inside it, so both halves are
+tested on either machine.
+
+**Three dependencies came with the field**, and each is a pure-Rust crate with no build
+script, which is the standing constraint of §3:
+
+- `unicode-segmentation` — grapheme clusters and word boundaries. A caret that lands inside
+  `é` written as `e` plus a combining acute is a panic on the next slice, and "one character"
+  in a filename is not one `char`.
+- `unicode-width` — the same East Asian width table the emulator lays its grid out with, so
+  the field gives `日` the two columns the shell will echo it back in. Without it a CJK
+  filename is drawn on top of itself and a click lands two columns out.
+- `arboard` — the system clipboard, text only (its default features pull in `image`, which
+  nothing here needs). Opened once, lazily, per window; a machine with no clipboard records
+  the failure and never asks again.
+
+One layout primitive changed for the field, in `crookui_core`: `Flex::with_no_overflow`. A
+flex measures a child that is not flexible with an *unbounded* main axis — that is how a child
+says how much it wants, and how `Empty` says "as much as there is" — and a child that asks for
+more than the flex has is given it and painted past the end. A list with a clip below it wants
+exactly that; a pane's column does not, because the field grows downwards *into* the grid and
+would otherwise be drawn over the panel's border and off the bottom of the window. So the pane
+asks for the other behaviour by name, and an overflowing flex measures those children again
+against what is left. The field's own ceiling — at most eight rows, and at most half of a
+short pane — is the other half of the same decision.
 
 ### What the emulator does not do
 
 Mouse reporting, IME composition, the kitty keyboard protocol, the numeric keypad, and OSC 52
-clipboard writes — nothing in Crook can reach a system clipboard yet, and an OSC 52 is logged
-rather than silently dropped. Ctrl+Enter and Ctrl+Tab are indistinguishable from the
+clipboard writes — the *field* reaches the system clipboard, the grid does not, and an OSC 52
+is logged rather than silently dropped. Ctrl+Enter and Ctrl+Tab are indistinguishable from the
 unmodified key in every legacy encoding, which is the stated reason the kitty protocol exists.
 
 One residue is worth writing down rather than discovering. End-of-file on the pty master is
@@ -596,6 +675,23 @@ still missing there is auto-scroll: selecting a tab with the keyboard does not b
 into view, because that needs a scrollable that can be told to make a particular child
 visible.
 
+**Shell integration, and the two things it would fix.** Crook never tells the shell anything
+about itself, and the shell never marks its prompts (OSC 133, or Warp's own bootstrap). Two
+consequences are worth naming rather than discovering:
+
+- **No completion.** Tab does nothing in the field, because the shell has never seen the
+  partial line and has nothing to complete. There is no way to fake it: completion is the
+  shell's, and reaching it means either sending the line for the shell to edit — which is the
+  design the field replaced — or asking the shell over an integration channel.
+- **A password prompt is composed in the clear.** `sudo`, `ssh` and `read -s` turn echo off
+  and read a line on the *normal* screen, so the field takes the keys, shows the secret as
+  ordinary text and records it in that pane's history for the life of the pane. The obvious
+  signal does not work: `zsh`'s line editor and `bash`'s readline both keep `ECHO` off at
+  their own prompt, so "the tty is not echoing" is true nearly all the time and cannot tell a
+  password prompt from a shell waiting for a command. Telling them apart needs to know where
+  the prompt is, which is what shell integration is for. Until then the field's history is at
+  least in memory only, per pane, and dies with the pane.
+
 **A settings *stack*.** The page exists; the machinery under it does not, and that is the
 split worth keeping. Warp's stack — a `define_settings_group!` macro, a settings-value crate,
 `schemars` schemas, TOML path routing, cloud sync, per-platform gating, a file watcher and a
@@ -610,8 +706,9 @@ reset button that doubles as the modified indicator, and inert rows drawn greyed
 dropped. The shape is the more interesting half — settings are a **pane**, the same thing a
 shell lives in, so they open in a tab of their own, sit in the strip beside the work they
 configure, split next to a running shell, and close with the same ×, the same middle click and
-the same `cmd/ctrl-w` as everything else. Warp's `settings_pane.rs` plus its one-per-window pane
-manager; `TabAction::OpenSettings` is both halves of that manager, navigating to the existing
+the same close chord — `cmd-w`, `ctrl-shift-w` off macOS — as everything else. Warp's
+`settings_pane.rs` plus its one-per-window pane manager; `TabAction::OpenSettings` is both
+halves of that manager, navigating to the existing
 pane or opening a tab for it.
 
 That shape has a price and it is worth naming, because the first draft of this page was a
@@ -626,7 +723,11 @@ model syncs against, and it filters the settings pane out, because a shell opene
 that draws no grid is a process nobody can see.
 
 The omission is search: Warp filters the rail and the content together from one field, per
-widget, with match counts; that needs a text input, and `crookui_core` has none.
+widget, with match counts. That needs a text input, and what Crook has is half of one. The
+model is there and is general — `app/src/editor` draws nothing, touches no clipboard and
+knows no keystroke — but the only element that draws it is `CommandInput`, which measures in
+terminal cells against a `CellFont` and reads a pane's `PaneInput`. `crookui_core` still has
+no text field of its own, so the gap here is an element, not a model.
 
 **Keymaps.** Warp has editable bindings, fixed bindings, context predicates, and a
 user-remappable keymap. Crook reads input directly. The half worth keeping is already kept:
@@ -661,6 +762,7 @@ platforms, and treat a build script as the cost it is.
 | Core front-ends | `StoredView::{Gui, Tui}` share one registry | one arm; the seam is kept, the arm is not written |
 | Channels | six | two |
 | Packaging | 2,245 lines of shell and PowerShell | a release binary today, `cargo-dist` next |
+| The command line | an input field, with shell integration behind it | an input field, with the alt screen as the whole test (§7) |
 | Autotracking | `Tracked<T>` dependency capture | explicit `ctx.notify()` |
 | Settings | ~800, with a macro DSL and cloud sync | 9, two `serde` structs in one JSON file |
 | Settings UI | a pane, 16 pages, search over ~800 widgets | a pane, 4 pages, no search |

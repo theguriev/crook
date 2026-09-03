@@ -590,7 +590,7 @@ impl TabStrip {
                 self.repair(Some(id));
                 // Deliberately not touching `opened`: that counter names agent
                 // sessions, and a settings tab is not one. Opening settings
-                // between two `cmd/ctrl-t`s must not skip a number.
+                // between two new-tab chords must not skip a number.
                 TabEffect::Changed
             }
 

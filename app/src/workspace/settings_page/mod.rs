@@ -5,8 +5,9 @@
 //! Settings are not a modal here. They are a **pane** — the same thing an
 //! agent session lives in — which means they open in a tab of their own, sit
 //! in the strip beside the work they configure, can be split next to it, and
-//! close with the same close button, the same middle click and the same
-//! `cmd/ctrl-w` as anything else. That is Warp's design
+//! close with the same close button, the same middle click and the same close
+//! chord — `cmd-w`, and `ctrl-shift-w` off macOS — as anything else. That is
+//! Warp's design
 //! (`app/src/pane_group/pane/settings_pane.rs`, plus the per-window manager
 //! that keeps at most one of them), and it is the best idea in that part of
 //! Warp: the thing you are configuring stays on screen while you configure it.
@@ -31,8 +32,9 @@
 //! second surface.
 //!
 //! There is no close button in the corner and no Escape binding. Both would be
-//! a second way to do what the row's close button and `cmd/ctrl-w` already do
-//! to every pane, and a settings pane is not special enough to have its own.
+//! a second way to do what the row's close button and the close chord already
+//! do to every pane, and a settings pane is not special enough to have its
+//! own.
 //!
 //! # What it does not have
 //!

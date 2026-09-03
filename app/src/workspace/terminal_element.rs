@@ -44,6 +44,8 @@ use crookui_core::geometry::{Color, Point, RectF, Vector2F, vec2f};
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 use crookui_core::scene::Scene;
 
+use crate::input_keys::{self, Platform};
+use crate::pane_input::PaneInput;
 use crate::terminal_font::{CellFont, CellMetrics};
 use crate::terminal_keys;
 use crate::terminal_model::TerminalHandle;
@@ -65,6 +67,22 @@ const STRIKEOUT_HEIGHT_RATIO: f32 = 0.28;
 /// How wide the beam cursor and the hollow block's outline are drawn.
 const CURSOR_STROKE: f32 = 2.;
 
+/// What a pane's grid does with the keys that reach the window.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Keys {
+    /// Nothing: some other pane is the focused one.
+    None,
+    /// Only the keys that interrupt, end and suspend a command.
+    ///
+    /// What a focused pane still takes while a modal menu is open over the
+    /// window. The menu freezes everything under it, and a `sleep 30` that
+    /// could not be interrupted until somebody found the mouse would be the
+    /// menu taking away the one key a terminal must never lose.
+    Signals,
+    /// Everything the routing rule gives the shell.
+    All,
+}
+
 /// One pane's terminal grid.
 pub struct TerminalElement {
     /// The grid to paint. Replaced during layout when a resize moved it, so a
@@ -79,12 +97,19 @@ pub struct TerminalElement {
     /// is what a test does, and what a pane whose shell has gone would do.
     handle: Option<TerminalHandle>,
 
-    /// Whether keys that reached the window belong to this pane.
+    /// How much of the keyboard this pane's grid takes.
     ///
     /// Decided by the workspace rather than here, because it is the workspace
     /// that knows which pane is focused and whether a menu is up over it. See
     /// [`crate::terminal_keys`] for the other half of the same line.
-    accepts_input: bool,
+    keys: Keys,
+
+    /// The line being composed under this grid, when there is a field.
+    ///
+    /// Read at the moment a key arrives rather than baked in when the frame
+    /// was built, because it decides what Ctrl-D means: an end of input on an
+    /// empty line, and a delete over a written one.
+    input: Option<PaneInput>,
 
     size: Option<Vector2F>,
     origin: Option<Point>,
@@ -97,31 +122,61 @@ impl TerminalElement {
             snapshot,
             font,
             handle: None,
-            accepts_input: false,
+            keys: Keys::None,
+            input: None,
             size: None,
             origin: None,
         }
     }
 
     /// Attaches the terminal the snapshot came from, so the grid can resize the
-    /// pty it measures and — when `accepts_input` — type into it.
-    pub fn with_terminal(mut self, handle: TerminalHandle, accepts_input: bool) -> Self {
+    /// pty it measures and type into it as far as `keys` allows.
+    pub fn with_terminal(mut self, handle: TerminalHandle, keys: Keys) -> Self {
         self.handle = Some(handle);
-        self.accepts_input = accepts_input;
+        self.keys = keys;
         self
     }
 
-    /// The typed keystroke, if this pane is the one that should have it.
+    /// Attaches the field under this grid, whose line decides what Ctrl-D
+    /// means.
+    pub fn with_input(mut self, input: PaneInput) -> Self {
+        self.input = Some(input);
+        self
+    }
+
+    /// The typed keystroke, if this pane is the one that should have it and the
+    /// shell is the half of the pane it belongs to.
     fn type_key(&self, event: &Event) -> bool {
         let Event::KeyDown { keystroke, chars } = event else {
             return false;
         };
-        if !self.accepts_input {
+        if self.keys == Keys::None {
             return false;
         }
         let Some(handle) = self.handle.as_ref() else {
             return false;
         };
+
+        // The whole policy is [`input_keys::route`]: on the alt screen the
+        // program has every key, on the normal screen the shell has only the
+        // ones that interrupt, end and suspend, and the input field below has
+        // the rest.
+        let pane = input_keys::Pane {
+            alt_screen: self.snapshot.alt_screen,
+            line_is_empty: self
+                .input
+                .as_ref()
+                .is_none_or(|input| input.editor().is_empty()),
+        };
+        if !input_keys::route(keystroke, chars, pane, Platform::current()).reaches_the_shell() {
+            return false;
+        }
+        // A modal menu takes the rest away: everything but the three keys a
+        // running command has to keep hearing.
+        if self.keys == Keys::Signals && !input_keys::is_signal(keystroke) {
+            return false;
+        }
+
         let Some((key, modifiers)) = terminal_keys::key_for(keystroke, chars) else {
             return false;
         };
@@ -196,12 +251,18 @@ impl Element for TerminalElement {
             .expect("a grid was painted before it was laid out");
 
         self.origin = Some(Point::from_vec2f(origin, ctx.scene.z_index()));
+        // The cursor is filled only when the grid is where typing would go. On
+        // the normal screen that is the field below, so the shell's own cursor
+        // is drawn as the outline an unfocused terminal gets: two filled block
+        // cursors in one pane say nothing about which of them is listening.
+        let owns_caret =
+            self.keys == Keys::All && !input_keys::shows_input(self.snapshot.alt_screen);
         paint_grid(
             &self.snapshot,
             &self.font,
             origin,
             size,
-            self.accepts_input,
+            owns_caret,
             ctx.scene,
         );
     }
@@ -251,16 +312,16 @@ fn bounded(max: f32, min: f32) -> f32 {
 
 /// Paints one snapshot into `scene`, filling `size` from `origin`.
 ///
-/// `focused` is whether this pane is the one that will receive typing. It is
-/// the cursor's business and nothing else's: an unfocused pane draws an
-/// outline where the focused one draws a filled block, which is how every
-/// terminal with splits says which shell is listening.
+/// `owns_caret` is whether this grid is where typing would go. It is the
+/// cursor's business and nothing else's: a grid that is not listening draws an
+/// outline where a listening one draws the filled block the program asked for,
+/// which is how every terminal with splits says which shell has the keyboard.
 fn paint_grid(
     snapshot: &Snapshot,
     font: &CellFont,
     origin: Vector2F,
     size: Vector2F,
-    focused: bool,
+    owns_caret: bool,
     scene: &mut Scene,
 ) {
     let metrics = font.metrics();
@@ -277,7 +338,7 @@ fn paint_grid(
     let shape = snapshot
         .cursor
         .as_ref()
-        .map(|cursor| shape_of(cursor, focused));
+        .map(|cursor| shape_of(cursor, owns_caret));
     // A block cursor is drawn as a filled cell, so the character inside it has
     // to be drawn in the ground colour or it disappears into the fill. An
     // outline leaves the character alone.
@@ -352,13 +413,14 @@ fn paint_cell(
     scene.draw_glyph(pen, glyph, drawn_with, metrics.font_size, ink);
 }
 
-/// What a cursor is drawn as, given whether the pane is listening.
+/// What a cursor is drawn as, given whether the grid is where typing goes.
 ///
-/// An unfocused pane is always an outline, whatever shape the child asked for:
-/// the shape says what the *program* wants, and focus says whether the shape
-/// means anything right now.
-fn shape_of(cursor: &Cursor, focused: bool) -> CursorShape {
-    if focused {
+/// A grid that is not listening is always an outline, whatever shape the child
+/// asked for: the shape says what the *program* wants, and this says whether
+/// the shape means anything right now. It does not while an input field below
+/// holds the keyboard, which on the normal screen is always.
+fn shape_of(cursor: &Cursor, owns_caret: bool) -> CursorShape {
+    if owns_caret {
         cursor.shape
     } else {
         CursorShape::HollowBlock

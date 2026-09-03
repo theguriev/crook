@@ -28,12 +28,23 @@
 //! `--run <command>` is the other half of running unattended, and it exists
 //! because a frame budget alone cannot show a terminal working: `--frames 3`
 //! draws three frames in the time it takes a shell to open a pty, so all three
-//! are empty. With `--run`, the command is typed into the first pane at startup
-//! and the run waits for it to print before it counts a frame or takes a
-//! picture — and says on stdout, or in the log, what the shell actually wrote.
+//! are empty. With `--run`, the command is typed into the first pane's input
+//! field a keystroke at a time and sent with Return, and the run waits for it to
+//! print before it counts a frame or takes a picture — and says on stdout, or in
+//! the log, what the shell actually wrote. That is the whole path a person's
+//! command takes, from a key press to a line of output, in a run nobody is
+//! sitting in front of.
+//!
+//! `--type <text>` is its quieter companion: it leaves text in the field
+//! *unsent*, which together with `--select <text>` is how a picture can show a
+//! line in the middle of being written.
 
+pub mod clipboard;
+pub mod editor;
 pub mod git;
 pub mod git_model;
+pub mod input_keys;
+pub mod pane_input;
 pub mod platform_insets;
 pub mod process;
 pub mod settings;
@@ -54,7 +65,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use crookui::{CosmicFontDb, Platform, Proxy, WindowDelegate, WindowOptions, render_scene_to_rgba};
-use crookui_core::event::Event;
+use crookui_core::event::{Event, Keystroke, Modifiers};
 use crookui_core::executor::{Background, LocalQueue};
 use crookui_core::geometry::{Vector2F, vec2f};
 use crookui_core::platform::TextLayoutSystem;
@@ -181,6 +192,28 @@ struct Overrides {
     /// Type this into the first pane's shell at startup, and wait for what it
     /// prints. See the module docs for why a frame budget alone is not enough.
     run: Option<String>,
+    /// Put this in the first pane's input field, and leave it there unsent.
+    ///
+    /// `--run`'s companion: that one shows what a shell printed, and this one
+    /// shows the line somebody is in the middle of composing. Together they are
+    /// the only way a picture can hold both halves of a pane at once.
+    type_text: Option<String>,
+    /// Select the first occurrence of this in the input field.
+    ///
+    /// A selection is a state that only exists while a button is held, so it is
+    /// the one thing about the field that no unattended run could otherwise
+    /// show.
+    select: Option<String>,
+}
+
+impl Overrides {
+    /// Whether this run needs shells opened for it.
+    ///
+    /// Neither the field nor the grid is worth a picture without one: a pane
+    /// with no shell draws a notice instead of both.
+    fn wants_shells(&self) -> bool {
+        self.run.is_some() || self.type_text.is_some()
+    }
 }
 
 /// Runs Crook.
@@ -279,6 +312,14 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 let command = args.next().context("`--run` needs a command")?;
                 overrides.run = Some(command);
             }
+            "--type" => {
+                let text = args.next().context("`--type` needs some text")?;
+                overrides.type_text = Some(text);
+            }
+            "--select" => {
+                let text = args.next().context("`--select` needs some text")?;
+                overrides.select = Some(text);
+            }
             "--density" => {
                 let mode = args.next().context("`--density` needs a mode")?;
                 overrides.density = Some(match mode.as_str() {
@@ -323,8 +364,10 @@ USAGE:
 OPTIONS:
     --snapshot <PATH>  Render one frame of the real view tree to a PNG and exit
     --frames <N>       Draw N frames, then exit; for running unattended
-    --run <COMMAND>    Type COMMAND into the first pane at startup, wait for its
-                       output, and report what the shell printed
+    --run <COMMAND>    Type COMMAND into the first pane's input field at startup,
+                       send it, and report what the shell printed
+    --type <TEXT>      Leave TEXT in the first pane's input field, unsent
+    --select <TEXT>    Select the first occurrence of TEXT in that field
     --menu             Start with the tab options menu open
     --settings [PAGE]  Start with a settings tab open, on `appearance`,
                        `usage`, `keys` or `about`
@@ -335,28 +378,51 @@ OPTIONS:
     -h, --help         Print this message
     -V, --version      Print the version and channel
 
-KEYS:
-    cmd/ctrl-t                 New agent tab
-    cmd/ctrl-b                 Move the tabs between the side panel and the header strip
-    cmd/ctrl-,                 Open the settings tab, or bring it forward
-    cmd/ctrl-d                 Split the focused pane to the right
-    cmd/ctrl-shift-d           Split the focused pane downwards
-    cmd/ctrl-w                 Close the focused pane, and its tab with the last one
-    cmd/ctrl-shift-left/right  Select the previous/next tab
-    cmd/ctrl-alt-left/right    Move the active tab",
+KEYS (macOS):
+    cmd-t                      New agent tab
+    cmd-b                      Move the tabs between the side panel and the header strip
+    cmd-,                      Open the settings tab, or bring it forward
+    cmd-d / cmd-shift-d        Split the focused pane to the right / downwards
+    cmd-w                      Close the focused pane, and its tab with the last one
+    cmd-alt-left/right         Select the previous/next tab
+    cmd-ctrl-left/right        Move the active tab
+
+KEYS (Linux and Windows):
+    ctrl-shift-t               New agent tab
+    ctrl-shift-b               Move the tabs between the side panel and the header strip
+    ctrl-,                     Open the settings tab, or bring it forward
+    ctrl-shift-d / ctrl-shift-e  Split the focused pane to the right / downwards
+    ctrl-shift-w               Close the focused pane, and its tab with the last one
+    ctrl-pageup/pagedown       Select the previous/next tab
+    ctrl-shift-pageup/pagedown Move the active tab
+
+    Control-Shift, because a bare ctrl-letter belongs to the program in the
+    pane: ctrl-c interrupts it, ctrl-d ends its input and ctrl-w takes back a
+    word. The comma is not a letter the tty wants, which is why the settings
+    chord is the one entry here that keeps a bare Control.
+
+THE INPUT FIELD:
+    Each pane composes its next command in the field under its output. Enter
+    sends the line, shift-enter lengthens it, and the up and down arrows walk
+    that pane's history. Everything else is the text editing this platform
+    already does. ctrl-c interrupts the shell and throws the half-written line
+    away with it, ctrl-z suspends, ctrl-d ends the input when the field is
+    empty and deletes a character when it is not, and while a full-screen
+    program is running every key reaches it. The settings tab is the one pane
+    with no field: it has no shell, and every control on it is a click.",
         version = env!("CARGO_PKG_VERSION")
     )
 }
 
 /// How many workers are parked on a timer at any moment.
 ///
-/// Two: the usage poll between readings, and the git gather between cycles.
-/// Both are one background task for the whole cycle — the wait *and* the work
-/// — so each holds its worker across a `recv_timeout` rather than yielding it,
-/// and neither is ever counted as idle. Raise this when a third such chain
-/// appears, and see the test at the bottom of this file for what happens if it
-/// is not raised.
-const PARKED_WORKERS: usize = 2;
+/// Three: the usage poll between readings, the git gather between cycles, and
+/// the caret blink between halves of its phase. Each is one background task for
+/// the whole cycle — the wait *and* the work — so each holds its worker across
+/// the wait rather than yielding it, and none is ever counted as idle. Raise
+/// this when a fourth such chain appears, and see the test at the bottom of
+/// this file for what happens if it is not raised.
+const PARKED_WORKERS: usize = 3;
 
 /// A pool with a worker left over once both poll chains are asleep.
 ///
@@ -489,18 +555,21 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
         app.add_window(|ctx| Workspace::new(fonts, cell_font, settings, Channel::Dev, quit, ctx));
     app.update(|ctx| {
         workspace.update(ctx, |workspace, ctx| {
-            // A run with a command to show wants one pane filling the body, not
+            // A run with a shell to show wants one pane filling the body, not
             // four seeded ones sharing it — and four shells opened to draw a
             // picture of one.
-            if overrides.run.is_none() {
+            if !overrides.wants_shells() {
                 seed_snapshot_tabs(workspace, ctx);
             }
             apply_overrides(workspace, &overrides, ctx);
         });
     });
 
+    // The presenter is a parameter rather than something the frame closure
+    // holds, because typing needs it too: a keystroke is dispatched through the
+    // element tree the last frame built.
     let mut presenter = Presenter::new(window_id, text_layout);
-    let mut frame = |app: &mut App| {
+    let frame = |app: &mut App, presenter: &mut Presenter| {
         app.update(|ctx| {
             let invalidation = ctx.take_all_invalidations_for_window(window_id);
             presenter.invalidate(invalidation, ctx);
@@ -508,21 +577,33 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
         })
     };
 
-    if let Some(command) = overrides.run.as_deref() {
-        let pane = start_run(&mut app, &workspace)?;
+    if overrides.wants_shells() {
+        let pane = start_shells(&mut app, &workspace)?;
         // A frame before a keystroke, because it is *layout* that measures the
-        // pane and resizes the pty. A command typed into the grid every
+        // pane and resizes the pty — and because a key is dispatched into the
+        // element tree that frame builds. A command typed into the grid every
         // terminal starts at stays wrapped at eighty columns however wide the
         // window it is finally drawn in.
-        frame(&mut app);
+        frame(&mut app, &mut presenter);
 
-        await_shell(&queue, &mut app, &workspace, pane);
-        type_run(&mut app, &workspace, pane, command);
-        let printed = settle_run(&queue, &mut app, &workspace, pane);
-        println!("the shell printed:\n{}", printed.trim_end());
+        if let Some(command) = overrides.run.as_deref() {
+            await_shell(&queue, &mut app, &workspace, pane);
+            type_run(&mut app, &mut presenter, window_id, command);
+            let printed = settle_run(&queue, &mut app, &workspace, pane);
+            println!("the shell printed:\n{}", printed.trim_end());
+        }
+
+        // Last, so that the line in the field is the one the picture was asked
+        // for rather than whatever the shell has been doing since.
+        fill_input(
+            &mut app,
+            &workspace,
+            pane,
+            &Field::from_overrides(&overrides),
+        );
     }
 
-    let scene = frame(&mut app);
+    let scene = frame(&mut app, &mut presenter);
 
     let (pixels, width, height) = render_scene_to_rgba(&scene, WINDOW_SIZE, &font_db)
         .context("failed to render the frame")?;
@@ -542,8 +623,8 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
     Ok(())
 }
 
-/// Opens the shells and reports the pane a `--run` command belongs in.
-fn start_run(app: &mut App, workspace: &ViewHandle<Workspace>) -> Result<PaneId> {
+/// Opens the shells and reports the pane the command line is aimed at.
+fn start_shells(app: &mut App, workspace: &ViewHandle<Workspace>) -> Result<PaneId> {
     let pane = workspace
         .read(&*app, |workspace, _| workspace.tabs().focused_pane_id())
         .context("the strip opened with no pane to run a command in")?;
@@ -585,16 +666,89 @@ fn await_shell(
     false
 }
 
-/// Types a `--run` command into its pane.
-fn type_run(app: &mut App, workspace: &ViewHandle<Workspace>, pane: PaneId, command: &str) {
-    // A newline rather than a carriage return: the pty's line discipline turns
-    // one into the other, and a literal `\r` in a log is harder to read.
-    let typed = format!("{command}\n");
+/// What `--type` and `--select` asked to leave in the input field.
+///
+/// Applied *after* a `--run` command has been typed and sent, in both kinds of
+/// run: the two share one field, and a run that typed its command over this
+/// would send the two of them as one line.
+#[derive(Clone, Debug, Default)]
+struct Field {
+    /// The line to leave in the field, unsent.
+    text: Option<String>,
+    /// The text to select within it.
+    selected: Option<String>,
+}
+
+impl Field {
+    /// What the command line asked the field to hold.
+    fn from_overrides(overrides: &Overrides) -> Self {
+        Self {
+            text: overrides.type_text.clone(),
+            selected: overrides.select.clone(),
+        }
+    }
+
+    /// Whether nothing was asked for, which is every ordinary run.
+    fn is_empty(&self) -> bool {
+        self.text.is_none() && self.selected.is_none()
+    }
+}
+
+/// Puts what `--type` and `--select` asked for into a pane's input field.
+fn fill_input(app: &mut App, workspace: &ViewHandle<Workspace>, pane: PaneId, field: &Field) {
+    if field.is_empty() {
+        return;
+    }
+
     app.update(|ctx| {
         workspace.update(ctx, |workspace, ctx| {
-            workspace.type_into(pane, &typed, ctx);
+            if let Some(text) = field.text.as_deref() {
+                workspace.type_into_input(pane, text, ctx);
+            }
+            if let Some(selected) = field.selected.as_deref()
+                && !workspace.select_in_input(pane, selected, ctx)
+            {
+                log::warn!("`--select` found no {selected:?} in the field to select");
+            }
         });
     });
+}
+
+/// Types a `--run` command into the focused pane's field and sends it.
+///
+/// As keystrokes, through the window's own event dispatch, because that is the
+/// path a command actually takes now: the field composes the line and Enter is
+/// what hands it to the pty. Writing to the pty directly would prove the pty
+/// works and nothing at all about the terminal in front of it.
+fn type_run(app: &mut App, presenter: &mut Presenter, window_id: WindowId, command: &str) {
+    for character in command.chars() {
+        // A command with a line in it is two lines sent, which is what pressing
+        // Return twice would do.
+        if character == '\n' {
+            press(app, presenter, window_id, "enter", "\r");
+            continue;
+        }
+        press(
+            app,
+            presenter,
+            window_id,
+            &character.to_lowercase().to_string(),
+            &character.to_string(),
+        );
+    }
+    press(app, presenter, window_id, "enter", "\r");
+}
+
+/// Presses one key on the window, exactly as the platform would.
+///
+/// Crook's own bindings would be consumed before this in the delegate; none of
+/// them is a bare key, so nothing typed here is ever swallowed on the way.
+fn press(app: &mut App, presenter: &mut Presenter, window_id: WindowId, key: &str, chars: &str) {
+    let event = Event::KeyDown {
+        keystroke: Keystroke::new(key, Modifiers::default()),
+        chars: chars.to_owned(),
+    };
+    app.update(|ctx| ctx.dispatch_window_event(window_id, event, presenter));
 }
 
 /// Pumps the queue until the pane stops changing, and returns what it says.
@@ -757,6 +911,9 @@ struct Shell {
     /// otherwise draw three empty grids in the time it takes a shell to open a
     /// pty, and the run it was meant to prove would prove nothing.
     run: Option<Run>,
+    /// What `--type` and `--select` asked to leave in the field, until the
+    /// first frame has been drawn. See [`Field`].
+    field: Field,
 }
 
 /// The state of a `--run` in a windowed session.
@@ -821,6 +978,7 @@ impl Shell {
                 apply_overrides(workspace, &launch.overrides, ctx);
                 workspace.start_usage_poll(ctx);
                 workspace.start_git_poll(ctx);
+                workspace.start_caret_blink(ctx);
                 // Last, because it opens a shell in every pane there is and the
                 // overrides above can still change how many that is.
                 workspace.start_terminals(ctx);
@@ -832,7 +990,7 @@ impl Shell {
         app.on_window_invalidated(window_id, move |_, _| redraw.request_redraw());
 
         let run = launch.overrides.run.clone().and_then(|command| {
-            let pane = start_run(&mut app, &workspace).ok()?;
+            let pane = start_shells(&mut app, &workspace).ok()?;
             Some(Run {
                 pane,
                 pending: Some(command),
@@ -842,6 +1000,7 @@ impl Shell {
         });
 
         Self {
+            field: Field::from_overrides(&launch.overrides),
             app,
             presenter: Presenter::new(window_id, text_layout),
             window_id,
@@ -854,7 +1013,7 @@ impl Shell {
     }
 
     /// Types the `--run` command, once there has been a frame to size the pane
-    /// it goes into.
+    /// it goes into and to build the tree the keystrokes are dispatched into.
     fn type_pending_run(&mut self) {
         let Some(run) = self.run.as_mut() else {
             return;
@@ -863,9 +1022,20 @@ impl Shell {
             return;
         };
 
-        let pane = run.pane;
         run.deadline = Instant::now() + RUN_TIMEOUT;
-        type_run(&mut self.app, &self.workspace, pane, &command);
+        type_run(&mut self.app, &mut self.presenter, self.window_id, &command);
+    }
+
+    /// Leaves what `--type` and `--select` asked for in the field, once there
+    /// is a pane and any `--run` command has been sent out of it.
+    fn fill_pending_field(&mut self) {
+        if self.field.is_empty() {
+            return;
+        }
+        let field = std::mem::take(&mut self.field);
+        if let Ok(pane) = start_shells(&mut self.app, &self.workspace) {
+            fill_input(&mut self.app, &self.workspace, pane, &field);
+        }
     }
 
     /// Whether a frame counts towards the budget yet.
@@ -960,6 +1130,7 @@ impl WindowDelegate for Shell {
 
     fn frame_drawn(&mut self) {
         self.type_pending_run();
+        self.fill_pending_field();
 
         let Some(budget) = self.frame_budget else {
             return;
@@ -1052,7 +1223,7 @@ mod tests {
                     layout: Some(Layout::Horizontal),
                     granularity: Some(Granularity::Tabs),
                     density: Some(Density::Expanded),
-                    run: None,
+                    ..Overrides::default()
                 }
             }
         );
@@ -1111,6 +1282,8 @@ mod tests {
             "--snapshot",
             "--frames",
             "--run",
+            "--type",
+            "--select",
             "--menu",
             "--hover",
             "--layout",
@@ -1128,8 +1301,35 @@ mod tests {
         }
 
         // The layout binding is the one KEYS entry that is not a tab action,
-        // so it is the one that can quietly stop being dispatched.
-        assert!(help.contains("cmd/ctrl-b"));
+        // so it is the one that can quietly stop being dispatched — and since
+        // the two platforms no longer share a chord, it is also the entry the
+        // list can most easily go on naming after the keymap has moved.
+        for (chord, key, platform) in [
+            (
+                "cmd-b",
+                Modifiers {
+                    cmd: true,
+                    ..Modifiers::default()
+                },
+                crate::input_keys::Platform::Mac,
+            ),
+            (
+                "ctrl-shift-b",
+                Modifiers {
+                    ctrl: true,
+                    shift: true,
+                    ..Modifiers::default()
+                },
+                crate::input_keys::Platform::Other,
+            ),
+        ] {
+            assert!(help.contains(chord), "{chord} is not in --help");
+            assert_eq!(
+                crate::input_keys::binding(&Keystroke::new("b", key), platform),
+                Some(crate::input_keys::Binding::ToggleLayout),
+                "--help names {chord} and nothing is bound to it"
+            );
+        }
     }
 
     /// Whether a pool of `workers` can still run a task once
@@ -1189,6 +1389,32 @@ mod tests {
     }
 
     #[test]
+    fn the_field_overrides_are_carried_through_to_the_run() {
+        assert_eq!(
+            parse(&["--type", "echo hi", "--select", "hi"]).expect("valid"),
+            Startup::Window {
+                frames: None,
+                overrides: Overrides {
+                    type_text: Some("echo hi".to_owned()),
+                    select: Some("hi".to_owned()),
+                    ..Overrides::default()
+                }
+            }
+        );
+        // Either of them means a pane needs a shell, because a pane without one
+        // draws a notice rather than a field.
+        assert!(Overrides::default().run.is_none());
+        assert!(!Overrides::default().wants_shells());
+        assert!(
+            Overrides {
+                type_text: Some("x".to_owned()),
+                ..Overrides::default()
+            }
+            .wants_shells()
+        );
+    }
+
+    #[test]
     fn help_and_version_answer_before_anything_is_opened() {
         assert_eq!(parse(&["--help"]).expect("valid"), Startup::Answered);
         assert_eq!(parse(&["-V"]).expect("valid"), Startup::Answered);
@@ -1199,6 +1425,8 @@ mod tests {
         assert!(parse(&["--snapshot"]).is_err());
         assert!(parse(&["--frames"]).is_err());
         assert!(parse(&["--run"]).is_err());
+        assert!(parse(&["--type"]).is_err());
+        assert!(parse(&["--select"]).is_err());
         assert!(parse(&["--frames", "soon"]).is_err());
         assert!(parse(&["--tabs"]).is_err());
     }

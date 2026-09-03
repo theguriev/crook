@@ -19,20 +19,28 @@ use super::super::action::{OptionsAction, SettingsAction};
 use super::super::view::Workspace;
 use super::widgets::{self, Segment};
 use super::{Control, Section};
+use crate::input_keys::Platform;
 use crate::settings::{
     Density, Granularity, Layout, PrimaryInfo, TabOptions, resolve_subtitle, subtitle_options_for,
 };
 
-/// The platform's application-command key, spelled the way a person says it.
+/// A binding as this platform spells it.
 ///
-/// The same `cfg` [`is_platform_chord`](super::super::view) resolves a
-/// keystroke with, so the Keys page cannot end up naming a chord the window
-/// does not answer to.
-const CHORD: &str = if cfg!(target_os = "macos") {
-    "cmd"
-} else {
-    "ctrl"
-};
+/// The two keymaps are not one chord with the modifier swapped. Off macOS a
+/// bare ctrl-letter belongs to the program in the pane — ctrl-c interrupts it,
+/// ctrl-d ends its input — so Crook's own chords take a Shift there and the
+/// tabs move on Page Up and Page Down rather than on the arrows the field
+/// selects with. A page that printed `cmd` or `ctrl` in front of one spelling
+/// would name chords the window does not answer to, so each row spells both
+/// out and this picks between them with the same [`Platform::current`] the
+/// window delegate resolves a keystroke with.
+fn chord(mac: &str, other: &str) -> String {
+    match Platform::current() {
+        Platform::Mac => mac,
+        Platform::Other => other,
+    }
+    .to_owned()
+}
 
 /// One page.
 pub(super) fn render(
@@ -315,12 +323,43 @@ fn keys(workspace: &Workspace) -> Box<dyn Element> {
             "Tabs and panes",
             true,
             vec![
-                binding("New agent tab", format!("{CHORD}-t")),
-                binding("Close the focused pane", format!("{CHORD}-w")),
-                binding("Split to the right", format!("{CHORD}-d")),
-                binding("Split downwards", format!("{CHORD}-shift-d")),
-                binding("Previous / next tab", format!("{CHORD}-shift-left / right")),
-                binding("Move the active tab", format!("{CHORD}-alt-left / right")),
+                binding("New agent tab", chord("cmd-t", "ctrl-shift-t")),
+                binding("Close the focused pane", chord("cmd-w", "ctrl-shift-w")),
+                binding("Split to the right", chord("cmd-d", "ctrl-shift-d")),
+                binding("Split downwards", chord("cmd-shift-d", "ctrl-shift-e")),
+                binding(
+                    "Previous / next tab",
+                    chord("cmd-alt-left / right", "ctrl-pageup / pagedown"),
+                ),
+                binding(
+                    "Move the active tab",
+                    chord("cmd-ctrl-left / right", "ctrl-shift-pageup / pagedown"),
+                ),
+                widgets::note(
+                    "Every chord here stays off the ones the field needs. On macOS that is why \
+                     the tabs are on cmd-alt-arrow rather than cmd-shift-arrow, which selects to \
+                     the end of a line; everywhere else it is why Crook's own chords carry a \
+                     Shift, since a bare ctrl-letter belongs to the program in the pane.",
+                    ui,
+                ),
+            ],
+            ui,
+        ),
+        widgets::category(
+            "The command field",
+            false,
+            vec![
+                binding("Send the line to the shell", "enter".to_owned()),
+                binding("Lengthen it by a line", "shift-enter".to_owned()),
+                binding("Walk this pane's history", "up / down".to_owned()),
+                widgets::note(
+                    "Everything else in the field is the text editing this platform already \
+                     does. ctrl-c interrupts the shell and throws the half-written line away \
+                     with it, ctrl-z suspends, and ctrl-d ends the input when the field is empty \
+                     and deletes a character when it is not. A full-screen program — vim, `top` \
+                     — takes every key back and the field goes away while it runs.",
+                    ui,
+                ),
             ],
             ui,
         ),
@@ -328,8 +367,8 @@ fn keys(workspace: &Workspace) -> Box<dyn Element> {
             "Window",
             false,
             vec![
-                binding("Move the tabs panel", format!("{CHORD}-b")),
-                binding("Open these settings", format!("{CHORD}-,")),
+                binding("Move the tabs panel", chord("cmd-b", "ctrl-shift-b")),
+                binding("Open these settings", chord("cmd-,", "ctrl-,")),
                 widgets::note(
                     "These settings are a pane, like a session is, so they close the way every \
                      pane does and have no key of their own for it. Pressing the binding again \

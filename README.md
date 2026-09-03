@@ -15,7 +15,7 @@ dropped, and why.
 
 ## v1 scope
 
-Three features, and the page that configures them:
+Four features, and the page that configures them:
 
 - **Tabs.** Open, close, switch, reorder. One agent session per tab, with a derived title.
   They live in a panel down the left edge or in a strip across the header, and the gear menu
@@ -27,20 +27,32 @@ Three features, and the page that configures them:
   colour, bold and italic faces, underline and strikeout, the alternate screen, ten thousand
   lines of scrollback, `SIGWINCH` on resize, and titles and working directories the shell
   reports with OSC 0, 2 and 7 — which is what makes a tab rename itself and its git chips
-  follow a `cd`. A tab splits into panes with `cmd-d` and `cmd-shift-d`, and a shell that
-  exits closes its pane, its tab, and with the last tab the window.
+  follow a `cd`. A tab splits into panes with `cmd-d` and `cmd-shift-d` (`ctrl-shift-d` and
+  `ctrl-shift-e` off macOS), and a shell that exits closes its pane, its tab, and with the
+  last tab the window.
+- **A command line that behaves like a text field.** Under each pane's output is an input
+  box, not a raw terminal line: a caret you can click, selection by drag, double and triple
+  click, word and line movement, undo, the system clipboard, a per-pane history on the up and
+  down arrows, and multi-line commands with shift-enter. Enter sends the line to the shell,
+  which echoes and runs it exactly as before. A full-screen program — vim, `top`, `less` —
+  takes the whole keyboard back and the field goes away while it runs; `ctrl-c`, `ctrl-z` and
+  an end-of-input `ctrl-d` always reach the shell. That line is drawn in one function,
+  `app/src/input_keys.rs`, and the architecture doc's §7 says why it is drawn there.
 - **A settings page**, which opens the way a shell does: `cmd/ctrl-,` — or the gear menu's
   last entry — puts it in a **tab of its own**, listed in the strip beside the work it
-  configures, splittable next to that work, and closed by the same × and the same
-  `cmd/ctrl-w` as any other pane. Four pages: Appearance, Usage, Keys and About. Every option
-  on it is one the application actually reads; there is nothing there that does not do
-  something. Changes apply on the click and are written to `<config>/crook/settings.json`,
-  which is the same eight keys the gear menu writes plus one.
+  configures, splittable next to that work, and closed by the same × and the same close chord
+  (`cmd-w`, `ctrl-shift-w` off macOS) as any other pane. Four pages: Appearance, Usage, Keys
+  and About. Every option on it is one the application actually reads; there is nothing there
+  that does not do something. Changes apply on the click and are written to
+  `<config>/crook/settings.json`, which is the same eight keys the gear menu writes plus one.
+  It is the one pane with no shell under it and no field: every control on it is a click.
 
 Everything else is out of scope on purpose. There is no keymap system, no persistence, no
-telemetry, and no mouse reporting, IME composition or system clipboard for the terminal. The
-list of what is absent — and what adding each item would touch — is the last section of the
-architecture doc.
+telemetry, no shell integration — the field composes a line without knowing where the shell's
+prompt is, so there is no completion and no command blocks — and no mouse reporting or IME
+composition. The terminal grid still reaches no clipboard of its own: the input field copies
+and pastes, an OSC 52 from the shell does not. The list of what is absent — and what adding
+each item would touch — is the last section of the architecture doc.
 
 ## Prerequisites
 

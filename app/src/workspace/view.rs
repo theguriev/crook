@@ -7,12 +7,16 @@ use std::sync::Arc;
 
 use crook_terminal::Snapshot;
 use crookui_core::elements::MouseStateHandle;
-use crookui_core::event::{Keystroke, Modifiers};
+use crookui_core::event::Keystroke;
 use crookui_core::fonts::FamilyId;
 use crookui_core::prelude::*;
 
+use crate::clipboard::Clipboard;
+use crate::editor::Selection;
 use crate::git::GitFacts;
 use crate::git_model::GitModel;
+use crate::input_keys::{self, Binding, Platform};
+use crate::pane_input::{CARET_PHASE, PaneInput};
 use crate::platform_insets::{LayoutInsets, TabsPlacement, layout_insets};
 use crate::settings::{Density, GeneralOptions, Granularity, Layout, Settings, TabOptions};
 use crate::tab::{AgentSession, Direction, PaneId, Tab, TabAction, TabEffect, TabId, TabStrip};
@@ -235,6 +239,15 @@ pub struct Workspace {
     git: ModelHandle<GitModel>,
     /// The shells behind the panes.
     terminals: ModelHandle<TerminalModel>,
+    /// The command line being composed in each pane.
+    ///
+    /// One per pane and never one per tab: a split gives the new pane a field
+    /// of its own, with its own undo stack and its own history, which is what
+    /// makes two panes of the same tab two places to work rather than one.
+    inputs: HashMap<PaneId, PaneInput>,
+    /// The system clipboard every field copies to and pastes from. One for the
+    /// window: see [`Clipboard`].
+    clipboard: Clipboard,
     interactions: HashMap<PaneId, PaneInteraction>,
     /// What the mouse is doing to each tab's chrome in the panel.
     ///
@@ -326,6 +339,8 @@ impl Workspace {
             chip,
             git,
             terminals,
+            inputs: HashMap::new(),
+            clipboard: Clipboard::new(),
             interactions: HashMap::new(),
             tab_chrome: HashMap::new(),
             settings,
@@ -688,14 +703,106 @@ impl Workspace {
             .update(ctx, |model, ctx| model.start(&panes, ctx));
     }
 
-    /// Types into a pane's shell, as if a person had.
+    /// Writes to a pane's shell directly, going round the input field.
     ///
-    /// The one way in from outside, and it exists for the command line's
-    /// `--run`: a way to prove the whole loop — pty, emulator, reader thread,
-    /// repaint — works, in a run nobody is sitting in front of.
+    /// **Not the path a command takes.** A person's line is composed in the
+    /// field and sent by Enter — see [`Self::type_into_input`] and the element
+    /// that owns it — and `--run` types it exactly that way, keystroke by
+    /// keystroke. This is the raw write underneath, and it exists for the tests
+    /// that have to put a shell in a state the field cannot ask for: an escape
+    /// that takes the alt screen, a command that has to be running already.
     pub fn type_into(&self, pane: PaneId, text: &str, ctx: &mut ViewContext<Self>) {
         self.terminals
             .update(ctx, |model, _| model.type_into(pane, text));
+    }
+
+    /// Starts the caret blink. Call once, after the window exists.
+    ///
+    /// A chain rather than a timer, for the reason the poll chains are one: the
+    /// next round is started by the previous one finishing, so there is exactly
+    /// one wait outstanding and nothing to cancel. It is the third thing in the
+    /// process that parks a background worker — see [`crate::PARKED_WORKERS`] —
+    /// and, like the other two, it is deliberately not started by a test or by
+    /// the headless snapshot, both of which want a frame rather than a
+    /// heartbeat.
+    pub fn start_caret_blink(&self, ctx: &mut ViewContext<Self>) {
+        self.blink_caret(ctx);
+    }
+
+    /// Waits out one half of the blink and repaints if a caret is on screen.
+    fn blink_caret(&self, ctx: &mut ViewContext<Self>) {
+        let waiting = ctx
+            .background()
+            .spawn(async { std::thread::sleep(CARET_PHASE) });
+
+        ctx.spawn(waiting, |workspace, (), ctx| {
+            // Only when something would actually be drawn differently. A window
+            // whose focused pane is running vim has no caret of its own, and
+            // repainting it twice a second for nobody is exactly the kind of
+            // idle tick the rest of this application does not have.
+            if workspace.shows_a_caret(ctx) {
+                ctx.notify();
+            }
+            workspace.blink_caret(ctx);
+        })
+        .detach();
+    }
+
+    /// Whether any field on screen is drawing a caret.
+    fn shows_a_caret(&self, app: &AppContext) -> bool {
+        if self.menu.open {
+            return false;
+        }
+        let Some(pane) = self.tabs.focused_pane_id() else {
+            return false;
+        };
+        self.terminal(pane, app)
+            .is_some_and(|(_, snapshot)| input_keys::shows_input(snapshot.alt_screen))
+    }
+
+    /// The command line being composed in a pane.
+    pub(super) fn input(&self, pane: PaneId) -> Option<&PaneInput> {
+        self.inputs.get(&pane)
+    }
+
+    /// The system clipboard every field copies to and pastes from.
+    pub(super) fn clipboard(&self) -> &Clipboard {
+        &self.clipboard
+    }
+
+    /// Types into a pane's field without sending it, as if a person had.
+    ///
+    /// The other half of [`Self::type_into`], and the one the command line's
+    /// `--type` uses: this leaves the text in the field for a picture to be
+    /// taken of, where `--run` sends it to the shell.
+    pub fn type_into_input(&self, pane: PaneId, text: &str, ctx: &mut ViewContext<Self>) {
+        let Some(input) = self.inputs.get(&pane) else {
+            log::warn!("nothing to type into: pane {pane:?} has no field");
+            return;
+        };
+        input.edit(|editor| editor.insert(text));
+        ctx.notify();
+    }
+
+    /// Selects the first occurrence of `text` in a pane's field, reporting
+    /// whether it was there to select.
+    ///
+    /// For `--select`: a selection is a state nobody can be dragging out while
+    /// a headless frame is being rendered.
+    pub fn select_in_input(&self, pane: PaneId, text: &str, ctx: &mut ViewContext<Self>) -> bool {
+        let Some(input) = self.inputs.get(&pane) else {
+            return false;
+        };
+
+        let found = input.edit(|editor| {
+            let Some(at) = editor.text().find(text) else {
+                return false;
+            };
+            editor.set_selection(Selection::new(at, at + text.len()));
+            true
+        });
+        ctx.notify();
+        found
     }
 
     /// What a pane's shell is showing, for a caller that wants the text rather
@@ -825,26 +932,20 @@ impl Workspace {
     /// the tabs themselves rather than a tab, and giving it its own dispatch
     /// path would be exactly the second code path.
     pub fn action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
-        if !is_platform_chord(keystroke.modifiers) {
-            return None;
-        }
-
-        let shift = keystroke.modifiers.shift;
-        let alt = keystroke.modifiers.alt;
-        let tab = match (keystroke.key.as_str(), shift, alt) {
-            ("t", false, false) => TabAction::New,
+        let tab = match input_keys::binding(keystroke, Platform::current())? {
+            Binding::NewTab => TabAction::New,
             // Warp's `pane_group:close_current_session`: the pane goes, and
             // the tab only goes with it when it was the tab's last one.
-            ("w", false, false) => TabAction::ClosePane(self.tabs.focused_pane_id()?),
-            ("d", false, false) => TabAction::Split(Direction::Right),
-            ("d", true, false) => TabAction::Split(Direction::Down),
-            ("left", true, false) => TabAction::Select(self.neighbour(-1)?),
-            ("right", true, false) => TabAction::Select(self.neighbour(1)?),
-            ("left", false, true) => TabAction::MoveLeft,
-            ("right", false, true) => TabAction::MoveRight,
+            Binding::ClosePane => TabAction::ClosePane(self.tabs.focused_pane_id()?),
+            Binding::SplitRight => TabAction::Split(Direction::Right),
+            Binding::SplitDown => TabAction::Split(Direction::Down),
+            Binding::PreviousTab => TabAction::Select(self.neighbour(-1)?),
+            Binding::NextTab => TabAction::Select(self.neighbour(1)?),
+            Binding::MoveTabLeft => TabAction::MoveLeft,
+            Binding::MoveTabRight => TabAction::MoveRight,
             // The sidebar chord every editor uses for the same gesture: move
             // the list of things you are working on out of the way, or back.
-            ("b", false, false) => {
+            Binding::ToggleLayout => {
                 return Some(WorkspaceAction::Options(OptionsAction::ToggleLayout));
             }
             // The binding every application on all three platforms uses for
@@ -853,8 +954,7 @@ impl Workspace {
             // and because a second press must navigate to the page rather
             // than toggle it away, which is what `OpenSettings` does and a
             // toggle could not.
-            (",", false, false) => TabAction::OpenSettings,
-            _ => return None,
+            Binding::OpenSettings => TabAction::OpenSettings,
         };
 
         Some(WorkspaceAction::Tab(tab))
@@ -970,8 +1070,25 @@ impl Workspace {
                     close: MouseStateHandle::default(),
                     body: MouseStateHandle::default(),
                 });
+            self.inputs.entry(*id).or_default();
         }
         self.interactions.retain(|id, _| open.contains(id));
+        // A closed pane's half-written command line goes with it. Keeping it
+        // would mean a later pane inheriting somebody else's history the first
+        // time an id was reused.
+        self.inputs.retain(|id, input| {
+            // The element tree that drew this field is still holding a clone
+            // of it, and a keystroke queued behind the close would land in an
+            // editor nothing can draw or read back — and Enter would write the
+            // line to a shell that has already ended. Taking the keyboard away
+            // is what the tree cannot work out for itself.
+            let open = open.contains(id);
+            if !open {
+                input.set_has_keys(false);
+            }
+            open
+        });
+        self.sync_input_keys();
 
         // A row that has gone cannot receive the hover-out that would clear
         // this, and a card anchored to a row that no longer paints would hang
@@ -981,6 +1098,21 @@ impl Workspace {
             .is_some_and(|hovered| !open.contains(&hovered))
         {
             self.hovered_row = None;
+        }
+    }
+
+    /// Tells every field whether the keyboard is its.
+    ///
+    /// Called wherever focus could have moved — a pane focused, closed or
+    /// split, a tab selected, the modal menu opened — because the element that
+    /// asks is a frame behind: it was built before whatever moved the focus,
+    /// and by the time a keystroke reaches it, what it was told is history.
+    fn sync_input_keys(&self) {
+        let listening = (!self.menu.open)
+            .then(|| self.tabs.focused_pane_id())
+            .flatten();
+        for (id, input) in &self.inputs {
+            input.set_has_keys(Some(*id) == listening);
         }
     }
 
@@ -1052,6 +1184,8 @@ impl Workspace {
                 if self.menu.open {
                     self.hovered_row = None;
                 }
+                // The menu is modal: while it is up the field takes nothing.
+                self.sync_input_keys();
                 ctx.notify();
                 return;
             }
@@ -1275,15 +1409,5 @@ impl TypedActionView for Workspace {
             WorkspaceAction::Settings(action) => self.apply_settings(action, ctx),
             WorkspaceAction::HoverRow { pane, entered } => self.hover_row(pane, entered, ctx),
         }
-    }
-}
-
-/// Whether these modifiers are the platform's "this is an application command"
-/// chord: Command on macOS, Control everywhere else.
-fn is_platform_chord(modifiers: Modifiers) -> bool {
-    if cfg!(target_os = "macos") {
-        modifiers.cmd && !modifiers.ctrl
-    } else {
-        modifiers.ctrl && !modifiers.cmd
     }
 }
