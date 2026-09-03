@@ -5754,6 +5754,11 @@ mod shells {
             let scene = hover_block(&mut harness, pane, 0);
             let controls = copy_controls(&scene, panel);
             assert_eq!(controls.len(), 1, "one control, on the hovered block");
+            assert_eq!(
+                icons_in(&scene, controls[0], Lucide::Copy).len(),
+                1,
+                "the control's plate is empty: it says nothing about what it does"
+            );
 
             let Some((clipboard, _system)) = working_clipboard(&harness) else {
                 return;
