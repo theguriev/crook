@@ -2209,10 +2209,9 @@ const OVERFLOWING: usize = 40;
 
 #[test]
 fn a_list_longer_than_the_panel_is_clipped_instead_of_painting_over_the_body() {
-    // Crook has no scrollable element, so this is a ceiling rather than a
-    // scroll bar — and the ceiling has to be a clip, because an unclipped row
-    // is drawn *and* hit-tested over whatever it spilled onto. The module docs
-    // say what the ceiling costs; this says that it exists.
+    // The clip half of `Scrollable`, on its own: whatever is off the end of
+    // the list is neither drawn over the body nor hit-tested there. What is
+    // past the fold is a scroll away, which the next test is about.
     let mut harness = Harness::panel(OVERFLOWING);
     let scene = harness.frame();
     let panel = panel_box(&scene);
@@ -2222,13 +2221,14 @@ fn a_list_longer_than_the_panel_is_clipped_instead_of_painting_over_the_body() {
 
     assert!(
         visible.len() < OVERFLOWING,
-        "all {OVERFLOWING} rows fit, so this test is no longer measuring the \
-         ceiling it names"
+        "all {OVERFLOWING} rows fit, so this test is no longer measuring an \
+         overflowing list"
     );
-    // The number `tabs_panel`'s module docs quote, asserted so the figure
-    // written down there cannot quietly stop being true. The stub shaper is
-    // deterministic — every glyph is half its font size and every line is
-    // 1.2x — so this is arithmetic, not a font's opinion.
+    // The number `tabs_panel`'s module docs quote as what one screenful of
+    // this panel holds, asserted so the figure written down there cannot
+    // quietly stop being true. The stub shaper is deterministic — every glyph
+    // is half its font size and every line is 1.2x — so this is arithmetic,
+    // not a font's opinion.
     assert_eq!(
         visible.len(),
         9,
@@ -2248,11 +2248,8 @@ fn a_list_longer_than_the_panel_is_clipped_instead_of_painting_over_the_body() {
         );
     }
 
-    // And what the ceiling actually costs: clicking every row the panel shows
-    // reaches fewer tabs than there are. The rest have no mouse target at all
-    // — the clip narrows the rect a hit test is resolved against, so a row
-    // past it is neither drawn nor clickable — and reaching them means the
-    // keyboard, or a scrolling element that does not exist yet.
+    // One target per row: clicking every row the panel shows reaches as many
+    // tabs as there are rows, and never the same tab twice.
     let mut reachable: Vec<TabId> = Vec::new();
     for row in &visible {
         harness.click(
@@ -2274,7 +2271,7 @@ fn a_list_longer_than_the_panel_is_clipped_instead_of_painting_over_the_body() {
     );
     assert!(
         reachable.len() < OVERFLOWING,
-        "every tab was reachable, so there is no ceiling to describe"
+        "every tab fitted on one screenful, so this is not an overflowing list"
     );
 
     // The other extreme, and the other figure the docs quote.
@@ -2287,6 +2284,52 @@ fn a_list_longer_than_the_panel_is_clipped_instead_of_painting_over_the_body() {
         7,
         "Panes/Expanded fits a different number than the module docs say"
     );
+}
+
+#[test]
+fn the_wheel_reaches_the_tabs_that_are_past_the_bottom_of_the_panel() {
+    // What the panel gained when `crookui_core` gained a `Scrollable`: before
+    // it, the rows past the fold had no mouse target at all and the module
+    // docs called that a ceiling. The last tab of forty is as far past it as a
+    // row gets.
+    let mut harness = Harness::panel(OVERFLOWING);
+    let last = *harness.tab_ids().last().expect("forty tabs");
+    harness.dispatch_action(TabAction::Select(harness.tab_ids()[0]));
+
+    let panel = panel_box(&harness.frame());
+    let position = center(panel);
+    for _ in 0..40 {
+        harness.dispatch(Event::ScrollWheel {
+            position,
+            delta: ScrollDelta::Lines(vec2f(0., -3.)),
+            modifiers: Modifiers::default(),
+        });
+    }
+
+    let scene = harness.frame();
+    let rows = panel_rows(&scene);
+    let bottom = rows.last().expect("the panel still draws rows");
+    harness.click(
+        bottom.origin() + vec2f(40., bottom.height() / 2.),
+        MouseButton::Left,
+    );
+
+    assert_eq!(
+        last,
+        harness.active_id(),
+        "scrolling to the end of the list did not put the last tab under the \
+         pointer"
+    );
+
+    // And the rows are still confined to the panel: a scrollable that had
+    // stopped clipping would paint the list over the body it sits beside.
+    let panel = panel_box(&harness.frame());
+    for (_, on_screen) in panel_row_rects(&harness.frame()) {
+        assert!(
+            on_screen.max_y() <= panel.max_y() + 0.5 && on_screen.min_y() >= panel.min_y() - 0.5,
+            "a scrolled row escaped the panel"
+        );
+    }
 }
 
 #[test]

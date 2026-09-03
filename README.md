@@ -15,16 +15,23 @@ dropped, and why.
 
 ## v1 scope
 
-Exactly two features:
+Two features, and the page that configures them:
 
 - **Tabs.** Open, close, switch, reorder. One agent session per tab, with a derived title.
+  They live in a panel down the left edge or in a strip across the header, and the gear menu
+  says what a row of them shows.
 - **A Claude Code usage chip** in the header, showing how much of the current session's token
   budget is spent and when it resets. It reads the session Claude Code already stores locally
   (`~/.claude/.credentials.json`, plus the macOS Keychain) and polls the usage endpoint.
+- **A settings page** — `cmd/ctrl-,`, or the gear menu's last entry — over four pages:
+  Appearance, Usage, Keys and About. Every option on it is one the application actually
+  reads; there is nothing on that page that does not do something. Changes apply on the
+  click and are written to `<config>/crook/settings.json`, which is the same eight keys the
+  gear menu writes plus one.
 
 Everything else is out of scope on purpose. There is no PTY, no terminal emulation, no
-settings UI, no keymap system, no persistence and no telemetry. The list of what is absent —
-and what adding each item would touch — is the last section of the architecture doc.
+keymap system, no persistence and no telemetry. The list of what is absent — and what adding
+each item would touch — is the last section of the architecture doc.
 
 ## Prerequisites
 

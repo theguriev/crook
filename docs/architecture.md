@@ -496,16 +496,31 @@ holds `tab_bar` and `tabs_panel` as mutually exclusive halves and `row_content` 
 copy of Warp's which-fact-goes-on-which-line table that both read. What it cost that the
 estimate above did not name was the window-control reservation — with a panel down the left
 edge the top-left corner belongs to the panel rather than to the header, so
-`platform_insets::TabsPlacement` divides one answer between two elements — and a ceiling:
-`crookui_core` has no scrollable element, so the list is `Clipped` and roughly nine tabs fit a
-640px window. That ceiling is written down in the module and asserted in a test rather than
-papered over.
+`platform_insets::TabsPlacement` divides one answer between two elements — and, for as long as
+`crookui_core` had no scrollable element, a ceiling: the list was `Clipped`, roughly nine tabs
+fitted a 640px window, and the rest were drawn, clipped away and unclickable. The settings
+page needed a `Scrollable` anyway, so the panel got one too and the ceiling is gone. What is
+still missing there is auto-scroll: selecting a tab with the keyboard does not bring its row
+into view, because that needs a scrollable that can be told to make a particular child
+visible.
 
-**Settings.** Warp's settings stack — a `define_settings_group!` macro, a settings-value
-crate, `schemars` schemas, TOML path routing, cloud sync, per-platform gating — exists to
-serve roughly 800 settings. Crook has none. When it has ten, a `serde` struct in a file is
-correct, and the migration from that to something larger is a day. Doing it in the other order
-is a month.
+**A settings *stack*.** The page exists; the machinery under it does not, and that is the
+split worth keeping. Warp's stack — a `define_settings_group!` macro, a settings-value crate,
+`schemars` schemas, TOML path routing, cloud sync, per-platform gating, a file watcher and a
+generated JSON Schema — exists to serve roughly 800 settings. Crook has nine, in two `serde`
+structs in one JSON file, read once at startup and written back whole. That is correct at nine
+and the migration to something larger is a day; doing it in the other order is a month.
+
+What the page itself took from Warp is the *presentation*, not the plumbing: a rail of pages,
+category headings with a rule between them, label-left/control-right rows with a description
+line, apply-on-click with no Save button, a reset button that doubles as the modified
+indicator, and inert rows drawn greyed rather than dropped. What it deliberately did not take
+is Warp's best idea in that area — settings as a **pane**, splittable beside the thing being
+configured — because a pane in Crook is an agent session, and a second kind of pane would put
+an "unless it is the settings one" branch in every row renderer, granularity rule and git
+lookup. It is a modal card instead. The other omission is search: Warp filters the rail and
+the content together from one field, per widget, with match counts; that needs a text input,
+and `crookui_core` has none.
 
 **Keymaps.** Warp has editable bindings, fixed bindings, context predicates, and a
 user-remappable keymap. Crook reads input directly. The half worth keeping is already kept:
@@ -539,7 +554,8 @@ platforms, and treat a build script as the cost it is.
 | Channels | six | two |
 | Packaging | 2,245 lines of shell and PowerShell | a release binary today, `cargo-dist` next |
 | Autotracking | `Tracked<T>` dependency capture | explicit `ctx.notify()` |
-| Settings | ~800, with a macro DSL and cloud sync | none |
+| Settings | ~800, with a macro DSL and cloud sync | 9, two `serde` structs in one JSON file |
+| Settings UI | a pane, 16 pages, search over ~800 widgets | a modal card, 4 pages, no search |
 
 The through-line: Crook keeps every *architectural* idea from Warp and rejects almost every
 *build-system* one. The architecture is what makes a GPU terminal tractable in Rust. The build

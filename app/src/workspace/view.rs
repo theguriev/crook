@@ -250,6 +250,13 @@ pub struct Workspace {
     /// The settings page: whether it is up, which page it is on, and what the
     /// mouse is doing to each of its controls.
     page: SettingsState,
+    /// How far the tabs panel's list has been scrolled.
+    ///
+    /// On the workspace rather than inside the panel module for the reason
+    /// every mouse state is: the element tree is rebuilt on every render, and
+    /// a scroll offset that lived in it would snap back to the top on the
+    /// frame the scroll itself caused.
+    panel_scroll: ScrollStateHandle,
     /// The row the pointer is on, if the detail card is armed.
     hovered_row: Option<PaneId>,
     /// The home directory, resolved once.
@@ -304,6 +311,7 @@ impl Workspace {
             overridden: Overridden::default(),
             menu: MenuState::default(),
             page: SettingsState::default(),
+            panel_scroll: ScrollStateHandle::default(),
             hovered_row: None,
             home: std::env::home_dir(),
             new_tab: MouseStateHandle::default(),
@@ -362,6 +370,11 @@ impl Workspace {
     /// The settings page's state.
     pub(super) fn settings_page(&self) -> &SettingsState {
         &self.page
+    }
+
+    /// How far the tabs panel's list has been scrolled.
+    pub(super) fn panel_scroll(&self) -> ScrollStateHandle {
+        self.panel_scroll.clone()
     }
 
     /// Whether the settings page is up.
