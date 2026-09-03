@@ -80,12 +80,12 @@ impl Direction {
 
 /// What a pane is showing.
 ///
-/// A pane used to be an agent session and nothing else, and for the first two
-/// features it was. The settings page is the second thing a pane can be, and
-/// it is a *pane* rather than a modal because that is Warp's design and it is
-/// the better one: settings open like a session opens, in a tab of their own,
-/// listed in the strip beside the work they configure, splittable next to it,
-/// closed by the same close button and the same `cmd/ctrl-w`.
+/// A pane used to be a session and nothing else. The settings page is the
+/// second thing a pane can be, and it is a *pane* rather than a modal because
+/// that is Warp's design and it is the better one: settings open the way a
+/// shell opens, in a tab of their own, listed in the strip beside the work
+/// they configure, splittable next to it, closed by the same close button and
+/// the same `cmd/ctrl-w`.
 ///
 /// The cost is this enum, and it is paid honestly rather than hidden behind a
 /// session with empty fields: everything that reads a pane now says what it
@@ -94,11 +94,13 @@ impl Direction {
 /// a gear and one line instead of resolving a fact table that has nothing in
 /// it.
 ///
-/// A third variant is what a PTY pane would be, and nothing here would have to
-/// move for it.
+/// The other arm carries the session a shell runs under — the terminal itself
+/// lives in a model keyed by [`PaneId`], not here, so this stays a thing that
+/// can be tested with no window and no process.
 #[derive(Debug)]
 pub enum PaneContent {
-    /// One agent session: what a tab opened with `cmd/ctrl-t` holds.
+    /// One session: what a tab opened with `cmd/ctrl-t` holds, and what the
+    /// shell in that tab reports its title and working directory into.
     Agent(AgentSession),
     /// The settings page. There is at most one in a window — `TabStrip::apply`
     /// navigates to the existing one rather than opening a second — and it

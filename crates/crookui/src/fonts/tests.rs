@@ -443,17 +443,57 @@ fn registering_a_family_is_idempotent_and_bytes_are_validated() {
 }
 
 #[test]
-fn fallback_fonts_are_left_to_the_shaper() {
+fn the_measurement_path_falls_back_to_a_face_that_covers_the_character() {
+    // A terminal grid resolves glyphs while painting, one character at a time,
+    // and a grid is not Latin by construction: a spinner is braille, a prompt
+    // is powerline, `ls` prints whatever the filenames are. Without this a
+    // character the monospace family lacks is a blank column.
+    let Some(fixture) = fixture() else { return };
+    let Ok(family) = fixture.font_db.default_monospace_family() else {
+        return;
+    };
+    let font_id = fixture
+        .font_db
+        .select_font(family, Properties::default())
+        .expect("the family was just registered");
+
+    for character in ['漢', '⠋', '✅', 'ᚠ'] {
+        if fixture.font_db.glyph_for_char(font_id, character).is_some() {
+            continue;
+        }
+        let Some((face, glyph)) = fixture.font_db.fallback_glyph(font_id, character) else {
+            // No font on this machine draws it, which is a fact about the
+            // machine rather than a failure of the lookup.
+            continue;
+        };
+        assert_ne!(0, glyph, "the notdef glyph is not a fallback");
+        assert_eq!(
+            Some(glyph),
+            fixture.font_db.glyph_for_char(face, character),
+            "the face it reported must be one that really covers {character:?}"
+        );
+    }
+}
+
+#[test]
+fn a_character_the_face_already_covers_falls_back_to_that_face() {
+    // Shaping is asked with the base face named, so the common case — the grid
+    // asking about a character it turns out to have after all — does not wander
+    // off into another family.
     let Some(fixture) = fixture() else { return };
 
     let font_id = fixture
         .font_db
         .select_font(fixture.family, Properties::default())
         .expect("the family was just registered");
+    let direct = fixture
+        .font_db
+        .glyph_for_char(font_id, 'm')
+        .expect("a UI family that cannot draw `m` is refused at registration");
 
-    assert!(
-        fixture.font_db.fallback_fonts('漢', font_id).is_empty(),
-        "the measurement path has no fallback; shaping does its own"
+    assert_eq!(
+        Some((font_id, direct)),
+        fixture.font_db.fallback_glyph(font_id, 'm')
     );
 }
 
