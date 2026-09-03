@@ -47,7 +47,7 @@ use super::super::row_content::{
     Chips, DetailSection, PANEL_PATH_CHARS, RowFacts, detail_card, detail_panes, metadata_line,
 };
 use super::super::view::Workspace;
-use super::super::{CLOSE_BUTTON_SIZE, GEAR_GLYPH, status_color};
+use super::super::{CLOSE_BUTTON_SIZE, CLOSE_ICON_SIZE, GEAR_ICON, status_color};
 
 /// Warp's `VERTICAL_TABS_ICON_SIZE`. The same in both densities.
 const ICON_SIZE: f32 = 24.;
@@ -179,14 +179,9 @@ pub(super) fn render(
                 } else {
                     CrossAxisAlignment::Center
                 })
-                .with_child(status_disc(status, ui))
+                .with_child(status_disc(status))
                 .with_child(Expanded::new(1., body.column).finish())
-                .with_child(close_slot(
-                    close_action,
-                    close_state.clone(),
-                    show_close,
-                    ui,
-                ))
+                .with_child(close_slot(close_action, close_state.clone(), show_close))
                 .finish(),
             is_selected,
             hovered,
@@ -381,7 +376,7 @@ fn row_shell(content: Box<dyn Element>, is_selected: bool, is_hovered: bool) -> 
 }
 
 /// The 24px leading mark: a status-coloured disc, centred in its reserved box.
-fn status_disc(status: Option<AgentStatus>, ui: FamilyId) -> Box<dyn Element> {
+fn status_disc(status: Option<AgentStatus>) -> Box<dyn Element> {
     let diameter = ICON_SIZE * DISC_RATIO;
 
     let mark: Box<dyn Element> = match status {
@@ -398,7 +393,7 @@ fn status_disc(status: Option<AgentStatus>, ui: FamilyId) -> Box<dyn Element> {
         // at the disc's own diameter so the row's text starts where every
         // other row's does. See the strip's `status_dot` for why this is a
         // different kind of mark rather than a fifth status colour.
-        None => Text::new(GEAR_GLYPH, ui, diameter * 0.8)
+        None => Icon::new(GEAR_ICON, diameter)
             .with_color(theme().text_muted)
             .finish(),
     };
@@ -412,18 +407,13 @@ fn status_disc(status: Option<AgentStatus>, ui: FamilyId) -> Box<dyn Element> {
 }
 
 /// A fixed square, holding the close button or holding nothing.
-fn close_slot(
-    action: TabAction,
-    state: MouseStateHandle,
-    visible: bool,
-    ui: FamilyId,
-) -> Box<dyn Element> {
+fn close_slot(action: TabAction, state: MouseStateHandle, visible: bool) -> Box<dyn Element> {
     let inner: Box<dyn Element> = if visible {
         Hoverable::new(state, move |state| {
             let hovered = state.is_hovered();
             Container::new(
                 Align::new(
-                    Text::new("\u{00d7}", ui, 14.)
+                    Icon::new(Lucide::X, CLOSE_ICON_SIZE)
                         .with_color(if hovered {
                             theme().text_primary
                         } else {

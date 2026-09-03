@@ -19,6 +19,7 @@ use crookui_core::prelude::*;
 use crate::tab::TabAction;
 use crate::theme::theme;
 
+use super::GEAR_ICON;
 use super::action::{OptionsAction, WorkspaceAction};
 use super::tab_options_menu;
 use super::view::Workspace;
@@ -27,7 +28,11 @@ use super::view::Workspace;
 /// up.
 pub(super) const GEAR_TOOLTIP: &str = "View options";
 
-/// The gear's hit box: a 16px glyph slot with 2px of padding all round.
+/// The gear itself, inside that slot. Lucide's own 24-unit box scaled to
+/// fourteen, which is the size Warp draws its toolbar icons at.
+const GEAR_ICON_SIZE: f32 = 14.;
+
+/// The gear's hit box: a 16px icon slot with 2px of padding all round.
 const GEAR_BUTTON_SIZE: f32 = 20.;
 
 /// The tooltip's width, fixed so the centring offset below can be a constant.
@@ -77,7 +82,12 @@ pub(super) fn gear_button(workspace: &Workspace, menu_anchor: AnchorTo) -> Box<d
 
         let button = Container::new(
             ConstrainedBox::new(
-                Align::new(Text::new("\u{2699}", ui, 14.).with_color(glyph).finish()).finish(),
+                Align::new(
+                    Icon::new(GEAR_ICON, GEAR_ICON_SIZE)
+                        .with_color(glyph)
+                        .finish(),
+                )
+                .finish(),
             )
             .with_width(16.)
             .with_height(16.)
@@ -184,14 +194,12 @@ fn gear_tooltip(ui: FamilyId) -> Box<dyn Element> {
 
 /// The button that opens another tab.
 pub(super) fn new_tab_button(workspace: &Workspace) -> Box<dyn Element> {
-    let ui = workspace.fonts().ui;
-
     ConstrainedBox::new(
         Hoverable::new(workspace.new_tab_state(), move |state| {
             let hovered = state.is_hovered();
             Container::new(
                 Align::new(
-                    Text::new("+", ui, 16.)
+                    Icon::new(Lucide::Plus, GEAR_ICON_SIZE)
                         .with_color(if hovered {
                             theme().text_primary
                         } else {

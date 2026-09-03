@@ -54,7 +54,9 @@ use super::row_content::{
     metadata_line,
 };
 use super::view::Workspace;
-use super::{CLOSE_BUTTON_SIZE, GEAR_GLYPH, STATUS_DOT_SIZE, TAB_MAX_WIDTH, controls};
+use super::{
+    CLOSE_BUTTON_SIZE, CLOSE_ICON_SIZE, GEAR_ICON, STATUS_DOT_SIZE, TAB_MAX_WIDTH, controls,
+};
 
 /// The whole strip, the button that opens another tab, and the options menu.
 pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
@@ -183,9 +185,9 @@ fn render_row(
                     // The panel, whose leading mark *is* the 24px disc, aligns
                     // the way Warp does.
                     .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                    .with_child(status_dot(status, ui))
+                    .with_child(status_dot(status))
                     .with_child(Expanded::new(1., text.render(&chips, is_selected, ui)).finish())
-                    .with_child(close_slot(close_action, close_state, show_close, ui))
+                    .with_child(close_slot(close_action, close_state, show_close))
                     .finish(),
             )
             .with_background_color(fill)
@@ -335,7 +337,7 @@ impl RowText {
 /// where every other row's does. What is in it is a mark of a different *kind*
 /// rather than a fifth colour: the settings pane is not an agent in a fifth
 /// state, and a grey dot beside it would say it was idle.
-fn status_dot(status: Option<AgentStatus>, ui: FamilyId) -> Box<dyn Element> {
+fn status_dot(status: Option<AgentStatus>) -> Box<dyn Element> {
     /// The gap between the dot and the title.
     const DOT_GAP: f32 = 7.;
     /// The gear's size. Bigger than the dot it stands in for, because a 7px
@@ -357,12 +359,11 @@ fn status_dot(status: Option<AgentStatus>, ui: FamilyId) -> Box<dyn Element> {
         ),
         // The gear gets its own width and a narrower gap, so that the slot and
         // the gap still add up to the dot's — every row's title starts at the
-        // same x whichever mark is in front of it. Constraining an 11px glyph
-        // to the dot's 7px slot instead would drop it: `Text` cuts a glyph
-        // that does not fit rather than shrinking it, so the mark would
-        // silently not be drawn at all.
+        // same x whichever mark is in front of it. It is not squeezed into the
+        // dot's 7px slot instead because a gear at seven pixels is a smudge:
+        // Lucide's gear has a hole in the middle of it.
         None => (
-            Text::new(GEAR_GLYPH, ui, GEAR_SIZE)
+            Icon::new(GEAR_ICON, GEAR_SIZE)
                 .with_color(theme().text_muted)
                 .finish(),
             STATUS_DOT_SIZE + DOT_GAP - GEAR_SIZE,
@@ -373,18 +374,13 @@ fn status_dot(status: Option<AgentStatus>, ui: FamilyId) -> Box<dyn Element> {
 }
 
 /// A fixed square, holding the close button or holding nothing.
-fn close_slot(
-    action: TabAction,
-    state: MouseStateHandle,
-    visible: bool,
-    ui: FamilyId,
-) -> Box<dyn Element> {
+fn close_slot(action: TabAction, state: MouseStateHandle, visible: bool) -> Box<dyn Element> {
     let inner: Box<dyn Element> = if visible {
         Hoverable::new(state, move |state| {
             let hovered = state.is_hovered();
             Container::new(
                 Align::new(
-                    Text::new("\u{00d7}", ui, 14.)
+                    Icon::new(Lucide::X, CLOSE_ICON_SIZE)
                         .with_color(if hovered {
                             theme().text_primary
                         } else {

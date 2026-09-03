@@ -44,6 +44,8 @@ mod view;
 #[cfg(test)]
 mod tests;
 
+use crookui_core::icons::Lucide;
+
 use crate::theme::theme;
 
 pub use action::{OptionsAction, SettingsAction, ThemeAction, WorkspaceAction};
@@ -62,6 +64,12 @@ pub(crate) const TAB_MAX_WIDTH: f32 = 220.;
 /// The square reserved for a tab's close button, drawn or not.
 pub(crate) const CLOSE_BUTTON_SIZE: f32 = 16.;
 
+/// The cross inside that square, in both layouts and in the Themes panel.
+///
+/// Smaller than the square it sits in, the way every icon in this interface
+/// is: the button is the box, the icon is what it says.
+pub(crate) const CLOSE_ICON_SIZE: f32 = 12.;
+
 /// The dot that carries the agent's status.
 pub(crate) const STATUS_DOT_SIZE: f32 = 7.;
 
@@ -69,9 +77,9 @@ pub(crate) const STATUS_DOT_SIZE: f32 = 7.;
 /// status.
 ///
 /// One constant for the strip, the panel and the gear button, because they are
-/// the same symbol standing for the same thing and three copies of a codepoint
-/// is how two of them end up different.
-pub(crate) const GEAR_GLYPH: &str = "\u{2699}";
+/// the same symbol standing for the same thing and three copies of it is how
+/// two of them end up different.
+pub(crate) const GEAR_ICON: Lucide = Lucide::Settings;
 
 /// Breaks `text` into lines of at most `max_chars` characters each.
 ///

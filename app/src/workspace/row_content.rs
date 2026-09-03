@@ -371,40 +371,24 @@ fn diff_chip(diff: DiffStats, ui: FamilyId) -> Box<dyn Element> {
     pill(row.finish())
 }
 
+/// How heavy the branch mark's stroke is, in Lucide's 24-unit grid.
+///
+/// Above Lucide's own 2, because this is the smallest icon in the interface —
+/// eight pixels beside a ten-pixel subtitle — and at eight pixels a 0.67px
+/// stroke leaves the two nodes as grey smudges rather than as circles.
+const BRANCH_STROKE_WIDTH: f32 = 2.75;
+
 /// The mark that says a line is a branch and not a path.
 ///
-/// Warp draws `UiIcon::GitBranch` from an SVG at `font_size - 2`. Crook has no
-/// icon system, so this is the same geometry out of three rectangles: a trunk,
-/// an arm, and the node the arm leads to. The slot is the same size either way,
-/// which is what keeps the two ports' rows the same width.
+/// Warp draws `UiIcon::GitBranch` from an SVG at `font_size - 2`, and so does
+/// this now: it is Lucide's `git-branch`, at the same size, where three
+/// rectangles used to stand in for one because there was no way to draw a
+/// path. The slot is the size it always was, which is what keeps the two
+/// ports' rows the same width.
 fn branch_mark(size: f32, color: Color) -> Box<dyn Element> {
-    let rule = |width: f32, height: f32| {
-        ConstrainedBox::new(
-            Container::new(Empty::new().finish())
-                .with_background_color(color)
-                .finish(),
-        )
-        .with_width(width)
-        .with_height(height)
-        .finish()
-    };
-
-    Flex::row()
-        .with_main_axis_size(MainAxisSize::Min)
-        .with_cross_axis_alignment(CrossAxisAlignment::Center)
-        .with_child(rule(1.5, size))
-        .with_child(rule(size * 0.4, 1.5))
-        .with_child(
-            ConstrainedBox::new(
-                Container::new(Empty::new().finish())
-                    .with_background_color(color)
-                    .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
-                    .finish(),
-            )
-            .with_width(3.)
-            .with_height(3.)
-            .finish(),
-        )
+    Icon::new(Lucide::GitBranch, size)
+        .with_stroke_width(BRANCH_STROKE_WIDTH)
+        .with_color(color)
         .finish()
 }
 

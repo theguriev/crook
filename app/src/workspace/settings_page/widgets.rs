@@ -63,6 +63,9 @@ pub(super) const LABEL_SIZE: f32 = 12.;
 pub(super) const DESCRIPTION_SIZE: f32 = 11.;
 
 /// The gap under one row, before the next one's label.
+/// The check on the chosen row of a picker.
+const CHECK_SIZE: f32 = 13.;
+
 const ROW_SPACING: f32 = 14.;
 
 /// How far a description stops short of the right edge, so it wraps — or here,
@@ -398,7 +401,7 @@ pub(super) fn choice(
                     // row is not the chosen one, rather than not drawn at all:
                     // an element that comes and goes changes the row's height
                     // by a pixel as the pointer moves down the list.
-                    Text::new("\u{2713}", ui, LABEL_SIZE)
+                    Icon::new(Lucide::Check, CHECK_SIZE)
                         .with_color(if selected {
                             theme().accent
                         } else {

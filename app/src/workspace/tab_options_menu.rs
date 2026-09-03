@@ -69,6 +69,10 @@ const ROW_INSET: f32 = 16.;
 /// The size of a check slot, and of a density icon.
 const ICON_SIZE: f32 = 16.;
 
+/// The check inside that slot, which is smaller than the slot the way every
+/// icon here is smaller than the box it sits in.
+const CHECK_SIZE: f32 = 13.;
+
 /// Every label in the menu except the two "View as" segments.
 const LABEL_SIZE: f32 = 12.;
 
@@ -101,6 +105,9 @@ const NOTE_LINE_CHARS: usize = 28;
 
 /// The info dot's diameter, which the note is centred against.
 pub(super) const INFO_DOT_SIZE: f32 = 12.;
+
+/// Its stroke, in Lucide's 24-unit grid. See [`info_icon`].
+const INFO_STROKE_WIDTH: f32 = 3.;
 
 /// The whole popup.
 pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
@@ -145,13 +152,13 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
     column.add_child(header("Density", ui));
     column.add_child(segmented_track(
         icon_segment(
-            list_icon(),
+            density_icon(Lucide::Menu),
             options.density == Density::Compact,
             menu.compact.clone(),
             OptionsAction::SetDensity(Density::Compact),
         ),
         icon_segment(
-            grid_icon(),
+            density_icon(Lucide::LayoutGrid),
             options.density == Density::Expanded,
             menu.expanded.clone(),
             OptionsAction::SetDensity(Density::Expanded),
@@ -441,60 +448,15 @@ fn icon_segment(
     .finish()
 }
 
-/// The Compact glyph: three rules, 16 wide and 2 tall, at y = 3, 7 and 11.
+/// The Compact mark, and the Expanded one.
 ///
-/// Warp draws `WarpIcon::Menu01` from an SVG. Crook has no icon system and this
-/// glyph is literally three rectangles, so it is three rectangles — cheaper
-/// than a path renderer introduced for two icons.
-fn list_icon() -> Box<dyn Element> {
-    let mut rules = Flex::column()
-        .with_main_axis_size(MainAxisSize::Min)
-        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_spacing(2.);
-
-    for _ in 0..3 {
-        rules.add_child(
-            ConstrainedBox::new(
-                Container::new(Empty::new().finish())
-                    .with_background_color(theme().text_muted)
-                    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(1.)))
-                    .finish(),
-            )
-            .with_height(2.)
-            .finish(),
-        );
-    }
-
-    Container::new(rules.finish()).with_padding_top(3.).finish()
-}
-
-/// The Expanded glyph: four 7x7 rounded squares in a 2x2, 2px apart.
-fn grid_icon() -> Box<dyn Element> {
-    let cell = || {
-        ConstrainedBox::new(
-            Container::new(Empty::new().finish())
-                .with_background_color(theme().text_muted)
-                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(2.)))
-                .finish(),
-        )
-        .with_width(7.)
-        .with_height(7.)
-        .finish()
-    };
-    let row = || {
-        Flex::row()
-            .with_main_axis_size(MainAxisSize::Min)
-            .with_spacing(2.)
-            .with_child(cell())
-            .with_child(cell())
-            .finish()
-    };
-
-    Flex::column()
-        .with_main_axis_size(MainAxisSize::Min)
-        .with_spacing(2.)
-        .with_child(row())
-        .with_child(row())
+/// Warp draws `WarpIcon::Menu01` — three rules — beside four squares, which is
+/// `menu` and `layout-grid` in Lucide almost exactly. Both used to be built
+/// out of `Container`s here, seven of them between the two, because there was
+/// nothing else to build them out of.
+fn density_icon(icon: Lucide) -> Box<dyn Element> {
+    Icon::new(icon, ICON_SIZE)
+        .with_color(theme().text_muted)
         .finish()
 }
 
@@ -536,7 +498,7 @@ fn check_row(
     Hoverable::new(state, move |mouse| {
         let check: Box<dyn Element> = if is_checked {
             Align::new(
-                Text::new("\u{2713}", ui, LABEL_SIZE)
+                Icon::new(Lucide::Check, CHECK_SIZE)
                     .with_color(theme().text_primary)
                     .finish(),
             )
@@ -595,22 +557,16 @@ fn check_row(
 fn info_icon(info: &InfoNote, ui: FamilyId) -> Box<dyn Element> {
     let text = info.text;
     Hoverable::new(info.state.clone(), move |mouse| {
-        let dot = ConstrainedBox::new(
-            Container::new(
-                Align::new(
-                    Text::new("i", ui, 9.)
-                        .with_color(theme().surface_raised)
-                        .finish(),
-                )
-                .finish(),
-            )
-            .with_background_color(theme().text_muted)
-            .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
-            .finish(),
-        )
-        .with_width(12.)
-        .with_height(12.)
-        .finish();
+        // Lucide's `info` is an outlined circle with an `i` in it, which is
+        // this dot's whole content — so the dot is the icon now, rather than a
+        // filled circle with a letter of the interface font on top of it. The
+        // stroke is heavier than Lucide's default because at twelve pixels its
+        // default is two thirds of one, and a ring that thin disappears
+        // against a raised surface.
+        let dot = Icon::new(Lucide::Info, INFO_DOT_SIZE)
+            .with_stroke_width(INFO_STROKE_WIDTH)
+            .with_color(theme().text_muted)
+            .finish();
 
         if !mouse.is_hovered() {
             return dot;

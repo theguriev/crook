@@ -382,6 +382,44 @@ column. `CosmicGlyphs::fallback_glyph` now asks cosmic-text's own fallback about
 character at a time and gets back the face that covers it, which is the same answer shaping
 gives a tab title.
 
+### Icons, in the same atlas
+
+The chrome's marks are [Lucide](https://lucide.dev) — the set `lucide-react` publishes — and
+they go through the machinery above rather than beside it. An icon is a mask, a mask is what
+a glyph already is, so an icon is one more entry in the glyph atlas, one more instance in the
+glyph pipeline, and one more branch of nothing at all in the shader.
+
+Three decisions make that work.
+
+**The geometry is vendored, not parsed.** `script/icons` pins a version of `lucide-static`,
+resolves every arc, shorthand, `<circle>`, `<rect>` and `<polyline>` into absolute moves,
+lines and cubics, and writes one Rust file. Nothing parses SVG at runtime, because the icons
+cannot change at runtime — an SVG parser in the binary would be work done on every launch to
+produce a constant. It also means the runtime has no arc code, no shorthand state and no XML.
+
+**The rasterizer is a distance field, not a path filler.** Every Lucide icon is a *stroke*
+with round caps and round joins and no fill. The usual way to draw one is to build the
+outline of the stroke — a quad per segment, an arc per join, a cap at each end — and fill
+that under a winding rule; all of that machinery exists to answer "is this pixel within half
+a stroke of the path", which for round joins and round caps *is* the distance to the path. So
+`crookui_core::icons::raster` flattens the cubics and asks each pixel how far it is from the
+nearest segment. Round joins and caps come out exact rather than approximated, there is no
+winding rule, and the whole thing is 200 lines. Coverage from that distance is the overlap of
+two bands — half a pixel either side of the centre, half a stroke either side of the path —
+which is exact for a straight run at any width, including the two-thirds-of-a-pixel stroke a
+16px icon has.
+
+**A mask per size, cached forever.** The key is the icon, the size in whole device pixels and
+the stroke width; there is no subpixel bucket, because an icon is snapped to the pixel grid on
+both axes where a glyph is snapped only vertically. Nothing is rasterized twice, and the whole
+set at the three sizes the chrome uses is a few dozen kilobytes of atlas.
+
+What this replaces is worth naming, because it is the argument for having done it at all.
+Before this, a gear was `⚙` and a close button `×` — codepoints, drawn out of whatever font
+the machine happened to have, which is a flat gear on one machine and a colour emoji on the
+next. Everything a font would not draw was built out of `Container`s: the two density marks
+in the gear menu were seven rectangles, and the git branch beside a tab title was three.
+
 ### One trap worth knowing now
 
 `cosmic-text`'s `ShapeLine::new` panics on multi-paragraph text. A tab title derived from
@@ -899,8 +937,9 @@ platforms, and treat a build script as the cost it is.
 | The command line | an input field, with shell integration behind it | an input field, with the alt screen as the whole test (§7) |
 | Autotracking | `Tracked<T>` dependency capture | explicit `ctx.notify()` |
 | Settings | ~800, with a macro DSL and cloud sync | 10, two `serde` structs and a name in one JSON file |
-| Themes | 21 built in, gradients, images, a creator, OS sync, hot reload | 14 built in, the same file format, a creator without the image, no OS sync |
+| Themes | 21 built in, gradients, images, a creator, OS sync, hot reload | 13 built in, the same file format, a creator without the image, no OS sync |
 | Theme chooser | a 240px docked panel with search and virtualisation | a 248px docked panel, no search, every row built |
+| Icons | its own `WarpIcon` and `UiIcon` sets, rendered from SVG | Lucide, vendored as path commands, one distance-field rasterizer (§4) |
 | Settings UI | a pane, 16 pages, search over ~800 widgets | a pane, 4 pages, no search |
 
 The through-line: Crook keeps every *architectural* idea from Warp and rejects almost every
