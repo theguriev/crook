@@ -151,7 +151,17 @@ fn whether_a_theme_is_light_is_inferred_from_its_text() {
         .filter(|builtin| builtin.theme.is_light)
         .map(|builtin| builtin.name)
         .collect();
-    assert_eq!(light_ones, ["Crook Light"]);
+
+    // The three light palettes that ship, and — for the two that are somebody
+    // else's — this is also the assertion that the inference agrees with what
+    // their own authors declared: Omarchy's files carry a `mode`, Crook's type
+    // does not, and a rule that read "dark" where a palette says "light" would
+    // have the overlay ladder running the wrong way on somebody else's theme.
+    assert_eq!(
+        light_ones,
+        ["Crook Light", "Catppuccin Latte", "Rosé Pine"],
+        "the inferred light themes are not the ones their authors call light"
+    );
 
     assert!(derived(Color::hex(0xffffff), Color::hex(0x111111)).is_light);
     assert!(!derived(Color::hex(0x111111), Color::hex(0xffffff)).is_light);

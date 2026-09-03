@@ -482,6 +482,13 @@ fn about(workspace: &Workspace) -> Box<dyn Element> {
                      why this page can say MIT and mean it.",
                     ui,
                 ),
+                widgets::note(
+                    "The palettes named after Catppuccin, Everforest, Gruvbox, Kanagawa, Nord, \
+                     Rosé Pine, Tokyo Night and the rest are their projects' own, published \
+                     under permissive licences. Their values were read from the theme files \
+                     Omarchy ships, which is MIT, from Basecamp.",
+                    ui,
+                ),
             ],
             ui,
         ),

@@ -809,7 +809,8 @@ platforms, and treat a build script as the cost it is.
 | The command line | an input field, with shell integration behind it | an input field, with the alt screen as the whole test (§7) |
 | Autotracking | `Tracked<T>` dependency capture | explicit `ctx.notify()` |
 | Settings | ~800, with a macro DSL and cloud sync | 10, two `serde` structs and a name in one JSON file |
-| Themes | 21 built in, gradients, images, a creator, OS sync, hot reload | 3 built in, the same file format, no OS sync |
+| Themes | 21 built in, gradients, images, a creator, OS sync, hot reload | 14 built in, the same file format, a creator without the image, no OS sync |
+| Theme chooser | a 240px docked panel with search and virtualisation | a 248px docked panel, no search, every row built |
 | Settings UI | a pane, 16 pages, search over ~800 widgets | a pane, 4 pages, no search |
 
 The through-line: Crook keeps every *architectural* idea from Warp and rejects almost every

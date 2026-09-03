@@ -38,12 +38,22 @@ Four features, and the page that configures them:
   takes the whole keyboard back and the field goes away while it runs; `ctrl-c`, `ctrl-z` and
   an end-of-input `ctrl-d` always reach the shell. That line is drawn in one function,
   `app/src/input_keys.rs`, and the architecture doc's §7 says why it is drawn there.
-- **Themes.** Three built in — Crook Dark, Crook Light and Midnight — and any number of your
-  own, read from `<config>/crook/themes/*.yaml` in **Warp's own theme file format**, so a
-  theme written for Warp works here unchanged. A theme names a background, a foreground, an
-  accent and the sixteen ANSI colours; everything else — surfaces, borders, overlays, muted
-  text — is derived from those, which is why a theme file is twenty lines rather than sixty.
-  Choosing one applies it to the chrome, to the grid and to every shell already running.
+- **Themes**, in a panel of their own. Fourteen built in — Crook Dark, Crook Light, Midnight,
+  and the eleven palettes Omarchy dresses a desktop in (Catppuccin, Everforest, Gruvbox,
+  Kanagawa, Nord, Rosé Pine, Tokyo Night and the rest, each its own project's, read from
+  Omarchy's files) — plus any number of your own from `<config>/crook/themes/*.yaml`, in
+  **Warp's own theme file format**, so a theme written for Warp works here unchanged.
+
+  A theme names a background, a foreground, an accent and the sixteen ANSI colours; everything
+  else — surfaces, borders, overlays, muted text — is derived from those, which is why a theme
+  file is twenty lines rather than sixty. Choosing one applies it to the chrome, to the grid
+  and to every shell already running.
+
+  The **Themes panel** is a second side panel, opened from the settings page's current-theme
+  row: preview cards, arrow keys that browse by applying, and a `+` that **makes a theme** out
+  of the one you are looking at — five candidate colours clustered out of its palette, one
+  click to choose the background, and everything else decided so the result is legible. What
+  it writes is a file in your themes folder, in the same format as any other.
 - **A settings page**, which opens the way a shell does: `cmd/ctrl-,` — or the gear menu's
   last entry — puts it in a **tab of its own**, listed in the strip beside the work it
   configures, splittable next to that work, and closed by the same × and the same close chord

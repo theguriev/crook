@@ -3378,7 +3378,13 @@ fn choosing_a_theme_in_the_panel_repaints_saves_and_reaches_the_shells() {
 
     harness.open_theme_panel();
     let cards = theme_cards(&harness.frame());
-    assert_eq!(cards.len(), 3, "three built-in themes, three cards");
+    // The cards that are *visible*: the list scrolls, and every theme that
+    // ships has a row whether or not the window is tall enough to show it.
+    assert!(
+        cards.len() >= 2,
+        "the panel drew {} cards, so there is nothing to click",
+        cards.len()
+    );
 
     // The second card is the light one, and it is the one that proves a theme
     // reaches everything: nothing about a dark theme replacing another dark
@@ -3425,11 +3431,19 @@ fn the_arrow_keys_browse_the_panel_and_the_shell_never_sees_them() {
     // key, which is the point: a Down that fell through to the shell at the
     // bottom of the list would recall a line of history from a panel the
     // person is looking at.
+    let last = harness.theme_names().last().cloned().expect("themes");
+    for _ in 0..harness.theme_names().len() + 2 {
+        assert!(harness.press_key("down", Modifiers::default()));
+    }
+    assert_eq!(harness.theme_name(), last);
     assert!(harness.press_key("down", Modifiers::default()));
-    assert_eq!(harness.theme_name(), "Midnight");
+    assert_eq!(harness.theme_name(), last);
 
-    assert!(harness.press_key("up", Modifiers::default()));
-    assert_eq!(harness.theme_name(), "Crook Light");
+    // Back to the top the same way.
+    for _ in 0..harness.theme_names().len() + 2 {
+        assert!(harness.press_key("up", Modifiers::default()));
+    }
+    assert_eq!(harness.theme_name(), "Crook Dark");
 
     // The pane's field is not listening while the panel is up, which is the
     // other half of the same door.
@@ -3574,15 +3588,24 @@ fn a_theme_dropped_into_the_folder_is_in_the_panel_the_next_time_it_opens() {
     harness.set_themes_directory(themes.path().to_owned());
 
     harness.open_theme_panel();
-    assert_eq!(harness.theme_names().len(), 3);
+    let before = harness.theme_names().len();
+    assert_eq!(
+        before,
+        crate::theme::BUILTIN.len(),
+        "only the built-ins to start"
+    );
 
-    fs::write(themes.path().join("nord.yaml"), theme_file_text()).expect("writable");
+    fs::write(themes.path().join("my_own.yaml"), theme_file_text()).expect("writable");
     harness.close_theme_panel();
     harness.open_theme_panel();
 
     let names = harness.theme_names();
-    assert_eq!(names.len(), 4, "the new theme is not listed: {names:?}");
-    assert!(names.contains(&"Nord".to_owned()));
+    assert_eq!(
+        names.len(),
+        before + 1,
+        "the new theme is not listed: {names:?}"
+    );
+    assert!(names.contains(&"My Own".to_owned()));
 }
 
 /// A theme file in Warp's format, for the tests that drop one in.

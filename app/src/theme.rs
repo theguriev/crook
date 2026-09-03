@@ -33,6 +33,7 @@ use crookui_core::geometry::Color;
 mod builtin;
 pub mod creator;
 mod file;
+mod omarchy;
 
 pub use builtin::{BUILTIN, Builtin, DARK, builtin_named};
 pub use file::{ThemeFile, load_themes_in, load_user_themes, user_themes_directory, write_theme};

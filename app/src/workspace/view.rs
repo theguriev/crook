@@ -441,8 +441,19 @@ impl Workspace {
     }
 
     /// The name of the theme in force.
+    ///
+    /// The palette on screen rather than the name in the settings file, when
+    /// the two differ — which they do under `--theme`, an override that is
+    /// deliberately never saved. A panel that outlined the *saved* theme while
+    /// a different one was on screen would be telling a person their own
+    /// window is wrong.
     pub fn theme_name(&self) -> &str {
-        self.settings.theme()
+        let showing = theme();
+        self.themes
+            .iter()
+            .find(|available| available.theme == showing)
+            .map(|available| available.name.as_str())
+            .unwrap_or_else(|| self.settings.theme())
     }
 
     /// Puts a theme on screen, remembers it, and repaints everything.

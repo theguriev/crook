@@ -15,6 +15,7 @@
 
 use crookui_core::geometry::Color;
 
+use super::omarchy::OMARCHY;
 use super::{TerminalColors, Theme};
 
 /// One theme, and what to call it.
@@ -31,21 +32,38 @@ pub struct Builtin {
     pub theme: Theme,
 }
 
-/// Every theme that ships, in the order the settings page lists them.
-pub const BUILTIN: [Builtin; 3] = [
-    Builtin {
+/// Every theme that ships, in the order the panel lists them.
+///
+/// Crook's three first, then the palettes in [`omarchy`](super::omarchy) —
+/// which are not Crook's and say so, and which are here so that a terminal on
+/// an Omarchy desktop can be the same colours as the desktop around it.
+pub const BUILTIN: [Builtin; 3 + OMARCHY.len()] = {
+    let mut themes = [Builtin {
         name: "Crook Dark",
         theme: DARK,
-    },
-    Builtin {
+    }; 3 + OMARCHY.len()];
+
+    themes[1] = Builtin {
         name: "Crook Light",
         theme: LIGHT,
-    },
-    Builtin {
+    };
+    themes[2] = Builtin {
         name: "Midnight",
         theme: MIDNIGHT,
-    },
-];
+    };
+
+    // A `for` in a `const` block, which is what lets one list be written in
+    // one place: `omarchy` names its own palettes, and this only says where
+    // they go.
+    let mut index = 0;
+    while index < OMARCHY.len() {
+        let (name, theme) = OMARCHY[index];
+        themes[3 + index] = Builtin { name, theme };
+        index += 1;
+    }
+
+    themes
+};
 
 /// The sixteen colours a program asks for by number.
 ///
