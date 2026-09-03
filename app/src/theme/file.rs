@@ -263,11 +263,20 @@ impl Document {
     fn parse(contents: &str) -> Result<Self> {
         let mut top = Vec::new();
         let mut nested = Vec::new();
-        let mut block: Option<String> = None;
-        // The indent the current block's keys sit at, so a block inside a
-        // block — `terminal_colors:` then `normal:` — is not mistaken for its
-        // parent's sibling.
-        let mut block_indent = 0;
+        // The blocks currently open, innermost last, as (indent, name). A
+        // *stack* rather than one current block, because a file can dedent:
+        // `terminal_colors:` opens one, `normal:` opens another inside it, and
+        // a key back at the outer indent belongs to the outer one. Treating
+        // that as an error — which the first version of this did — threw away
+        // the whole theme over a key it was going to ignore anyway.
+        let mut blocks: Vec<(usize, String)> = Vec::new();
+
+        // A file written on Windows, or exported by an editor that stamps one,
+        // starts with a byte-order mark. Left in place it becomes part of the
+        // first key's name, and since Warp writes its own themes with the keys
+        // in alphabetical order that key is `accent` — so the theme would be
+        // dropped for want of a colour it plainly declares.
+        let contents = contents.trim_start_matches('\u{feff}');
 
         for (number, line) in contents.lines().enumerate() {
             let trimmed = line.trim();
@@ -280,6 +289,9 @@ impl Document {
                 continue;
             }
 
+            // Tabs count as one column each. YAML forbids them for indentation
+            // and no theme file has ever used one; counting them as something
+            // keeps a file that does from collapsing into one flat block.
             let indent = line.len() - line.trim_start().len();
             let Some((key, value)) = trimmed.split_once(':') else {
                 bail!("line {} is not `key: value`: {trimmed:?}", number + 1);
@@ -288,28 +300,23 @@ impl Document {
             let key = key.trim().to_owned();
             let value = value_of(value);
 
-            if indent == 0 {
-                block = value.is_empty().then(|| key.clone());
-                block_indent = 0;
-                if !value.is_empty() {
-                    top.push((key, value));
-                }
+            // Close every block this line has dedented out of.
+            while blocks.last().is_some_and(|(opened, _)| indent <= *opened) {
+                blocks.pop();
+            }
+
+            if value.is_empty() {
+                // A key with no value opens a block, whatever depth it is at.
+                blocks.push((indent, key));
                 continue;
             }
 
-            match &block {
-                // A block of its own inside a block: `normal:` under
-                // `terminal_colors:`. The inner name is what the colours below
-                // it belong to, which is all this parser needs — no theme file
-                // has ever had two blocks with the same inner name.
-                Some(_) if value.is_empty() => {
-                    block = Some(key);
-                    block_indent = indent;
-                }
-                Some(current) if indent > block_indent => {
-                    nested.push((current.clone(), key, value));
-                }
-                _ => bail!("line {} is indented under nothing: {trimmed:?}", number + 1),
+            match blocks.last() {
+                Some((_, block)) => nested.push((block.clone(), key, value)),
+                None if indent == 0 => top.push((key, value)),
+                // Indented, with nothing open above it. A stray line rather
+                // than a theme.
+                None => bail!("line {} is indented under nothing: {trimmed:?}", number + 1),
             }
         }
 
@@ -556,51 +563,34 @@ fn emit(name: &str, theme: &Theme) -> String {
     let hex = |color: Color| format!("'#{:02x}{:02x}{:02x}'", color.r, color.g, color.b);
     let colors = theme.terminal;
 
+    // Single-quoted, with any quote doubled — YAML's own escape inside a
+    // single-quoted scalar — and with anything that would end the line turned
+    // into a space. A name is the one field here a person could type, and a
+    // newline in one produces a file this very module cannot read back.
+    let name: String = name
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .replace('\'', "''");
+
     let mut text = String::new();
-    // Single-quoted, and with any quote in the name doubled, which is how YAML
-    // escapes one inside a single-quoted scalar. A name is the one field here
-    // that a person types.
-    text.push_str(&format!(
-        "name: '{}'
-",
-        name.replace('\'', "''")
-    ));
-    text.push_str(&format!(
-        "background: {}
-",
-        hex(colors.background)
-    ));
-    text.push_str(&format!(
-        "accent: {}
-",
-        hex(theme.accent)
-    ));
-    text.push_str(&format!(
-        "foreground: {}
-",
-        hex(colors.foreground)
-    ));
-    text.push_str(&format!(
-        "cursor: {}
-",
-        hex(colors.cursor)
-    ));
-    text.push_str(
-        "terminal_colors:
-",
-    );
+    text.push_str(&format!("name: '{name}'\n"));
+    text.push_str(&format!("background: {}\n", hex(colors.background)));
+    text.push_str(&format!("accent: {}\n", hex(theme.accent)));
+    text.push_str(&format!("foreground: {}\n", hex(colors.foreground)));
+    text.push_str(&format!("cursor: {}\n", hex(colors.cursor)));
+    text.push_str("terminal_colors:\n");
 
     for (block, eight) in [("normal", colors.normal), ("bright", colors.bright)] {
-        text.push_str(&format!(
-            "  {block}:
-"
-        ));
+        text.push_str(&format!("  {block}:\n"));
         for (name, color) in ANSI_NAMES.iter().zip(eight) {
-            text.push_str(&format!(
-                "    {name}: {}
-",
-                hex(color)
-            ));
+            text.push_str(&format!("    {name}: {}\n", hex(color)));
         }
     }
 

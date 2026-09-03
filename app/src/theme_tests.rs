@@ -1,6 +1,7 @@
 //! What a derived palette has to be true of, whatever colours it was given.
 
 use super::*;
+use crate::theme::creator::contrast;
 
 /// A theme derived from four colours, for asserting the rules rather than the
 /// values.
@@ -165,6 +166,40 @@ fn whether_a_theme_is_light_is_inferred_from_its_text() {
 
     assert!(derived(Color::hex(0xffffff), Color::hex(0x111111)).is_light);
     assert!(!derived(Color::hex(0x111111), Color::hex(0xffffff)).is_light);
+}
+
+#[test]
+fn muted_text_reads_on_every_bundled_palette_light_or_dark() {
+    // The rung that fails quietly: 55% towards the text reads as "quieter" on
+    // a dark palette and falls to about 2.5:1 on a light one, which is under
+    // every threshold there is. Every subtitle, description and placeholder in
+    // the interface is drawn in it.
+    for builtin in BUILTIN {
+        let theme = builtin.theme;
+        let ratio = contrast(theme.text_muted, theme.surface);
+        assert!(
+            ratio >= 3.5,
+            "{}: muted text sits at {ratio:.2}:1 on its own surface",
+            builtin.name
+        );
+    }
+}
+
+#[test]
+fn the_window_behind_the_panes_is_visibly_deeper_than_they_are() {
+    // The field a command is typed into is a well in this colour. A percentage
+    // of a very dark background is one step out of 255 — the difference
+    // between a recess and a rendering artefact — and every bundled dark
+    // palette lands in exactly that region.
+    for builtin in BUILTIN {
+        let theme = builtin.theme;
+        assert!(
+            distance(theme.ground, theme.surface) >= 6,
+            "{}: the ground and the panes on it differ by {}",
+            builtin.name,
+            distance(theme.ground, theme.surface)
+        );
+    }
 }
 
 #[test]

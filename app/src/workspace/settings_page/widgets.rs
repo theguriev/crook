@@ -486,7 +486,7 @@ pub(super) fn current_theme_row(
     let mut card = Some(card);
     let mut name = Some(name);
 
-    Hoverable::new(state, move |mouse| {
+    let row = Hoverable::new(state, move |mouse| {
         let border = if mouse.is_hovered() {
             theme().accent
         } else {
@@ -536,11 +536,15 @@ pub(super) fn current_theme_row(
         // the tabs those tests reason about.
         .with_corner_radius(CornerRadius::with_all(Radius::Pixels(10.)))
         .with_uniform_padding(8.)
-        .with_margin_bottom(10.)
         .finish()
     })
     .on_click(move |_, ctx, _| ctx.dispatch_typed_action(action))
-    .finish()
+    .finish();
+
+    // The gap under the row goes *outside* the `Hoverable`: a margin inside it
+    // is part of the box the hit test is resolved against, so the row lit up —
+    // and opened the panel — from ten pixels below where it is drawn.
+    Container::new(row).with_margin_bottom(10.).finish()
 }
 
 /// A label and a value that cannot be edited, for the About page.

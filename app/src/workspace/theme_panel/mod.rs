@@ -112,6 +112,15 @@ pub(super) enum Control {
     Cancel,
     /// The creator's "Create theme".
     Save,
+    /// The creator's preview card.
+    ///
+    /// A key of its own even though the card is not a control there: every
+    /// card is wrapped in a `Hoverable`, a `Hoverable` takes the press it sees
+    /// whether or not it has a click handler, and a flex hands every event to
+    /// every child. Sharing a key with the button below it meant the preview
+    /// consumed the press and the button never fired — the settings page keeps
+    /// its card and its row apart for exactly this reason.
+    Preview,
 }
 
 /// Whether the panel is up, what it is doing, and what the mouse is doing to

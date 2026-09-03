@@ -130,16 +130,82 @@ fn a_draft_is_legible_whichever_swatch_is_chosen() {
 }
 
 #[test]
-fn a_dark_draft_and_a_light_draft_get_different_ansi_sets() {
-    // Warp picks one of two fixed palettes by which foreground won, because
-    // the standard bright colours are chosen to sit on black and are
-    // unreadable on white.
-    let (dark_normal, _) = ansi_for(Color::hex(0xffffff));
-    let (light_normal, _) = ansi_for(Color::hex(0x000000));
+fn the_ansi_set_is_the_one_that_reads_on_the_background_it_will_be_drawn_on() {
+    // Warp picks by which foreground won, which is right at both ends of the
+    // range and wrong in the middle. The two extremes still land where they
+    // should:
+    let (on_black, _) = ansi_for(Color::hex(0x000000));
+    let (on_white, _) = ansi_for(Color::hex(0xffffff));
+    assert_eq!(on_black, ANSI_NORMAL);
+    assert_eq!(on_white, LIGHT.terminal.normal);
 
-    assert_eq!(dark_normal, ANSI_NORMAL);
-    assert_eq!(light_normal, LIGHT.terminal.normal);
-    assert_ne!(dark_normal, light_normal);
+    // And every draft, from every bundled palette, has a set of colours that
+    // reads on the grid *as a whole*. Not every colour individually: ANSI
+    // black is the shadow slot, and the xterm blue is almost invisible on
+    // black in every terminal ever written — both are properties of the
+    // standard palette rather than of this choice. What the choice has to get
+    // right is the average, and that is what the by-the-foreground rule got
+    // wrong on a mid-tone background.
+    let average = |colors: crate::theme::TerminalColors| {
+        let sum: f32 = colors
+            .normal
+            .iter()
+            .skip(1)
+            .chain(colors.bright.iter().skip(1))
+            .map(|color| contrast(colors.background, *color))
+            .sum();
+        sum / 14.
+    };
+
+    for builtin in crate::theme::BUILTIN {
+        let mut draft = Draft::new(&builtin.theme);
+        for index in 0..CANDIDATES {
+            draft.choose(index);
+            assert!(
+                average(draft.theme.terminal) >= 2.0,
+                "{}: swatch {index} leaves its terminal colours at {:.2}:1 on average",
+                builtin.name,
+                average(draft.theme.terminal)
+            );
+        }
+    }
+
+    // The case the old rule got wrong, named: a mid-tone background takes
+    // black text, so picking by the foreground would hand it the palette meant
+    // for paper.
+    let mid = Color::hex(0x7a7394);
+    assert_eq!(
+        foreground_for(mid),
+        Color::hex(0x000000),
+        "the middle takes black text"
+    );
+    assert_eq!(
+        ansi_for(mid).0,
+        ANSI_NORMAL,
+        "a mid-tone grid should take the colours that read on it, not the ones its text implies"
+    );
+}
+
+#[test]
+fn a_palette_of_one_colour_still_makes_a_theme_with_a_visible_cursor() {
+    // A theme file of sixteen identical colours parses, and clustering five
+    // candidates out of one colour gives five of it. What must not happen is
+    // an accent — and so a cursor — the same colour as the grid.
+    let flat = Color::hex(0x000000);
+    let source = Theme::derived(
+        flat,
+        TerminalColors {
+            foreground: flat,
+            background: flat,
+            cursor: flat,
+            normal: [flat; 8],
+            bright: [flat; 8],
+        },
+    );
+
+    let draft = Draft::new(&source);
+    assert_ne!(draft.theme.accent, draft.theme.terminal.background);
+    assert_ne!(draft.theme.terminal.cursor, draft.theme.terminal.background);
 }
 
 #[test]

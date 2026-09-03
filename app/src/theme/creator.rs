@@ -216,7 +216,7 @@ fn assemble(candidates: [Color; CANDIDATES], chosen: usize) -> Theme {
     let background = candidates[chosen];
     let foreground = foreground_for(background);
     let accent = accent_for(background, foreground, candidates, chosen);
-    let (normal, bright) = ansi_for(foreground);
+    let (normal, bright) = ansi_for(background);
 
     Theme::derived(
         accent,
@@ -271,6 +271,12 @@ fn accent_for(
         .enumerate()
         .filter(|(index, _)| *index != chosen)
         .map(|(_, candidate)| *candidate)
+        // A source palette can be monochrome — a theme file of sixteen
+        // identical colours parses — and clustering five candidates out of one
+        // colour gives five of it. An accent equal to the background is an
+        // invisible cursor, so those are dropped and the foreground stands in
+        // below.
+        .filter(|candidate| *candidate != background)
         .max_by(|left, right| {
             let score = |color: Color| {
                 let lab = Lab::of(color);
@@ -287,21 +293,42 @@ fn accent_for(
 
 /// The sixteen a generated theme is given.
 ///
-/// Warp picks one of two fixed palettes by which foreground won, and these are
-/// Crook's own two: the xterm values every terminal agrees on for a dark
-/// theme, and the darkened set `Crook Light` carries for a light one — the
-/// standard bright colours are chosen to sit on black and are unreadable on
-/// white.
-pub fn ansi_for(foreground: Color) -> ([Color; 8], [Color; 8]) {
-    if luminance(foreground) < 128 {
-        (LIGHT.terminal.normal, LIGHT.terminal.bright)
-    } else {
+/// Two fixed sets, as Warp has two: the xterm values every terminal agrees on,
+/// and the darkened set `Crook Light` carries — the standard bright colours
+/// are chosen to sit on black and are unreadable on white.
+///
+/// **Chosen by the background, not by the foreground.** Warp picks by which
+/// foreground won, which is the same answer whenever the background is at
+/// either end of the range and the wrong one in the middle: a mid-tone
+/// background takes black text, so Warp's rule hands it the palette meant for
+/// paper, and `ls` comes out in colours a shade away from what it is written
+/// on. Here each set is scored against the background it will actually be
+/// drawn on, and the one whose worst colour reads best wins.
+pub fn ansi_for(background: Color) -> ([Color; 8], [Color; 8]) {
+    // The *average* of the seven colours a program actually prints text in,
+    // rather than the worst of them. Two slots would decide it wrongly on
+    // their own: colour 0 is the shadow slot and is meant to disappear into a
+    // dark grid, and the xterm blue is famously almost invisible on black — a
+    // rule that scored either would hand every dark background the palette
+    // meant for paper.
+    let legibility = |eight: [Color; 8]| {
+        let sum: f32 = eight
+            .iter()
+            .skip(1)
+            .map(|color| contrast(background, *color))
+            .sum();
+        sum / (eight.len() - 1) as f32
+    };
+
+    if legibility(ANSI_NORMAL) >= legibility(LIGHT.terminal.normal) {
         (ANSI_NORMAL, ANSI_BRIGHT)
+    } else {
+        (LIGHT.terminal.normal, LIGHT.terminal.bright)
     }
 }
 
 /// The WCAG 2.0 contrast ratio between two colours, 1 to 21.
-fn contrast(left: Color, right: Color) -> f32 {
+pub(super) fn contrast(left: Color, right: Color) -> f32 {
     let (lighter, darker) = {
         let (left, right) = (relative_luminance(left), relative_luminance(right));
         if left > right {
@@ -325,12 +352,6 @@ fn relative_luminance(color: Color) -> f32 {
     };
 
     0.2126 * channel(color.r) + 0.7152 * channel(color.g) + 0.0722 * channel(color.b)
-}
-
-/// The same integer luma the theme module infers light from dark with.
-fn luminance(color: Color) -> u8 {
-    ((2126 * u32::from(color.r) + 7152 * u32::from(color.g) + 722 * u32::from(color.b)) / 10000)
-        as u8
 }
 
 /// A colour in CIE L\*a\*b\*, where distance means what the eye means by it.

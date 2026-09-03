@@ -483,10 +483,11 @@ fn about(workspace: &Workspace) -> Box<dyn Element> {
                     ui,
                 ),
                 widgets::note(
-                    "The palettes named after Catppuccin, Everforest, Gruvbox, Kanagawa, Nord, \
-                     Rosé Pine, Tokyo Night and the rest are their projects' own, published \
-                     under permissive licences. Their values were read from the theme files \
-                     Omarchy ships, which is MIT, from Basecamp.",
+                    "The bundled palettes named after Catppuccin, Everforest, Gruvbox, \
+                     Kanagawa, Nord, Rosé Pine and Tokyo Night belong to those projects, each \
+                     under its own licence. Their values were read from the theme files \
+                     Omarchy ships, which is MIT, from Basecamp; Matte Black and Osaka Jade \
+                     are Omarchy's own.",
                     ui,
                 ),
             ],

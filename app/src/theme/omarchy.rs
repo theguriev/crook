@@ -1,6 +1,6 @@
 //! The themes Omarchy dresses a desktop in.
 //!
-//! Eleven palettes, read out of the `colors.toml` files Omarchy ships, so that
+//! Ten palettes, read out of the `colors.toml` files Omarchy ships, so that
 //! a terminal on an Omarchy desktop is the same colours as the desktop around
 //! it. Switching the desktop theme does not switch Crook's — there is no
 //! mechanism for that and inventing one would mean watching a file nobody
@@ -11,11 +11,18 @@
 //!
 //! Not Crook's, and not Omarchy's either for most of them. Each palette
 //! belongs to the project that designed it — Catppuccin, Everforest, Gruvbox,
-//! Kanagawa, Nord, Rosé Pine, Tokyo Night and the rest — all published under
-//! permissive licences, and all widely redistributed in exactly this form: a
-//! list of hex values a terminal reads. Omarchy is where the values here were
-//! read from, because it has already done the work of choosing one coherent
-//! set of sixteen per palette; Omarchy itself is MIT, from Basecamp.
+//! Kanagawa, Nord, Rosé Pine, Tokyo Night — each published under its own
+//! licence, and each already redistributed in exactly this form by every
+//! terminal that ships themes: a list of hex values. Omarchy is where the
+//! values here were read from, because it has already done the work of
+//! choosing one coherent set of sixteen per palette, and Omarchy is MIT, from
+//! Basecamp. Matte Black and Osaka Jade are Omarchy's own.
+//!
+//! One palette Omarchy ships is deliberately **not** here: Ristretto, whose
+//! colours are Monokai Pro's — a paid product whose licence does not permit
+//! this. Bundling it would have been a claim nobody checked, which is the
+//! whole reason this paragraph names licences one at a time rather than
+//! saying "all permissive" and moving on.
 //!
 //! # The mapping
 //!
@@ -280,36 +287,6 @@ pub const OSAKA_JADE: Theme = Theme::derived(
     },
 );
 
-/// Ristretto, as Omarchy sets it.
-pub const RISTRETTO: Theme = Theme::derived(
-    Color::hex(0xf38d70),
-    TerminalColors {
-        foreground: Color::hex(0xe6d9db),
-        background: Color::hex(0x2c2525),
-        cursor: Color::hex(0xf38d70),
-        normal: [
-            Color::hex(0x181414),
-            Color::hex(0xfd6883),
-            Color::hex(0xadda78),
-            Color::hex(0xf9cc6c),
-            Color::hex(0xf38d70),
-            Color::hex(0xa8a9eb),
-            Color::hex(0x85dacc),
-            Color::hex(0xc3b7b8),
-        ],
-        bright: [
-            Color::hex(0x72696a),
-            Color::hex(0xff8297),
-            Color::hex(0xc8e292),
-            Color::hex(0xfcd675),
-            Color::hex(0xf8a788),
-            Color::hex(0xbebffd),
-            Color::hex(0x9bf1e1),
-            Color::hex(0xe6d9db),
-        ],
-    },
-);
-
 /// Rosé Pine, as Omarchy sets it.
 pub const ROSE_PINE: Theme = Theme::derived(
     Color::hex(0x56949f),
@@ -371,7 +348,7 @@ pub const TOKYO_NIGHT: Theme = Theme::derived(
 );
 
 /// Every Omarchy palette, in the order the panel lists them.
-pub const OMARCHY: [(&str, Theme); 11] = [
+pub const OMARCHY: [(&str, Theme); 10] = [
     ("Catppuccin", CATPPUCCIN),
     ("Catppuccin Latte", CATPPUCCIN_LATTE),
     ("Everforest", EVERFOREST),
@@ -380,7 +357,6 @@ pub const OMARCHY: [(&str, Theme); 11] = [
     ("Matte Black", MATTE_BLACK),
     ("Nord", NORD),
     ("Osaka Jade", OSAKA_JADE),
-    ("Ristretto", RISTRETTO),
     ("Rosé Pine", ROSE_PINE),
     ("Tokyo Night", TOKYO_NIGHT),
 ];

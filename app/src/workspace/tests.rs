@@ -362,6 +362,18 @@ impl Harness {
             .read(&self.app, |workspace, _| workspace.is_creating_theme())
     }
 
+    /// The name of the theme the panel's keyboard row is on.
+    fn selected_theme_name(&self) -> String {
+        self.workspace.read(&self.app, |workspace, _| {
+            let panel = workspace.theme_panel();
+            workspace
+                .themes()
+                .get(panel.selected)
+                .map(|theme| theme.name.clone())
+                .unwrap_or_default()
+        })
+    }
+
     /// Every theme the panel would list.
     fn theme_names(&self) -> Vec<String> {
         self.workspace.read(&self.app, |workspace, _| {
@@ -3333,6 +3345,20 @@ fn theme_cards(scene: &Scene) -> Vec<RectF> {
     cards
 }
 
+/// The creator's two buttons, left to right: Cancel, then Create.
+fn creator_buttons(scene: &Scene) -> Vec<RectF> {
+    let mut buttons: Vec<RectF> = visible_rects(scene)
+        .filter(|(rect, _)| {
+            rect.corner_radius.get_top_left() == Radius::Pixels(6.)
+                && rect.border.width >= 1.
+                && (rect.bounds.height() - 27.2).abs() < 1.
+        })
+        .map(|(_, bounds)| bounds)
+        .collect();
+    buttons.sort_by(|left, right| left.min_x().total_cmp(&right.min_x()));
+    buttons
+}
+
 /// The five swatches the creator offers, left to right.
 fn creator_swatches(scene: &Scene) -> Vec<RectF> {
     let mut swatches: Vec<RectF> = visible_rects(scene)
@@ -3350,6 +3376,8 @@ fn the_settings_page_shows_the_theme_in_force_and_opens_the_panel() {
     // list you look at instead of your work.
     let mut harness = Harness::new(1);
     let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+    let themes = Scratch::new();
+    harness.set_themes_directory(themes.path().to_owned());
     harness.open_settings_page();
 
     let scene = harness.frame();
@@ -3373,8 +3401,14 @@ fn choosing_a_theme_in_the_panel_repaints_saves_and_reaches_the_shells() {
     // the one that is easy to miss: a grid resolves its colours through a
     // palette handed to it when its shell started.
     let scratch = Scratch::new();
+    let themes = Scratch::new();
     let mut harness = Harness::with_settings(1, scratch.settings());
     let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+    // Pointed at an empty folder of this test's own: a list read from the real
+    // one would assert something about the machine the test runs on, and a
+    // theme file there called "Crook Light" would make this fail for a reason
+    // that has nothing to do with the panel.
+    harness.set_themes_directory(themes.path().to_owned());
 
     harness.open_theme_panel();
     let cards = theme_cards(&harness.frame());
@@ -3419,6 +3453,8 @@ fn the_arrow_keys_browse_the_panel_and_the_shell_never_sees_them() {
     // than either.
     let mut harness = Harness::new(1);
     let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+    let themes = Scratch::new();
+    harness.set_themes_directory(themes.path().to_owned());
     harness.open_theme_panel();
     harness.frame();
 
@@ -3460,6 +3496,8 @@ fn escape_and_enter_both_put_the_panel_away() {
     for key in ["escape", "enter"] {
         let mut harness = Harness::new(1);
         let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+        let themes = Scratch::new();
+        harness.set_themes_directory(themes.path().to_owned());
         harness.open_theme_panel();
         assert!(harness.is_theme_panel_open());
 
@@ -3482,6 +3520,8 @@ fn a_chord_still_reaches_the_window_while_the_panel_is_up() {
     // `cmd/ctrl-t` would be a panel you had to close to open a tab.
     let mut harness = Harness::new(1);
     let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+    let themes = Scratch::new();
+    harness.set_themes_directory(themes.path().to_owned());
     harness.open_theme_panel();
 
     let before = harness.tab_ids().len();
@@ -4539,4 +4579,173 @@ mod shells {
             "the grid was squeezed to nothing to make room for the field"
         );
     }
+}
+
+#[test]
+fn clicking_create_writes_the_theme() {
+    // The button, clicked — not the action, dispatched. Every control in the
+    // panel is wrapped in a `Hoverable`, a `Hoverable` claims the press it
+    // sees whether or not it has a click handler, and a flex hands every event
+    // to every child: a preview card that shared the button's mouse state
+    // swallowed the press and the button never fired. A test that dispatches
+    // the action cannot see that, which is why this one aims at pixels.
+    let themes = Scratch::new();
+    let mut harness = Harness::new(1);
+    let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+    harness.set_themes_directory(themes.path().to_owned());
+
+    harness.open_theme_panel();
+    harness.start_creating();
+    let scene = harness.frame();
+
+    let buttons = creator_buttons(&scene);
+    assert_eq!(buttons.len(), 2, "Cancel and Create");
+    harness.click(center(buttons[1]), MouseButton::Left);
+
+    assert!(
+        !harness.is_creating(),
+        "clicking Create left the creator open"
+    );
+    assert_eq!(
+        fs::read_dir(themes.path())
+            .expect("readable")
+            .flatten()
+            .count(),
+        1,
+        "clicking Create wrote no theme"
+    );
+    assert_eq!(harness.theme_name(), "Crook Dark variant");
+}
+
+#[test]
+fn clicking_cancel_puts_the_theme_back_and_writes_nothing() {
+    let themes = Scratch::new();
+    let mut harness = Harness::new(1);
+    let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+    harness.set_themes_directory(themes.path().to_owned());
+
+    harness.open_theme_panel();
+    harness.start_creating();
+    let buttons = creator_buttons(&harness.frame());
+    harness.click(center(buttons[0]), MouseButton::Left);
+
+    assert!(!harness.is_creating());
+    assert_eq!(crate::theme::theme(), crate::theme::DARK);
+    assert_eq!(
+        fs::read_dir(themes.path())
+            .expect("readable")
+            .flatten()
+            .count(),
+        0
+    );
+}
+
+#[test]
+fn the_arrow_keys_do_nothing_while_the_creator_is_up() {
+    // The list is not on screen, so a key that quietly chose *and saved* a
+    // theme behind the creator would leave the settings file naming a theme
+    // the window is not in — and cancelling would then restore a third one.
+    let scratch = Scratch::new();
+    let themes = Scratch::new();
+    let mut harness = Harness::with_settings(1, scratch.settings());
+    let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+    harness.set_themes_directory(themes.path().to_owned());
+
+    harness.open_theme_panel();
+    harness.start_creating();
+    let draft = crate::theme::theme();
+
+    assert!(harness.press_key("down", Modifiers::default()));
+    assert_eq!(
+        crate::theme::theme(),
+        draft,
+        "an arrow key changed the theme from behind the creator"
+    );
+
+    harness.cancel_creating();
+    assert_eq!(crate::theme::theme(), crate::theme::DARK);
+}
+
+#[test]
+fn escape_while_the_creator_is_up_puts_the_theme_back() {
+    let themes = Scratch::new();
+    let mut harness = Harness::new(1);
+    let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+    harness.set_themes_directory(themes.path().to_owned());
+
+    harness.open_theme_panel();
+    harness.start_creating();
+    assert_ne!(crate::theme::theme(), crate::theme::DARK);
+
+    assert!(harness.press_key("escape", Modifiers::default()));
+
+    assert!(!harness.is_theme_panel_open());
+    assert!(!harness.is_creating());
+    assert_eq!(
+        crate::theme::theme(),
+        crate::theme::DARK,
+        "escape left the unsaved draft painted on the window"
+    );
+}
+
+#[test]
+fn re_opening_the_panel_while_creating_puts_the_theme_back_too() {
+    // The settings page's row dispatches `OpenPanel` whether or not the panel
+    // is already up, so this is one click away at any moment.
+    let themes = Scratch::new();
+    let mut harness = Harness::new(1);
+    let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+    harness.set_themes_directory(themes.path().to_owned());
+
+    harness.open_theme_panel();
+    harness.start_creating();
+    harness.open_theme_panel();
+
+    assert!(!harness.is_creating());
+    assert_eq!(
+        crate::theme::theme(),
+        crate::theme::DARK,
+        "the abandoned draft is still on screen"
+    );
+}
+
+#[test]
+fn the_panel_opens_on_the_theme_that_is_on_screen() {
+    // Warp's chooser opens on the theme you are in. Opening at the top of the
+    // list would move a person's theme the first time they pressed Down.
+    let themes = Scratch::new();
+    let mut harness = Harness::new(1);
+    let _guard =
+        crate::theme::ThemeGuard::new(crate::theme::named("Midnight").expect("a built-in"));
+    harness.set_themes_directory(themes.path().to_owned());
+
+    harness.open_theme_panel();
+    assert_eq!(harness.selected_theme_name(), "Midnight");
+
+    // And one press moves to the row beside it, not to the second row of the
+    // list.
+    assert!(harness.press_key("down", Modifiers::default()));
+    assert_eq!(harness.theme_names()[3], harness.theme_name());
+}
+
+#[test]
+fn the_row_height_the_panel_scrolls_by_is_the_height_it_draws() {
+    // Scrolling to a row is arithmetic — the selected row's index times a
+    // constant — so a constant that drifted from what is drawn would scroll to
+    // the wrong place rather than fail. This is what pins it.
+    let themes = Scratch::new();
+    let mut harness = Harness::new(1);
+    let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+    harness.set_themes_directory(themes.path().to_owned());
+    harness.open_theme_panel();
+
+    let cards = theme_cards(&harness.frame());
+    assert!(cards.len() >= 2, "two cards are needed to measure the gap");
+
+    let drawn = cards[1].min_y() - cards[0].min_y();
+    assert!(
+        (drawn - crate::workspace::theme_panel::ROW_HEIGHT).abs() < 0.5,
+        "rows are drawn {drawn} apart and scrolled by {}",
+        crate::workspace::theme_panel::ROW_HEIGHT
+    );
 }

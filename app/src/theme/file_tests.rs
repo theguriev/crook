@@ -505,12 +505,107 @@ fn a_written_theme_is_spelled_the_way_warp_spells_one() {
     let path = write_theme(&scratch.path, "Spelling", &crate::theme::DARK).expect("written");
     let text = fs::read_to_string(&path).expect("readable");
 
-    assert!(text.contains("name: 'Spelling'\n"));
-    assert!(text.contains("background: '#1a1d24'\n"));
-    assert!(text.contains("terminal_colors:\n  normal:\n    black: '#000000'\n"));
-    assert!(text.contains("  bright:\n    black: '#7f7f7f'\n"));
+    // The exact prologue, in Warp's key order, rather than a handful of
+    // `contains` checks: the previous version of this test asserted that the
+    // file held no double quote, which no possible output of the emitter ever
+    // does, so it could not fail.
     assert!(
-        !text.contains("#RRGGBB") && !text.contains('"'),
-        "colours should be single-quoted lower-case hex: {text}"
+        text.starts_with(
+            "name: 'Spelling'\n\
+             background: '#1a1d24'\n\
+             accent: '#8b5cf6'\n\
+             foreground: '#e8ebf0'\n\
+             cursor: '#8b5cf6'\n\
+             terminal_colors:\n"
+        ),
+        "the file does not open the way Warp writes one: {text}"
     );
+    assert!(text.contains("  normal:\n    black: '#000000'\n    red: '#cd0000'\n"));
+    assert!(text.contains("  bright:\n    black: '#7f7f7f'\n"));
+    assert_eq!(
+        text.lines().count(),
+        6 + 2 + 16,
+        "five colours, a name, two block headings and sixteen colours: {text}"
+    );
+}
+
+#[test]
+fn a_key_after_a_nested_block_belongs_to_the_block_it_dedented_into() {
+    // The shape every real theme has once anything is added to it: a key at
+    // the outer indent after an inner block has closed. Treating that as an
+    // error — which is what a single "current block" does — throws away a
+    // whole theme over a key that was going to be ignored anyway.
+    // A key back at `terminal_colors`' own indent once `bright:` has closed,
+    // and then one back at the document's.
+    let dedented = SOLARIZED.to_string() + "  selection: '#264f78'\ncursor_shape: block\n";
+
+    let parsed = parse(&dedented).expect("a dedent is not an error");
+    assert_eq!(parsed.theme.terminal.normal[1], Color::hex(0xdc322f));
+}
+
+#[test]
+fn a_byte_order_mark_does_not_swallow_the_first_key() {
+    // A file exported by an editor on Windows starts with one, and Warp writes
+    // its own themes in alphabetical order — so the key it would swallow is
+    // `accent`, and the theme would be dropped for want of a colour it plainly
+    // declares.
+    let with_bom = format!("\u{feff}{}", AS_WARP_WRITES_IT);
+
+    let parsed = parse(&with_bom).expect("a BOM is not a parse error");
+    assert_eq!(parsed.theme.accent, Color::hex(0x01a0e4));
+}
+
+#[test]
+fn a_name_that_could_not_be_written_on_one_line_still_round_trips() {
+    // A name is the one field a person could type into. A newline in one would
+    // produce a file this same module cannot read back — which is the failure
+    // that matters here, since the module both ends of the round trip.
+    let scratch = Scratch::new("control-characters");
+
+    for name in ["two\nlines", "tab\there", "carriage\rreturn"] {
+        let path =
+            write_theme(&scratch.path, name, &crate::theme::builtin::MIDNIGHT).expect("written");
+        let read_back = read(&path).expect("what was written should parse");
+
+        assert!(
+            !read_back.name.contains(['\n', '\r', '\t']),
+            "{:?} came back as {:?}",
+            name,
+            read_back.name
+        );
+        assert_eq!(read_back.theme, crate::theme::builtin::MIDNIGHT);
+    }
+}
+
+#[test]
+fn the_walk_is_sorted_by_name_and_then_by_path() {
+    // Not merely that both files survive: that they come back in an order
+    // nothing about the filesystem can change. Delete either sort in
+    // `load_themes_in` and this fails.
+    let root = std::env::temp_dir().join(format!("crook-order-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("inner")).expect("creatable");
+
+    // Named so that the file order and the theme order disagree: `aaa.yaml`
+    // holds "Zeta" and `zzz.yaml` holds "Alpha".
+    fs::write(
+        root.join("aaa.yaml"),
+        SOLARIZED.replace("name: Solarized Dark", "name: Zeta"),
+    )
+    .expect("writable");
+    fs::write(
+        root.join("inner").join("zzz.yaml"),
+        SOLARIZED.replace("name: Solarized Dark", "name: Alpha"),
+    )
+    .expect("writable");
+
+    let themes = load_themes_in(&root);
+    let names: Vec<&str> = themes.iter().map(|theme| theme.name.as_str()).collect();
+    assert_eq!(
+        names,
+        ["Alpha", "Zeta"],
+        "the walk is ordered by the filesystem rather than by name"
+    );
+
+    let _ = fs::remove_dir_all(&root);
 }

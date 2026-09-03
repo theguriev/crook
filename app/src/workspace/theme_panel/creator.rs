@@ -43,8 +43,11 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
         return Empty::new().finish();
     };
 
-    Flex::column()
-        .with_main_axis_size(MainAxisSize::Max)
+    // The buttons are pinned and everything above them scrolls. A column that
+    // simply grew put Cancel and Create past the bottom edge of a short window
+    // — drawn, unreachable, and with no hint that they were there.
+    let scrolling = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
         .with_child(swatches(workspace, draft))
         .with_child(
@@ -56,8 +59,25 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
             format!("Text and colours follow. {}", contrast_note(draft)),
             ui,
         ))
-        .with_child(Expanded::new(1., Empty::new().finish()).finish())
-        .with_child(buttons(workspace, ui))
+        .finish();
+
+    Flex::column()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_child(
+            Expanded::new(
+                1.,
+                Scrollable::new(state.scroll.clone(), scrolling)
+                    .with_scrollbar(theme().overlay_3)
+                    .finish(),
+            )
+            .finish(),
+        )
+        .with_child(
+            Container::new(buttons(workspace, ui))
+                .with_margin_top(10.)
+                .finish(),
+        )
         .finish()
 }
 
@@ -146,7 +166,7 @@ fn preview(workspace: &Workspace, draft: &crate::theme::creator::Draft) -> Box<d
         PANEL_CARD,
         true,
         None,
-        workspace.theme_panel().control(Control::Save),
+        workspace.theme_panel().control(Control::Preview),
         workspace.fonts(),
     )
 }

@@ -567,11 +567,21 @@ impl Workspace {
             Some(directory) => crate::theme::available_in(directory),
             None => crate::theme::available(),
         };
-        let current = self.settings.theme().to_owned();
+        self.select_theme_in_force();
+    }
+
+    /// Puts the keyboard's row on the theme that is on screen.
+    ///
+    /// By palette rather than by name, for the reason [`Self::theme_name`]
+    /// answers by palette: under `--theme` the saved name is not what a person
+    /// is looking at, and the row they would arrow away from has to be the one
+    /// they can see.
+    fn select_theme_in_force(&mut self) {
+        let showing = theme();
         self.panel.selected = self
             .themes
             .iter()
-            .position(|available| available.name == current)
+            .position(|available| available.theme == showing)
             .unwrap_or(0);
     }
 
@@ -1479,10 +1489,25 @@ impl Workspace {
                 // dropped in while Crook was running is in the list.
                 self.refresh_themes();
                 if self.panel.open && self.panel.mode == Mode::Choosing {
+                    // Already showing the list. Still worth the refresh above,
+                    // and the selection below, but nothing else moves.
+                    self.select_theme_in_force();
+                    self.scroll_selection_into_view();
+                    ctx.notify();
                     return;
                 }
-                self.leave_creator();
+                // A creator that was up is *cancelled*, not abandoned: its
+                // draft is painted on the window, and leaving it there would
+                // mean a palette nobody chose, that nothing can name and no
+                // file holds.
+                self.cancel_draft();
                 self.panel.open = true;
+                // Warp's chooser opens on the theme you are in. A panel that
+                // opened at the top of the list with the selection somewhere
+                // else would move a person's theme the first time they pressed
+                // Down.
+                self.select_theme_in_force();
+                self.scroll_selection_into_view();
                 self.panel.forget_hover_state();
                 self.sync_input_keys();
                 ctx.notify();
@@ -1513,7 +1538,10 @@ impl Workspace {
                 ctx.notify();
             }
             ThemeAction::MoveSelection(delta) => {
-                if self.themes.is_empty() {
+                // Not while the creator is up: the list is not on screen, and
+                // a key that quietly chose and *saved* a theme behind it would
+                // leave the settings file naming a theme the window is not in.
+                if self.panel.mode == Mode::Creating || self.themes.is_empty() {
                     return;
                 }
                 let last = self.themes.len() as isize - 1;
@@ -1524,7 +1552,10 @@ impl Workspace {
                 self.apply_theme_action(ThemeAction::Choose(next), ctx);
             }
             ThemeAction::StartCreating => {
-                self.theme_before_draft = Some(self.settings.theme().to_owned());
+                // The theme *in force*, which is not always the saved one:
+                // under `--theme` they differ, and cancelling back to the
+                // saved one would change the window rather than restore it.
+                self.theme_before_draft = Some(self.theme_name().to_owned());
                 let draft = Draft::new(&theme());
                 crate::theme::set_theme(draft.theme);
                 self.panel.draft = Some(draft);
@@ -1582,6 +1613,9 @@ impl Workspace {
         self.panel.forget_hover_state();
         self.refresh_themes();
         self.set_theme(&name, ctx);
+        // After `set_theme`, because `refresh_themes` points the selection at
+        // whatever was in force *before* the new theme existed.
+        self.select_theme_in_force();
         self.scroll_selection_into_view();
         ctx.notify();
     }
@@ -1614,18 +1648,21 @@ impl Workspace {
         // Back to the *name* that was in force, through the same lookup a
         // click uses: the draft was never saved, so nothing has to be undone
         // except what is on screen.
-        if let Some(name) = self.theme_before_draft.take()
-            && let Some(palette) = crate::theme::named(&name)
-        {
-            crate::theme::set_theme(palette);
+        // Looked up in the list this workspace is showing rather than through
+        // `theme::named`, which reads the real themes folder: a test points
+        // the folder somewhere else, and a cancel that fell back to the
+        // machine's own themes would put back a palette from outside the test.
+        if let Some(name) = self.theme_before_draft.take() {
+            let palette = self
+                .themes
+                .iter()
+                .find(|available| available.name == name)
+                .map(|available| available.theme)
+                .or_else(|| crate::theme::named(&name));
+            if let Some(palette) = palette {
+                crate::theme::set_theme(palette);
+            }
         }
-    }
-
-    /// Leaves the creator without putting anything back.
-    fn leave_creator(&mut self) {
-        self.panel.draft = None;
-        self.theme_before_draft = None;
-        self.panel.mode = Mode::Choosing;
     }
 
     /// Keeps the row the keyboard is on inside the list.

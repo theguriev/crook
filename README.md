@@ -38,9 +38,9 @@ Four features, and the page that configures them:
   takes the whole keyboard back and the field goes away while it runs; `ctrl-c`, `ctrl-z` and
   an end-of-input `ctrl-d` always reach the shell. That line is drawn in one function,
   `app/src/input_keys.rs`, and the architecture doc's §7 says why it is drawn there.
-- **Themes**, in a panel of their own. Fourteen built in — Crook Dark, Crook Light, Midnight,
-  and the eleven palettes Omarchy dresses a desktop in (Catppuccin, Everforest, Gruvbox,
-  Kanagawa, Nord, Rosé Pine, Tokyo Night and the rest, each its own project's, read from
+- **Themes**, in a panel of their own. Thirteen built in — Crook Dark, Crook Light, Midnight,
+  and ten of the palettes Omarchy dresses a desktop in (Catppuccin, Everforest, Gruvbox,
+  Kanagawa, Nord, Rosé Pine, Tokyo Night and three more, each its own project's, read from
   Omarchy's files) — plus any number of your own from `<config>/crook/themes/*.yaml`, in
   **Warp's own theme file format**, so a theme written for Warp works here unchanged.
 
