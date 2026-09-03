@@ -18,7 +18,7 @@ use crookui_core::fonts::{FamilyId, FontId, LineStyle, StyleAndFont};
 use crookui_core::geometry::{RectF, Vector2F, vec2f};
 use crookui_core::platform::TextLayoutSystem;
 use crookui_core::prelude::*;
-use crookui_core::scene::{Radius, Rect, Scene};
+use crookui_core::scene::{CornerRadius, Radius, Rect, Scene};
 use crookui_core::text_layout::{Glyph, Line, Run};
 use crookui_core::{AddSingletonModel as _, App, Presenter, WindowId};
 
@@ -642,6 +642,27 @@ fn platform_chord() -> Modifiers {
     }
 }
 
+/// The chord that opens the settings, which is not the one the tab bindings
+/// use.
+///
+/// `input_keys` spends Ctrl-Shift on the tabs everywhere but macOS, precisely
+/// so the field keeps plain Ctrl — and the settings chord is the exception it
+/// names: the same `cmd-,` / `ctrl-,` every application has, with no Shift,
+/// because it has no field gesture to stay out of the way of.
+fn settings_chord() -> Modifiers {
+    if cfg!(target_os = "macos") {
+        Modifiers {
+            cmd: true,
+            ..Default::default()
+        }
+    } else {
+        Modifiers {
+            ctrl: true,
+            ..Default::default()
+        }
+    }
+}
+
 /// The tabs, by their rounded-top boxes, in bar order.
 fn tab_boxes(scene: &Scene) -> Vec<RectF> {
     rects_rounded_by(scene, Radius::Pixels(8.))
@@ -1157,22 +1178,46 @@ fn selected_chips(scene: &Scene) -> Vec<RectF> {
         .collect()
 }
 
-/// The body's panes, in render order, by the ground each of them paints.
+/// The body's panes, in render order.
 ///
-/// A pane has no chrome any more — no corner radius, no border, no margin —
-/// so what identifies one is its fill. Two other things are painted in the
-/// window's ground. The window itself, which starts at the origin where a pane
-/// never does — the header is above it in one layout and the tabs panel is
-/// beside it in the other — and so is filtered out here. And the well a pane
-/// composes its next command in, which is why every caller of this counts one
-/// box per pane *and one per field*: only the harnesses that start a shell
-/// draw any, and [`field_boxes`] is how to tell those apart.
+/// A pane has no chrome left to find it by — no corner radius, no border, no
+/// margin — and its fill is the terminal's own ground, which for a grid that
+/// has not been told otherwise is the same `surface` the header and the tabs
+/// panel are painted in. So it is found by what it is *not*: filled like a
+/// terminal, and neither bordered (the header's underline, the panel's right
+/// edge) nor rounded (the usage chip, and the well a pane composes its next
+/// command in — see [`field_boxes`] for that one).
+///
+/// The one other thing that matches is the grid's own ground, painted inside
+/// the pane it belongs to, so a rect contained in another is dropped. Without
+/// that a shell test would count every pane twice.
 fn panel_boxes(scene: &Scene) -> Vec<RectF> {
-    visible_rects(scene)
-        .filter(|(rect, _)| rect.background == Fill::Solid(THEME.ground))
+    let candidates: Vec<RectF> = visible_rects(scene)
+        .filter(|(rect, _)| {
+            rect.background == Fill::Solid(THEME.surface)
+                && rect.border == Border::default()
+                && rect.corner_radius == CornerRadius::default()
+        })
         .map(|(_, bounds)| bounds)
-        .filter(|bounds| bounds.origin() != Vector2F::zero())
+        .collect();
+
+    candidates
+        .iter()
+        .filter(|bounds| {
+            !candidates
+                .iter()
+                .any(|other| other != *bounds && contains(*other, **bounds))
+        })
+        .copied()
         .collect()
+}
+
+/// Whether `outer` covers every corner of `inner`.
+fn contains(outer: RectF, inner: RectF) -> bool {
+    outer.min_x() <= inner.min_x()
+        && outer.min_y() <= inner.min_y()
+        && outer.max_x() >= inner.max_x()
+        && outer.max_y() >= inner.max_y()
 }
 
 #[test]
@@ -3176,9 +3221,9 @@ fn the_settings_page_opens_in_a_tab_and_the_binding_brings_that_tab_forward() {
 
     assert_eq!(
         Some(WorkspaceAction::Tab(TabAction::OpenSettings)),
-        harness.action_for(",", platform_chord())
+        harness.action_for(",", settings_chord())
     );
-    assert!(harness.press_key(",", platform_chord()));
+    assert!(harness.press_key(",", settings_chord()));
 
     let with_settings = harness.tab_ids();
     assert_eq!(with_settings.len(), before.len() + 1, "no tab was opened");
@@ -3195,7 +3240,7 @@ fn the_settings_page_opens_in_a_tab_and_the_binding_brings_that_tab_forward() {
 
     // Somewhere else, then back: the same tab, brought forward.
     harness.dispatch_action(TabAction::Select(before[0]));
-    assert!(harness.press_key(",", platform_chord()));
+    assert!(harness.press_key(",", settings_chord()));
     assert_eq!(settings_tab, harness.active_id());
     assert_eq!(
         with_settings,

@@ -579,7 +579,7 @@ fn is_blank(character: char) -> bool {
 
 /// A resolved terminal colour as the scene spells one. Every cell is opaque:
 /// the emulator has already applied inverse, dim and hidden.
-fn color(rgb: Rgb) -> Color {
+pub(super) fn color(rgb: Rgb) -> Color {
     Color::rgb(rgb.r, rgb.g, rgb.b)
 }
 

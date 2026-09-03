@@ -35,6 +35,9 @@
 //! has no shell. A run whose shell *failed to start* draws the reason, because
 //! "no shell" is a much worse answer than "the login shell is not executable".
 
+use std::sync::Arc;
+
+use crook_terminal::Snapshot;
 use crookui_core::fonts::{Properties, Weight};
 use crookui_core::prelude::*;
 
@@ -47,7 +50,7 @@ use crate::theme::THEME;
 use super::action::WorkspaceAction;
 use super::input_element::CommandInput;
 use super::settings_page;
-use super::terminal_element::{Keys, TerminalElement};
+use super::terminal_element::{Keys, TerminalElement, color};
 use super::view::Workspace;
 
 /// The gap between a pane's edge and the grid inside it.
@@ -152,6 +155,15 @@ fn panel(
         return Empty::new().finish();
     };
 
+    // Fetched once and used twice: the grid draws it, and the pane is painted
+    // in whatever background it resolved. See `pane_ground`.
+    let terminal = if is_settings {
+        None
+    } else {
+        workspace.terminal(id, app)
+    };
+    let ground = pane_ground(terminal.as_ref());
+
     // **Where the keyboard line is drawn.** A pane takes typing only when it is
     // the focused one *and* nothing is floating over the window: the options
     // menu is modal, and a shell that swallowed the keys while it was up would
@@ -173,7 +185,7 @@ fn panel(
             (true, true) => Keys::Signals,
             (true, false) => Keys::All,
         };
-        contents(workspace, pane, keys, app)
+        contents(workspace, pane, terminal, keys, app)
     };
 
     // The `Hoverable` is here for its click handler alone — nothing about a
@@ -190,7 +202,7 @@ fn panel(
             // now, so it is filled instead.
             Align::new(content).top_left().finish(),
         )
-        .with_background_color(THEME.ground)
+        .with_background_color(ground)
         .with_uniform_padding(if is_settings { 0. } else { GRID_PADDING })
         .finish()
     })
@@ -204,12 +216,39 @@ fn panel(
     .finish()
 }
 
+/// What is painted behind a pane, and therefore what its padding is made of.
+///
+/// The shell's own background, whatever the shell has made of it. That matters
+/// more than it looks: `crook_palette` starts a grid on the pane's colour
+/// precisely so an untouched screen and the pane around it are one surface,
+/// and a pane painted in anything else turns [`GRID_PADDING`] into a visible
+/// frame around the grid — which is exactly what a rounded card was, minus the
+/// rounding. A shell that sets its own background with OSC 11 moves the pane
+/// with it, for the same reason.
+///
+/// The fallback is the palette's default rather than a colour of this module's
+/// choosing: a pane with no shell yet is about to have one, and it should not
+/// change colour when it arrives.
+fn pane_ground(terminal: Option<&(TerminalHandle, Arc<Snapshot>)>) -> Color {
+    terminal.map_or(THEME.surface, |(_, snapshot)| color(snapshot.background))
+}
+
 /// The pane's grid and the field under it, or an explanation of why it has
 /// neither.
-fn contents(workspace: &Workspace, pane: &Pane, keys: Keys, app: &AppContext) -> Box<dyn Element> {
+///
+/// The terminal is passed in rather than looked up again: `panel` has already
+/// asked for it, because the pane is painted in the background this same
+/// snapshot resolved.
+fn contents(
+    workspace: &Workspace,
+    pane: &Pane,
+    terminal: Option<(TerminalHandle, Arc<Snapshot>)>,
+    keys: Keys,
+    app: &AppContext,
+) -> Box<dyn Element> {
     let font = workspace.cell_font().clone();
 
-    let Some((handle, snapshot)) = workspace.terminal(pane.id(), app) else {
+    let Some((handle, snapshot)) = terminal else {
         let reason = workspace.terminal_failure(pane.id(), app).map_or_else(
             || "no shell is running in this pane".to_owned(),
             |failure| format!("the shell could not be started: {failure}"),
