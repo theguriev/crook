@@ -35,7 +35,9 @@ mod pane;
 #[cfg(test)]
 mod tests;
 
-pub use pane::{Direction, Pane, PaneEffect, PaneGroup, PaneId, SplitAxis};
+pub use pane::{
+    Direction, Pane, PaneContent, PaneEffect, PaneGroup, PaneId, SETTINGS_TITLE, SplitAxis,
+};
 
 /// A tab's identity, stable for as long as the tab exists.
 ///
@@ -212,6 +214,18 @@ impl Tab {
         }
     }
 
+    /// A tab over the settings page.
+    ///
+    /// Named the same as its pane, so the strip says "Settings" whether it is
+    /// drawing tabs or panes and whether or not the tab has since been split.
+    pub fn settings() -> Self {
+        Self {
+            id: TabId::next(),
+            name: SETTINGS_TITLE.to_owned(),
+            panes: PaneGroup::settings(),
+        }
+    }
+
     /// This tab's identity, for as long as it is open.
     pub fn id(&self) -> TabId {
         self.id
@@ -253,11 +267,10 @@ impl Tab {
         self.panes.focused().map_or("", Pane::title)
     }
 
-    /// What the agent in the focused pane is doing.
-    pub fn status(&self) -> AgentStatus {
-        self.panes
-            .focused()
-            .map_or_else(AgentStatus::default, Pane::status)
+    /// What the agent in the focused pane is doing, or `None` when the
+    /// focused pane holds no agent.
+    pub fn status(&self) -> Option<AgentStatus> {
+        self.panes.focused().and_then(Pane::status)
     }
 }
 
@@ -288,6 +301,15 @@ pub enum TabAction {
     /// Focus a pane, activating its tab. Warp's
     /// `WorkspaceAction::FocusPane(PaneViewLocator)`.
     FocusPane(PaneId),
+    /// Show the settings page: focus the pane already holding it, or open a
+    /// tab for it.
+    ///
+    /// One action for both halves, because "open settings" is one gesture and
+    /// a caller that had to ask whether the page was already up would be a
+    /// second copy of the rule. Warp's `Workspace::open_settings_pane` makes
+    /// the same choice for the same reason, against a per-window manager that
+    /// holds at most one settings pane.
+    OpenSettings,
 }
 
 /// What the shell must do after an action was applied.
@@ -421,6 +443,19 @@ impl TabStrip {
             .flat_map(|tab| tab.panes().iter().map(|pane| (tab.id(), pane)))
     }
 
+    /// Where the settings page is, if it is open at all.
+    ///
+    /// The window's one settings pane, named by both ids because everything
+    /// that wants it wants both: the renderer needs the pane, and
+    /// [`TabAction::OpenSettings`] needs the tab to bring forward. Searched
+    /// rather than remembered — a cached id would be a second thing to keep
+    /// true through every close, and the strip holds a handful of tabs.
+    pub fn settings_pane(&self) -> Option<(TabId, PaneId)> {
+        self.panes()
+            .find(|(_, pane)| pane.is_settings())
+            .map(|(tab, pane)| (tab, pane.id()))
+    }
+
     /// The pane with this id, wherever it is.
     pub fn pane(&self, id: PaneId) -> Option<&Pane> {
         self.tabs.iter().find_map(|tab| tab.panes().get(id))
@@ -535,6 +570,28 @@ impl TabStrip {
                     // tab takes the window with it.
                     PaneEffect::GroupEmptied => self.close(tab_id),
                 }
+            }
+
+            TabAction::OpenSettings => {
+                if let Some((_, pane)) = self.settings_pane() {
+                    // Already open: this is a navigation, not a second page.
+                    // Through the ordinary focus path, so activating its tab,
+                    // the MRU and the "did anything move" answer are all the
+                    // ones a click on its row would have produced.
+                    return self.apply(TabAction::FocusPane(pane));
+                }
+
+                let tab = Tab::settings();
+                let id = tab.id();
+                let at = self
+                    .index_of(self.active)
+                    .map_or(self.tabs.len(), |i| i + 1);
+                self.tabs.insert(at, tab);
+                self.repair(Some(id));
+                // Deliberately not touching `opened`: that counter names agent
+                // sessions, and a settings tab is not one. Opening settings
+                // between two `cmd/ctrl-t`s must not skip a number.
+                TabEffect::Changed
             }
 
             TabAction::FocusPane(id) => {

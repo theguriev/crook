@@ -24,6 +24,7 @@ use crate::tab::{Pane, SplitAxis, TabAction};
 use crate::theme::THEME;
 
 use super::action::WorkspaceAction;
+use super::settings_page;
 use super::terminal_element::TerminalElement;
 use super::view::Workspace;
 
@@ -72,8 +73,15 @@ struct PaneState {
     is_split: bool,
 }
 
-/// One pane's panel: the grid its shell is drawing, and a click target that
-/// focuses it.
+/// One pane's panel: what the pane is showing, and a click target that focuses
+/// it.
+///
+/// The chrome — the fill, the border that says which pane is focused, the
+/// radius, the margin — is the same whatever the pane holds. What differs is
+/// the content and the padding around it: a shell's grid is inset by
+/// [`GRID_PADDING`], and the settings page gets the panel's whole inside,
+/// because its own rail has to reach the panel's edges the way Warp's reaches
+/// its pane's.
 fn panel(
     workspace: &Workspace,
     pane: &Pane,
@@ -81,6 +89,7 @@ fn panel(
     app: &AppContext,
 ) -> Box<dyn Element> {
     let id = pane.id();
+    let is_settings = pane.is_settings();
     let PaneState {
         is_focused,
         is_split,
@@ -98,8 +107,16 @@ fn panel(
     // make the menu unusable. Everything upstream of this — the bindings the
     // help text lists — was already consumed by `Workspace::action_for` in the
     // window delegate, so nothing here has to know which chords those are.
-    let accepts_input = is_focused && !workspace.is_options_menu_open();
-    let content = grid(workspace, pane, accepts_input, app);
+    //
+    // The settings page is not in that argument: it is a pane with no shell,
+    // and every control on it is a click. There is nothing to give the
+    // keyboard to.
+    let content = if is_settings {
+        settings_page::render(workspace, app)
+    } else {
+        let accepts_input = is_focused && !workspace.is_options_menu_open();
+        grid(workspace, pane, accepts_input, app)
+    };
 
     Hoverable::new(interaction.body.clone(), move |mouse| {
         // An unsplit tab has nothing to distinguish its one pane from, so it
@@ -121,7 +138,7 @@ fn panel(
             .with_border(Border::all(1.).with_border_color(border))
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(10.)))
             .with_uniform_margin(12.)
-            .with_uniform_padding(GRID_PADDING)
+            .with_uniform_padding(if is_settings { 0. } else { GRID_PADDING })
             .finish()
     })
     // Warp wraps every leaf of its tree in the same handler, dispatching

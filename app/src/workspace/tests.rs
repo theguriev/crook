@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crookui_core::event::{Event, Keystroke, Modifiers, MouseButton};
+use crookui_core::event::{Event, Keystroke, Modifiers, MouseButton, ScrollDelta};
 use crookui_core::executor::{Background, LocalQueue};
 use crookui_core::fonts::{FamilyId, FontId, LineStyle, StyleAndFont};
 use crookui_core::geometry::{RectF, Vector2F, vec2f};
@@ -22,16 +22,19 @@ use crookui_core::scene::{Radius, Rect, Scene};
 use crookui_core::text_layout::{Glyph, Line, Run};
 use crookui_core::{AddSingletonModel as _, App, Presenter, WindowId};
 
+use crate::Channel;
 use crate::git::{DiffStats, GitFacts, Head};
-use crate::settings::{Density, Granularity, Layout, PrimaryInfo, Settings, Subtitle, TabOptions};
+use crate::settings::{
+    Density, GeneralOptions, Granularity, Layout, PrimaryInfo, Settings, Subtitle, TabOptions,
+};
 use crate::tab::{AgentSession, AgentStatus, Direction, Pane, PaneId, Tab, TabAction, TabId};
 use crate::terminal_font::{CELL_FONT_SIZE, CellFont};
 use crate::theme::THEME;
 use crate::usage_model::UsageModel;
 
 use super::{
-    Fonts, OptionsAction, QuitRequest, Workspace, WorkspaceAction, controls, tab_options_menu,
-    tabs_panel,
+    Fonts, OptionsAction, QuitRequest, Section, SettingsAction, Workspace, WorkspaceAction,
+    controls, settings_page, tab_options_menu, tabs_panel,
 };
 
 /// Big enough that two tabs both reach their maximum width, so the geometry
@@ -154,8 +157,8 @@ impl Harness {
         // text out with none: a cell is half the font size, and a character is
         // its own glyph id.
         let cell_font = CellFont::headless(CELL_FONT_SIZE);
-        let (window_id, workspace) =
-            app.add_window(|ctx| Workspace::new(fonts, cell_font, settings, quit, ctx));
+        let (window_id, workspace) = app
+            .add_window(|ctx| Workspace::new(fonts, cell_font, settings, Channel::Dev, quit, ctx));
 
         let mut harness = Self {
             queue,
@@ -308,6 +311,75 @@ impl Harness {
             .read(&self.app, |workspace, _| workspace.is_options_menu_open())
     }
 
+    /// Opens the settings tab, or brings it forward — the keystroke's action,
+    /// sent the way the gear menu's entry sends it.
+    fn open_settings_page(&mut self) {
+        self.dispatch_action(TabAction::OpenSettings);
+    }
+
+    /// Which page of the settings the rail has selected.
+    fn settings_section(&self) -> Section {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.settings_section())
+    }
+
+    /// Shows a different page, the way a click on the rail does.
+    fn select_settings_section(&mut self, section: Section) {
+        self.dispatch_workspace_action(WorkspaceAction::Settings(SettingsAction::Select(section)));
+    }
+
+    fn is_settings_page_open(&self) -> bool {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.is_settings_page_open())
+    }
+
+    /// The options that are not the tab strip's.
+    fn general(&self) -> GeneralOptions {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.general())
+    }
+
+    /// Whether the usage poll chain is meant to be running.
+    fn usage_is_wanted(&self) -> bool {
+        self.workspace.read(&self.app, |workspace, ctx| {
+            workspace.usage().as_ref(ctx).is_wanted()
+        })
+    }
+
+    /// Turns the wheel over the middle of the settings card.
+    ///
+    /// Positive is away from the user, so a negative count moves the page
+    /// down. A count far past the end is how a test says "the bottom of the
+    /// page" without depending on how tall the page happens to be: the offset
+    /// clamps, and one more click changes nothing.
+    fn scroll_settings_page(&mut self, lines: f32) {
+        let position = center(settings_pane_box(&self.frame()));
+        self.dispatch(Event::ScrollWheel {
+            position,
+            delta: ScrollDelta::Lines(vec2f(0., lines)),
+            modifiers: Modifiers::default(),
+        });
+    }
+
+    /// What a keystroke means to the workspace, if it means anything.
+    fn action_for(&self, key: &str, modifiers: Modifiers) -> Option<WorkspaceAction> {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.action_for(&Keystroke::new(key, modifiers))
+        })
+    }
+
+    /// Presses a key and applies whatever it is bound to, which is what the
+    /// window's own key handler does.
+    fn press_key(&mut self, key: &str, modifiers: Modifiers) -> bool {
+        match self.action_for(key, modifiers) {
+            Some(action) => {
+                self.dispatch_workspace_action(action);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Puts known git facts in front of the renderer.
     ///
     /// The gather chain is never started in a test, so this is the only way a
@@ -318,7 +390,7 @@ impl Harness {
             workspace
                 .tabs()
                 .pane(pane)
-                .and_then(|pane| pane.session().working_directory.clone())
+                .and_then(|pane| pane.session()?.working_directory.clone())
                 .expect("every seeded session has a working directory")
         });
         let facts = GitFacts {
@@ -460,7 +532,7 @@ impl Harness {
             workspace
                 .tabs()
                 .pane(pane)
-                .and_then(|pane| pane.session().working_directory.clone())
+                .and_then(|pane| pane.session()?.working_directory.clone())
         })
     }
 
@@ -479,7 +551,7 @@ impl Harness {
     /// session's working directory.
     fn branch_shown(&self, pane: PaneId) -> Option<Head> {
         self.workspace.read(&self.app, |workspace, app| {
-            let session = workspace.tabs().pane(pane)?.session();
+            let session = workspace.tabs().pane(pane)?.session()?;
             workspace.git_facts(session, app)?.branch.clone()
         })
     }
@@ -2284,10 +2356,9 @@ const OVERFLOWING: usize = 40;
 
 #[test]
 fn a_list_longer_than_the_panel_is_clipped_instead_of_painting_over_the_body() {
-    // Crook has no scrollable element, so this is a ceiling rather than a
-    // scroll bar — and the ceiling has to be a clip, because an unclipped row
-    // is drawn *and* hit-tested over whatever it spilled onto. The module docs
-    // say what the ceiling costs; this says that it exists.
+    // The clip half of `Scrollable`, on its own: whatever is off the end of
+    // the list is neither drawn over the body nor hit-tested there. What is
+    // past the fold is a scroll away, which the next test is about.
     let mut harness = Harness::panel(OVERFLOWING);
     let scene = harness.frame();
     let panel = panel_box(&scene);
@@ -2297,13 +2368,14 @@ fn a_list_longer_than_the_panel_is_clipped_instead_of_painting_over_the_body() {
 
     assert!(
         visible.len() < OVERFLOWING,
-        "all {OVERFLOWING} rows fit, so this test is no longer measuring the \
-         ceiling it names"
+        "all {OVERFLOWING} rows fit, so this test is no longer measuring an \
+         overflowing list"
     );
-    // The number `tabs_panel`'s module docs quote, asserted so the figure
-    // written down there cannot quietly stop being true. The stub shaper is
-    // deterministic — every glyph is half its font size and every line is
-    // 1.2x — so this is arithmetic, not a font's opinion.
+    // The number `tabs_panel`'s module docs quote as what one screenful of
+    // this panel holds, asserted so the figure written down there cannot
+    // quietly stop being true. The stub shaper is deterministic — every glyph
+    // is half its font size and every line is 1.2x — so this is arithmetic,
+    // not a font's opinion.
     assert_eq!(
         visible.len(),
         9,
@@ -2323,11 +2395,8 @@ fn a_list_longer_than_the_panel_is_clipped_instead_of_painting_over_the_body() {
         );
     }
 
-    // And what the ceiling actually costs: clicking every row the panel shows
-    // reaches fewer tabs than there are. The rest have no mouse target at all
-    // — the clip narrows the rect a hit test is resolved against, so a row
-    // past it is neither drawn nor clickable — and reaching them means the
-    // keyboard, or a scrolling element that does not exist yet.
+    // One target per row: clicking every row the panel shows reaches as many
+    // tabs as there are rows, and never the same tab twice.
     let mut reachable: Vec<TabId> = Vec::new();
     for row in &visible {
         harness.click(
@@ -2349,7 +2418,7 @@ fn a_list_longer_than_the_panel_is_clipped_instead_of_painting_over_the_body() {
     );
     assert!(
         reachable.len() < OVERFLOWING,
-        "every tab was reachable, so there is no ceiling to describe"
+        "every tab fitted on one screenful, so this is not an overflowing list"
     );
 
     // The other extreme, and the other figure the docs quote.
@@ -2362,6 +2431,52 @@ fn a_list_longer_than_the_panel_is_clipped_instead_of_painting_over_the_body() {
         7,
         "Panes/Expanded fits a different number than the module docs say"
     );
+}
+
+#[test]
+fn the_wheel_reaches_the_tabs_that_are_past_the_bottom_of_the_panel() {
+    // What the panel gained when `crookui_core` gained a `Scrollable`: before
+    // it, the rows past the fold had no mouse target at all and the module
+    // docs called that a ceiling. The last tab of forty is as far past it as a
+    // row gets.
+    let mut harness = Harness::panel(OVERFLOWING);
+    let last = *harness.tab_ids().last().expect("forty tabs");
+    harness.dispatch_action(TabAction::Select(harness.tab_ids()[0]));
+
+    let panel = panel_box(&harness.frame());
+    let position = center(panel);
+    for _ in 0..40 {
+        harness.dispatch(Event::ScrollWheel {
+            position,
+            delta: ScrollDelta::Lines(vec2f(0., -3.)),
+            modifiers: Modifiers::default(),
+        });
+    }
+
+    let scene = harness.frame();
+    let rows = panel_rows(&scene);
+    let bottom = rows.last().expect("the panel still draws rows");
+    harness.click(
+        bottom.origin() + vec2f(40., bottom.height() / 2.),
+        MouseButton::Left,
+    );
+
+    assert_eq!(
+        last,
+        harness.active_id(),
+        "scrolling to the end of the list did not put the last tab under the \
+         pointer"
+    );
+
+    // And the rows are still confined to the panel: a scrollable that had
+    // stopped clipping would paint the list over the body it sits beside.
+    let panel = panel_box(&harness.frame());
+    for (_, on_screen) in panel_row_rects(&harness.frame()) {
+        assert!(
+            on_screen.max_y() <= panel.max_y() + 0.5 && on_screen.min_y() >= panel.min_y() - 0.5,
+            "a scrolled row escaped the panel"
+        );
+    }
 }
 
 #[test]
@@ -2858,6 +2973,369 @@ fn choosing_one_option_does_not_carry_another_command_line_override_into_the_fil
         Layout::Horizontal,
         harness.options().layout,
         "the save changed what is on screen"
+    );
+}
+
+/// The settings pane's panel.
+///
+/// The settings page is a pane, so it has no chrome of its own: what bounds it
+/// is the body panel every pane gets. In a window whose active tab is the
+/// settings tab there is exactly one panel, and this is it.
+fn settings_pane_box(scene: &Scene) -> RectF {
+    let panels = panel_boxes(scene);
+    assert_eq!(
+        panels.len(),
+        1,
+        "the settings tab holds one pane, so its body has one panel"
+    );
+    panels[0]
+}
+
+/// The card's switches, top to bottom, by the round track they are painted on.
+fn settings_switch_boxes(scene: &Scene) -> Vec<RectF> {
+    let pane = settings_pane_box(scene);
+    let mut switches: Vec<RectF> = visible_rects(scene)
+        .filter(|(rect, _)| rect.corner_radius.get_top_left() == Radius::Percentage(50.))
+        .map(|(_, bounds)| bounds)
+        .filter(|bounds| pane.contains_point(center(*bounds)) && (bounds.width() - 28.).abs() < 0.5)
+        .collect();
+    switches.sort_by(|left, right| left.min_y().total_cmp(&right.min_y()));
+    switches
+}
+
+/// The rail's page buttons, top to bottom.
+///
+/// Found by their rounded box *and* by being in the rail's column, because the
+/// page beside them rounds its one button by the same six pixels.
+fn settings_rail_boxes(scene: &Scene) -> Vec<RectF> {
+    let pane = settings_pane_box(scene);
+    let mut rows: Vec<RectF> = visible_rects(scene)
+        .filter(|(rect, _)| rect.corner_radius.get_top_left() == Radius::Pixels(6.))
+        .map(|(_, bounds)| bounds)
+        .filter(|bounds| {
+            pane.contains_point(center(*bounds))
+                && center(*bounds).x() < pane.min_x() + settings_page::RAIL_WIDTH
+        })
+        .collect();
+    rows.sort_by(|left, right| left.min_y().total_cmp(&right.min_y()));
+    rows
+}
+
+/// The one button on the page, by its outline.
+///
+/// `None` while the button is drawn in its disabled state, which is exactly
+/// what "there is nothing to reset" looks like: the outline is what goes.
+fn settings_button_box(scene: &Scene) -> Option<RectF> {
+    let pane = settings_pane_box(scene);
+    visible_rects(scene)
+        // By the border's *colour*: a disabled button keeps its stroke and
+        // paints it in nothing at all, which is the whole of how the reset
+        // control says there is nothing to reset.
+        .filter(|(rect, _)| {
+            rect.corner_radius.get_top_left() == Radius::Pixels(6.)
+                && rect.border.color == Fill::Solid(THEME.border)
+        })
+        .map(|(_, bounds)| bounds)
+        .find(|bounds| {
+            pane.contains_point(center(*bounds))
+                && center(*bounds).x() > pane.min_x() + settings_page::RAIL_WIDTH
+        })
+}
+
+#[test]
+fn the_settings_page_opens_in_a_tab_and_the_binding_brings_that_tab_forward() {
+    // Warp's `open_settings_pane`: one settings pane per window. A second
+    // press is a navigation to it, never a second page and never a toggle —
+    // which is also why the keystroke resolves to a `TabAction` rather than to
+    // anything the settings page owns.
+    let mut harness = Harness::new(2);
+    let before = harness.tab_ids();
+    assert!(!harness.is_settings_page_open());
+
+    assert_eq!(
+        Some(WorkspaceAction::Tab(TabAction::OpenSettings)),
+        harness.action_for(",", platform_chord())
+    );
+    assert!(harness.press_key(",", platform_chord()));
+
+    let with_settings = harness.tab_ids();
+    assert_eq!(with_settings.len(), before.len() + 1, "no tab was opened");
+    assert!(harness.is_settings_page_open());
+    let settings_tab = harness.active_id();
+    assert!(
+        !before.contains(&settings_tab),
+        "the settings page went into a tab that already existed"
+    );
+    assert!(
+        frame_text(&harness.frame()).contains("Settings"),
+        "the strip does not say which tab it is"
+    );
+
+    // Somewhere else, then back: the same tab, brought forward.
+    harness.dispatch_action(TabAction::Select(before[0]));
+    assert!(harness.press_key(",", platform_chord()));
+    assert_eq!(settings_tab, harness.active_id());
+    assert_eq!(
+        with_settings,
+        harness.tab_ids(),
+        "the binding opened a second settings tab"
+    );
+}
+
+#[test]
+fn the_settings_pane_closes_the_way_every_other_pane_does() {
+    // No close button of its own and no Escape binding: the row's ×, a middle
+    // click and `cmd/ctrl-w` already close a pane, and the settings pane is
+    // not special enough to have a fourth way.
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    let settings_tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the settings pane is focused");
+
+    assert_eq!(None, harness.action_for("escape", Modifiers::default()));
+
+    harness.dispatch_action(TabAction::ClosePane(pane));
+    assert!(
+        !harness.is_settings_page_open(),
+        "closing the pane left the page open"
+    );
+    assert!(
+        !harness.tab_ids().contains(&settings_tab),
+        "the settings pane was the tab's last one, so the tab should have gone with it"
+    );
+}
+
+#[test]
+fn opening_the_settings_page_from_the_gear_menu_takes_the_menu_down() {
+    // The popup is a menu about the strip. It stays up through every option
+    // click on purpose, but this entry navigates away from what it is about.
+    let mut harness = Harness::seeded();
+    harness.dispatch_option(OptionsAction::TogglePopup);
+    assert!(harness.is_menu_open());
+
+    harness.open_settings_page();
+    assert!(harness.is_settings_page_open());
+    assert!(
+        !harness.is_menu_open(),
+        "the menu survived the page opening"
+    );
+}
+
+#[test]
+fn the_settings_row_leads_with_a_gear_and_says_nothing_a_session_would() {
+    // The row stands for something that is not an agent: no status colour, no
+    // working directory, no branch. The last of those is a trap the fact table
+    // walks straight into — with "Pane title as: Branch" every arm falls back
+    // to the command, and the compact subtitle *is* the command, so a row
+    // built through it would read "Settings" over "Settings".
+    let mut harness = Harness::new(1);
+    harness.dispatch_option(OptionsAction::SetPrimaryInfo(PrimaryInfo::Branch));
+    harness.open_settings_page();
+
+    let scene = harness.frame();
+    let settings_row = tab_boxes(&scene)
+        .into_iter()
+        .max_by(|left, right| left.min_x().total_cmp(&right.min_x()))
+        .expect("the strip draws the settings tab");
+    let text = text_where(&scene, |position| {
+        settings_row.contains_point(position + vec2f(0., -4.))
+    });
+
+    assert_eq!(
+        text.matches("Settings").count(),
+        1,
+        "the settings row prints its name {} times: {text:?}",
+        text.matches("Settings").count()
+    );
+
+    // No status dot: every colour a dot can be is an agent state, and the
+    // settings pane is not an agent in a fifth one.
+    let dots: Vec<RectF> = visible_rects(&scene)
+        .filter(|(rect, _)| {
+            rect.corner_radius.get_top_left() == Radius::Percentage(50.)
+                && (rect.bounds.width() - super::STATUS_DOT_SIZE).abs() < 0.5
+        })
+        .map(|(_, bounds)| bounds)
+        .filter(|bounds| settings_row.contains_point(center(*bounds)))
+        .collect();
+    assert!(dots.is_empty(), "the settings row drew a status dot");
+}
+
+#[test]
+fn the_rail_switches_pages_and_the_pane_shows_the_one_it_names() {
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+
+    let rail = settings_rail_boxes(&harness.frame());
+    assert_eq!(rail.len(), 4, "four pages in the rail");
+
+    // The third: Keys.
+    harness.click(center(rail[2]), MouseButton::Left);
+    assert_eq!(Section::Keys, harness.settings_section());
+
+    let text = frame_text(&harness.frame());
+    assert!(
+        text.contains("Tabs and panes"),
+        "the Keys page did not come up: {text}"
+    );
+    assert!(
+        !text.contains("Tab placement"),
+        "the Appearance page is still on screen"
+    );
+}
+
+#[test]
+fn the_page_and_the_scroll_position_outlive_the_tab_they_were_in() {
+    // What Warp's per-window pane manager buys by holding its view handle
+    // through a close: coming back to settings comes back to where you were.
+    // Here the state is the workspace's rather than the pane's, which is the
+    // same guarantee with nothing to keep alive.
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.select_settings_section(Section::About);
+    let pane = harness
+        .focused_pane_id()
+        .expect("the settings pane is focused");
+
+    harness.dispatch_action(TabAction::ClosePane(pane));
+    assert!(!harness.is_settings_page_open());
+
+    harness.open_settings_page();
+    assert_eq!(
+        Section::About,
+        harness.settings_section(),
+        "reopening the settings went back to the first page"
+    );
+}
+
+#[test]
+fn a_switch_on_the_page_writes_the_option_the_gear_menu_writes() {
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+
+    // The page is taller than the pane and the switches are at the bottom of
+    // it. Scrolling past the end lands on the last pixel of content, which is
+    // what makes this independent of how tall the page happens to be.
+    harness.scroll_settings_page(-100.);
+    let scene = harness.frame();
+
+    let switches = settings_switch_boxes(&scene);
+    assert_eq!(
+        switches.len(),
+        3,
+        "PR link, diff stats and the detail card, in that order"
+    );
+
+    assert!(harness.options().show_details_on_hover);
+    harness.click(center(switches[2]), MouseButton::Left);
+    assert!(
+        !harness.options().show_details_on_hover,
+        "the switch did not write the option"
+    );
+    assert!(
+        harness.is_settings_page_open(),
+        "a click on a control closed the page"
+    );
+}
+
+#[test]
+fn a_switch_the_density_has_made_inert_is_drawn_and_does_nothing() {
+    // Warp's third way with an irrelevant setting, and the one the page takes:
+    // the row stays, greyed, with no handler. The gear menu takes the other —
+    // it drops the two rows entirely — and both are right for their surface.
+    let mut harness = Harness::new(1);
+    assert_eq!(Density::Compact, harness.options().density);
+    harness.open_settings_page();
+    harness.scroll_settings_page(-100.);
+
+    let switches = settings_switch_boxes(&harness.frame());
+    let before = harness.options();
+    harness.click(center(switches[0]), MouseButton::Left);
+
+    assert_eq!(
+        before,
+        harness.options(),
+        "a compact row has no chips, so its chip switch must not be clickable"
+    );
+}
+
+#[test]
+fn the_reset_button_puts_every_tab_option_back_and_then_goes_quiet() {
+    let mut harness = Harness::new(1);
+    harness.dispatch_option(OptionsAction::SetPrimaryInfo(PrimaryInfo::Branch));
+    harness.dispatch_option(OptionsAction::ToggleShowDiffStats);
+    assert_ne!(TabOptions::default(), harness.options());
+
+    harness.open_settings_page();
+    harness.scroll_settings_page(-100.);
+
+    let button = settings_button_box(&harness.frame()).expect("the reset button should be drawn");
+    harness.click(center(button), MouseButton::Left);
+
+    assert_eq!(
+        TabOptions::default(),
+        harness.options(),
+        "reset left an option where it was"
+    );
+
+    // And now it is the page's modified indicator, saying that nothing has
+    // been changed: still drawn, still inert, and without its outline.
+    harness.scroll_settings_page(-100.);
+    assert!(
+        settings_button_box(&harness.frame()).is_none(),
+        "the reset button kept its outline with nothing left to reset"
+    );
+}
+
+#[test]
+fn turning_the_usage_chip_off_takes_the_pill_out_of_the_header_and_stops_the_poll() {
+    let mut harness = Harness::new(1);
+    assert!(harness.general().show_usage_chip);
+    assert!(
+        frame_text(&harness.frame()).contains("claude"),
+        "the chip should be in the header to start with"
+    );
+
+    harness.open_settings_page();
+    harness.select_settings_section(Section::Usage);
+
+    let switches = settings_switch_boxes(&harness.frame());
+    assert_eq!(switches.len(), 1, "one switch on the usage page");
+    harness.click(center(switches[0]), MouseButton::Left);
+
+    assert!(!harness.general().show_usage_chip);
+    assert!(
+        !harness.usage_is_wanted(),
+        "a hidden chip must not go on polling"
+    );
+    assert!(
+        !frame_text(&harness.frame()).contains("claude"),
+        "the chip is still in the header"
+    );
+}
+
+#[test]
+fn a_settings_pane_can_be_split_beside_a_session() {
+    // The reason it is a pane at all: Warp's settings can sit next to the
+    // thing being configured. Nothing here special-cases the split — a split
+    // opens an agent session beside whatever pane was focused, and the
+    // settings pane is a pane.
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+
+    let panes = harness.active_pane_ids();
+    assert_eq!(panes.len(), 2, "the settings tab did not split");
+    assert!(
+        harness.is_settings_page_open(),
+        "splitting took the settings page away"
+    );
+    assert_eq!(
+        panel_boxes(&harness.frame()).len(),
+        2,
+        "the body should draw the settings page and the session side by side"
     );
 }
 

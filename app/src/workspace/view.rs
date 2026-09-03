@@ -11,18 +11,19 @@ use crookui_core::event::{Keystroke, Modifiers};
 use crookui_core::fonts::FamilyId;
 use crookui_core::prelude::*;
 
-use crate::WINDOW_CHROME;
 use crate::git::GitFacts;
 use crate::git_model::GitModel;
 use crate::platform_insets::{LayoutInsets, TabsPlacement, layout_insets};
-use crate::settings::{Density, Granularity, Layout, Settings, TabOptions};
+use crate::settings::{Density, GeneralOptions, Granularity, Layout, Settings, TabOptions};
 use crate::tab::{AgentSession, Direction, PaneId, Tab, TabAction, TabEffect, TabId, TabStrip};
 use crate::terminal_font::CellFont;
 use crate::terminal_model::{TerminalHandle, TerminalModel, TerminalUpdate};
 use crate::theme::THEME;
 use crate::usage_model::UsageModel;
+use crate::{Channel, WINDOW_CHROME};
 
-use super::action::{OptionsAction, WorkspaceAction};
+use super::action::{OptionsAction, SettingsAction, WorkspaceAction};
+use super::settings_page::{Section, SettingsState};
 use super::usage_chip::UsageChip;
 use super::{body, header_toolbar, tabs_panel};
 
@@ -118,6 +119,43 @@ pub(super) struct MenuState {
     pub(super) diff_stats: MouseStateHandle,
     /// "Show details on hover".
     pub(super) details_on_hover: MouseStateHandle,
+    /// The row that opens the settings page.
+    pub(super) settings: MouseStateHandle,
+}
+
+impl MenuState {
+    /// Drops every hover and press the popup was holding.
+    ///
+    /// Called when something other than a click on the gear takes the menu
+    /// down — today, the settings page opening over it. Every row is about to
+    /// stop existing without seeing a hover-out, and the next time the menu
+    /// opens the row the pointer happened to be on would come back lit.
+    ///
+    /// Written out one handle at a time, like the struct itself, because the
+    /// fields are what stops two controls from sharing one state; a loop here
+    /// would need a collection, and a collection is the thing this type exists
+    /// not to be.
+    fn forget_hover_state(&self) {
+        for state in [
+            &self.gear,
+            &self.panes,
+            &self.tabs,
+            &self.compact,
+            &self.expanded,
+            &self.primary_command,
+            &self.primary_directory,
+            &self.primary_branch,
+            &self.subtitle_first,
+            &self.subtitle_second,
+            &self.pr_link,
+            &self.pr_link_info,
+            &self.diff_stats,
+            &self.details_on_hover,
+            &self.settings,
+        ] {
+            state.lock().reset_interaction_state();
+        }
+    }
 }
 
 /// Which options the command line put on screen without adopting them.
@@ -206,6 +244,10 @@ pub struct Workspace {
     /// of state for several rows rather than one per row.
     tab_chrome: HashMap<TabId, TabInteraction>,
     settings: Settings,
+    /// Which build this is, for the settings page's About section. Carried
+    /// rather than looked up: nothing else in the view layer knows which
+    /// binary started it, and the alternative is a second global.
+    channel: Channel,
     /// The options, kept beside [`Self::settings`] rather than read out of it
     /// on every access. A renderer reads this dozens of times per frame and
     /// wants a `Copy` snapshot, not a borrow of the thing a save is cloning.
@@ -214,6 +256,16 @@ pub struct Workspace {
     /// the file. See [`Overridden`].
     overridden: Overridden,
     menu: MenuState,
+    /// The settings page: whether it is up, which page it is on, and what the
+    /// mouse is doing to each of its controls.
+    page: SettingsState,
+    /// How far the tabs panel's list has been scrolled.
+    ///
+    /// On the workspace rather than inside the panel module for the reason
+    /// every mouse state is: the element tree is rebuilt on every render, and
+    /// a scroll offset that lived in it would snap back to the top on the
+    /// frame the scroll itself caused.
+    panel_scroll: ScrollStateHandle,
     /// The row the pointer is on, if the detail card is armed.
     hovered_row: Option<PaneId>,
     /// The home directory, resolved once.
@@ -234,6 +286,7 @@ impl Workspace {
         fonts: Fonts,
         cell_font: CellFont,
         settings: Settings,
+        channel: Channel,
         quit: QuitRequest,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
@@ -276,9 +329,12 @@ impl Workspace {
             interactions: HashMap::new(),
             tab_chrome: HashMap::new(),
             settings,
+            channel,
             options,
             overridden: Overridden::default(),
             menu: MenuState::default(),
+            page: SettingsState::default(),
+            panel_scroll: ScrollStateHandle::default(),
             hovered_row: None,
             home: std::env::home_dir(),
             new_tab: MouseStateHandle::default(),
@@ -316,6 +372,71 @@ impl Workspace {
     /// The settings, including where they are saved.
     pub fn settings(&self) -> &Settings {
         &self.settings
+    }
+
+    /// Everything the settings page writes that is not a tab option.
+    ///
+    /// Read straight out of [`Self::settings`] rather than mirrored beside it,
+    /// the way `options` is. The mirror exists because every renderer reads
+    /// the tab options dozens of times a frame and wants a `Copy` snapshot
+    /// rather than a borrow of the thing a save is cloning; one switch on one
+    /// page does not earn a second copy to keep in step.
+    pub fn general(&self) -> GeneralOptions {
+        self.settings.general()
+    }
+
+    /// Which build this is: `dev` or `stable`.
+    pub fn channel(&self) -> &'static str {
+        self.channel.name()
+    }
+
+    /// The usage model, for the settings page's live reading.
+    pub(super) fn usage(&self) -> &ModelHandle<UsageModel> {
+        &self.usage
+    }
+
+    /// The settings page's state.
+    pub(super) fn settings_page(&self) -> &SettingsState {
+        &self.page
+    }
+
+    /// Which page of the settings the rail has selected.
+    ///
+    /// Public for the snapshot path and the tests: which page is showing is
+    /// not something a renderer asks for — it reads
+    /// [`Self::settings_page`] — and it is the one piece of the page's state
+    /// worth asserting from outside.
+    pub fn settings_section(&self) -> Section {
+        self.page.section
+    }
+
+    /// How far the tabs panel's list has been scrolled.
+    pub(super) fn panel_scroll(&self) -> ScrollStateHandle {
+        self.panel_scroll.clone()
+    }
+
+    /// Whether the settings page is open — which is to say, whether a pane is
+    /// holding it.
+    ///
+    /// Asked of the strip rather than of a flag beside it: the pane *is* the
+    /// page, and a second answer kept here would be one more thing to keep
+    /// true through every close.
+    pub fn is_settings_page_open(&self) -> bool {
+        self.tabs.settings_pane().is_some()
+    }
+
+    /// Opens the settings page at `section`, for a run that was asked to start
+    /// on it.
+    ///
+    /// The same two steps a click on the menu entry and a click on the rail
+    /// take, in that order, so a snapshot of the page is a snapshot of the
+    /// real thing rather than of a second code path.
+    pub fn open_settings_page(&mut self, section: Section, ctx: &mut ViewContext<Self>) {
+        self.apply_settings(SettingsAction::Select(section), ctx);
+        if self.apply(TabAction::OpenSettings, ctx) == TabEffect::CloseWindow {
+            // Unreachable: opening a tab never empties the strip.
+            (self.quit)();
+        }
     }
 
     /// Whether the options menu is up.
@@ -381,6 +502,28 @@ impl Workspace {
         self.git
             .update(ctx, |model, _| model.set_diff_stats_wanted(wants_diff));
 
+        self.save_settings(ctx);
+        ctx.notify();
+    }
+
+    /// Replaces the options that are not the tab strip's, saves them, and
+    /// starts or stops whatever they gate.
+    ///
+    /// The mirror of [`Self::set_options`] for the other group, and it has one
+    /// job that one does not: the usage chip's switch is also the poll's, so
+    /// the model is told before the file is written. A person who turns the
+    /// chip off has said they do not want Crook talking to the network, and
+    /// waiting for a background save to land before acting on that would be
+    /// the wrong order to do two things in.
+    fn set_general(&mut self, general: GeneralOptions, ctx: &mut ViewContext<Self>) {
+        if general == self.settings.general() {
+            return;
+        }
+
+        self.settings.set_general(general);
+        self.usage.update(ctx, |model, ctx| {
+            model.set_wanted(general.show_usage_chip, ctx);
+        });
         self.save_settings(ctx);
         ctx.notify();
     }
@@ -520,9 +663,17 @@ impl Workspace {
         self.hover_row(pane, true, ctx);
     }
 
-    /// Starts the usage poll chain. Call once, after the window exists.
+    /// Starts the usage poll chain, if anything is going to show what it
+    /// reads. Call once, after the window exists.
+    ///
+    /// Gated on the same switch the chip is, and gated *here* rather than at
+    /// the call site: "nothing displays the reading" and "do not fetch the
+    /// reading" have to be one statement, or a build that hides the chip goes
+    /// on polling forever because somebody added a second entry point.
     pub fn start_usage_poll(&self, ctx: &mut ViewContext<Self>) {
-        self.usage.update(ctx, |model, ctx| model.start(ctx));
+        let wanted = self.general().show_usage_chip;
+        self.usage
+            .update(ctx, |model, ctx| model.set_wanted(wanted, ctx));
     }
 
     /// Opens a shell in every pane, and in every pane opened from now on.
@@ -589,7 +740,14 @@ impl Workspace {
             return false;
         };
 
-        report(pane.session_mut());
+        // `None` when the pane holds the settings page rather than a session.
+        // A report addressed to it is a report for a session that has been
+        // closed, and it fails the same way: nothing written, `false`
+        // returned.
+        let Some(session) = pane.session_mut() else {
+            return false;
+        };
+        report(session);
         // A report can move the session somewhere else, and the git facts a
         // row shows are looked up by directory — which is what makes the branch
         // chip follow a shell's `cd`.
@@ -689,6 +847,13 @@ impl Workspace {
             ("b", false, false) => {
                 return Some(WorkspaceAction::Options(OptionsAction::ToggleLayout));
             }
+            // The binding every application on all three platforms uses for
+            // this, and the one Warp binds `ShowSettings` to. A tab action
+            // rather than a settings one, because what it opens is a tab —
+            // and because a second press must navigate to the page rather
+            // than toggle it away, which is what `OpenSettings` does and a
+            // toggle could not.
+            (",", false, false) => TabAction::OpenSettings,
             _ => return None,
         };
 
@@ -726,7 +891,13 @@ impl Workspace {
     /// underlay — the press that should dismiss the menu would be swallowed by
     /// the card instead.
     pub(super) fn shows_details_for(&self, pane: PaneId) -> bool {
-        self.options.show_details_on_hover && !self.menu.open && self.hovered_row == Some(pane)
+        self.options.show_details_on_hover
+            && !self.menu.open
+            && self.hovered_row == Some(pane)
+            // The card says what a row had no room for, and the settings row
+            // has nothing behind its one line. `detail_panes` drops the pane
+            // as well; without this the card would still open, empty.
+            && self.tabs.pane(pane).is_some_and(|pane| !pane.is_settings())
     }
 
     /// The home directory every row abbreviates its path against.
@@ -818,7 +989,7 @@ impl Workspace {
         let directories: Vec<PathBuf> = self
             .tabs
             .panes()
-            .filter_map(|(_, pane)| pane.session().working_directory.clone())
+            .filter_map(|(_, pane)| pane.session()?.working_directory.clone())
             .collect();
         self.git
             .update(ctx, |model, ctx| model.track(directories, ctx));
@@ -836,11 +1007,23 @@ impl Workspace {
             .update(ctx, |model, ctx| model.sync(&panes, ctx));
     }
 
-    /// The open panes and where each of them is working.
+    /// The open panes that want a shell, and where each of them is working.
+    ///
+    /// The settings pane is not one of them. Nothing draws a grid for it and
+    /// nothing can type into it, so a shell opened here would be a process
+    /// running for a pane that cannot show it — started when the page opens,
+    /// killed when the tab closes, and visible to nobody in between.
     fn open_panes(&self) -> Vec<(PaneId, Option<PathBuf>)> {
         self.tabs
             .panes()
-            .map(|(_, pane)| (pane.id(), pane.session().working_directory.clone()))
+            .filter(|(_, pane)| !pane.is_settings())
+            .map(|(_, pane)| {
+                (
+                    pane.id(),
+                    pane.session()
+                        .and_then(|session| session.working_directory.clone()),
+                )
+            })
             .collect()
     }
 
@@ -854,7 +1037,10 @@ impl Workspace {
         let chosen = Overridden {
             density: matches!(action, OptionsAction::SetDensity(_)),
             granularity: matches!(action, OptionsAction::SetGranularity(_)),
-            layout: matches!(action, OptionsAction::ToggleLayout),
+            layout: matches!(
+                action,
+                OptionsAction::ToggleLayout | OptionsAction::SetLayout(_)
+            ),
         };
 
         match action {
@@ -881,6 +1067,7 @@ impl Workspace {
                 options.show_details_on_hover = !options.show_details_on_hover;
             }
             OptionsAction::ToggleLayout => options.layout = options.layout.toggled(),
+            OptionsAction::SetLayout(layout) => options.layout = layout,
         }
 
         if self.overridden.clear(chosen) && options == self.options {
@@ -903,6 +1090,60 @@ impl Workspace {
         // preferences panel — change the title field, turn two chips off, and
         // only then click away.
         self.set_options(options, ctx);
+    }
+
+    /// Switches the page the rail has selected, or does one of the two things
+    /// only the settings page can do.
+    ///
+    /// Opening and closing are not here: those are [`TabAction::OpenSettings`]
+    /// and the ordinary close of a pane, because the page is a pane. Every
+    /// other control on it dispatches an [`OptionsAction`] and lands in
+    /// [`Self::apply_option`] beside the gear menu's clicks, which is why this
+    /// handles three actions rather than fifteen.
+    fn apply_settings(&mut self, action: SettingsAction, ctx: &mut ViewContext<Self>) {
+        match action {
+            SettingsAction::Select(section) => {
+                if self.page.section == section {
+                    return;
+                }
+                self.page.section = section;
+                // A page is a different set of controls at a different set of
+                // positions. Both of the things that survive a section change
+                // would otherwise be wrong: the scroll offset belongs to the
+                // page that was showing, and every control the pointer was
+                // over is about to stop existing without a hover-out.
+                self.page.scroll.lock().scroll_to_top();
+                self.page.forget_hover_state();
+                ctx.notify();
+            }
+            SettingsAction::ToggleUsageChip => {
+                let mut general = self.general();
+                general.show_usage_chip = !general.show_usage_chip;
+                self.set_general(general, ctx);
+            }
+            SettingsAction::ResetTabOptions => {
+                // Through `set_options` like every other write, so the reset
+                // ends the command line's overrides exactly as clicking each
+                // control by hand would.
+                self.set_options(TabOptions::default(), ctx);
+            }
+        }
+    }
+
+    /// Takes the options menu down, and forgets what the mouse was doing to
+    /// it.
+    ///
+    /// Called when something other than the gear closes it — today, its own
+    /// "Settings…" entry, which navigates away from the strip the menu is
+    /// about. Every row is about to stop existing without seeing a hover-out,
+    /// and the next time the menu opens the row the pointer happened to be on
+    /// would come back lit.
+    fn close_menu(&mut self) {
+        if !self.menu.open {
+            return;
+        }
+        self.menu.open = false;
+        self.menu.forget_hover_state();
     }
 
     /// Arms or disarms the detail card.
@@ -1020,11 +1261,18 @@ impl TypedActionView for Workspace {
     fn handle_action(&mut self, action: &WorkspaceAction, ctx: &mut ViewContext<Self>) {
         match *action {
             WorkspaceAction::Tab(action) => {
+                // The one tab action the options menu itself dispatches, and
+                // the menu's job is done the moment it does: it is a popup
+                // about the strip, and this puts a page over the body.
+                if action == TabAction::OpenSettings {
+                    self.close_menu();
+                }
                 if self.apply(action, ctx) == TabEffect::CloseWindow {
                     (self.quit)();
                 }
             }
             WorkspaceAction::Options(action) => self.apply_option(action, ctx),
+            WorkspaceAction::Settings(action) => self.apply_settings(action, ctx),
             WorkspaceAction::HoverRow { pane, entered } => self.hover_row(pane, entered, ctx),
         }
     }

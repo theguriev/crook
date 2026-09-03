@@ -60,12 +60,18 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::End)
             .with_child(Expanded::new(1., leading).finish())
-            .with_child(
+            // Not a chip drawn transparently: the settings page's switch turns
+            // the poll off as well as the pill, and a chip that was still in
+            // the tree would still be a view being rendered, observed and laid
+            // out for a number nobody asked for.
+            .with_child(if workspace.general().show_usage_chip {
                 Container::new(ChildView::new(workspace.chip()).finish())
                     .with_margin_left(CHIP_GUTTER)
                     .with_margin_bottom(CHIP_LIFT)
-                    .finish(),
-            )
+                    .finish()
+            } else {
+                Empty::new().finish()
+            })
             .finish(),
     )
     .with_background_color(THEME.surface)

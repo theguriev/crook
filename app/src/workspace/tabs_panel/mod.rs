@@ -35,26 +35,23 @@
 //! only place they appear — which is why the target follows the granularity
 //! rather than the row.
 //!
-//! # The ceiling, and what is past it
+//! # A list longer than the panel
 //!
-//! Crook has no scrollable element. A list longer than the panel would paint
-//! over the body and hit-test there, so it is wrapped in [`Clipped`] — and
-//! what that leaves is a hard ceiling rather than a scroll bar.
+//! It scrolls. That is one line here and it was not free: until
+//! `crookui_core` grew a [`Scrollable`], this list was a [`Clipped`] with a
+//! hard ceiling — in the 1024x640 window Crook opens, nine tabs in the default
+//! combination and seven at the other extreme, with every tab past that drawn,
+//! clipped away, and unclickable.
 //!
-//! In the 1024x640 window Crook opens, the list gets 608px under a 32px
-//! control bar. A single-pane tab costs 62px in `Panes`/`Compact` and 82px in
-//! `Panes`/`Expanded`; in `Tabs` it is 49px and 69px. So roughly **nine tabs
-//! in the default combination, seven at the other extreme**, and every tab
-//! past that is drawn and then clipped away. Those rows are not merely
-//! invisible: they cannot be clicked either, because [`Clipped`] narrows the
-//! rect every hit test is resolved against.
-//!
-//! They are still *reachable* — `cmd/ctrl-shift-left/right` walks the strip
-//! whatever the panel can show, and selecting a tab does not scroll the list to
-//! it because there is nothing to scroll. Making the rest reachable with a
-//! mouse means adding a scrolling element to `crookui_core`, which is a change
-//! to the framework rather than to this file, and it is not faked here: no
-//! paging, no "+ N more", no silently dropped tabs.
+//! [`Scrollable`] keeps the half of [`Clipped`] that mattered — a row that
+//! overflows is neither painted over the body nor hit-tested there — and adds
+//! the wheel. What it does not add is auto-scroll: selecting a tab with
+//! `cmd/ctrl-shift-left/right` moves the selection whether or not the row is
+//! on screen, and does not bring it into view. Warp scrolls to its selected
+//! tab, which needs a scrollable that can be told "make this child visible",
+//! and that means an element that knows where its children ended up. It is a
+//! real gap and it is written down here rather than faked with a guess at the
+//! row's offset.
 
 use crookui_core::elements::Padding;
 use crookui_core::fonts::FamilyId;
@@ -119,9 +116,17 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
                 .with_main_axis_size(MainAxisSize::Max)
                 .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
                 .with_child(control_bar(workspace))
-                // The list takes whatever the control bar left, and is clipped
-                // to it. See the module docs for what that costs.
-                .with_child(Expanded::new(1., Clipped::new(list(workspace, app)).finish()).finish())
+                // The list takes whatever the control bar left, and scrolls
+                // inside it.
+                .with_child(
+                    Expanded::new(
+                        1.,
+                        Scrollable::new(workspace.panel_scroll(), list(workspace, app))
+                            .with_scrollbar(THEME.overlay_3)
+                            .finish(),
+                    )
+                    .finish(),
+                )
                 .finish(),
         )
         .with_background_color(THEME.surface)

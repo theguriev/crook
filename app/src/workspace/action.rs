@@ -9,16 +9,21 @@
 //! other direction, with one `WorkspaceAction` that carries tab actions and
 //! vertical-tab display options side by side.
 
-use crate::settings::{Density, Granularity, PrimaryInfo, Subtitle};
+use crate::settings::{Density, Granularity, Layout, PrimaryInfo, Subtitle};
 use crate::tab::{PaneId, TabAction};
+
+use super::settings_page::Section;
 
 /// Everything the header dispatches.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum WorkspaceAction {
     /// Something happened to the strip. Applied by `TabStrip::apply`.
     Tab(TabAction),
-    /// Something happened in the options menu.
+    /// Something happened in the options menu, or on the settings page, which
+    /// writes the same options through the same path.
     Options(OptionsAction),
+    /// Something happened to the settings page itself.
+    Settings(SettingsAction),
     /// The pointer entered a row, or left it.
     ///
     /// Carried as an action rather than written directly, because a hover
@@ -45,6 +50,32 @@ impl From<OptionsAction> for WorkspaceAction {
     fn from(action: OptionsAction) -> Self {
         Self::Options(action)
     }
+}
+
+impl From<SettingsAction> for WorkspaceAction {
+    fn from(action: SettingsAction) -> Self {
+        Self::Settings(action)
+    }
+}
+
+/// What the settings page does that is not writing an option.
+///
+/// The split is deliberate and it is the page's whole design: every control
+/// that changes a tab option dispatches the [`OptionsAction`] the gear menu
+/// already dispatches, so the two surfaces cannot drift apart. What is left is
+/// this — three actions, none of which is "open" or "close": the page is a
+/// pane, so opening it is [`TabAction::OpenSettings`] and closing it is
+/// closing a pane, through the same close button, middle click and
+/// `cmd/ctrl-w` as every other pane in the window.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SettingsAction {
+    /// Show a different page of the settings in the pane already holding
+    /// them.
+    Select(Section),
+    /// "Show the usage chip", which is also what starts and stops the poll.
+    ToggleUsageChip,
+    /// Put every tab option back to the value a fresh install opens with.
+    ResetTabOptions,
 }
 
 /// What the options menu writes.
@@ -74,11 +105,18 @@ pub enum OptionsAction {
     ToggleShowDetailsOnHover,
     /// Move the tabs between the panel and the strip.
     ///
-    /// A toggle rather than a `SetLayout(Layout)`, because there are exactly
-    /// two layouts and the only thing that sends this is a keystroke that
-    /// means "the other one". The menu has no control for it: Warp keeps
-    /// `use_vertical_tabs` in its settings window rather than in this popup,
-    /// and a popup that could move itself out from under the pointer is a
-    /// worse place for it.
+    /// A toggle rather than a `SetLayout`, because what sends it is a
+    /// keystroke that means "the other one". The gear menu has no control for
+    /// it — Warp keeps `use_vertical_tabs` in its settings window rather than
+    /// in this popup, and a popup that could move itself out from under the
+    /// pointer is a worse place for it.
     ToggleLayout,
+    /// Put the tabs somewhere by name.
+    ///
+    /// What the settings page's segmented control sends. A named value rather
+    /// than a toggle because a segmented control has two halves and clicking
+    /// the selected one must do nothing: a toggle there would swap the layout
+    /// under a pointer that had just been told it was already on the right
+    /// half.
+    SetLayout(Layout),
 }

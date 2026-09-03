@@ -1,11 +1,19 @@
-//! The tab strip's options, and the file that makes them outlive a launch.
+//! Everything Crook remembers between launches, and the file it remembers it
+//! in.
 //!
-//! Six things the options menu writes — what a row stands for, how tall it is,
-//! what its title says, what its second line says, which chips it carries, and
-//! whether hovering it opens a detail card — plus their home on disk. The
-//! defaults are Warp's, value for value, because the menu is Warp's: a Crook
-//! that opened with different ones would be a different feature wearing the
-//! same labels.
+//! Two groups. [`TabOptions`] is what the tab strip's gear menu writes — what
+//! a row stands for, how tall it is, what its title says, what its second line
+//! says, which chips it carries, and whether hovering it opens a detail card.
+//! Its defaults are Warp's, value for value, because the menu is Warp's: a
+//! Crook that opened with different ones would be a different feature wearing
+//! the same labels. [`GeneralOptions`] is what is left over once the tab strip
+//! has had its say, and today that is one switch.
+//!
+//! Both are written by the settings page, and [`TabOptions`] is also written
+//! by the gear menu. Neither knows which of the two changed it: a settings
+//! page that had its own copy of an option would be a second source of truth
+//! for the same key, and the menu and the page would disagree about what the
+//! file says the moment both were open.
 //!
 //! # Why JSON, and why one file
 //!
@@ -48,7 +56,7 @@ const SETTINGS_FILE: &str = "settings.json";
 ///
 /// Warp's `VerticalTabsDisplayGranularity`, under
 /// `appearance.vertical_tabs.display_granularity`.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Granularity {
     /// A row per pane: a tab split several ways contributes several rows, and
@@ -66,7 +74,7 @@ pub enum Granularity {
 /// Warp's `VerticalTabsViewMode`, under `appearance.vertical_tabs.view_mode`.
 /// What it changes is the number of lines and whether the metadata chips exist
 /// at all; the padding and the leading icon are the same size either way.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Density {
     /// A title and an optional subtitle. No chips, which is why
@@ -92,7 +100,7 @@ pub enum Density {
 /// a boolean named after one of its two states reads backwards the moment the
 /// other state is the default — `"use_vertical_tabs": true` as the value you
 /// get by *not* writing it is a sentence nobody can check.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Layout {
     /// A panel down the left edge, the full height of the window, with the
@@ -118,7 +126,7 @@ impl Layout {
 /// Warp's `VerticalTabsPrimaryInfo`, under
 /// `appearance.vertical_tabs.primary_info`. Whichever of the three this names
 /// takes the title line, and the remaining two fill the lines below it.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrimaryInfo {
     /// What the session is doing: the agent's own title, or the last command.
@@ -149,7 +157,7 @@ impl PrimaryInfo {
 /// [`PrimaryInfo`] does, because the second line is whichever of them the title
 /// did not take — see [`resolve_subtitle`] for what happens when a stored value
 /// collides with the title's.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Subtitle {
     /// The git branch, falling back to the working directory, falling back to
@@ -214,6 +222,40 @@ pub fn subtitle_options_for(primary: PrimaryInfo) -> [Subtitle; 2] {
         PrimaryInfo::Command => [Subtitle::Branch, Subtitle::WorkingDirectory],
         PrimaryInfo::WorkingDirectory => [Subtitle::Branch, Subtitle::Command],
         PrimaryInfo::Branch => [Subtitle::Command, Subtitle::WorkingDirectory],
+    }
+}
+
+/// Everything the settings page writes that is not about the tab strip.
+///
+/// One switch, and that is not an accident of scheduling. Crook has a window,
+/// a tab strip and a usage chip; every option that could be offered about the
+/// first two is already in [`TabOptions`], and the chip has exactly one
+/// question worth asking about it. Warp's settings hold roughly eight hundred
+/// keys behind a schema system, a migration path and a cloud-sync policy —
+/// `docs/architecture.md` is explicit that a `serde` struct in a file is the
+/// right answer until there are ten of them, and this is the second struct,
+/// not the beginning of a schema.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GeneralOptions {
+    /// Whether the header carries the Claude Code usage chip.
+    ///
+    /// Off is not merely a hidden pill: the chip is the only thing that reads
+    /// the usage endpoint, so turning it off is also what stops Crook talking
+    /// to the network at all. That is why this is a setting rather than a
+    /// matter of taste about a header, and why [`Workspace`] gates the poll on
+    /// it rather than rendering nothing and polling anyway.
+    ///
+    /// [`Workspace`]: crate::workspace::Workspace
+    pub show_usage_chip: bool,
+}
+
+impl Default for GeneralOptions {
+    /// The chip on, because it is half of what Crook v1 is for.
+    fn default() -> Self {
+        Self {
+            show_usage_chip: true,
+        }
     }
 }
 
@@ -290,6 +332,8 @@ pub struct Settings {
     document: Map<String, Value>,
     /// The options themselves, already resolved against the defaults.
     tab_options: TabOptions,
+    /// The options that are not the tab strip's, resolved the same way.
+    general: GeneralOptions,
 }
 
 impl Settings {
@@ -304,6 +348,7 @@ impl Settings {
                 path: None,
                 document: Map::new(),
                 tab_options: TabOptions::default(),
+                general: GeneralOptions::default(),
             };
         };
 
@@ -320,6 +365,7 @@ impl Settings {
             path: None,
             document: Map::new(),
             tab_options: TabOptions::default(),
+            general: GeneralOptions::default(),
         }
     }
 
@@ -332,21 +378,19 @@ impl Settings {
 
         // Parsed from a copy, so that a value this build cannot make sense of
         // still reaches `document` and survives the next save.
-        let tab_options = match serde_json::from_value(Value::Object(document.clone())) {
-            Ok(tab_options) => tab_options,
-            Err(err) => {
-                log::warn!(
-                    "{} holds tab options this build cannot read ({err}); using defaults",
-                    path.display()
-                );
-                TabOptions::default()
-            }
-        };
+        //
+        // Two independent parses of the same object rather than one parse of a
+        // struct holding both, because the two groups fail independently: a
+        // hand-edited `display_granularity` that names nothing must not take
+        // the usage chip down with it.
+        let tab_options = parse_group(&document, &path, "tab options");
+        let general = parse_group(&document, &path, "general options");
 
         Self {
             path: Some(path),
             document,
             tab_options,
+            general,
         }
     }
 
@@ -366,6 +410,17 @@ impl Settings {
     /// value should outlive the process.
     pub fn set_tab_options(&mut self, tab_options: TabOptions) {
         self.tab_options = tab_options;
+    }
+
+    /// The options that are not the tab strip's.
+    pub fn general(&self) -> GeneralOptions {
+        self.general
+    }
+
+    /// Replaces them. Touches no file, exactly as
+    /// [`Settings::set_tab_options`] does not.
+    pub fn set_general(&mut self, general: GeneralOptions) {
+        self.general = general;
     }
 
     /// Writes the settings to disk, atomically.
@@ -411,17 +466,50 @@ impl Settings {
 
     /// What to write: the file as it was read, with the keys this build owns
     /// overwritten by their current values.
+    ///
+    /// Both groups are flat in the same object, which is what lets a person
+    /// find `show_usage_chip` beside `layout` in a file they opened in an
+    /// editor. It also means the two structs may not name the same key twice —
+    /// the later `extend` would silently win — and that is a thing to check
+    /// when a third group appears rather than a thing to defend against here.
     fn merged_document(&self) -> Result<Map<String, Value>> {
-        let owned = serde_json::to_value(self.tab_options)
-            .context("could not serialize the tab options")?;
-        let Value::Object(owned) = owned else {
-            bail!("the tab options serialized to something other than a JSON object");
-        };
-
         let mut document = self.document.clone();
-        document.extend(owned);
+        document.extend(owned_keys(self.tab_options, "tab options")?);
+        document.extend(owned_keys(self.general, "general options")?);
         Ok(document)
     }
+}
+
+/// One group of options out of a settings document, defaulting past anything
+/// unusable.
+///
+/// `group` names the group in the warning, which is the only thing that tells
+/// a person which half of their file the parser gave up on.
+fn parse_group<T: Default + for<'de> Deserialize<'de>>(
+    document: &Map<String, Value>,
+    path: &Path,
+    group: &str,
+) -> T {
+    match serde_json::from_value(Value::Object(document.clone())) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            log::warn!(
+                "{} holds {group} this build cannot read ({err}); using defaults",
+                path.display()
+            );
+            T::default()
+        }
+    }
+}
+
+/// One group of options as the JSON keys it owns.
+fn owned_keys(options: impl Serialize, group: &str) -> Result<Map<String, Value>> {
+    let value = serde_json::to_value(options)
+        .with_context(|| format!("could not serialize the {group}"))?;
+    let Value::Object(owned) = value else {
+        bail!("the {group} serialized to something other than a JSON object");
+    };
+    Ok(owned)
 }
 
 /// `<configuration directory>/crook/settings.json`, where there is one.
@@ -676,6 +764,9 @@ mod tests {
                 "show_details_on_hover",
                 "show_diff_stats",
                 "show_pr_link",
+                // Crook's own, and the one key in the file with no Warp
+                // spelling to match: Warp has no usage chip.
+                "show_usage_chip",
                 "view_mode",
             ],
             written.keys().collect::<Vec<_>>()
@@ -823,7 +914,9 @@ mod tests {
         let written: Map<String, Value> =
             serde_json::from_str(&contents).expect("the file should be a JSON object");
 
-        assert_eq!(8, written.len());
+        // Eight tab options and one general one, and nothing else: the 8KB
+        // key the file started with is gone.
+        assert_eq!(9, written.len());
         assert!(!contents.contains("padding"));
         assert_eq!(
             everything_flipped(),

@@ -29,7 +29,7 @@ use crookui_core::prelude::*;
 
 use crate::git::{self, DiffStats, GitFacts, Head};
 use crate::settings::{Granularity, PrimaryInfo, Subtitle, TabOptions, resolve_subtitle};
-use crate::tab::{AgentSession, Pane, PaneId, Tab};
+use crate::tab::{AgentSession, Pane, PaneId, SETTINGS_TITLE, Tab};
 use crate::theme::THEME;
 
 /// The height a metadata line is pinned to, whether or not it has chips in it.
@@ -122,6 +122,16 @@ pub(super) struct RowFacts {
     directory: Option<String>,
     /// The branch it is on, if the directory is a repository.
     branch: Option<String>,
+    /// Whether this row stands for the settings pane rather than a session.
+    ///
+    /// A settings pane has no command, no directory and no branch, so there is
+    /// nothing for the table above to resolve and every line but the title is
+    /// suppressed here rather than in each of the two renderers. Without it the
+    /// table's own fallbacks would print the name twice: under
+    /// `PrimaryInfo::Branch` the title falls back to the command and the
+    /// subtitle *is* the command, so the row would read "Settings" over
+    /// "Settings".
+    is_settings: bool,
 }
 
 impl RowFacts {
@@ -144,6 +154,17 @@ impl RowFacts {
                 .and_then(|facts| facts.branch.as_ref())
                 .map(Head::label)
                 .map(str::to_owned),
+            is_settings: false,
+        }
+    }
+
+    /// The facts of the settings pane: a name, and nothing else to say.
+    pub(super) fn settings() -> Self {
+        Self {
+            command: SETTINGS_TITLE.to_owned(),
+            directory: None,
+            branch: None,
+            is_settings: true,
         }
     }
 
@@ -174,6 +195,9 @@ impl RowFacts {
     /// The description line: whichever of the command and the working
     /// directory the title did not take.
     pub(super) fn description(&self, primary: PrimaryInfo) -> Option<RowLine> {
+        if self.is_settings {
+            return None;
+        }
         match primary {
             PrimaryInfo::Command => self.directory.clone().map(RowLine::plain),
             PrimaryInfo::WorkingDirectory | PrimaryInfo::Branch => {
@@ -185,6 +209,9 @@ impl RowFacts {
     /// The metadata line's left text: the branch, or the working directory
     /// when the branch is already the title.
     pub(super) fn metadata(&self, primary: PrimaryInfo) -> Option<RowLine> {
+        if self.is_settings {
+            return None;
+        }
         match primary {
             PrimaryInfo::Command | PrimaryInfo::WorkingDirectory => {
                 self.branch.as_deref().map(RowLine::branch)
@@ -200,6 +227,9 @@ impl RowFacts {
     /// a menu that checked the stored value would put a tick beside an option
     /// the row is silently overriding.
     pub(super) fn subtitle(&self, options: TabOptions) -> Option<RowLine> {
+        if self.is_settings {
+            return None;
+        }
         match resolve_subtitle(options.primary_info, options.subtitle) {
             // Warp's `compact_branch_subtitle_display`: the branch, else the
             // directory, else no second line at all.
@@ -456,10 +486,18 @@ pub(super) fn detail_card(
 /// is of a kind with no sidecar. Every Crook pane is an agent session, so that
 /// clause has nothing to exclude and is not written here.
 pub(super) fn detail_panes(tab: &Tab, pane: PaneId, granularity: Granularity) -> Vec<&Pane> {
-    match granularity {
+    // Never the settings pane: the card exists to show what a row had no room
+    // for, and a settings row has nothing behind its one line. Filtered here
+    // rather than in the two renderers, so a split tab holding a session and
+    // the settings page draws a card for the session alone.
+    let panes: Vec<&Pane> = match granularity {
         Granularity::Panes => tab.panes().get(pane).into_iter().collect(),
         Granularity::Tabs => tab.panes().iter().collect(),
-    }
+    };
+    panes
+        .into_iter()
+        .filter(|pane| !pane.is_settings())
+        .collect()
 }
 
 /// The hairline between two sections of a card.
