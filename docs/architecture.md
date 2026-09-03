@@ -1021,7 +1021,7 @@ platforms, and treat a build script as the cost it is.
 | Shell integration | its own bootstrap, a request/response channel | the four OSC 133 marks, injected into zsh, bash and fish |
 | Autotracking | `Tracked<T>` dependency capture | explicit `ctx.notify()` |
 | Settings | ~800, with a macro DSL and cloud sync | 10, two `serde` structs and a name in one JSON file |
-| Themes | 21 built in, gradients, images, a creator, OS sync, hot reload | 14 built in, the same file format, a creator without the image, no OS sync |
+| Themes | 21 built in, gradients, images, a creator, OS sync, hot reload | 13 built in, the same file format, a creator without the image, no OS sync |
 | Theme chooser | a 240px docked panel with search and virtualisation | a 248px docked panel, no search, every row built |
 | Settings UI | a pane, 16 pages, search over ~800 widgets | a pane, 4 pages, no search |
 

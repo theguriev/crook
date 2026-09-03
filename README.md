@@ -15,7 +15,7 @@ dropped, and why.
 
 ## v1 scope
 
-Four features, and the page that configures them:
+Six features, and the page that configures them:
 
 - **Tabs.** Open, close, switch, reorder. One agent session per tab, with a derived title.
   They live in a panel down the left edge or in a strip across the header, and the gear menu
