@@ -47,9 +47,10 @@ use crook_terminal::{Block, BlockId, CellSide, LiveBlock, Snapshot, SnapshotCell
 use crookui_core::AppContext;
 use crookui_core::element::{Element, SizeConstraint};
 use crookui_core::event::{DispatchedEvent, Event, MouseButton};
-use crookui_core::geometry::{Color, Point, RectF, Vector2F, vec2f};
+use crookui_core::geometry::{Point, RectF, Vector2F, vec2f};
+use crookui_core::icons::{IconKey, Lucide};
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
-use crookui_core::scene::{Border, ClipBounds, CornerRadius, Radius, Scene};
+use crookui_core::scene::{ClipBounds, CornerRadius, Radius, Scene};
 
 use crate::clipboard::Clipboard;
 use crate::pane_blocks::{PaneBlocks, ScrollCause};
@@ -120,6 +121,15 @@ const CONTROL_OFFSET: f32 = 12.;
 
 /// How round the control's plate is.
 const CONTROL_RADIUS: f32 = 5.;
+
+/// The icon inside that plate, centred.
+///
+/// Two overlapping sheets, which used to be two rectangles here because there
+/// was no icon system to ask — see `crookui_core::icons`. Lucide's `copy` is
+/// the same drawing, and it does not need the front sheet filled with the
+/// plate's colour to read as two: its back sheet is only the L behind the
+/// front one.
+const CONTROL_ICON_SIZE: f32 = 15.;
 
 /// The thumb, in the geometry [`Scrollable`](crookui_core::elements::Scrollable)
 /// paints its own with, so the two scrollbars in the application match.
@@ -806,7 +816,16 @@ impl BlockList {
             .draw_rect_with_hit_recording(bounds)
             .with_background(plate)
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CONTROL_RADIUS)));
-        paint_copy_icon(bounds, plate, theme().text_muted, ctx.scene);
+
+        let inset = (CONTROL_SIZE - CONTROL_ICON_SIZE) / 2.;
+        ctx.scene.draw_icon(
+            IconKey::new(Lucide::Copy, CONTROL_ICON_SIZE),
+            RectF::new(
+                bounds.origin() + Vector2F::splat(inset),
+                Vector2F::splat(CONTROL_ICON_SIZE),
+            ),
+            theme().text_muted,
+        );
     }
 
     /// Paints the thumb, in the geometry the general-purpose scrollable uses.
@@ -1174,33 +1193,6 @@ fn paint_selection(
             .with_background(theme().selection);
         start = end;
     }
-}
-
-/// Two overlapping sheets: the copy control's icon.
-///
-/// Drawn from rectangles rather than from a glyph because Crook ships no icon
-/// font, and a codepoint that half the machines in the world have no face for
-/// would be a control with nothing in it.
-fn paint_copy_icon(bounds: RectF, plate: Color, ink: Color, scene: &mut Scene) {
-    const SHEET: Vector2F = Vector2F::new(10., 12.);
-    let stroke = Border::all(1.).with_border_color(ink);
-    let radius = CornerRadius::with_all(Radius::Pixels(2.));
-
-    let back = RectF::new(bounds.origin() + vec2f(4., 3.), SHEET);
-    scene
-        .draw_rect_without_hit_recording(back)
-        .with_border(stroke)
-        .with_corner_radius(radius);
-
-    // Filled in the plate's own colour so it occludes the sheet behind it,
-    // which is what makes two rectangles read as two sheets rather than as a
-    // grid.
-    let front = RectF::new(bounds.origin() + vec2f(9., 8.), SHEET);
-    scene
-        .draw_rect_without_hit_recording(front)
-        .with_background(plate)
-        .with_border(stroke)
-        .with_corner_radius(radius);
 }
 
 #[cfg(test)]

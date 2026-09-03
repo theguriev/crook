@@ -14,6 +14,26 @@ use super::Segment::{self, Close, Cubic, Line, Move};
 /// Lucide's `check`.
 pub(super) static CHECK: &[Segment] = &[Move(20.0, 6.0), Line(9.0, 17.0), Line(4.0, 12.0)];
 
+/// Lucide's `copy`.
+pub(super) static COPY: &[Segment] = &[
+    Move(10.0, 8.0),
+    Line(20.0, 8.0),
+    Cubic(21.1046, 8.0, 22.0, 8.8954, 22.0, 10.0),
+    Line(22.0, 20.0),
+    Cubic(22.0, 21.1046, 21.1046, 22.0, 20.0, 22.0),
+    Line(10.0, 22.0),
+    Cubic(8.8954, 22.0, 8.0, 21.1046, 8.0, 20.0),
+    Line(8.0, 10.0),
+    Cubic(8.0, 8.8954, 8.8954, 8.0, 10.0, 8.0),
+    Close,
+    Move(4.0, 16.0),
+    Cubic(2.9, 16.0, 2.0, 15.1, 2.0, 14.0),
+    Line(2.0, 4.0),
+    Cubic(2.0, 2.9, 2.9, 2.0, 4.0, 2.0),
+    Line(14.0, 2.0),
+    Cubic(15.1, 2.0, 16.0, 2.9, 16.0, 4.0),
+];
+
 /// Lucide's `git-branch`.
 pub(super) static GIT_BRANCH: &[Segment] = &[
     Move(15.0, 6.0),
@@ -158,6 +178,7 @@ pub(super) static X: &[Segment] = &[
 /// three columns of the same row and a test walks it end to end.
 pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [
     (Lucide::Check, "check", CHECK),
+    (Lucide::Copy, "copy", COPY),
     (Lucide::GitBranch, "git-branch", GIT_BRANCH),
     (Lucide::Info, "info", INFO),
     (Lucide::LayoutGrid, "layout-grid", LAYOUT_GRID),
@@ -168,7 +189,7 @@ pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [
 ];
 
 /// How many there are.
-pub const ICONS: usize = 8;
+pub const ICONS: usize = 9;
 
 /// The icons Crook draws, from Lucide.
 ///
@@ -180,6 +201,10 @@ pub enum Lucide {
     ///
     /// Lucide's [`check`](https://lucide.dev/icons/check).
     Check,
+    /// The control that takes a block's text, on the block the pointer is on.
+    ///
+    /// Lucide's [`copy`](https://lucide.dev/icons/copy).
+    Copy,
     /// The mark that says a line is a branch and not a path.
     ///
     /// Lucide's [`git-branch`](https://lucide.dev/icons/git-branch).
