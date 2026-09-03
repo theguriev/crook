@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use super::*;
+use crate::selection::{CellSide, GridPoint, SelectionKind, ViewportPoint};
 use crate::snapshot::{CellFlags, CursorShape, Rgb};
 
 /// A small grid, which keeps the assertions readable and the snapshots cheap.
@@ -437,4 +438,409 @@ fn test_an_ordinary_screen_carries_no_combining_table_at_all() {
     let snapshot = emulator.snapshot();
     assert!(!snapshot.has_combining());
     assert!(snapshot.combining.is_empty());
+}
+
+/// Selects from one cell to another with a plain drag, the way a pointer does.
+fn drag(emulator: &mut Emulator, from: (usize, usize), to: (usize, usize)) {
+    emulator.start_selection(
+        SelectionKind::Simple,
+        ViewportPoint::new(from.0, from.1),
+        CellSide::Left,
+    );
+    emulator.update_selection(ViewportPoint::new(to.0, to.1), CellSide::Right);
+}
+
+#[test]
+fn test_a_drag_selects_the_cells_it_covers_and_hands_back_their_text() {
+    let mut emulator = emulator();
+    emulator.advance(b"hello world");
+    drag(&mut emulator, (0, 6), (0, 10));
+
+    assert_eq!(Some("world".to_owned()), emulator.selection_text());
+    assert!(emulator.has_selection());
+
+    let snapshot = emulator.snapshot();
+    assert!(snapshot.is_selected(0, 6));
+    assert!(snapshot.is_selected(0, 10));
+    assert!(!snapshot.is_selected(0, 5), "the space before it");
+    assert!(!snapshot.is_selected(0, 11), "past the last cell");
+}
+
+#[test]
+fn test_which_half_of_a_cell_was_pressed_decides_whether_it_is_taken() {
+    // The gap a selection ends in is between two cells, not on one. Dragging
+    // right from the left of `w` takes it; starting from its right half does
+    // not.
+    let mut emulator = emulator();
+    emulator.advance(b"hello world");
+
+    emulator.start_selection(
+        SelectionKind::Simple,
+        ViewportPoint::new(0, 6),
+        CellSide::Right,
+    );
+    emulator.update_selection(ViewportPoint::new(0, 10), CellSide::Right);
+    assert_eq!(Some("orld".to_owned()), emulator.selection_text());
+
+    emulator.start_selection(
+        SelectionKind::Simple,
+        ViewportPoint::new(0, 6),
+        CellSide::Left,
+    );
+    emulator.update_selection(ViewportPoint::new(0, 10), CellSide::Left);
+    assert_eq!(Some("worl".to_owned()), emulator.selection_text());
+}
+
+#[test]
+fn test_a_press_with_no_drag_behind_it_selects_nothing_at_all() {
+    // What makes a plain click clear the last selection rather than leave a
+    // one-cell highlight where it landed.
+    let mut emulator = emulator();
+    emulator.advance(b"hello world");
+    drag(&mut emulator, (0, 0), (0, 4));
+    assert!(emulator.has_selection());
+
+    emulator.start_selection(
+        SelectionKind::Simple,
+        ViewportPoint::new(0, 8),
+        CellSide::Left,
+    );
+    assert!(!emulator.has_selection(), "a click selected a cell");
+    assert_eq!(None, emulator.snapshot().selection);
+}
+
+#[test]
+fn test_a_word_and_a_line_selection_use_the_emulators_own_boundaries() {
+    // The double and triple click. The rules are the emulator's — its semantic
+    // escape characters, its idea of where a wrapped line ends — which is the
+    // reason for going through it rather than splitting the snapshot's text.
+    let mut emulator = emulator();
+    emulator.advance(b"one two three");
+
+    emulator.start_selection(
+        SelectionKind::Semantic,
+        ViewportPoint::new(0, 5),
+        CellSide::Left,
+    );
+    assert_eq!(Some("two".to_owned()), emulator.selection_text());
+
+    emulator.start_selection(
+        SelectionKind::Lines,
+        ViewportPoint::new(0, 5),
+        CellSide::Left,
+    );
+    assert_eq!(
+        Some("one two three\n".to_owned()),
+        emulator.selection_text()
+    );
+}
+
+#[test]
+fn test_a_selection_dragged_out_of_a_wrapped_line_comes_back_as_one_line() {
+    // A line too long for the grid is one line of text on two rows, and the
+    // fold is a place the terminal put the text rather than something the
+    // shell printed. Copying it back with a newline in it would break the
+    // command it came from.
+    let mut emulator = emulator();
+    emulator.advance(b"abcdefghijklmnopqrstuvwxyz");
+    assert_eq!(
+        "abcdefghijklmnopqrst",
+        emulator
+            .snapshot()
+            .row(0)
+            .iter()
+            .map(|cell| cell.c)
+            .collect::<String>()
+    );
+
+    drag(&mut emulator, (0, 0), (1, 5));
+    assert_eq!(
+        Some("abcdefghijklmnopqrstuvwxyz".to_owned()),
+        emulator.selection_text()
+    );
+}
+
+#[test]
+fn test_a_selection_stays_on_its_text_while_output_scrolls_underneath_it() {
+    // **The reason the selection lives in the emulator.** `Selection::rotate`
+    // is what moves it with the text, and `Term` calls it on every path that
+    // scrolls — so a selection made around a word is still around that word
+    // after another screenful has printed below it, and the cells it covers
+    // are somewhere else entirely.
+    let mut emulator = emulator();
+    emulator.advance(b"marker line\r\n");
+    drag(&mut emulator, (0, 0), (0, 10));
+    assert_eq!(Some("marker line".to_owned()), emulator.selection_text());
+    assert_eq!(
+        Some(GridPoint::new(0, 0)),
+        emulator.selection().map(|span| span.start)
+    );
+
+    // Enough lines to push it off the screen entirely: the grid is five rows.
+    for line in 0..12 {
+        emulator.advance(format!("filler {line}\r\n").as_bytes());
+    }
+
+    assert_eq!(
+        Some("marker line".to_owned()),
+        emulator.selection_text(),
+        "the selection came away from the text it was drawn around"
+    );
+    let span = emulator.selection().expect("it is still selected");
+    assert_eq!(
+        GridPoint::new(-9, 0),
+        span.start,
+        "and it has followed the text up into the history"
+    );
+    assert!(
+        !emulator.snapshot().text().contains("marker"),
+        "the marker is not even on screen any more"
+    );
+    assert_eq!(
+        0,
+        emulator.snapshot().display_offset,
+        "the viewport did not move; the text did"
+    );
+}
+
+#[test]
+fn test_a_selection_made_in_the_scrollback_lands_on_the_lines_it_was_aimed_at() {
+    // The display offset, which is the whole of "a selection made four screens
+    // back must not highlight the live output".
+    let mut emulator = emulator();
+    for line in 0..20 {
+        emulator.advance(format!("line {line:02}\r\n").as_bytes());
+    }
+    emulator.scroll_lines(10);
+    let snapshot = emulator.snapshot();
+    assert_eq!(10, snapshot.display_offset);
+    assert_eq!("line 06", snapshot.text().lines().next().unwrap());
+
+    drag(&mut emulator, (0, 0), (0, 6));
+    assert_eq!(Some("line 06".to_owned()), emulator.selection_text());
+    assert!(
+        emulator.snapshot().is_selected(0, 0),
+        "the top row of the scrolled viewport is the row that was pressed"
+    );
+
+    // And scrolling back to the live output leaves the highlight behind with
+    // the text, rather than dragging it down the screen.
+    emulator.scroll_to_bottom();
+    let snapshot = emulator.snapshot();
+    assert_eq!(Some("line 06".to_owned()), emulator.selection_text());
+    assert!(!snapshot.is_selected(0, 0));
+}
+
+#[test]
+fn test_moving_a_selection_never_rebuilds_the_grid() {
+    // The reason `Snapshot::selection` is a span and not a flag on every cell.
+    // A drag is a stream of pointer moves and none of them changes a character
+    // the shell printed, so the cells of the last snapshot are the right cells
+    // and are carried across untouched.
+    let mut emulator = emulator();
+    emulator.advance(b"hello world");
+    let before = emulator.snapshot();
+
+    drag(&mut emulator, (0, 0), (0, 4));
+    let after = emulator.snapshot();
+
+    assert_eq!(
+        before.cells, after.cells,
+        "a drag changed a cell the child printed"
+    );
+    assert_eq!(
+        before.revision + 1,
+        after.revision,
+        "a highlight is drawn content, so the revision has to move with it"
+    );
+    assert!(!before.same_content(&after));
+
+    // And a pointer move that lands on the same cells costs no revision at
+    // all, so holding a button still is free.
+    emulator.update_selection(ViewportPoint::new(0, 4), CellSide::Right);
+    assert_eq!(after.revision, emulator.snapshot().revision);
+}
+
+#[test]
+fn test_a_cleared_selection_leaves_the_grid_exactly_as_it_was() {
+    let mut emulator = emulator();
+    emulator.advance(b"hello world");
+    let before = emulator.snapshot();
+
+    drag(&mut emulator, (0, 0), (0, 4));
+    emulator.snapshot();
+    emulator.clear_selection();
+
+    let after = emulator.snapshot();
+    assert!(!emulator.has_selection());
+    assert_eq!(None, emulator.selection_text());
+    assert!(
+        before.same_content(&after),
+        "clearing a selection changed something other than the selection"
+    );
+}
+
+#[test]
+fn test_a_selection_can_be_found_by_the_text_it_covers() {
+    // What `--select-output` and the tests select with, since neither has a
+    // pointer to aim.
+    let mut emulator = emulator();
+    emulator.advance(b"alpha\r\nbeta\r\ngamma");
+
+    let (start, end) = emulator
+        .snapshot()
+        .find("beta\ngam")
+        .expect("the screen shows it");
+    assert_eq!(ViewportPoint::new(1, 0), start);
+    assert_eq!(ViewportPoint::new(2, 2), end);
+
+    emulator.start_selection(SelectionKind::Simple, start, CellSide::Left);
+    emulator.update_selection(end, CellSide::Right);
+    assert_eq!(Some("beta\ngam".to_owned()), emulator.selection_text());
+
+    assert_eq!(None, emulator.snapshot().find("nothing here"));
+    assert_eq!(None, emulator.snapshot().find(""));
+}
+
+/// Every block gesture that can be aimed at a small grid, so the sweep below
+/// cannot miss one for being unable to imagine it.
+fn block_gestures(
+    rows: usize,
+    columns: usize,
+) -> impl Iterator<Item = ((usize, usize, CellSide), (usize, usize, CellSide))> {
+    let sides = [CellSide::Left, CellSide::Right];
+    (0..rows).flat_map(move |from_row| {
+        (0..columns).flat_map(move |from_column| {
+            sides.into_iter().flat_map(move |from_side| {
+                (0..rows).flat_map(move |to_row| {
+                    (0..columns).flat_map(move |to_column| {
+                        sides.into_iter().map(move |to_side| {
+                            (
+                                (from_row, from_column, from_side),
+                                (to_row, to_column, to_side),
+                            )
+                        })
+                    })
+                })
+            })
+        })
+    })
+}
+
+#[test]
+fn test_a_block_that_ends_where_it_began_selects_nothing_rather_than_a_row_it_cannot_index() {
+    // **A crash and a stolen interrupt, from the same arithmetic.**
+    // `Selection::range_block` moves the start a column right when the drag
+    // began on the right of a cell and the end a column left when it finished
+    // on the left of one, and never checks the two did not cross. On the last
+    // column the start lands one past the row, which `selection_to_string`
+    // indexes it with; anywhere else the range comes back inverted, covering
+    // no cell — so nothing is highlighted while `has_selection` still says
+    // there is something to copy, and off macOS that spends the interrupt.
+    let mut emulator = emulator();
+    for row in 0..5 {
+        emulator.advance(format!("row{row} abcdefghijklmn\r\n").as_bytes());
+    }
+    let columns = emulator.size().columns as usize;
+
+    for column in [0, 4, columns - 1] {
+        emulator.start_selection(
+            SelectionKind::Block,
+            ViewportPoint::new(0, column),
+            CellSide::Right,
+        );
+        emulator.update_selection(ViewportPoint::new(2, column), CellSide::Left);
+
+        assert_eq!(
+            None,
+            emulator.selection(),
+            "a block with no width in it selected column {column}"
+        );
+        assert!(!emulator.has_selection());
+        // The line that used to panic on the last column, and used to hand
+        // back a clipboard full of newlines on every other one.
+        assert_eq!(None, emulator.selection_text());
+        assert_eq!(None, emulator.snapshot().selection);
+    }
+}
+
+#[test]
+fn test_no_block_gesture_at_all_leaves_a_span_the_grid_cannot_be_walked_with() {
+    // The exhaustive form of the test above: every pair of cells on a small
+    // grid, both sides of each, is either a span whose text can be taken or no
+    // span at all. Nothing in between, because everything in between is a
+    // panic or a highlight of nothing.
+    let mut emulator = Emulator::new(TerminalSize::new(8, 4), 100, Palette::default());
+    emulator.advance(b"ab cd ef\r\ngh ij kl\r\nmn op qr\r\nst uv wx");
+    let (rows, columns) = (4, 8);
+
+    for (from, to) in block_gestures(rows, columns) {
+        emulator.start_selection(
+            SelectionKind::Block,
+            ViewportPoint::new(from.0, from.1),
+            from.2,
+        );
+        emulator.update_selection(ViewportPoint::new(to.0, to.1), to.2);
+
+        let Some(span) = emulator.selection() else {
+            assert_eq!(None, emulator.selection_text(), "{from:?} -> {to:?}");
+            continue;
+        };
+        assert!(
+            span.start.line <= span.end.line && span.start.column <= span.end.column,
+            "{from:?} -> {to:?} came back inverted: {span:?}"
+        );
+        assert!(
+            span.end.column < columns,
+            "{from:?} -> {to:?} names a column the grid does not have: {span:?}"
+        );
+        // Would panic rather than fail, which is the point of running it.
+        assert!(emulator.selection_text().is_some(), "{from:?} -> {to:?}");
+    }
+}
+
+#[test]
+fn test_a_double_width_character_is_highlighted_across_both_of_its_columns() {
+    // Its glyph is drawn once, from the first column, across the width of two.
+    // A highlight that lit only the column the character is stored in would
+    // cut the glyph down the middle — while the copy took the whole of it,
+    // because `line_to_string` emits the character for a range touching
+    // either half.
+    let mut emulator = emulator();
+    emulator.advance("a漢b".as_bytes());
+
+    // Ending on the right of the character's own column, and on either side of
+    // its trailing half: all three take the character, so all three light both
+    // of the columns it is drawn across.
+    for end in [
+        (1, CellSide::Right),
+        (2, CellSide::Left),
+        (2, CellSide::Right),
+    ] {
+        emulator.start_selection(
+            SelectionKind::Simple,
+            ViewportPoint::new(0, 0),
+            CellSide::Left,
+        );
+        emulator.update_selection(ViewportPoint::new(0, end.0), end.1);
+
+        let snapshot = emulator.snapshot();
+        let text = emulator.selection_text().expect("something is selected");
+        assert!(text.contains('漢'), "{end:?} did not take the character");
+        assert!(
+            snapshot.is_selected(0, 1) && snapshot.is_selected(0, 2),
+            "{end:?} highlighted half a glyph"
+        );
+    }
+
+    // And the character is not dragged into a selection that stops before it.
+    emulator.start_selection(
+        SelectionKind::Simple,
+        ViewportPoint::new(0, 0),
+        CellSide::Left,
+    );
+    emulator.update_selection(ViewportPoint::new(0, 0), CellSide::Right);
+    let snapshot = emulator.snapshot();
+    assert_eq!(Some("a".to_owned()), emulator.selection_text());
+    assert!(!snapshot.is_selected(0, 1) && !snapshot.is_selected(0, 2));
 }

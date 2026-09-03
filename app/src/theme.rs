@@ -72,6 +72,17 @@ pub struct Theme {
     pub text_muted: Color,
     /// The one saturated colour, for what the app is currently doing.
     pub accent: Color,
+    /// What sits behind selected text, in the field and in a pane's output
+    /// alike.
+    ///
+    /// Translucent on purpose: it is painted over whatever the cell already
+    /// had — the panel's ground under a command line, a coloured `ls` cell
+    /// under the shell's output — and the character itself is drawn on top of
+    /// it afterwards, so selecting text shifts its ground and never touches
+    /// its ink. A solid fill would have to be light enough to read the
+    /// darkest foreground on and dark enough to read the brightest, which no
+    /// single colour is.
+    pub selection: Color,
     /// Session usage below half.
     pub usage_normal: Color,
     /// Session usage between half and 80%.
@@ -164,6 +175,13 @@ impl Theme {
             text_primary: foreground,
             text_muted: composite(background, foreground, 55),
             accent,
+            // The accent at 30%, which is `percent_of_255(30)` — enough to
+            // pick a selected run out of a screenful, and translucent enough
+            // that the character drawn over it stays its own colour. Derived
+            // from the accent rather than named by a theme file, because
+            // Warp's format does not carry a selection colour and a theme
+            // written for Warp has to get one anyway.
+            selection: accent.with_alpha(percent_of_255(30)),
             // The usage bands and the diff chips are read as signals rather
             // than as part of the palette — "critical" has to be red on every
             // theme — so they come from the theme's own ANSI colours, which is

@@ -38,6 +38,23 @@ pub enum WorkspaceAction {
         /// Whether it arrived, rather than left.
         entered: bool,
     },
+    /// Let go of what is selected in a pane's output.
+    ///
+    /// Carried as an action for a reason the grid could not solve on its own.
+    /// A pane's grid and the field under it are siblings, and a `Flex` hands
+    /// the same keystroke to both of them — the grid first. Both route it
+    /// through [`crate::input_keys::route`], and both ask the same question to
+    /// do it: is anything selected in the output? A grid that released the
+    /// selection while it copied would answer the field's question differently
+    /// from its own a moment later, and the field would then take `ctrl-c` for
+    /// the interrupt it is with nothing selected and throw away the
+    /// half-written command line with it.
+    ///
+    /// Actions are applied once the whole tree has seen the event, so the two
+    /// elements route against the same answer and the release lands after both
+    /// of them. **Nothing may change what is selected in the output while a
+    /// keystroke is being dispatched.**
+    ReleaseSelection(PaneId),
 }
 
 impl From<TabAction> for WorkspaceAction {

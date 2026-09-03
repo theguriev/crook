@@ -148,6 +148,21 @@ impl CommandInput {
         let pane = input_keys::Pane {
             alt_screen: self.alt_screen,
             line_is_empty: self.input.editor().is_empty(),
+            // Asked even though the answer only ever takes a key *away* from
+            // this element: routing the same keystroke against a different
+            // pane would let `cmd-c` copy the output above and then overwrite
+            // the clipboard with whatever this field happened to have
+            // selected. One question, one answer, two elements.
+            //
+            // Which holds only because nothing changes the answer while the
+            // keystroke is in flight. The grid above is handed the same event
+            // first, and it *does* let go of the selection it copies — but
+            // through an action, applied once every element has routed. See
+            // `WorkspaceAction::ReleaseSelection`.
+            grid_has_selection: self
+                .terminal
+                .as_ref()
+                .is_some_and(TerminalHandle::has_selection),
         };
         match input_keys::route(keystroke, chars, pane, Platform::current()) {
             Route::Edit(intent) => {
@@ -166,7 +181,9 @@ impl CommandInput {
                 ctx.notify();
                 false
             }
-            Route::Raw | Route::Ignored => false,
+            // The grid beside this element owns both: the interrupt's key and
+            // the selection the copy chord is asking for.
+            Route::CopyOutput | Route::Raw | Route::Ignored => false,
         }
     }
 
@@ -191,6 +208,14 @@ impl CommandInput {
             return false;
         }
 
+        // Clicking into the field lets go of whatever was selected in the
+        // output above it. Two highlights in one pane, only one of which the
+        // pointer is anywhere near, is a person's next `cmd-c` copying the
+        // wrong one — and the caret they just placed is where they are now
+        // looking.
+        if let Some(terminal) = self.terminal.as_ref() {
+            terminal.clear_selection();
+        }
         self.input
             .press(self.offset_at(position - bounds.origin()), click_count);
         ctx.notify();

@@ -75,6 +75,10 @@ pub struct Pane {
     /// Whether the field is empty. What makes Ctrl-D an end of input rather
     /// than a delete — see [`route`].
     pub line_is_empty: bool,
+    /// Whether there is a selection in the output above the field. What makes
+    /// the copy chord mean the *screen* rather than the line — rule 1 of
+    /// [`route`], and the only rule that can take a key away from the shell.
+    pub grid_has_selection: bool,
 }
 
 /// What the input field should do about a keystroke.
@@ -134,6 +138,11 @@ pub enum Route {
     Interrupt,
     /// To the input field's editor.
     Edit(Intent),
+    /// Copy what is selected in the output, and let go of it.
+    ///
+    /// The grid's, not the field's: there are two selections on screen and
+    /// this is the one that outranks the other. See rule 1 of [`route`].
+    CopyOutput,
     /// Nowhere. Nothing is typed and nothing is sent.
     Ignored,
 }
@@ -173,14 +182,38 @@ pub enum Binding {
 
 /// **The whole keyboard policy of a pane, in one function.**
 ///
-/// 1. Crook's own bindings never reach here. `Workspace::action_for` consumes
+/// 0. Crook's own bindings never reach here. `Workspace::action_for` consumes
 ///    what [`binding`] names, in the window delegate, before any element sees
 ///    the event — which is what makes `cmd-t` open a tab everywhere rather
 ///    than typing a `t`.
+/// 1. **A selection in the output owns the copy chord while it exists.** There
+///    are two selections on a pane — the one dragged out of the shell's output
+///    and the one in the field below it — and only one `cmd-c`. The output's
+///    wins, which is Warp's rule and the one a person expects: they have just
+///    dragged a highlight across something and pressed copy, and the invisible
+///    empty selection in a field they were not looking at is not what they
+///    meant.
+///
+///    Off macOS that chord is `ctrl-c`, which is also SIGINT, and **that
+///    collision is settled by the selection existing rather than by the key**:
+///    with nothing selected `ctrl-c` interrupts, exactly as it always has, so
+///    a runaway command is never more than one keystroke from being stopped.
+///    With something selected it copies — and *releases* the selection, so the
+///    very next `ctrl-c` interrupts. That release is the whole safety of this
+///    rule, and it is also the only feedback a copy has: the highlight going
+///    away is how a person knows it happened. The other three clearing rules —
+///    typing, clicking elsewhere, closing the pane — are the element's, in
+///    [`crate::workspace::terminal_element`].
+///
+///    A modal menu is the one thing that suspends this: while one is up the
+///    pane reports no selection at all, so the three keys a running command
+///    has to keep hearing still mean what they always mean.
 /// 2. **The alt screen belongs to the program.** vim, `top` and `less` drive
 ///    every cell of the screen and read every key themselves, so on the alt
 ///    screen everything goes raw to the pty — and the input field is not even
-///    drawn. See [`shows_input`].
+///    drawn. See [`shows_input`]. Rule 1 is deliberately above this one: text
+///    on a full-screen program's screen is still text somebody selected with
+///    the mouse, and there is no reason they cannot copy it.
 /// 3. **The signal keys always reach the shell.** Ctrl-C interrupts and
 ///    abandons the line with it, Ctrl-Z suspends, and Ctrl-D ends the input —
 ///    but only on an empty line, exactly as it does in a shell. The field
@@ -191,6 +224,9 @@ pub enum Binding {
 ///    keystroke the keymap has no meaning for does nothing at all rather than
 ///    leaking into the shell.
 pub fn route(keystroke: &Keystroke, chars: &str, pane: Pane, platform: Platform) -> Route {
+    if pane.grid_has_selection && copies_the_output(keystroke, platform) {
+        return Route::CopyOutput;
+    }
     if pane.alt_screen {
         return Route::Raw;
     }
@@ -295,6 +331,33 @@ enum Signal {
     EndOfInput,
     /// Ctrl-Z: suspend the foreground command.
     Suspend,
+}
+
+/// Whether this keystroke asks for whatever is selected on screen.
+///
+/// Every chord that means "copy" on this platform, including the ones the
+/// field would otherwise get and the one the shell would otherwise get. Rule 1
+/// of [`route`] only consults it when there *is* something selected, which is
+/// what keeps `ctrl-c` a signal the rest of the time.
+///
+/// Alt is excluded on both platforms because no copy chord has it, and a
+/// `ctrl-alt-c` is somebody's window-manager binding leaking through rather
+/// than a request to copy.
+fn copies_the_output(keystroke: &Keystroke, platform: Platform) -> bool {
+    let modifiers = keystroke.modifiers;
+    if keystroke.key != "c" || modifiers.alt {
+        return false;
+    }
+    match platform {
+        // Cmd-C is the copy chord; Ctrl-C is here as well because a terminal
+        // person reaches for it, and on this one key it costs nothing — the
+        // interrupt is what it does whenever there is nothing to copy.
+        Platform::Mac => modifiers.cmd != modifiers.ctrl && !modifiers.shift,
+        // Ctrl-C and Ctrl-Shift-C, which are the interrupt and the copy: with
+        // a selection on screen both copy, and the Shift is no longer the
+        // thing a person has to remember.
+        Platform::Other => modifiers.ctrl && !modifiers.cmd,
+    }
 }
 
 /// Which signal a keystroke is, if it is one.
@@ -599,6 +662,7 @@ mod tests {
         Pane {
             alt_screen: false,
             line_is_empty: false,
+            grid_has_selection: false,
         }
     }
 
@@ -607,6 +671,15 @@ mod tests {
         Pane {
             alt_screen: false,
             line_is_empty: true,
+            grid_has_selection: false,
+        }
+    }
+
+    /// A pane with a selection dragged out of the output above its field.
+    fn selected(pane: Pane) -> Pane {
+        Pane {
+            grid_has_selection: true,
+            ..pane
         }
     }
 
@@ -625,6 +698,7 @@ mod tests {
         let vim = Pane {
             alt_screen: true,
             line_is_empty: true,
+            grid_has_selection: false,
         };
         for platform in [Platform::Mac, Platform::Other] {
             for (key, modifiers) in [("left", none()), ("a", none()), ("enter", none())] {
@@ -672,6 +746,148 @@ mod tests {
                 "and the shell hears it"
             );
         }
+    }
+
+    #[test]
+    fn a_selection_in_the_output_takes_the_copy_chord_from_the_field() {
+        // Rule 1. Two selections, one `cmd-c`: the one somebody just dragged
+        // across the output wins over the one in a field they were not
+        // looking at.
+        assert_eq!(
+            route(
+                &keystroke("c", cmd()),
+                "",
+                selected(composing()),
+                Platform::Mac
+            ),
+            Route::CopyOutput
+        );
+        assert_eq!(
+            route(&keystroke("c", cmd()), "", composing(), Platform::Mac),
+            Route::Edit(Intent::Copy),
+            "with nothing selected in the output it is the field's copy again"
+        );
+
+        assert_eq!(
+            route(
+                &keystroke("c", ctrl_shift()),
+                "",
+                selected(composing()),
+                Platform::Other
+            ),
+            Route::CopyOutput
+        );
+        assert_eq!(
+            route(
+                &keystroke("c", ctrl_shift()),
+                "",
+                composing(),
+                Platform::Other
+            ),
+            Route::Edit(Intent::Copy)
+        );
+    }
+
+    #[test]
+    fn ctrl_c_interrupts_with_nothing_selected_and_copies_with_something() {
+        // **The collision that matters.** A terminal whose interrupt key was
+        // spent on the clipboard would be a terminal nobody could run a
+        // program in, so the selection has to be what decides — and copying
+        // lets go of it, which is why the second `ctrl-c` always interrupts.
+        for platform in [Platform::Mac, Platform::Other] {
+            assert_eq!(
+                route(&keystroke("c", ctrl()), "", composing(), platform),
+                Route::Interrupt,
+                "with nothing selected `ctrl-c` is the signal it has always been"
+            );
+            assert_eq!(
+                route(&keystroke("c", ctrl()), "", selected(composing()), platform),
+                Route::CopyOutput
+            );
+            assert!(
+                !Route::CopyOutput.reaches_the_shell(),
+                "a copy must not also interrupt the command it copied from"
+            );
+
+            // And nothing else the shell reserves is taken by a selection
+            // being on screen.
+            assert_eq!(
+                route(&keystroke("z", ctrl()), "", selected(composing()), platform),
+                Route::Raw
+            );
+            assert_eq!(
+                route(&keystroke("d", ctrl()), "", selected(empty()), platform),
+                Route::Raw
+            );
+        }
+    }
+
+    #[test]
+    fn a_selection_can_be_copied_off_a_full_screen_programs_screen() {
+        // Rule 1 sits above rule 2 on purpose: what vim has drawn is still
+        // text somebody dragged a pointer across. Every other key on that
+        // screen is still vim's, including `ctrl-c` once the selection is
+        // gone.
+        let vim = Pane {
+            alt_screen: true,
+            line_is_empty: true,
+            grid_has_selection: true,
+        };
+        for platform in [Platform::Mac, Platform::Other] {
+            assert_eq!(
+                route(&keystroke("c", ctrl()), "", vim, platform),
+                Route::CopyOutput
+            );
+            assert_eq!(
+                route(&keystroke("c", ctrl()), "", selected(vim), platform),
+                Route::CopyOutput
+            );
+            assert_eq!(
+                route(&keystroke("x", ctrl()), "", vim, platform),
+                Route::Raw,
+                "every other key on the alt screen is still the program's"
+            );
+            assert_eq!(
+                route(
+                    &keystroke("c", ctrl()),
+                    "",
+                    Pane {
+                        grid_has_selection: false,
+                        ..vim
+                    },
+                    platform
+                ),
+                Route::Raw,
+                "and with nothing selected `ctrl-c` reaches the program"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_but_a_copy_chord_is_taken_by_a_selection() {
+        // The rule has to be narrow, or a selection nobody remembered making
+        // would start eating keys. Only the letter `c`, only with the copy
+        // modifiers of this platform.
+        let pane = selected(composing());
+        for (key, modifiers) in [("v", cmd()), ("x", cmd()), ("c", none()), ("c", alt())] {
+            assert_ne!(
+                route(&keystroke(key, modifiers), "c", pane, Platform::Mac),
+                Route::CopyOutput,
+                "{key} was taken by a selection"
+            );
+        }
+        for (key, modifiers) in [("c", none()), ("c", shift()), ("v", ctrl()), ("x", ctrl())] {
+            assert_ne!(
+                route(&keystroke(key, modifiers), "c", pane, Platform::Other),
+                Route::CopyOutput,
+                "{key} was taken by a selection"
+            );
+        }
+        assert_eq!(
+            route(&keystroke("c", cmd_alt()), "", pane, Platform::Mac),
+            Route::Ignored,
+            "a window manager's chord is not a request to copy"
+        );
     }
 
     #[test]

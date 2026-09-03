@@ -409,6 +409,38 @@ fn keys(workspace: &Workspace) -> Box<dyn Element> {
             ui,
         ),
         widgets::category(
+            "Selecting the output",
+            false,
+            vec![
+                binding("Select a run of text", "drag".to_owned()),
+                binding(
+                    "Select a word / a whole line",
+                    "double / triple click".to_owned(),
+                ),
+                binding("Select a column of it", "alt-drag".to_owned()),
+                binding(
+                    "Copy what is selected",
+                    chord("cmd-c", "ctrl-c or ctrl-shift-c"),
+                ),
+                widgets::note(
+                    "A selection in the output owns the copy chord for as long as it exists, \
+                     and copying lets go of it — which is the only sign a copy happened. That \
+                     is what settles ctrl-c off macOS, where the same key is also the \
+                     interrupt: with nothing selected it interrupts exactly as it always has, \
+                     and because copying releases the selection, the very next press does too.",
+                    ui,
+                ),
+                widgets::note(
+                    "The copy leaves the command field alone. A selection is also let go of by \
+                     typing, by clicking into the field, and by clicking elsewhere in the \
+                     output — but never by the shell printing, which is exactly when somebody \
+                     is reading what is already on screen.",
+                    ui,
+                ),
+            ],
+            ui,
+        ),
+        widgets::category(
             "The command field",
             false,
             vec![

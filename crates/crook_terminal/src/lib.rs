@@ -55,10 +55,12 @@
 //!   is what makes this crate testable without a process.
 //! * [`Snapshot`] is what the renderer draws.
 //! * [`input`] encodes key presses into the bytes a shell expects.
+//! * [`selection`] is the vocabulary a pointer selects text with.
 
 mod emulator;
 pub mod input;
 mod pty;
+pub mod selection;
 mod snapshot;
 
 use std::fmt;
@@ -71,6 +73,7 @@ use anyhow::Result;
 pub use crate::emulator::{Emulator, TerminalEvent};
 pub use crate::input::{InputModes, Key, Modifiers};
 pub use crate::pty::{ChildExit, Program, Pty, PtyReader, default_shell};
+pub use crate::selection::{CellSide, GridPoint, SelectionKind, SelectionSpan, ViewportPoint};
 pub use crate::snapshot::{
     CellCombining, CellFlags, Cursor, CursorShape, Palette, Rgb, Snapshot, SnapshotCell,
     TerminalSize,
@@ -259,6 +262,35 @@ impl Terminal {
     /// Returns the viewport to the live output.
     pub fn scroll_to_bottom(&mut self) {
         self.emulator.scroll_to_bottom();
+    }
+
+    /// Starts a selection at a cell of the viewport, replacing any there was.
+    ///
+    /// The kind is what the gesture meant: [`SelectionKind::Simple`] for a
+    /// drag, [`SelectionKind::Semantic`] for a double click, and
+    /// [`SelectionKind::Lines`] for a triple click.
+    pub fn start_selection(&mut self, kind: SelectionKind, at: ViewportPoint, side: CellSide) {
+        self.emulator.start_selection(kind, at, side);
+    }
+
+    /// Drags the open end of the selection to a cell of the viewport.
+    pub fn update_selection(&mut self, at: ViewportPoint, side: CellSide) {
+        self.emulator.update_selection(at, side);
+    }
+
+    /// Drops the selection.
+    pub fn clear_selection(&mut self) {
+        self.emulator.clear_selection();
+    }
+
+    /// Whether there is anything selected to copy.
+    pub fn has_selection(&self) -> bool {
+        self.emulator.has_selection()
+    }
+
+    /// The selected text, or `None` when nothing is selected.
+    pub fn selection_text(&self) -> Option<String> {
+        self.emulator.selection_text()
     }
 
     /// The title the child last asked for, which is what a tab should call

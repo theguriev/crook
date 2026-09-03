@@ -30,6 +30,13 @@ Four features, and the page that configures them:
   follow a `cd`. A tab splits into panes with `cmd-d` and `cmd-shift-d` (`ctrl-shift-d` and
   `ctrl-shift-e` off macOS), and a shell that exits closes its pane, its tab, and with the
   last tab the window.
+- **Output you can select and copy.** Drag across a pane's output to select it, double click
+  for a word, triple click for a line, alt-drag for a column; the drag keeps going when the
+  pointer leaves the pane, a drag past the top or bottom edge scrolls the screen under the
+  pointer, and the selection stays on its own text while the shell prints more underneath.
+  `cmd-c` — `ctrl-c` or `ctrl-shift-c` off macOS — copies it and lets it go, so the next
+  `ctrl-c` interrupts the shell the way it always has. The half-written command line in the
+  field below is left exactly where it was: a copy is not an interrupt.
 - **A command line that behaves like a text field.** Under each pane's output is an input
   box, not a raw terminal line: a caret you can click, selection by drag, double and triple
   click, word and line movement, undo, the system clipboard, a per-pane history on the up and

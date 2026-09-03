@@ -81,7 +81,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crook_terminal::{
-    Key, Modifiers, Palette, Rgb, Snapshot, Terminal, TerminalEvent, TerminalOptions, TerminalSize,
+    CellSide, Key, Modifiers, Palette, Rgb, SelectionKind, Snapshot, Terminal, TerminalEvent,
+    TerminalOptions, TerminalSize, ViewportPoint,
 };
 use crookui_core::geometry::Color;
 use crookui_core::prelude::*;
@@ -618,6 +619,61 @@ impl TerminalHandle {
             return;
         }
         self.drive(|terminal| terminal.scroll_lines(delta));
+    }
+
+    /// Starts a selection where a press landed, replacing any there was.
+    pub fn start_selection(&self, kind: SelectionKind, at: ViewportPoint, side: CellSide) {
+        self.drive(|terminal| terminal.start_selection(kind, at, side));
+    }
+
+    /// Drags the open end of the selection to where the pointer is, scrolling
+    /// the viewport by `scroll` lines first.
+    ///
+    /// The two happen together because they are one gesture: a drag past the
+    /// bottom of the pane moves the viewport *and* takes the selection with it,
+    /// and doing them in two calls would take the terminal's lock twice and
+    /// publish a frame in between with the screen scrolled and the selection
+    /// still on the row the pointer left.
+    pub fn drag_selection(&self, at: ViewportPoint, side: CellSide, scroll: i32) {
+        self.drive(|terminal| {
+            if scroll != 0 {
+                terminal.scroll_lines(scroll);
+            }
+            terminal.update_selection(at, side);
+        });
+    }
+
+    /// Selects from one cell of the viewport to another, as `--select-output`
+    /// and the tests do, neither of which has a pointer to aim.
+    pub fn select_cells(&self, from: ViewportPoint, to: ViewportPoint) {
+        self.drive(|terminal| {
+            terminal.start_selection(SelectionKind::Simple, from, CellSide::Left);
+            terminal.update_selection(to, CellSide::Right);
+        });
+    }
+
+    /// Drops the selection, reporting whether there was one to drop.
+    pub fn clear_selection(&self) -> bool {
+        self.drive(|terminal| {
+            let had = terminal.has_selection();
+            terminal.clear_selection();
+            had
+        })
+    }
+
+    /// Whether there is anything selected in this pane's output.
+    ///
+    /// Asked of the terminal rather than of a snapshot, because the answer
+    /// decides what `ctrl-c` means and a snapshot is a frame old: the one
+    /// keystroke that must never be wrong about this is the one that stops a
+    /// running command.
+    pub fn has_selection(&self) -> bool {
+        self.0.lock().has_selection()
+    }
+
+    /// What is selected, or `None` when nothing is.
+    pub fn selection_text(&self) -> Option<String> {
+        self.0.lock().selection_text()
     }
 
     /// Runs `work` against the terminal and republishes what it draws.

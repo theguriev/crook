@@ -32,23 +32,51 @@
 //! when the whole number of columns or rows actually moved, because a resize is
 //! a syscall, a `SIGWINCH`, and a full-screen program redrawing itself.
 //!
+//! # Selecting the output
+//!
+//! The grid is the other selectable surface in a pane. A press starts a
+//! selection at the cell under it — a character, a word on the second click, a
+//! line on the third, a block with Alt — a drag takes it out, and a drag that
+//! leaves the top or the bottom edge scrolls the viewport under the pointer so
+//! that a selection can run past the screen it began on.
+//!
+//! **None of the selection is kept here.** The cells belong to the emulator,
+//! which is what keeps them anchored to their text while the shell prints more
+//! underneath — see [`crook_terminal::selection`] — and the *gesture* belongs
+//! to the workspace, because a press and the drag that answers it are separated
+//! by every frame the pointer takes to move and this element is thrown away on
+//! each of them. What is here is the arithmetic between a pixel and a cell, the
+//! rectangles the highlight is drawn as, and the four rules that let go of a
+//! selection: typing, clicking into the field, clicking somewhere else in the
+//! output, and the pane closing. The fifth thing that could and must not is the
+//! shell printing, which is why nothing in the paint path touches it.
+//!
 //! [`Line`]: crookui_core::text_layout::Line
 
 use std::sync::Arc;
 
-use crook_terminal::{CellFlags, Cursor, CursorShape, Rgb, Snapshot, SnapshotCell, TerminalSize};
+use crook_terminal::{
+    CellFlags, CellSide, Cursor, CursorShape, Rgb, SelectionKind, Snapshot, SnapshotCell,
+    TerminalSize, ViewportPoint,
+};
 use crookui_core::AppContext;
 use crookui_core::element::{Element, SizeConstraint};
-use crookui_core::event::{DispatchedEvent, Event};
+use crookui_core::event::{DispatchedEvent, Event, Modifiers, MouseButton};
 use crookui_core::geometry::{Color, Point, RectF, Vector2F, vec2f};
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 use crookui_core::scene::Scene;
 
-use crate::input_keys::{self, Platform};
+use crate::clipboard::Clipboard;
+use crate::input_keys::{self, Platform, Route};
 use crate::pane_input::PaneInput;
+use crate::pane_selection::PaneSelection;
+use crate::tab::PaneId;
 use crate::terminal_font::{CellFont, CellMetrics};
 use crate::terminal_keys;
 use crate::terminal_model::TerminalHandle;
+use crate::theme::theme;
+
+use super::action::WorkspaceAction;
 
 /// How thick the rules a cell can carry are, as a fraction of the font size.
 ///
@@ -111,8 +139,23 @@ pub struct TerminalElement {
     /// empty line, and a delete over a written one.
     input: Option<PaneInput>,
 
+    /// The pointer gesture that selects text out of this grid, and where a
+    /// copy of it goes.
+    ///
+    /// `None` for a grid nobody can select from: a test painting a snapshot,
+    /// or a pane with no terminal behind it to ask what is selected.
+    mouse: Option<Mouse>,
+
     size: Option<Vector2F>,
     origin: Option<Point>,
+}
+
+/// What the grid needs to be selectable: which pane this is, the gesture the
+/// workspace keeps for it, and somewhere for the copy to go.
+struct Mouse {
+    pane: PaneId,
+    gesture: PaneSelection,
+    clipboard: Clipboard,
 }
 
 impl TerminalElement {
@@ -124,6 +167,7 @@ impl TerminalElement {
             handle: None,
             keys: Keys::None,
             input: None,
+            mouse: None,
             size: None,
             origin: None,
         }
@@ -144,9 +188,26 @@ impl TerminalElement {
         self
     }
 
+    /// Makes the output selectable: `gesture` is the press this pane has open,
+    /// which outlives the frame, `clipboard` is where a copy goes, and `pane`
+    /// is who the release is dispatched for.
+    pub fn with_selection(
+        mut self,
+        pane: PaneId,
+        gesture: PaneSelection,
+        clipboard: Clipboard,
+    ) -> Self {
+        self.mouse = Some(Mouse {
+            pane,
+            gesture,
+            clipboard,
+        });
+        self
+    }
+
     /// The typed keystroke, if this pane is the one that should have it and the
     /// shell is the half of the pane it belongs to.
-    fn type_key(&self, event: &Event) -> bool {
+    fn type_key(&self, event: &Event, ctx: &mut EventContext) -> bool {
         let Event::KeyDown { keystroke, chars } = event else {
             return false;
         };
@@ -157,23 +218,48 @@ impl TerminalElement {
             return false;
         };
 
-        // The whole policy is [`input_keys::route`]: on the alt screen the
-        // program has every key, on the normal screen the shell has only the
-        // ones that interrupt, end and suspend, and the input field below has
-        // the rest.
+        // The whole policy is [`input_keys::route`]: a selection in the output
+        // owns the copy chord, on the alt screen the program has every key, on
+        // the normal screen the shell has only the ones that interrupt, end and
+        // suspend, and the input field below has the rest.
+        //
+        // A modal menu suspends the selection's claim rather than the menu's
+        // own filter below: while one is up, the three keys a running command
+        // has to keep hearing mean what they always mean, and `ctrl-c` cannot
+        // be spent on the clipboard by a selection nobody can see the pointer
+        // on any more. A grid with nowhere to copy *to* reports the same, so
+        // the interrupt is never taken by a chord that could not have answered
+        // it.
+        let modal = self.keys == Keys::Signals;
+        let can_copy = !modal && self.mouse.is_some();
         let pane = input_keys::Pane {
             alt_screen: self.snapshot.alt_screen,
             line_is_empty: self
                 .input
                 .as_ref()
                 .is_none_or(|input| input.editor().is_empty()),
+            grid_has_selection: can_copy && handle.has_selection(),
         };
-        if !input_keys::route(keystroke, chars, pane, Platform::current()).reaches_the_shell() {
+        let route = input_keys::route(keystroke, chars, pane, Platform::current());
+
+        if route == Route::CopyOutput {
+            return self.copy_selection(handle, ctx);
+        }
+        // **Typing releases the selection**, whichever half of the pane the key
+        // belongs to: a line going into the field under a highlight nobody is
+        // aiming at any more is the same stale highlight as one left over a
+        // screen that has scrolled. A key the keymap has no meaning for changes
+        // nothing and so releases nothing.
+        if route != Route::Ignored && pane.grid_has_selection {
+            self.release_selection(ctx);
+        }
+
+        if !route.reaches_the_shell() {
             return false;
         }
         // A modal menu takes the rest away: everything but the three keys a
         // running command has to keep hearing.
-        if self.keys == Keys::Signals && !input_keys::is_signal(keystroke) {
+        if modal && !input_keys::is_signal(keystroke) {
             return false;
         }
 
@@ -181,6 +267,182 @@ impl TerminalElement {
             return false;
         };
         handle.send_key(key, modifiers)
+    }
+
+    /// Puts what is selected in the output on the clipboard and lets go of it.
+    ///
+    /// Letting go is not tidiness. Off macOS this chord is also SIGINT, and the
+    /// selection is the only thing standing between a person and an interrupt
+    /// key that no longer interrupts — so the very next press of it does. It is
+    /// also the only sign a copy happened at all: the highlight goes away.
+    ///
+    /// It goes away even on the copy that could not be made — a machine with no
+    /// clipboard at all, or one whose clipboard another process was holding.
+    /// **That is deliberate, and it is the lesser of two bad answers.** Keeping
+    /// the selection would be more truthful about the copy, and it would also
+    /// hand the same selection the next press of this chord, and the one after
+    /// it: on a machine where the clipboard never opens, that is a terminal
+    /// whose interrupt never works again. A copy that did not happen costs a
+    /// highlight and a line in the log; one that disarmed the interrupt would
+    /// cost the pane.
+    fn copy_selection(&self, handle: &TerminalHandle, ctx: &mut EventContext) -> bool {
+        let Some(mouse) = self.mouse.as_ref() else {
+            return false;
+        };
+        if !handle
+            .selection_text()
+            .is_some_and(|copied| mouse.clipboard.write(&copied))
+        {
+            log::warn!("the selection could not be put on the clipboard; letting go of it anyway");
+        }
+        self.release_selection(ctx);
+        true
+    }
+
+    /// Asks for the selection to be let go of, once this keystroke is done
+    /// with.
+    ///
+    /// Dispatched rather than done here, and [`WorkspaceAction::ReleaseSelection`]
+    /// carries the reason: the field under this grid routes the same keystroke
+    /// against the same question a moment later, and a grid that had already
+    /// changed the answer would have it route as though nothing were selected.
+    fn release_selection(&self, ctx: &mut EventContext) {
+        let Some(mouse) = self.mouse.as_ref() else {
+            return;
+        };
+        ctx.dispatch_typed_action(WorkspaceAction::ReleaseSelection(mouse.pane));
+    }
+
+    /// Starts a selection where a press landed, in the units the click count
+    /// asks for: a character, a word, or a whole line.
+    ///
+    /// Alt makes it a block, which is how a column is taken out of aligned
+    /// output — `ls -l`, a table, a diff — without the rest of every line
+    /// coming with it.
+    fn press(
+        &self,
+        position: Vector2F,
+        click_count: u32,
+        modifiers: Modifiers,
+        ctx: &mut EventContext,
+    ) -> bool {
+        let Some(mouse) = self.mouse.as_ref() else {
+            return false;
+        };
+        let (Some(handle), Some((at, side))) = (self.handle.as_ref(), self.cell_at(position))
+        else {
+            return false;
+        };
+
+        let kind = match (click_count, modifiers.alt) {
+            (1, true) => SelectionKind::Block,
+            // A press that is never dragged anywhere leaves an *empty* simple
+            // selection, which is no selection at all — so a plain click on the
+            // output is also how the last one is let go of.
+            (1, _) => SelectionKind::Simple,
+            (2, _) => SelectionKind::Semantic,
+            _ => SelectionKind::Lines,
+        };
+        handle.start_selection(kind, at, side);
+        mouse.gesture.begin();
+        ctx.notify();
+        true
+    }
+
+    /// Drags the open end of the selection to the pointer, scrolling the
+    /// viewport when the pointer has left the grid.
+    fn drag(&self, position: Vector2F, ctx: &mut EventContext) -> bool {
+        let Some(mouse) = self.mouse.as_ref() else {
+            return false;
+        };
+        // Deliberately not hit-tested: dragging *past* the pane is how a
+        // selection is taken to the end of a line, and how it is taken past the
+        // end of the screen. What keeps this pane's grid out of a drag that
+        // began in the field, or in the pane beside it, is that only the pane
+        // the press landed on has a gesture open.
+        if !mouse.gesture.is_dragging() {
+            return false;
+        }
+        let (Some(handle), Some((at, side))) = (self.handle.as_ref(), self.cell_at(position))
+        else {
+            return false;
+        };
+
+        handle.drag_selection(at, side, self.autoscroll(position));
+        ctx.notify();
+        true
+    }
+
+    /// Ends the gesture, reporting whether this pane had one.
+    fn release(&self) -> bool {
+        self.mouse.as_ref().is_some_and(|mouse| mouse.gesture.end())
+    }
+
+    /// The cell of the viewport a window position lands on, and which half of
+    /// it the pointer is on.
+    ///
+    /// Clamped into the grid rather than refused outside it, because a drag
+    /// that has left the pane is still selecting: past the right edge means the
+    /// end of the row, and past the bottom means the last row — and the row it
+    /// clamps to is the one [`Self::autoscroll`] is about to scroll under the
+    /// pointer.
+    ///
+    /// The answer is a cell of the *screen*, not of the text. Turning one into
+    /// the other needs the display offset, which only the emulator has and
+    /// which moves whenever the shell prints while the viewport is scrolled
+    /// back — so that conversion happens under the terminal's own lock at the
+    /// moment the press lands, and a selection dragged out four screens into
+    /// the scrollback cannot end up on the live output.
+    fn cell_at(&self, position: Vector2F) -> Option<(ViewportPoint, CellSide)> {
+        let bounds = self.bounds()?;
+        let metrics = self.font.metrics();
+        let (fitting_columns, fitting_rows) = metrics.grid_for(bounds.width(), bounds.height());
+        let columns = usize::from(fitting_columns).min(self.snapshot.columns);
+        let rows = usize::from(fitting_rows).min(self.snapshot.rows);
+        if columns == 0 || rows == 0 {
+            return None;
+        }
+
+        let local = position - bounds.origin();
+        let (column, side) = column_at(local.x(), metrics.width, columns);
+        let row = (local.y() / metrics.height)
+            .floor()
+            .clamp(0., (rows - 1) as f32) as usize;
+        Some((ViewportPoint::new(row, column), side))
+    }
+
+    /// How far to scroll before a drag lands, when the pointer has left the top
+    /// or the bottom of the grid.
+    ///
+    /// Proportional to how far past the edge it is, in rows, and positive is
+    /// back into history — the sense the wheel and the emulator both use. That
+    /// is what makes a selection able to run past the screen it started on:
+    /// each move of the pointer beyond the edge takes the viewport with it.
+    /// Bounded by a screenful per event so that flinging the pointer at the
+    /// bottom of the window does not skip the output it was dragging over.
+    fn autoscroll(&self, position: Vector2F) -> i32 {
+        let Some(bounds) = self.bounds() else {
+            return 0;
+        };
+        let height = self.font.metrics().height;
+        let past = if position.y() < bounds.min_y() {
+            bounds.min_y() - position.y()
+        } else if position.y() > bounds.max_y() {
+            bounds.max_y() - position.y()
+        } else {
+            return 0;
+        };
+
+        let rows = self.snapshot.rows.max(1) as f32;
+        let lines = (past / height).clamp(-rows, rows);
+        // Away from zero: a pointer one pixel past the edge is already asking
+        // for the next line, and having to travel a whole row's height before
+        // anything happens would make the edge feel dead.
+        if lines > 0. {
+            lines.ceil() as i32
+        } else {
+            lines.floor() as i32
+        }
     }
 
     /// Moves the viewport through the scrollback, if the wheel turned over this
@@ -276,20 +538,57 @@ impl Element for TerminalElement {
         let Some(z_index) = self.z_index() else {
             return false;
         };
+
+        // **The rest of a gesture this grid already owns is not hit tested.**
+        // A press opened it here; where the pointer has got to since is the
+        // gesture, not a new one. Dragging *out* of the pane is how a selection
+        // is taken to the end of a line and past the end of the screen, and the
+        // button can perfectly well come up over the tabs panel or a popup —
+        // painted in a later layer, so `at_z_index` would drop the release and
+        // leave the gesture open for ever, and every unrelated drag afterwards
+        // would rewrite this pane's selection. What keeps a neighbour's drag
+        // out is [`PaneSelection`]: only the pane the press landed on has one.
+        match event.raw_event() {
+            Event::MouseDragged {
+                button: MouseButton::Left,
+                position,
+                ..
+            } => return self.drag(*position, ctx),
+            Event::MouseUp {
+                button: MouseButton::Left,
+                ..
+            } => return self.release(),
+            _ => {}
+        }
+
         // Keystrokes are never filtered by what is painted over them — they are
-        // not about a place on screen — but the wheel is, so that a menu open
-        // over a pane scrolls the menu rather than the shell underneath it.
+        // not about a place on screen — but a press and the wheel are, so that
+        // a menu open over a pane is neither clicked nor scrolled through.
         let Some(event) = event.at_z_index(z_index, ctx) else {
             return false;
         };
 
-        if self.type_key(event) || self.scroll(event) {
+        if self.type_key(event, ctx) || self.scroll(event) {
             // Both move the viewport to somewhere the last frame did not draw:
             // typing returns to the live output, and the wheel leaves it.
             ctx.notify();
             return true;
         }
-        false
+
+        match event {
+            Event::MouseDown {
+                button: MouseButton::Left,
+                position,
+                click_count,
+                modifiers,
+            } if self
+                .bounds()
+                .is_some_and(|bounds| bounds.contains_point(*position)) =>
+            {
+                self.press(*position, *click_count, *modifiers, ctx)
+            }
+            _ => false,
+        }
     }
 
     fn size(&self) -> Option<Vector2F> {
@@ -353,6 +652,11 @@ fn paint_grid(
         let cells = &cells[..columns];
 
         paint_backgrounds(cells, snapshot.background, origin.x(), top, metrics, scene);
+        // Over the cells' own backgrounds and under everything else: the
+        // highlight is translucent, so it takes the colour of whatever the
+        // shell painted the cell and the character is still drawn on top of it
+        // in its own ink. Selecting text changes its ground, never its colour.
+        paint_selection(snapshot, row, columns, origin.x(), top, metrics, scene);
         paint_rules(cells, origin.x(), top, metrics, scene);
 
         for (column, cell) in cells.iter().enumerate() {
@@ -459,6 +763,68 @@ fn paint_backgrounds(
         }
         start = end;
     }
+}
+
+/// Fills the cells of one row that are inside the selection.
+///
+/// Merged into runs the way the backgrounds are: a selected line is one
+/// rectangle, not eighty, and a selection dragged over a screenful of `cat` is
+/// a rectangle per row.
+fn paint_selection(
+    snapshot: &Snapshot,
+    row: usize,
+    columns: usize,
+    left: f32,
+    top: f32,
+    metrics: CellMetrics,
+    scene: &mut Scene,
+) {
+    if snapshot.selection.is_none() {
+        return;
+    }
+
+    let mut start = 0;
+    while start < columns {
+        if !snapshot.is_selected(row, start) {
+            start += 1;
+            continue;
+        }
+
+        let end = (start..columns)
+            .find(|column| !snapshot.is_selected(row, *column))
+            .unwrap_or(columns);
+        scene
+            .draw_rect_without_hit_recording(RectF::new(
+                vec2f(left + start as f32 * metrics.width, top),
+                vec2f((end - start) as f32 * metrics.width, metrics.height),
+            ))
+            .with_background(theme().selection);
+        start = end;
+    }
+}
+
+/// Which column a horizontal offset lands on, and which half of it.
+///
+/// The half is what makes a selection end *between* two characters rather than
+/// on one: dragging right from the left of a character takes it and dragging
+/// right from its middle does not. Outside the row the answer is its first cell
+/// on the left and its last on the right, which is what a drag that has left
+/// the pane means.
+fn column_at(x: f32, width: f32, columns: usize) -> (usize, CellSide) {
+    if x < 0. {
+        return (0, CellSide::Left);
+    }
+    let cell = x / width;
+    let column = cell.floor() as usize;
+    if column >= columns {
+        return (columns - 1, CellSide::Right);
+    }
+    let side = if cell.fract() < 0.5 {
+        CellSide::Left
+    } else {
+        CellSide::Right
+    };
+    (column, side)
 }
 
 /// Draws the underlines and strikeouts one row asks for.

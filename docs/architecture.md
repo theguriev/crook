@@ -555,18 +555,108 @@ history, grapheme-aware deletion — testable in microseconds with no window, no
 fonts. `app/src/pane_input.rs` is the per-pane state the element tree is rebuilt around;
 `app/src/workspace/input_element.rs` draws it on the grid's own cell metrics.
 
+### Selecting the output
+
+The grid above the field is selectable with the pointer, and it is the emulator's own model
+that makes it so. `alacritty_terminal` already has a `Selection` — four kinds (a plain drag, a
+block, a word, a line), a `side` so a selection ends *between* two characters, and
+`Selection::rotate`, which `Term` calls on every path that scrolls the grid. That last one is
+the whole reason the selection is stored in `Term::selection` rather than beside it: a
+selection made around a word stays around that word while a build prints a hundred more lines
+underneath it, and a copy kept anywhere else would be wrong the first time a `\n` arrived.
+`crates/crook_terminal/src/selection.rs` is a vocabulary over it — `SelectionKind`,
+`CellSide`, and two point types — and nothing above the crate ever names an alacritty type.
+
+**The two point types are not fussiness.** A `ViewportPoint` is a cell of what is *on screen*
+and a `GridPoint` is a cell of the *text*, with negative lines for scrollback; the display
+offset is the distance between them and it moves whenever the shell prints while somebody is
+scrolled back. A mouse produces the first, a selection is stored in the second, and confusing
+them is exactly the bug where a selection dragged out four screens into the history highlights
+the live output instead. They are separate types so the conversion — which happens inside the
+emulator, under its own lock, at the moment the press lands — cannot be skipped.
+
+**On the snapshot it is a span, not a flag on every cell.** A selection changes on pointer
+moves that change nothing the shell printed. A per-cell `selected` bool lives inside
+`Snapshot::cells`, and the only way to change something in `cells` is to *build* `cells` — a
+walk of the grid with a palette resolution per cell, ten thousand of them, for every pixel the
+pointer travels while a button is held. A span sits beside the cells instead, so the emulator
+hands back the very cells it already built with two new points next to them. It is compared in
+`same_content` like everything else, because a highlight *is* drawn content: a renderer that
+skipped a frame on an unchanged revision would leave the old highlight under a pointer that
+had moved on. So the revision stays honest and costs one comparison of two points.
+
+The gesture — "is the button that went down on this grid still down?" — is the one piece the
+emulator cannot hold, because it never hears about a button, and the element cannot hold it
+either, because the tree is rebuilt between the press and the drag. It lives in
+`app/src/pane_selection.rs`, per pane, beside the input field's state and for the same reason.
+
+**And the gesture, once open, is not hit-tested.** A press is: a menu open over a pane must not
+be clicked through. The drag and the release that follow are not, because they are the *same*
+gesture, and where the pointer has got to since is not a new one. Dragging out of the pane is
+how a selection is taken to the end of a line and past the end of the screen, and the button
+can perfectly well come up over the tabs panel, which paints in a later layer — an occlusion
+test on the release would drop it and leave the pane with a press it still thinks is down, so
+that every unrelated drag afterwards, from any other press or from none, rewrote this pane's
+selection. What keeps a neighbour's drag out is `PaneSelection`, not the layer: only the pane
+the press landed on has a gesture to continue.
+
+**Two elements route each keystroke, so nothing may change the answer between them.** A pane's
+grid and the field under it are siblings in a `Flex`, which hands the same `KeyDown` to both —
+the grid first. Both ask `TerminalHandle::has_selection` to route it, and both act on a
+different half of the answer. So the grid does not release what it copies where it copies it:
+it dispatches `WorkspaceAction::ReleaseSelection`, and actions are applied once the whole tree
+has seen the event. A grid that released it in place would have the field read the same
+`ctrl-c` as the interrupt it is with *nothing* selected, and throw away the half-written
+command line; on macOS the field's own `cmd-c` would then overwrite the clipboard the grid had
+just written. The invariant is worth stating plainly: **nothing may change what is selected in
+the output while a keystroke is being dispatched.**
+
+**Two places where the range the emulator hands back has to be checked.** `SelectionRange::new`
+asserts `start <= end` and everything downstream relies on it, but `Selection::range_block`
+builds one without going through the constructor: it moves the start a column right when the
+drag began on the right of a cell and the end a column left when it ended on the left of one,
+and never checks the two did not cross. An alt-drag whose ends share a column comes back
+inverted — covering no cell, so nothing is highlighted, while `has_selection` still says there
+is something to copy and off macOS spends the interrupt on it — and on the *last* column the
+start lands on `columns`, one past the row, which `Term::line_to_string` then indexes the row
+with and panics. `snapshot::selection_of` drops such a range, and `Emulator::selection_text`
+asks it rather than the terminal, so the text and the highlight come from one decision.
+
+**A double-width character is highlighted across both of its columns.** Its glyph is drawn
+once, from the first, across the width of two, and copying already treats the pair as one
+character. So `Snapshot::is_selected` lights both in either direction — reaching the trailing
+half takes the character, and reaching the character takes the column its right half is drawn
+in — or a drag that stopped in the middle of a CJK glyph would cut it down the middle while
+`cmd-c` took the whole of it.
+
 ### Where the keyboard line is drawn
 
-**One function: `input_keys::route`.** Four rules, in order.
+**One function: `input_keys::route`.** Five rules, in order.
 
-1. **Crook's own chords never arrive.** The window delegate consumes what `input_keys::binding`
+0. **Crook's own chords never arrive.** The window delegate consumes what `input_keys::binding`
    names before any element sees the event, which is what makes `cmd-t` open a tab everywhere
    rather than typing a `t`.
+1. **A selection in the output owns the copy chord while it exists.** There are two selections
+   on a pane and one `cmd-c`; the one somebody just dragged across the output wins over the
+   invisible one in a field they were not looking at. Off macOS that chord is also `ctrl-c`,
+   and **the collision is settled by the selection rather than by the key**: with nothing
+   selected `ctrl-c` interrupts exactly as it always has, and with something selected it
+   copies *and lets go*, so the very next press interrupts. That release is the whole safety
+   of the rule, and it is also the only feedback a copy has — including on the copy that could
+   not be made, because a selection that survived a clipboard failure would claim the next
+   press too, and the one after it. A modal menu suspends the claim entirely, because a
+   running command has to stay interruptible. The other four ways a selection is released —
+   typing, clicking into the field, clicking elsewhere in the output, the pane closing — are
+   the element's; the shell printing is deliberately not one of them. The half-written command
+   line in the field is *not* one of them either: a copy is not an interrupt, and the field
+   only hears about it because it routes the same keystroke a moment later.
 2. **The alt screen belongs to the program.** vim, `top` and `less` drive every cell and read
    every key themselves, so on the alt screen every key goes raw to the pty — and the field is
    not drawn at all. `Snapshot::alt_screen` is the whole test. This is the honest line between
    "a shell reading a line" and "a program driving the screen": it needs no shell integration,
    no prompt marks and no heuristics, and it is a fact the emulator already knows.
+   Rule 1 sits above this one: what vim has drawn is still text somebody dragged a pointer
+   across, and every other key on that screen is still the program's.
 3. **The signal keys reach the shell.** `ctrl-c` interrupts — and throws the half-written line
    away with it, because that is what the gesture means — `ctrl-z` suspends, and `ctrl-d` ends
    the input, but only when the field is empty. The field now holds the line the shell's own

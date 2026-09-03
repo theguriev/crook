@@ -57,7 +57,7 @@ use super::view::Workspace;
 ///
 /// Every logical pixel here is a column or a row the shell does not get, which
 /// is why it is small.
-const GRID_PADDING: f32 = 8.;
+pub(super) const GRID_PADDING: f32 = 8.;
 
 /// The line between two panes, and the whole of what separates them.
 ///
@@ -262,6 +262,16 @@ fn contents(
     // so it is given the field even on the screen that does not draw one.
     if let Some(input) = workspace.input(pane.id()) {
         grid = grid.with_input(input.clone());
+    }
+    // The gesture outlives this element by design: a press and the drag that
+    // follows it are separated by however many frames the pointer takes to
+    // move, and every one of them throws this tree away.
+    if let Some(interaction) = workspace.interaction(pane.id()) {
+        grid = grid.with_selection(
+            pane.id(),
+            interaction.selection.clone(),
+            workspace.clipboard().clone(),
+        );
     }
     let grid = grid.finish();
     if !input_keys::shows_input(alt_screen) {

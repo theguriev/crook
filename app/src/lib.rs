@@ -37,7 +37,10 @@
 //!
 //! `--type <text>` is its quieter companion: it leaves text in the field
 //! *unsent*, which together with `--select <text>` is how a picture can show a
-//! line in the middle of being written.
+//! line in the middle of being written. `--select-output <text>` is the same
+//! trick above the field: it drags a highlight across what the shell printed,
+//! which is the state a person is in the instant before they press copy and one
+//! nobody can hold a button down for in a headless run.
 
 pub mod clipboard;
 pub mod editor;
@@ -45,6 +48,7 @@ pub mod git;
 pub mod git_model;
 pub mod input_keys;
 pub mod pane_input;
+pub mod pane_selection;
 pub mod platform_insets;
 pub mod process;
 pub mod settings;
@@ -214,6 +218,12 @@ struct Overrides {
     /// the one thing about the field that no unattended run could otherwise
     /// show.
     select: Option<String>,
+    /// Select the first occurrence of this in the first pane's *output*.
+    ///
+    /// `--select`'s companion, above the field rather than in it: what a person
+    /// drags a pointer across the shell's output to take, which is the other
+    /// state no unattended run can hold a button down for.
+    select_output: Option<String>,
 }
 
 impl Overrides {
@@ -222,7 +232,7 @@ impl Overrides {
     /// Neither the field nor the grid is worth a picture without one: a pane
     /// with no shell draws a notice instead of both.
     fn wants_shells(&self) -> bool {
-        self.run.is_some() || self.type_text.is_some()
+        self.run.is_some() || self.type_text.is_some() || self.select_output.is_some()
     }
 }
 
@@ -334,6 +344,10 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 let text = args.next().context("`--select` needs some text")?;
                 overrides.select = Some(text);
             }
+            "--select-output" => {
+                let text = args.next().context("`--select-output` needs some text")?;
+                overrides.select_output = Some(text);
+            }
             "--density" => {
                 let mode = args.next().context("`--density` needs a mode")?;
                 overrides.density = Some(match mode.as_str() {
@@ -382,6 +396,8 @@ OPTIONS:
                        send it, and report what the shell printed
     --type <TEXT>      Leave TEXT in the first pane's input field, unsent
     --select <TEXT>    Select the first occurrence of TEXT in that field
+    --select-output <TEXT>
+                       Select the first occurrence of TEXT in that pane's output
     --menu             Start with the tab options menu open
     --settings [PAGE]  Start with a settings tab open, on `appearance`,
                        `usage`, `keys` or `about`
@@ -415,6 +431,17 @@ KEYS (Linux and Windows):
     pane: ctrl-c interrupts it, ctrl-d ends its input and ctrl-w takes back a
     word. The comma is not a letter the tty wants, which is why the settings
     chord is the one entry here that keeps a bare Control.
+
+THE OUTPUT:
+    Drag across a pane's output to select it: a double click takes a word, a
+    triple click a line, and alt-drag a column. The drag keeps going when the
+    pointer leaves the pane, a drag past the top or bottom edge scrolls the
+    screen under the pointer, and the selection stays on its own text while the
+    shell prints more underneath. cmd-c — ctrl-c or ctrl-shift-c off macOS —
+    copies it and lets it go, which is what keeps ctrl-c the interrupt it has
+    always been the moment there is nothing selected. The half-written command
+    line in the field below is left alone: a copy is not an interrupt. Typing,
+    or clicking anywhere else in the pane, lets the selection go too.
 
 THE INPUT FIELD:
     Each pane composes its next command in the field under its output. Enter
@@ -629,12 +656,13 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
         }
 
         // Last, so that the line in the field is the one the picture was asked
-        // for rather than whatever the shell has been doing since.
-        fill_input(
+        // for rather than whatever the shell has been doing since, and so that
+        // there is output on screen for `--select-output` to find.
+        compose_pane(
             &mut app,
             &workspace,
             pane,
-            &Field::from_overrides(&overrides),
+            &Composed::from_overrides(&overrides),
         );
     }
 
@@ -701,49 +729,59 @@ fn await_shell(
     false
 }
 
-/// What `--type` and `--select` asked to leave in the input field.
+/// What `--type`, `--select` and `--select-output` asked to leave on screen.
 ///
 /// Applied *after* a `--run` command has been typed and sent, in both kinds of
 /// run: the two share one field, and a run that typed its command over this
-/// would send the two of them as one line.
+/// would send the two of them as one line — and there is nothing in the output
+/// to select until the command that printed it has finished.
 #[derive(Clone, Debug, Default)]
-struct Field {
+struct Composed {
     /// The line to leave in the field, unsent.
     text: Option<String>,
     /// The text to select within it.
     selected: Option<String>,
+    /// The text to select in the pane's output, above the field.
+    selected_output: Option<String>,
 }
 
-impl Field {
-    /// What the command line asked the field to hold.
+impl Composed {
+    /// What the command line asked the pane to hold.
     fn from_overrides(overrides: &Overrides) -> Self {
         Self {
             text: overrides.type_text.clone(),
             selected: overrides.select.clone(),
+            selected_output: overrides.select_output.clone(),
         }
     }
 
     /// Whether nothing was asked for, which is every ordinary run.
     fn is_empty(&self) -> bool {
-        self.text.is_none() && self.selected.is_none()
+        self.text.is_none() && self.selected.is_none() && self.selected_output.is_none()
     }
 }
 
-/// Puts what `--type` and `--select` asked for into a pane's input field.
-fn fill_input(app: &mut App, workspace: &ViewHandle<Workspace>, pane: PaneId, field: &Field) {
-    if field.is_empty() {
+/// Puts what the command line asked for into a pane: a line in its field, a
+/// selection in that line, and a selection in the output above it.
+fn compose_pane(app: &mut App, workspace: &ViewHandle<Workspace>, pane: PaneId, asked: &Composed) {
+    if asked.is_empty() {
         return;
     }
 
     app.update(|ctx| {
         workspace.update(ctx, |workspace, ctx| {
-            if let Some(text) = field.text.as_deref() {
+            if let Some(text) = asked.text.as_deref() {
                 workspace.type_into_input(pane, text, ctx);
             }
-            if let Some(selected) = field.selected.as_deref()
+            if let Some(selected) = asked.selected.as_deref()
                 && !workspace.select_in_input(pane, selected, ctx)
             {
                 log::warn!("`--select` found no {selected:?} in the field to select");
+            }
+            if let Some(selected) = asked.selected_output.as_deref()
+                && !workspace.select_in_output(pane, selected, ctx)
+            {
+                log::warn!("`--select-output` found no {selected:?} in the output to select");
             }
         });
     });
@@ -946,9 +984,9 @@ struct Shell {
     /// otherwise draw three empty grids in the time it takes a shell to open a
     /// pty, and the run it was meant to prove would prove nothing.
     run: Option<Run>,
-    /// What `--type` and `--select` asked to leave in the field, until the
-    /// first frame has been drawn. See [`Field`].
-    field: Field,
+    /// What the command line asked to leave on screen, until the first frame
+    /// has been drawn. See [`Composed`].
+    composed: Composed,
 }
 
 /// The state of a `--run` in a windowed session.
@@ -1035,7 +1073,7 @@ impl Shell {
         });
 
         Self {
-            field: Field::from_overrides(&launch.overrides),
+            composed: Composed::from_overrides(&launch.overrides),
             app,
             presenter: Presenter::new(window_id, text_layout),
             window_id,
@@ -1061,15 +1099,19 @@ impl Shell {
         type_run(&mut self.app, &mut self.presenter, self.window_id, &command);
     }
 
-    /// Leaves what `--type` and `--select` asked for in the field, once there
-    /// is a pane and any `--run` command has been sent out of it.
-    fn fill_pending_field(&mut self) {
-        if self.field.is_empty() {
+    /// Leaves what the command line asked for on screen, once there is a pane
+    /// and any `--run` command has both been sent and answered.
+    ///
+    /// The wait for the answer is `--select-output`'s: there is nothing in the
+    /// output to select until the shell has printed it, and a run with no
+    /// command to wait for has already answered.
+    fn compose_pending_pane(&mut self) {
+        if self.composed.is_empty() || !self.budget_has_started() {
             return;
         }
-        let field = std::mem::take(&mut self.field);
+        let asked = std::mem::take(&mut self.composed);
         if let Ok(pane) = start_shells(&mut self.app, &self.workspace) {
-            fill_input(&mut self.app, &self.workspace, pane, &field);
+            compose_pane(&mut self.app, &self.workspace, pane, &asked);
         }
     }
 
@@ -1165,7 +1207,7 @@ impl WindowDelegate for Shell {
 
     fn frame_drawn(&mut self) {
         self.type_pending_run();
-        self.fill_pending_field();
+        self.compose_pending_pane();
 
         let Some(budget) = self.frame_budget else {
             return;
@@ -1319,6 +1361,7 @@ mod tests {
             "--run",
             "--type",
             "--select",
+            "--select-output",
             "--menu",
             "--hover",
             "--layout",
@@ -1424,25 +1467,41 @@ mod tests {
     }
 
     #[test]
-    fn the_field_overrides_are_carried_through_to_the_run() {
+    fn the_pane_overrides_are_carried_through_to_the_run() {
         assert_eq!(
-            parse(&["--type", "echo hi", "--select", "hi"]).expect("valid"),
+            parse(&[
+                "--type",
+                "echo hi",
+                "--select",
+                "hi",
+                "--select-output",
+                "printed"
+            ])
+            .expect("valid"),
             Startup::Window {
                 frames: None,
                 overrides: Overrides {
                     type_text: Some("echo hi".to_owned()),
                     select: Some("hi".to_owned()),
+                    select_output: Some("printed".to_owned()),
                     ..Overrides::default()
                 }
             }
         );
-        // Either of them means a pane needs a shell, because a pane without one
-        // draws a notice rather than a field.
+        // Any of them means a pane needs a shell, because a pane without one
+        // draws a notice rather than a field and has no output to select in.
         assert!(Overrides::default().run.is_none());
         assert!(!Overrides::default().wants_shells());
         assert!(
             Overrides {
                 type_text: Some("x".to_owned()),
+                ..Overrides::default()
+            }
+            .wants_shells()
+        );
+        assert!(
+            Overrides {
+                select_output: Some("x".to_owned()),
                 ..Overrides::default()
             }
             .wants_shells()
@@ -1462,6 +1521,7 @@ mod tests {
         assert!(parse(&["--run"]).is_err());
         assert!(parse(&["--type"]).is_err());
         assert!(parse(&["--select"]).is_err());
+        assert!(parse(&["--select-output"]).is_err());
         assert!(parse(&["--frames", "soon"]).is_err());
         assert!(parse(&["--tabs"]).is_err());
     }

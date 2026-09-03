@@ -16,6 +16,14 @@
 //! emulator answers those into [`Emulator::take_replies`], and it is the
 //! caller's job to put those bytes back on the pty; a caller that drops them
 //! will hang any program that waits for an answer.
+//!
+//! The pointer's selection is kept here too, in `Term`'s own `selection` field
+//! rather than beside it, and that is not an implementation detail: every path
+//! in `Term` that scrolls the grid rotates the selection with the text as it
+//! goes, so a selection made around a word stays around that word while a
+//! hundred more lines print underneath it. A copy kept anywhere else would have
+//! to reproduce that, and would be wrong the first time a `\n` arrived. See
+//! [`crate::selection`].
 
 use std::path::{Path, PathBuf};
 use std::str;
@@ -24,6 +32,7 @@ use std::time::Instant;
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
+use alacritty_terminal::selection::Selection;
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::Processor;
 use alacritty_terminal::vte::{Parser, Perform};
@@ -31,6 +40,7 @@ use parking_lot::Mutex;
 
 use crate::input::InputModes;
 use crate::pty::ChildExit;
+use crate::selection::{CellSide, GridPoint, SelectionKind, SelectionSpan, ViewportPoint};
 use crate::snapshot::{self, Palette, Snapshot, TerminalSize};
 
 /// Something the child process asked the surrounding application to do.
@@ -183,6 +193,13 @@ pub struct Emulator {
     /// [`Emulator::snapshot`] settles it by comparing what it builds against
     /// what it already had.
     dirty: bool,
+    /// Whether the pointer has moved the selection since the cached snapshot.
+    ///
+    /// Kept apart from [`Self::dirty`] because it is the cheap half: nothing
+    /// the child printed has changed, so the cells of the cached snapshot are
+    /// still the right cells and only the span beside them has to be replaced.
+    /// See [`Emulator::snapshot`].
+    selection_dirty: bool,
 }
 
 impl Emulator {
@@ -214,6 +231,7 @@ impl Emulator {
             replies: Vec::new(),
             snapshot,
             dirty: false,
+            selection_dirty: false,
         }
     }
 
@@ -235,20 +253,42 @@ impl Emulator {
     /// Returns the very same `Arc` — and so the same revision — until the drawn
     /// content actually differs, so a caller may compare revisions, or the
     /// pointers, to decide whether to repaint.
+    ///
+    /// **A selection that moved does not rebuild the grid.** Dragging one out
+    /// is a stream of pointer moves, none of which changes a cell the child
+    /// printed, so the cells of the last snapshot are still exactly the right
+    /// cells: they are copied across and only the span beside them is replaced.
+    /// That is a memcpy of an already-built `Vec`, where rebuilding would be a
+    /// walk of the emulator's grid with a palette resolution per cell — the
+    /// whole reason [`Snapshot::selection`] is a span and not a flag on every
+    /// [`SnapshotCell`](crate::SnapshotCell).
     pub fn snapshot(&mut self) -> Arc<Snapshot> {
         // A program that emitted a synchronized update and then died never
         // sends the bytes that would end it, and no more output will arrive to
         // notice that. Painting is the other moment the question comes up.
         self.expire_sync();
-        if !self.dirty {
+        if self.dirty {
+            self.dirty = false;
+            self.selection_dirty = false;
+
+            let revision = self.snapshot.revision + 1;
+            let built = snapshot::build(&self.term, &self.palette, revision, self.title.as_deref());
+            if !built.same_content(&self.snapshot) {
+                self.snapshot = Arc::new(built);
+            }
             return Arc::clone(&self.snapshot);
         }
-        self.dirty = false;
 
-        let revision = self.snapshot.revision + 1;
-        let built = snapshot::build(&self.term, &self.palette, revision, self.title.as_deref());
-        if !built.same_content(&self.snapshot) {
-            self.snapshot = Arc::new(built);
+        if self.selection_dirty {
+            self.selection_dirty = false;
+            let selection = self.selection();
+            if selection != self.snapshot.selection {
+                self.snapshot = Arc::new(Snapshot {
+                    revision: self.snapshot.revision + 1,
+                    selection,
+                    ..(*self.snapshot).clone()
+                });
+            }
         }
         Arc::clone(&self.snapshot)
     }
@@ -256,7 +296,7 @@ impl Emulator {
     /// Whether anything has happened that might have changed the grid. A cheap
     /// "should I bother taking a snapshot?".
     pub fn is_dirty(&self) -> bool {
-        self.dirty
+        self.dirty || self.selection_dirty
     }
 
     /// Changes the size of the grid, reflowing the scrollback into it.
@@ -298,6 +338,78 @@ impl Emulator {
     /// How many lines of scrollback sit above the viewport.
     pub fn history_len(&self) -> usize {
         self.term.grid().history_size()
+    }
+
+    /// Which cell of the text a cell of the viewport is showing.
+    ///
+    /// The one conversion that needs the emulator, and the reason
+    /// [`ViewportPoint`] and [`GridPoint`] are separate types: a row of the
+    /// screen is a different line of the text after every scroll, and a
+    /// selection is kept in lines so that it stays on the words it was drawn
+    /// around.
+    pub fn grid_point(&self, at: ViewportPoint) -> GridPoint {
+        let display_offset = self.term.grid().display_offset();
+        GridPoint::new(at.row as i32 - display_offset as i32, at.column)
+    }
+
+    /// Starts a selection at a cell of the viewport, replacing any there was.
+    ///
+    /// A [`SelectionKind::Simple`] selection that is never dragged anywhere is
+    /// empty, and an empty selection is no selection: that is what makes a
+    /// plain click clear the last one rather than leave a one-cell highlight
+    /// behind.
+    pub fn start_selection(&mut self, kind: SelectionKind, at: ViewportPoint, side: CellSide) {
+        let point = self.grid_point(at);
+        self.term.selection = Some(Selection::new(kind.into(), point.into(), side.into()));
+        self.selection_dirty = true;
+    }
+
+    /// Drags the open end of the selection to a cell of the viewport.
+    ///
+    /// Does nothing when no selection has been started, so a drag that began
+    /// somewhere else cannot pull one out of this grid.
+    pub fn update_selection(&mut self, at: ViewportPoint, side: CellSide) {
+        let point = self.grid_point(at);
+        let Some(selection) = self.term.selection.as_mut() else {
+            return;
+        };
+        selection.update(point.into(), side.into());
+        self.selection_dirty = true;
+    }
+
+    /// Drops the selection.
+    pub fn clear_selection(&mut self) {
+        if self.term.selection.take().is_some() {
+            self.selection_dirty = true;
+        }
+    }
+
+    /// What is selected, as cells of the grid, or `None` when nothing is.
+    pub fn selection(&self) -> Option<SelectionSpan> {
+        snapshot::selection_of(&self.term)
+    }
+
+    /// Whether there is anything selected to copy.
+    ///
+    /// Not `self.term.selection.is_some()`: an empty selection — a press with
+    /// no drag behind it, or one whose text has scrolled out of the history —
+    /// is a selection object with no cells in it.
+    pub fn has_selection(&self) -> bool {
+        self.selection().is_some()
+    }
+
+    /// The selected text, laid out the way the screen shows it: one line per
+    /// row, and a wrapped line joined back into one.
+    ///
+    /// Asked of [`Self::selection`] first, and not for tidiness: that is the
+    /// one place that decides whether the range alacritty built is a range the
+    /// grid can be walked with, and `Term::selection_to_string` walks it with
+    /// no such check — a block range it built inverted would index a row one
+    /// column past its end. The text and the highlight come back from the same
+    /// decision, so they cannot disagree about what is selected.
+    pub fn selection_text(&self) -> Option<String> {
+        self.selection()?;
+        self.term.selection_to_string()
     }
 
     /// The title the child last asked for.

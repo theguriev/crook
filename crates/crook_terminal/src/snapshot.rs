@@ -22,17 +22,26 @@
 //! Cells are stored row-major in one `Vec`, so a 200x50 grid is a single 120 KB
 //! allocation the renderer walks in order — [`Snapshot::iter_rows`] hands out
 //! the rows as slices.
+//!
+//! The one thing on a snapshot that is *not* a picture of what the child
+//! printed is [`Snapshot::selection`], which is what the pointer has taken.
+//! It is a span rather than a per-cell flag, and the doc comment on the field
+//! says why at length: a selection changes on pointer moves that change no
+//! content, and it must be possible to move one without rebuilding the grid.
 
 use std::ops::{BitOr, BitOrAssign};
 
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::Line;
+use alacritty_terminal::selection::SelectionRange;
 use alacritty_terminal::term::cell::{Cell, Flags};
 use alacritty_terminal::term::color::{self, Colors};
 use alacritty_terminal::term::{Term, TermMode};
 use alacritty_terminal::vte::ansi::{
     Color, CursorShape as VteCursorShape, NamedColor, Rgb as VteRgb,
 };
+
+use crate::selection::{GridPoint, SelectionSpan, ViewportPoint};
 
 /// How much of a colour survives the dim attribute.
 ///
@@ -474,6 +483,29 @@ pub struct Snapshot {
     pub alt_screen: bool,
     /// The title the child process last asked for, if any.
     pub title: Option<String>,
+    /// What the pointer has selected, in grid coordinates, or `None` when
+    /// nothing is selected. Read it with [`Snapshot::is_selected`].
+    ///
+    /// **A span, and deliberately not a `selected` flag on [`SnapshotCell`].**
+    /// The two are not equivalent, because of what a selection *is*: it moves
+    /// on pointer moves, and a pointer move changes nothing the shell printed.
+    ///
+    /// A per-cell flag lives inside [`Self::cells`], and the only way to change
+    /// something inside `cells` is to build `cells` — which means walking the
+    /// emulator's grid and resolving a palette entry per cell, ten thousand
+    /// times, for every pixel the pointer travels while a button is held. A
+    /// span is two points beside the cells, so the emulator can hand back the
+    /// very cells it already built with a new span next to them and never look
+    /// at the grid at all. See [`crate::Emulator::snapshot`].
+    ///
+    /// It cannot be kept out of [`Self::same_content`] either way: a highlight
+    /// *is* drawn content, so a renderer that skipped a frame because the
+    /// revision had not moved would leave the old highlight on screen under a
+    /// pointer that had gone somewhere else. So the span is compared like
+    /// everything else, and [`Self::revision`] goes up when it moves — which
+    /// costs one comparison of two points, where the flag would cost a
+    /// comparison of every cell.
+    pub selection: Option<SelectionSpan>,
 }
 
 impl Snapshot {
@@ -522,6 +554,43 @@ impl Snapshot {
         }
     }
 
+    /// Whether the cell drawn at this row and column is selected.
+    ///
+    /// The row is a *viewport* row, which is what a renderer walks; the span is
+    /// in grid coordinates, which is what keeps it on the same text while the
+    /// screen scrolls, and [`Self::display_offset`] is the distance between the
+    /// two.
+    pub fn is_selected(&self, row: usize, column: usize) -> bool {
+        let Some(span) = self.selection else {
+            return false;
+        };
+        let Some(cell) = self.cell(row, column) else {
+            return false;
+        };
+
+        let line = row as i32 - self.display_offset as i32;
+        if span.contains(GridPoint::new(line, column)) {
+            return true;
+        }
+        // A double-width character is one selection's worth of text in two
+        // columns, and its glyph is drawn once, from the first of them, across
+        // both. So the pair is highlighted together in either direction:
+        // reaching the trailing half takes the character, and reaching the
+        // character takes the column its right half is drawn in. Copying
+        // already treats them as one — `Term::line_to_string` emits the whole
+        // character for a range that touches either column — and a highlight
+        // that lit only one of them would cut the glyph down the middle.
+        if cell.flags.contains(CellFlags::WIDE) && span.contains(GridPoint::new(line, column + 1)) {
+            return true;
+        }
+        cell.flags.contains(CellFlags::WIDE_SPACER)
+            && column > 0
+            && self
+                .cell(row, column - 1)
+                .is_some_and(|lead| lead.flags.contains(CellFlags::WIDE))
+            && span.contains(GridPoint::new(line, column - 1))
+    }
+
     /// Whether the two snapshots would be drawn identically — everything except
     /// the revision they carry.
     pub fn same_content(&self, other: &Self) -> bool {
@@ -534,6 +603,7 @@ impl Snapshot {
             && self.history_len == other.history_len
             && self.alt_screen == other.alt_screen
             && self.title == other.title
+            && self.selection == other.selection
             && self.cells == other.cells
             && self.combining == other.combining
     }
@@ -544,6 +614,42 @@ impl Snapshot {
     /// attribute, so it is not a rendering path.
     pub fn text(&self) -> String {
         let mut text = String::with_capacity(self.cells.len() + self.rows);
+        self.walk(|character, _| text.push(character));
+        text
+    }
+
+    /// Where a run of text is on screen: the first and last cell of the first
+    /// occurrence of `text`, or `None` when the screen does not show it.
+    ///
+    /// A selection is normally two points a person aimed a pointer at, and
+    /// there is nothing to aim one with in a headless run or a test. This is
+    /// how those name a region instead — see `--select-output`.
+    pub fn find(&self, text: &str) -> Option<(ViewportPoint, ViewportPoint)> {
+        if text.is_empty() {
+            return None;
+        }
+
+        let mut showing = String::with_capacity(self.cells.len() + self.rows);
+        let mut cells = Vec::with_capacity(showing.capacity());
+        self.walk(|character, at| {
+            showing.push(character);
+            cells.push(at);
+        });
+
+        // `cells` has one entry per *character*, and `find` answers in bytes.
+        let byte = showing.find(text)?;
+        let first = showing[..byte].chars().count();
+        let last = first + text.chars().count() - 1;
+        Some((*cells.get(first)?, *cells.get(last)?))
+    }
+
+    /// Every character on screen in reading order, with the cell it was drawn
+    /// in, and a newline at the end of each row.
+    ///
+    /// The one walk of the grid that both "what does it say" and "where does it
+    /// say it" go through, so the two can never disagree about which cell a
+    /// character came from.
+    fn walk(&self, mut visit: impl FnMut(char, ViewportPoint)) {
         for (row, cells) in self.iter_rows().enumerate() {
             let end = cells
                 .iter()
@@ -555,12 +661,18 @@ impl Snapshot {
                 if cell.flags.contains(CellFlags::WIDE_SPACER) {
                     continue;
                 }
-                text.push(cell.c);
-                text.extend(self.zerowidth(row, column));
+                visit(cell.c, ViewportPoint::new(row, column));
+                for mark in self.zerowidth(row, column) {
+                    visit(*mark, ViewportPoint::new(row, column));
+                }
             }
-            text.push('\n');
+            // The row's newline belongs to its last column: a match that ends
+            // at a line break ends at the end of that line.
+            visit(
+                '\n',
+                ViewportPoint::new(row, self.columns.saturating_sub(1)),
+            );
         }
-        text
     }
 }
 
@@ -647,6 +759,42 @@ fn cursor_of<T>(
     })
 }
 
+/// What is selected right now, resolved through the grid the selection was
+/// anchored to.
+///
+/// `Selection` is two anchors and a kind; turning that into cells needs the
+/// terminal — a word selection asks it where the word ends, and a line
+/// selection asks it which rows a wrapped line covers — so this cannot be done
+/// once and cached. It is also how an empty selection, which is what a press
+/// with no drag behind it leaves, comes back as "nothing is selected".
+pub(crate) fn selection_of<T>(term: &Term<T>) -> Option<SelectionSpan> {
+    term.selection
+        .as_ref()
+        .and_then(|selection| selection.to_range(term))
+        .filter(covers_cells)
+        .map(SelectionSpan::from)
+}
+
+/// Whether a range names cells the grid actually has.
+///
+/// `SelectionRange::new` asserts `start <= end`, and every reader in this crate
+/// and above it relies on that — but `Selection::range_block`, which builds one
+/// for a block selection, does not go through the constructor. It moves the
+/// start one column right when the drag began on the right of a cell and the
+/// end one column left when it ended on the left of one, and it never checks
+/// that the two did not cross. An alt-drag whose ends share a column, right
+/// side to left side, therefore comes back with `start.column > end.column`,
+/// and on the *last* column the start lands on `columns` — one past the row —
+/// which `Term::line_to_string` then indexes the row with and panics.
+///
+/// Such a range covers nothing: [`SelectionSpan::contains`] matches no cell in
+/// it, so nothing would be highlighted. This is what makes the rest of the
+/// terminal agree with the highlight — no span, no text, and `has_selection`
+/// reporting false so the copy chord goes back to being the interrupt.
+fn covers_cells(range: &SelectionRange) -> bool {
+    range.start <= range.end && (!range.is_block || range.start.column <= range.end.column)
+}
+
 /// Builds the snapshot the renderer draws from the emulator's current state.
 pub(crate) fn build<T>(
     term: &Term<T>,
@@ -694,6 +842,7 @@ pub(crate) fn build<T>(
         history_len: grid.history_size(),
         alt_screen: term.mode().contains(TermMode::ALT_SCREEN),
         title: title.map(str::to_owned),
+        selection: selection_of(term),
     }
 }
 

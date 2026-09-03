@@ -4,7 +4,7 @@
 //! id and a cell is half the font size — so an assertion here is about the grid
 //! rather than about which fonts the machine running it happens to have.
 
-use crook_terminal::CellCombining;
+use crook_terminal::{CellCombining, GridPoint, SelectionSpan};
 use crookui_core::scene::{ClipBounds, Fill, Glyph, Rect};
 
 use super::*;
@@ -49,6 +49,19 @@ fn snapshot(lines: &[&str], columns: usize) -> Snapshot {
         history_len: 0,
         alt_screen: false,
         title: None,
+        selection: None,
+    }
+}
+
+/// The same, with a run of cells selected from one grid point to another.
+fn selected(lines: &[&str], columns: usize, start: (i32, usize), end: (i32, usize)) -> Snapshot {
+    Snapshot {
+        selection: Some(SelectionSpan {
+            start: GridPoint::new(start.0, start.1),
+            end: GridPoint::new(end.0, end.1),
+            block: false,
+        }),
+        ..snapshot(lines, columns)
     }
 }
 
@@ -402,4 +415,100 @@ fn a_combining_mark_is_drawn_over_the_character_it_belongs_to() {
         "a mark carries its own offset and shares the character's pen"
     );
     assert_eq!(painted[2].glyph_key.glyph_id, u32::from('!'));
+}
+
+/// The rectangles the highlight put in the scene, left to right and top to
+/// bottom, as (origin, size) pairs.
+fn selection_rects(scene: &Scene) -> Vec<(Vector2F, Vector2F)> {
+    rects(scene)
+        .into_iter()
+        .filter(|rect| rect.background == Fill::Solid(crate::theme::theme().selection))
+        .map(|rect| (rect.bounds.origin(), rect.bounds.size()))
+        .collect()
+}
+
+#[test]
+fn a_selected_run_is_one_rectangle_and_the_text_on_it_is_untouched() {
+    // The two halves of "the text stays readable": the highlight is one quad
+    // behind the run rather than eighty, and every glyph is still drawn in the
+    // colour the shell asked for.
+    let font = font();
+    let metrics = font.metrics();
+    let scene = painted(&selected(&["hello world"], 11, (0, 6), (0, 10)));
+
+    let highlight = selection_rects(&scene);
+    assert_eq!(highlight.len(), 1, "one rectangle for one run of cells");
+    assert_eq!(highlight[0].0, vec2f(6. * metrics.width, 0.));
+    assert_eq!(highlight[0].1, vec2f(5. * metrics.width, metrics.height));
+
+    let painted_in: Vec<_> = glyphs(&scene).iter().map(|glyph| glyph.color).collect();
+    assert_eq!(
+        painted_in.len(),
+        10,
+        "the space between the words draws nothing"
+    );
+    assert!(
+        painted_in.iter().all(|ink| *ink == color(INK)),
+        "selecting text repainted the text"
+    );
+}
+
+#[test]
+fn a_selection_over_several_rows_fills_each_of_them_to_its_edge() {
+    // What tells a run of text from a rectangle. The middle row is selected
+    // edge to edge whatever columns the two ends are in, because that is what
+    // the text between them is.
+    let font = font();
+    let metrics = font.metrics();
+    let scene = painted(&selected(&["abcd", "efgh", "ijkl"], 4, (0, 2), (2, 1)));
+
+    let highlight = selection_rects(&scene);
+    assert_eq!(highlight.len(), 3, "one run per row");
+    assert_eq!(highlight[0].0, vec2f(2. * metrics.width, 0.));
+    assert_eq!(highlight[0].1.x(), 2. * metrics.width, "from the press on");
+    assert_eq!(highlight[1].0, vec2f(0., metrics.height));
+    assert_eq!(highlight[1].1.x(), 4. * metrics.width, "the whole row");
+    assert_eq!(highlight[2].0, vec2f(0., 2. * metrics.height));
+    assert_eq!(highlight[2].1.x(), 2. * metrics.width, "up to the release");
+}
+
+#[test]
+fn a_screen_with_nothing_selected_pays_nothing_for_the_highlight() {
+    let scene = painted(&snapshot(&["hello world"], 11));
+    assert!(selection_rects(&scene).is_empty());
+}
+
+#[test]
+fn a_selection_made_in_the_scrollback_is_drawn_against_the_lines_it_holds() {
+    // The display offset. Viewport row zero is `display_offset` lines above the
+    // live bottom line, so a span on line -2 is drawn on the top row of a
+    // viewport scrolled two lines back and nowhere at all when it is not.
+    let mut scrolled = selected(&["abcd", "efgh"], 4, (-2, 0), (-2, 3));
+    scrolled.display_offset = 2;
+    assert_eq!(
+        selection_rects(&painted(&scrolled)).len(),
+        1,
+        "the selected line is the top row of this viewport"
+    );
+
+    scrolled.display_offset = 0;
+    assert!(
+        selection_rects(&painted(&scrolled)).is_empty(),
+        "scrolling back to the live output left the highlight behind on screen"
+    );
+}
+
+#[test]
+fn a_column_is_split_down_its_middle_so_a_selection_ends_between_characters() {
+    // Dragging right from the left half of a character takes it; from the
+    // right half it does not. Nobody notices this until it is missing.
+    assert_eq!(column_at(0., 10., 8), (0, CellSide::Left));
+    assert_eq!(column_at(4.9, 10., 8), (0, CellSide::Left));
+    assert_eq!(column_at(5., 10., 8), (0, CellSide::Right));
+    assert_eq!(column_at(25., 10., 8), (2, CellSide::Right));
+
+    // Outside the row is its first cell on the left and its last on the right,
+    // which is what a drag that has left the pane means.
+    assert_eq!(column_at(-40., 10., 8), (0, CellSide::Left));
+    assert_eq!(column_at(800., 10., 8), (7, CellSide::Right));
 }

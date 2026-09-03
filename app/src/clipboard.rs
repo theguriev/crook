@@ -53,10 +53,14 @@ impl Clipboard {
         self.with(|clipboard| clipboard.get_text())
     }
 
-    /// Puts `text` on the clipboard, or does nothing at all when there is no
-    /// clipboard to put it on.
-    pub fn write(&self, text: &str) {
-        self.with(|clipboard| clipboard.set_text(text.to_owned()));
+    /// Puts `text` on the clipboard, reporting whether it got there.
+    ///
+    /// `false` is a machine with no clipboard, or one whose clipboard was busy
+    /// — never a reason to show anybody an error, and never a reason for the
+    /// caller to retry.
+    pub fn write(&self, text: &str) -> bool {
+        self.with(|clipboard| clipboard.set_text(text.to_owned()))
+            .is_some()
     }
 
     /// Runs `use_clipboard` against the open clipboard, opening it if this is

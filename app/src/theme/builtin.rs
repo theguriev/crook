@@ -94,6 +94,9 @@ pub const DARK: Theme = Theme {
     text_primary: Color::hex(0xe8ebf0),
     text_muted: Color::hex(0x8a93a3),
     accent: Color::hex(0x8b5cf6),
+    // The accent at 30%, the same ratio `Theme::derived` gives a theme read
+    // from a file.
+    selection: Color::hex(0x8b5cf6).with_alpha(76),
     // Normal deliberately repeats `text_muted`: usage under half is not news,
     // and a colour there would spend the reader's attention on nothing.
     usage_normal: Color::hex(0x8a93a3),

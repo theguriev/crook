@@ -17,6 +17,7 @@ use crate::git::GitFacts;
 use crate::git_model::GitModel;
 use crate::input_keys::{self, Binding, Platform};
 use crate::pane_input::{CARET_PHASE, PaneInput};
+use crate::pane_selection::PaneSelection;
 use crate::platform_insets::{LayoutInsets, TabsPlacement, layout_insets};
 use crate::settings::{Density, GeneralOptions, Granularity, Layout, Settings, TabOptions};
 use crate::tab::{AgentSession, Direction, PaneId, Tab, TabAction, TabEffect, TabId, TabStrip};
@@ -67,6 +68,8 @@ pub(super) struct PaneInteraction {
     pub(super) close: MouseStateHandle,
     /// The pane's panel in the body.
     pub(super) body: MouseStateHandle,
+    /// The selection gesture in the pane's output. See [`PaneSelection`].
+    pub(super) selection: PaneSelection,
 }
 
 /// What the mouse is doing to one tab's chrome in the panel.
@@ -847,6 +850,47 @@ impl Workspace {
         Some(self.terminals.as_ref(app).snapshot(pane)?.text())
     }
 
+    /// What is selected in a pane's output, or `None` when nothing is.
+    pub fn terminal_selection(&self, pane: PaneId, app: &AppContext) -> Option<String> {
+        self.terminals.as_ref(app).handle(pane)?.selection_text()
+    }
+
+    /// Selects the first occurrence of `text` in a pane's output, reporting
+    /// whether the screen was showing it.
+    ///
+    /// The output's half of [`Self::select_in_input`], and it exists for the
+    /// same reason: a selection is a state somebody is holding a button down
+    /// to be in, and nobody is holding anything down in a headless run. See
+    /// `--select-output`.
+    pub fn select_in_output(&self, pane: PaneId, text: &str, ctx: &mut ViewContext<Self>) -> bool {
+        let model = self.terminals.as_ref(ctx);
+        let (Some(handle), Some(snapshot)) = (model.handle(pane), model.snapshot(pane)) else {
+            return false;
+        };
+        let Some((from, to)) = snapshot.find(text) else {
+            return false;
+        };
+
+        handle.select_cells(from, to);
+        ctx.notify();
+        true
+    }
+
+    /// Lets go of what is selected in a pane's output.
+    ///
+    /// Dispatched by the grid rather than done where it is decided, and
+    /// [`WorkspaceAction::ReleaseSelection`] says why: the grid and the field
+    /// under it route one keystroke against one answer, and this is what runs
+    /// after both of them have had it.
+    fn release_selection(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        let Some(handle) = self.terminals.as_ref(ctx).handle(pane) else {
+            return;
+        };
+        if handle.clear_selection() {
+            ctx.notify();
+        }
+    }
+
     /// Starts the git gather chain. Call once, after the window exists.
     ///
     /// Separate from [`Self::new`] for the reason the usage poll is: a
@@ -1115,6 +1159,7 @@ impl Workspace {
                     chip: MouseStateHandle::default(),
                     close: MouseStateHandle::default(),
                     body: MouseStateHandle::default(),
+                    selection: PaneSelection::new(),
                 });
             self.inputs.entry(*id).or_default();
         }
@@ -1468,6 +1513,7 @@ impl TypedActionView for Workspace {
             WorkspaceAction::Options(action) => self.apply_option(action, ctx),
             WorkspaceAction::Settings(action) => self.apply_settings(action, ctx),
             WorkspaceAction::HoverRow { pane, entered } => self.hover_row(pane, entered, ctx),
+            WorkspaceAction::ReleaseSelection(pane) => self.release_selection(pane, ctx),
         }
     }
 }
