@@ -1,14 +1,18 @@
-//! The active tab's body: one panel per pane it holds, each running a shell.
+//! The active tab's body: one pane per pane the tab holds, each running a
+//! shell — or, for one of them, the settings page.
 //!
-//! A panel is the pane's terminal and nothing else. What the session is called
-//! and what its agent is doing are already in the tab strip beside it, and a
-//! heading repeated inside every panel would cost two rows of grid to say what
-//! is on screen twice — Warp draws its panes the same way, for the same reason.
+//! A pane is its terminal and nothing else. Not a card: no corner radius, no
+//! border, no margin, no heading. What the session is called and what its
+//! shell is doing are already in the tab strip beside it, and everything a box
+//! around the grid would add is chrome charged against the thing a person came
+//! to look at. Warp draws its panes exactly this way — its pane view has no
+//! radius anywhere, its optional accent border is off by default, and what
+//! separates two panes is a one- or two-pixel divider and nothing else.
 //!
-//! A tab that has never been split renders exactly the panel it always did.
-//! That is Warp's collapse rule seen from the front: a group that fell back to
-//! one pane is indistinguishable from one that never split — no divider, no
-//! accent border, `in_split_pane == false`.
+//! A tab that has never been split therefore renders a single grid filling the
+//! body. That is Warp's collapse rule seen from the front: a group that fell
+//! back to one pane is indistinguishable from one that never split — no
+//! divider, `in_split_pane == false`.
 //!
 //! # When there is no terminal
 //!
@@ -28,11 +32,19 @@ use super::settings_page;
 use super::terminal_element::TerminalElement;
 use super::view::Workspace;
 
-/// The gap between a panel's edge and the grid inside it.
+/// The gap between a pane's edge and the grid inside it.
 ///
-/// Smaller than the placeholder panel's padding was: every logical pixel here
-/// is a column or a row the shell does not get.
+/// Every logical pixel here is a column or a row the shell does not get, which
+/// is why it is small.
 const GRID_PADDING: f32 = 8.;
+
+/// The line between two panes, and the whole of what separates them.
+///
+/// Warp's `get_divider_thickness`: one pixel under its minimalist UI flag and
+/// two without it. One, because Crook has no drag to make a thicker line
+/// easier to grab — Warp pads its divider by four on each side for exactly
+/// that and only when the thin one is in use.
+const DIVIDER_THICKNESS: f32 = 1.;
 
 pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
     let Some(tab) = workspace.tabs().active() else {
@@ -56,7 +68,6 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
         // does not do.
         let state = PaneState {
             is_focused: panes.is_focused(pane.id()),
-            is_split: panes.is_split(),
         };
         layout.add_child(Expanded::new(1., panel(workspace, pane, state, app)).finish());
     }
@@ -64,24 +75,40 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
     layout.finish()
 }
 
-/// What a panel is drawn as. Warp's `SplitPaneState`, which is likewise
+/// What a pane is drawn as. Warp's `SplitPaneState`, which is likewise
 /// resolved by the group rather than kept by the pane, so "two panes are
 /// focused" is not representable.
+///
+/// One field, since the chrome went: whether a pane is in a split no longer
+/// changes anything about how it is drawn, only the divider between panes
+/// says there is more than one.
 #[derive(Copy, Clone)]
 struct PaneState {
     is_focused: bool,
-    is_split: bool,
 }
 
-/// One pane's panel: what the pane is showing, and a click target that focuses
-/// it.
+/// One pane, and a click target that focuses it.
 ///
-/// The chrome — the fill, the border that says which pane is focused, the
-/// radius, the margin — is the same whatever the pane holds. What differs is
-/// the content and the padding around it: a shell's grid is inset by
-/// [`GRID_PADDING`], and the settings page gets the panel's whole inside,
-/// because its own rail has to reach the panel's edges the way Warp's reaches
-/// its pane's.
+/// **No box.** A pane fills its share of the body: no corner radius, no
+/// margin, no border, and nothing between it and the next pane but a
+/// [`divider`]. That is Warp's arrangement, and it is Warp's for a reason
+/// worth copying — a terminal is the thing you are looking at, and a rounded
+/// card around it spends contrast, corners and twelve pixels of every edge on
+/// chrome that says nothing a person needs to know.
+///
+/// **And no focus outline.** The card used to carry one: an accent border
+/// around the focused pane of a split tab. Warp has the same border and turns
+/// it off by default — `show_accent_border` is `false` and only the
+/// shared-session path sets it — because the cursor already answers the
+/// question. `terminal_element` draws a filled block in the pane that is
+/// listening and a hollow one everywhere else, which is the signal at the one
+/// place a person is already looking, rather than four hundred pixels of
+/// outline at the edges of their vision.
+///
+/// Warp's other option here is dimming the inactive panes, and it is also off
+/// by default (`appearance.panes.should_dim_inactive_panes`). Crook has no
+/// setting to hang it on, so it is not implemented rather than implemented
+/// with the default nobody chose.
 fn panel(
     workspace: &Workspace,
     pane: &Pane,
@@ -90,10 +117,7 @@ fn panel(
 ) -> Box<dyn Element> {
     let id = pane.id();
     let is_settings = pane.is_settings();
-    let PaneState {
-        is_focused,
-        is_split,
-    } = state;
+    let PaneState { is_focused } = state;
 
     let Some(interaction) = workspace.interaction(id) else {
         // Unreachable, for the same reason it is in the bar.
@@ -118,28 +142,23 @@ fn panel(
         grid(workspace, pane, accepts_input, app)
     };
 
-    Hoverable::new(interaction.body.clone(), move |mouse| {
-        // An unsplit tab has nothing to distinguish its one pane from, so it
-        // keeps the plain panel it has always had. Warp says the same thing
-        // with `SplitPaneState::NotInSplitPane`, which suppresses the
-        // active-pane indicator outright.
-        let border = if !is_split {
-            THEME.border
-        } else if is_focused {
-            THEME.accent
-        } else if mouse.is_hovered() {
-            THEME.text_muted
-        } else {
-            THEME.border
-        };
-
-        Container::new(content)
-            .with_background_color(THEME.surface)
-            .with_border(Border::all(1.).with_border_color(border))
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(10.)))
-            .with_uniform_margin(12.)
-            .with_uniform_padding(if is_settings { 0. } else { GRID_PADDING })
-            .finish()
+    // The `Hoverable` is here for its click handler alone — nothing about a
+    // pane changes under the pointer any more — and it is what records the hit
+    // rect that makes the pane clickable at all.
+    Hoverable::new(interaction.body.clone(), move |_| {
+        Container::new(
+            // The pane fills the share it was given, whatever its content
+            // measured. A grid measures to whole cells and stops short of the
+            // remainder, and a container that sized itself to that would leave
+            // a strip down the right of every pane and along the bottom that
+            // looked like part of the pane and did not focus it when clicked.
+            // The card's margin used to hide the ragged edge; nothing hides it
+            // now, so it is filled instead.
+            Align::new(content).top_left().finish(),
+        )
+        .with_background_color(THEME.ground)
+        .with_uniform_padding(if is_settings { 0. } else { GRID_PADDING })
+        .finish()
     })
     // Warp wraps every leaf of its tree in the same handler, dispatching
     // `Activate(pane_id, ActivationReason::Click)`. On an unsplit tab this
@@ -210,12 +229,14 @@ fn divider(axis: SplitAxis) -> Box<dyn Element> {
         .with_background_color(THEME.border)
         .finish();
 
+    // Edge to edge, with no margin along its length. It used to stop twenty
+    // pixels short of both ends, which was right when each pane was a rounded
+    // card with a gutter around it: a full-length line would have crossed the
+    // gutter and pointed at nothing. Now the panes meet, and the line is where
+    // they meet.
+    let line = ConstrainedBox::new(line);
     match axis {
-        SplitAxis::Horizontal => Container::new(ConstrainedBox::new(line).with_width(1.).finish())
-            .with_vertical_margin(20.)
-            .finish(),
-        SplitAxis::Vertical => Container::new(ConstrainedBox::new(line).with_height(1.).finish())
-            .with_horizontal_margin(20.)
-            .finish(),
+        SplitAxis::Horizontal => line.with_width(DIVIDER_THICKNESS).finish(),
+        SplitAxis::Vertical => line.with_height(DIVIDER_THICKNESS).finish(),
     }
 }
