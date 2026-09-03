@@ -87,7 +87,7 @@ use crookui_core::geometry::Color;
 use crookui_core::prelude::*;
 
 use crate::tab::PaneId;
-use crate::theme::THEME;
+use crate::theme::theme;
 
 /// The longest a pane goes between repaints while its shell is talking.
 ///
@@ -279,6 +279,27 @@ impl TerminalModel {
         if let Err(error) = session.shared.lock().write(text.as_bytes()) {
             log::warn!("could not write to the shell in pane {pane:?}: {error}");
         }
+    }
+
+    /// Repaints every shell in the palette a new theme resolved.
+    ///
+    /// The one thing applying a theme has to do that repainting the chrome
+    /// does not: a grid resolves its colours through a palette that was handed
+    /// to it when its shell started, so a theme change has to reach every
+    /// terminal that is already running. Each one is given the new palette and
+    /// asked to publish a fresh snapshot — the emulator has not changed, only
+    /// what its cells resolve to, so nothing is reparsed and the shell is not
+    /// told anything.
+    pub fn set_palette(&mut self, palette: Palette, ctx: &mut ModelContext<Self>) {
+        if self.palette == palette {
+            return;
+        }
+        self.palette = palette;
+
+        for session in self.sessions.values() {
+            session.shared.repaint_in(self.palette.clone());
+        }
+        ctx.notify();
     }
 
     /// Starts a shell for one pane and the thread that reads it.
@@ -866,6 +887,18 @@ impl Shared {
         self.publish_state().deferred = false;
     }
 
+    /// Resolves this session's cells through a new palette, and publishes what
+    /// that changed.
+    ///
+    /// Publishing directly rather than marking the session pending: an idle
+    /// shell writes nothing, so nothing would ever come along to carry the new
+    /// colours to the screen, and a theme that only applied to panes with a
+    /// command running would be a theme nobody could see themselves choose.
+    fn repaint_in(&self, palette: Palette) {
+        self.lock().set_palette(palette);
+        self.publish();
+    }
+
     /// Rebuilds the grid, hands it to the main thread, and wakes it.
     ///
     /// The `Arc` goes into a slot of its own so that painting never waits on
@@ -1049,28 +1082,46 @@ fn packed(size: TerminalSize) -> u32 {
     u32::from(size.columns) << 16 | u32::from(size.rows)
 }
 
-/// The terminal palette, in Crook's colours.
+/// The terminal palette, in the colours of the theme in force.
 ///
-/// The two that matter are the defaults: a grid whose background is the pane's
-/// own means an untouched screen costs no rectangles at all, and text that
-/// matches the rest of the window means a shell does not look pasted into it.
-/// The agreement runs the other way too — `body::pane_ground` paints the pane
-/// in whatever background the grid resolved — so a shell that sets its own with
+/// The two defaults matter most: a grid whose background is the pane's own
+/// means an untouched screen costs no rectangles at all, and text that matches
+/// the rest of the window means a shell does not look pasted into it. The
+/// agreement runs the other way too — `body::pane_ground` paints the pane in
+/// whatever background the grid resolved — so a shell that sets its own with
 /// OSC 11 takes the padding around it along.
-/// Everything a program actually asks for — the sixteen ANSI colours, the cube,
-/// a `Color::Spec` — keeps the values every terminal agrees on.
-fn crook_palette() -> Palette {
-    let foreground = rgb(THEME.text_primary);
+///
+/// The sixteen ANSI colours come from the theme as well, which is the half of
+/// a theme a terminal actually shows: a palette that themed the chrome and
+/// left `ls` in xterm red would be a half-applied theme. The cube and the grey
+/// ramp above them stay the values every terminal agrees on, because a program
+/// asking for colour 137 is asking for a specific colour and not for an
+/// opinion.
+pub fn crook_palette() -> Palette {
+    let theme = theme();
+    let colours = theme.terminal;
+
+    let mut ansi = Palette::default().ansi;
+    for (entry, colour) in ansi.iter_mut().zip(
+        colours
+            .normal
+            .iter()
+            .chain(colours.bright.iter())
+            .map(|colour| rgb(*colour)),
+    ) {
+        *entry = colour;
+    }
+
     Palette {
-        foreground,
-        background: rgb(THEME.surface),
-        cursor: rgb(THEME.accent),
-        bright_foreground: foreground,
-        // What dim text is drawn in. Derived from this palette's own
-        // foreground: left at the default it would be held back from a grey
-        // Crook does not use.
-        dim_foreground: rgb(THEME.text_muted),
-        ..Palette::default()
+        ansi,
+        foreground: rgb(colours.foreground),
+        background: rgb(colours.background),
+        cursor: rgb(colours.cursor),
+        bright_foreground: rgb(colours.bright[7]),
+        // What dim text is drawn in. Derived from the interface's muted text
+        // rather than left at the emulator's default, which is a grey Crook
+        // does not use.
+        dim_foreground: rgb(theme.text_muted),
     }
 }
 

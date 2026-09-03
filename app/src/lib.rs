@@ -175,6 +175,16 @@ struct Overrides {
     menu: bool,
     /// Start with the first row's hover detail card up.
     hover: bool,
+    /// Start in this theme rather than the saved one.
+    ///
+    /// Applied straight to the palette rather than through
+    /// `Workspace::set_theme`, which would save it: `--theme` is a way to look
+    /// at a frame — a screenshot of the light theme, a check that a file
+    /// somebody wrote loads — and it must not become what the next launch
+    /// opens in. The settings page goes on showing the *saved* theme as the
+    /// chosen one, which is the same thing `--density` does and for the same
+    /// reason.
+    theme: Option<String>,
     /// Start with a settings tab open, on this page of it.
     ///
     /// Unlike the three option overrides below it, this one has nothing to
@@ -287,6 +297,10 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 frames = Some(count.parse().context("`--frames` takes a number")?);
             }
             "--menu" => overrides.menu = true,
+            "--theme" => {
+                let name = args.next().context("`--theme` needs a name")?;
+                overrides.theme = Some(name);
+            }
             "--settings" => {
                 // The section is optional, and a bare `--settings` opens the
                 // page where a click on the menu entry opens it. Peeking
@@ -371,6 +385,7 @@ OPTIONS:
     --menu             Start with the tab options menu open
     --settings [PAGE]  Start with a settings tab open, on `appearance`,
                        `usage`, `keys` or `about`
+    --theme <NAME>     Start in this theme rather than the saved one
     --hover            Start with the first row's detail card up
     --layout <MODE>    Start with the tabs `vertical` or `horizontal` rather than as saved
     --granularity <M>  Start with rows standing for `panes` or `tabs` rather than as saved
@@ -504,6 +519,7 @@ fn open_window(channel: Channel, frames: Option<u32>, overrides: Overrides) -> R
     // Blocking, and deliberately: one small file, read once, before there is a
     // window to stall.
     let settings = Settings::for_user();
+    apply_startup_theme(&settings, &launch.overrides);
 
     let options = WindowOptions {
         title: channel.window_title(),
@@ -522,6 +538,24 @@ fn open_window(channel: Channel, frames: Option<u32>, overrides: Overrides) -> R
             &launch,
         ))
     })
+}
+
+/// Puts a theme in force before there is a window to repaint.
+///
+/// The command line's if it named one, and the saved one otherwise. A name
+/// nothing on this machine answers to is a warning and the default — a theme
+/// file can be deleted between two launches, and that is not a reason to
+/// refuse to start.
+fn apply_startup_theme(settings: &Settings, overrides: &Overrides) {
+    let name = overrides
+        .theme
+        .as_deref()
+        .unwrap_or_else(|| settings.theme());
+
+    match theme::named(name) {
+        Some(palette) => theme::set_theme(palette),
+        None => log::warn!("no theme called {name:?} on this machine; opening in the default"),
+    }
 }
 
 /// Renders one frame of the real view tree and writes it to `path`.
@@ -547,6 +581,7 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
 
     let quit: QuitRequest = Rc::new(|| {});
     let settings = Settings::ephemeral();
+    apply_startup_theme(&settings, &overrides);
     // A snapshot is always rendered as the dev channel: the only thing the
     // channel reaches is the About page's label, and a PNG that said "stable"
     // on a machine that built it from a working tree would be wrong in the one

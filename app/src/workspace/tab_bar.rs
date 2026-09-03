@@ -46,7 +46,7 @@ use crookui_core::prelude::*;
 
 use crate::settings::{Density, Granularity, TabOptions};
 use crate::tab::{AgentStatus, PaneId, TabAction, TabId};
-use crate::theme::THEME;
+use crate::theme::theme;
 
 use super::action::WorkspaceAction;
 use super::row_content::{
@@ -158,11 +158,11 @@ fn render_row(
         }
 
         let (fill, border) = if is_selected {
-            (THEME.tab_active, THEME.border)
+            (theme().tab_active, theme().border)
         } else if hovered {
-            (THEME.surface, THEME.tab_inactive)
+            (theme().surface, theme().tab_inactive)
         } else {
-            (THEME.tab_inactive, THEME.tab_inactive)
+            (theme().tab_inactive, theme().tab_inactive)
         };
 
         // A row is given `bar width / row count` and no minimum, so past a
@@ -290,9 +290,9 @@ impl RowText {
     /// The text column, as the density wants it.
     fn render(self, chips: &Chips, is_selected: bool, ui: FamilyId) -> Box<dyn Element> {
         let (title_color, weight) = if is_selected {
-            (THEME.text_primary, Weight::Semibold)
+            (theme().text_primary, Weight::Semibold)
         } else {
-            (THEME.text_muted, Weight::Normal)
+            (theme().text_muted, Weight::Normal)
         };
         let title = self.title.render(12.5, title_color, weight, ui);
 
@@ -307,7 +307,7 @@ impl RowText {
                     .with_spacing(1.)
                     .with_child(title);
                 if let Some(second) = self.second {
-                    column.add_child(second.render(10., THEME.text_muted, Weight::Normal, ui));
+                    column.add_child(second.render(10., theme().text_muted, Weight::Normal, ui));
                 }
                 column.finish()
             }
@@ -363,7 +363,7 @@ fn status_dot(status: Option<AgentStatus>, ui: FamilyId) -> Box<dyn Element> {
         // silently not be drawn at all.
         None => (
             Text::new(GEAR_GLYPH, ui, GEAR_SIZE)
-                .with_color(THEME.text_muted)
+                .with_color(theme().text_muted)
                 .finish(),
             STATUS_DOT_SIZE + DOT_GAP - GEAR_SIZE,
         ),
@@ -386,16 +386,16 @@ fn close_slot(
                 Align::new(
                     Text::new("\u{00d7}", ui, 14.)
                         .with_color(if hovered {
-                            THEME.text_primary
+                            theme().text_primary
                         } else {
-                            THEME.text_muted
+                            theme().text_muted
                         })
                         .finish(),
                 )
                 .finish(),
             )
             .with_background_color(if hovered {
-                THEME.border
+                theme().border
             } else {
                 Color::TRANSPARENT
             })

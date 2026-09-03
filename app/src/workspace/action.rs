@@ -75,6 +75,15 @@ pub enum SettingsAction {
     Select(Section),
     /// "Show the usage chip", which is also what starts and stops the poll.
     ToggleUsageChip,
+    /// Put a theme on screen: the one at this index of the list the settings
+    /// page last read.
+    ///
+    /// An index rather than a name because an action is `Copy` and a name is a
+    /// [`String`]. The list it indexes is the workspace's own, taken when the
+    /// settings tab was opened and not read again while it is up — so a theme
+    /// file appearing on disk in between cannot renumber the row somebody is
+    /// about to click.
+    SetTheme(usize),
     /// Put every tab option back to the value a fresh install opens with.
     ResetTabOptions,
 }

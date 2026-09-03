@@ -42,7 +42,7 @@ mod view;
 #[cfg(test)]
 mod tests;
 
-use crate::theme::THEME;
+use crate::theme::theme;
 
 pub use action::{OptionsAction, SettingsAction, WorkspaceAction};
 pub use input_element::CommandInput;
@@ -101,9 +101,9 @@ pub(crate) fn status_color(status: crate::tab::AgentStatus) -> crookui_core::geo
     use crate::tab::AgentStatus;
 
     match status {
-        AgentStatus::Idle => THEME.border,
-        AgentStatus::Running => THEME.accent,
-        AgentStatus::NeedsInput => THEME.usage_high,
-        AgentStatus::Failed => THEME.usage_critical,
+        AgentStatus::Idle => theme().border,
+        AgentStatus::Running => theme().accent,
+        AgentStatus::NeedsInput => theme().usage_high,
+        AgentStatus::Failed => theme().usage_critical,
     }
 }

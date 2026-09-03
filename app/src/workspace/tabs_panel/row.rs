@@ -40,7 +40,7 @@ use crookui_core::prelude::*;
 
 use crate::settings::{Density, Granularity, TabOptions};
 use crate::tab::{AgentStatus, PaneId, TabAction, TabId};
-use crate::theme::THEME;
+use crate::theme::theme;
 
 use super::super::action::WorkspaceAction;
 use super::super::row_content::{
@@ -274,7 +274,7 @@ fn compact_column(facts: &RowFacts, options: TabOptions, ui: FamilyId) -> RowBod
         .with_spacing(COMPACT_LINE_GAP)
         .with_child(facts.title(options.primary_info).render(
             TITLE_SIZE,
-            THEME.text_primary,
+            theme().text_primary,
             Weight::Normal,
             ui,
         ));
@@ -284,7 +284,7 @@ fn compact_column(facts: &RowFacts, options: TabOptions, ui: FamilyId) -> RowBod
     let subtitle = facts.subtitle(options);
     let is_multiline = subtitle.is_some();
     if let Some(subtitle) = subtitle {
-        column.add_child(subtitle.render(SUBTITLE_SIZE, THEME.text_muted, Weight::Normal, ui));
+        column.add_child(subtitle.render(SUBTITLE_SIZE, theme().text_muted, Weight::Normal, ui));
     }
 
     RowBody {
@@ -306,10 +306,10 @@ fn expanded_column(facts: &RowFacts, chips: &Chips, options: TabOptions, ui: Fam
         .map_or_else(
             || {
                 Text::new("", ui, DESCRIPTION_SIZE)
-                    .with_color(THEME.text_muted)
+                    .with_color(theme().text_muted)
                     .finish()
             },
-            |line| line.render(DESCRIPTION_SIZE, THEME.text_muted, Weight::Normal, ui),
+            |line| line.render(DESCRIPTION_SIZE, theme().text_muted, Weight::Normal, ui),
         );
 
     let column = Flex::column()
@@ -319,7 +319,7 @@ fn expanded_column(facts: &RowFacts, chips: &Chips, options: TabOptions, ui: Fam
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
         .with_child(facts.title(options.primary_info).render(
             TITLE_SIZE,
-            THEME.text_primary,
+            theme().text_primary,
             Weight::Normal,
             ui,
         ))
@@ -357,9 +357,9 @@ fn expanded_column(facts: &RowFacts, chips: &Chips, options: TabOptions, ui: Fam
 /// Warp's arithmetic and costs it nothing against itself.
 fn row_shell(content: Box<dyn Element>, is_selected: bool, is_hovered: bool) -> Box<dyn Element> {
     let background = if is_selected {
-        THEME.overlay_2
+        theme().overlay_2
     } else if is_hovered {
-        THEME.overlay_1
+        theme().overlay_1
     } else {
         Color::TRANSPARENT
     };
@@ -372,7 +372,7 @@ fn row_shell(content: Box<dyn Element>, is_selected: bool, is_hovered: bool) -> 
     .with_uniform_padding(ROW_PADDING)
     .with_background_color(background)
     .with_border(Border::all(1.).with_border_color(if is_selected {
-        THEME.overlay_3
+        theme().overlay_3
     } else {
         Color::TRANSPARENT
     }))
@@ -399,7 +399,7 @@ fn status_disc(status: Option<AgentStatus>, ui: FamilyId) -> Box<dyn Element> {
         // other row's does. See the strip's `status_dot` for why this is a
         // different kind of mark rather than a fifth status colour.
         None => Text::new(GEAR_GLYPH, ui, diameter * 0.8)
-            .with_color(THEME.text_muted)
+            .with_color(theme().text_muted)
             .finish(),
     };
 
@@ -425,16 +425,16 @@ fn close_slot(
                 Align::new(
                     Text::new("\u{00d7}", ui, 14.)
                         .with_color(if hovered {
-                            THEME.text_primary
+                            theme().text_primary
                         } else {
-                            THEME.text_muted
+                            theme().text_muted
                         })
                         .finish(),
                 )
                 .finish(),
             )
             .with_background_color(if hovered {
-                THEME.overlay_3
+                theme().overlay_3
             } else {
                 Color::TRANSPARENT
             })

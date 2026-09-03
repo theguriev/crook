@@ -81,7 +81,7 @@ fn the_prompt_is_drawn_first_and_the_text_starts_after_it() {
 
     assert_eq!(painted[0].glyph_key.glyph_id, u32::from(PROMPT));
     assert_eq!(painted[0].position, vec2f(0., metrics.baseline));
-    assert_eq!(painted[0].color, THEME.accent);
+    assert_eq!(painted[0].color, theme().accent);
 
     assert_eq!(painted[1].glyph_key.glyph_id, u32::from('h'));
     assert_eq!(
@@ -104,7 +104,7 @@ fn an_unfocused_field_dims_its_prompt_and_draws_no_caret() {
     // going to receive what is typed.
     let scene = painted(&holding("hi"), 20, false);
 
-    assert_eq!(glyphs(&scene)[0].color, THEME.text_muted);
+    assert_eq!(glyphs(&scene)[0].color, theme().text_muted);
     assert!(
         rects(&scene).is_empty(),
         "an unfocused field paints no caret and no selection it is not making"
@@ -125,7 +125,7 @@ fn the_caret_is_one_cell_at_the_column_it_is_on() {
         "the caret sits one cell past the last character, where the next one goes"
     );
     assert_eq!(caret.bounds.size(), vec2f(metrics.width, metrics.height));
-    assert_eq!(caret.background, Fill::Solid(THEME.accent));
+    assert_eq!(caret.background, Fill::Solid(theme().accent));
 }
 
 #[test]
@@ -136,8 +136,12 @@ fn a_character_under_the_caret_is_drawn_in_the_ground_it_sits_on() {
     input.edit(|editor| editor.set_caret(0));
 
     let painted = glyphs(&painted(&input, 20, true));
-    assert_eq!(painted[1].color, THEME.ground, "the character on the caret");
-    assert_eq!(painted[2].color, THEME.text_primary, "and only that one");
+    assert_eq!(
+        painted[1].color,
+        theme().ground,
+        "the character on the caret"
+    );
+    assert_eq!(painted[2].color, theme().text_primary, "and only that one");
 }
 
 #[test]
@@ -159,7 +163,7 @@ fn a_selection_is_one_rectangle_over_the_cells_it_covers() {
     );
     assert_eq!(
         selection.background,
-        Fill::Solid(THEME.accent.with_alpha(SELECTION_ALPHA))
+        Fill::Solid(theme().accent.with_alpha(SELECTION_ALPHA))
     );
     assert!(
         painted.len() > 1,

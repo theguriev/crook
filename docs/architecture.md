@@ -729,6 +729,50 @@ knows no keystroke — but the only element that draws it is `CommandInput`, whi
 terminal cells against a `CellFont` and reads a pane's `PaneInput`. `crookui_core` still has
 no text field of its own, so the gap here is an element, not a model.
 
+**A theme *system* the size of Warp's.** Themes themselves are in — see below — but Warp's
+appearance layer is a great deal more than a palette: gradient fills for background, accent and
+cursor; background images with an opacity ramp; a `details` block of ten opacity knobs; a theme
+creator that k-means five colours out of a photograph; importers for Alacritty and iTerm
+configs; and a filesystem watcher that hot-reloads the themes directory. Crook reads the same
+file format and ignores every one of those fields rather than refusing a file that carries
+them, which is the property that matters: a theme written for Warp loads here.
+
+The one omission worth naming is **OS sync**. Warp resolves the active theme as a pure function
+of (a `use_system_theme` flag, an explicit `{light, dark}` pair of theme names, the OS mode) —
+a design worth copying exactly when it arrives, because it needs no per-theme pairing metadata.
+What it needs first is the OS mode, and that means plumbing `winit`'s system-theme query and
+its `ThemeChanged` event through `crookui`, which is a change to the windowing layer rather
+than to the theme one.
+
+**Themes, and what a theme is allowed to be.** `app/src/theme.rs` used to be one `const`
+struct of twenty colours with a comment saying this type is the shape themes would load into
+when they arrived. They arrived, and the type was the right shape: what changed is that
+`THEME.surface` became `theme().surface`, a process-wide value behind a lock rather than a
+constant. That global is the one architectural compromise in the feature, and it is
+deliberate — Warp reads its appearance layer as a singleton entity because every one of its
+render functions holds an `AppContext`, and half of Crook's are free functions over borrowed
+data that hold nothing. Threading a `&Theme` through sixty signatures buys nothing a lock read
+does not.
+
+The file format is Warp's, key for key, because there are hundreds of these files already
+written and a format differing by a key name would waste all of them. It is read by a
+hundred-line parser for the subset a theme file actually is — a flat map, one nested block,
+hex strings — rather than by a YAML crate, which is the same trade as everywhere else in this
+repository: `serde_yaml` is unmaintained, and anchors, flow mappings and multi-document files
+have never appeared in a theme.
+
+Two ideas were taken wholesale from how Warp derives a palette, and both pay for themselves.
+**A theme stores four colours and derives the rest** — surfaces, borders, overlays and muted
+text are the background composited with the foreground at fixed percentages, so a palette
+nobody anticipated still has surfaces that read and nobody can write an internally
+inconsistent theme. And **light or dark is inferred, never declared**: a theme whose text is
+dark is a theme for a light background, which is one function over luminance and cannot be got
+wrong by a file that never says it.
+
+Crook's own addition is an invariant the derivation makes unrepresentable: there is one
+background, and both the chrome and the terminal grid are painted in it. Two backgrounds that
+nearly matched is precisely the bug that took two commits to remove from the pane renderer.
+
 **Keymaps.** Warp has editable bindings, fixed bindings, context predicates, and a
 user-remappable keymap. Crook reads input directly. The half worth keeping is already kept:
 keyboard and mouse produce the *same* action values, so a keymap layer can be inserted later
@@ -764,7 +808,8 @@ platforms, and treat a build script as the cost it is.
 | Packaging | 2,245 lines of shell and PowerShell | a release binary today, `cargo-dist` next |
 | The command line | an input field, with shell integration behind it | an input field, with the alt screen as the whole test (§7) |
 | Autotracking | `Tracked<T>` dependency capture | explicit `ctx.notify()` |
-| Settings | ~800, with a macro DSL and cloud sync | 9, two `serde` structs in one JSON file |
+| Settings | ~800, with a macro DSL and cloud sync | 10, two `serde` structs and a name in one JSON file |
+| Themes | 21 built in, gradients, images, a creator, OS sync, hot reload | 3 built in, the same file format, no OS sync |
 | Settings UI | a pane, 16 pages, search over ~800 widgets | a pane, 4 pages, no search |
 
 The through-line: Crook keeps every *architectural* idea from Warp and rejects almost every

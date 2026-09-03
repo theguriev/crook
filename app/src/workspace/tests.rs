@@ -29,7 +29,7 @@ use crate::settings::{
 };
 use crate::tab::{AgentSession, AgentStatus, Direction, Pane, PaneId, Tab, TabAction, TabId};
 use crate::terminal_font::{CELL_FONT_SIZE, CellFont};
-use crate::theme::THEME;
+use crate::theme::theme;
 use crate::usage_model::UsageModel;
 
 use super::{
@@ -315,6 +315,23 @@ impl Harness {
     /// sent the way the gear menu's entry sends it.
     fn open_settings_page(&mut self) {
         self.dispatch_action(TabAction::OpenSettings);
+    }
+
+    /// Runs `change` against the workspace, the way an action handler does.
+    fn workspace_update(
+        &mut self,
+        change: impl FnOnce(&mut Workspace, &mut ViewContext<Workspace>),
+    ) {
+        let workspace = &self.workspace;
+        self.app.update(|ctx| {
+            workspace.update(ctx, |workspace, ctx| change(workspace, ctx));
+        });
+    }
+
+    /// The name of the theme in force.
+    fn theme_name(&self) -> String {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.theme_name().to_owned())
     }
 
     /// Which page of the settings the rail has selected.
@@ -754,7 +771,7 @@ fn menu_box(scene: &Scene) -> RectF {
     let boxes: Vec<RectF> = visible_rects(scene)
         .filter(|(rect, _)| {
             rect.corner_radius.get_top_left() == Radius::Pixels(6.)
-                && rect.background == Fill::Solid(THEME.surface_raised)
+                && rect.background == Fill::Solid(theme().surface_raised)
         })
         .map(|(_, bounds)| bounds)
         .collect();
@@ -883,7 +900,7 @@ fn detail_cards(scene: &Scene) -> Vec<RectF> {
     visible_rects(scene)
         .filter(|(rect, _)| {
             rect.corner_radius.get_top_left() == Radius::Pixels(4.)
-                && rect.background == Fill::Solid(THEME.surface_raised)
+                && rect.background == Fill::Solid(theme().surface_raised)
         })
         .map(|(_, bounds)| bounds)
         .collect()
@@ -1172,7 +1189,7 @@ fn selected_chips(scene: &Scene) -> Vec<RectF> {
     visible_rects(scene)
         .filter(|(rect, _)| {
             rect.corner_radius.get_top_left() == Radius::Pixels(8.)
-                && rect.background == Fill::Solid(THEME.tab_active)
+                && rect.background == Fill::Solid(theme().tab_active)
         })
         .map(|(_, bounds)| bounds)
         .collect()
@@ -1194,7 +1211,7 @@ fn selected_chips(scene: &Scene) -> Vec<RectF> {
 fn panel_boxes(scene: &Scene) -> Vec<RectF> {
     let candidates: Vec<RectF> = visible_rects(scene)
         .filter(|(rect, _)| {
-            rect.background == Fill::Solid(THEME.surface)
+            rect.background == Fill::Solid(theme().surface)
                 && rect.border == Border::default()
                 && rect.corner_radius == CornerRadius::default()
         })
@@ -2211,7 +2228,7 @@ fn every_show_toggle_carries_its_own_check() {
 fn panel_box(scene: &Scene) -> RectF {
     let boxes: Vec<RectF> = visible_rects(scene)
         .filter(|(rect, _)| {
-            rect.background == Fill::Solid(THEME.surface)
+            rect.background == Fill::Solid(theme().surface)
                 && (rect.bounds.width() - tabs_panel::PANEL_WIDTH).abs() < 0.5
                 && rect.bounds.min_x() < 1.
         })
@@ -2262,7 +2279,7 @@ fn selected_panel_rows(scene: &Scene) -> Vec<RectF> {
     let panel = panel_box(scene);
     visible_rects(scene)
         .filter(|(rect, _)| {
-            rect.border.color == Fill::Solid(THEME.overlay_3)
+            rect.border.color == Fill::Solid(theme().overlay_3)
                 && rect.bounds.width() > 100.
                 && rect.bounds.max_x() <= panel.max_x()
         })
@@ -2435,7 +2452,7 @@ fn lifted_tab_box(scene: &Scene) -> RectF {
     let panel = panel_box(scene);
     let boxes: Vec<RectF> = visible_rects(scene)
         .filter(|(rect, _)| {
-            rect.background == Fill::Solid(THEME.overlay_1)
+            rect.background == Fill::Solid(theme().overlay_1)
                 && rect.bounds.width() > 100.
                 && rect.bounds.max_x() <= panel.max_x()
         })
@@ -2789,7 +2806,7 @@ fn the_layout_keybinding_moves_the_tabs_and_the_gear_with_them() {
         visible_rects(&scene).all(|(rect, _)| (rect.bounds.width() - tabs_panel::PANEL_WIDTH)
             .abs()
             > 0.5
-            || rect.background != Fill::Solid(THEME.surface)),
+            || rect.background != Fill::Solid(theme().surface)),
         "the panel is still painted beside the strip"
     );
     // The gear went with the tabs: it is now at the far end of the header
@@ -2913,7 +2930,7 @@ fn moving_the_tabs_makes_every_control_forget_the_pointer() {
 fn card_dividers(scene: &Scene, card: RectF) -> Vec<RectF> {
     visible_rects(scene)
         .filter(|(rect, _)| {
-            rect.background == Fill::Solid(THEME.overlay_2)
+            rect.background == Fill::Solid(theme().overlay_2)
                 && (rect.bounds.height() - 1.).abs() < 0.01
                 && card.contains_point(rect.bounds.origin())
         })
@@ -3200,13 +3217,116 @@ fn settings_button_box(scene: &Scene) -> Option<RectF> {
         // control says there is nothing to reset.
         .filter(|(rect, _)| {
             rect.corner_radius.get_top_left() == Radius::Pixels(6.)
-                && rect.border.color == Fill::Solid(THEME.border)
+                && rect.border.color == Fill::Solid(theme().border)
         })
         .map(|(_, bounds)| bounds)
         .find(|bounds| {
             pane.contains_point(center(*bounds))
                 && center(*bounds).x() > pane.min_x() + settings_page::RAIL_WIDTH
         })
+}
+
+/// The theme cards on the settings page, top to bottom.
+///
+/// Found by the one thing only a card is: a rounded box painted in a theme's
+/// *terminal* background. Every other rounded box on the page is painted in
+/// the palette in force, and a card is the one element in Crook drawn in a
+/// palette that is not.
+fn theme_cards(scene: &Scene) -> Vec<RectF> {
+    let pane = settings_pane_box(scene);
+    let mut cards: Vec<RectF> = visible_rects(scene)
+        .filter(|(rect, _)| {
+            rect.corner_radius.get_top_left() == Radius::Pixels(6.)
+                && rect.border.width >= 1.
+                && (rect.bounds.width() - 152.).abs() < 0.5
+        })
+        .map(|(_, bounds)| bounds)
+        .filter(|bounds| pane.contains_point(center(*bounds)))
+        .collect();
+    cards.sort_by(|left, right| left.min_y().total_cmp(&right.min_y()));
+    cards
+}
+
+#[test]
+fn choosing_a_theme_repaints_the_window_saves_it_and_reaches_the_shells() {
+    // The whole of what applying a theme has to do. The last of the three is
+    // the one that is easy to miss: a grid resolves its colours through a
+    // palette handed to it when its shell started, so a theme that stopped at
+    // the edge of the terminal would be the least useful half of a theme.
+    let scratch = Scratch::new();
+    let mut harness = Harness::with_settings(1, scratch.settings());
+    let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+
+    harness.open_settings_page();
+    let cards = theme_cards(&harness.frame());
+    assert_eq!(cards.len(), 3, "three built-in themes, three cards");
+
+    // The second card is the light one, and it is the one that proves a theme
+    // reaches everything: nothing about a dark theme replacing another dark
+    // theme is visible in a test.
+    harness.click(center(cards[1]), MouseButton::Left);
+
+    assert_eq!(harness.theme_name(), "Crook Light");
+    assert!(
+        crate::theme::theme().is_light,
+        "the palette every view reads did not change"
+    );
+    assert_eq!(
+        crate::terminal_model::crook_palette().background,
+        crook_terminal::Rgb::new(
+            crate::theme::theme().terminal.background.r,
+            crate::theme::theme().terminal.background.g,
+            crate::theme::theme().terminal.background.b,
+        ),
+        "the palette a shell is drawn through is not the theme's"
+    );
+
+    let written = scratch.written_containing("\"theme\"");
+    assert!(
+        written.contains("\"theme\": \"Crook Light\""),
+        "the chosen theme did not reach the settings file: {written}"
+    );
+}
+
+#[test]
+fn the_card_of_the_theme_in_force_is_the_marked_one() {
+    let mut harness = Harness::new(1);
+    let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+    harness.open_settings_page();
+
+    // A selected card is outlined at two pixels and the rest at one, which is
+    // Warp's way of marking the chosen one *on* the preview rather than beside
+    // it.
+    let scene = harness.frame();
+    let widths: Vec<f32> = visible_rects(&scene)
+        .filter(|(rect, _)| {
+            rect.corner_radius.get_top_left() == Radius::Pixels(6.)
+                && (rect.bounds.width() - 152.).abs() < 0.5
+        })
+        .map(|(rect, _)| rect.border.width)
+        .collect();
+
+    assert_eq!(
+        widths.iter().filter(|width| **width > 1.5).count(),
+        1,
+        "exactly one card should be drawn as the chosen one: {widths:?}"
+    );
+}
+
+#[test]
+fn a_theme_this_machine_does_not_have_is_refused_rather_than_swapped_for_another() {
+    // A theme file can be deleted between two launches, and the name in the
+    // settings file is then a name nothing answers to. Quietly adopting a
+    // different theme would lose the choice: put the file back and it comes
+    // back.
+    let mut harness = Harness::new(1);
+    let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+
+    let before = harness.theme_name();
+    harness.workspace_update(|workspace, ctx| workspace.set_theme("Nothing At All", ctx));
+
+    assert_eq!(harness.theme_name(), before);
+    assert_eq!(crate::theme::theme(), crate::theme::DARK);
 }
 
 #[test]
@@ -3688,7 +3808,7 @@ mod shells {
             .filter(|(rect, _)| {
                 rect.corner_radius.get_top_left()
                     == Radius::Pixels(crate::workspace::body::FIELD_RADIUS)
-                    && rect.background == Fill::Solid(THEME.ground)
+                    && rect.background == Fill::Solid(theme().ground)
             })
             .map(|(_, bounds)| bounds)
             .collect();
@@ -4063,7 +4183,7 @@ mod shells {
         let scene = harness.frame();
         let carets: Vec<_> = visible_rects(&scene)
             .filter(|(rect, bounds)| {
-                rect.background == Fill::Solid(THEME.accent)
+                rect.background == Fill::Solid(theme().accent)
                     && (bounds.width() - cell.width).abs() < 0.5
                     && (bounds.height() - cell.height).abs() < 0.5
             })

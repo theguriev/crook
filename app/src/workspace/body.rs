@@ -45,7 +45,7 @@ use crate::input_keys;
 use crate::tab::{Pane, PaneId, SplitAxis, TabAction};
 use crate::terminal_font::CellFont;
 use crate::terminal_model::TerminalHandle;
-use crate::theme::THEME;
+use crate::theme::theme;
 
 use super::action::WorkspaceAction;
 use super::input_element::CommandInput;
@@ -230,7 +230,7 @@ fn panel(
 /// choosing: a pane with no shell yet is about to have one, and it should not
 /// change colour when it arrives.
 fn pane_ground(terminal: Option<&(TerminalHandle, Arc<Snapshot>)>) -> Color {
-    terminal.map_or(THEME.surface, |(_, snapshot)| color(snapshot.background))
+    terminal.map_or(theme().surface, |(_, snapshot)| color(snapshot.background))
 }
 
 /// The pane's grid and the field under it, or an explanation of why it has
@@ -324,12 +324,12 @@ fn field(
     // Darker than the panel it sits in rather than lighter, which is what a
     // text field looks like on a dark ground: a well to type into.
     let border = if state.focused {
-        THEME.accent
+        theme().accent
     } else {
-        THEME.border
+        theme().border
     };
     Container::new(composing)
-        .with_background_color(THEME.ground)
+        .with_background_color(theme().ground)
         .with_border(Border::all(1.).with_border_color(border))
         .with_corner_radius(CornerRadius::with_all(Radius::Pixels(FIELD_RADIUS)))
         .with_margin_top(GRID_PADDING)
@@ -346,7 +346,7 @@ fn notice(workspace: &Workspace, pane: &Pane, reason: String) -> Box<dyn Element
         .with_spacing(9.)
         .with_child(
             Text::new(pane.title().to_owned(), fonts.ui, 16.)
-                .with_color(THEME.text_primary)
+                .with_color(theme().text_primary)
                 .with_style(Properties {
                     weight: Weight::Semibold,
                     ..Default::default()
@@ -355,7 +355,7 @@ fn notice(workspace: &Workspace, pane: &Pane, reason: String) -> Box<dyn Element
         )
         .with_child(
             Text::new(reason, fonts.monospace, 12.5)
-                .with_color(THEME.text_muted)
+                .with_color(theme().text_muted)
                 .finish(),
         )
         .finish()
@@ -371,7 +371,7 @@ fn notice(workspace: &Workspace, pane: &Pane, reason: String) -> Box<dyn Element
 /// otherwise steals the hit box a person is aiming at.
 fn divider(axis: SplitAxis) -> Box<dyn Element> {
     let line = Container::new(Empty::new().finish())
-        .with_background_color(THEME.border)
+        .with_background_color(theme().border)
         .finish();
 
     // Edge to edge, with no margin along its length. It used to stop twenty

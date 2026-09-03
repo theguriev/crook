@@ -22,7 +22,7 @@ use crate::settings::{Density, GeneralOptions, Granularity, Layout, Settings, Ta
 use crate::tab::{AgentSession, Direction, PaneId, Tab, TabAction, TabEffect, TabId, TabStrip};
 use crate::terminal_font::CellFont;
 use crate::terminal_model::{TerminalHandle, TerminalModel, TerminalUpdate};
-use crate::theme::THEME;
+use crate::theme::theme;
 use crate::usage_model::UsageModel;
 use crate::{Channel, WINDOW_CHROME};
 
@@ -398,6 +398,42 @@ impl Workspace {
     /// page does not earn a second copy to keep in step.
     pub fn general(&self) -> GeneralOptions {
         self.settings.general()
+    }
+
+    /// The name of the theme in force.
+    pub fn theme_name(&self) -> &str {
+        self.settings.theme()
+    }
+
+    /// Puts a theme on screen, remembers it, and repaints everything.
+    ///
+    /// Everything: the chrome reads [`theme`](crate::theme::theme) on the next
+    /// render, and every shell already running is handed the new palette,
+    /// because a grid resolves its colours through the one it was started
+    /// with. A theme that stopped at the edge of the terminal would be the
+    /// least useful half of a theme.
+    ///
+    /// A name this machine has no theme for is ignored with a warning rather
+    /// than falling back: the file may be one directory away from being put
+    /// back, and silently adopting a different theme would lose the choice.
+    pub fn set_theme(&mut self, name: &str, ctx: &mut ViewContext<Self>) {
+        let Some(palette) = crate::theme::named(name) else {
+            log::warn!("no theme called {name:?} on this machine; keeping the current one");
+            return;
+        };
+
+        crate::theme::set_theme(palette);
+        self.settings.set_theme(name);
+        self.save_settings(ctx);
+        self.sync_palette(ctx);
+        ctx.notify();
+    }
+
+    /// Hands the terminals the palette the theme in force resolves to.
+    fn sync_palette(&self, ctx: &mut ViewContext<Self>) {
+        let palette = crate::terminal_model::crook_palette();
+        self.terminals
+            .update(ctx, |model, ctx| model.set_palette(palette, ctx));
     }
 
     /// Which build this is: `dev` or `stable`.
@@ -909,6 +945,16 @@ impl Workspace {
     /// a tab that has been closed — and what makes "the strip changed" and
     /// "the window is dirty" the same statement rather than two.
     pub fn apply(&mut self, action: TabAction, ctx: &mut ViewContext<Self>) -> TabEffect {
+        // Opening the settings is the one gesture that can precede choosing a
+        // theme, and therefore the one moment worth walking the themes
+        // directory: a file dropped in while Crook was running is in the list
+        // the next time the page is opened. Here rather than in the action
+        // handler, because every way of opening the page — the keystroke, the
+        // menu entry, `--settings` — comes through this one call.
+        if action == TabAction::OpenSettings {
+            self.page.themes = crate::theme::available();
+        }
+
         let effect = self.tabs.apply(action);
         self.sync_interactions();
         self.sync_git(ctx);
@@ -1255,6 +1301,18 @@ impl Workspace {
                 general.show_usage_chip = !general.show_usage_chip;
                 self.set_general(general, ctx);
             }
+            SettingsAction::SetTheme(index) => {
+                let Some(chosen) = self.page.themes.get(index).map(|theme| theme.name.clone())
+                else {
+                    // Unreachable: the index came out of this very list, in
+                    // the frame the click was dispatched from.
+                    log::error!(
+                        "the settings page asked for theme {index}, which is not in its list"
+                    );
+                    return;
+                };
+                self.set_theme(&chosen, ctx);
+            }
             SettingsAction::ResetTabOptions => {
                 // Through `set_options` like every other write, so the reset
                 // ends the command line's overrides exactly as clicking each
@@ -1384,7 +1442,7 @@ impl View for Workspace {
         };
 
         Container::new(content)
-            .with_background_color(THEME.ground)
+            .with_background_color(theme().ground)
             .finish()
     }
 }
@@ -1398,6 +1456,8 @@ impl TypedActionView for Workspace {
                 // The one tab action the options menu itself dispatches, and
                 // the menu's job is done the moment it does: it is a popup
                 // about the strip, and this puts a page over the body.
+                // The menu is a popup about the strip, and its job is done
+                // the moment its own entry puts a page over the body.
                 if action == TabAction::OpenSettings {
                     self.close_menu();
                 }
