@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crook_terminal::Snapshot;
 use crookui_core::elements::MouseStateHandle;
@@ -22,12 +23,14 @@ use crate::settings::{Density, GeneralOptions, Granularity, Layout, Settings, Ta
 use crate::tab::{AgentSession, Direction, PaneId, Tab, TabAction, TabEffect, TabId, TabStrip};
 use crate::terminal_font::CellFont;
 use crate::terminal_model::{TerminalHandle, TerminalModel, TerminalUpdate};
-use crate::theme::theme;
+use crate::theme::creator::Draft;
+use crate::theme::{Available, theme};
 use crate::usage_model::UsageModel;
 use crate::{Channel, WINDOW_CHROME};
 
-use super::action::{OptionsAction, SettingsAction, WorkspaceAction};
+use super::action::{OptionsAction, SettingsAction, ThemeAction, WorkspaceAction};
 use super::settings_page::{Section, SettingsState};
+use super::theme_panel::{Mode, ThemePanelState};
 use super::usage_chip::UsageChip;
 use super::{body, header_toolbar, tabs_panel};
 
@@ -272,6 +275,38 @@ pub struct Workspace {
     /// The settings page: whether it is up, which page it is on, and what the
     /// mouse is doing to each of its controls.
     page: SettingsState,
+    /// The Themes panel, which is the other surface that lists themes.
+    panel: ThemePanelState,
+    /// Every theme that can be chosen, as of the last time a surface that
+    /// lists them was opened.
+    ///
+    /// One list for both surfaces. Reading it walks a directory, so it is not
+    /// read on the render path; refreshing it on the gestures that can precede
+    /// choosing a theme is the same trade the settings page already made, and
+    /// keeping *one* of it is what stops the panel and the page from
+    /// disagreeing about what exists.
+    themes: Vec<Available>,
+    /// The theme that was in force when the creator opened, to put back if it
+    /// is cancelled.
+    theme_before_draft: Option<String>,
+    /// Where themes are read from and written to.
+    ///
+    /// Carried rather than asked for each time, because a test must be able to
+    /// point it somewhere else: a list read from the real folder would assert
+    /// something about the machine running the test, and a creator test would
+    /// write a theme into the folder of whoever ran it. `Settings` has the
+    /// same seam for the same reason.
+    themes_directory: Option<PathBuf>,
+    /// How many settings saves have been asked for.
+    ///
+    /// Each save task carries the number it was asked at and does nothing if a
+    /// later one has been asked for since. Browsing themes with the arrow keys
+    /// asks for one per keystroke, which is exactly the case `save_settings`
+    /// said it would need this for.
+    ///
+    /// An `Arc<AtomicU64>` rather than a `Cell`, because the check happens on
+    /// the worker that is about to write.
+    save_generation: Arc<AtomicU64>,
     /// How far the tabs panel's list has been scrolled.
     ///
     /// On the workspace rather than inside the panel module for the reason
@@ -349,6 +384,11 @@ impl Workspace {
             overridden: Overridden::default(),
             menu: MenuState::default(),
             page: SettingsState::default(),
+            panel: ThemePanelState::default(),
+            themes: crate::theme::available(),
+            theme_before_draft: None,
+            themes_directory: crate::theme::user_themes_directory(),
+            save_generation: Arc::new(AtomicU64::new(0)),
             panel_scroll: ScrollStateHandle::default(),
             hovered_row: None,
             home: std::env::home_dir(),
@@ -417,7 +457,12 @@ impl Workspace {
     /// than falling back: the file may be one directory away from being put
     /// back, and silently adopting a different theme would lose the choice.
     pub fn set_theme(&mut self, name: &str, ctx: &mut ViewContext<Self>) {
-        let Some(palette) = crate::theme::named(name) else {
+        let known = self
+            .themes
+            .iter()
+            .find(|available| available.name == name)
+            .map(|available| available.theme);
+        let Some(palette) = known.or_else(|| crate::theme::named(name)) else {
             log::warn!("no theme called {name:?} on this machine; keeping the current one");
             return;
         };
@@ -449,6 +494,74 @@ impl Workspace {
     /// The settings page's state.
     pub(super) fn settings_page(&self) -> &SettingsState {
         &self.page
+    }
+
+    /// The Themes panel's state.
+    pub(super) fn theme_panel(&self) -> &ThemePanelState {
+        &self.panel
+    }
+
+    /// Whether the Themes panel is up.
+    pub fn is_theme_panel_open(&self) -> bool {
+        self.panel.open
+    }
+
+    /// Opens the Themes panel, for a run that was asked to start on it.
+    ///
+    /// The same two actions a click on the settings row and a click on the `+`
+    /// send, so a snapshot of the panel is a snapshot of the real thing.
+    pub fn open_theme_panel(&mut self, creating: bool, ctx: &mut ViewContext<Self>) {
+        self.apply_theme_action(ThemeAction::OpenPanel, ctx);
+        if creating {
+            self.apply_theme_action(ThemeAction::StartCreating, ctx);
+        }
+    }
+
+    /// Whether it is showing the creator.
+    pub fn is_creating_theme(&self) -> bool {
+        self.panel.mode == Mode::Creating
+    }
+
+    /// Whether one pane's field is listening to the keyboard.
+    ///
+    /// The answer `sync_input_keys` last wrote, read back — which is what a
+    /// test asking "did the panel take the keyboard" wants to know.
+    pub fn pane_takes_keys(&self, pane: PaneId) -> bool {
+        self.inputs.get(&pane).is_some_and(|input| input.has_keys())
+    }
+
+    /// Every theme that can be chosen.
+    ///
+    /// The list both surfaces read. Refreshed when one of them opens rather
+    /// than on the render path: reading it walks a directory, and a panel that
+    /// did so while a pointer moved over it would `readdir` sixty times a
+    /// second.
+    pub(super) fn themes(&self) -> &[Available] {
+        &self.themes
+    }
+
+    /// Points the themes folder somewhere else.
+    ///
+    /// For a test, and for a run that must not read or write the folder of
+    /// whoever started it.
+    pub fn set_themes_directory(&mut self, directory: PathBuf) {
+        self.themes_directory = Some(directory);
+        self.refresh_themes();
+    }
+
+    /// Re-reads the themes folder, and keeps the keyboard's row pointing at
+    /// the theme in force.
+    fn refresh_themes(&mut self) {
+        self.themes = match self.themes_directory.as_deref() {
+            Some(directory) => crate::theme::available_in(directory),
+            None => crate::theme::available(),
+        };
+        let current = self.settings.theme().to_owned();
+        self.panel.selected = self
+            .themes
+            .iter()
+            .position(|available| available.name == current)
+            .unwrap_or(0);
     }
 
     /// Which page of the settings the rail has selected.
@@ -945,14 +1058,13 @@ impl Workspace {
     /// a tab that has been closed — and what makes "the strip changed" and
     /// "the window is dirty" the same statement rather than two.
     pub fn apply(&mut self, action: TabAction, ctx: &mut ViewContext<Self>) -> TabEffect {
-        // Opening the settings is the one gesture that can precede choosing a
-        // theme, and therefore the one moment worth walking the themes
-        // directory: a file dropped in while Crook was running is in the list
-        // the next time the page is opened. Here rather than in the action
-        // handler, because every way of opening the page — the keystroke, the
-        // menu entry, `--settings` — comes through this one call.
+        // Opening the settings is one of the two gestures that can precede
+        // choosing a theme — the other is opening the panel — and therefore
+        // one of the two moments worth walking the themes directory. Here
+        // rather than in the action handler, because every way of opening the
+        // page comes through this one call.
         if action == TabAction::OpenSettings {
-            self.page.themes = crate::theme::available();
+            self.refresh_themes();
         }
 
         let effect = self.tabs.apply(action);
@@ -978,6 +1090,18 @@ impl Workspace {
     /// the tabs themselves rather than a tab, and giving it its own dispatch
     /// path would be exactly the second code path.
     pub fn action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
+        // **The panel takes the keyboard while it is up.** Before the bindings
+        // and before anything a pane would see: Warp's chooser moves its
+        // selection with the arrow keys, and a keystroke that both moved the
+        // selection and recalled a line of shell history would be worse than
+        // either. `sync_input_keys` closes the other half of the same door by
+        // taking the keyboard away from the focused pane's field.
+        if self.panel.open
+            && let Some(action) = self.panel_action_for(keystroke)
+        {
+            return Some(action);
+        }
+
         let tab = match input_keys::binding(keystroke, Platform::current())? {
             Binding::NewTab => TabAction::New,
             // Warp's `pane_group:close_current_session`: the pane goes, and
@@ -1004,6 +1128,30 @@ impl Workspace {
         };
 
         Some(WorkspaceAction::Tab(tab))
+    }
+
+    /// What a keystroke means to the Themes panel, if it means anything.
+    ///
+    /// Only unmodified keys, and only the four the panel actually uses: a
+    /// chord is a window command wherever the pointer is, and swallowing one
+    /// here would make `cmd/ctrl-t` stop opening a tab while a panel happened
+    /// to be showing.
+    fn panel_action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
+        if !keystroke.modifiers.is_empty() {
+            return None;
+        }
+
+        let action = match keystroke.key.as_str() {
+            "up" => ThemeAction::MoveSelection(-1),
+            "down" => ThemeAction::MoveSelection(1),
+            // Enter and Escape both close it. Nothing is uncommitted — moving
+            // the selection has already applied and saved, as it does in Warp
+            // — so "confirm" and "dismiss" are the same gesture with two keys,
+            // and the creator's Escape is the one that puts something back.
+            "enter" | "escape" => ThemeAction::ClosePanel,
+            _ => return None,
+        };
+        Some(WorkspaceAction::Theme(action))
     }
 
     pub(super) fn chip(&self) -> &ViewHandle<UsageChip> {
@@ -1154,7 +1302,9 @@ impl Workspace {
     /// asks is a frame behind: it was built before whatever moved the focus,
     /// and by the time a keystroke reaches it, what it was told is history.
     fn sync_input_keys(&self) {
-        let listening = (!self.menu.open)
+        // The menu is modal and the Themes panel owns the arrow keys, so
+        // neither leaves the keyboard with a pane.
+        let listening = (!self.menu.open && !self.panel.open)
             .then(|| self.tabs.focused_pane_id())
             .flatten();
         for (id, input) in &self.inputs {
@@ -1301,24 +1451,189 @@ impl Workspace {
                 general.show_usage_chip = !general.show_usage_chip;
                 self.set_general(general, ctx);
             }
-            SettingsAction::SetTheme(index) => {
-                let Some(chosen) = self.page.themes.get(index).map(|theme| theme.name.clone())
-                else {
-                    // Unreachable: the index came out of this very list, in
-                    // the frame the click was dispatched from.
-                    log::error!(
-                        "the settings page asked for theme {index}, which is not in its list"
-                    );
-                    return;
-                };
-                self.set_theme(&chosen, ctx);
-            }
             SettingsAction::ResetTabOptions => {
                 // Through `set_options` like every other write, so the reset
                 // ends the command line's overrides exactly as clicking each
                 // control by hand would.
                 self.set_options(TabOptions::default(), ctx);
             }
+        }
+    }
+
+    /// Everything the Themes panel does.
+    fn apply_theme_action(&mut self, action: ThemeAction, ctx: &mut ViewContext<Self>) {
+        match action {
+            ThemeAction::OpenPanel => {
+                // Opening is also the moment to re-read the folder: a theme
+                // dropped in while Crook was running is in the list.
+                self.refresh_themes();
+                if self.panel.open && self.panel.mode == Mode::Choosing {
+                    return;
+                }
+                self.leave_creator();
+                self.panel.open = true;
+                self.panel.forget_hover_state();
+                self.sync_input_keys();
+                ctx.notify();
+            }
+            ThemeAction::ClosePanel => {
+                if !self.panel.open {
+                    return;
+                }
+                // A creator left open is cancelled rather than kept: the draft
+                // is on screen, and a panel that came back holding a theme
+                // nobody had chosen would be applying it.
+                self.cancel_draft();
+                self.panel.open = false;
+                self.panel.forget_hover_state();
+                self.sync_input_keys();
+                ctx.notify();
+            }
+            ThemeAction::Choose(index) => {
+                let Some(name) = self.themes.get(index).map(|theme| theme.name.clone()) else {
+                    log::error!("the themes panel asked for {index}, which is not in its list");
+                    return;
+                };
+                self.panel.selected = index;
+                self.set_theme(&name, ctx);
+                // Clicking a row does not scroll, but arrowing onto one does,
+                // and both go through here so the two cannot drift.
+                self.scroll_selection_into_view();
+                ctx.notify();
+            }
+            ThemeAction::MoveSelection(delta) => {
+                if self.themes.is_empty() {
+                    return;
+                }
+                let last = self.themes.len() as isize - 1;
+                let next = (self.panel.selected as isize + delta).clamp(0, last) as usize;
+                if next == self.panel.selected {
+                    return;
+                }
+                self.apply_theme_action(ThemeAction::Choose(next), ctx);
+            }
+            ThemeAction::StartCreating => {
+                self.theme_before_draft = Some(self.settings.theme().to_owned());
+                let draft = Draft::new(&theme());
+                crate::theme::set_theme(draft.theme);
+                self.panel.draft = Some(draft);
+                self.panel.mode = Mode::Creating;
+                self.panel.forget_hover_state();
+                self.sync_palette(ctx);
+                ctx.notify();
+            }
+            ThemeAction::CancelCreating => {
+                self.cancel_draft();
+                self.sync_palette(ctx);
+                ctx.notify();
+            }
+            ThemeAction::PickBackground(index) => {
+                let Some(draft) = self.panel.draft.as_mut() else {
+                    return;
+                };
+                draft.choose(index);
+                // Applied to the window rather than to a preview card: a
+                // palette is judged against real output, which is the whole
+                // reason the creator is in a panel beside a shell.
+                crate::theme::set_theme(draft.theme);
+                self.sync_palette(ctx);
+                ctx.notify();
+            }
+            ThemeAction::Create => self.save_draft(ctx),
+        }
+    }
+
+    /// Writes the draft into the themes folder and chooses it.
+    fn save_draft(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(draft) = self.panel.draft.clone() else {
+            return;
+        };
+        let Some(directory) = self.themes_directory.clone() else {
+            log::warn!("no configuration directory, so a theme cannot be written anywhere");
+            return;
+        };
+
+        // Named after the theme it was built from, because that is the only
+        // thing about it a person did not choose by clicking: Warp fills its
+        // name field from the image's file name for the same reason.
+        let name = self.unused_theme_name();
+        match crate::theme::write_theme(&directory, &name, &draft.theme) {
+            Ok(path) => log::info!("wrote {name:?} to {}", path.display()),
+            Err(error) => {
+                log::warn!("could not write the theme: {error:#}");
+                return;
+            }
+        }
+
+        self.theme_before_draft = None;
+        self.panel.draft = None;
+        self.panel.mode = Mode::Choosing;
+        self.panel.forget_hover_state();
+        self.refresh_themes();
+        self.set_theme(&name, ctx);
+        self.scroll_selection_into_view();
+        ctx.notify();
+    }
+
+    /// A name for a new theme that nothing on this machine is using.
+    fn unused_theme_name(&self) -> String {
+        let base = format!("{} variant", self.settings.theme());
+        let taken = |candidate: &str| self.themes.iter().any(|theme| theme.name == candidate);
+
+        if !taken(&base) {
+            return base;
+        }
+        for serial in 2.. {
+            let candidate = format!("{base} {serial}");
+            if !taken(&candidate) {
+                return candidate;
+            }
+        }
+        base
+    }
+
+    /// Puts back the theme the creator was opened over, if it is open.
+    fn cancel_draft(&mut self) {
+        if self.panel.draft.take().is_none() {
+            return;
+        }
+        self.panel.mode = Mode::Choosing;
+        self.panel.forget_hover_state();
+
+        // Back to the *name* that was in force, through the same lookup a
+        // click uses: the draft was never saved, so nothing has to be undone
+        // except what is on screen.
+        if let Some(name) = self.theme_before_draft.take()
+            && let Some(palette) = crate::theme::named(&name)
+        {
+            crate::theme::set_theme(palette);
+        }
+    }
+
+    /// Leaves the creator without putting anything back.
+    fn leave_creator(&mut self) {
+        self.panel.draft = None;
+        self.theme_before_draft = None;
+        self.panel.mode = Mode::Choosing;
+    }
+
+    /// Keeps the row the keyboard is on inside the list.
+    ///
+    /// Rows are a fixed height, so this is arithmetic. Warp asks its scrollable
+    /// to bring a saved child position into view; `Scrollable` has no such
+    /// call, and at a fixed row height it does not need one — which is the
+    /// same trade `tabs_panel` names for its own list.
+    fn scroll_selection_into_view(&self) {
+        let row = super::theme_panel::ROW_HEIGHT;
+        let top = self.panel.selected as f32 * row;
+        let mut scroll = self.panel.scroll.lock();
+
+        let offset = scroll.offset();
+        let viewport = scroll.viewport();
+        if top < offset {
+            scroll.scroll_to(top);
+        } else if top + row > offset + viewport {
+            scroll.scroll_to(top + row - viewport);
         }
     }
 
@@ -1387,11 +1702,29 @@ impl Workspace {
             return;
         }
 
+        // **Only the last one asked for lands.** This function's own comment
+        // used to say that two clicks a millisecond apart could persist the
+        // earlier state, and that the fix was worth having when an option
+        // could be changed from somewhere other than a person's hand. Browsing
+        // themes with the arrow keys is that: one save per keystroke, each on
+        // its own background task, racing each other to the same file. A
+        // generation number makes the race decidable — a task that finds a
+        // later one has been asked for since simply does nothing.
+        let generation = self.save_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let latest = self.save_generation.clone();
         let settings = self.settings.clone();
+
         ctx.background()
             .spawn(async move {
+                // Checked on the worker, immediately before the write: a task
+                // that has been overtaken has nothing to do, and the one that
+                // was asked for last is the one holding the state a person can
+                // see.
+                if latest.load(Ordering::Relaxed) != generation {
+                    return;
+                }
                 if let Err(error) = settings.save_blocking() {
-                    log::warn!("could not save the tab options: {error:#}");
+                    log::warn!("could not save the settings: {error:#}");
                 }
             })
             .detach();
@@ -1420,13 +1753,22 @@ impl View for Workspace {
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
         // The header and the body, which sit one above the other in both
         // layouts. What changes is whether the header holds the tabs.
+        //
+        // The Themes panel goes *between* the tabs and the work in both, which
+        // is where Warp puts its chooser: a docked sibling that pushes the
+        // terminal aside rather than a modal that covers it, so a theme is
+        // judged against a running shell.
         let stacked = Flex::column()
             .with_main_axis_size(MainAxisSize::Max)
             .with_child(header_toolbar::render(self, app))
-            .with_child(Expanded::new(1., body::render(self, app)).finish())
+            .with_child(Expanded::new(1., self.beside_panel(body::render(self, app), app)).finish())
             .finish();
 
         let content = match self.options.layout {
+            // With the tabs in a strip the header spans the window, so the
+            // panel sits beside the body under it — otherwise it would push
+            // the strip sideways and take the window's top-left corner from
+            // it.
             Layout::Horizontal => stacked,
             // The panel is the full height of the window and the header starts
             // beside it, not above it. That is what puts the panel's control
@@ -1443,6 +1785,26 @@ impl View for Workspace {
 
         Container::new(content)
             .with_background_color(theme().ground)
+            .finish()
+    }
+}
+
+impl Workspace {
+    /// `work` with the Themes panel beside it, when the panel is up.
+    ///
+    /// One place, called from the one point both layouts share, so the panel
+    /// cannot end up on a different side of the window depending on where the
+    /// tabs are.
+    fn beside_panel(&self, work: Box<dyn Element>, app: &AppContext) -> Box<dyn Element> {
+        if !self.panel.open {
+            return work;
+        }
+
+        Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_child(super::theme_panel::render(self, app))
+            .with_child(Expanded::new(1., work).finish())
             .finish()
     }
 }
@@ -1467,6 +1829,7 @@ impl TypedActionView for Workspace {
             }
             WorkspaceAction::Options(action) => self.apply_option(action, ctx),
             WorkspaceAction::Settings(action) => self.apply_settings(action, ctx),
+            WorkspaceAction::Theme(action) => self.apply_theme_action(action, ctx),
             WorkspaceAction::HoverRow { pane, entered } => self.hover_row(pane, entered, ctx),
         }
     }

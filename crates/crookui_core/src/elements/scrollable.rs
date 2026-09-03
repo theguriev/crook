@@ -105,6 +105,14 @@ impl ScrollState {
         (self.content_height - self.viewport_height).max(0.)
     }
 
+    /// How much of the content is on screen at once.
+    ///
+    /// What a caller needs to answer "is the thing I just selected visible" —
+    /// which, for a list of fixed-height rows, is the whole of scroll-to-row.
+    pub fn viewport(&self) -> f32 {
+        self.viewport_height
+    }
+
     /// Whether there is anything to scroll.
     pub fn is_scrollable(&self) -> bool {
         self.max_offset() > 0.

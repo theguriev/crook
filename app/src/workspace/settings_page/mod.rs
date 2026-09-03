@@ -59,7 +59,6 @@ use crookui_core::elements::{MouseStateHandle, Padding};
 use crookui_core::prelude::*;
 
 use crate::settings::{Density, Granularity, Layout, PrimaryInfo, Subtitle};
-use crate::theme::Available;
 use crate::theme::theme;
 
 use super::action::{SettingsAction, WorkspaceAction};
@@ -165,8 +164,10 @@ pub(super) enum Control {
     ShowUsageChip,
     /// "Reset to defaults".
     ResetTabOptions,
-    /// One theme's card, by its place in the list.
-    Theme(usize),
+    /// The preview in the "Current theme" row.
+    ThemeRow,
+    /// The row around it, which is what opens the Themes panel.
+    ThemeRowButton,
 }
 
 /// Which page the rail has selected, and what the mouse is doing to each of
@@ -187,15 +188,6 @@ pub(super) struct SettingsState {
     pub(super) section: Section,
     /// How far the content column has been scrolled.
     pub(super) scroll: ScrollStateHandle,
-    /// Every theme that can be chosen, as of the last time the page opened.
-    ///
-    /// Held rather than asked for on every render because reading it walks a
-    /// directory: the settings page draws sixty times a second while a pointer
-    /// moves over it, and a `readdir` per frame is a cost with nothing on the
-    /// other side of it. Warp keeps the same list live with a filesystem
-    /// watcher; this refreshes on the one gesture that can precede choosing a
-    /// theme, which is opening the page.
-    pub(super) themes: Vec<Available>,
     /// One mouse state per control, created the first time that control is
     /// drawn and kept for as long as the window lives.
     ///

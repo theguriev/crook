@@ -35,7 +35,7 @@ pub mod creator;
 mod file;
 
 pub use builtin::{BUILTIN, Builtin, DARK, builtin_named};
-pub use file::{ThemeFile, load_themes_in, load_user_themes, user_themes_directory};
+pub use file::{ThemeFile, load_themes_in, load_user_themes, user_themes_directory, write_theme};
 
 /// A palette, in the roles the interface asks for.
 ///

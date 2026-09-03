@@ -338,7 +338,10 @@ fn two_files_of_the_same_name_are_two_themes_in_a_stable_order() {
         names.contains(&"Solarized Dark") && names.contains(&"Solarized Dark (two)"),
         "the two files did not both survive: {names:?}"
     );
-    assert_eq!(first, again, "the same directory listed itself differently twice");
+    assert_eq!(
+        first, again,
+        "the same directory listed itself differently twice"
+    );
 
     let _ = fs::remove_dir_all(&root);
 }
@@ -380,8 +383,7 @@ struct Scratch {
 
 impl Scratch {
     fn new(name: &str) -> Self {
-        let path =
-            std::env::temp_dir().join(format!("crook-write-{}-{name}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("crook-write-{}-{name}", std::process::id()));
         let _ = fs::remove_dir_all(&path);
         fs::create_dir_all(&path).expect("the scratch directory should be creatable");
         Self { path }
@@ -439,7 +441,15 @@ fn a_written_theme_cannot_land_outside_the_themes_folder() {
     // a file path is not.
     let scratch = Scratch::new("escape");
 
-    for name in ["../../evil", "/etc/passwd", "..", "", "a/b", "  ", "..\\..\\evil"] {
+    for name in [
+        "../../evil",
+        "/etc/passwd",
+        "..",
+        "",
+        "a/b",
+        "  ",
+        "..\\..\\evil",
+    ] {
         let path = write_theme(&scratch.path, name, &crate::theme::DARK)
             .expect("even a hostile name should write somewhere safe");
         assert_eq!(
@@ -463,8 +473,8 @@ fn writing_a_theme_never_overwrites_one_that_is_already_there() {
     let scratch = Scratch::new("collide");
 
     let first = write_theme(&scratch.path, "My Theme", &crate::theme::DARK).expect("written");
-    let second = write_theme(&scratch.path, "my theme", &crate::theme::builtin::LIGHT)
-        .expect("written");
+    let second =
+        write_theme(&scratch.path, "my theme", &crate::theme::builtin::LIGHT).expect("written");
 
     assert_ne!(first, second);
     assert_eq!(

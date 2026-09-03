@@ -24,6 +24,8 @@ pub enum WorkspaceAction {
     Options(OptionsAction),
     /// Something happened to the settings page itself.
     Settings(SettingsAction),
+    /// Something happened in the Themes panel.
+    Theme(ThemeAction),
     /// The pointer entered a row, or left it.
     ///
     /// Carried as an action rather than written directly, because a hover
@@ -58,6 +60,44 @@ impl From<SettingsAction> for WorkspaceAction {
     }
 }
 
+impl From<ThemeAction> for WorkspaceAction {
+    fn from(action: ThemeAction) -> Self {
+        Self::Theme(action)
+    }
+}
+
+/// What the Themes panel does.
+///
+/// Its own vocabulary rather than more [`SettingsAction`] variants, because
+/// the panel is not the settings page: it opens beside a running shell, it
+/// outlives the page being closed, and its keyboard belongs to it while it is
+/// up. What the two share is the *write* path — both end at
+/// `Workspace::set_theme` — which is where sharing matters.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ThemeAction {
+    /// Show the panel, or bring it back to its list if it is already showing.
+    OpenPanel,
+    /// Take it down. What the × sends, and Escape.
+    ClosePanel,
+    /// Apply and remember the theme at this index of the workspace's list.
+    Choose(usize),
+    /// Move the keyboard's selection by this many rows, and apply what it
+    /// lands on.
+    ///
+    /// Warp's arrow keys do exactly this: they move *and* choose, so browsing
+    /// with the keyboard is browsing the real thing rather than a list of
+    /// names.
+    MoveSelection(isize),
+    /// Start making a theme from the one in force.
+    StartCreating,
+    /// Put back the theme that was in force, and go back to the list.
+    CancelCreating,
+    /// Use this candidate as the draft's background.
+    PickBackground(usize),
+    /// Write the draft into the themes folder and choose it.
+    Create,
+}
+
 /// What the settings page does that is not writing an option.
 ///
 /// The split is deliberate and it is the page's whole design: every control
@@ -75,15 +115,6 @@ pub enum SettingsAction {
     Select(Section),
     /// "Show the usage chip", which is also what starts and stops the poll.
     ToggleUsageChip,
-    /// Put a theme on screen: the one at this index of the list the settings
-    /// page last read.
-    ///
-    /// An index rather than a name because an action is `Copy` and a name is a
-    /// [`String`]. The list it indexes is the workspace's own, taken when the
-    /// settings tab was opened and not read again while it is up — so a theme
-    /// file appearing on disk in between cannot renumber the row somebody is
-    /// about to click.
-    SetTheme(usize),
     /// Put every tab option back to the value a fresh install opens with.
     ResetTabOptions,
 }

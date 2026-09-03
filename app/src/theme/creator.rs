@@ -304,7 +304,11 @@ pub fn ansi_for(foreground: Color) -> ([Color; 8], [Color; 8]) {
 fn contrast(left: Color, right: Color) -> f32 {
     let (lighter, darker) = {
         let (left, right) = (relative_luminance(left), relative_luminance(right));
-        if left > right { (left, right) } else { (right, left) }
+        if left > right {
+            (left, right)
+        } else {
+            (right, left)
+        }
     };
     (lighter + 0.05) / (darker + 0.05)
 }
@@ -385,11 +389,7 @@ impl Lab {
                 (value - 16. / 116.) / 7.787
             }
         };
-        let (x, y, z) = (
-            inverse(fx) * 0.95047,
-            inverse(fy),
-            inverse(fz) * 1.08883,
-        );
+        let (x, y, z) = (inverse(fx) * 0.95047, inverse(fy), inverse(fz) * 1.08883);
 
         let linear_r = 3.2406 * x - 1.5372 * y - 0.4986 * z;
         let linear_g = -0.9689 * x + 1.8758 * y + 0.0415 * z;

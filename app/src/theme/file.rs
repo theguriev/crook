@@ -356,8 +356,9 @@ impl Document {
             else {
                 continue;
             };
-            let first = parse_hex(&first)
-                .with_context(|| format!("`{key}` is a gradient whose first stop is not a colour"))?;
+            let first = parse_hex(&first).with_context(|| {
+                format!("`{key}` is a gradient whose first stop is not a colour")
+            })?;
             let second = parse_hex(&second).with_context(|| {
                 format!("`{key}` is a gradient whose second stop is not a colour")
             })?;
@@ -484,11 +485,7 @@ fn parse_hex(value: &str) -> Result<Color> {
         )),
         // `#abc` means `#aabbcc`, which is what every hex colour parser on the
         // web does and what Warp's does too.
-        3 => Ok(Color::rgb(
-            digit(0)? * 17,
-            digit(1)? * 17,
-            digit(2)? * 17,
-        )),
+        3 => Ok(Color::rgb(digit(0)? * 17, digit(1)? * 17, digit(2)? * 17)),
         _ => bail!("{value:?} is not three or six hex digits"),
     }
 }
@@ -563,25 +560,47 @@ fn emit(name: &str, theme: &Theme) -> String {
     // Single-quoted, and with any quote in the name doubled, which is how YAML
     // escapes one inside a single-quoted scalar. A name is the one field here
     // that a person types.
-    text.push_str(&format!("name: '{}'
-", name.replace('\'', "''")));
-    text.push_str(&format!("background: {}
-", hex(colors.background)));
-    text.push_str(&format!("accent: {}
-", hex(theme.accent)));
-    text.push_str(&format!("foreground: {}
-", hex(colors.foreground)));
-    text.push_str(&format!("cursor: {}
-", hex(colors.cursor)));
-    text.push_str("terminal_colors:
-");
+    text.push_str(&format!(
+        "name: '{}'
+",
+        name.replace('\'', "''")
+    ));
+    text.push_str(&format!(
+        "background: {}
+",
+        hex(colors.background)
+    ));
+    text.push_str(&format!(
+        "accent: {}
+",
+        hex(theme.accent)
+    ));
+    text.push_str(&format!(
+        "foreground: {}
+",
+        hex(colors.foreground)
+    ));
+    text.push_str(&format!(
+        "cursor: {}
+",
+        hex(colors.cursor)
+    ));
+    text.push_str(
+        "terminal_colors:
+",
+    );
 
     for (block, eight) in [("normal", colors.normal), ("bright", colors.bright)] {
-        text.push_str(&format!("  {block}:
-"));
+        text.push_str(&format!(
+            "  {block}:
+"
+        ));
         for (name, color) in ANSI_NAMES.iter().zip(eight) {
-            text.push_str(&format!("    {name}: {}
-", hex(color)));
+            text.push_str(&format!(
+                "    {name}: {}
+",
+                hex(color)
+            ));
         }
     }
 
