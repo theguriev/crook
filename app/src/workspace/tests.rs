@@ -25,6 +25,7 @@ use crookui_core::{AddSingletonModel as _, App, Presenter, WindowId};
 use crate::git::{DiffStats, GitFacts, Head};
 use crate::settings::{Density, Granularity, Layout, PrimaryInfo, Settings, Subtitle, TabOptions};
 use crate::tab::{AgentSession, AgentStatus, Direction, Pane, PaneId, Tab, TabAction, TabId};
+use crate::terminal_font::{CELL_FONT_SIZE, CellFont};
 use crate::theme::THEME;
 use crate::usage_model::UsageModel;
 
@@ -98,6 +99,10 @@ fn ephemeral_settings(layout: Layout) -> Settings {
 }
 
 struct Harness {
+    /// The queue standing in for the event loop. Kept, rather than dropped into
+    /// the executor, because a terminal's output comes home on it: a test with
+    /// a shell in it has to pump the queue by hand.
+    queue: Arc<LocalQueue>,
     app: App,
     presenter: Presenter,
     window_id: WindowId,
@@ -131,7 +136,8 @@ impl Harness {
     /// carries the path, and `Workspace::save_settings` returns before doing
     /// anything at all when there is none.
     fn with_settings(tabs: usize, settings: Settings) -> Self {
-        let mut app = App::new(LocalQueue::new().foreground(), Arc::new(Background::new(1)));
+        let queue = LocalQueue::new();
+        let mut app = App::new(queue.foreground(), Arc::new(Background::new(1)));
         app.update(|ctx| ctx.add_singleton_model(UsageModel::new));
 
         let quit_requests = Rc::new(Cell::new(0));
@@ -144,10 +150,15 @@ impl Harness {
             ui: FamilyId(0),
             monospace: FamilyId(0),
         };
+        // Measured with no font backend, exactly as the stub shaper above lays
+        // text out with none: a cell is half the font size, and a character is
+        // its own glyph id.
+        let cell_font = CellFont::headless(CELL_FONT_SIZE);
         let (window_id, workspace) =
-            app.add_window(|ctx| Workspace::new(fonts, settings, quit, ctx));
+            app.add_window(|ctx| Workspace::new(fonts, cell_font, settings, quit, ctx));
 
         let mut harness = Self {
+            queue,
             app,
             presenter: Presenter::new(window_id, Arc::new(StubShaper)),
             window_id,
@@ -364,6 +375,131 @@ impl Harness {
     fn focused_pane_id(&self) -> Option<PaneId> {
         self.workspace
             .read(&self.app, |workspace, _| workspace.tabs().focused_pane_id())
+    }
+
+    /// Opens a shell in every pane, the way the window delegate does at
+    /// startup. Returns false when the machine has no shell to open.
+    fn start_terminals(&mut self) -> bool {
+        let workspace = &self.workspace;
+        self.app.update(|ctx| {
+            workspace.update(ctx, |workspace, ctx| workspace.start_terminals(ctx));
+        });
+
+        let Some(pane) = self.focused_pane_id() else {
+            return false;
+        };
+        let started = self.workspace.read(&self.app, |workspace, app| {
+            workspace.terminal(pane, app).is_some()
+        });
+        if !started {
+            eprintln!("skipped: no shell could be started here");
+        }
+        started
+    }
+
+    /// Types into a pane's shell without going through the keyboard.
+    fn type_into(&mut self, pane: PaneId, text: &str) {
+        let workspace = &self.workspace;
+        self.app.update(|ctx| {
+            workspace.update(ctx, |workspace, ctx| workspace.type_into(pane, text, ctx));
+        });
+    }
+
+    /// What a pane's shell is showing.
+    fn terminal_text(&self, pane: PaneId) -> String {
+        self.workspace
+            .read(&self.app, |workspace, app| {
+                workspace.terminal_text(pane, app)
+            })
+            .unwrap_or_default()
+    }
+
+    /// Presses a key exactly as the window delegate does: the bindings first,
+    /// and only what they decline reaches the element tree — which is where a
+    /// focused pane's grid picks it up.
+    ///
+    /// This *is* the line between Crook's keyboard and the shell's, so a test
+    /// that dispatched straight into the tree would be testing the wrong half.
+    fn press(&mut self, key: &str, modifiers: Modifiers, chars: &str) {
+        let keystroke = Keystroke::new(key, modifiers);
+        let bound = self
+            .workspace
+            .read(&self.app, |workspace, _| workspace.action_for(&keystroke));
+
+        if let Some(action) = bound {
+            self.dispatch_workspace_action(action);
+            return;
+        }
+        self.dispatch(Event::KeyDown {
+            keystroke,
+            chars: chars.to_owned(),
+        });
+    }
+
+    /// Pumps the queue until `settled` is true, or fails after
+    /// [`SHELL_TIMEOUT`].
+    fn wait_for(&mut self, what: &str, mut settled: impl FnMut(&mut Self) -> bool) {
+        let deadline = std::time::Instant::now() + SHELL_TIMEOUT;
+        loop {
+            self.queue.run_until_parked();
+            if settled(self) {
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "{what}");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    fn quit_requests(&self) -> usize {
+        self.quit_requests.get()
+    }
+
+    /// Where a pane's session says it is working.
+    fn working_directory(&self, pane: PaneId) -> Option<PathBuf> {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace
+                .tabs()
+                .pane(pane)
+                .and_then(|pane| pane.session().working_directory.clone())
+        })
+    }
+
+    /// What the strip would print as a pane's title.
+    fn pane_title(&self, pane: PaneId) -> String {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace
+                .tabs()
+                .pane(pane)
+                .map(|pane| pane.title().to_owned())
+                .unwrap_or_default()
+        })
+    }
+
+    /// The branch the strip would print for a pane, which is looked up by the
+    /// session's working directory.
+    fn branch_shown(&self, pane: PaneId) -> Option<Head> {
+        self.workspace.read(&self.app, |workspace, app| {
+            let session = workspace.tabs().pane(pane)?.session();
+            workspace.git_facts(session, app)?.branch.clone()
+        })
+    }
+}
+
+/// How long a test waits for a shell to do as it was told.
+const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The modifier that means "this is an application command" on this platform.
+fn platform_chord() -> Modifiers {
+    if cfg!(target_os = "macos") {
+        Modifiers {
+            cmd: true,
+            ..Default::default()
+        }
+    } else {
+        Modifiers {
+            ctrl: true,
+            ..Default::default()
+        }
     }
 }
 
@@ -2723,4 +2859,150 @@ fn choosing_one_option_does_not_carry_another_command_line_override_into_the_fil
         harness.options().layout,
         "the save changed what is on screen"
     );
+}
+
+/// The shell in a pane, driven through the real workspace.
+///
+/// These four are the only tests in this file that start a process. They are
+/// worth the cost: everything between a shell writing a byte and a tab knowing
+/// about it — a reader thread, a wake, a model, a subscription, a session, the
+/// git model's directory list — has no meaning without one at the end of it,
+/// and a double would only assert that the double was called.
+mod shells {
+    use super::*;
+
+    /// The pane every test here works in.
+    fn one_shell(harness: &mut Harness) -> Option<PaneId> {
+        if !harness.start_terminals() {
+            return None;
+        }
+        harness.focused_pane_id()
+    }
+
+    #[test]
+    fn typing_into_the_focused_pane_reaches_its_shell() {
+        // The keyboard path end to end: a key press the bindings declined, into
+        // the element tree, into the focused pane's pty, and back out as
+        // characters on the grid.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+
+        for character in "echo typed-it".chars() {
+            harness.press(
+                &character.to_lowercase().to_string(),
+                Modifiers::default(),
+                &character.to_string(),
+            );
+        }
+        harness.press("enter", Modifiers::default(), "\r");
+
+        harness.wait_for("the shell never echoed what was typed at it", |harness| {
+            harness.terminal_text(pane).contains("typed-it")
+        });
+    }
+
+    #[test]
+    fn a_binding_opens_a_tab_instead_of_typing_a_letter_into_the_shell() {
+        // The line this whole feature turns on. `cmd-t` — `ctrl-t` off macOS —
+        // is Crook's, and a grid that swallowed it would leave the window with
+        // no way to open a tab; a grid that let it through *as well* would put
+        // a stray `t` in somebody's command line.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+
+        // A letter either side of the chord, so the claim is about what landed
+        // *between* them rather than about a `t` somewhere in a prompt this
+        // test does not control.
+        assert_eq!(harness.tab_ids().len(), 1);
+        harness.press("q", Modifiers::default(), "q");
+        harness.press("t", platform_chord(), "t");
+        harness.press("q", Modifiers::default(), "q");
+
+        assert_eq!(harness.tab_ids().len(), 2, "the binding did not open a tab");
+        harness.wait_for("the shell never echoed what was typed at it", |harness| {
+            harness.terminal_text(pane).contains("qq")
+        });
+        assert!(
+            !harness.terminal_text(pane).contains("qtq"),
+            "the binding was typed into the shell as well as opening a tab"
+        );
+    }
+
+    #[test]
+    fn a_shell_that_renames_itself_renames_its_row_and_moves_where_git_is_read() {
+        // OSC 0 and OSC 7, which is what makes the strip's "Command /
+        // Conversation" and "Working Directory" say something true rather than
+        // repeating the name the pane was born with.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        assert_eq!(harness.pane_title(pane), "agent 1");
+
+        harness.type_into(
+            pane,
+            "printf '\\033]0;deploy the release\\007\\033]7;file:///tmp\\007'\n",
+        );
+        harness.wait_for("the shell's title never reached the strip", |harness| {
+            harness.pane_title(pane) == "deploy the release"
+        });
+        assert_eq!(harness.working_directory(pane), Some(PathBuf::from("/tmp")));
+
+        // And the branch chip follows it: the git facts a row prints are looked
+        // up by the session's directory, so a `cd` the shell reported has to
+        // move the lookup with it.
+        harness.record_git(pane, "shell-moved-here", None);
+        assert_eq!(
+            harness.branch_shown(pane),
+            Some(Head::Branch("shell-moved-here".to_owned())),
+            "the row is still reading the repository the pane started in"
+        );
+    }
+
+    #[test]
+    fn a_shell_that_exits_closes_its_tab_and_takes_its_terminal_with_it() {
+        // The ordinary case, and the one that closes the loop: the pane goes
+        // through `TabAction::ClosePane`, the strip's change comes back round
+        // through `sync_terminals`, and the session is ended rather than left
+        // holding a pty nothing reads.
+        let mut harness = Harness::panel(2);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        assert_eq!(harness.tab_ids().len(), 2);
+
+        harness.type_into(pane, "exit\n");
+        harness.wait_for("the shell exited and its tab stayed open", |harness| {
+            harness.tab_ids().len() == 1
+        });
+
+        assert_eq!(harness.quit_requests(), 0, "one tab was left to show");
+        assert_eq!(
+            harness.terminal_text(pane),
+            String::new(),
+            "the closed pane's terminal outlived the pane"
+        );
+    }
+
+    #[test]
+    fn a_shell_that_exits_closes_its_pane_and_the_window_with_the_last_one() {
+        // Requirement seven, and it goes through `TabAction::ClosePane` — the
+        // same path `cmd-w` takes — rather than a second way to close things.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        assert_eq!(harness.quit_requests(), 0);
+
+        harness.type_into(pane, "exit\n");
+        harness.wait_for("the shell exited and its window stayed open", |harness| {
+            harness.quit_requests() > 0
+        });
+    }
 }

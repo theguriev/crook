@@ -53,7 +53,9 @@ mod tests;
 use std::sync::Arc;
 
 use anyhow::{Context as _, Result, bail};
-use cosmic_text::{FontSystem, SwashCache, fontdb};
+use cosmic_text::{
+    Align, Attrs, AttrsList, FontSystem, Hinting, ShapeLine, Shaping, SwashCache, Wrap, fontdb,
+};
 use crookui_core::fonts::{
     FamilyId, FontId, GlyphId, GlyphKey, Metrics, Properties, RasterBounds, RasterFormat,
     RasterizedGlyph, Style, SubpixelAlignment, Weight,
@@ -408,6 +410,72 @@ impl FontStore {
         (glyph_id != 0).then_some(glyph_id.into())
     }
 
+    /// The face and glyph a character falls back to when `font_id` has none.
+    ///
+    /// This is the shaper's own fallback, asked one character at a time.
+    /// `ShapeLine` walks cosmic-text's per-OS fallback lists — script-specific
+    /// families first, then the platform's common ones — and finishes by trying
+    /// every face in the database, so the answer is "the best installed font
+    /// that can draw this", not "one of a hardcoded few". It comes back with
+    /// the face it chose, which is exactly what a grid needs to push a glyph
+    /// record.
+    ///
+    /// The base face is named in the request so shaping starts where the grid
+    /// is: a face that turns out to cover the character after all keeps it.
+    fn fallback_glyph(&self, font_id: FontId, character: char) -> Option<(FontId, GlyphId)> {
+        let mut buffer = [0; 4];
+        let text: &str = character.encode_utf8(&mut buffer);
+
+        let attrs_list = {
+            let font_system = self.font_system.read();
+            let base = self
+                .face(font_id)
+                .ok()
+                .and_then(|face| font_system.db().face(face.id).cloned());
+            let mut attrs = Attrs::new();
+            if let Some(face) = &base
+                && let Some((family, _)) = face.families.first()
+            {
+                attrs = attrs
+                    .family(fontdb::Family::Name(family.as_str()))
+                    .style(face.style)
+                    .weight(face.weight);
+            }
+            AttrsList::new(&attrs)
+        };
+
+        let shape_line = {
+            let mut font_system = self.font_system.write();
+            ShapeLine::new(
+                &mut font_system,
+                text,
+                &attrs_list,
+                Shaping::Advanced,
+                DEFAULT_TAB_WIDTH,
+            )
+        };
+        // The size is irrelevant — only the face and the glyph id are read back
+        // — so it is the one every font is defined at.
+        let layout = shape_line.layout(
+            1.,
+            None,
+            Wrap::None,
+            Some(Align::Left),
+            None,
+            Hinting::Disabled,
+        );
+
+        let glyph = layout.first()?.glyphs.first()?;
+        // Every fallback face was tried and none covered it: there is no font
+        // on this machine that can draw this character.
+        (glyph.glyph_id != 0).then(|| {
+            (
+                self.font_id_for_face(glyph.font_id),
+                GlyphId::from(glyph.glyph_id),
+            )
+        })
+    }
+
     fn font_metrics(&self, font_id: FontId) -> Metrics {
         if let Some(metrics) = self.metrics.read().get(&font_id) {
             return *metrics;
@@ -629,6 +697,16 @@ impl CosmicFontDb {
             .map(|family| family.name.clone())
     }
 
+    /// A handle to the measurement path, sharing this backend's fonts.
+    ///
+    /// Cheap: it clones an [`Arc`]. See [`CosmicGlyphs`] for why a grid needs
+    /// one rather than a table computed at startup.
+    pub fn glyphs(&self) -> CosmicGlyphs {
+        CosmicGlyphs {
+            store: Arc::clone(&self.store),
+        }
+    }
+
     /// The face in `family_id` that best matches `properties`.
     ///
     /// `None` only for a [`FamilyId`] this backend never issued.
@@ -646,29 +724,86 @@ impl CosmicFontDb {
         self.store.glyph_for_char(font_id, character)
     }
 
-    /// Faces to try when `font_id` has no glyph for `character`. Always empty.
+    /// The face and glyph `character` falls back to when `font_id` has none.
     ///
-    /// Not an oversight, and not a stub. Font fallback happens twice in this
-    /// stack and only one of the two decides what appears on screen:
-    /// cosmic-text picks fallback faces *during shaping*, from its own per-OS
-    /// lists, so a tab title containing CJK or an emoji already renders
-    /// correctly and the [`FontId`]s of the faces it chose come back in the
-    /// [`Run`]s. This method feeds the other path — the single-glyph
-    /// measurement one above — which in Crook is used only by a monospace grid
-    /// that is Latin by construction.
+    /// Font fallback happens twice in this stack. Shaping does its own, from
+    /// cosmic-text's per-OS lists, so a tab title containing CJK or an emoji
+    /// has always rendered correctly and the [`FontId`]s of the faces it chose
+    /// come back in the [`Run`]s. This is the same answer for the other path —
+    /// the single-glyph measurement one above — which is what a terminal grid
+    /// paints from. A grid is *not* Latin by construction: a spinner is
+    /// braille, a prompt is powerline, `ls` prints whatever the filenames are.
     ///
     /// Warp's version costs a `fontconfig` link on Linux and a DirectWrite
-    /// `IDWriteFontFallback` call on Windows. It buys a correct answer for a
-    /// question Crook does not yet ask, so it stays unanswered.
+    /// `IDWriteFontFallback` call on Windows. This one costs a shaping call per
+    /// distinct character its caller has never seen before, and callers memoize
+    /// it.
     ///
     /// [`Run`]: crookui_core::text_layout::Run
-    pub fn fallback_fonts(&self, character: char, font_id: FontId) -> Vec<FontId> {
-        log::trace!("no measurement-path fallback for {character:?}, missing from {font_id:?}");
-        Vec::new()
+    pub fn fallback_glyph(&self, font_id: FontId, character: char) -> Option<(FontId, GlyphId)> {
+        self.store.fallback_glyph(font_id, character)
     }
 
     /// The advance width of `m` in `family_id` at `font_size`, in logical
     /// pixels — the unit UI sizing is expressed in.
+    pub fn em_width(&self, family_id: FamilyId, font_size: f32) -> Result<f32> {
+        self.glyphs().em_width(family_id, font_size)
+    }
+}
+
+/// The measurement path on its own: which glyph a character is, how wide it is,
+/// and what a face's vertical metrics are.
+///
+/// A cheap-clone handle over the same `FontStore` [`CosmicFontDb`] owns, which
+/// is the trick [`CosmicFontDb::text_layout`] already plays for the shaper. It
+/// exists because a monospace grid is the one thing in Crook that resolves
+/// glyphs *while painting* rather than while shaping: it asks
+/// [`Self::glyph_for_char`] per distinct character and then pushes glyph records
+/// straight into the scene at a fixed advance. The database itself is moved into
+/// the event loop when the window opens, so nothing above the platform line can
+/// hold it — and a table precomputed at startup cannot answer for the characters
+/// a shell has not printed yet.
+///
+/// Rasterization is deliberately not here. It needs `&mut` scaler state and its
+/// only caller is the renderer, which has the database itself.
+#[derive(Clone)]
+pub struct CosmicGlyphs {
+    store: Arc<FontStore>,
+}
+
+impl CosmicGlyphs {
+    /// The face in `family_id` that best matches `properties`.
+    ///
+    /// `None` only for a [`FamilyId`] the backend never issued.
+    pub fn select_font(&self, family_id: FamilyId, properties: Properties) -> Option<FontId> {
+        self.store.select_font(family_id, properties)
+    }
+
+    /// The glyph `character` maps to in `font_id`, or `None` when the face does
+    /// not cover it. For the answer that also looks at every other installed
+    /// face, see [`Self::fallback_glyph`].
+    pub fn glyph_for_char(&self, font_id: FontId, character: char) -> Option<GlyphId> {
+        self.store.glyph_for_char(font_id, character)
+    }
+
+    /// The face and glyph `character` falls back to when `font_id` has none.
+    /// See [`CosmicFontDb::fallback_glyph`].
+    pub fn fallback_glyph(&self, font_id: FontId, character: char) -> Option<(FontId, GlyphId)> {
+        self.store.fallback_glyph(font_id, character)
+    }
+
+    /// A glyph's advance in font units — scale by `font_size / units_per_em`.
+    pub fn glyph_advance(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Vector2F> {
+        self.store.glyph_advance(font_id, glyph_id)
+    }
+
+    /// The font-wide metrics of a face, in font units.
+    pub fn font_metrics(&self, font_id: FontId) -> Metrics {
+        self.store.font_metrics(font_id)
+    }
+
+    /// The advance width of `m` in `family_id` at `font_size`, in logical
+    /// pixels — the unit UI sizing, and a terminal cell, is expressed in.
     pub fn em_width(&self, family_id: FamilyId, font_size: f32) -> Result<f32> {
         let font_id = self
             .select_font(family_id, Properties::default())
@@ -677,8 +812,8 @@ impl CosmicFontDb {
             .glyph_for_char(font_id, VALIDATION_CHAR)
             .with_context(|| format!("{font_id:?} has no {VALIDATION_CHAR:?} glyph"))?;
 
-        let advance = self.store.glyph_advance(font_id, glyph_id)?;
-        let units_per_em = self.store.font_metrics(font_id).units_per_em;
+        let advance = self.glyph_advance(font_id, glyph_id)?;
+        let units_per_em = self.font_metrics(font_id).units_per_em;
         Ok(advance.x() * font_size / units_per_em as f32)
     }
 }

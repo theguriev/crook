@@ -98,6 +98,6 @@ pub mod fonts;
 pub mod rendering;
 pub mod windowing;
 
-pub use fonts::{CosmicFontDb, CosmicTextLayout};
+pub use fonts::{CosmicFontDb, CosmicGlyphs, CosmicTextLayout};
 pub use rendering::render_scene_to_rgba;
 pub use windowing::{Platform, Proxy, WindowDelegate, WindowOptions, run};

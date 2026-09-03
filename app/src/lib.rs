@@ -24,6 +24,13 @@
 //! offscreen renderer and exits. It is not a hand-built scene: it goes through
 //! `View::render`, layout and paint exactly as the window does, which is what
 //! makes it worth having in CI on a machine with no display.
+//!
+//! `--run <command>` is the other half of running unattended, and it exists
+//! because a frame budget alone cannot show a terminal working: `--frames 3`
+//! draws three frames in the time it takes a shell to open a pty, so all three
+//! are empty. With `--run`, the command is typed into the first pane at startup
+//! and the run waits for it to print before it counts a frame or takes a
+//! picture — and says on stdout, or in the log, what the shell actually wrote.
 
 pub mod git;
 pub mod git_model;
@@ -31,6 +38,9 @@ pub mod platform_insets;
 pub mod process;
 pub mod settings;
 pub mod tab;
+pub mod terminal_font;
+pub mod terminal_keys;
+pub mod terminal_model;
 pub mod theme;
 pub mod usage_model;
 pub mod workspace;
@@ -40,6 +50,7 @@ use std::io::BufWriter;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use crookui::{CosmicFontDb, Platform, Proxy, WindowDelegate, WindowOptions, render_scene_to_rgba};
@@ -54,6 +65,7 @@ use crookui_core::{AddSingletonModel as _, App, Presenter, WindowId};
 use crate::platform_insets::WindowChrome;
 use crate::settings::{Density, Granularity, Layout, Settings};
 use crate::tab::{AgentStatus, Direction, PaneId, Tab, TabAction};
+use crate::terminal_font::{CELL_FONT_SIZE, CellFont};
 use crate::usage_model::UsageModel;
 use crate::workspace::{Fonts, QuitRequest, Workspace};
 
@@ -71,6 +83,19 @@ pub const WINDOW_CHROME: WindowChrome = WindowChrome::Native;
 /// The scale factor the headless snapshot renders at. Two, because that is
 /// where subpixel glyph positioning and the atlas are actually exercised.
 const SNAPSHOT_SCALE_FACTOR: f32 = 2.;
+
+/// The longest a `--run` waits for its command to finish printing.
+///
+/// A wall clock rather than a signal, because there is no such thing as "the
+/// command has finished" from outside the pty: a shell prints its prompt back
+/// and goes quiet, and quiet is the only evidence there is.
+const RUN_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How long the grid has to stop changing before a `--run` calls it finished.
+const RUN_QUIET: Duration = Duration::from_millis(400);
+
+/// How long the headless `--run` sleeps between pumps while it waits.
+const RUN_POLL: Duration = Duration::from_millis(10);
 
 /// Which build of Crook this is.
 ///
@@ -133,7 +158,7 @@ enum Startup {
 /// matching `Workspace::override_*` method, which puts a value in front of the
 /// renderer without letting it into the settings the next menu click saves, so
 /// asking for one does not change the options of whoever asked.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Overrides {
     /// Start with the tab options menu open.
     menu: bool,
@@ -145,6 +170,9 @@ struct Overrides {
     granularity: Option<Granularity>,
     /// Start in this density rather than the saved one.
     density: Option<Density>,
+    /// Type this into the first pane's shell at startup, and wait for what it
+    /// prints. See the module docs for why a frame budget alone is not enough.
+    run: Option<String>,
 }
 
 /// Runs Crook.
@@ -219,6 +247,10 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
             }
             "--menu" => overrides.menu = true,
             "--hover" => overrides.hover = true,
+            "--run" => {
+                let command = args.next().context("`--run` needs a command")?;
+                overrides.run = Some(command);
+            }
             "--density" => {
                 let mode = args.next().context("`--density` needs a mode")?;
                 overrides.density = Some(match mode.as_str() {
@@ -263,6 +295,8 @@ USAGE:
 OPTIONS:
     --snapshot <PATH>  Render one frame of the real view tree to a PNG and exit
     --frames <N>       Draw N frames, then exit; for running unattended
+    --run <COMMAND>    Type COMMAND into the first pane at startup, wait for its
+                       output, and report what the shell printed
     --menu             Start with the tab options menu open
     --hover            Start with the first row's detail card up
     --layout <MODE>    Start with the tabs `vertical` or `horizontal` rather than as saved
@@ -330,7 +364,7 @@ fn resolve_fonts(font_db: &CosmicFontDb) -> Result<Fonts> {
 /// what every later launch does.
 fn apply_overrides(
     workspace: &mut Workspace,
-    overrides: Overrides,
+    overrides: &Overrides,
     ctx: &mut ViewContext<Workspace>,
 ) {
     if let Some(layout) = overrides.layout {
@@ -355,6 +389,11 @@ fn open_window(channel: Channel, frames: Option<u32>, overrides: Overrides) -> R
     // the delegate is built inside a closure that cannot report an error.
     let font_db = CosmicFontDb::new().context("no usable system fonts")?;
     let fonts = resolve_fonts(&font_db)?;
+    // Resolved here, from the database, because this is the last moment
+    // anything can hold it: it is moved into the event loop on the next line
+    // but one, and a grid needs to ask it for a glyph on every frame after
+    // that. See `CosmicGlyphs`.
+    let cell_font = CellFont::new(font_db.glyphs(), fonts.monospace, CELL_FONT_SIZE)?;
     let text_layout: Arc<dyn TextLayoutSystem> = Arc::new(font_db.text_layout());
     // Blocking, and deliberately: one small file, read once, before there is a
     // window to stall.
@@ -371,44 +410,76 @@ fn open_window(channel: Channel, frames: Option<u32>, overrides: Overrides) -> R
         Box::new(Shell::new(
             platform,
             fonts,
+            cell_font.clone(),
             settings.clone(),
             text_layout.clone(),
             frames,
-            overrides,
+            &overrides,
         ))
     })
 }
 
 /// Renders one frame of the real view tree and writes it to `path`.
+///
+/// With `--run`, this is also the only way to see a shell in a picture: the
+/// command is typed into the one pane, the queue is pumped until the grid stops
+/// changing, and the frame that is written is the one with the output in it.
 fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
     let font_db = CosmicFontDb::new().context("no usable system fonts")?;
     let fonts = resolve_fonts(&font_db)?;
+    let cell_font = CellFont::new(font_db.glyphs(), fonts.monospace, CELL_FONT_SIZE)?;
     let text_layout: Arc<dyn TextLayoutSystem> = Arc::new(font_db.text_layout());
 
-    // A local queue stands in for the event loop. Nothing is spawned onto it:
-    // neither the usage poll nor the git gather is started, so the frame is the
-    // same on a build machine with no Claude Code session, no network and no
-    // repository — and it uses ephemeral settings, so it is also the same
-    // whatever options the person running it happens to have.
-    let mut app = App::new(LocalQueue::new().foreground(), background_pool());
+    // A local queue stands in for the event loop. Nothing is spawned onto it
+    // unless `--run` asked for it: neither the usage poll nor the git gather is
+    // started, so the frame is the same on a build machine with no Claude Code
+    // session, no network and no repository — and it uses ephemeral settings,
+    // so it is also the same whatever options the person running it happens to
+    // have.
+    let queue = LocalQueue::new();
+    let mut app = App::new(queue.foreground(), background_pool());
     app.update(|ctx| ctx.add_singleton_model(UsageModel::new));
 
     let quit: QuitRequest = Rc::new(|| {});
     let settings = Settings::ephemeral();
-    let (window_id, workspace) = app.add_window(|ctx| Workspace::new(fonts, settings, quit, ctx));
+    let (window_id, workspace) =
+        app.add_window(|ctx| Workspace::new(fonts, cell_font, settings, quit, ctx));
     app.update(|ctx| {
         workspace.update(ctx, |workspace, ctx| {
-            seed_snapshot_tabs(workspace, ctx);
-            apply_overrides(workspace, overrides, ctx);
+            // A run with a command to show wants one pane filling the body, not
+            // four seeded ones sharing it — and four shells opened to draw a
+            // picture of one.
+            if overrides.run.is_none() {
+                seed_snapshot_tabs(workspace, ctx);
+            }
+            apply_overrides(workspace, &overrides, ctx);
         });
     });
 
     let mut presenter = Presenter::new(window_id, text_layout);
-    let scene = app.update(|ctx| {
-        let invalidation = ctx.take_all_invalidations_for_window(window_id);
-        presenter.invalidate(invalidation, ctx);
-        presenter.build_scene(WINDOW_SIZE, SNAPSHOT_SCALE_FACTOR, ctx)
-    });
+    let mut frame = |app: &mut App| {
+        app.update(|ctx| {
+            let invalidation = ctx.take_all_invalidations_for_window(window_id);
+            presenter.invalidate(invalidation, ctx);
+            presenter.build_scene(WINDOW_SIZE, SNAPSHOT_SCALE_FACTOR, ctx)
+        })
+    };
+
+    if let Some(command) = overrides.run.as_deref() {
+        let pane = start_run(&mut app, &workspace)?;
+        // A frame before a keystroke, because it is *layout* that measures the
+        // pane and resizes the pty. A command typed into the grid every
+        // terminal starts at stays wrapped at eighty columns however wide the
+        // window it is finally drawn in.
+        frame(&mut app);
+
+        await_shell(&queue, &mut app, &workspace, pane);
+        type_run(&mut app, &workspace, pane, command);
+        let printed = settle_run(&queue, &mut app, &workspace, pane);
+        println!("the shell printed:\n{}", printed.trim_end());
+    }
+
+    let scene = frame(&mut app);
 
     let (pixels, width, height) = render_scene_to_rgba(&scene, WINDOW_SIZE, &font_db)
         .context("failed to render the frame")?;
@@ -426,6 +497,98 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
 
     println!("wrote {} ({width}x{height})", path.display());
     Ok(())
+}
+
+/// Opens the shells and reports the pane a `--run` command belongs in.
+fn start_run(app: &mut App, workspace: &ViewHandle<Workspace>) -> Result<PaneId> {
+    let pane = workspace
+        .read(&*app, |workspace, _| workspace.tabs().focused_pane_id())
+        .context("the strip opened with no pane to run a command in")?;
+
+    app.update(|ctx| {
+        workspace.update(ctx, |workspace, ctx| workspace.start_terminals(ctx));
+    });
+    Ok(pane)
+}
+
+/// Waits for the shell to say something of its own before anything is typed.
+///
+/// A pty echoes what is typed into it whether or not a child has read it yet,
+/// so typing immediately produces text that looks like progress while the shell
+/// is still starting. [`settle_run`] would then time its quiet window from that
+/// echo and call a shell that has not run anything finished — which it did, on
+/// a prompt that takes longer than [`RUN_QUIET`] to draw itself.
+///
+/// Returns false when nothing was heard, and the caller types anyway: a shell
+/// with no prompt at all is a strange shell, not a reason to run nothing.
+fn await_shell(
+    queue: &LocalQueue,
+    app: &mut App,
+    workspace: &ViewHandle<Workspace>,
+    pane: PaneId,
+) -> bool {
+    let deadline = Instant::now() + RUN_TIMEOUT;
+    while Instant::now() < deadline {
+        queue.run_until_parked();
+        let spoken = workspace
+            .read(&*app, |workspace, app| workspace.terminal_text(pane, app))
+            .unwrap_or_default();
+        if !spoken.trim().is_empty() {
+            return true;
+        }
+        std::thread::sleep(RUN_POLL);
+    }
+    log::warn!("the shell printed nothing within {RUN_TIMEOUT:?}; typing anyway");
+    false
+}
+
+/// Types a `--run` command into its pane.
+fn type_run(app: &mut App, workspace: &ViewHandle<Workspace>, pane: PaneId, command: &str) {
+    // A newline rather than a carriage return: the pty's line discipline turns
+    // one into the other, and a literal `\r` in a log is harder to read.
+    let typed = format!("{command}\n");
+    app.update(|ctx| {
+        workspace.update(ctx, |workspace, ctx| {
+            workspace.type_into(pane, &typed, ctx);
+        });
+    });
+}
+
+/// Pumps the queue until the pane stops changing, and returns what it says.
+///
+/// "Stopped changing" is the only definition of finished available from outside
+/// a pty: a shell runs the command, prints its prompt back, and goes quiet.
+/// Bounded by [`RUN_TIMEOUT`], because a command that never goes quiet — `top`,
+/// a `sleep` — still has to produce a picture.
+fn settle_run(
+    queue: &LocalQueue,
+    app: &mut App,
+    workspace: &ViewHandle<Workspace>,
+    pane: PaneId,
+) -> String {
+    let deadline = Instant::now() + RUN_TIMEOUT;
+    let mut showing = String::new();
+    let mut unchanged_since = Instant::now();
+
+    loop {
+        queue.run_until_parked();
+        let now = workspace
+            .read(&*app, |workspace, app| workspace.terminal_text(pane, app))
+            .unwrap_or_default();
+
+        if now != showing {
+            showing = now;
+            unchanged_since = Instant::now();
+        } else if !showing.trim().is_empty() && unchanged_since.elapsed() >= RUN_QUIET {
+            return showing;
+        }
+
+        if Instant::now() >= deadline {
+            log::warn!("the command was still printing after {RUN_TIMEOUT:?}");
+            return showing;
+        }
+        std::thread::sleep(RUN_POLL);
+    }
 }
 
 /// Fills the snapshot's strip with something worth looking at.
@@ -544,16 +707,38 @@ struct Shell {
     proxy: Proxy,
     frames_drawn: u32,
     frame_budget: Option<u32>,
+    /// The pane `--run` typed into, and how long it may take to answer.
+    ///
+    /// `None` for every ordinary run. When it is set, the frame budget does not
+    /// start counting until this pane has printed something: `--frames 3` would
+    /// otherwise draw three empty grids in the time it takes a shell to open a
+    /// pty, and the run it was meant to prove would prove nothing.
+    run: Option<Run>,
+}
+
+/// The state of a `--run` in a windowed session.
+struct Run {
+    pane: PaneId,
+    /// The command, until the first frame has been drawn. It waits for that
+    /// frame because layout is what measures the pane and resizes the pty, and
+    /// a command typed before it would be wrapped at the eighty columns every
+    /// terminal starts at.
+    pending: Option<String>,
+    /// When to give up waiting for output and start counting frames anyway, so
+    /// a command that prints nothing still ends the run.
+    deadline: Instant,
+    printed: bool,
 }
 
 impl Shell {
     fn new(
         platform: &Platform,
         fonts: Fonts,
+        cell_font: CellFont,
         settings: Settings,
         text_layout: Arc<dyn TextLayoutSystem>,
         frame_budget: Option<u32>,
-        overrides: Overrides,
+        overrides: &Overrides,
     ) -> Self {
         let mut app = App::new(platform.foreground.clone(), background_pool());
         app.update(|ctx| ctx.add_singleton_model(UsageModel::new));
@@ -567,7 +752,7 @@ impl Shell {
         };
 
         let (window_id, workspace) =
-            app.add_window(|ctx| Workspace::new(fonts, settings, quit, ctx));
+            app.add_window(|ctx| Workspace::new(fonts, cell_font, settings, quit, ctx));
         app.update(|ctx| {
             workspace.update(ctx, |workspace, ctx| {
                 // Before the polls, not after: `start_git_poll` decides
@@ -577,12 +762,25 @@ impl Shell {
                 apply_overrides(workspace, overrides, ctx);
                 workspace.start_usage_poll(ctx);
                 workspace.start_git_poll(ctx);
+                // Last, because it opens a shell in every pane there is and the
+                // overrides above can still change how many that is.
+                workspace.start_terminals(ctx);
             });
         });
 
         // The only thing that makes a frame happen: a view said it changed.
         let redraw = proxy.clone();
         app.on_window_invalidated(window_id, move |_, _| redraw.request_redraw());
+
+        let run = overrides.run.clone().and_then(|command| {
+            let pane = start_run(&mut app, &workspace).ok()?;
+            Some(Run {
+                pane,
+                pending: Some(command),
+                deadline: Instant::now() + RUN_TIMEOUT,
+                printed: false,
+            })
+        });
 
         Self {
             app,
@@ -592,7 +790,63 @@ impl Shell {
             proxy,
             frames_drawn: 0,
             frame_budget,
+            run,
         }
+    }
+
+    /// Types the `--run` command, once there has been a frame to size the pane
+    /// it goes into.
+    fn type_pending_run(&mut self) {
+        let Some(run) = self.run.as_mut() else {
+            return;
+        };
+        let Some(command) = run.pending.take() else {
+            return;
+        };
+
+        let pane = run.pane;
+        run.deadline = Instant::now() + RUN_TIMEOUT;
+        type_run(&mut self.app, &self.workspace, pane, &command);
+    }
+
+    /// Whether a frame counts towards the budget yet.
+    ///
+    /// Always, unless `--run` is still waiting for its command to say
+    /// something. See [`Shell::run`].
+    fn budget_has_started(&mut self) -> bool {
+        let Some(run) = self.run.as_ref() else {
+            return true;
+        };
+        if run.printed {
+            return true;
+        }
+
+        let pane = run.pane;
+        let printed = self
+            .workspace
+            .read(&self.app, |workspace, app| {
+                workspace.terminal_text(pane, app)
+            })
+            .is_some_and(|text| !text.trim().is_empty());
+
+        let run = self.run.as_mut().expect("checked a moment ago");
+        run.printed = printed || Instant::now() >= run.deadline;
+        run.printed
+    }
+
+    /// Says what the pane `--run` typed into is showing, so an unattended run
+    /// leaves evidence that the loop worked.
+    fn report_run(&self) {
+        let Some(run) = self.run.as_ref() else {
+            return;
+        };
+        let printed = self
+            .workspace
+            .read(&self.app, |workspace, app| {
+                workspace.terminal_text(run.pane, app)
+            })
+            .unwrap_or_default();
+        log::info!("the shell printed:\n{}", printed.trim_end());
     }
 
     /// Handles a keystroke, if it is bound to something.
@@ -646,14 +900,24 @@ impl WindowDelegate for Shell {
     }
 
     fn frame_drawn(&mut self) {
-        self.frames_drawn += 1;
+        self.type_pending_run();
 
         let Some(budget) = self.frame_budget else {
             return;
         };
 
+        // A frame drawn before the command answered is not one of the N that
+        // were asked for; asking for another is what keeps the loop turning
+        // until the shell has something to draw.
+        if !self.budget_has_started() {
+            self.proxy.request_redraw();
+            return;
+        }
+
+        self.frames_drawn += 1;
         if self.frames_drawn >= budget {
             log::info!("drew {budget} frames; exiting");
+            self.report_run();
             self.proxy.exit();
         } else {
             self.proxy.request_redraw();
@@ -727,7 +991,8 @@ mod tests {
                     hover: true,
                     layout: Some(Layout::Horizontal),
                     granularity: Some(Granularity::Tabs),
-                    density: Some(Density::Expanded)
+                    density: Some(Density::Expanded),
+                    run: None,
                 }
             }
         );
@@ -758,6 +1023,7 @@ mod tests {
         for flag in [
             "--snapshot",
             "--frames",
+            "--run",
             "--menu",
             "--hover",
             "--layout",
@@ -845,6 +1111,7 @@ mod tests {
     fn an_argument_that_needs_a_value_and_has_none_is_an_error() {
         assert!(parse(&["--snapshot"]).is_err());
         assert!(parse(&["--frames"]).is_err());
+        assert!(parse(&["--run"]).is_err());
         assert!(parse(&["--frames", "soon"]).is_err());
         assert!(parse(&["--tabs"]).is_err());
     }

@@ -15,16 +15,23 @@ dropped, and why.
 
 ## v1 scope
 
-Exactly two features:
+Three features:
 
 - **Tabs.** Open, close, switch, reorder. One agent session per tab, with a derived title.
 - **A Claude Code usage chip** in the header, showing how much of the current session's token
   budget is spent and when it resets. It reads the session Claude Code already stores locally
   (`~/.claude/.credentials.json`, plus the macOS Keychain) and polls the usage endpoint.
+- **A shell in every pane.** A real pseudo-terminal and a real xterm-compatible emulator:
+  colour, bold and italic faces, underline and strikeout, the alternate screen, ten thousand
+  lines of scrollback, `SIGWINCH` on resize, and titles and working directories the shell
+  reports with OSC 0, 2 and 7 — which is what makes a tab rename itself and its git chips
+  follow a `cd`. A tab splits into panes with `cmd-d` and `cmd-shift-d`, and a shell that
+  exits closes its pane, its tab, and with the last tab the window.
 
-Everything else is out of scope on purpose. There is no PTY, no terminal emulation, no
-settings UI, no keymap system, no persistence and no telemetry. The list of what is absent —
-and what adding each item would touch — is the last section of the architecture doc.
+Everything else is out of scope on purpose. There is no settings UI, no keymap system, no
+persistence, no telemetry, and no mouse reporting, IME composition or system clipboard for
+the terminal. The list of what is absent — and what adding each item would touch — is the
+last section of the architecture doc.
 
 ## Prerequisites
 
@@ -120,12 +127,13 @@ release-only feature combination does not compile — cheaply, and without produ
 ## Repository layout
 
 ```
-app/                  the `crook` library, plus two ~20-line channel binaries
-crates/crookui_core/  entities, handles, contexts, elements, layout, Scene   (MIT)
-crates/crookui/       winit windowing, wgpu renderer, cosmic-text font stack (MIT)
-crates/crook_usage/   Claude Code credentials and usage polling               (MIT)
-docs/architecture.md  the design, and the reasoning behind each divergence
-script/               bootstrap, run, bundle
+app/                     the `crook` library, plus two ~20-line channel binaries
+crates/crookui_core/     entities, handles, contexts, elements, layout, Scene   (MIT)
+crates/crookui/          winit windowing, wgpu renderer, cosmic-text font stack (MIT)
+crates/crook_usage/      Claude Code credentials and usage polling              (MIT)
+crates/crook_terminal/   pty, emulator, and the snapshot the renderer draws     (MIT)
+docs/architecture.md     the design, and the reasoning behind each divergence
+script/                  bootstrap, run, bundle
 ```
 
 ## Checks
@@ -159,6 +167,19 @@ that repository is AGPL-3.0. Crook stays clear of the AGPL half:
 - `app/` was written against a description of how Warp's tab strip and header behave, not by
   copying either. Where its comments mention Warp they are recording a divergence — an
   index-versus-identity bug not inherited, a public field not repeated.
+- `crook_terminal` is Crook's own code over two crates.io dependencies: `portable-pty`
+  (MIT) for the process side and **`alacritty_terminal` (Apache-2.0)** for the grid, the
+  scrollback and the escape-sequence parser. Nothing in it comes from Warp, whose terminal
+  lives in the AGPL half of that repository.
+
+[Alacritty](https://github.com/alacritty/alacritty) is a fast, cross-platform terminal
+emulator by Joe Wilm and the Alacritty contributors, released under the Apache License 2.0.
+Crook uses its `alacritty_terminal` crate — the emulator without the window — and would be a
+great deal poorer without it. Apache-2.0 is permissive and compatible with MIT
+redistribution; it asks that the licence and any `NOTICE` travel with the code, which
+`Cargo.lock` and the dependency's own vendored licence do, and it grants a patent licence
+MIT does not. A binary built from this repository therefore contains Apache-2.0 code, and
+that fact belongs in whatever notice a distribution ships.
 
 None of this is legal advice; it is a record of where each file came from, so that someone
 who needs to answer the question properly has the facts to work from.

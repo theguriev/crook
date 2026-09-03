@@ -1,0 +1,15 @@
+[package]
+name = "crook_terminal"
+description = "A pty and a terminal emulator behind a snapshot the renderer can draw."
+license = "MIT"
+authors.workspace = true
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+
+[dependencies]
+alacritty_terminal.workspace = true
+anyhow.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+portable-pty.workspace = true

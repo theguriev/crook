@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
+use std::sync::Arc;
 
+use crook_terminal::Snapshot;
 use crookui_core::elements::MouseStateHandle;
 use crookui_core::event::{Keystroke, Modifiers};
 use crookui_core::fonts::FamilyId;
@@ -15,6 +17,8 @@ use crate::git_model::GitModel;
 use crate::platform_insets::{LayoutInsets, TabsPlacement, layout_insets};
 use crate::settings::{Density, Granularity, Layout, Settings, TabOptions};
 use crate::tab::{AgentSession, Direction, PaneId, Tab, TabAction, TabEffect, TabId, TabStrip};
+use crate::terminal_font::CellFont;
+use crate::terminal_model::{TerminalHandle, TerminalModel, TerminalUpdate};
 use crate::theme::THEME;
 use crate::usage_model::UsageModel;
 
@@ -185,9 +189,14 @@ impl Overridden {
 pub struct Workspace {
     tabs: TabStrip,
     fonts: Fonts,
+    /// The faces and the cell every pane's grid is drawn with, resolved once at
+    /// startup because measuring one is a search through the font database.
+    cell_font: CellFont,
     usage: ModelHandle<UsageModel>,
     chip: ViewHandle<UsageChip>,
     git: ModelHandle<GitModel>,
+    /// The shells behind the panes.
+    terminals: ModelHandle<TerminalModel>,
     interactions: HashMap<PaneId, PaneInteraction>,
     /// What the mouse is doing to each tab's chrome in the panel.
     ///
@@ -223,6 +232,7 @@ impl Workspace {
     /// start in.
     pub fn new(
         fonts: Fonts,
+        cell_font: CellFont,
         settings: Settings,
         quit: QuitRequest,
         ctx: &mut ViewContext<Self>,
@@ -243,13 +253,26 @@ impl Workspace {
         // the model checks before it notifies.
         ctx.observe(&git, |_, _, ctx| ctx.notify());
 
+        let terminals = ctx.add_model(TerminalModel::new);
+        // Two channels, and they carry different things. The observation is
+        // "a grid changed, draw it again", which the model raises at most once
+        // per pane per frame interval. The subscription is the handful of
+        // things a shell does that the *strip* has to act on: rename itself,
+        // move, or finish.
+        ctx.observe(&terminals, |_, _, ctx| ctx.notify());
+        ctx.subscribe_to_model(&terminals, |workspace, _, update, ctx| {
+            workspace.apply_terminal_update(update, ctx);
+        });
+
         let options = settings.tab_options();
         let mut workspace = Self {
             tabs: TabStrip::new(),
             fonts,
+            cell_font,
             usage,
             chip,
             git,
+            terminals,
             interactions: HashMap::new(),
             tab_chrome: HashMap::new(),
             settings,
@@ -274,6 +297,11 @@ impl Workspace {
     /// The families the interface is set in.
     pub fn fonts(&self) -> Fonts {
         self.fonts
+    }
+
+    /// The faces and the cell a terminal grid is drawn with.
+    pub fn cell_font(&self) -> &CellFont {
+        &self.cell_font
     }
 
     /// Everything the options menu writes, as a snapshot.
@@ -497,6 +525,34 @@ impl Workspace {
         self.usage.update(ctx, |model, ctx| model.start(ctx));
     }
 
+    /// Opens a shell in every pane, and in every pane opened from now on.
+    ///
+    /// Call once, after the window exists. Separate from [`Self::new`] for the
+    /// reason the poll chains are separate from it: a headless snapshot and a
+    /// test render this very view tree, and neither should leave a shell
+    /// running to do it.
+    pub fn start_terminals(&self, ctx: &mut ViewContext<Self>) {
+        let panes = self.open_panes();
+        self.terminals
+            .update(ctx, |model, ctx| model.start(&panes, ctx));
+    }
+
+    /// Types into a pane's shell, as if a person had.
+    ///
+    /// The one way in from outside, and it exists for the command line's
+    /// `--run`: a way to prove the whole loop — pty, emulator, reader thread,
+    /// repaint — works, in a run nobody is sitting in front of.
+    pub fn type_into(&self, pane: PaneId, text: &str, ctx: &mut ViewContext<Self>) {
+        self.terminals
+            .update(ctx, |model, _| model.type_into(pane, text));
+    }
+
+    /// What a pane's shell is showing, for a caller that wants the text rather
+    /// than the pixels.
+    pub fn terminal_text(&self, pane: PaneId, app: &AppContext) -> Option<String> {
+        Some(self.terminals.as_ref(app).snapshot(pane)?.text())
+    }
+
     /// Starts the git gather chain. Call once, after the window exists.
     ///
     /// Separate from [`Self::new`] for the reason the usage poll is: a
@@ -535,10 +591,49 @@ impl Workspace {
 
         report(pane.session_mut());
         // A report can move the session somewhere else, and the git facts a
-        // row shows are looked up by directory.
+        // row shows are looked up by directory — which is what makes the branch
+        // chip follow a shell's `cd`.
         self.sync_git(ctx);
         ctx.notify();
         true
+    }
+
+    /// Applies what a pane's shell did.
+    ///
+    /// A title and a working directory go into the session, which is what makes
+    /// the strip's "Command / Conversation" and "Working Directory" say
+    /// something true — and, through [`Self::sync_git`], what makes the branch
+    /// and diff chips follow a `cd`.
+    ///
+    /// A shell that ended closes its pane through [`TabAction::ClosePane`],
+    /// which is the same path `cmd-w` takes: the pane goes, its tab goes with
+    /// it if it was the last pane, and the window goes if that was the last
+    /// tab. There is deliberately no second way to close anything.
+    fn apply_terminal_update(&mut self, update: &TerminalUpdate, ctx: &mut ViewContext<Self>) {
+        let reported = match update {
+            TerminalUpdate::Title(pane, title) => {
+                let title = title.clone();
+                self.update_session(*pane, ctx, |session| session.derived_title = title)
+            }
+            TerminalUpdate::WorkingDirectory(pane, directory) => {
+                let directory = directory.clone();
+                self.update_session(*pane, ctx, |session| {
+                    session.working_directory = Some(directory);
+                })
+            }
+            TerminalUpdate::Closed(pane) => {
+                if self.apply(TabAction::ClosePane(*pane), ctx) == TabEffect::CloseWindow {
+                    (self.quit)();
+                }
+                true
+            }
+        };
+
+        if !reported {
+            // The pane closed between the shell saying something and the main
+            // thread hearing it. Nothing to write it into, and nothing wrong.
+            log::debug!("a terminal reported {update:?} for a pane that has gone");
+        }
     }
 
     /// Applies a tab action, brings the per-tab mouse state back in step, and
@@ -552,6 +647,7 @@ impl Workspace {
         let effect = self.tabs.apply(action);
         self.sync_interactions();
         self.sync_git(ctx);
+        self.sync_terminals(ctx);
 
         // An action that changed nothing repaints nothing: holding down
         // cmd-alt-left on the leftmost tab must not put the window on a
@@ -638,6 +734,30 @@ impl Workspace {
         self.home.as_deref()
     }
 
+    /// The terminal running in a pane, and the grid it is showing.
+    ///
+    /// Both or neither: an element that had a handle and no snapshot would have
+    /// nothing to paint, and one that had a snapshot and no handle could not
+    /// resize the pty it was measuring.
+    pub(super) fn terminal(
+        &self,
+        pane: PaneId,
+        app: &AppContext,
+    ) -> Option<(TerminalHandle, Arc<Snapshot>)> {
+        let terminals = self.terminals.as_ref(app);
+        Some((terminals.handle(pane)?, terminals.snapshot(pane)?))
+    }
+
+    /// Why a pane has no terminal, when the attempt failed rather than never
+    /// having been made.
+    pub(super) fn terminal_failure<'a>(
+        &self,
+        pane: PaneId,
+        app: &'a AppContext,
+    ) -> Option<&'a str> {
+        self.terminals.as_ref(app).failure(pane)
+    }
+
     /// What is known about the repository a session sits in.
     ///
     /// A map lookup on a model the background pool fills in. Nothing on the
@@ -702,6 +822,26 @@ impl Workspace {
             .collect();
         self.git
             .update(ctx, |model, ctx| model.track(directories, ctx));
+    }
+
+    /// Opens a shell for every pane that has none, and ends the ones whose
+    /// panes have gone.
+    ///
+    /// Called from [`Self::apply`] like [`Self::sync_git`], so that "a pane
+    /// exists" and "a shell is running in it" are one statement rather than two
+    /// that can disagree. Before [`Self::start_terminals`] it opens nothing.
+    fn sync_terminals(&mut self, ctx: &mut ViewContext<Self>) {
+        let panes = self.open_panes();
+        self.terminals
+            .update(ctx, |model, ctx| model.sync(&panes, ctx));
+    }
+
+    /// The open panes and where each of them is working.
+    fn open_panes(&self) -> Vec<(PaneId, Option<PathBuf>)> {
+        self.tabs
+            .panes()
+            .map(|(_, pane)| (pane.id(), pane.session().working_directory.clone()))
+            .collect()
     }
 
     /// Applies one option, or opens and closes the menu.
@@ -850,7 +990,7 @@ impl View for Workspace {
         let stacked = Flex::column()
             .with_main_axis_size(MainAxisSize::Max)
             .with_child(header_toolbar::render(self, app))
-            .with_child(Expanded::new(1., body::render(self)).finish())
+            .with_child(Expanded::new(1., body::render(self, app)).finish())
             .finish();
 
         let content = match self.options.layout {

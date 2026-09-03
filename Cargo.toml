@@ -10,6 +10,7 @@ publish = false
 
 [workspace.dependencies]
 # Local crates.
+crook_terminal = { path = "crates/crook_terminal" }
 crook_usage = { path = "crates/crook_usage" }
 crookui = { path = "crates/crookui" }
 crookui_core = { path = "crates/crookui_core" }
@@ -21,6 +22,7 @@ crookui_core = { path = "crates/crookui_core" }
 # of them needs `pkg-config` or a vendored toolchain, cross-platform CI stops
 # being free. See docs/architecture.md.
 
+alacritty_terminal = "0.26"
 anyhow = "1.0"
 async-executor = "1.14"
 async-task = "4.7"
@@ -38,6 +40,7 @@ parking_lot = "0.12"
 # the examples, and the renderer's own tests.
 png = "0.18"
 pollster = "0.4"
+portable-pty = "0.9"
 rustc-hash = "2.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

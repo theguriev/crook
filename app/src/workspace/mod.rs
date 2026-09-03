@@ -32,6 +32,7 @@ mod row_content;
 mod tab_bar;
 mod tab_options_menu;
 mod tabs_panel;
+mod terminal_element;
 mod usage_chip;
 mod view;
 
@@ -41,6 +42,7 @@ mod tests;
 use crate::theme::THEME;
 
 pub use action::{OptionsAction, WorkspaceAction};
+pub use terminal_element::TerminalElement;
 pub use usage_chip::{UsageChip, UsageChipAction};
 pub use view::{Fonts, QuitRequest, Workspace};
 

@@ -128,7 +128,7 @@ and because every subsequent decision leans on it. Two things are trimmed:
   while the render loop is still being learned.
 - **Renderer-agnosticism in the view registry.** Warp's `StoredView` is an enum with `Gui` and
   `Tui` arms sharing one registry, one ref-count and one focus path. Crook's has one arm. The
-  seam is preserved (see §7) but the second arm is not written until there is a second
+  seam is preserved (see §8) but the second arm is not written until there is a second
   front-end.
 
 ---
@@ -352,11 +352,14 @@ the same thing in glyphon means one `Buffer` per color run per line, re-shaped w
 changes — and switching later would mean rewriting the renderer *and* every call site that
 produces text.
 
-"A terminal whose unit of work is an agent" will render a terminal grid. The glyph record in
-the `Scene` is the seam that makes that possible: the grid renderer will not shape at all, it
-will look up `glyph_for_char` and `glyph_advance` per cell and push records directly, bypassing
-`cosmic-text` on the monospace fast path exactly as Warp does. That path exists only because
-the `Scene` stores glyphs rather than text areas.
+That grid now exists, and it takes exactly the path this section was written to keep open.
+`app/src/workspace/terminal_element.rs` does not shape at all: it asks `glyph_for_char` per
+cell — memoized by `(face, character)` — multiplies the column index by a fixed advance, and
+pushes one individually coloured glyph record into the `Scene`. A 200x50 screen of dense text
+is 10,000 glyph records, 94 distinct atlas entries and **one** instanced draw call, and a
+screen that is merely idle is two rectangles and no glyphs at all. Expressing per-cell colour
+through a `TextArea`'s `default_color` would have meant one re-shaped buffer per colour run
+per line.
 
 Three smaller costs, for completeness: glyphon pins a `wgpu` major version and historically
 lags by one or two, so taking it constrains `wgpu` and transitively `winit`; glyphon does
@@ -365,13 +368,19 @@ that is the difference between text that looks right on a dark background and te
 anemic; and glyphon clips with a hard rectangle, where Warp fades overflowing text with a
 per-instance vertex attribute.
 
-**But be honest about the trade.** For a project that genuinely stops at tabs and a chip,
-glyphon is the better choice. The 600 lines it saves are the *easiest* 600 lines in the text
-plan — atlas packing, an instance buffer, and a shader, all mechanical and all correct the
-first time. Crook writes them because the architecture is the point of the exercise and
-because the terminal grid is the next thing, not because 600 lines of atlas code are
-interesting. If that grid never gets built, this section will read as over-engineering, and
-that reading will be correct.
+**The trade, settled.** For a project that genuinely stopped at tabs and a chip, glyphon was
+the better choice, and this section said so: "if that grid never gets built, this section will
+read as over-engineering, and that reading will be correct." The grid got built, and the
+monospace fast path it needed is the one thing glyphon's model cannot express. The 600 lines
+were the easiest 600 in the text plan and they are the reason the next 400 were possible.
+
+One thing the original plan did get wrong, and it is worth recording: it assumed a grid "is
+Latin by construction", so the single-glyph measurement path shipped with no font fallback.
+It is not Latin. A spinner is braille, a prompt is powerline, `ls` prints whatever the
+filenames are, and a build script prints emoji — and every one of those was a silently blank
+column. `CosmicGlyphs::fallback_glyph` now asks cosmic-text's own fallback about one
+character at a time and gets back the face that covers it, which is the same answer shaping
+gives a tab title.
 
 ### One trap worth knowing now
 
@@ -461,10 +470,100 @@ release time.
 
 ---
 
-## 7. What is deliberately absent
+## 7. The terminal
+
+A pane runs a shell. `crates/crook_terminal/` is the whole of it, and it is deliberately the
+one crate in the workspace that owns no thread, no executor and no timer.
+
+### Three pieces and one contract
+
+`Pty` opens a pseudo-terminal and starts a program on it, through `portable-pty` — which
+already knows `openpty` and a controlling tty on Unix and ConPTY on Windows, so there is not
+one `#[cfg]` in this crate that spawns a process. **Warp vendors a ConPTY; Crook accepts the
+system one**, which is the same trade §3 makes everywhere else.
+
+`Emulator` wraps `alacritty_terminal`'s `Term`, which owns the grid, the scrollback, the
+alternate screen and the mode flags, and its `vte` parser. That crate is Apache-2.0 and is
+credited as such in the README. Writing a VT parser is not the interesting part of a terminal
+and getting one subtly wrong is a decade of bug reports.
+
+`Snapshot` is the contract with the renderer, and it is the piece worth arguing about. It is
+a flat, owned, row-major `Vec<SnapshotCell>` — a character and two **already-resolved** RGB
+colours per cell, twelve bytes — plus a cursor, the palette defaults, the scrollback offsets
+and the title. Two properties carry the design:
+
+- **Nothing left to look up.** Indexed colours, named colours, OSC 4/10/11/12 overrides, dim,
+  inverse and hidden are all applied while the snapshot is built. The renderer reads
+  `cell.foreground` and draws it. It never needs a theme and it cannot disagree with the
+  emulator about what a colour means.
+- **A revision that only moves on a real change.** `snapshot()` builds a candidate and
+  compares it with the one it has; if they would be drawn identically the same `Arc` comes
+  back. `Arc::ptr_eq` is therefore a sound "skip this frame" test, and it is one of the three
+  filters that keep an idle pane free.
+
+Alacritty's own damage tracking is not used for that, because `Term::damage()`
+unconditionally reports the cursor's cell as damaged and so can never say "nothing changed".
+
+Zero-width characters — a combining accent, a virama, a variation selector, a ZWJ — do not
+fit in a twelve-byte `Copy` cell, and dropping them turns `José` into `Jose` on a filesystem
+that hands out decomposed names. They ride beside the grid in a small side table that is
+empty for essentially every screen.
+
+### Who drives it
+
+`app/src/terminal_model.rs`, in the shape `usage_model` and `git_model` established: work off
+the UI thread, delivered on it, `ctx.notify` only when something a viewer could see actually
+changed. Each terminal gets an OS thread of its own rather than a background-pool worker,
+because a pty read blocks for as long as the shell is quiet and the pool is sized for exactly
+the two poll chains that park on timers.
+
+**Reading and drawing are throttled separately, and conflating them costs three orders of
+magnitude.** A pty master hands out about a kilobyte per `read` however large a buffer it is
+given; a reader that paused for a frame after each one would move 64 KB a second, and the
+*program* on the far end would run at that speed too, because it blocks on its own writes
+once the kernel's buffer fills. So the reader never pauses — it reads and parses as fast as
+the child can produce — and only publishing is rate-limited to one frame per pane per 16 ms.
+A batch parsed inside that window is left parsed and undrawn, and one shared thread comes
+back for it when the window is up. That thread is not a nicety: the batch that misses the
+window is always the *last* one of a burst, and without it the final screenful of a `cat`
+would sit invisible until the shell next said something.
+
+The emulator's mutex is never held across a frame. The reader takes it to parse, and again to
+build a snapshot, and publishes the `Arc` into a slot of its own; painting clones that `Arc`
+and walks owned data. Layout — which asks "did the grid move?" on every single frame —
+answers from an atomic before it ever asks for the lock.
+
+### Where the keyboard line is drawn
+
+**At the Command key.** Nothing carrying Command or Super is ever typed into a shell, so
+`cmd-t` opens a tab and an unbound `cmd-k` does nothing rather than typing a `k`. Control is
+the opposite and always reaches the shell; the four Control chords Crook binds on Linux and
+Windows are the whole of what the shell loses there. A pane takes typing only when it is
+focused *and* nothing is floating over the window.
+
+### What the emulator does not do
+
+Mouse reporting, IME composition, the kitty keyboard protocol, the numeric keypad, and OSC 52
+clipboard writes — nothing in Crook can reach a system clipboard yet, and an OSC 52 is logged
+rather than silently dropped. Ctrl+Enter and Ctrl+Tab are indistinguishable from the
+unmodified key in every legacy encoding, which is the stated reason the kitty protocol exists.
+
+One residue is worth writing down rather than discovering. End-of-file on the pty master is
+the only signal this design has that a session is over, and something other than the child
+can hold that open — a `sleep 60 &`, a server that outlived the shell that started it. Such a
+pane stays open after its shell exits, and closing it by hand leaves its reader thread parked
+on a descriptor that nothing can close from outside. What it does *not* leak is the session:
+the reader holds it weakly, so the emulator, its ten thousand lines of scrollback and the pty
+itself go the moment the pane does.
+
+---
+
+## 8. What is deliberately absent
 
 Everything below is a real feature of Warp, and every one of them is out of Crook v1. The
 point of listing them is the second half of each entry: roughly what adding it would touch.
+The terminal used to head this list; §7 is what it became, and the parts of *it* that are
+still absent are named at the end of that section.
 
 **A TUI front-end.** Warp runs the same views in a terminal by making the core
 renderer-agnostic: `StoredView` is an enum whose `Gui` and `Tui` arms share one registry, one
@@ -474,13 +573,6 @@ cell-grid element trait, a measure/arrange/paint presenter over a character buff
 `crossterm` terminal guard and input thread, and a frame renderer with wide-grapheme
 continuation handling — call it 2,000 lines. Crucially it means **no change to the core**,
 which is the entire reason for the `crookui_core` / `crookui` split.
-
-**PTY and terminal emulation.** `portable-pty` for the process side, `alacritty_terminal` or
-`vte` for parsing. Do not vendor a ConPTY like Warp does — accept the system one and set the
-Windows 10 1809 floor in the installer. This touches: a new model per tab holding the grid; the
-`Scene` glyph fast path described in §4; and the `std::process::Command` lint, which starts
-mattering for real. It is also the point at which the text subsystem's design pays off or does
-not.
 
 **Tab groups, pinning, tear-off.** Each of these converts index arithmetic into
 range arithmetic. Groups add a "cannot cross the group boundary" branch to every move and a
@@ -525,7 +617,7 @@ platforms, and treat a build script as the cost it is.
 
 ---
 
-## 8. Summary of the divergences
+## 9. Summary of the divergences
 
 | | Warp | Crook |
 | --- | --- | --- |
@@ -534,6 +626,8 @@ platforms, and treat a build script as the cost it is.
 | Native prerequisites | full Xcode + Metal Toolchain; LLVM, CMake, protoc on Windows; ~15 `-dev` packages on Linux | CLT; VS Build Tools; `build-essential` + `pkg-config` |
 | Font stack | CoreText + forked font-kit/fontconfig + forked dwrote | `cosmic-text` + `swash`, one path |
 | Glyph atlas and shader | hand-written | hand-written — the one place Crook does *not* take the shortcut (§4) |
+| Terminal emulator | its own, in the AGPL half of the repository | `alacritty_terminal` (Apache-2.0) behind a resolved-colour `Snapshot` (§7) |
+| ConPTY on Windows | vendored | the system one, through `portable-pty` |
 | Geometry | `pathfinder_*` with a patched `pathfinder_simd` | plain vectors and rects |
 | Core front-ends | `StoredView::{Gui, Tui}` share one registry | one arm; the seam is kept, the arm is not written |
 | Channels | six | two |
