@@ -19,6 +19,27 @@
 //! second one as a spacer — so a command echoed by the shell lands under the
 //! one the field drew it as, character for character.
 //!
+//! # The first row continues the shell's prompt
+//!
+//! No shell puts its prompt on one line and your typing on the next, so
+//! neither does this. When the shell says where its prompt ended — OSC 133
+//! `B`, whose cell the emulator keeps — the field's first row is drawn on that
+//! same row, starting at the cell after the prompt's last one, and the caret
+//! sits immediately after the `❯` exactly as it would in any other terminal.
+//! That row is *above* this element's own box, because the list above painted
+//! the prompt there, and the field is therefore one row shorter than the
+//! number of rows it draws.
+//!
+//! The offset belongs to the first row of the text and to no other. A line
+//! that wraps carries on at the gutter on the next row, the way a shell's own
+//! line editor wraps, and a field that has scrolled past its first row —
+//! a command long enough to overflow its budget — has no row that continues
+//! anything and goes back to being a block of rows at the gutter.
+//!
+//! Where the shell said nothing, the field keeps its own row. See
+//! [`block_list::inline_start`](super::block_list::inline_start) for the
+//! whole of that decision, and for why there is no third case.
+//!
 //! # Rows
 //!
 //! The editor's lines are logical: it stores newlines and knows nothing about
@@ -43,10 +64,10 @@
 //! pixel bar in the *terminal's* cursor colour, because an accent caret is a
 //! form field's and would disagree with the output above it.
 //!
-//! There is no prompt glyph either. The shell's own prompt is in the open
-//! block two lines up, and a second invented one under it is two prompts on
-//! screen, which is exactly what makes a composer read as a widget bolted
-//! under the output. Column zero here is column zero there.
+//! There is no prompt glyph either. The shell's own prompt is the one the
+//! field's first row continues, and a second invented one under it is two
+//! prompts on screen, which is exactly what makes a composer read as a widget
+//! bolted under the output. Column zero here is column zero there.
 //!
 //! # What it does not own
 //!
@@ -64,7 +85,7 @@ use crookui_core::element::{Element, SizeConstraint};
 use crookui_core::event::{DispatchedEvent, Event, Keystroke, MouseButton};
 use crookui_core::geometry::{Color, Point, RectF, Vector2F, vec2f};
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
-use crookui_core::scene::{CornerRadius, Radius, Scene};
+use crookui_core::scene::{ClipBounds, CornerRadius, Radius, Scene};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
@@ -161,6 +182,14 @@ pub struct CommandInput {
     /// stays in the one function that states it.
     alt_screen: bool,
 
+    /// The column the first row starts at when it continues the shell's own
+    /// prompt line, or `None` when the field takes a row of its own.
+    ///
+    /// Handed in by the body rather than worked out here, because the answer
+    /// is about the *list* above: which row it drew last, and whether it is
+    /// scrolled to its end. See [`super::block_list::inline_start`].
+    inline: Option<usize>,
+
     size: Option<Vector2F>,
     origin: Option<Point>,
     /// The rows the last layout wrapped, so that painting the frame it
@@ -182,6 +211,7 @@ impl CommandInput {
             blocks: None,
             focused: false,
             alt_screen: false,
+            inline: None,
             size: None,
             origin: None,
             rows: None,
@@ -192,6 +222,13 @@ impl CommandInput {
     /// Draws in the terminal's own colours rather than the theme's.
     pub fn with_ink(mut self, ink: Ink) -> Self {
         self.ink = ink;
+        self
+    }
+
+    /// Continues the shell's prompt line: the first row is drawn on the row
+    /// above this element's box, starting at `column`.
+    pub fn with_inline(mut self, column: Option<usize>) -> Self {
+        self.inline = column;
         self
     }
 
@@ -307,7 +344,7 @@ impl CommandInput {
         let Some(bounds) = self.bounds() else {
             return false;
         };
-        if !bounds.contains_point(position) {
+        if !self.takes_press(position - bounds.origin(), bounds.width()) {
             return false;
         }
 
@@ -343,6 +380,31 @@ impl CommandInput {
         true
     }
 
+    /// Whether a press at `local` — measured from this element's origin — is
+    /// the field's to answer.
+    ///
+    /// The field's own box, plus the part of the row above it that the field
+    /// draws into when it continues the shell's prompt. **That row belongs to
+    /// two elements**, and the split is by column: the prompt on the left is
+    /// output for the list above to select, and the first cell of the line
+    /// being typed onwards is the field's. `BlockList::press` declines exactly
+    /// the half claimed here, so a press on that row is answered once.
+    fn takes_press(&self, local: Vector2F, width: f32) -> bool {
+        if local.x() < 0. || local.x() > width {
+            return false;
+        }
+        let height = self.size.map_or(0., Vector2F::y);
+        if local.y() >= 0. {
+            return local.y() <= height;
+        }
+
+        let metrics = self.font.metrics();
+        let Some(rows) = self.rows.as_ref().filter(|rows| rows.shift() > 0) else {
+            return false;
+        };
+        local.y() >= -metrics.height && local.x() >= rows.indent(0, metrics)
+    }
+
     /// The offset a point inside the field lands on, snapped to the nearest
     /// grapheme boundary.
     ///
@@ -353,7 +415,14 @@ impl CommandInput {
         let metrics = self.font.metrics();
         let width = self.size.map_or(0., Vector2F::x);
         let editor = self.input.editor();
-        let rows = Rows::of(editor.text(), editor.caret(), width, metrics, self.budget);
+        let rows = Rows::of(
+            editor.text(),
+            editor.caret(),
+            width,
+            metrics,
+            self.budget,
+            self.inline,
+        );
         rows.at_point(editor.text(), local, metrics)
     }
 }
@@ -377,8 +446,20 @@ impl Element for CommandInput {
         let metrics = self.font.metrics();
         let budget = row_budget(constraint.max.y(), metrics, self.pane_rows());
         let editor = self.input.editor();
-        let rows = Rows::of(editor.text(), editor.caret(), width, metrics, budget);
-        let height = rows.drawn() as f32 * metrics.height;
+        let rows = Rows::of(
+            editor.text(),
+            editor.caret(),
+            width,
+            metrics,
+            budget,
+            self.inline,
+        );
+        // Short by the row shared with the prompt, which the list above has
+        // already been given the space for. A one-line field that continues a
+        // prompt therefore measures zero and the whole column is a row
+        // shorter, which is the point: the line being typed is *on* the
+        // prompt's row rather than under it.
+        let height = rows.height(metrics);
         drop(editor);
 
         let size = vec2f(
@@ -397,6 +478,18 @@ impl Element for CommandInput {
             .as_ref()
             .expect("an input was painted before it was laid out");
 
+        // **A layer, and only when the first row continues the prompt.** That
+        // row was painted by the list above, which paints into a layer of its
+        // own — and layers composite in the order they were started, so text
+        // drawn back into the enclosing one would end up *under* the ground
+        // the list filled its box with. A layer started here is later than the
+        // list's and therefore over it. It is not clipped to this element
+        // either: the row it needs is outside the box, so it inherits the
+        // pane's clip instead.
+        let layered = rows.shift() > 0;
+        if layered {
+            ctx.scene.start_layer(ClipBounds::ActiveLayer);
+        }
         self.origin = Some(Point::from_vec2f(origin, ctx.scene.z_index()));
         paint_input(
             &self.input,
@@ -407,6 +500,9 @@ impl Element for CommandInput {
             self.ink,
             ctx.scene,
         );
+        if layered {
+            ctx.scene.stop_layer();
+        }
     }
 
     fn dispatch_event(
@@ -463,20 +559,42 @@ impl Element for CommandInput {
 struct Rows {
     /// The byte range of the text each drawn row shows, top to bottom.
     rows: Vec<Range<usize>>,
+    /// The column the first drawn row starts at, when that row continues the
+    /// shell's prompt, and `None` when every row starts at the gutter.
+    ///
+    /// Resolved here rather than taken on trust, because the answer depends on
+    /// the wrapping this type just did: a field scrolled past its own first
+    /// row has nothing on screen that continues the prompt.
+    inline: Option<usize>,
 }
 
 impl Rows {
     /// The rows of `text` a field this wide draws, scrolled so that `caret` is
     /// among them.
-    fn of(text: &str, caret: usize, width: f32, metrics: CellMetrics, budget: usize) -> Self {
+    ///
+    /// `inline` is the column the first row starts at when it continues the
+    /// prompt above — see [`super::block_list::inline_start`] — which is a
+    /// column that row does not have for text of its own.
+    fn of(
+        text: &str,
+        caret: usize,
+        width: f32,
+        metrics: CellMetrics,
+        budget: usize,
+        inline: Option<usize>,
+    ) -> Self {
         let budget = budget.max(1);
+        let columns = columns_for(width, metrics);
+        // Never zero: a field one cell wide still has to make progress, which
+        // is the same floor `columns_for` applies.
+        let first_columns = inline.map_or(columns, |start| columns.saturating_sub(start).max(1));
         let mut rows = VecDeque::with_capacity(budget);
 
         // The caret is kept on the last row of the window rather than the
         // first: a command is written left to right and downwards, so the rows
         // that matter are the ones behind the caret. Only when there are not
         // that many behind it does the window run on past it.
-        for row in RowWalk::new(text, columns_for(width, metrics)) {
+        for row in RowWalk::new(text, columns, first_columns) {
             let past_caret = row.start > caret;
             if past_caret && rows.len() >= budget {
                 break;
@@ -489,12 +607,59 @@ impl Rows {
             }
         }
 
-        Self { rows: rows.into() }
+        let rows: Vec<_> = rows.into();
+        // The offset is the *first* row of the text's, and the window has to
+        // still hold it. Once a runaway command has scrolled that row away,
+        // the row at the top of the window is a middle one, which continues
+        // nothing — and every row it does hold was wrapped at the full width,
+        // so drawing them all at the gutter is exactly right.
+        let inline = inline.filter(|_| rows.first().is_some_and(|row| row.start == 0));
+        Self { rows, inline }
     }
 
     /// How many rows are drawn.
     fn drawn(&self) -> usize {
         self.rows.len()
+    }
+
+    /// How many of the drawn rows are drawn above the field's own box: one
+    /// when the first row continues the prompt, and none otherwise.
+    ///
+    /// The field's height is short by exactly this, which is how the row it
+    /// shares with the prompt is paid for.
+    fn shift(&self) -> usize {
+        usize::from(self.inline.is_some())
+    }
+
+    /// How tall the field is, which is the rows it draws minus the one it
+    /// shares.
+    fn height(&self, metrics: CellMetrics) -> f32 {
+        (self.drawn() - self.shift()) as f32 * metrics.height
+    }
+
+    /// How far into the row the text of row `index` starts, in pixels.
+    ///
+    /// Only ever the first row's, and only when it continues the prompt: a
+    /// wrapped line carries on at the gutter, the way a shell's own line
+    /// editor wraps it.
+    fn indent(&self, index: usize, metrics: CellMetrics) -> f32 {
+        if index == 0 {
+            self.inline.unwrap_or(0) as f32 * metrics.width
+        } else {
+            0.
+        }
+    }
+
+    /// Where row `index` is drawn, relative to the field's own origin.
+    ///
+    /// The y is negative for the row shared with the prompt, which is the
+    /// whole of how that row is reached: it was painted by the list above and
+    /// this element draws into what is left of it.
+    fn offset(&self, index: usize, metrics: CellMetrics) -> Vector2F {
+        vec2f(
+            self.indent(index, metrics),
+            (index as f32 - self.shift() as f32) * metrics.height,
+        )
     }
 
     /// The rows that are drawn, top to bottom.
@@ -518,11 +683,19 @@ impl Rows {
     /// The column rounds rather than truncating, so the boundary is halfway
     /// across a cell: a click on the left half of a character puts the caret
     /// before it and one on the right half puts it after.
+    ///
+    /// `local` is measured from the field's own origin, so the row it shares
+    /// with the prompt is at a negative y and its first cell is
+    /// [`Self::indent`] to the right — which is the same arithmetic
+    /// [`Self::offset`] paints with, inverted, so a click lands on the
+    /// grapheme it was aimed at rather than one column out.
     fn at_point(&self, text: &str, local: Vector2F, metrics: CellMetrics) -> usize {
-        let row = (local.y() / metrics.height)
+        let row = (local.y() / metrics.height + self.shift() as f32)
             .floor()
             .clamp(0., (self.drawn() - 1) as f32) as usize;
-        let column = (local.x() / metrics.width).round().max(0.) as usize;
+        let column = ((local.x() - self.indent(row, metrics)) / metrics.width)
+            .round()
+            .max(0.) as usize;
 
         let Some(range) = self.rows.get(row) else {
             return text.len();
@@ -550,6 +723,12 @@ struct RowWalk<'a> {
     text: &'a str,
     /// How many cells of text fit on a row.
     columns: usize,
+    /// How many fit on the *first* row, which is shorter when that row
+    /// continues the shell's prompt: the prompt has already used the left of
+    /// it. The same as [`Self::columns`] otherwise.
+    first_columns: usize,
+    /// Whether the next row produced is the first one.
+    first: bool,
     /// Where the next row starts.
     at: usize,
     /// The end of the logical line the next row starts in, carried rather than
@@ -568,11 +747,13 @@ struct RowWalk<'a> {
 }
 
 impl<'a> RowWalk<'a> {
-    fn new(text: &'a str, columns: usize) -> Self {
+    fn new(text: &'a str, columns: usize, first_columns: usize) -> Self {
         let line_end = line_end_from(text, 0);
         Self {
             text,
             columns,
+            first_columns,
+            first: true,
             at: 0,
             line_end,
             line_is_ascii: text[..line_end].is_ascii(),
@@ -601,10 +782,20 @@ impl Iterator for RowWalk<'_> {
             return Some(self.at..self.at);
         }
 
+        // The first row is the short one when it continues the prompt; every
+        // row after it has the whole width, because a wrapped line carries on
+        // at the gutter.
+        let columns = if self.first {
+            self.first_columns
+        } else {
+            self.columns
+        };
+        self.first = false;
+
         let start = self.at;
         let (bytes, filled) = take_cells(
             &self.text[start..self.line_end],
-            self.columns,
+            columns,
             self.line_is_ascii,
         );
         let end = start + bytes;
@@ -614,7 +805,7 @@ impl Iterator for RowWalk<'_> {
             self.at = end;
         } else if self.line_end == self.text.len() {
             self.at = end;
-            self.trailing = filled == self.columns;
+            self.trailing = filled == columns;
             self.more = self.trailing;
         } else {
             // Past the newline that ended this line.
@@ -720,10 +911,15 @@ fn columns_for(width: f32, metrics: CellMetrics) -> usize {
 /// line of the terminal rather than as a widget bolted under it — a frame that
 /// lights up when you click it is a form field, whatever colour it is.
 ///
-/// **And there is no prompt glyph.** The shell's own prompt is two lines above
-/// in the open block, and a second invented one under it is two prompts on
+/// **And there is no prompt glyph.** The shell's own prompt is the row the
+/// first line continues, and a second invented one under it is two prompts on
 /// screen, which is what kills the illusion. Column zero here is column zero
 /// there.
+///
+/// Every row is placed through [`Rows::offset`], which is the one place that
+/// knows the first row may start part-way along the row above. The glyphs, the
+/// selection and the caret all go through it, so none of the three can end up
+/// a column or a row away from the other two.
 fn paint_input(
     input: &PaneInput,
     font: &CellFont,
@@ -736,7 +932,6 @@ fn paint_input(
     let metrics = font.metrics();
     let editor = input.editor();
     let text = editor.text();
-    let left = origin.x();
 
     let selection = editor.selection().range();
     let caret = (focused && input.caret_is_visible())
@@ -744,12 +939,15 @@ fn paint_input(
         .flatten();
 
     for (row, range) in rows.iter().enumerate() {
-        let top = origin.y() + row as f32 * metrics.height;
-        paint_selection(text, range, &selection, left, top, metrics, scene);
+        let at = origin + rows.offset(row, metrics);
+        paint_selection(text, range, &selection, at, metrics, scene);
 
         let mut column = 0;
         for grapheme in text[range.clone()].graphemes(true) {
-            let pen = vec2f(left + column as f32 * metrics.width, top + metrics.baseline);
+            let pen = vec2f(
+                at.x() + column as f32 * metrics.width,
+                at.y() + metrics.baseline,
+            );
             // Every character of a cluster shares one pen: a combining mark
             // carries its own offset from the character it sits on, and has no
             // cell of its own to sit in.
@@ -766,11 +964,12 @@ fn paint_input(
     // and would disagree with the block above it.
     if let Some((row, column)) = caret {
         let height = metrics.height * CARET_HEIGHT;
+        let at = origin + rows.offset(row, metrics);
         scene
             .draw_rect_without_hit_recording(RectF::new(
                 vec2f(
-                    left + column as f32 * metrics.width,
-                    origin.y() + row as f32 * metrics.height + (metrics.height - height) / 2.,
+                    at.x() + column as f32 * metrics.width,
+                    at.y() + (metrics.height - height) / 2.,
                 ),
                 vec2f(CARET_WIDTH, height),
             ))
@@ -783,12 +982,15 @@ fn paint_input(
 ///
 /// One rectangle per row rather than per cell, for the reason the grid merges
 /// its background runs: a selected line is one quad, not eighty.
+///
+/// `at` is where the row's first cell is drawn, which on a row that continues
+/// the prompt is already past it — so a selection on that row starts where its
+/// text does rather than at the gutter.
 fn paint_selection(
     text: &str,
     row: &Range<usize>,
     selection: &Range<usize>,
-    left: f32,
-    top: f32,
+    at: Vector2F,
     metrics: CellMetrics,
     scene: &mut Scene,
 ) {
@@ -802,7 +1004,7 @@ fn paint_selection(
     let to = cells(&text[row.start..end]);
     scene
         .draw_rect_without_hit_recording(RectF::new(
-            vec2f(left + from as f32 * metrics.width, top),
+            vec2f(at.x() + from as f32 * metrics.width, at.y()),
             vec2f((to - from) as f32 * metrics.width, metrics.height),
         ))
         .with_background(theme().selection);

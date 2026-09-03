@@ -5354,6 +5354,59 @@ mod shells {
     }
 
     #[test]
+    fn an_unmarked_shell_keeps_the_composer_on_a_row_of_its_own() {
+        // The fallback, in the real tree. Nothing said where this prompt ends
+        // — and nothing guesses, because there is no pattern in a prompt to
+        // find — so the field keeps the row under the output it has always
+        // had, on the same ground, in the same font and at the same gutter.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+        if !draws_blocks(&harness) {
+            return;
+        }
+        harness.type_field(pane, "echo hello");
+
+        let panel = panel_of_the_pane(&mut harness);
+        let scene = harness.frame();
+        let composer = composer_boxes(&scene)
+            .first()
+            .copied()
+            .expect("a pane on the normal screen draws a composer");
+
+        let typed: Vec<Vector2F> = scene
+            .layers()
+            .flat_map(|layer| layer.glyphs.iter())
+            .filter(|glyph| glyph.glyph_key.glyph_id == u32::from('h'))
+            .map(|glyph| glyph.position)
+            .filter(|at| at.y() >= composer.min_y())
+            .collect();
+        assert!(
+            !typed.is_empty(),
+            "the line being typed is not inside the composer's own box"
+        );
+
+        let baseline = typed[0].y();
+        let row = text_where(&scene, |at| (at.y() - baseline).abs() < 0.5);
+        assert_eq!(
+            row, "echo hello",
+            "the field's row holds the line and nothing the shell printed"
+        );
+        let left = scene
+            .layers()
+            .flat_map(|layer| layer.glyphs.iter())
+            .filter(|glyph| (glyph.position.y() - baseline).abs() < 0.5)
+            .map(|glyph| glyph.position.x())
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            (left - (panel.min_x() + crate::workspace::body::GUTTER)).abs() < 0.5,
+            "column zero here is column zero in the output above"
+        );
+    }
+
+    #[test]
     fn a_field_too_tall_for_its_pane_gives_way_instead_of_painting_over_it() {
         // The field grows downwards into the grid. In a short window a
         // six-line command used to be laid out past the panel it sits in —
@@ -5803,6 +5856,151 @@ mod shells {
                 over_the_tall_one, over_the_first,
                 "the list scrolled to its top and the control stayed on the block that had \
                  been under the pointer"
+            );
+        }
+
+        /// Where the shell said its prompt ends, or `None` when it has not
+        /// said — which is the unmarked case and has its own test.
+        fn prompt_end(harness: &Harness, pane: PaneId) -> Option<crook_terminal::PromptEnd> {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                workspace.terminal(pane, app)?.1.live_block.prompt_end
+            })
+        }
+
+        /// The baseline the composer's first row is drawn on when it continues
+        /// the prompt: the row *above* the field's own box, which the list
+        /// painted the prompt into.
+        fn prompt_row_baseline(scene: &Scene) -> f32 {
+            let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
+            let composer = composer_boxes(scene)
+                .first()
+                .copied()
+                .expect("a pane on the normal screen draws a composer");
+            composer.min_y() - cell.height + cell.baseline
+        }
+
+        #[test]
+        fn a_line_typed_at_the_prompt_shares_its_row_and_still_reaches_the_shell() {
+            // **The whole of the change, end to end, against a real shell.**
+            // The shell says where its prompt ends, the line being typed
+            // starts in that very cell on that very row — and pressing Enter
+            // still runs it and still makes it a block of its own.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            await_prompt(&mut harness, pane);
+
+            let Some(prompt) = prompt_end(&harness, pane) else {
+                return;
+            };
+            type_line(&mut harness, "echo INLINE");
+
+            let panel = panel_of_the_pane(&mut harness);
+            let scene = harness.frame();
+            let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
+            let baseline = prompt_row_baseline(&scene);
+
+            let row = text_where(&scene, |at| (at.y() - baseline).abs() < 0.5);
+            assert!(
+                row.ends_with("echo INLINE"),
+                "the line being typed is not on the prompt's row: {row:?}"
+            );
+            assert!(
+                row.len() > "echo INLINE".len(),
+                "the prompt should be on that row too, and it is only {row:?}"
+            );
+
+            // In the cell the shell named, and not a column either side of it.
+            let start =
+                panel.min_x() + crate::workspace::body::GUTTER + prompt.column as f32 * cell.width;
+            let first: Vec<char> = scene
+                .layers()
+                .flat_map(|layer| layer.glyphs.iter())
+                .filter(|glyph| (glyph.position.y() - baseline).abs() < 0.5)
+                .filter(|glyph| (glyph.position.x() - start).abs() < 0.5)
+                .filter_map(|glyph| char::from_u32(glyph.glyph_key.glyph_id))
+                .collect();
+            assert_eq!(
+                first,
+                vec!['e'],
+                "the first character of the line is not in the cell OSC 133 B named"
+            );
+
+            // And Enter still does what Enter did.
+            harness.press("enter", Modifiers::default(), "\r");
+            harness.wait_for("the command never became a block", |harness| {
+                harness
+                    .workspace
+                    .read(&harness.app, |workspace, app| {
+                        let blocks = workspace.terminal_blocks(pane, app)?;
+                        Some(
+                            blocks
+                                .iter()
+                                .any(|block| block.command.as_deref() == Some("echo INLINE")),
+                        )
+                    })
+                    .unwrap_or_default()
+            });
+            harness.frame();
+
+            let last = block_count(&harness, pane) - 1;
+            let text = block_text(&harness, pane, last);
+            assert!(
+                text.contains("INLINE"),
+                "the command and its output are not in the block it made: {text:?}"
+            );
+            assert_eq!(
+                harness.field_text(pane),
+                "",
+                "the field kept the line it sent"
+            );
+        }
+
+        #[test]
+        fn the_prompt_s_row_is_the_list_s_on_the_left_and_the_field_s_on_the_right() {
+            // The row belongs to two elements, and both are handed every
+            // press. A click past the prompt puts the caret in the line being
+            // typed; a click on the prompt itself is output, and must leave
+            // that caret exactly where it was.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            await_prompt(&mut harness, pane);
+
+            let Some(prompt) = prompt_end(&harness, pane) else {
+                return;
+            };
+            harness.type_field(pane, "echo hello");
+
+            let panel = panel_of_the_pane(&mut harness);
+            let scene = harness.frame();
+            let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
+            let middle = prompt_row_baseline(&scene) - cell.baseline + cell.height * 0.5;
+            let start =
+                panel.min_x() + crate::workspace::body::GUTTER + prompt.column as f32 * cell.width;
+
+            harness.click(vec2f(start + cell.width * 5., middle), MouseButton::Left);
+            assert_eq!(
+                harness.field_caret(pane),
+                5,
+                "the boundary before `hello`, five cells into the line"
+            );
+
+            harness.click(
+                vec2f(
+                    panel.min_x() + crate::workspace::body::GUTTER + cell.width * 0.5,
+                    middle,
+                ),
+                MouseButton::Left,
+            );
+            assert_eq!(
+                harness.field_caret(pane),
+                5,
+                "a click on the prompt moved a caret that is not in the prompt"
             );
         }
     }

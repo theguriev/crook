@@ -210,6 +210,26 @@ impl Block {
     }
 }
 
+/// The cell the shell's prompt finished on, resolved against the viewport the
+/// way [`LiveBlock`]'s rows are.
+///
+/// This is where OSC 133 `B` left the cursor: one column past the last cell
+/// the prompt painted, which is the cell the shell would echo the first
+/// character of a command line into. A renderer that draws the line being
+/// composed *at* this cell puts it where the shell itself would put it.
+///
+/// `row` may fall outside the viewport for the same reasons
+/// [`LiveBlock::top_row`] may, and `column` may be `columns` — one past the
+/// last column of the row — when the prompt filled its row exactly, because
+/// the cell that is next is then the first of the row below.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct PromptEnd {
+    /// Viewport row the prompt finished on.
+    pub row: i32,
+    /// The column the next character the shell prints would land in.
+    pub column: usize,
+}
+
 /// The block that everything arriving now belongs to, resolved against the
 /// viewport the way [`crate::Cursor`] is.
 ///
@@ -234,6 +254,21 @@ pub struct LiveBlock {
     pub top_row: i32,
     /// Viewport row its last line is drawn on.
     pub bottom_row: i32,
+    /// Where this block's prompt ended, or `None` when nothing has said.
+    ///
+    /// `None` in exactly three cases, and there is no fourth: a prompt that
+    /// has not finished — `A` arrived and `B` has not — a session whose shell
+    /// reports no marks at all, and the alternate screen, where a full-screen
+    /// program owns the grid and the cell a prompt underneath it ended on
+    /// means nothing.
+    ///
+    /// **It is not re-checked against what is on screen now.** A `B` the shell
+    /// printed and then scrolled a long way from still reports its cell, moved
+    /// with the history the way every other anchor here is; so does one a file
+    /// somebody `cat`ted printed. Anything drawing at it has to ask whether
+    /// the row is still one this block is showing — see
+    /// `block_list::inline_start`, which is the caller this exists for.
+    pub prompt_end: Option<PromptEnd>,
 }
 
 impl Default for LiveBlock {
@@ -247,6 +282,7 @@ impl Default for LiveBlock {
             started_at: None,
             top_row: 0,
             bottom_row: -1,
+            prompt_end: None,
         }
     }
 }
@@ -448,10 +484,37 @@ impl Anchor {
         )
     }
 
-    /// An anchor on the cell the cursor is on right now.
-    fn at_cursor<T>(term: &Term<T>) -> Self {
-        let grid = term.grid();
-        Self::at(grid.cursor.point.line.0, grid.cursor.point.column.0, term)
+    /// An anchor on the cell the next character the shell prints will land in.
+    ///
+    /// The cursor's own cell, except when the cursor is sitting on the last
+    /// column with a wrap pending — which is exactly where a prompt that
+    /// filled its row leaves it. Alacritty holds the cursor on that column
+    /// rather than storing one past the end of the row, so the cell that is
+    /// really next is the first of the row below, and an anchor on the cursor
+    /// would name the cell the prompt's own last character is in.
+    fn at_input<T>(term: &Term<T>) -> Self {
+        let cursor = &term.grid().cursor;
+        let (line, column) = if cursor.input_needs_wrap {
+            (cursor.point.line.0 + 1, 0)
+        } else {
+            (cursor.point.line.0, cursor.point.column.0)
+        };
+        Self::at(line, column, term)
+    }
+
+    /// The cell the anchor names, as a grid line and an *unclamped* column.
+    ///
+    /// [`Self::point`] clamps both, because what it produces is handed to
+    /// `Term`, which indexes a row with it. This does not: the column here is
+    /// reported rather than read, and clamping it would turn "the row is full,
+    /// the next character goes below" into "the next character goes on top of
+    /// the last one".
+    fn cell<T>(self, term: &Term<T>) -> (i32, usize) {
+        let column = match self {
+            Self::At { column, .. } => column,
+            Self::Top => 0,
+        };
+        (self.line(term), column)
     }
 
     /// An anchor on a named cell, read against the history the grid has now.
@@ -531,17 +594,35 @@ impl BlockTracker {
     /// The open block, resolved against the viewport.
     pub(crate) fn live<T>(&self, term: &Term<T>) -> LiveBlock {
         let grid = term.grid();
-        let (top_row, bottom_row) = if term.mode().contains(TermMode::ALT_SCREEN) {
+        let alt_screen = term.mode().contains(TermMode::ALT_SCREEN);
+        let display_offset = grid.display_offset() as i32;
+        let (top_row, bottom_row) = if alt_screen {
             // A full-screen program owns the whole grid and there is no
             // history under it, so the anchor's arithmetic means nothing here.
             (0, grid.screen_lines() as i32 - 1)
         } else {
-            let display_offset = grid.display_offset() as i32;
             (
                 self.open.top.line(term) + display_offset,
                 last_content_line(term) + display_offset,
             )
         };
+
+        // The `B` mark's cell, resolved the same way and for the same reason:
+        // a caller has viewport rows and the anchor has grid lines. Nothing on
+        // the alternate screen, where marks are not believed at all and the
+        // anchor left over from the prompt underneath names a cell a
+        // full-screen program has since painted over.
+        let prompt_end = self
+            .open
+            .command_start
+            .filter(|_| !alt_screen)
+            .map(|anchor| {
+                let (line, column) = anchor.cell(term);
+                PromptEnd {
+                    row: line + display_offset,
+                    column,
+                }
+            });
 
         LiveBlock {
             id: self.open.id,
@@ -550,6 +631,7 @@ impl BlockTracker {
             started_at: self.open.started_at,
             top_row,
             bottom_row,
+            prompt_end,
         }
     }
 
@@ -668,7 +750,7 @@ impl BlockTracker {
             // The only signal the table records without moving is the prompt
             // end, and what it records is where the echoed command line
             // starts.
-            Transition::Record => self.open.command_start = Some(Anchor::at_cursor(term)),
+            Transition::Record => self.open.command_start = Some(Anchor::at_input(term)),
             Transition::Enter(state) => {
                 // A bare Enter at a prompt submits an empty line, and an empty
                 // line is not a command: recording one would give a block a

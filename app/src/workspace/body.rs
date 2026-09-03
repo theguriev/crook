@@ -47,6 +47,19 @@
 //! the space, which is why it is a plain child of the column and the output is
 //! the flexible one.
 //!
+//! **And where the shell says where its prompt ends, the composer's first row
+//! is that prompt's row.** [`block_list::inline_start`] answers whether it is
+//! and at which column, from the `B` mark the emulator kept and from where the
+//! list is scrolled to; the field then draws its first row above its own box
+//! and measures a row shorter, so the caret sits immediately after the `❯`
+//! rather than under it. The composer being on a row of its own is what a
+//! composer *is* to a reader, however little chrome it carries, and no shell
+//! puts its prompt on one line and your typing on the next.
+//!
+//! The two arrangements are the same three-fact decision seen from both sides:
+//! the frame that gains the rule above the composer is the frame the composer
+//! takes a row back, because both are "there is output cut off under this".
+//!
 //! # Where the pty learns its size
 //!
 //! [`PaneSizer`], from the *pane's* rectangle and never from the output's box.
@@ -74,7 +87,7 @@ use crookui_core::geometry::{Point, Vector2F, vec2f};
 use crookui_core::prelude::*;
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 
-use crate::pane_blocks::HEIGHT_TOLERANCE;
+use crate::pane_blocks::PaneBlocks;
 use crate::pane_surface::{self, Surface};
 use crate::tab::{Pane, PaneId, SplitAxis, TabAction};
 use crate::terminal_font::CellFont;
@@ -328,6 +341,11 @@ fn contents(
     // theme's, so that a shell which changed them takes the field with it.
     let ink = Ink::of(&snapshot);
     let surface = pane_surface::of(&snapshot, Instant::now());
+    // Read before the snapshot goes to the surface, and from the same three
+    // facts the list itself reads, so the two elements cannot disagree about
+    // whether they share a row. See `block_list::inline_start`.
+    let cut_off = is_cut_off(workspace, id);
+    let inline = block_list::inline_start(&snapshot, surface, cut_off);
     let output = match surface.surface {
         Surface::Blocks => blocks(workspace, id, &handle, snapshot, font.clone(), keys, app),
         Surface::Grid => grid(workspace, id, &handle, snapshot, font.clone(), keys),
@@ -361,7 +379,8 @@ fn contents(
             ComposerState {
                 focused: keys == Keys::All,
                 alt_screen,
-                cut_off: is_cut_off(workspace, id),
+                cut_off,
+                inline,
                 ink,
             },
         ))
@@ -383,7 +402,7 @@ fn contents(
 fn is_cut_off(workspace: &Workspace, pane: PaneId) -> bool {
     workspace
         .pane_blocks(pane)
-        .is_some_and(|view| view.max_offset() - view.offset() > HEIGHT_TOLERANCE)
+        .is_some_and(PaneBlocks::is_cut_off)
 }
 
 /// The pane's finished commands as a list, with the open one at the end.
@@ -459,6 +478,9 @@ struct ComposerState {
     focused: bool,
     alt_screen: bool,
     cut_off: bool,
+    /// The column its first row starts at when it continues the shell's own
+    /// prompt line rather than taking a row of its own.
+    inline: Option<usize>,
     ink: Ink,
 }
 
@@ -488,6 +510,7 @@ fn composer(
     let cell = font.metrics().height;
     let mut composing = CommandInput::new(input.clone(), font, workspace.clipboard().clone())
         .with_terminal(handle, state.focused, state.alt_screen)
+        .with_inline(state.inline)
         .with_ink(state.ink);
     // So that Enter brings the list back to the block the command is about to
     // make, however far up somebody had scrolled to read.

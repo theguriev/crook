@@ -248,6 +248,36 @@ impl BlockList {
         pane_surface::of(&self.snapshot, Instant::now())
     }
 
+    /// The column the composer's first row starts at on this list's last row,
+    /// when it continues the prompt drawn there.
+    ///
+    /// The same answer `body` gives the composer, from the same function and
+    /// the same three facts, which is what stops the two elements disagreeing
+    /// about who owns the row they share.
+    fn inline_start(&self) -> Option<usize> {
+        inline_start(&self.snapshot, self.surface(), self.view.is_cut_off())
+    }
+
+    /// Whether a press belongs to the composer below rather than to this list.
+    ///
+    /// **The prompt's row belongs to two elements at once**, and the split is
+    /// by column: the prompt on the left is output, which a drag selects, and
+    /// everything from the composer's first cell rightwards is the line being
+    /// typed. Both elements are handed every press — a flex offers an event to
+    /// all of its children — so exactly one of them has to decline, and it is
+    /// this one, because the composer is the element that knows where its own
+    /// caret would go.
+    fn press_is_the_composer_s(&self, position: Vector2F) -> bool {
+        let Some(start) = self.inline_start() else {
+            return false;
+        };
+        let Some((_, last)) = self.live_rows() else {
+            return false;
+        };
+        self.cell_at(position)
+            .is_some_and(|(at, _)| at.row == last && at.column >= start)
+    }
+
     /// Brings the height index up to date with this frame's blocks, and walks
     /// out the items that are in view.
     fn measure(&mut self, size: Vector2F) {
@@ -510,6 +540,14 @@ impl BlockList {
             .map_or(f32::INFINITY, |item| item.top);
         if position.y() - bounds.origin().y() < live_top {
             self.output.release_selection(ctx);
+            return false;
+        }
+
+        // The row the composer's first line continues is half this list's and
+        // half the composer's. See `press_is_the_composer_s`: the composer
+        // clears the output's selection itself, as every press into it does,
+        // so there is nothing to do here but stand aside.
+        if self.press_is_the_composer_s(*position) {
             return false;
         }
 
@@ -1023,6 +1061,61 @@ fn live_height(snapshot: &Snapshot, composer: bool) -> f32 {
     // padding is only what keeps its last row off the window's edge.
     let bottom = if composer { 0. } else { RUNNING_PADDING_BOTTOM };
     PADDING_TOP + (last - first + 1) as f32 + bottom
+}
+
+/// The cell column the composer's first row starts at when it continues the
+/// shell's own prompt line, or `None` when the composer takes a row of its
+/// own.
+///
+/// **Two cases, and there is deliberately no third.** Either the shell said
+/// where its prompt ended — OSC 133 `B`, whose cell the emulator kept as
+/// [`LiveBlock::prompt_end`] — and the line being typed continues that row,
+/// which is what every other terminal does and what stops a composer reading
+/// as a widget however little chrome it has; or nothing said, and the composer
+/// starts at the gutter on the row below, exactly where it has always been.
+///
+/// The missing third option is *guessing*: finding the end of a prompt by
+/// pattern-matching what is on screen. There is no pattern. A prompt is
+/// whatever `PS1` was set to — a `$`, a `❯`, two lines of segments, a bare
+/// space, a right-aligned clock — and a rule that put the caret after the last
+/// `>` on the row would land in the middle of somebody's `=>` on one machine
+/// in ten. A caret honestly one row down on every machine is better than a
+/// caret in the wrong place on some of them, so an unmarked shell keeps
+/// today's composer and the fallback is a case rather than a bug.
+///
+/// Past the mark, three things have to hold, and none of them is about the
+/// mark: they are all about the row the composer would be drawn on.
+///
+/// * The pane draws a block list with a composer under it. On the grid — the
+///   alternate screen, an overflowing block — there is no composer at all, and
+///   the prompt row is not this list's to draw.
+/// * The list is scrolled to its own end, so its last row *is* the row
+///   immediately above the composer. Scrolled up, the row above the composer
+///   is whatever the wheel left there, and a line typed onto it would land on
+///   somebody's output. That is the same condition the rule above the composer
+///   is drawn on, which is why the two changes are one change: the frame that
+///   gains the seam is the frame the composer takes a row of its own.
+/// * The mark is on that last row. A prompt the shell has since scrolled away
+///   from fails this, and so does a `B` printed by a file somebody `cat`ted.
+///
+/// And there has to be a cell left on the row. A prompt that filled its row
+/// exactly reports the first column of the row *below* as its end, which is
+/// not a row this block has yet — so the composer's own row is where the next
+/// character goes anyway, and the fallback is already the right answer.
+pub(super) fn inline_start(
+    snapshot: &Snapshot,
+    surface: pane_surface::PaneSurface,
+    cut_off: bool,
+) -> Option<usize> {
+    if surface.surface != pane_surface::Surface::Blocks || !surface.composer || cut_off {
+        return None;
+    }
+    let prompt = snapshot.live_block.prompt_end?;
+    let (_, last) = live_rows(snapshot)?;
+    if prompt.row < 0 || prompt.row as usize != last || prompt.column >= snapshot.columns {
+        return None;
+    }
+    Some(prompt.column)
 }
 
 /// The first and last viewport rows the open block occupies, or `None` when it

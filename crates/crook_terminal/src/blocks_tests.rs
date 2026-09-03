@@ -603,3 +603,142 @@ fn test_a_shell_killed_under_a_full_screen_program_still_closes_its_block() {
     assert!(block.rows.is_empty());
     assert_eq!(BlockState::Terminated, emulator.live_block().state);
 }
+
+#[test]
+fn test_the_prompt_end_is_the_cell_after_the_prompt_s_last_one() {
+    // What a composer drawn on the prompt's own row needs: the cell the shell
+    // would echo the first character of a command line into, which is one past
+    // the last cell the prompt painted.
+    let mut emulator = emulator();
+    emulator.advance(format!("{A}$ {B}").as_bytes());
+
+    let live = emulator.live_block();
+    let prompt = live
+        .prompt_end
+        .expect("the shell said where its prompt ended");
+    assert_eq!(
+        prompt,
+        PromptEnd { row: 0, column: 2 },
+        "`$ ` is two cells, so the third is where typing goes"
+    );
+    assert_eq!(
+        prompt.row, live.bottom_row,
+        "the prompt is the block's last row"
+    );
+
+    // And it is exactly where the shell does put it: the echo of a command
+    // lands in that cell.
+    emulator.advance(b"echo hi");
+    let snapshot = emulator.snapshot();
+    assert_eq!(
+        snapshot.cell(0, prompt.column).map(|cell| cell.c),
+        Some('e'),
+        "the shell echoed somewhere else: {:?}",
+        snapshot.text()
+    );
+}
+
+#[test]
+fn test_a_prompt_end_moves_with_the_row_it_was_printed_on() {
+    // The anchor's whole job. A prompt three rows above the bottom of a
+    // twenty-column, six-row grid is two rows above it after two lines scroll
+    // past, and a cell that did not move with them would be a caret drawn on
+    // somebody else's output.
+    let mut emulator = emulator();
+    emulator.advance(format!("{A}$ {B}").as_bytes());
+    let before = emulator.live_block().prompt_end.expect("a prompt ended");
+
+    emulator.advance(b"\r\nnoise\r\nnoise");
+    let after = emulator
+        .live_block()
+        .prompt_end
+        .expect("the mark did not survive");
+    assert_eq!(after.column, before.column);
+    assert_eq!(
+        after.row, before.row,
+        "nothing has scrolled off a six-row grid yet"
+    );
+
+    emulator.advance("\r\nnoise".repeat(10).as_bytes());
+    let scrolled = emulator
+        .live_block()
+        .prompt_end
+        .expect("the mark did not survive");
+    assert!(
+        scrolled.row < 0,
+        "the prompt has gone off the top and should say so, not clamp to row {}",
+        scrolled.row
+    );
+}
+
+#[test]
+fn test_the_three_cases_with_no_prompt_end_and_no_fourth() {
+    // Each of them is a defined answer rather than a gap: a renderer asking
+    // "where does the line being typed start" gets `None` and puts it on a row
+    // of its own.
+
+    // One: a session whose shell reports nothing at all.
+    let mut bare = emulator();
+    bare.advance(b"$ ");
+    assert_eq!(None, bare.live_block().prompt_end, "no marks, no cell");
+
+    // Two: a prompt that has started and not finished.
+    let mut drawing = emulator();
+    drawing.advance(format!("{A}$ ").as_bytes());
+    assert_eq!(
+        None,
+        drawing.live_block().prompt_end,
+        "`A` alone does not say where the prompt ends"
+    );
+
+    // Three: the alternate screen, where marks are not believed at all and the
+    // cell a prompt underneath ended on has been painted over.
+    let mut full_screen = emulator();
+    full_screen.advance(format!("{A}$ {B}vim\r\n{C}").as_bytes());
+    full_screen.advance(b"\x1b[?1049h~\r\n~");
+    assert_eq!(
+        None,
+        full_screen.live_block().prompt_end,
+        "a full-screen program owns the grid"
+    );
+    full_screen.advance(b"\x1b[?1049l");
+    assert!(
+        full_screen.live_block().prompt_end.is_some(),
+        "and the mark is back the moment the program gives the screen up"
+    );
+}
+
+#[test]
+fn test_a_prompt_that_fills_its_row_ends_on_the_row_below() {
+    // Alacritty holds the cursor on the last column with a wrap pending rather
+    // than storing one past the end of the row, so an anchor on the cursor
+    // would name the cell the prompt's own last character is in — and a caret
+    // drawn there would sit on top of it.
+    let mut emulator = emulator();
+    emulator.advance(format!("{A}{}{B}", "-".repeat(20)).as_bytes());
+
+    let live = emulator.live_block();
+    assert_eq!(
+        Some(PromptEnd { row: 1, column: 0 }),
+        live.prompt_end,
+        "twenty columns are full, so the next character goes below them"
+    );
+}
+
+#[test]
+fn test_the_prompt_end_is_part_of_what_a_repaint_is_worth() {
+    // It is drawn from, so a frame that would show it somewhere else has to be
+    // a new revision. It rides on `live_block`, which `same_content` already
+    // compares, and this is the test that says so.
+    let mut emulator = emulator();
+    emulator.advance(format!("{A}$ ").as_bytes());
+    let before = emulator.snapshot();
+
+    emulator.advance(B.as_bytes());
+    let after = emulator.snapshot();
+    assert_ne!(
+        before.revision, after.revision,
+        "the mark printed nothing, and the caret still moved"
+    );
+    assert!(!after.same_content(&before));
+}

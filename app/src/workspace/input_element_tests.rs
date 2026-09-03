@@ -32,9 +32,21 @@ fn width_for(columns: usize) -> f32 {
     columns as f32 * font().metrics().width
 }
 
-/// The rows a field `columns` cells wide draws `text` in.
+/// The rows a field `columns` cells wide draws `text` in, on a row of its own.
 fn rows_of(text: &str, caret: usize, columns: usize) -> Rows {
-    Rows::of(text, caret, width_for(columns), font().metrics(), MAX_ROWS)
+    rows_inline(text, caret, columns, None)
+}
+
+/// The same, with the first row continuing a prompt that ended at `inline`.
+fn rows_inline(text: &str, caret: usize, columns: usize, inline: Option<usize>) -> Rows {
+    Rows::of(
+        text,
+        caret,
+        width_for(columns),
+        font().metrics(),
+        MAX_ROWS,
+        inline,
+    )
 }
 
 /// How many rows a composer offered `available` pixels in a pane of
@@ -45,7 +57,7 @@ fn budget(available: f32, pane_rows: usize) -> usize {
 
 /// Every row of `text` in a field `columns` cells wide, drawn or not.
 fn wrap(text: &str, columns: usize) -> Vec<Range<usize>> {
-    RowWalk::new(text, columns).collect()
+    RowWalk::new(text, columns, columns).collect()
 }
 
 /// Paints a field `columns` cells wide, tall enough for everything in it.
@@ -53,19 +65,36 @@ fn painted(input: &PaneInput, columns: usize, focused: bool) -> Scene {
     painted_in(input, columns, focused, Ink::default())
 }
 
+/// The same, with the first row continuing a prompt that ended at `inline`.
+fn painted_inline(input: &PaneInput, columns: usize, inline: Option<usize>) -> Scene {
+    painted_rows(
+        input,
+        &{
+            let editor = input.editor();
+            rows_inline(editor.text(), editor.caret(), columns, inline)
+        },
+        true,
+        Ink::default(),
+    )
+}
+
 /// The same, in colours a shell resolved rather than the theme's.
 fn painted_in(input: &PaneInput, columns: usize, focused: bool, ink: Ink) -> Scene {
     let editor = input.editor();
     let rows = rows_of(editor.text(), editor.caret(), columns);
     drop(editor);
+    painted_rows(input, &rows, focused, ink)
+}
 
+/// Paints a field into a scene from rows somebody else wrapped.
+fn painted_rows(input: &PaneInput, rows: &Rows, focused: bool, ink: Ink) -> Scene {
     let mut scene = Scene::new(1.);
     scene.start_layer(ClipBounds::None);
     paint_input(
         input,
         &font(),
         Vector2F::zero(),
-        &rows,
+        rows,
         focused,
         ink,
         &mut scene,
@@ -335,7 +364,7 @@ fn the_composer_takes_at_most_half_a_short_pane() {
     assert_eq!(budget(f32::INFINITY, 0), 1, "a pane with no rows yet");
 
     let text = "a\n".repeat(20);
-    let rows = Rows::of(&text, text.len(), width_for(20), metrics, 2);
+    let rows = Rows::of(&text, text.len(), width_for(20), metrics, 2, None);
     assert_eq!(rows.drawn(), 2);
 }
 
@@ -480,5 +509,141 @@ fn the_composer_is_drawn_in_the_terminal_s_own_colours() {
         rects(&scene).pop().map(|caret| caret.background),
         Some(Fill::Solid(ink.caret)),
         "and the caret is not the one the grid draws the shell's cursor in"
+    );
+}
+
+#[test]
+fn the_first_row_continues_the_prompt_and_a_wrapped_one_starts_at_the_gutter() {
+    // What a shell's own line editor does, and the whole of the change: the
+    // line being typed carries on from the prompt's last cell, and when it
+    // runs out of row it comes back to column zero on the next one.
+    let metrics = font().metrics();
+    // Twelve columns with a prompt three cells wide leaves nine for the first
+    // row; `abcdefghijkl` is twelve characters, so three of them wrap.
+    let painted = glyphs(&painted_inline(&holding("abcdefghijkl"), 12, Some(3)));
+
+    assert_eq!(painted.len(), 12);
+    assert_eq!(
+        painted[0].position,
+        vec2f(3. * metrics.width, metrics.baseline - metrics.height),
+        "the first character goes in the cell after the prompt, on the prompt's own row"
+    );
+    assert_eq!(
+        painted[8].position,
+        vec2f(11. * metrics.width, metrics.baseline - metrics.height),
+        "and the row fills to its right edge"
+    );
+    assert_eq!(
+        painted[9].position,
+        vec2f(0., metrics.baseline),
+        "what wraps starts at the gutter, not under the prompt"
+    );
+    assert_eq!(painted[10].position, vec2f(metrics.width, metrics.baseline));
+}
+
+#[test]
+fn the_caret_sits_in_the_cell_after_the_prompt_when_the_field_is_empty() {
+    // Nothing typed yet is the state a person looks at most, and it is the one
+    // that used to read as a widget: a caret alone on a row of its own under
+    // a prompt that ends in `❯`.
+    let metrics = font().metrics();
+    let caret = rects(&painted_inline(&PaneInput::new(), 20, Some(2)))
+        .pop()
+        .expect("a focused composer draws a caret");
+
+    assert_eq!(
+        caret.bounds.origin().x(),
+        2. * metrics.width,
+        "immediately after the prompt, with no empty cell between"
+    );
+    assert!(
+        caret.bounds.origin().y() < 0.,
+        "and on the prompt's row, which is above the field's own box"
+    );
+}
+
+#[test]
+fn a_field_that_continues_the_prompt_is_a_row_shorter_than_it_draws() {
+    // The row it shares was already paid for by the list above. A field that
+    // measured its full height would push the output up by a blank row and
+    // leave the prompt with a gap under it.
+    let metrics = font().metrics();
+
+    let one = rows_inline("ls", 2, 20, Some(2));
+    assert_eq!(one.drawn(), 1);
+    assert_eq!(one.height(metrics), 0., "one row, and it is the prompt's");
+
+    let two = rows_inline("abcdefghijkl", 12, 12, Some(3));
+    assert_eq!(two.drawn(), 2);
+    assert_eq!(
+        two.height(metrics),
+        metrics.height,
+        "only the wrapped row is its own"
+    );
+
+    let alone = rows_of("ls", 2, 20);
+    assert_eq!(
+        alone.height(metrics),
+        metrics.height,
+        "and without a prompt to continue, its own row"
+    );
+}
+
+#[test]
+fn a_click_on_the_prompt_s_row_lands_on_the_character_it_was_aimed_at() {
+    // The hit test has to undo exactly what the painter did — both the row the
+    // field is drawn above its box and the columns the prompt already used —
+    // or every click on the first row is out by the width of the prompt.
+    let metrics = font().metrics();
+    let input = holding("abcdefghijkl");
+    let editor = input.editor();
+    let rows = rows_inline(editor.text(), editor.caret(), 12, Some(3));
+    drop(editor);
+    let text = "abcdefghijkl";
+
+    let at = |x: f32, y: f32| rows.at_point(text, vec2f(x, y), metrics);
+
+    // The shared row is at a negative y, and its column zero is three cells in.
+    let row = -metrics.height * 0.5;
+    assert_eq!(at(3. * metrics.width, row), 0, "before the first character");
+    assert_eq!(at(6. * metrics.width, row), 3, "the boundary before `d`");
+    assert_eq!(
+        at(6.6 * metrics.width, row),
+        4,
+        "the right half of a character puts the caret after it"
+    );
+    // Aiming at the prompt itself is the start of the line, never a negative
+    // column: the list beside this answers for those cells.
+    assert_eq!(at(0., row), 0);
+
+    // And the row below it is an ordinary row at the gutter.
+    assert_eq!(
+        at(0., metrics.height * 0.5),
+        9,
+        "the first wrapped character"
+    );
+    assert_eq!(at(2. * metrics.width, metrics.height * 0.5), 11);
+}
+
+#[test]
+fn a_field_scrolled_past_its_first_row_continues_nothing() {
+    // A command long enough to overflow its budget scrolls, and the row at the
+    // top of the window is then a middle one. Drawing that indented would put
+    // the middle of a command line beside the prompt, and the caret a row out.
+    let metrics = font().metrics();
+    let text = "a\n".repeat(MAX_ROWS + 4);
+    let rows = rows_inline(&text, text.len(), 20, Some(2));
+
+    assert_eq!(rows.drawn(), MAX_ROWS, "the field stops growing");
+    assert_eq!(
+        rows.shift(),
+        0,
+        "there is no row here that continues a prompt"
+    );
+    assert_eq!(rows.height(metrics), MAX_ROWS as f32 * metrics.height);
+    assert_eq!(
+        rows.offset(0, metrics),
+        vec2f(0., 0.),
+        "every row at the gutter"
     );
 }

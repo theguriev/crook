@@ -84,7 +84,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
-pub use crate::blocks::{Block, BlockId, BlockState, IgnoreReason, LiveBlock};
+pub use crate::blocks::{Block, BlockId, BlockState, IgnoreReason, LiveBlock, PromptEnd};
 pub use crate::emulator::{Emulator, TerminalEvent};
 pub use crate::harvest::{BlockRows, RowCombining, StyleRun};
 pub use crate::input::{InputModes, Key, Modifiers};

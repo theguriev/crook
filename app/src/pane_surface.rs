@@ -50,6 +50,15 @@
 //! printing for a minute is still one command among the ones before it, and a
 //! program that genuinely owns the screen reaches the grid by the overflow
 //! rule above, which is the honest way to get there.
+//!
+//! # Where the composer's first row goes is a separate question
+//!
+//! This module answers *whether* there is one. Whether that one continues the
+//! shell's own prompt line — and at which column — is `inline_start`, in
+//! `workspace::block_list`, because the answer is about the list's geometry
+//! rather than the snapshot's: which row it drew last, and whether it is
+//! scrolled to its end. It takes the [`PaneSurface`] from here as one of its
+//! three facts.
 
 use std::time::{Duration, Instant};
 

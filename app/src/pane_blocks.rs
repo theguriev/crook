@@ -234,6 +234,19 @@ impl PaneBlocks {
         self.max_offset() > HEIGHT_TOLERANCE
     }
 
+    /// Whether the list has content below its own fold: it is scrolled off its
+    /// bottom rather than following it.
+    ///
+    /// Two things ask, and they have to agree or the pane contradicts itself:
+    /// the rule above the composer is drawn exactly when there is a seam to
+    /// mark, and the composer only continues the shell's prompt line while the
+    /// row above it really is the open block's last one. Both read the *last*
+    /// layout's measurement, which is the only order that is not circular —
+    /// the composer is measured before the list it would be told about.
+    pub fn is_cut_off(&self) -> bool {
+        self.max_offset() - self.offset() > HEIGHT_TOLERANCE
+    }
+
     /// Records what layout measured and reconciles the position with it,
     /// reporting whether that moved the content.
     ///

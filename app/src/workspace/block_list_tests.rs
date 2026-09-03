@@ -7,6 +7,8 @@
 //! real OSC 133 marks — because a hand-built block would be a block this
 //! module invented rather than one the emulator makes.
 
+use std::time::Instant;
+
 use crook_terminal::{Block, Emulator, Palette, TerminalSize};
 
 use super::*;
@@ -154,4 +156,108 @@ fn a_block_copies_back_as_exactly_its_own_text() {
     assert!(second.contains("TWO"), "its own output: {second:?}");
     assert!(!second.contains("first"), "the block before it: {second:?}");
     assert!(!second.contains("ONE"), "that block's output: {second:?}");
+}
+
+/// What `inline_start` is asked, for a pane that is drawing blocks with a
+/// composer under it and is scrolled to its own end.
+fn inline(emulator: &mut Emulator) -> Option<usize> {
+    inline_at(emulator, false)
+}
+
+/// The same, saying whether the list has output cut off below the fold.
+fn inline_at(emulator: &mut Emulator, cut_off: bool) -> Option<usize> {
+    let snapshot = emulator.snapshot();
+    let surface = pane_surface::of(&snapshot, Instant::now());
+    inline_start(&snapshot, surface, cut_off)
+}
+
+#[test]
+fn the_composer_starts_one_column_after_the_prompt_s_last_cell() {
+    // The whole feature: the shell said where its prompt ended, so the line
+    // being typed continues that row instead of starting one below it.
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+
+    assert_eq!(
+        inline(&mut emulator),
+        Some(2),
+        "`$ ` is two cells, so the third is where typing goes"
+    );
+
+    // And it is the same cell the shell itself would use, which is what makes
+    // the composed line land under the echoed one.
+    let snapshot = emulator.snapshot();
+    let (_, last) = live_rows(&snapshot).expect("the prompt is on screen");
+    assert_eq!(
+        snapshot.live_block.prompt_end.map(|end| end.row),
+        Some(last as i32),
+        "the prompt has to be on the row the list draws last"
+    );
+}
+
+#[test]
+fn a_shell_that_reports_nothing_keeps_the_composer_on_its_own_row() {
+    // The fallback, and the reason there is no third case: with no mark there
+    // is nothing but the screen to go on, and no pattern in a prompt to find.
+    let mut emulator = emulator();
+    emulator.advance(b"$ ");
+
+    assert_eq!(inline(&mut emulator), None);
+    // The list is unchanged by that: one open block holding everything, drawn
+    // exactly as it was, with the composer under its last row.
+    let snapshot = emulator.snapshot();
+    assert_eq!(live_rows(&snapshot), Some((0, 0)));
+    assert_eq!(live_height(&snapshot, true), PADDING_TOP + 1.);
+}
+
+#[test]
+fn a_list_scrolled_off_its_own_bottom_gives_the_composer_a_row_back() {
+    // The row above the composer is then whatever the wheel left there, and a
+    // line typed onto it would land on somebody's output. It is the same
+    // condition the rule above the composer is drawn on, so the frame that
+    // gains the seam is the frame the composer takes its own row.
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+
+    assert_eq!(inline_at(&mut emulator, false), Some(2));
+    assert_eq!(inline_at(&mut emulator, true), None);
+}
+
+#[test]
+fn a_prompt_the_shell_has_printed_past_is_not_continued() {
+    // A mark on a row that is no longer the block's last one. A `B` a file
+    // printed looks exactly like this, and so does a prompt something scrolled
+    // away from.
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+    assert_eq!(inline(&mut emulator), Some(2));
+
+    emulator.advance(b"\r\nnoise");
+    assert_eq!(
+        inline(&mut emulator),
+        None,
+        "the prompt's row has output under it now"
+    );
+}
+
+#[test]
+fn there_is_nothing_to_continue_where_there_is_no_composer() {
+    // Both of the surfaces that take the field away. A full-screen program
+    // owns the grid, and a command that has been running longer than a blink
+    // has taken the space the field was in — in neither case is there a line
+    // being typed to place.
+    let mut alt = emulator();
+    alt.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07vim\r\n\x1b]133;C\x07");
+    alt.advance(b"\x1b[?1049h~");
+    assert_eq!(inline(&mut alt), None, "the alternate screen");
+
+    let mut running = emulator();
+    running.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07sleep 9\r\n\x1b]133;C\x07");
+    let snapshot = running.snapshot();
+    let later = Instant::now() + pane_surface::LONG_RUNNING;
+    assert_eq!(
+        inline_start(&snapshot, pane_surface::of(&snapshot, later), false),
+        None,
+        "a long-running command"
+    );
 }
