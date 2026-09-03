@@ -415,15 +415,35 @@ fn value_of(value: &str) -> String {
     let value = value.trim();
 
     for quote in ['"', '\''] {
-        if let Some(rest) = value.strip_prefix(quote) {
-            return match rest.split_once(quote) {
-                Some((inside, _)) => inside.to_owned(),
-                // An opening quote and no closing one. Taking the rest of the
-                // line is what every lenient parser does, and the value is
-                // about to be checked for being a colour anyway.
-                None => rest.to_owned(),
-            };
+        let Some(rest) = value.strip_prefix(quote) else {
+            continue;
+        };
+
+        // A doubled quote inside a quoted scalar is one literal quote — YAML's
+        // own escape, and the one a name like `it's mine` is written with.
+        // Scanning for it rather than splitting on the first quote is the
+        // difference between reading that name back and reading back `it`.
+        let mut inside = String::new();
+        let mut characters = rest.chars().peekable();
+        while let Some(character) = characters.next() {
+            if character != quote {
+                inside.push(character);
+                continue;
+            }
+            if characters.peek() == Some(&quote) {
+                characters.next();
+                inside.push(quote);
+                continue;
+            }
+            // The closing quote. Whatever follows on the line is a comment or
+            // nothing, and either way it is not part of the value.
+            return inside;
         }
+
+        // An opening quote and no closing one. Taking the rest of the line is
+        // what every lenient parser does, and the value is about to be checked
+        // for being a colour anyway.
+        return inside;
     }
 
     match value.split_once(" #") {
@@ -471,6 +491,101 @@ fn parse_hex(value: &str) -> Result<Color> {
         )),
         _ => bail!("{value:?} is not three or six hex digits"),
     }
+}
+
+/// Writes `theme` into `directory` as a theme file, and says where it went.
+///
+/// The inverse of everything above, and it exists for one reason: a theme
+/// somebody makes in the application has to become a *file*, in the same
+/// format as the ones they can download, in the folder the settings page
+/// already points at. A theme that lived only in the settings file would be a
+/// theme they could not share, edit, copy to another machine or keep after
+/// reinstalling.
+///
+/// The name is written into the file as `name:` verbatim and *separately*
+/// sanitised into a file name — see [`file_stem`]. A file whose name is
+/// already taken gets a serial rather than overwriting: nothing here should be
+/// able to destroy a theme somebody wrote by hand.
+pub fn write_theme(directory: &Path, name: &str, theme: &Theme) -> Result<PathBuf> {
+    fs::create_dir_all(directory)
+        .with_context(|| format!("could not create {}", directory.display()))?;
+
+    let stem = file_stem(name);
+    let mut path = directory.join(format!("{stem}.yaml"));
+    let mut serial = 2;
+    while path.exists() {
+        path = directory.join(format!("{stem}_{serial}.yaml"));
+        serial += 1;
+    }
+
+    fs::write(&path, emit(name, theme))
+        .with_context(|| format!("could not write {}", path.display()))?;
+    Ok(path)
+}
+
+/// A theme name as a file name that cannot be anything else.
+///
+/// Warp writes `<name>.yaml` with the name exactly as typed and no
+/// sanitisation at all — a name with a slash in it lands somewhere else
+/// entirely, and one with `..` in it lands somewhere much worse. Here the stem
+/// keeps letters, digits and single underscores and nothing else, so a stem
+/// can never contain a separator, a `.`, or a leading dash; an empty result
+/// falls back to `theme`.
+fn file_stem(name: &str) -> String {
+    let mut stem = String::new();
+    for character in name.chars() {
+        if character.is_ascii_alphanumeric() {
+            stem.extend(character.to_lowercase());
+        } else if !stem.ends_with('_') {
+            stem.push('_');
+        }
+    }
+
+    let stem = stem.trim_matches('_');
+    if stem.is_empty() {
+        "theme".to_owned()
+    } else {
+        stem.to_owned()
+    }
+}
+
+/// One theme as the text of a theme file.
+///
+/// Warp's key order — background, accent, foreground, cursor, then the two
+/// eight-colour blocks — and Warp's spelling of a colour: a quoted, lower-case,
+/// six-digit hex string. Quoted because `#` starts a comment in YAML and an
+/// unquoted colour would be read back as nothing at all.
+fn emit(name: &str, theme: &Theme) -> String {
+    let hex = |color: Color| format!("'#{:02x}{:02x}{:02x}'", color.r, color.g, color.b);
+    let colors = theme.terminal;
+
+    let mut text = String::new();
+    // Single-quoted, and with any quote in the name doubled, which is how YAML
+    // escapes one inside a single-quoted scalar. A name is the one field here
+    // that a person types.
+    text.push_str(&format!("name: '{}'
+", name.replace('\'', "''")));
+    text.push_str(&format!("background: {}
+", hex(colors.background)));
+    text.push_str(&format!("accent: {}
+", hex(theme.accent)));
+    text.push_str(&format!("foreground: {}
+", hex(colors.foreground)));
+    text.push_str(&format!("cursor: {}
+", hex(colors.cursor)));
+    text.push_str("terminal_colors:
+");
+
+    for (block, eight) in [("normal", colors.normal), ("bright", colors.bright)] {
+        text.push_str(&format!("  {block}:
+"));
+        for (name, color) in ANSI_NAMES.iter().zip(eight) {
+            text.push_str(&format!("    {name}: {}
+", hex(color)));
+        }
+    }
+
+    text
 }
 
 #[cfg(test)]

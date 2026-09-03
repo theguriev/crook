@@ -31,6 +31,7 @@ use std::sync::RwLock;
 use crookui_core::geometry::Color;
 
 mod builtin;
+pub mod creator;
 mod file;
 
 pub use builtin::{BUILTIN, Builtin, DARK, builtin_named};

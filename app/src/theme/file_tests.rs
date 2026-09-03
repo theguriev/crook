@@ -372,3 +372,135 @@ fn a_user_theme_takes_the_name_of_a_built_in_rather_than_sitting_beside_it() {
 
     let _ = fs::remove_dir_all(&root);
 }
+
+/// A scratch themes directory of this test's own.
+struct Scratch {
+    path: PathBuf,
+}
+
+impl Scratch {
+    fn new(name: &str) -> Self {
+        let path =
+            std::env::temp_dir().join(format!("crook-write-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&path);
+        fs::create_dir_all(&path).expect("the scratch directory should be creatable");
+        Self { path }
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+#[test]
+fn a_theme_written_out_is_a_theme_that_reads_back() {
+    // The one property the writer has to have, and the one a hand-written
+    // emitter against a hand-written parser can lose silently: a name with a
+    // quote, a colon, a `#` or a newline in it has to survive the round trip,
+    // because every one of those means something in YAML.
+    let scratch = Scratch::new("round-trip");
+
+    for name in [
+        "Crook Dark 2",
+        "it's mine",
+        "a: colon",
+        "hash # here",
+        "Ünïcødé",
+        "  padded  ",
+    ] {
+        // A derived theme, so the whole palette can be compared: a file
+        // carries the seed colours and the derivation rebuilds the rest, which
+        // means a hand-written palette like `DARK` is *not* expected to come
+        // back byte for byte — see the assertion on the seeds below.
+        let source = crate::theme::builtin::MIDNIGHT;
+        let path = write_theme(&scratch.path, name, &source).expect("the theme should be written");
+        let read_back = read(&path).expect("what was written should parse");
+
+        assert_eq!(read_back.name, name, "the name did not survive {path:?}");
+        assert_eq!(
+            read_back.theme, source,
+            "the palette did not survive {path:?}"
+        );
+    }
+
+    // And for a hand-tuned palette, the seeds a file is able to carry.
+    let path = write_theme(&scratch.path, "Hand Tuned", &crate::theme::DARK).expect("written");
+    let read_back = read(&path).expect("parses");
+    assert_eq!(read_back.theme.terminal, crate::theme::DARK.terminal);
+    assert_eq!(read_back.theme.accent, crate::theme::DARK.accent);
+}
+
+#[test]
+fn a_written_theme_cannot_land_outside_the_themes_folder() {
+    // Warp writes `<name>.yaml` with the name exactly as typed, which is the
+    // one thing every survey said not to copy: a name is a person's text, and
+    // a file path is not.
+    let scratch = Scratch::new("escape");
+
+    for name in ["../../evil", "/etc/passwd", "..", "", "a/b", "  ", "..\\..\\evil"] {
+        let path = write_theme(&scratch.path, name, &crate::theme::DARK)
+            .expect("even a hostile name should write somewhere safe");
+        assert_eq!(
+            path.parent(),
+            Some(scratch.path.as_path()),
+            "{name:?} escaped the themes folder to {path:?}"
+        );
+        assert!(
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".yaml")),
+            "{name:?} produced {path:?}"
+        );
+    }
+}
+
+#[test]
+fn writing_a_theme_never_overwrites_one_that_is_already_there() {
+    // A theme file is something somebody may have written by hand and spent an
+    // evening on. Two themes that sanitise to the same stem get a serial.
+    let scratch = Scratch::new("collide");
+
+    let first = write_theme(&scratch.path, "My Theme", &crate::theme::DARK).expect("written");
+    let second = write_theme(&scratch.path, "my theme", &crate::theme::builtin::LIGHT)
+        .expect("written");
+
+    assert_ne!(first, second);
+    assert_eq!(
+        read(&first).expect("still there").theme.terminal,
+        crate::theme::DARK.terminal,
+        "the first theme was overwritten"
+    );
+
+    let themes = crate::theme::available_in(&scratch.path);
+    let mine: Vec<&str> = themes
+        .iter()
+        .filter(|theme| theme.from_file())
+        .map(|theme| theme.name.as_str())
+        .collect();
+    assert_eq!(
+        mine.len(),
+        2,
+        "both files should be listed, told apart by name: {mine:?}"
+    );
+}
+
+#[test]
+fn a_written_theme_is_spelled_the_way_warp_spells_one() {
+    // Not decoration: a theme Crook writes should be a theme Warp reads, which
+    // means Warp's key names, Warp's nesting and Warp's quoted lower-case
+    // six-digit hex.
+    let scratch = Scratch::new("spelling");
+    let path = write_theme(&scratch.path, "Spelling", &crate::theme::DARK).expect("written");
+    let text = fs::read_to_string(&path).expect("readable");
+
+    assert!(text.contains("name: 'Spelling'\n"));
+    assert!(text.contains("background: '#1a1d24'\n"));
+    assert!(text.contains("terminal_colors:\n  normal:\n    black: '#000000'\n"));
+    assert!(text.contains("  bright:\n    black: '#7f7f7f'\n"));
+    assert!(
+        !text.contains("#RRGGBB") && !text.contains('"'),
+        "colours should be single-quoted lower-case hex: {text}"
+    );
+}

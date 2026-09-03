@@ -53,7 +53,7 @@ pub const BUILTIN: [Builtin; 3] = [
 /// `crook_terminal`'s own default palette holds. A theme that wants its own
 /// sixteen says so; a theme that does not gets the ones every program was
 /// written against.
-const ANSI_NORMAL: [Color; 8] = [
+pub(super) const ANSI_NORMAL: [Color; 8] = [
     Color::hex(0x000000),
     Color::hex(0xcd0000),
     Color::hex(0x00cd00),
@@ -65,7 +65,7 @@ const ANSI_NORMAL: [Color; 8] = [
 ];
 
 /// The bright half of the same eight.
-const ANSI_BRIGHT: [Color; 8] = [
+pub(super) const ANSI_BRIGHT: [Color; 8] = [
     Color::hex(0x7f7f7f),
     Color::hex(0xff0000),
     Color::hex(0x00ff00),
