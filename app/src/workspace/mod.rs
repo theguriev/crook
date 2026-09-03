@@ -1,4 +1,5 @@
-//! The root view: the tabs, a header, and the active tab's body.
+//! The root view: the tabs, a header, the active tab's body — and, over all
+//! three when it is up, the settings page.
 //!
 //! Where those three sit relative to one another is [`Layout`]'s to say, and
 //! it is the one setting that rearranges the window rather than a row inside
@@ -29,6 +30,7 @@ mod body;
 mod controls;
 mod header_toolbar;
 mod row_content;
+mod settings_page;
 mod tab_bar;
 mod tab_options_menu;
 mod tabs_panel;
@@ -40,7 +42,8 @@ mod tests;
 
 use crate::theme::THEME;
 
-pub use action::{OptionsAction, WorkspaceAction};
+pub use action::{OptionsAction, SettingsAction, WorkspaceAction};
+pub use settings_page::Section;
 pub use usage_chip::{UsageChip, UsageChipAction};
 pub use view::{Fonts, QuitRequest, Workspace};
 
@@ -55,6 +58,26 @@ pub(crate) const CLOSE_BUTTON_SIZE: f32 = 16.;
 
 /// The dot that carries the agent's status.
 pub(crate) const STATUS_DOT_SIZE: f32 = 7.;
+
+/// Breaks `text` into lines of at most `max_chars` characters each.
+///
+/// A word longer than the budget gets a line of its own and overflows it,
+/// because breaking inside a word would be worse and the note has no such
+/// word. Counted rather than measured: measuring needs the shaper, and this
+/// runs while the element tree is being built.
+pub(crate) fn wrap(text: &str, max_chars: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        match lines.last_mut() {
+            Some(line) if line.chars().count() + 1 + word.chars().count() <= max_chars => {
+                line.push(' ');
+                line.push_str(word);
+            }
+            _ => lines.push(word.to_owned()),
+        }
+    }
+    lines
+}
 
 /// The colour that says what an agent is doing.
 ///

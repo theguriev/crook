@@ -55,7 +55,7 @@ use crate::platform_insets::WindowChrome;
 use crate::settings::{Density, Granularity, Layout, Settings};
 use crate::tab::{AgentStatus, Direction, PaneId, Tab, TabAction};
 use crate::usage_model::UsageModel;
-use crate::workspace::{Fonts, QuitRequest, Workspace};
+use crate::workspace::{Fonts, QuitRequest, Section, Workspace};
 
 /// The window Crook opens, in logical pixels.
 const WINDOW_SIZE: Vector2F = vec2f(1024., 640.);
@@ -139,6 +139,12 @@ struct Overrides {
     menu: bool,
     /// Start with the first row's hover detail card up.
     hover: bool,
+    /// Start with the settings page open on this section.
+    ///
+    /// Unlike the three option overrides below it, this one has nothing to
+    /// keep out of the settings file: which page of the settings somebody is
+    /// looking at is not an option and is never written down.
+    settings: Option<Section>,
     /// Start in this layout rather than the saved one.
     layout: Option<Layout>,
     /// Start with rows standing for this rather than for the saved one.
@@ -218,6 +224,26 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 frames = Some(count.parse().context("`--frames` takes a number")?);
             }
             "--menu" => overrides.menu = true,
+            "--settings" => {
+                // The section is optional, and a bare `--settings` opens the
+                // page where a click on the menu entry opens it. Peeking
+                // rather than consuming is what lets `--settings --hover`
+                // mean what it looks like it means.
+                let section = match args.peek().map(String::as_str) {
+                    Some("appearance") => Some(Section::Appearance),
+                    Some("usage") => Some(Section::Usage),
+                    Some("keys") => Some(Section::Keys),
+                    Some("about") => Some(Section::About),
+                    Some(other) if !other.starts_with("--") => {
+                        bail!("`--settings` takes appearance, usage, keys or about, not {other}");
+                    }
+                    _ => None,
+                };
+                if section.is_some() {
+                    args.next();
+                }
+                overrides.settings = Some(section.unwrap_or_default());
+            }
             "--hover" => overrides.hover = true,
             "--density" => {
                 let mode = args.next().context("`--density` needs a mode")?;
@@ -264,6 +290,8 @@ OPTIONS:
     --snapshot <PATH>  Render one frame of the real view tree to a PNG and exit
     --frames <N>       Draw N frames, then exit; for running unattended
     --menu             Start with the tab options menu open
+    --settings [PAGE]  Start with the settings page open, on `appearance`,
+                       `usage`, `keys` or `about`
     --hover            Start with the first row's detail card up
     --layout <MODE>    Start with the tabs `vertical` or `horizontal` rather than as saved
     --granularity <M>  Start with rows standing for `panes` or `tabs` rather than as saved
@@ -274,6 +302,7 @@ OPTIONS:
 KEYS:
     cmd/ctrl-t                 New agent tab
     cmd/ctrl-b                 Move the tabs between the side panel and the header strip
+    cmd/ctrl-,                 Open the settings page; escape closes it
     cmd/ctrl-d                 Split the focused pane to the right
     cmd/ctrl-shift-d           Split the focused pane downwards
     cmd/ctrl-w                 Close the focused pane, and its tab with the last one
@@ -348,6 +377,9 @@ fn apply_overrides(
     if overrides.hover {
         workspace.hover_first_row(ctx);
     }
+    if let Some(section) = overrides.settings {
+        workspace.open_settings_page(section, ctx);
+    }
 }
 
 fn open_window(channel: Channel, frames: Option<u32>, overrides: Overrides) -> Result<()> {
@@ -372,6 +404,7 @@ fn open_window(channel: Channel, frames: Option<u32>, overrides: Overrides) -> R
             platform,
             fonts,
             settings.clone(),
+            channel,
             text_layout.clone(),
             frames,
             overrides,
@@ -395,7 +428,12 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
 
     let quit: QuitRequest = Rc::new(|| {});
     let settings = Settings::ephemeral();
-    let (window_id, workspace) = app.add_window(|ctx| Workspace::new(fonts, settings, quit, ctx));
+    // A snapshot is always rendered as the dev channel: the only thing the
+    // channel reaches is the About page's label, and a PNG that said "stable"
+    // on a machine that built it from a working tree would be wrong in the one
+    // way a snapshot exists to catch.
+    let (window_id, workspace) =
+        app.add_window(|ctx| Workspace::new(fonts, settings, Channel::Dev, quit, ctx));
     app.update(|ctx| {
         workspace.update(ctx, |workspace, ctx| {
             seed_snapshot_tabs(workspace, ctx);
@@ -551,6 +589,7 @@ impl Shell {
         platform: &Platform,
         fonts: Fonts,
         settings: Settings,
+        channel: Channel,
         text_layout: Arc<dyn TextLayoutSystem>,
         frame_budget: Option<u32>,
         overrides: Overrides,
@@ -567,7 +606,7 @@ impl Shell {
         };
 
         let (window_id, workspace) =
-            app.add_window(|ctx| Workspace::new(fonts, settings, quit, ctx));
+            app.add_window(|ctx| Workspace::new(fonts, settings, channel, quit, ctx));
         app.update(|ctx| {
             workspace.update(ctx, |workspace, ctx| {
                 // Before the polls, not after: `start_git_poll` decides
@@ -725,6 +764,7 @@ mod tests {
                 overrides: Overrides {
                     menu: true,
                     hover: true,
+                    settings: None,
                     layout: Some(Layout::Horizontal),
                     granularity: Some(Granularity::Tabs),
                     density: Some(Density::Expanded)
@@ -741,6 +781,33 @@ mod tests {
                 }
             }
         );
+        // `--settings` takes an optional page, so it has to be right about
+        // both halves: a page it recognises is consumed, and the next flag is
+        // left for the loop rather than eaten as a page name.
+        assert_eq!(
+            parse(&["--settings", "about", "--hover"]).expect("valid"),
+            Startup::Window {
+                frames: None,
+                overrides: Overrides {
+                    hover: true,
+                    settings: Some(Section::About),
+                    ..Overrides::default()
+                }
+            }
+        );
+        assert_eq!(
+            parse(&["--settings", "--menu"]).expect("valid"),
+            Startup::Window {
+                frames: None,
+                overrides: Overrides {
+                    menu: true,
+                    settings: Some(Section::Appearance),
+                    ..Overrides::default()
+                }
+            }
+        );
+        assert!(parse(&["--settings", "keybindings"]).is_err());
+
         assert!(parse(&["--density", "cosy"]).is_err());
         assert!(parse(&["--density"]).is_err());
         assert!(parse(&["--layout", "diagonal"]).is_err());

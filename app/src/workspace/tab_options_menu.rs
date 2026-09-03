@@ -49,8 +49,9 @@ use crookui_core::prelude::*;
 use crate::settings::{Density, Granularity, PrimaryInfo, resolve_subtitle, subtitle_options_for};
 use crate::theme::THEME;
 
-use super::action::{OptionsAction, WorkspaceAction};
+use super::action::{OptionsAction, SettingsAction, WorkspaceAction};
 use super::view::Workspace;
+use super::wrap;
 
 /// The popup's fixed width. Not derived from anything: Warp's panel is 248 and
 /// its popup is 200, and the two numbers are unrelated.
@@ -234,6 +235,13 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
         ui,
     ));
 
+    // Warp opens its settings from the application menu bar and from
+    // `cmd-,`; this popup has no such row. Crook has no menu bar at all, so
+    // the one menu it does have carries the entry — otherwise the settings
+    // page would be reachable only by a keystroke nobody was told about.
+    column.add_child(divider());
+    column.add_child(settings_row(menu.settings.clone(), ui));
+
     ConstrainedBox::new(
         // Warp finishes this with `DropShadow::default()`. Crook's fragment
         // shader has no shadow branch — it was deliberately removed — so the
@@ -247,6 +255,52 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
             .finish(),
     )
     .with_width(POPUP_WIDTH)
+    .finish()
+}
+
+/// The row that opens the settings page.
+///
+/// Built here rather than through [`check_row`] because it is not a check row:
+/// nothing about it is ever ticked, and passing `false` forever to a parameter
+/// named `is_checked` would be a worse lie than eleven lines of layout. It
+/// keeps that function's geometry — the same 16px slot, the same 8px gap — so
+/// its label starts where every other label in the popup starts.
+fn settings_row(state: MouseStateHandle, ui: FamilyId) -> Box<dyn Element> {
+    Hoverable::new(state, move |mouse| {
+        let background = if mouse.is_hovered() {
+            THEME.overlay_1
+        } else {
+            Color::TRANSPARENT
+        };
+
+        Container::new(
+            Flex::row()
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_child(
+                    Container::new(
+                        ConstrainedBox::new(Empty::new().finish())
+                            .with_width(ICON_SIZE)
+                            .with_height(ICON_SIZE)
+                            .finish(),
+                    )
+                    .with_margin_right(8.)
+                    .finish(),
+                )
+                .with_child(
+                    Text::new("Settings\u{2026}", ui, LABEL_SIZE)
+                        .with_color(THEME.text_primary)
+                        .finish(),
+                )
+                .finish(),
+        )
+        .with_horizontal_padding(ROW_INSET)
+        .with_vertical_padding(4.)
+        .with_background_color(background)
+        .finish()
+    })
+    .on_click(|_, ctx, _| {
+        ctx.dispatch_typed_action(WorkspaceAction::Settings(SettingsAction::Toggle));
+    })
     .finish()
 }
 
@@ -624,26 +678,6 @@ fn note_panel(text: &str, ui: FamilyId) -> Box<dyn Element> {
     )
     .with_width(NOTE_WIDTH)
     .finish()
-}
-
-/// Breaks `text` into lines of at most `max_chars` characters each.
-///
-/// A word longer than the budget gets a line of its own and overflows it,
-/// because breaking inside a word would be worse and the note has no such
-/// word. Counted rather than measured: measuring needs the shaper, and this
-/// runs while the element tree is being built.
-fn wrap(text: &str, max_chars: usize) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    for word in text.split_whitespace() {
-        match lines.last_mut() {
-            Some(line) if line.chars().count() + 1 + word.chars().count() <= max_chars => {
-                line.push(' ');
-                line.push_str(word);
-            }
-            _ => lines.push(word.to_owned()),
-        }
-    }
-    lines
 }
 
 #[cfg(test)]

@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crookui_core::event::{Event, Keystroke, Modifiers, MouseButton};
+use crookui_core::event::{Event, Keystroke, Modifiers, MouseButton, ScrollDelta};
 use crookui_core::executor::{Background, LocalQueue};
 use crookui_core::fonts::{FamilyId, FontId, LineStyle, StyleAndFont};
 use crookui_core::geometry::{RectF, Vector2F, vec2f};
@@ -22,15 +22,18 @@ use crookui_core::scene::{Radius, Rect, Scene};
 use crookui_core::text_layout::{Glyph, Line, Run};
 use crookui_core::{AddSingletonModel as _, App, Presenter, WindowId};
 
+use crate::Channel;
 use crate::git::{DiffStats, GitFacts, Head};
-use crate::settings::{Density, Granularity, Layout, PrimaryInfo, Settings, Subtitle, TabOptions};
+use crate::settings::{
+    Density, GeneralOptions, Granularity, Layout, PrimaryInfo, Settings, Subtitle, TabOptions,
+};
 use crate::tab::{AgentSession, AgentStatus, Direction, Pane, PaneId, Tab, TabAction, TabId};
 use crate::theme::THEME;
 use crate::usage_model::UsageModel;
 
 use super::{
-    Fonts, OptionsAction, QuitRequest, Workspace, WorkspaceAction, controls, tab_options_menu,
-    tabs_panel,
+    Fonts, OptionsAction, QuitRequest, Section, SettingsAction, Workspace, WorkspaceAction,
+    controls, settings_page, tab_options_menu, tabs_panel,
 };
 
 /// Big enough that two tabs both reach their maximum width, so the geometry
@@ -145,7 +148,7 @@ impl Harness {
             monospace: FamilyId(0),
         };
         let (window_id, workspace) =
-            app.add_window(|ctx| Workspace::new(fonts, settings, quit, ctx));
+            app.add_window(|ctx| Workspace::new(fonts, settings, Channel::Dev, quit, ctx));
 
         let mut harness = Self {
             app,
@@ -295,6 +298,64 @@ impl Harness {
     fn is_menu_open(&self) -> bool {
         self.workspace
             .read(&self.app, |workspace, _| workspace.is_options_menu_open())
+    }
+
+    /// Opens the settings page, or closes it — the keystroke's action, sent
+    /// the way the menu entry sends it.
+    fn toggle_settings_page(&mut self) {
+        self.dispatch_workspace_action(WorkspaceAction::Settings(SettingsAction::Toggle));
+    }
+
+    fn is_settings_page_open(&self) -> bool {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.is_settings_page_open())
+    }
+
+    /// The options that are not the tab strip's.
+    fn general(&self) -> GeneralOptions {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.general())
+    }
+
+    /// Whether the usage poll chain is meant to be running.
+    fn usage_is_wanted(&self) -> bool {
+        self.workspace.read(&self.app, |workspace, ctx| {
+            workspace.usage().as_ref(ctx).is_wanted()
+        })
+    }
+
+    /// Turns the wheel over the middle of the settings card.
+    ///
+    /// Positive is away from the user, so a negative count moves the page
+    /// down. A count far past the end is how a test says "the bottom of the
+    /// page" without depending on how tall the page happens to be: the offset
+    /// clamps, and one more click changes nothing.
+    fn scroll_settings_page(&mut self, lines: f32) {
+        let position = center(settings_card_box(&self.frame()));
+        self.dispatch(Event::ScrollWheel {
+            position,
+            delta: ScrollDelta::Lines(vec2f(0., lines)),
+            modifiers: Modifiers::default(),
+        });
+    }
+
+    /// What a keystroke means to the workspace, if it means anything.
+    fn action_for(&self, key: &str, modifiers: Modifiers) -> Option<WorkspaceAction> {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.action_for(&Keystroke::new(key, modifiers))
+        })
+    }
+
+    /// Presses a key and applies whatever it is bound to, which is what the
+    /// window's own key handler does.
+    fn press_key(&mut self, key: &str, modifiers: Modifiers) -> bool {
+        match self.action_for(key, modifiers) {
+            Some(action) => {
+                self.dispatch_workspace_action(action);
+                true
+            }
+            None => false,
+        }
     }
 
     /// Puts known git facts in front of the renderer.
@@ -2722,5 +2783,301 @@ fn choosing_one_option_does_not_carry_another_command_line_override_into_the_fil
         Layout::Horizontal,
         harness.options().layout,
         "the save changed what is on screen"
+    );
+}
+
+/// The chord that means "this is an application command" on this platform.
+///
+/// The same `cfg` the workspace resolves a keystroke with, so a test cannot
+/// pass on one platform by asserting the other one's binding.
+fn platform_chord() -> Modifiers {
+    if cfg!(target_os = "macos") {
+        Modifiers {
+            cmd: true,
+            ..Modifiers::default()
+        }
+    } else {
+        Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        }
+    }
+}
+
+/// The settings card, by its ground.
+///
+/// Radius and fill together: the body's panels are rounded by the same ten
+/// pixels and the options popup is painted in the same raised surface, but
+/// nothing else in a frame is both.
+fn settings_card_box(scene: &Scene) -> RectF {
+    let boxes: Vec<RectF> = visible_rects(scene)
+        .filter(|(rect, _)| {
+            rect.corner_radius.get_top_left() == Radius::Pixels(10.)
+                && rect.background == Fill::Solid(THEME.surface_raised)
+        })
+        .map(|(_, bounds)| bounds)
+        .collect();
+
+    assert_eq!(boxes.len(), 1, "exactly one settings card per frame");
+    boxes[0]
+}
+
+/// The card's switches, top to bottom, by the round track they are painted on.
+fn settings_switch_boxes(scene: &Scene) -> Vec<RectF> {
+    let card = settings_card_box(scene);
+    let mut switches: Vec<RectF> = visible_rects(scene)
+        .filter(|(rect, _)| rect.corner_radius.get_top_left() == Radius::Percentage(50.))
+        .map(|(_, bounds)| bounds)
+        .filter(|bounds| card.contains_point(center(*bounds)) && (bounds.width() - 28.).abs() < 0.5)
+        .collect();
+    switches.sort_by(|left, right| left.min_y().total_cmp(&right.min_y()));
+    switches
+}
+
+/// The rail's page buttons, top to bottom.
+///
+/// Found by their rounded box *and* by being in the rail's column, because the
+/// page beside them rounds its one button by the same six pixels.
+fn settings_rail_boxes(scene: &Scene) -> Vec<RectF> {
+    let card = settings_card_box(scene);
+    let mut rows: Vec<RectF> = visible_rects(scene)
+        .filter(|(rect, _)| rect.corner_radius.get_top_left() == Radius::Pixels(6.))
+        .map(|(_, bounds)| bounds)
+        .filter(|bounds| {
+            card.contains_point(center(*bounds))
+                && center(*bounds).x() < card.min_x() + settings_page::RAIL_WIDTH
+        })
+        .collect();
+    rows.sort_by(|left, right| left.min_y().total_cmp(&right.min_y()));
+    rows
+}
+
+/// The one button on the page, by its outline.
+///
+/// `None` while the button is drawn in its disabled state, which is exactly
+/// what "there is nothing to reset" looks like: the outline is what goes.
+fn settings_button_box(scene: &Scene) -> Option<RectF> {
+    let card = settings_card_box(scene);
+    visible_rects(scene)
+        // By the border's *colour*: a disabled button keeps its stroke and
+        // paints it in nothing at all, which is the whole of how the reset
+        // control says there is nothing to reset.
+        .filter(|(rect, _)| {
+            rect.corner_radius.get_top_left() == Radius::Pixels(6.)
+                && rect.border.color == Fill::Solid(THEME.border)
+        })
+        .map(|(_, bounds)| bounds)
+        .find(|bounds| {
+            card.contains_point(center(*bounds))
+                && center(*bounds).x() > card.min_x() + settings_page::RAIL_WIDTH
+        })
+}
+
+#[test]
+fn the_settings_page_opens_on_the_platform_chord_and_escape_closes_it() {
+    let mut harness = Harness::panel(1);
+    assert!(!harness.is_settings_page_open());
+
+    // Escape with the page down is left for whatever wants it next.
+    assert_eq!(None, harness.action_for("escape", Modifiers::default()));
+
+    assert!(harness.press_key(",", platform_chord()));
+    assert!(harness.is_settings_page_open());
+
+    assert!(harness.press_key("escape", Modifiers::default()));
+    assert!(
+        !harness.is_settings_page_open(),
+        "escape did not take the page down"
+    );
+}
+
+#[test]
+fn opening_the_settings_page_takes_the_options_menu_down_with_it() {
+    // The page is modal, so a menu left open underneath would be visible,
+    // unclickable, and unable to receive the hover-out that closes it.
+    let mut harness = Harness::seeded();
+    harness.dispatch_option(OptionsAction::TogglePopup);
+    assert!(harness.is_menu_open());
+
+    harness.toggle_settings_page();
+    assert!(harness.is_settings_page_open());
+    assert!(
+        !harness.is_menu_open(),
+        "the menu survived the page opening"
+    );
+}
+
+#[test]
+fn the_rail_switches_pages_and_the_card_shows_the_one_it_names() {
+    let mut harness = Harness::seeded();
+    harness.toggle_settings_page();
+
+    let rail = settings_rail_boxes(&harness.frame());
+    assert_eq!(rail.len(), 4, "four pages in the rail");
+
+    // The third: Keys.
+    harness.click(center(rail[2]), MouseButton::Left);
+    let text = frame_text(&harness.frame());
+    assert!(
+        text.contains("Tabs and panes"),
+        "the Keys page did not come up: {text}"
+    );
+    assert!(
+        !text.contains("Tab placement"),
+        "the Appearance page is still on screen"
+    );
+}
+
+#[test]
+fn a_switch_on_the_page_writes_the_option_the_gear_menu_writes() {
+    let mut harness = Harness::seeded();
+    harness.toggle_settings_page();
+
+    // The page is taller than the card and the switches are at the bottom of
+    // it. Scrolling past the end lands on the last pixel of content, which is
+    // what makes this independent of how tall the page happens to be.
+    harness.scroll_settings_page(-100.);
+    let scene = harness.frame();
+
+    let switches = settings_switch_boxes(&scene);
+    assert_eq!(
+        switches.len(),
+        3,
+        "PR link, diff stats and the detail card, in that order"
+    );
+
+    assert!(harness.options().show_details_on_hover);
+    harness.click(center(switches[2]), MouseButton::Left);
+    assert!(
+        !harness.options().show_details_on_hover,
+        "the switch did not write the option"
+    );
+    assert!(
+        harness.is_settings_page_open(),
+        "a click on a control closed the page"
+    );
+}
+
+#[test]
+fn a_switch_the_density_has_made_inert_is_drawn_and_does_nothing() {
+    // Warp's third way with an irrelevant setting, and the one the page takes:
+    // the row stays, greyed, with no handler. The gear menu takes the other —
+    // it drops the two rows entirely — and both are right for their surface.
+    let mut harness = Harness::seeded();
+    assert_eq!(Density::Compact, harness.options().density);
+    harness.toggle_settings_page();
+    harness.scroll_settings_page(-100.);
+
+    let switches = settings_switch_boxes(&harness.frame());
+    let before = harness.options();
+    harness.click(center(switches[0]), MouseButton::Left);
+
+    assert_eq!(
+        before,
+        harness.options(),
+        "a compact row has no chips, so its chip switch must not be clickable"
+    );
+}
+
+#[test]
+fn the_reset_button_puts_every_tab_option_back_and_then_goes_quiet() {
+    let mut harness = Harness::seeded();
+    harness.dispatch_option(OptionsAction::SetPrimaryInfo(PrimaryInfo::Branch));
+    harness.dispatch_option(OptionsAction::ToggleShowDiffStats);
+    assert_ne!(TabOptions::default(), harness.options());
+
+    harness.toggle_settings_page();
+    harness.scroll_settings_page(-100.);
+
+    let button = settings_button_box(&harness.frame()).expect("the reset button should be drawn");
+    harness.click(center(button), MouseButton::Left);
+
+    assert_eq!(
+        TabOptions::default(),
+        harness.options(),
+        "reset left an option where it was"
+    );
+
+    // And now it is the page's modified indicator, saying that nothing has
+    // been changed: still drawn, still inert, and without its outline.
+    harness.scroll_settings_page(-100.);
+    assert!(
+        settings_button_box(&harness.frame()).is_none(),
+        "the reset button kept its outline with nothing left to reset"
+    );
+}
+
+#[test]
+fn turning_the_usage_chip_off_takes_the_pill_out_of_the_header_and_stops_the_poll() {
+    let mut harness = Harness::seeded();
+    assert!(harness.general().show_usage_chip);
+    assert!(
+        frame_text(&harness.frame()).contains("claude"),
+        "the chip should be in the header to start with"
+    );
+
+    harness.toggle_settings_page();
+    harness.dispatch_workspace_action(WorkspaceAction::Settings(SettingsAction::Select(
+        Section::Usage,
+    )));
+
+    let switches = settings_switch_boxes(&harness.frame());
+    assert_eq!(switches.len(), 1, "one switch on the usage page");
+    harness.click(center(switches[0]), MouseButton::Left);
+
+    assert!(!harness.general().show_usage_chip);
+    assert!(
+        !harness.usage_is_wanted(),
+        "a hidden chip must not go on polling"
+    );
+
+    harness.toggle_settings_page();
+    assert!(
+        !frame_text(&harness.frame()).contains("claude"),
+        "the chip is still in the header"
+    );
+}
+
+#[test]
+fn a_click_outside_the_card_closes_the_page_and_one_on_it_does_not() {
+    let mut harness = Harness::seeded();
+    harness.toggle_settings_page();
+
+    let card = settings_card_box(&harness.frame());
+    harness.click(center(card), MouseButton::Left);
+    assert!(
+        harness.is_settings_page_open(),
+        "a click on the card's own background closed it"
+    );
+
+    // The card is centred, so the window's top-left corner is outside it.
+    harness.click(vec2f(4., 4.), MouseButton::Left);
+    assert!(
+        !harness.is_settings_page_open(),
+        "a click outside the card left it up"
+    );
+}
+
+#[test]
+fn the_window_under_the_settings_page_is_frozen_while_it_is_up() {
+    let mut harness = Harness::new(3);
+    let scene = harness.frame();
+    let tabs = tab_boxes(&scene);
+    let first = harness.tab_ids()[0];
+    let active_before = harness.active_id();
+    assert_ne!(first, active_before, "the last tab starts active");
+
+    harness.toggle_settings_page();
+    harness.frame();
+    harness.click(center(tabs[0]), MouseButton::Left);
+
+    assert_eq!(
+        active_before,
+        harness.active_id(),
+        "a click that should have been swallowed by the modal selected a tab"
+    );
+    assert!(
+        !harness.is_settings_page_open(),
+        "the click outside the card should also have dismissed the page"
     );
 }

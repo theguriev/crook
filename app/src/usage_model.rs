@@ -86,10 +86,20 @@ pub struct UsageModel {
     snapshot: Option<ClaudeUsageSnapshot>,
     problem: Option<UsageProblem>,
 
-    /// The poller, while no cycle owns it. `Some` only before
-    /// [`Self::start`]; after that it lives inside the running cycle, which is
-    /// what makes a second chain unrepresentable.
+    /// The poller, while no cycle owns it. `Some` before the first
+    /// [`Self::set_wanted`] and again once a cycle has parked it; while a
+    /// chain is running it lives inside that cycle, which is what makes a
+    /// second chain unrepresentable.
     idle_poller: Option<UsagePoller>,
+
+    /// Whether anything on screen is showing the reading.
+    ///
+    /// The chip is the only thing that does, so this is the settings page's
+    /// "Show the usage chip" switch, one indirection away. It gates the chain
+    /// rather than merely the pixels: a hidden chip that went on polling would
+    /// keep talking to Anthropic's servers every minute on behalf of a person
+    /// who has just said they do not want to see the number.
+    wanted: bool,
 
     /// Cuts the sleeping cycle's wait short. Sending to a cycle that is
     /// already awake is harmless: `user_request` is what actually carries the
@@ -121,6 +131,7 @@ impl UsageModel {
             snapshot: None,
             problem: None,
             idle_poller: Some(UsagePoller::new()),
+            wanted: false,
             wake: None,
             user_request: Arc::new(AtomicBool::new(false)),
             busy_for_user: false,
@@ -146,12 +157,32 @@ impl UsageModel {
         self.busy_for_user
     }
 
-    /// Starts the poll chain. Does nothing on a second call.
-    pub fn start(&mut self, ctx: &mut ModelContext<Self>) {
-        let Some(poller) = self.idle_poller.take() else {
+    /// Says whether the reading is being shown, starting and stopping the
+    /// poll chain to match.
+    ///
+    /// Turning it on reads immediately rather than after a wait, so switching
+    /// the chip on fills it in on the click. Turning it off does not cancel
+    /// the request already in flight — there is no way to, and abandoning its
+    /// answer would only mean fetching it again — so the chain stops one cycle
+    /// later, in [`Self::finish`], which is where the poller comes back.
+    ///
+    /// Idempotent in both directions: calling it with the value it already has
+    /// cannot start a second chain, and neither can calling it twice while a
+    /// cycle owns the poller.
+    pub fn set_wanted(&mut self, wanted: bool, ctx: &mut ModelContext<Self>) {
+        if self.wanted == wanted {
             return;
-        };
-        self.spawn_cycle(poller, Duration::ZERO, ctx);
+        }
+        self.wanted = wanted;
+
+        if wanted && let Some(poller) = self.idle_poller.take() {
+            self.spawn_cycle(poller, Duration::ZERO, ctx);
+        }
+    }
+
+    /// Whether the poll chain is meant to be running.
+    pub fn is_wanted(&self) -> bool {
+        self.wanted
     }
 
     /// Asks for a reading now, on a person's behalf.
@@ -227,6 +258,15 @@ impl UsageModel {
         // least the chip has to stop saying it is working.
         if changed || outcome.user_initiated {
             ctx.notify();
+        }
+
+        // Nobody is looking at the number any more. The poller parks here
+        // rather than at the moment the switch was thrown, because that moment
+        // is in the middle of a blocking HTTP call this has no handle on.
+        if !self.wanted {
+            self.wake = None;
+            self.idle_poller = Some(poller);
+            return;
         }
 
         // A click that arrived while this cycle was already fetching could not
