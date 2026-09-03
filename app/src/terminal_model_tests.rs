@@ -184,6 +184,7 @@ fn session() -> Option<Arc<Shared>> {
     Some(Arc::new(Shared {
         terminal: Mutex::new(terminal),
         latest: Mutex::new(snapshot),
+        blocks: Mutex::new(Arc::default()),
         events: Mutex::new(Vec::new()),
         wake: Arc::new(Wake::default()),
         grid: AtomicU32::new(packed(INITIAL_GRID)),

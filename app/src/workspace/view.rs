@@ -17,13 +17,15 @@ use crate::editor::Selection;
 use crate::git::GitFacts;
 use crate::git_model::GitModel;
 use crate::input_keys::{self, Binding, Platform};
+use crate::pane_blocks::PaneBlocks;
 use crate::pane_input::{CARET_PHASE, PaneInput};
 use crate::pane_selection::PaneSelection;
+use crate::pane_surface;
 use crate::platform_insets::{LayoutInsets, TabsPlacement, layout_insets};
 use crate::settings::{Density, GeneralOptions, Granularity, Layout, Settings, TabOptions};
 use crate::tab::{AgentSession, Direction, PaneId, Tab, TabAction, TabEffect, TabId, TabStrip};
 use crate::terminal_font::CellFont;
-use crate::terminal_model::{TerminalHandle, TerminalModel, TerminalUpdate};
+use crate::terminal_model::{BlockHistory, TerminalHandle, TerminalModel, TerminalUpdate};
 use crate::theme::creator::Draft;
 use crate::theme::{Available, theme};
 use crate::usage_model::UsageModel;
@@ -73,6 +75,9 @@ pub(super) struct PaneInteraction {
     pub(super) body: MouseStateHandle,
     /// The selection gesture in the pane's output. See [`PaneSelection`].
     pub(super) selection: PaneSelection,
+    /// Where the pane's block list is scrolled to and what the pointer is
+    /// over. See [`PaneBlocks`].
+    pub(super) blocks: PaneBlocks,
 }
 
 /// What the mouse is doing to one tab's chrome in the panel.
@@ -876,6 +881,17 @@ impl Workspace {
             .update(ctx, |model, ctx| model.start(&panes, ctx));
     }
 
+    /// Says whether shells opened from now on report command boundaries.
+    ///
+    /// Call before [`Self::start_terminals`]. Off is not a broken state — it
+    /// is what a shell Crook has no integration for already does — and it is
+    /// what a test asks for when it wants the whole session in one open block
+    /// so that a drag across the output has something to select.
+    pub fn set_shell_marks(&self, enabled: bool, ctx: &mut ViewContext<Self>) {
+        self.terminals
+            .update(ctx, |model, _| model.set_shell_marks(enabled));
+    }
+
     /// Writes to a pane's shell directly, going round the input field.
     ///
     /// **Not the path a command takes.** A person's line is composed in the
@@ -929,13 +945,60 @@ impl Workspace {
         let Some(pane) = self.tabs.focused_pane_id() else {
             return false;
         };
-        self.terminal(pane, app)
-            .is_some_and(|(_, snapshot)| input_keys::shows_input(snapshot.alt_screen))
+        self.terminal(pane, app).is_some_and(|(_, snapshot)| {
+            pane_surface::of(&snapshot, std::time::Instant::now()).composer
+        })
     }
 
     /// The command line being composed in a pane.
     pub(super) fn input(&self, pane: PaneId) -> Option<&PaneInput> {
         self.inputs.get(&pane)
+    }
+
+    /// Where a pane's block list is scrolled to, and what the pointer is over.
+    pub(super) fn pane_blocks(&self, pane: PaneId) -> Option<&PaneBlocks> {
+        self.interactions.get(&pane).map(|state| &state.blocks)
+    }
+
+    /// Scrolls a pane's block list by `lines`, positive being further down,
+    /// and reports whether anything moved.
+    ///
+    /// For `--scroll-blocks`: a list scrolled off its own bottom is what draws
+    /// the rule above the composer, and no unattended run can turn a wheel.
+    pub fn scroll_blocks(&self, pane: PaneId, lines: f32, ctx: &mut ViewContext<Self>) -> bool {
+        let Some(view) = self.pane_blocks(pane) else {
+            return false;
+        };
+        let moved = view.apply(crate::pane_blocks::ScrollCause::Wheel(lines));
+        ctx.notify();
+        moved
+    }
+
+    /// Puts the pointer over one finished block, so that its copy control is
+    /// drawn, and reports whether there was a block at that index.
+    ///
+    /// For `--hover-block`, and for the same reason: a hover only exists while
+    /// somebody is holding a pointer still.
+    pub fn hover_block(&self, pane: PaneId, index: usize, ctx: &mut ViewContext<Self>) -> bool {
+        let (Some(view), Some(history)) = (self.pane_blocks(pane), self.terminal_blocks(pane, ctx))
+        else {
+            return false;
+        };
+        let Some(block) = history.get(index) else {
+            return false;
+        };
+        view.hover(Some(block.id), false);
+        ctx.notify();
+        true
+    }
+
+    /// The commands that have finished in a pane, oldest first.
+    pub(super) fn terminal_blocks(
+        &self,
+        pane: PaneId,
+        app: &AppContext,
+    ) -> Option<Arc<BlockHistory>> {
+        self.terminals.as_ref(app).blocks(pane)
     }
 
     /// The system clipboard every field copies to and pastes from.
@@ -1329,6 +1392,7 @@ impl Workspace {
                     close: MouseStateHandle::default(),
                     body: MouseStateHandle::default(),
                     selection: PaneSelection::new(),
+                    blocks: PaneBlocks::new(),
                 });
             self.inputs.entry(*id).or_default();
         }

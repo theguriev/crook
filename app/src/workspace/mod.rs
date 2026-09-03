@@ -26,10 +26,12 @@
 //! lets the tab model stay a thing that can be tested with no window.
 
 mod action;
+mod block_list;
 mod body;
 mod controls;
 mod header_toolbar;
 mod input_element;
+mod pane_output;
 mod row_content;
 mod settings_page;
 mod tab_bar;
@@ -47,7 +49,9 @@ mod tests;
 use crate::theme::theme;
 
 pub use action::{OptionsAction, SettingsAction, ThemeAction, WorkspaceAction};
+pub use block_list::BlockList;
 pub use input_element::CommandInput;
+pub use pane_output::{Keys, Output};
 pub use settings_page::Section;
 pub use terminal_element::TerminalElement;
 pub use usage_chip::{UsageChip, UsageChipAction};

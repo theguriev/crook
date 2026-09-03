@@ -47,11 +47,14 @@ pub mod editor;
 pub mod git;
 pub mod git_model;
 pub mod input_keys;
+pub mod pane_blocks;
 pub mod pane_input;
 pub mod pane_selection;
+pub mod pane_surface;
 pub mod platform_insets;
 pub mod process;
 pub mod settings;
+pub mod shell_integration;
 pub mod tab;
 pub mod terminal_font;
 pub mod terminal_keys;
@@ -211,9 +214,23 @@ struct Overrides {
     granularity: Option<Granularity>,
     /// Start in this density rather than the saved one.
     density: Option<Density>,
-    /// Type this into the first pane's shell at startup, and wait for what it
-    /// prints. See the module docs for why a frame budget alone is not enough.
-    run: Option<String>,
+    /// Type these into the first pane's shell at startup, in order, waiting
+    /// for what each one prints. See the module docs for why a frame budget
+    /// alone is not enough.
+    ///
+    /// Repeatable, because one command is one block and a picture of a *list*
+    /// of blocks needs several.
+    run: Vec<String>,
+    /// Hover the finished block at this index, so its copy control is drawn.
+    ///
+    /// A hover is a state that only exists while a pointer is over something,
+    /// which is the other thing no unattended run can hold still.
+    hover_block: Option<usize>,
+    /// Scroll the first pane's block list up by this many lines.
+    ///
+    /// What puts output under the composer, which is the only thing that draws
+    /// the rule above it.
+    scroll_blocks: Option<i32>,
     /// Put this in the first pane's input field, and leave it there unsent.
     ///
     /// `--run`'s companion: that one shows what a shell printed, and this one
@@ -240,7 +257,11 @@ impl Overrides {
     /// Neither the field nor the grid is worth a picture without one: a pane
     /// with no shell draws a notice instead of both.
     fn wants_shells(&self) -> bool {
-        self.run.is_some() || self.type_text.is_some() || self.select_output.is_some()
+        !self.run.is_empty()
+            || self.type_text.is_some()
+            || self.select_output.is_some()
+            || self.hover_block.is_some()
+            || self.scroll_blocks.is_some()
     }
 }
 
@@ -347,7 +368,17 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
             "--hover" => overrides.hover = true,
             "--run" => {
                 let command = args.next().context("`--run` needs a command")?;
-                overrides.run = Some(command);
+                overrides.run.push(command);
+            }
+            "--hover-block" => {
+                let index = args.next().context("`--hover-block` needs an index")?;
+                overrides.hover_block =
+                    Some(index.parse().context("`--hover-block` takes a number")?);
+            }
+            "--scroll-blocks" => {
+                let lines = args.next().context("`--scroll-blocks` needs a count")?;
+                overrides.scroll_blocks =
+                    Some(lines.parse().context("`--scroll-blocks` takes a number")?);
             }
             "--type" => {
                 let text = args.next().context("`--type` needs some text")?;
@@ -406,7 +437,11 @@ OPTIONS:
     --snapshot <PATH>  Render one frame of the real view tree to a PNG and exit
     --frames <N>       Draw N frames, then exit; for running unattended
     --run <COMMAND>    Type COMMAND into the first pane's input field at startup,
-                       send it, and report what the shell printed
+                       send it, and report what the shell printed. Repeatable:
+                       one command is one block
+    --hover-block <N>  Hover the Nth finished block, so its copy control is drawn
+    --scroll-blocks <N>
+                       Scroll the first pane's block list up by N lines
     --type <TEXT>      Leave TEXT in the first pane's input field, unsent
     --select <TEXT>    Select the first occurrence of TEXT in that field
     --select-output <TEXT>
@@ -448,25 +483,58 @@ KEYS (Linux and Windows):
     chord is the one entry here that keeps a bare Control.
 
 THE OUTPUT:
-    Drag across a pane's output to select it: a double click takes a word, a
-    triple click a line, and alt-drag a column. The drag keeps going when the
-    pointer leaves the pane, a drag past the top or bottom edge scrolls the
-    screen under the pointer, and the selection stays on its own text while the
-    shell prints more underneath. cmd-c — ctrl-c or ctrl-shift-c off macOS —
-    copies it and lets it go, which is what keeps ctrl-c the interrupt it has
-    always been the moment there is nothing selected. The half-written command
-    line in the field below is left alone: a copy is not an interrupt. Typing,
-    or clicking anywhere else in the pane, lets the selection go too.
+    A pane's output is a list of commands. Each block holds its prompt, the
+    line that was run and everything it printed; a hairline separates one from
+    the next, a red wash marks one that failed, an accent stripe one that is
+    still running, and hovering any of them reveals a control that copies
+    exactly that command and its output — no neighbour's text and no trailing
+    blank rows.
+
+    Drag across the output to select it: a double click takes a word, a triple
+    click a line, and alt-drag a column. The drag keeps going when the pointer
+    leaves the pane, a drag past the top or bottom edge scrolls the screen
+    under the pointer, and the selection stays on its own text while the shell
+    prints more underneath. cmd-c — ctrl-c or ctrl-shift-c off macOS — copies
+    it and lets it go, which is what keeps ctrl-c the interrupt it has always
+    been the moment there is nothing selected. The half-written command line in
+    the field below is left alone: a copy is not an interrupt. Typing, or
+    clicking anywhere else in the pane, lets the selection go too.
+
+    A selection lives in the block that is still running, and nowhere else: a
+    finished command's rows have been copied out of the emulator, and a
+    selection has to live there to stay anchored to its text while output
+    arrives. Copying a finished block needs no selection — that is what its
+    hover control is for.
+
+SHELL INTEGRATION:
+    Blocks need the shell to say where a command starts and ends, and Crook
+    installs the four OSC 133 marks into zsh, bash and fish by itself. There is
+    nothing to install and nothing to configure: a scratch rc stub is written
+    before the shell starts, chains onto whatever hooks are already there, and
+    is removed when the pane closes; no dotfile is ever written to. Set
+    CROOK_NO_SHELL_INTEGRATION to anything but 0 to turn it off.
+
+    It reaches only shells Crook starts — not the far side of an ssh, not a
+    container, not pwsh, nu, ksh or tcsh. Without it a pane is a plain
+    terminal: one continuous stream drawn as a grid, scrolled through the
+    emulator's own scrollback, with every key going straight to the shell and
+    no field under it. Everything else, selection and copying included, is
+    unchanged.
 
 THE INPUT FIELD:
-    Each pane composes its next command in the field under its output. Enter
-    sends the line, shift-enter lengthens it, and the up and down arrows walk
-    that pane's history. Everything else is the text editing this platform
-    already does. ctrl-c interrupts the shell and throws the half-written line
-    away with it, ctrl-z suspends, ctrl-d ends the input when the field is
-    empty and deletes a character when it is not, and while a full-screen
-    program is running every key reaches it. The settings tab is the one pane
-    with no field: it has no shell, and every control on it is a click.",
+    Each pane composes its next command in the field under its output, at the
+    same column zero, in the terminal's own font and colours: no box, no
+    border, no focus ring. Enter sends the line, shift-enter lengthens it, and
+    the up and down arrows walk that pane's history. Everything else is the
+    text editing this platform already does. ctrl-c interrupts the shell and
+    throws the half-written line away with it, ctrl-z suspends, ctrl-d ends the
+    input when the field is empty and deletes a character when it is not.
+
+    The field goes away, and every key reaches the program instead, while a
+    full-screen program is running, once the shell reports a command that has
+    been running for longer than a blink, and whenever the output is drawn as a
+    plain grid. The settings tab is the one pane that never has one: it has no
+    shell, and every control on it is a click.",
         version = env!("CARGO_PKG_VERSION")
     )
 }
@@ -666,11 +734,13 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
         // window it is finally drawn in.
         frame(&mut app, &mut presenter);
 
-        if let Some(command) = overrides.run.as_deref() {
+        if !overrides.run.is_empty() {
             await_shell(&queue, &mut app, &workspace, pane);
-            type_run(&mut app, &mut presenter, window_id, command);
-            let printed = settle_run(&queue, &mut app, &workspace, pane);
-            println!("the shell printed:\n{}", printed.trim_end());
+            for command in &overrides.run {
+                type_run(&mut app, &mut presenter, window_id, command);
+                let printed = settle_run(&queue, &mut app, &workspace, pane);
+                println!("the shell printed:\n{}", printed.trim_end());
+            }
         }
 
         // Last, so that the line in the field is the one the picture was asked
@@ -682,6 +752,12 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
             pane,
             &Composed::from_overrides(&overrides),
         );
+
+        // A frame first, because both of these are answered against what the
+        // last layout measured: how far the list can scroll, and which blocks
+        // are on screen to be hovered.
+        frame(&mut app, &mut presenter);
+        aim_at_blocks(&mut app, &workspace, pane, &overrides);
     }
 
     let scene = frame(&mut app, &mut presenter);
@@ -800,6 +876,30 @@ fn compose_pane(app: &mut App, workspace: &ViewHandle<Workspace>, pane: PaneId, 
                 && !workspace.select_in_output(pane, selected, ctx)
             {
                 log::warn!("`--select-output` found no {selected:?} in the output to select");
+            }
+        });
+    });
+}
+
+/// Puts the pointer and the scroll position where `--hover-block` and
+/// `--scroll-blocks` asked for them.
+fn aim_at_blocks(
+    app: &mut App,
+    workspace: &ViewHandle<Workspace>,
+    pane: PaneId,
+    overrides: &Overrides,
+) {
+    app.update(|ctx| {
+        workspace.update(ctx, |workspace, ctx| {
+            if let Some(lines) = overrides.scroll_blocks
+                && !workspace.scroll_blocks(pane, -lines as f32, ctx)
+            {
+                log::warn!("`--scroll-blocks` found nothing to scroll");
+            }
+            if let Some(index) = overrides.hover_block
+                && !workspace.hover_block(pane, index, ctx)
+            {
+                log::warn!("`--hover-block` found no block {index} to hover");
             }
         });
     });
@@ -1010,11 +1110,11 @@ struct Shell {
 /// The state of a `--run` in a windowed session.
 struct Run {
     pane: PaneId,
-    /// The command, until the first frame has been drawn. It waits for that
-    /// frame because layout is what measures the pane and resizes the pty, and
-    /// a command typed before it would be wrapped at the eighty columns every
-    /// terminal starts at.
-    pending: Option<String>,
+    /// The commands still to be typed, in order. The first waits for the first
+    /// frame, because layout is what measures the pane and resizes the pty,
+    /// and a command typed before it would be wrapped at the eighty columns
+    /// every terminal starts at.
+    pending: std::collections::VecDeque<String>,
     /// When to give up waiting for output and start counting frames anyway, so
     /// a command that prints nothing still ends the run.
     deadline: Instant,
@@ -1080,15 +1180,18 @@ impl Shell {
         let redraw = proxy.clone();
         app.on_window_invalidated(window_id, move |_, _| redraw.request_redraw());
 
-        let run = launch.overrides.run.clone().and_then(|command| {
-            let pane = start_shells(&mut app, &workspace).ok()?;
-            Some(Run {
+        // The windowed run types the commands one after another, so they are
+        // queued rather than joined: two commands sent as one line would be
+        // one block.
+        let run = (!launch.overrides.run.is_empty())
+            .then(|| start_shells(&mut app, &workspace).ok())
+            .flatten()
+            .map(|pane| Run {
                 pane,
-                pending: Some(command),
+                pending: launch.overrides.run.clone().into(),
                 deadline: Instant::now() + RUN_TIMEOUT,
                 printed: false,
-            })
-        });
+            });
 
         Self {
             composed: Composed::from_overrides(&launch.overrides),
@@ -1109,7 +1212,7 @@ impl Shell {
         let Some(run) = self.run.as_mut() else {
             return;
         };
-        let Some(command) = run.pending.take() else {
+        let Some(command) = run.pending.pop_front() else {
             return;
         };
 
@@ -1507,8 +1610,9 @@ mod tests {
             }
         );
         // Any of them means a pane needs a shell, because a pane without one
-        // draws a notice rather than a field and has no output to select in.
-        assert!(Overrides::default().run.is_none());
+        // draws a notice rather than a composer and has no output to select
+        // in.
+        assert!(Overrides::default().run.is_empty());
         assert!(!Overrides::default().wants_shells());
         assert!(
             Overrides {

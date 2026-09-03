@@ -1,9 +1,12 @@
-//! What a field actually puts in the scene, and where a click in it lands.
+//! What the composer actually puts in the scene, and where a click in it
+//! lands.
 //!
 //! Painted against [`CellFont::headless`], where a character is its own glyph
 //! id and a cell is half the font size — so an assertion here is about the
-//! field rather than about which fonts the machine running it happens to have.
+//! composer rather than about which fonts the machine running it happens to
+//! have.
 
+use crook_terminal::{Emulator, Palette, TerminalSize};
 use crookui_core::scene::{ClipBounds, Fill, Glyph, Rect};
 
 use super::*;
@@ -21,14 +24,23 @@ fn holding(text: &str) -> PaneInput {
     input
 }
 
-/// How wide a field has to be to hold `columns` cells of text.
+/// How wide a composer has to be to hold `columns` cells of text.
+///
+/// Exactly the columns, because there is no prompt glyph taking any of them:
+/// column zero here is column zero in the output above.
 fn width_for(columns: usize) -> f32 {
-    (columns + PROMPT_COLUMNS) as f32 * font().metrics().width
+    columns as f32 * font().metrics().width
 }
 
 /// The rows a field `columns` cells wide draws `text` in.
 fn rows_of(text: &str, caret: usize, columns: usize) -> Rows {
     Rows::of(text, caret, width_for(columns), font().metrics(), MAX_ROWS)
+}
+
+/// How many rows a composer offered `available` pixels in a pane of
+/// `pane_rows` rows may draw.
+fn budget(available: f32, pane_rows: usize) -> usize {
+    row_budget(available, font().metrics(), pane_rows)
 }
 
 /// Every row of `text` in a field `columns` cells wide, drawn or not.
@@ -38,13 +50,26 @@ fn wrap(text: &str, columns: usize) -> Vec<Range<usize>> {
 
 /// Paints a field `columns` cells wide, tall enough for everything in it.
 fn painted(input: &PaneInput, columns: usize, focused: bool) -> Scene {
+    painted_in(input, columns, focused, Ink::default())
+}
+
+/// The same, in colours a shell resolved rather than the theme's.
+fn painted_in(input: &PaneInput, columns: usize, focused: bool, ink: Ink) -> Scene {
     let editor = input.editor();
     let rows = rows_of(editor.text(), editor.caret(), columns);
     drop(editor);
 
     let mut scene = Scene::new(1.);
     scene.start_layer(ClipBounds::None);
-    paint_input(input, &font(), Vector2F::zero(), &rows, focused, &mut scene);
+    paint_input(
+        input,
+        &font(),
+        Vector2F::zero(),
+        &rows,
+        focused,
+        ink,
+        &mut scene,
+    );
     scene.stop_layer();
     scene
 }
@@ -73,75 +98,81 @@ fn offset_at(input: &PaneInput, columns: usize, local: Vector2F) -> usize {
 }
 
 #[test]
-fn the_prompt_is_drawn_first_and_the_text_starts_after_it() {
-    // The affordance that makes the box read as a command line rather than as
-    // somewhere to write a paragraph.
+fn there_is_no_prompt_glyph_and_the_text_starts_at_column_zero() {
+    // The shell's own prompt is in the open block above. A second invented one
+    // under it is two prompts on screen, which is what makes the composer read
+    // as a widget rather than as the next line of the terminal.
     let metrics = font().metrics();
     let painted = glyphs(&painted(&holding("hi"), 20, true));
 
-    assert_eq!(painted[0].glyph_key.glyph_id, u32::from(PROMPT));
-    assert_eq!(painted[0].position, vec2f(0., metrics.baseline));
-    assert_eq!(painted[0].color, theme().accent);
-
-    assert_eq!(painted[1].glyph_key.glyph_id, u32::from('h'));
+    assert_eq!(painted.len(), 2, "two characters, and nothing invented");
+    assert_eq!(painted[0].glyph_key.glyph_id, u32::from('h'));
     assert_eq!(
-        painted[1].position,
-        vec2f(PROMPT_COLUMNS as f32 * metrics.width, metrics.baseline)
+        painted[0].position,
+        vec2f(0., metrics.baseline),
+        "column zero, which is the grid's column zero"
     );
-    assert_eq!(painted[2].glyph_key.glyph_id, u32::from('i'));
-    assert_eq!(
-        painted[2].position,
-        vec2f(
-            (PROMPT_COLUMNS + 1) as f32 * metrics.width,
-            metrics.baseline
-        )
-    );
+    assert_eq!(painted[0].color, theme().terminal.foreground);
+    assert_eq!(painted[1].position, vec2f(metrics.width, metrics.baseline));
 }
 
 #[test]
-fn an_unfocused_field_dims_its_prompt_and_draws_no_caret() {
-    // Two panes both drawing a caret would say nothing about which of them is
-    // going to receive what is typed.
-    let scene = painted(&holding("hi"), 20, false);
+fn the_caret_is_the_whole_of_the_focus_affordance() {
+    // No ring, no border, no tint, no change of ground: an unfocused composer
+    // and a focused one differ by exactly one rectangle.
+    let focused = painted(&holding("hi"), 20, true);
+    let unfocused = painted(&holding("hi"), 20, false);
 
-    assert_eq!(glyphs(&scene)[0].color, theme().text_muted);
+    assert_eq!(glyphs(&focused), glyphs(&unfocused), "the text is the text");
+    assert_eq!(rects(&focused).len(), 1, "the caret, and nothing else");
     assert!(
-        rects(&scene).is_empty(),
-        "an unfocused field paints no caret and no selection it is not making"
+        rects(&unfocused).is_empty(),
+        "an unfocused composer paints no caret and no box"
     );
 }
 
 #[test]
-fn the_caret_is_one_cell_at_the_column_it_is_on() {
+fn the_caret_is_a_bar_in_the_terminal_cursor_colour() {
+    // The colour the grid paints the shell's own cursor in. An accent caret is
+    // a form field's, and it would disagree with the block above it.
     let metrics = font().metrics();
     let input = holding("hi");
     let caret = rects(&painted(&input, 20, true))
         .pop()
-        .expect("a focused field draws a caret");
+        .expect("a focused composer draws a caret");
 
     assert_eq!(
-        caret.bounds.origin(),
-        vec2f((PROMPT_COLUMNS + 2) as f32 * metrics.width, 0.),
-        "the caret sits one cell past the last character, where the next one goes"
+        caret.bounds.origin().x(),
+        2. * metrics.width,
+        "one cell past the last character, where the next one goes"
     );
-    assert_eq!(caret.bounds.size(), vec2f(metrics.width, metrics.height));
-    assert_eq!(caret.background, Fill::Solid(theme().accent));
+    assert_eq!(
+        caret.bounds.width(),
+        CARET_WIDTH,
+        "a bar, not a filled cell"
+    );
+    assert!(
+        caret.bounds.height() < metrics.height,
+        "and shorter than the cell"
+    );
+    assert_eq!(caret.background, Fill::Solid(theme().terminal.cursor));
 }
 
 #[test]
-fn a_character_under_the_caret_is_drawn_in_the_ground_it_sits_on() {
-    // A filled caret is a rectangle, and rectangles paint under glyphs: a
-    // character left in its own colour would vanish into the fill.
+fn the_character_under_the_caret_keeps_its_own_colour() {
+    // A bar three pixels wide stands beside the character rather than over it,
+    // so there is nothing to invert — which is the other half of not using the
+    // grid's block cursor here.
     let input = holding("hi");
     input.edit(|editor| editor.set_caret(0));
 
     let painted = glyphs(&painted(&input, 20, true));
-    assert_eq!(
-        painted[1].color,
-        theme().ground,
-        "the character on the caret"
+    assert!(
+        painted
+            .iter()
+            .all(|glyph| glyph.color == theme().terminal.foreground),
+        "every character in its own ink"
     );
-    assert_eq!(painted[2].color, theme().text_primary, "and only that one");
 }
 
 #[test]
@@ -152,19 +183,13 @@ fn a_selection_is_one_rectangle_over_the_cells_it_covers() {
 
     let painted = rects(&painted(&input, 20, true));
     let selection = &painted[0];
-    assert_eq!(
-        selection.bounds.origin(),
-        vec2f((PROMPT_COLUMNS + 5) as f32 * metrics.width, 0.)
-    );
+    assert_eq!(selection.bounds.origin(), vec2f(5. * metrics.width, 0.));
     assert_eq!(
         selection.bounds.size(),
         vec2f(5. * metrics.width, metrics.height),
         "five cells, one quad"
     );
-    assert_eq!(
-        selection.background,
-        Fill::Solid(theme().accent.with_alpha(SELECTION_ALPHA))
-    );
+    assert_eq!(selection.background, Fill::Solid(theme().selection));
     assert!(
         painted.len() > 1,
         "the caret is still drawn, at the head of the selection"
@@ -257,7 +282,7 @@ fn a_double_width_character_takes_the_two_cells_the_grid_gives_it() {
 fn a_click_past_a_wide_character_lands_after_it() {
     let metrics = font().metrics();
     let input = holding("日x");
-    let left = PROMPT_COLUMNS as f32 * metrics.width;
+    let left = 0.;
 
     assert_eq!(
         offset_at(&input, 20, vec2f(left + metrics.width * 0.4, 1.)),
@@ -292,16 +317,22 @@ fn only_the_rows_that_are_drawn_are_ever_built() {
 }
 
 #[test]
-fn the_field_takes_at_most_half_a_short_pane() {
-    // The field grows downwards *into* the grid. In a pane four rows tall, a
-    // field that took its eight would leave the shell it is composing for
-    // nothing to be seen in — and, before the flex was taught to bound it,
-    // would paint the other four over the panel's border and the pane below.
+fn the_composer_takes_at_most_half_a_short_pane() {
+    // The composer grows downwards *into* the output. In a pane four rows
+    // tall, one that took its eight would leave the shell it is composing for
+    // nothing to be seen in — and would paint the other four over the pane
+    // below.
     let metrics = font().metrics();
-    assert_eq!(row_budget(f32::INFINITY, metrics), MAX_ROWS);
-    assert_eq!(row_budget(metrics.height * 40., metrics), MAX_ROWS);
-    assert_eq!(row_budget(metrics.height * 4., metrics), 2);
-    assert_eq!(row_budget(metrics.height * 0.5, metrics), 1);
+    assert_eq!(budget(metrics.height * 40., 0), MAX_ROWS);
+    assert_eq!(budget(metrics.height * 4., 0), 2);
+    assert_eq!(budget(metrics.height * 0.5, 0), 1);
+
+    // A flex measures a non-flexible child against an unbounded height, which
+    // is the parent asking how big it would like to be. Half of infinity is
+    // not an answer; half the pane is.
+    assert_eq!(budget(f32::INFINITY, 4), 2);
+    assert_eq!(budget(f32::INFINITY, 40), MAX_ROWS);
+    assert_eq!(budget(f32::INFINITY, 0), 1, "a pane with no rows yet");
 
     let text = "a\n".repeat(20);
     let rows = Rows::of(&text, text.len(), width_for(20), metrics, 2);
@@ -333,7 +364,7 @@ fn a_click_lands_on_the_boundary_nearest_where_it_was_aimed() {
     // halfway across a cell, not at its left edge.
     let metrics = font().metrics();
     let input = holding("abc");
-    let left = PROMPT_COLUMNS as f32 * metrics.width;
+    let left = 0.;
 
     assert_eq!(
         offset_at(&input, 20, vec2f(left + metrics.width * 0.49, 1.)),
@@ -398,8 +429,12 @@ fn a_field_narrower_than_its_own_prompt_still_holds_a_cell() {
     // no columns at all would divide by zero on the next wrap.
     let metrics = font().metrics();
     assert_eq!(columns_for(0., metrics), 1);
-    assert_eq!(columns_for(metrics.width * 2., metrics), 1);
-    assert_eq!(columns_for(metrics.width * 12., metrics), 10);
+    assert_eq!(columns_for(metrics.width * 1., metrics), 1);
+    assert_eq!(
+        columns_for(metrics.width * 12., metrics),
+        12,
+        "every column of the box, because no prompt glyph takes any of them"
+    );
 }
 
 #[test]
@@ -408,15 +443,42 @@ fn a_combining_mark_is_drawn_over_the_character_it_belongs_to() {
     // plus an accent that has no cell of its own.
     let painted = glyphs(&painted(&holding("e\u{301}!"), 20, true));
 
-    assert_eq!(painted[1].glyph_key.glyph_id, u32::from('e'));
-    assert_eq!(painted[2].glyph_key.glyph_id, u32::from('\u{301}'));
+    assert_eq!(painted[0].glyph_key.glyph_id, u32::from('e'));
+    assert_eq!(painted[1].glyph_key.glyph_id, u32::from('\u{301}'));
     assert_eq!(
-        painted[1].position, painted[2].position,
+        painted[0].position, painted[1].position,
         "a mark carries its own offset and shares the character's pen"
     );
     assert_eq!(
-        painted[3].position.x() - painted[1].position.x(),
+        painted[2].position.x() - painted[0].position.x(),
         font().metrics().width,
         "and the cluster took one cell, not two"
+    );
+}
+
+#[test]
+fn the_composer_is_drawn_in_the_terminal_s_own_colours() {
+    // A shell that changed its foreground or its cursor colour at runtime —
+    // OSC 10 and OSC 12, which is what every light-or-dark theme script sends
+    // — takes the pane's ground and every block on it with it. A field left
+    // behind in the theme's own grey is then the one thing on the pane that
+    // did not follow, and it is the thing being typed into.
+    let mut emulator = Emulator::new(TerminalSize::new(20, 3), 10, Palette::default());
+    emulator.advance(b"\x1b]10;#102030\x07\x1b]12;#405060\x07x");
+    let ink = Ink::of(&emulator.snapshot());
+
+    assert_eq!(ink.text, Color::rgb(0x10, 0x20, 0x30));
+    assert_eq!(ink.caret, Color::rgb(0x40, 0x50, 0x60));
+    assert_ne!(ink.text, theme().terminal.foreground, "the shell moved it");
+
+    let scene = painted_in(&holding("hi"), 20, true, ink);
+    assert!(
+        glyphs(&scene).iter().all(|glyph| glyph.color == ink.text),
+        "the line being typed is not in the colour the output above it is in"
+    );
+    assert_eq!(
+        rects(&scene).pop().map(|caret| caret.background),
+        Some(Fill::Solid(ink.caret)),
+        "and the caret is not the one the grid draws the shell's cursor in"
     );
 }

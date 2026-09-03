@@ -3,9 +3,9 @@
 //! [`Emulator`] wraps `alacritty_terminal`'s `Term`, which owns the grid, the
 //! scrollback, the cursor, the alternate screen and the mode flags. This module
 //! supplies the three things `Term` does not: the event listener it reports
-//! through, an OSC 7 reader for the working directory (which no layer below
-//! this one interprets), and the translation of both into a [`Snapshot`] and a
-//! queue of [`TerminalEvent`]s.
+//! through, a reader for the OSC sequences `vte` throws away — OSC 7 for the
+//! working directory and OSC 133 for command boundaries — and the translation
+//! of both into a [`Snapshot`] and a queue of [`TerminalEvent`]s.
 //!
 //! It owns no pty and no thread, so it is the whole emulator under test: feed
 //! it bytes with [`Emulator::advance`] and read [`Emulator::snapshot`]. The pty
@@ -38,7 +38,9 @@ use alacritty_terminal::vte::ansi::Processor;
 use alacritty_terminal::vte::{Parser, Perform};
 use parking_lot::Mutex;
 
+use crate::blocks::{Block, BlockId, BlockTracker, IgnoreReason, LiveBlock};
 use crate::input::InputModes;
+use crate::marks::ShellMark;
 use crate::pty::ChildExit;
 use crate::selection::{CellSide, GridPoint, SelectionKind, SelectionSpan, ViewportPoint};
 use crate::snapshot::{self, Palette, Snapshot, TerminalSize};
@@ -88,29 +90,49 @@ impl EventListener for EventProxy {
     }
 }
 
-/// Watches the byte stream for OSC 7, the working-directory report.
+/// Watches the byte stream for the OSC sequences the emulator itself drops.
 ///
-/// `vte` parses OSC 7 into params and then drops it, because alacritty resolves
-/// the child's directory from its process id instead — a route that needs
-/// per-platform process introspection this crate deliberately does not have. So
-/// the bytes get a second pass through `vte`'s own parser with a `Perform` that
-/// implements nothing but `osc_dispatch`. That costs one extra walk of the
+/// `vte` parses OSC 7 and OSC 133 into params and then discards both: OSC 7
+/// because alacritty resolves the child's directory from its process id
+/// instead — a route that needs per-platform process introspection this crate
+/// deliberately does not have — and OSC 133 because `vte::ansi::Handler` has no
+/// hook for it at all, so no amount of implementing that trait can see one.
+///
+/// So the bytes get a second pass through `vte`'s own parser with a `Perform`
+/// that implements nothing but `osc_dispatch`. That costs one extra walk of the
 /// stream, which is a table-driven byte loop that does nothing at all outside
 /// an escape sequence, and it buys a correct OSC parser instead of a hand-
 /// rolled scanner that has to get chunk boundaries right.
+///
+/// The two are not read the same way. A working directory is position-
+/// independent — it means the same thing wherever in the chunk it appeared — so
+/// it is simply collected. A command boundary means *the cursor is here, now*,
+/// so [`Self::terminated`] stops the watcher on one and [`Emulator::advance`]
+/// feeds the real parser only up to that point before reading the cursor.
 #[derive(Default)]
-struct WorkingDirectoryWatcher {
-    reported: Option<PathBuf>,
+struct OscWatcher {
+    working_directory: Option<PathBuf>,
+    mark: Option<ShellMark>,
 }
 
-impl Perform for WorkingDirectoryWatcher {
+impl Perform for OscWatcher {
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
-        if params.len() < 2 || params[0] != b"7" {
-            return;
+        match params.first() {
+            Some(&b"7") if params.len() >= 2 => {
+                if let Some(path) = parse_working_directory(params[1]) {
+                    self.working_directory = Some(path);
+                }
+            }
+            Some(&b"133") => self.mark = ShellMark::parse(params),
+            _ => {}
         }
-        if let Some(path) = parse_working_directory(params[1]) {
-            self.reported = Some(path);
-        }
+    }
+
+    /// Stops the parser on a captured mark, and only on a mark: an OSC 133 in
+    /// a dialect this does not read leaves it running, so a stream full of them
+    /// costs nothing.
+    fn terminated(&self) -> bool {
+        self.mark.is_some()
     }
 }
 
@@ -175,8 +197,9 @@ fn percent_decode(value: &str) -> Option<String> {
 pub struct Emulator {
     term: Term<EventProxy>,
     parser: Processor,
-    working_directory_parser: Parser,
-    working_directory_watcher: WorkingDirectoryWatcher,
+    osc_parser: Parser,
+    osc_watcher: OscWatcher,
+    blocks: BlockTracker,
     proxy: EventProxy,
     palette: Palette,
     size: TerminalSize,
@@ -216,12 +239,15 @@ impl Emulator {
         // This crate tracks that itself, and its first snapshot is revision 0.
         term.reset_damage();
 
-        let snapshot = Arc::new(snapshot::build(&term, &palette, 0, None));
+        let blocks = BlockTracker::new();
+        let live = blocks.live(&term);
+        let snapshot = Arc::new(snapshot::build(&term, &palette, 0, None, live));
         Self {
             term,
             parser: Processor::new(),
-            working_directory_parser: Parser::new(),
-            working_directory_watcher: WorkingDirectoryWatcher::default(),
+            osc_parser: Parser::new(),
+            osc_watcher: OscWatcher::default(),
+            blocks,
             proxy,
             palette,
             size,
@@ -236,16 +262,101 @@ impl Emulator {
     }
 
     /// Feeds output from the child process into the grid.
+    ///
+    /// The stream is fed in pieces rather than in one call, and the pieces are
+    /// cut by the OSC 133 marks in it: the watcher runs first and stops on a
+    /// mark, the grid is advanced only as far as the watcher got, and the mark
+    /// is then applied while the cursor still stands where the shell left it.
+    /// Feeding the whole chunk first and looking for marks afterwards — which
+    /// is all OSC 7 needs — would put every boundary wherever the end of the
+    /// chunk happened to land, and a mark split across two calls to this method
+    /// would land nowhere at all. `vte` keeps the state that spans the split, so
+    /// a mark arriving one byte at a time works exactly as one arriving whole.
+    ///
+    /// The one case this cannot place exactly is a mark inside a synchronized
+    /// update: `vte` buffers those bytes and applies them when the update
+    /// closes, so the cursor read here is the one from before it opened. A
+    /// program that brackets its whole frame that way and emits OSC 133 inside
+    /// it is anchoring against a screen that has not been drawn yet — and a
+    /// program drawing frames is on the alternate screen, where marks are
+    /// ignored outright.
     pub fn advance(&mut self, bytes: &[u8]) {
         self.expire_sync();
         if bytes.is_empty() {
             return;
         }
-        self.parser.advance(&mut self.term, bytes);
-        self.working_directory_parser
-            .advance(&mut self.working_directory_watcher, bytes);
+
+        let mut rest = bytes;
+        while !rest.is_empty() {
+            let consumed = self
+                .osc_parser
+                .advance_until_terminated(&mut self.osc_watcher, rest);
+            let (piece, remaining) = rest.split_at(consumed);
+            self.parser.advance(&mut self.term, piece);
+            if let Some(mark) = self.osc_watcher.mark.take() {
+                self.blocks.mark(
+                    mark,
+                    &mut self.term,
+                    &self.palette,
+                    self.working_directory.as_deref(),
+                );
+            }
+            rest = remaining;
+        }
         self.dirty = true;
         self.drain();
+    }
+
+    /// Records that a command line has been handed to the shell, which is the
+    /// one block boundary that needs no cooperation from it.
+    ///
+    /// The application knows what it wrote and when, so a block opened this way
+    /// carries the command text exactly, where a shell-integrated one carries
+    /// whatever was echoed on screen. Call it just before writing the line.
+    pub fn command_submitted(&mut self, command: &str) {
+        self.blocks.submitted(
+            command,
+            &mut self.term,
+            &self.palette,
+            self.working_directory.as_deref(),
+        );
+        self.dirty = true;
+    }
+
+    /// The finished blocks, oldest first.
+    pub fn blocks(&self) -> &[Block] {
+        self.blocks.finished()
+    }
+
+    /// One finished block by id, or `None` once it has been evicted.
+    pub fn block(&self, id: BlockId) -> Option<&Block> {
+        self.blocks
+            .finished()
+            .binary_search_by_key(&id, |block| block.id)
+            .ok()
+            .map(|at| &self.blocks.finished()[at])
+    }
+
+    /// How many blocks have been dropped off the front of the list to keep a
+    /// stream of forged marks from growing it without bound.
+    pub fn blocks_evicted(&self) -> usize {
+        self.blocks.evicted()
+    }
+
+    /// The block everything arriving now belongs to. Also on every
+    /// [`Snapshot`].
+    pub fn live_block(&self) -> LiveBlock {
+        self.blocks.live(&self.term)
+    }
+
+    /// Why the last mark that changed nothing changed nothing, or `None` when
+    /// the last one was acted on.
+    ///
+    /// Marks are ignored constantly and on purpose — a prompt framework redraws
+    /// its prompt several times per keystroke — so this is how "why is there no
+    /// block here" gets an answer instead of a shrug.
+    pub fn last_ignored_mark(&self) -> Option<IgnoreReason> {
+        self.blocks.last_ignored()
     }
 
     /// The visible grid.
@@ -272,7 +383,14 @@ impl Emulator {
             self.selection_dirty = false;
 
             let revision = self.snapshot.revision + 1;
-            let built = snapshot::build(&self.term, &self.palette, revision, self.title.as_deref());
+            let live = self.blocks.live(&self.term);
+            let built = snapshot::build(
+                &self.term,
+                &self.palette,
+                revision,
+                self.title.as_deref(),
+                live,
+            );
             if !built.same_content(&self.snapshot) {
                 self.snapshot = Arc::new(built);
             }
@@ -304,12 +422,22 @@ impl Emulator {
     /// This does not tell the child process anything; only the pty can do that.
     /// [`crate::Terminal::resize`] does both.
     pub fn resize(&mut self, size: TerminalSize) {
-        let geometry_changed = size.columns != self.size.columns || size.rows != self.size.rows;
+        let columns_changed = size.columns != self.size.columns;
+        let geometry_changed = columns_changed || size.rows != self.size.rows;
         self.size = size;
         if !geometry_changed {
             return;
         }
         self.term.resize(size);
+        // A column change reflows the scrollback, which moves every line the
+        // open block is anchored against; a row change does not, and the
+        // anchor's own arithmetic already covers the lines a taller screen
+        // pulls back out of the history. Afterwards, because the open block's
+        // first row is then re-found on the reflowed grid rather than guessed
+        // at.
+        if columns_changed {
+            self.blocks.reflowed(&self.term);
+        }
         self.dirty = true;
         self.drain();
     }
@@ -434,10 +562,20 @@ impl Emulator {
         std::mem::take(&mut self.replies)
     }
 
-    /// Queues an event for the application, used by [`crate::Terminal`] to
-    /// report things the escape stream cannot, such as the child exiting.
-    pub(crate) fn push_event(&mut self, event: TerminalEvent) {
-        self.events.push(event);
+    /// Records that the child process has finished: queues the event, and
+    /// closes the open block, which nothing in the escape stream will.
+    ///
+    /// Terminating is absorbing. A shell that has exited never comes back, and
+    /// anything still printing on the pty afterwards is a child that outlived
+    /// it, so no later mark reopens the session.
+    pub(crate) fn child_exited(&mut self, exit: ChildExit) {
+        self.events.push(TerminalEvent::ChildExited(exit));
+        self.blocks.exited(
+            &mut self.term,
+            &self.palette,
+            self.working_directory.as_deref(),
+        );
+        self.dirty = true;
     }
 
     /// Which encoding the child currently expects for cursor and keypad keys.
@@ -502,6 +640,7 @@ impl Emulator {
 
     /// Translates everything `Term` reported during the last operation.
     fn drain(&mut self) {
+        let mut exited = None;
         for event in self.proxy.take() {
             match event {
                 Event::Title(title) => self.set_title(Some(title)),
@@ -510,7 +649,7 @@ impl Emulator {
                 Event::Exit => self.events.push(TerminalEvent::Exit),
                 Event::ChildExit(status) => {
                     let exit = ChildExit::from_code(status.code().unwrap_or(1) as u32);
-                    self.events.push(TerminalEvent::ChildExited(exit));
+                    exited = Some(exit);
                 }
                 Event::ClipboardStore(_, text) => {
                     self.events.push(TerminalEvent::ClipboardStore(text));
@@ -540,11 +679,17 @@ impl Emulator {
             }
         }
 
-        if let Some(directory) = self.working_directory_watcher.reported.take()
+        if let Some(directory) = self.osc_watcher.working_directory.take()
             && self.working_directory.as_deref() != Some(directory.as_path())
         {
             self.working_directory = Some(directory.clone());
             self.events.push(TerminalEvent::WorkingDirectory(directory));
+        }
+
+        // Last, because it closes the open block: a working directory reported
+        // on the way out belongs to the block that is still open.
+        if let Some(exit) = exited {
+            self.child_exited(exit);
         }
     }
 

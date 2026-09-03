@@ -394,6 +394,34 @@ fn keys(workspace: &Workspace) -> Box<dyn Element> {
             ui,
         ),
         widgets::category(
+            "Command blocks",
+            false,
+            vec![
+                binding(
+                    "Copy a whole command and its output",
+                    "hover it, then click".to_owned(),
+                ),
+                binding("Move through the commands", "wheel".to_owned()),
+                widgets::note(
+                    "A pane's output is a list of commands, and that needs the shell to say \
+                     where each one starts and ends. Crook installs the marks that do it into \
+                     zsh, bash and fish by itself, without writing to any dotfile — there is \
+                     nothing to set up here. It cannot reach a shell it did not start, so on \
+                     the far side of an ssh, in a container, or under a shell it has no \
+                     snippet for, a pane is a plain terminal instead: one continuous stream, \
+                     no blocks, and no field — every key goes straight to the shell.",
+                    ui,
+                ),
+                widgets::note(
+                    "There is no keyboard binding here yet. Selecting a block, walking between \
+                     them and jumping to the bottom are all still to come; what a block can be \
+                     asked for today is its own text, exactly, with one click.",
+                    ui,
+                ),
+            ],
+            ui,
+        ),
+        widgets::category(
             "Selecting the output",
             false,
             vec![
@@ -422,6 +450,16 @@ fn keys(workspace: &Workspace) -> Box<dyn Element> {
                      is reading what is already on screen.",
                     ui,
                 ),
+                widgets::note(
+                    "A selection lives in the command that is still running, and nowhere else. \
+                     A finished command's rows have been copied out of the terminal — which is \
+                     what makes them survive a clear, a resize and the scrollback filling up — \
+                     and a selection has to stay in the terminal to stay anchored to its own \
+                     text while output arrives. A press on a finished command lets go of \
+                     whatever was selected rather than starting a new selection; its copy \
+                     control takes the whole of it.",
+                    ui,
+                ),
             ],
             ui,
         ),
@@ -436,8 +474,14 @@ fn keys(workspace: &Workspace) -> Box<dyn Element> {
                     "Everything else in the field is the text editing this platform already \
                      does. ctrl-c interrupts the shell and throws the half-written line away \
                      with it, ctrl-z suspends, and ctrl-d ends the input when the field is empty \
-                     and deletes a character when it is not. A full-screen program — vim, `top` \
-                     — takes every key back and the field goes away while it runs.",
+                     and deletes a character when it is not.",
+                    ui,
+                ),
+                widgets::note(
+                    "The field goes away, and every key reaches the program instead, in three \
+                     cases: a full-screen program — vim, `top` — is up, the shell has reported \
+                     a command running for longer than a blink, or the output is being drawn as \
+                     a plain terminal because the shell reports no command boundaries at all.",
                     ui,
                 ),
             ],

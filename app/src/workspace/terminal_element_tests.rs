@@ -4,7 +4,7 @@
 //! id and a cell is half the font size — so an assertion here is about the grid
 //! rather than about which fonts the machine running it happens to have.
 
-use crook_terminal::{CellCombining, GridPoint, SelectionSpan};
+use crook_terminal::{CellCombining, GridPoint, LiveBlock, SelectionSpan};
 use crookui_core::scene::{ClipBounds, Fill, Glyph, Rect};
 
 use super::*;
@@ -48,6 +48,7 @@ fn snapshot(lines: &[&str], columns: usize) -> Snapshot {
         display_offset: 0,
         history_len: 0,
         alt_screen: false,
+        live_block: LiveBlock::default(),
         title: None,
         selection: None,
     }

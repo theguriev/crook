@@ -41,6 +41,7 @@ use alacritty_terminal::vte::ansi::{
     Color, CursorShape as VteCursorShape, NamedColor, Rgb as VteRgb,
 };
 
+use crate::blocks::LiveBlock;
 use crate::selection::{GridPoint, SelectionSpan, ViewportPoint};
 
 /// How much of a colour survives the dim attribute.
@@ -481,6 +482,17 @@ pub struct Snapshot {
     /// Whether the alternate screen is active. Full-screen programs run here,
     /// and there is no scrollback while it is.
     pub alt_screen: bool,
+    /// The block the rows arriving now belong to, and which rows of this
+    /// viewport are its own.
+    ///
+    /// There is always one, because output has to belong somewhere: a session
+    /// whose shell reports no boundaries at all keeps a single open block in
+    /// [`BlockState::Unknown`](crate::BlockState) that holds everything. The
+    /// blocks *before* it are not here — they are owned rows rather than a
+    /// picture of the viewport, and they change only when one closes, so they
+    /// live on [`crate::Terminal::blocks`] where nothing copies them per
+    /// frame.
+    pub live_block: LiveBlock,
     /// The title the child process last asked for, if any.
     pub title: Option<String>,
     /// What the pointer has selected, in grid coordinates, or `None` when
@@ -602,6 +614,7 @@ impl Snapshot {
             && self.display_offset == other.display_offset
             && self.history_len == other.history_len
             && self.alt_screen == other.alt_screen
+            && self.live_block == other.live_block
             && self.title == other.title
             && self.selection == other.selection
             && self.cells == other.cells
@@ -678,7 +691,7 @@ impl Snapshot {
 
 /// Turns one grid cell into a drawable one, applying every attribute that only
 /// changes which colours are used.
-fn convert(cell: &Cell, palette: &Palette, overrides: &Colors) -> SnapshotCell {
+pub(crate) fn convert(cell: &Cell, palette: &Palette, overrides: &Colors) -> SnapshotCell {
     let mut foreground = if cell.flags.contains(Flags::DIM) {
         palette.resolve_dim(cell.fg, overrides)
     } else {
@@ -801,6 +814,7 @@ pub(crate) fn build<T>(
     palette: &Palette,
     revision: u64,
     title: Option<&str>,
+    live_block: LiveBlock,
 ) -> Snapshot {
     let grid = term.grid();
     let overrides = term.colors();
@@ -841,6 +855,7 @@ pub(crate) fn build<T>(
         display_offset,
         history_len: grid.history_size(),
         alt_screen: term.mode().contains(TermMode::ALT_SCREEN),
+        live_block,
         title: title.map(str::to_owned),
         selection: selection_of(term),
     }

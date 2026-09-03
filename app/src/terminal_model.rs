@@ -81,12 +81,14 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crook_terminal::{
-    CellSide, Key, Modifiers, Palette, Rgb, SelectionKind, Snapshot, Terminal, TerminalEvent,
-    TerminalOptions, TerminalSize, ViewportPoint,
+    Block, CellSide, Key, Modifiers, Palette, Rgb, SelectionKind, Snapshot, Terminal,
+    TerminalEvent, TerminalOptions, TerminalSize, ViewportPoint,
 };
 use crookui_core::geometry::Color;
 use crookui_core::prelude::*;
 
+use crate::pane_surface;
+use crate::shell_integration;
 use crate::tab::PaneId;
 use crate::theme::theme;
 
@@ -141,6 +143,54 @@ pub enum TerminalUpdate {
     Closed(PaneId),
 }
 
+/// The finished blocks of one pane, as the surface holds them.
+///
+/// One [`Arc`] per block rather than one per list, because the list is
+/// append-only: a batch that closes one command clones a pointer per block
+/// that was already there and copies the rows of exactly the new one. The
+/// whole structure is behind another `Arc`, so a frame takes the history for
+/// the cost of a pointer.
+///
+/// Kept here rather than read off the emulator every frame for the reason the
+/// snapshot is: the terminal's lock belongs to whichever thread is parsing,
+/// and painting must never queue behind a shell mid-burst.
+#[derive(Debug, Default)]
+pub struct BlockHistory {
+    /// Oldest first.
+    blocks: Vec<Arc<Block>>,
+    /// How many blocks have been dropped off the front since the session
+    /// started. A list caching geometry per index compares this against what
+    /// it saw last to learn that the front moved rather than the back grew.
+    evicted: usize,
+}
+
+impl BlockHistory {
+    /// The blocks, oldest first.
+    pub fn iter(&self) -> impl ExactSizeIterator<Item = &Arc<Block>> {
+        self.blocks.iter()
+    }
+
+    /// One block by its position in the list, oldest first.
+    pub fn get(&self, index: usize) -> Option<&Arc<Block>> {
+        self.blocks.get(index)
+    }
+
+    /// How many blocks are held.
+    pub fn len(&self) -> usize {
+        self.blocks.len()
+    }
+
+    /// Whether no command has finished yet.
+    pub fn is_empty(&self) -> bool {
+        self.blocks.is_empty()
+    }
+
+    /// How many blocks have been dropped off the front.
+    pub fn evicted(&self) -> usize {
+        self.evicted
+    }
+}
+
 /// The terminals behind the open panes.
 pub struct TerminalModel {
     sessions: HashMap<PaneId, Session>,
@@ -160,6 +210,16 @@ pub struct TerminalModel {
     /// The colours every terminal resolves its cells against.
     palette: Palette,
 
+    /// Whether a pane installs command marks into the shell it opens.
+    ///
+    /// On, and the seam a setting hangs on when there is one. Off is not a
+    /// broken state: it is exactly what a person gets on a shell Crook has no
+    /// integration for, on a machine whose temporary directory cannot be
+    /// written, or with [`shell_integration::OPT_OUT_VARIABLE`] set — one open
+    /// block holding the whole session, which the surface draws as one
+    /// continuous stream.
+    shell_marks: bool,
+
     /// The one thread that comes back for batches parsed too soon to draw.
     ///
     /// Shared by every pane and started with the first of them, so a model that
@@ -172,6 +232,17 @@ pub struct TerminalModel {
 /// One running shell, as the model holds it.
 struct Session {
     shared: Arc<Shared>,
+    /// The scratch files the shell was started against, held for as long as
+    /// the shell runs. Dropping it removes the directory the shell's rc stubs
+    /// live in, so it must outlive the process reading them — see
+    /// [`shell_integration::Session`].
+    _integration: shell_integration::Session,
+    /// Whether a repaint is already scheduled for the moment the open block
+    /// becomes long-running.
+    ///
+    /// One at a time: a command that prints while it runs would otherwise
+    /// queue a timer per batch, all of them landing on the same frame.
+    long_running_timer: bool,
     /// The last snapshot delivered to the main thread. Compared by pointer to
     /// decide whether a frame is worth spending.
     snapshot: Arc<Snapshot>,
@@ -193,6 +264,7 @@ impl TerminalModel {
             failures: HashMap::new(),
             live: false,
             palette: crook_palette(),
+            shell_marks: true,
             flusher: Arc::new(Flusher::default()),
             flushing: false,
         }
@@ -214,6 +286,14 @@ impl TerminalModel {
     /// Whether shells are being opened at all.
     pub fn is_live(&self) -> bool {
         self.live
+    }
+
+    /// Says whether shells opened from now on install command marks.
+    ///
+    /// Only shells opened *after* this: the integration is installed when a
+    /// shell starts and cannot be taken out of one that is already running.
+    pub fn set_shell_marks(&mut self, enabled: bool) {
+        self.shell_marks = enabled;
     }
 
     /// Opens a shell for every pane that has none, and closes the ones whose
@@ -268,6 +348,13 @@ impl TerminalModel {
             .map(|session| session.shared.snapshot())
     }
 
+    /// The commands that have finished in a pane, oldest first.
+    pub fn blocks(&self, pane: PaneId) -> Option<Arc<BlockHistory>> {
+        self.sessions
+            .get(&pane)
+            .map(|session| session.shared.blocks())
+    }
+
     /// Types `text` into a pane's shell, as if a person had.
     ///
     /// The pty buffers it, so this works before the shell has finished starting:
@@ -305,12 +392,27 @@ impl TerminalModel {
 
     /// Starts a shell for one pane and the thread that reads it.
     fn open(&mut self, pane: PaneId, directory: Option<PathBuf>, ctx: &mut ModelContext<Self>) {
-        let options = TerminalOptions {
+        // The integration writes its stub files before the shell is started
+        // and removes them when this value is dropped, so it is moved into the
+        // session below rather than left to fall out of scope here.
+        let integration = shell_integration::Session::open(&shell_integration::Options {
+            enabled: self.shell_marks,
+            ..Default::default()
+        });
+        let mut options = TerminalOptions {
             size: INITIAL_GRID,
             working_directory: directory,
             palette: self.palette.clone(),
             ..Default::default()
         };
+        integration.apply(&mut options);
+        if !integration.marks() {
+            log::debug!(
+                "pane {pane:?} is running {:?}, which Crook has no command marks for; \
+                 its output will be one continuous block",
+                integration.shell()
+            );
+        }
 
         let mut terminal = match Terminal::spawn(options) {
             Ok(terminal) => terminal,
@@ -337,6 +439,7 @@ impl TerminalModel {
         let shared = Arc::new(Shared {
             terminal: Mutex::new(terminal),
             latest: Mutex::new(snapshot.clone()),
+            blocks: Mutex::new(Arc::default()),
             events: Mutex::new(Vec::new()),
             wake: Arc::new(Wake::default()),
             grid: AtomicU32::new(packed(INITIAL_GRID)),
@@ -373,6 +476,8 @@ impl TerminalModel {
             pane,
             Session {
                 shared,
+                _integration: integration,
+                long_running_timer: false,
                 snapshot,
                 title: None,
                 directory: None,
@@ -490,6 +595,7 @@ impl TerminalModel {
         if changed {
             ctx.notify();
         }
+        self.schedule_long_running(pane, ctx);
         for update in updates {
             ctx.emit(update);
         }
@@ -503,6 +609,45 @@ impl TerminalModel {
             return;
         }
         self.watch(pane, ctx);
+    }
+
+    /// Draws the frame in which a running command takes the whole pane.
+    ///
+    /// Nothing else would. A `sleep 5` echoes its own line and then says
+    /// nothing for five seconds, so the last frame before the shell goes quiet
+    /// is one where the command has been running for a millisecond and the
+    /// composer is still up — and it would stay up until the command ended.
+    /// One timer per command, armed by the first batch that sees it running.
+    fn schedule_long_running(&mut self, pane: PaneId, ctx: &mut ModelContext<Self>) {
+        let Some(session) = self.sessions.get_mut(&pane) else {
+            return;
+        };
+        let Some(waiting) = pane_surface::until_long_running(&session.snapshot, Instant::now())
+        else {
+            // Either nothing is running or the frame that hid the composer has
+            // already been drawn. Either way the next command arms a fresh
+            // timer.
+            session.long_running_timer = false;
+            return;
+        };
+        if session.long_running_timer {
+            return;
+        }
+        session.long_running_timer = true;
+
+        let sleeping = ctx.background().spawn(async move {
+            std::thread::sleep(waiting);
+        });
+        ctx.spawn(sleeping, move |model, (), ctx| {
+            if let Some(session) = model.sessions.get_mut(&pane) {
+                session.long_running_timer = false;
+            }
+            // Unconditionally: the block may have finished while this waited,
+            // in which case the frame this draws is the one with the finished
+            // block in the list.
+            ctx.notify();
+        })
+        .detach();
     }
 }
 
@@ -534,6 +679,35 @@ impl TerminalHandle {
     /// painted, and the same `Arc` comes back until the content changes.
     pub fn snapshot(&self) -> Arc<Snapshot> {
         self.0.snapshot()
+    }
+
+    /// The commands that have finished in this pane, oldest first.
+    ///
+    /// Owned for the same reason the snapshot is, and the same `Arc` comes
+    /// back until a command ends — so a list that keys its geometry on this
+    /// pointer rebuilds nothing on a frame that only moved the live block.
+    pub fn blocks(&self) -> Arc<BlockHistory> {
+        self.0.blocks()
+    }
+
+    /// Runs a composed command line, reporting whether it reached the pty.
+    ///
+    /// Not [`Self::write`] with a newline stuck on the end: this is the block
+    /// boundary that does not depend on the shell cooperating. The emulator is
+    /// told the exact text and the exact moment before a byte leaves, which is
+    /// what a shell with no OSC 133 integration can never report and what a
+    /// shell that has one can only report as whatever it echoed.
+    pub fn submit(&self, line: &str) -> bool {
+        self.drive(|terminal| {
+            terminal.scroll_to_bottom();
+            match terminal.submit(line) {
+                Ok(()) => true,
+                Err(error) => {
+                    log::warn!("could not send a line to a shell: {error}");
+                    false
+                }
+            }
+        })
     }
 
     /// Sets the grid and tells the child about it, reporting whether anything
@@ -691,6 +865,7 @@ impl TerminalHandle {
         let mut terminal = self.0.lock();
         let outcome = work(&mut terminal);
         let snapshot = terminal.snapshot();
+        self.0.sync_blocks(&terminal);
         drop(terminal);
 
         *self.0.latest.lock().unwrap_or_else(PoisonError::into_inner) = snapshot;
@@ -705,6 +880,10 @@ struct Shared {
     /// The most recent snapshot the reader built, so painting never waits on
     /// parsing.
     latest: Mutex<Arc<Snapshot>>,
+
+    /// The finished blocks, rebuilt beside every snapshot and for the same
+    /// reason. See [`BlockHistory`].
+    blocks: Mutex<Arc<BlockHistory>>,
 
     /// What the child has asked for and nobody has looked at yet.
     events: Mutex<Vec<TerminalEvent>>,
@@ -887,6 +1066,44 @@ impl Shared {
             .clone()
     }
 
+    fn blocks(&self) -> Arc<BlockHistory> {
+        self.blocks
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Brings the held block list up to date with the emulator's, cloning the
+    /// rows of the blocks that are new and the pointers of the ones that are
+    /// not.
+    ///
+    /// Called under the same lock acquisition that builds a snapshot, because
+    /// the two are one picture: a frame that had the new block but the old
+    /// live-block anchor would paint the same rows twice.
+    fn sync_blocks(&self, terminal: &Terminal) {
+        let mut held = self.blocks.lock().unwrap_or_else(PoisonError::into_inner);
+        let evicted = terminal.blocks_evicted();
+        let finished = terminal.blocks();
+        if held.evicted == evicted && held.len() == finished.len() {
+            return;
+        }
+
+        // What the emulator dropped off the front, dropped here too. The rest
+        // is still the same list with more on the end, because ids are handed
+        // out in order and never reused.
+        let dropped = evicted.saturating_sub(held.evicted);
+        let mut blocks: Vec<Arc<Block>> = held.iter().skip(dropped).cloned().collect();
+        blocks.truncate(finished.len());
+        blocks.extend(
+            finished
+                .iter()
+                .skip(blocks.len())
+                .map(|block| Arc::new(block.clone())),
+        );
+
+        *held = Arc::new(BlockHistory { blocks, evicted });
+    }
+
     fn take_events(&self) -> Vec<TerminalEvent> {
         std::mem::take(&mut *self.events.lock().unwrap_or_else(PoisonError::into_inner))
     }
@@ -964,6 +1181,7 @@ impl Shared {
         let mut terminal = self.lock();
         let snapshot = terminal.snapshot();
         let events = terminal.take_events();
+        self.sync_blocks(&terminal);
         drop(terminal);
 
         *self.latest.lock().unwrap_or_else(PoisonError::into_inner) = snapshot;

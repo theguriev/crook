@@ -533,13 +533,126 @@ build a snapshot, and publishes the `Arc` into a slot of its own; painting clone
 and walks owned data. Layout — which asks "did the grid move?" on every single frame —
 answers from an atomic before it ever asks for the lock.
 
+### Blocks: the output is a list of commands
+
+A pane draws its output as a list whose items are commands — prompt, command line, output —
+and the line being composed sits under that list as a sibling on the same ground. Three pieces
+in `crook_terminal` and three in `app/` make it, and the interesting decisions are all in the
+seam between them.
+
+**Where a boundary comes from.** Two things, and only one needs the shell. `Terminal::submit`
+is what the composer calls on Enter: it records the exact command text and the exact moment
+before a byte leaves for the pty, so a block knows what was run even when it never learns how
+it ended. The other is OSC 133 — `A` prompt start, `B` prompt end, `C` output start,
+`D;<exit>` finished — read out of the *same second `vte` pass* the emulator already ran for
+OSC 7, so the mark is applied while the cursor still stands where the shell left it. That is
+also why `Emulator::advance` feeds the stream in pieces cut at the marks: feeding a whole
+chunk and looking for marks afterwards would place every boundary wherever the pty read
+happened to end.
+
+`blocks::TABLE` is the whole state machine — one row per state the open block can be in, one
+column per thing it can be told, every cell either a transition or a *named reason* for doing
+nothing. There is no if-chain anywhere else deciding what a mark means, and the rule that
+fills the doubtful cells is **merging two blocks is recoverable; splitting one is not**. A
+block that swallowed its neighbour still shows every byte in order; a block cut in half has
+lost the connection between a command and its output and no later mark can put it back. The
+case that proves it: every prompt framework with a transient prompt re-emits `A` and `B` when
+a line is accepted, between the submit and `preexec`'s `C`, and obeying that would file an
+empty statusless block above every single command.
+
+**Harvesting, not slicing.** When a block closes, its rows are *copied out of the emulator*
+into an owned per-block store and the emulator moves on. The obvious alternative — remember
+that block seven is grid lines 412 to 480 and slice the scrollback when drawing — cannot be
+made to work over `alacritty_terminal`, for three independent reasons: its history is capped
+and evicts from the top *without counting*, so a stored line number silently drifts; it
+reflows on a column change, so every stored number moves at once; and `clear` throws the lines
+away entirely while the block that printed them is still on screen. Owning the rows makes a
+block survive all three. The other alternative — one grid with decorations drawn over it — is
+worse in a way that is not obvious until it is built: every row of a grid is in *one*
+coordinate space, so per-block padding, per-block height, a per-block hover target and a
+per-block copy all have to fight arithmetic that says row 41 is 41 cells below row 0.
+
+What that costs is the reason `harvest::BlockRows` is not a `Vec<SnapshotCell>`. A cell is
+twelve bytes; ten thousand rows of two hundred columns is 24 MB per pane, for ever, with
+nothing evicting it. So a block is stored the way its text actually is — one `String` for
+every row end to end with trailing blanks trimmed, one run-length `Vec<StyleRun>` for how it
+is painted, `u32` prefix offsets into both — and ordinary output is one run a row. A screenful
+measures under an eighth of the cell array it came from, and a thousand-row block is five
+allocations rather than three thousand. Exactly one method gets rows back out:
+`materialise(row, &mut cells)` fills a caller-supplied scratch `Vec<SnapshotCell>` reused down
+the whole list, so a harvested row goes through the *same* three painting passes a live one
+does — merged background runs, underline and strikeout rules, then one glyph id and one fixed
+advance per cell. A second cell painter would be a second set of bugs.
+
+**The grid is emptied at every harvest, and that is load-bearing.** Closing a block drops the
+emulator's history *and* blanks the screen above the block that opens next, so the grid holds
+the open block and nothing else. Three answers depend on that one invariant:
+
+- the open block's anchor stays exact, because the history can now only fill up when the open
+  block is longer than the whole scrollback — at which point "this block starts above the
+  oldest line we have" is not an approximation but the truth;
+- a column change, which reflows every stored line number into meaninglessness, is answered by
+  looking for the first line in the grid with anything on it;
+- rows *below* the cursor when a command ends — what a progress display that redraws with
+  `\e[3A` leaves behind — can be harvested with the block that printed them, because nothing
+  else can have put anything there.
+
+**Two surfaces, one function.** `pane_surface::of` answers both "what draws the output?" and
+"is there a composer?" from one `Snapshot`, and every element that needs either asks it rather
+than testing a flag of its own — three copies of that rule is how a pane ends up with two
+cursors. The block list is the ordinary answer; the *grid* is the answer on the alternate
+screen and when the open block has grown past the top of the viewport, which is also what a
+shell with no integration looks like from its first screenful onwards. The grid never has a
+composer under it: the pty is sized from the pane, so a grid laid out above a field has fewer
+rows to draw than the child was told it had, and the newest ones would be painted under the
+field.
+
+The composer also goes when the shell reports a command running for longer than 50 ms — Warp's
+number, fast enough that nothing anybody waits for is missed and slow enough that `ls` never
+flickers the field away and back. It takes the composer's space and *not* the block list: a
+`cargo build` printing for a minute is still one command among the ones before it. And
+"running" means the shell said `C`, never merely that a line was sent: a shell that reports no
+marks never answers, and a rule that read a sent line as a running command would take the
+field away at the first Enter of such a session and never give it back.
+
+**The list is a virtualiser, and `Scrollable` is not.** That element lays its child out at
+infinite height and paints all of it — a clipper. So `block_list` owns its own offset, keeps a
+prefix sum of item heights in the per-pane view between frames, binary-searches it for the
+first visible item and walks forward until it passes the bottom of the box; the same
+arithmetic runs again *inside* an item, so a fifty-thousand-row block costs a screenful. The
+finished part of the sum is rebuilt only when a command ends. Scroll position is a *mode*
+(`FollowBottom`, or `Fixed` lines from the top) rather than a number, so following the end
+cannot die silently, and every mutation names its cause — a wheel, a resize, a submit, a key
+that reached the pty — in one function.
+
+**What it does not do yet** is in `docs/blocks.md`, and one entry belongs here because someone
+will hit it: **selection is still the emulator's**, so it works inside the block that is still
+running and nowhere else. A finished block's cells are not in the emulator to drag across —
+that is the price of owning them — and copying a whole finished block needs no selection,
+which is what its hover control is for. Cross-block selection is stage two and must be one
+implementation, not two that have to agree.
+
 ### The command line is an input field
 
-A pane's next command is composed in a bordered box under its grid — an ordinary GUI text
-input, with a caret you can click, selection by drag, word and line movement, undo, the
-system clipboard, and a history on the arrows — and only reaches the pty when Enter sends it,
-as `line + "\n"`. The shell then echoes and runs it, so the grid above shows prompt, command
-and output exactly as it did when every keystroke went straight through.
+A pane's next command is composed under its output — an ordinary GUI text input, with a caret
+you can click, selection by drag, word and line movement, undo, the system clipboard, and a
+history on the arrows — and only reaches the pty when Enter sends it, through
+`Terminal::submit`, which records the boundary before the bytes leave. The shell then echoes
+and runs it, so the output above shows prompt, command and result exactly as it did when every
+keystroke went straight through.
+
+**It is not a box.** No background, no corner radius, no side or bottom border, no margin and
+no focus ring: the caret existing is the entire focus affordance. It fills nothing of its own,
+so the pane's ground is its ground; it is drawn in the terminal's own font and in the colours
+the *shell* resolved, so a script that changes them with OSC 10 or 12 carries the field with
+the output rather than leaving it behind in the theme's grey; and one `GUTTER` constant is the
+list's left inset, the field's left padding and the width the pty is measured short by, which
+is what puts a typed line and the shell's echo of it in the same column. The only thing that
+ever separates it from the output is a one-pixel rule in the same role and the same full-bleed
+extent as the divider between two blocks — and that rule is drawn only when there is output
+cut off underneath, so the seam is invisible until it means something. What is left of the
+"field" is behaviour, which is the point: a composer that reads as a widget bolted under a
+terminal is one people stop believing is part of it.
 
 **Why not leave the shell to do the line editing?** Because it cannot do it as a GUI. The
 line lives in the child's own reader, so there is nothing on this side to hit-test, select,
@@ -557,9 +670,11 @@ fonts. `app/src/pane_input.rs` is the per-pane state the element tree is rebuilt
 
 ### Selecting the output
 
-The grid above the field is selectable with the pointer, and it is the emulator's own model
-that makes it so. `alacritty_terminal` already has a `Selection` — four kinds (a plain drag, a
-block, a word, a line), a `side` so a selection ends *between* two characters, and
+The output is selectable with the pointer, and it is the emulator's own model that makes it so
+— which is also exactly why a selection reaches the block that is still running and no other:
+a finished block's cells have been harvested out of the emulator, and this is what they would
+have to still be in. `alacritty_terminal` already has a `Selection` — four kinds (a plain
+drag, a block, a word, a line), a `side` so a selection ends *between* two characters, and
 `Selection::rotate`, which `Term` calls on every path that scrolls the grid. That last one is
 the whole reason the selection is stored in `Term::selection` rather than beside it: a
 selection made around a word stays around that word while a build prints a hundred more lines
@@ -765,22 +880,27 @@ still missing there is auto-scroll: selecting a tab with the keyboard does not b
 into view, because that needs a scrollable that can be told to make a particular child
 visible.
 
-**Shell integration, and the two things it would fix.** Crook never tells the shell anything
-about itself, and the shell never marks its prompts (OSC 133, or Warp's own bootstrap). Two
-consequences are worth naming rather than discovering:
+**The rest of shell integration.** Crook now installs the four OSC 133 marks into the zsh,
+bash and fish it starts (`app/src/shell_integration`, and "Blocks" in §7), which is the half
+that says where a command starts and ends. Warp's channel does more than that, and the two
+things still missing are worth naming rather than discovering:
 
 - **No completion.** Tab does nothing in the field, because the shell has never seen the
   partial line and has nothing to complete. There is no way to fake it: completion is the
   shell's, and reaching it means either sending the line for the shell to edit — which is the
-  design the field replaced — or asking the shell over an integration channel.
-- **A password prompt is composed in the clear.** `sudo`, `ssh` and `read -s` turn echo off
-  and read a line on the *normal* screen, so the field takes the keys, shows the secret as
-  ordinary text and records it in that pane's history for the life of the pane. The obvious
-  signal does not work: `zsh`'s line editor and `bash`'s readline both keep `ECHO` off at
-  their own prompt, so "the tty is not echoing" is true nearly all the time and cannot tell a
-  password prompt from a shell waiting for a command. Telling them apart needs to know where
-  the prompt is, which is what shell integration is for. Until then the field's history is at
-  least in memory only, per pane, and dies with the pane.
+  design the field replaced — or a request/response channel to the shell, which OSC 133 is
+  not. VS Code's private `OSC 633` is that channel; adding one means a snippet that answers as
+  well as announces, and a protocol between the two.
+- **A password prompt is composed in the clear — in one remaining case.** `sudo`, `ssh` and
+  `read -s` turn echo off and read a line on the *normal* screen. With marks this is now
+  handled by the rule that hides the composer: the prompt happens while a command is running,
+  so the field is gone and the keys go to the pty with echo off, where they belong. The hole
+  left is a shell that reports no marks at all *and* has not yet filled a screen — the only
+  state where a field is on screen and nothing knows a command is running. The obvious signal
+  does not close it: `zsh`'s line editor and `bash`'s readline both keep `ECHO` off at their
+  own prompt, so "the tty is not echoing" is true nearly all the time and cannot tell a
+  password prompt from a shell waiting for a command. The field's history is at least in
+  memory only, per pane, and dies with the pane.
 
 **A settings *stack*.** The page exists; the machinery under it does not, and that is the
 split worth keeping. Warp's stack — a `define_settings_group!` macro, a settings-value crate,
@@ -896,7 +1016,9 @@ platforms, and treat a build script as the cost it is.
 | Core front-ends | `StoredView::{Gui, Tui}` share one registry | one arm; the seam is kept, the arm is not written |
 | Channels | six | two |
 | Packaging | 2,245 lines of shell and PowerShell | a release binary today, `cargo-dist` next |
-| The command line | an input field, with shell integration behind it | an input field, with the alt screen as the whole test (§7) |
+| The command line | an input field, with shell integration behind it | an input field, with OSC 133 behind it (§7) |
+| Blocks | a block per command, with selection, navigation and re-run | a block per command: harvested rows, a virtualising list, hover-to-copy (§7, `docs/blocks.md`) |
+| Shell integration | its own bootstrap, a request/response channel | the four OSC 133 marks, injected into zsh, bash and fish |
 | Autotracking | `Tracked<T>` dependency capture | explicit `ctx.notify()` |
 | Settings | ~800, with a macro DSL and cloud sync | 10, two `serde` structs and a name in one JSON file |
 | Themes | 21 built in, gradients, images, a creator, OS sync, hot reload | 14 built in, the same file format, a creator without the image, no OS sync |

@@ -211,7 +211,8 @@ pub enum Binding {
 /// 2. **The alt screen belongs to the program.** vim, `top` and `less` drive
 ///    every cell of the screen and read every key themselves, so on the alt
 ///    screen everything goes raw to the pty — and the input field is not even
-///    drawn. See [`shows_input`]. Rule 1 is deliberately above this one: text
+///    drawn. See [`crate::pane_surface`], which is where the visible half of
+///    this rule lives. Rule 1 is deliberately above this one: text
 ///    on a full-screen program's screen is still text somebody selected with
 ///    the mouse, and there is no reason they cannot copy it.
 /// 3. **The signal keys always reach the shell.** Ctrl-C interrupts and
@@ -243,14 +244,6 @@ pub fn route(keystroke: &Keystroke, chars: &str, pane: Pane, platform: Platform)
         Some(intent) => Route::Edit(intent),
         None => Route::Ignored,
     }
-}
-
-/// Whether a pane showing this screen draws an input field.
-///
-/// The visible half of rule 2 in [`route`]: a program that has taken the whole
-/// screen is not reading a line, so there is no line to compose.
-pub fn shows_input(alt_screen: bool) -> bool {
-    !alt_screen
 }
 
 /// Whether this is one of the three keys that interrupt, end and suspend.
@@ -1140,12 +1133,6 @@ mod tests {
                 Some(Intent::DeleteForward)
             );
         }
-    }
-
-    #[test]
-    fn the_field_is_drawn_on_the_normal_screen_and_nowhere_else() {
-        assert!(shows_input(false));
-        assert!(!shows_input(true));
     }
 
     /// Every chord Crook keeps for itself, per platform.

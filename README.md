@@ -29,22 +29,53 @@ Four features, and the page that configures them:
   reports with OSC 0, 2 and 7 — which is what makes a tab rename itself and its git chips
   follow a `cd`. A tab splits into panes with `cmd-d` and `cmd-shift-d` (`ctrl-shift-d` and
   `ctrl-shift-e` off macOS), and a shell that exits closes its pane, its tab, and with the
-  last tab the window.
+  last tab the window. With shell integration the scrollback moves into the blocks: each
+  finished command owns its rows, so ten thousand *commands* survive a `clear`, a resize, and
+  the emulator's own history evicting anything.
+- **Output as a list of commands.** A pane is not a grid with decorations drawn over it: each
+  command is a block holding its prompt, the line that was run and everything it printed, with
+  a hairline between one and the next, a red wash on one that failed and an accent stripe on
+  one that is still running. Hovering a block reveals a control that copies exactly that
+  command and its output — no neighbour's text, no trailing blank rows, no over-selection —
+  which is the thing scrollback cannot do. The list virtualises: a frame costs a screenful,
+  not a session. **This needs shell integration**, which Crook installs into zsh, bash and
+  fish by itself; see below for what a shell without it looks like.
+  [`docs/blocks.md`](docs/blocks.md) is the map of the whole surface.
 - **Output you can select and copy.** Drag across a pane's output to select it, double click
   for a word, triple click for a line, alt-drag for a column; the drag keeps going when the
   pointer leaves the pane, a drag past the top or bottom edge scrolls the screen under the
   pointer, and the selection stays on its own text while the shell prints more underneath.
   `cmd-c` — `ctrl-c` or `ctrl-shift-c` off macOS — copies it and lets it go, so the next
   `ctrl-c` interrupts the shell the way it always has. The half-written command line in the
-  field below is left exactly where it was: a copy is not an interrupt.
-- **A command line that behaves like a text field.** Under each pane's output is an input
-  box, not a raw terminal line: a caret you can click, selection by drag, double and triple
-  click, word and line movement, undo, the system clipboard, a per-pane history on the up and
-  down arrows, and multi-line commands with shift-enter. Enter sends the line to the shell,
-  which echoes and runs it exactly as before. A full-screen program — vim, `top`, `less` —
-  takes the whole keyboard back and the field goes away while it runs; `ctrl-c`, `ctrl-z` and
-  an end-of-input `ctrl-d` always reach the shell. That line is drawn in one function,
+  field below is left exactly where it was: a copy is not an interrupt. **A selection lives in
+  the block that is still running** — its cells are the only ones still in the emulator, which
+  is what keeps a selection anchored to its own text while output arrives — so a drag cannot
+  cross two finished commands. Copying a *finished* block needs no selection: that is what its
+  hover control is for.
+- **A command line that behaves like a text field.** Under each pane's output is the line
+  being composed — not a box and not a raw terminal line: no border, no fill, no focus ring,
+  on the pane's own ground, in the terminal's own font and colours, at the same column zero as
+  the output above it. It is an editor: a caret you can click, selection by drag, double and
+  triple click, word and line movement, undo, the system clipboard, a per-pane history on the
+  up and down arrows, and multi-line commands with shift-enter. Enter sends the line to the
+  shell, which echoes and runs it exactly as before. A full-screen program — vim, `top`,
+  `less` — takes the whole keyboard back, and so does any command that has been running for
+  longer than a blink: the field goes away and its space goes to the block. `ctrl-c`, `ctrl-z`
+  and an end-of-input `ctrl-d` always reach the shell. That line is drawn in one function,
   `app/src/input_keys.rs`, and the architecture doc's §7 says why it is drawn there.
+- **Shell integration, installed by itself.** A pane running zsh, bash or fish emits the four
+  OSC 133 marks that say where a prompt starts, where a command starts and how it ended. There
+  is nothing to install and nothing to configure: Crook writes a scratch `ZDOTDIR`, `--rcfile`
+  or `vendor_conf.d` stub, chains onto whatever hooks are already there, never touches
+  `~/.zshrc`, and removes the stub when the pane closes. Set `CROOK_NO_SHELL_INTEGRATION` to
+  anything but `0` to turn it off. It reaches only shells Crook itself starts — not the far
+  side of an `ssh`, not a container, and not a shell it has no snippet for (`pwsh`, `nu`,
+  `ksh`, `tcsh`) — and on those machines the same text can be pasted at the end of the rc file
+  by hand: it is `app/src/shell_integration/crook.zsh` and its two siblings.
+  **Without it Crook is a plain terminal**: one continuous stream of output drawn as a grid,
+  scrolled through the emulator's own scrollback, with every key going straight to the shell.
+  No blocks, no per-command copy, and no composer — everything else, including selection and
+  copying, works exactly as it does with it.
 - **Themes**, in a panel of their own. Thirteen built in — Crook Dark, Crook Light, Midnight,
   and ten of the palettes Omarchy dresses a desktop in (Catppuccin, Everforest, Gruvbox,
   Kanagawa, Nord, Rosé Pine, Tokyo Night and three more, each its own project's, read from
@@ -71,11 +102,15 @@ Four features, and the page that configures them:
   It is the one pane with no shell under it and no field: every control on it is a click.
 
 Everything else is out of scope on purpose. There is no keymap system, no persistence, no
-telemetry, no shell integration — the field composes a line without knowing where the shell's
-prompt is, so there is no completion and no command blocks — and no mouse reporting or IME
-composition. The terminal grid still reaches no clipboard of its own: the input field copies
-and pastes, an OSC 52 from the shell does not. The list of what is absent — and what adding
-each item would touch — is the last section of the architecture doc.
+telemetry, and no mouse reporting or IME composition. The shell integration reports command
+boundaries and nothing else, so there is still no completion: Tab does nothing in the field,
+because the shell has never seen the partial line. Blocks are stage one — no cross-block or
+block-level selection, no keyboard navigation between blocks, no sticky header,
+no jump-to-bottom, and the shell's prompt stays on its own row rather than being lifted into
+the composer; [`docs/blocks.md`](docs/blocks.md) lists those and says what each would touch.
+The terminal grid still reaches no clipboard of its own: the input field copies and pastes, an
+OSC 52 from the shell does not. The list of what is absent — and what adding each item would
+touch — is the last section of the architecture doc.
 
 ## Prerequisites
 
@@ -177,6 +212,7 @@ crates/crookui/          winit windowing, wgpu renderer, cosmic-text font stack 
 crates/crook_usage/      Claude Code credentials and usage polling              (MIT)
 crates/crook_terminal/   pty, emulator, and the snapshot the renderer draws     (MIT)
 docs/architecture.md     the design, and the reasoning behind each divergence
+docs/blocks.md           the block surface: what draws it, and what it does not do yet
 script/                  bootstrap, run, bundle
 ```
 

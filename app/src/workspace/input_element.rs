@@ -1,6 +1,7 @@
 //! The command input: an [`Editor`] with a caret, a selection and a mouse.
 //!
-//! This is the field under a pane's grid, and it is drawn on the grid's terms.
+//! This is the composer under a pane's output, and it is drawn on the
+//! output's terms.
 //! A terminal cell is the unit of everything here — the caret is one cell wide,
 //! a selection is a run of cells, and a glyph is placed by multiplying a column
 //! by a fixed advance — so the line being composed sits in the same type, on
@@ -22,17 +23,30 @@
 //!
 //! The editor's lines are logical: it stores newlines and knows nothing about
 //! how wide anything is. Wrapping is this element's business, and it is where
-//! the field's height comes from — a line longer than the field becomes two
-//! rows, the box grows by one, and the grid above gives up the space. The box
+//! the composer's height comes from — a line longer than the box becomes two
+//! rows, the box grows by one, and the output above gives up the space. It
 //! stops growing at [`MAX_ROWS`], and sooner than that in a pane too short to
-//! spare them: see [`row_budget`]. Past its budget the field scrolls, keeping
-//! the caret in view, because a command that has run away with itself must not
+//! spare them: see [`row_budget`]. Past its budget it scrolls, keeping the
+//! caret in view, because a command that has run away with itself must not
 //! push the output it was written against off the screen.
 //!
 //! Only the rows that are drawn are ever built. A pasted megabyte is one
 //! command line as far as the editor is concerned, and materialising its
 //! hundred thousand rows to draw eight of them would cost a quarter of a
 //! second on every keystroke after it.
+//!
+//! # No box, and no prompt
+//!
+//! The chrome is in `body::composer`, and there is almost none of it: no
+//! background, no radius, no side or bottom border, no margin, and no focus
+//! ring. What this element draws is text, a selection and a caret — a three
+//! pixel bar in the *terminal's* cursor colour, because an accent caret is a
+//! form field's and would disagree with the output above it.
+//!
+//! There is no prompt glyph either. The shell's own prompt is in the open
+//! block two lines up, and a second invented one under it is two prompts on
+//! screen, which is exactly what makes a composer read as a widget bolted
+//! under the output. Column zero here is column zero there.
 //!
 //! # What it does not own
 //!
@@ -44,49 +58,98 @@
 use std::collections::VecDeque;
 use std::ops::Range;
 
+use crook_terminal::Snapshot;
 use crookui_core::AppContext;
 use crookui_core::element::{Element, SizeConstraint};
 use crookui_core::event::{DispatchedEvent, Event, Keystroke, MouseButton};
 use crookui_core::geometry::{Color, Point, RectF, Vector2F, vec2f};
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
-use crookui_core::scene::Scene;
+use crookui_core::scene::{CornerRadius, Radius, Scene};
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::clipboard::Clipboard;
 use crate::input_keys::{self, Platform, Route};
+use crate::pane_blocks::{PaneBlocks, ScrollCause};
 use crate::pane_input::PaneInput;
 use crate::terminal_font::{CellFont, CellMetrics};
 use crate::terminal_model::TerminalHandle;
 use crate::theme::theme;
 
-/// The mark at the left of the field.
-///
-/// A prompt rather than a label: it is what makes the box read as a command
-/// line rather than as somewhere to write a paragraph. A machine with no font
-/// that can draw it draws nothing, and the field is still a field.
-const PROMPT: char = '\u{276f}';
+use super::terminal_element::color;
 
-/// How many cells the prompt and the gap after it take.
-const PROMPT_COLUMNS: usize = 2;
-
-/// The tallest the field ever grows, in rows.
+/// The tallest the composer ever grows, in rows.
 const MAX_ROWS: usize = 8;
 
-/// How much of the accent colour a selection is filled with.
+/// How wide the caret is drawn.
 ///
-/// Low enough to read text through, high enough to see at a glance which cells
-/// are in it.
-const SELECTION_ALPHA: u8 = 76;
+/// A bar rather than a filled cell, in the same three pixels Warp uses. The
+/// grid draws the *shell's* cursor as a block, and a second block in the
+/// composer would be two cursors claiming the same keyboard.
+const CARET_WIDTH: f32 = 3.;
+
+/// How tall the caret is, as a fraction of the cell.
+///
+/// The glyph's own height rather than the line box's, so the bar stands beside
+/// the text it is in rather than touching the row above and the row below.
+const CARET_HEIGHT: f32 = 0.8;
+
+/// What the composer draws its text and its caret in.
+///
+/// The *terminal's* colours rather than the theme's. A shell that changed its
+/// foreground or its cursor colour at runtime — OSC 10, OSC 12, any of the
+/// scripts that follow a light or dark system theme — moves the output and the
+/// pane's ground with it, and a field left behind in the theme's own grey is
+/// then the one thing on the pane that does not follow. The block above and
+/// the line being typed at its prompt have to be the same ink.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct Ink {
+    /// The characters.
+    pub text: Color,
+    /// The caret.
+    pub caret: Color,
+}
+
+impl Ink {
+    /// The colours a snapshot resolved: its default foreground, and the colour
+    /// the grid paints the shell's own cursor in.
+    ///
+    /// The theme's cursor is the fallback for a shell that has hidden its
+    /// cursor, which is the one case a snapshot has no colour to offer.
+    pub fn of(snapshot: &Snapshot) -> Self {
+        Self {
+            text: color(snapshot.foreground),
+            caret: snapshot
+                .cursor
+                .as_ref()
+                .map_or_else(|| theme().terminal.cursor, |cursor| color(cursor.color)),
+        }
+    }
+}
+
+impl Default for Ink {
+    /// What a composer with no shell behind it draws in.
+    fn default() -> Self {
+        Self {
+            text: theme().terminal.foreground,
+            caret: theme().terminal.cursor,
+        }
+    }
+}
 
 /// One pane's command input.
 pub struct CommandInput {
     input: PaneInput,
     font: CellFont,
     clipboard: Clipboard,
+    ink: Ink,
 
     /// The shell a submitted line is sent to, when there is one.
     terminal: Option<TerminalHandle>,
+
+    /// The list above this composer, which a submitted line returns to its own
+    /// end.
+    blocks: Option<PaneBlocks>,
 
     /// Whether this pane's field was the one listening when the frame was
     /// built. The caret's business and the prompt's; a keystroke asks
@@ -114,7 +177,9 @@ impl CommandInput {
             input,
             font,
             clipboard,
+            ink: Ink::default(),
             terminal: None,
+            blocks: None,
             focused: false,
             alt_screen: false,
             size: None,
@@ -124,8 +189,21 @@ impl CommandInput {
         }
     }
 
+    /// Draws in the terminal's own colours rather than the theme's.
+    pub fn with_ink(mut self, ink: Ink) -> Self {
+        self.ink = ink;
+        self
+    }
+
+    /// Attaches the block list above this composer, so that a command run from
+    /// here returns it to its own end.
+    pub fn with_blocks(mut self, blocks: PaneBlocks) -> Self {
+        self.blocks = Some(blocks);
+        self
+    }
+
     /// Attaches the shell a submitted line goes to, and says whether this pane
-    /// is the one whose field has the keys.
+    /// is the one whose composer has the keys.
     pub fn with_terminal(
         mut self,
         handle: TerminalHandle,
@@ -136,6 +214,20 @@ impl CommandInput {
         self.focused = focused;
         self.alt_screen = alt_screen;
         self
+    }
+
+    /// How many rows the pane holds, which is what the composer's ceiling is
+    /// half of.
+    ///
+    /// Asked of the terminal during layout rather than baked in when the frame
+    /// was built: the pane resizes the pty in this same pass, a step above
+    /// this element, so a row count taken from the snapshot the tree was built
+    /// with would be one frame stale — and one frame stale here is a composer
+    /// that takes the whole of a pane that has just been made short.
+    fn pane_rows(&self) -> usize {
+        self.terminal
+            .as_ref()
+            .map_or(0, |handle| handle.snapshot().rows)
     }
 
     /// Handles a keystroke, if this pane's field is the one listening and the
@@ -187,15 +279,26 @@ impl CommandInput {
         }
     }
 
-    /// Sends a composed line to the shell, with the newline that runs it.
+    /// Runs a composed line.
+    ///
+    /// [`TerminalHandle::submit`] rather than a write with a newline stuck on
+    /// the end: the emulator is told the exact command and the exact moment
+    /// before a byte leaves, which is the block boundary that does not depend
+    /// on the shell having any integration at all.
     fn send(&self, line: &str) {
         let Some(terminal) = self.terminal.as_ref() else {
             log::warn!("a line was composed in a pane with no shell to send it to");
             return;
         };
-        // A newline rather than a carriage return: the pty's line discipline
-        // turns one into the other, and this is what the shell is waiting for.
-        terminal.write(&format!("{line}\n"));
+        if !terminal.submit(line) {
+            return;
+        }
+        // Running a command means the person is done reading history, and the
+        // block it makes is at the end of the list. Without this a list left
+        // scrolled up stays there, and nothing on screen answers the Enter.
+        if let Some(blocks) = self.blocks.as_ref() {
+            blocks.apply(ScrollCause::Submit);
+        }
     }
 
     /// Puts the caret where a press landed, selecting a word or a line when the
@@ -272,7 +375,7 @@ impl Element for CommandInput {
         };
 
         let metrics = self.font.metrics();
-        let budget = row_budget(constraint.max.y(), metrics);
+        let budget = row_budget(constraint.max.y(), metrics, self.pane_rows());
         let editor = self.input.editor();
         let rows = Rows::of(editor.text(), editor.caret(), width, metrics, budget);
         let height = rows.drawn() as f32 * metrics.height;
@@ -301,6 +404,7 @@ impl Element for CommandInput {
             origin,
             rows,
             self.focused,
+            self.ink,
             ctx.scene,
         );
     }
@@ -418,9 +522,7 @@ impl Rows {
         let row = (local.y() / metrics.height)
             .floor()
             .clamp(0., (self.drawn() - 1) as f32) as usize;
-        let column = ((local.x() - PROMPT_COLUMNS as f32 * metrics.width) / metrics.width)
-            .round()
-            .max(0.) as usize;
+        let column = (local.x() / metrics.width).round().max(0.) as usize;
 
         let Some(range) = self.rows.get(row) else {
             return text.len();
@@ -576,59 +678,65 @@ fn cells(text: &str) -> usize {
         .sum()
 }
 
-/// How many rows the field may draw in the space it has been offered.
+/// How many rows the composer may draw.
 ///
-/// Never more than [`MAX_ROWS`], and never more than half of what it was
-/// offered: the field grows downwards *into the grid*, and one that took the
-/// whole panel would leave the shell it is composing for nothing to be seen
-/// in. Never fewer than one, because a pane can be dragged shorter than a cell
-/// and a field with no rows would have no caret.
-fn row_budget(available: f32, metrics: CellMetrics) -> usize {
-    if !available.is_finite() {
-        return MAX_ROWS;
-    }
-    let fits = (available / metrics.height).floor().max(0.) as usize;
+/// Never more than [`MAX_ROWS`], and never more than half the pane: the
+/// composer grows downwards *into the output*, and one that took the whole
+/// panel would leave the shell it is composing for nothing to be seen in.
+/// Never fewer than one, because a pane can be dragged shorter than a cell and
+/// a composer with no rows would have no caret.
+///
+/// `available` is what the parent offered, and it is usually infinite —
+/// measuring a non-flexible flex child *is* asking it how big it would like to
+/// be. Half of infinity is not an answer, so the fallback is `pane_rows`: the
+/// grid the pty was told about, which is the pane minus its own insets and
+/// therefore exactly the number the rule is about.
+fn row_budget(available: f32, metrics: CellMetrics, pane_rows: usize) -> usize {
+    let fits = if available.is_finite() {
+        (available / metrics.height).floor().max(0.) as usize
+    } else {
+        pane_rows
+    };
     (fits / 2).clamp(1, MAX_ROWS)
 }
 
-/// How many cells of text a field this wide holds. Never fewer than one: a pane
-/// can be dragged narrower than its own prompt.
+/// How many cells of text a composer this wide holds. Never fewer than one: a
+/// pane can be dragged narrower than a cell.
+///
+/// The same count the grid above gets from the same width, because the two
+/// share a column zero and a right edge — which is what makes a line that
+/// wraps in the composer wrap in the same place when the shell echoes it back.
 fn columns_for(width: f32, metrics: CellMetrics) -> usize {
-    let cells = (width / metrics.width).floor().max(0.) as usize;
-    cells.saturating_sub(PROMPT_COLUMNS).max(1)
+    ((width / metrics.width).floor().max(0.) as usize).max(1)
 }
 
-/// Paints one field into `scene` from `origin`, in the rows a layout wrapped.
+/// Paints one composer into `scene` from `origin`, in the rows a layout
+/// wrapped.
 ///
-/// `focused` is whether this pane's field is the one receiving keys, and it is
-/// the caret's business and nothing else's: an unfocused field shows its text
-/// and its selection and no caret at all, because a caret in a field that is
-/// not listening is a lie about where typing would go.
+/// `focused` is whether this pane's composer is the one receiving keys, and it
+/// is the caret's business and nothing else's. **There is no other focus
+/// affordance**: no ring, no border, no tint, no change of ground. That is
+/// Warp's answer and it is the whole reason the composer reads as the next
+/// line of the terminal rather than as a widget bolted under it — a frame that
+/// lights up when you click it is a form field, whatever colour it is.
+///
+/// **And there is no prompt glyph.** The shell's own prompt is two lines above
+/// in the open block, and a second invented one under it is two prompts on
+/// screen, which is what kills the illusion. Column zero here is column zero
+/// there.
 fn paint_input(
     input: &PaneInput,
     font: &CellFont,
     origin: Vector2F,
     rows: &Rows,
     focused: bool,
+    ink: Ink,
     scene: &mut Scene,
 ) {
     let metrics = font.metrics();
     let editor = input.editor();
     let text = editor.text();
-    let left = origin.x() + PROMPT_COLUMNS as f32 * metrics.width;
-
-    let prompt = if focused {
-        theme().accent
-    } else {
-        theme().text_muted
-    };
-    paint_character(
-        PROMPT,
-        vec2f(origin.x(), origin.y() + metrics.baseline),
-        prompt,
-        font,
-        scene,
-    );
+    let left = origin.x();
 
     let selection = editor.selection().range();
     let caret = (focused && input.caret_is_visible())
@@ -642,36 +750,32 @@ fn paint_input(
         let mut column = 0;
         for grapheme in text[range.clone()].graphemes(true) {
             let pen = vec2f(left + column as f32 * metrics.width, top + metrics.baseline);
-            // A character under a filled caret has to be drawn in the ground it
-            // sits on, or it disappears into the fill — the same trick the grid
-            // plays with a block cursor.
-            let ink = if caret == Some((row, column)) {
-                theme().ground
-            } else {
-                theme().text_primary
-            };
-
             // Every character of a cluster shares one pen: a combining mark
             // carries its own offset from the character it sits on, and has no
             // cell of its own to sit in.
             for character in grapheme.chars() {
-                paint_character(character, pen, ink, font, scene);
+                paint_character(character, pen, ink.text, font, scene);
             }
             column += cells(grapheme);
         }
     }
 
-    // Last, so that it is drawn over the selection it may be sitting in.
+    // Last, so that it is drawn over the selection it may be sitting in. In
+    // the *terminal's* cursor colour, which is the one the grid paints the
+    // shell's own cursor in: a caret in the accent would be a form field's,
+    // and would disagree with the block above it.
     if let Some((row, column)) = caret {
+        let height = metrics.height * CARET_HEIGHT;
         scene
             .draw_rect_without_hit_recording(RectF::new(
                 vec2f(
                     left + column as f32 * metrics.width,
-                    origin.y() + row as f32 * metrics.height,
+                    origin.y() + row as f32 * metrics.height + (metrics.height - height) / 2.,
                 ),
-                vec2f(metrics.width, metrics.height),
+                vec2f(CARET_WIDTH, height),
             ))
-            .with_background(theme().accent);
+            .with_background(ink.caret)
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CARET_WIDTH / 2.)));
     }
 }
 
@@ -701,7 +805,7 @@ fn paint_selection(
             vec2f(left + from as f32 * metrics.width, top),
             vec2f((to - from) as f32 * metrics.width, metrics.height),
         ))
-        .with_background(theme().accent.with_alpha(SELECTION_ALPHA));
+        .with_background(theme().selection);
 }
 
 /// Draws one character at a pen position, in whichever face can draw it.

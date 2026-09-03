@@ -54,11 +54,25 @@
 //! * [`Emulator`] turns bytes into a grid. It works with no pty at all, which
 //!   is what makes this crate testable without a process.
 //! * [`Snapshot`] is what the renderer draws.
+//! * [`Block`] is one command, its output and how it ended, with its rows owned
+//!   rather than borrowed from the grid. [`Terminal::blocks`] is the history;
+//!   [`Snapshot::live_block`] is the one still open.
 //! * [`input`] encodes key presses into the bytes a shell expects.
 //! * [`selection`] is the vocabulary a pointer selects text with.
+//!
+//! ## Selection, and what it does not cover yet
+//!
+//! Selecting text still belongs to the emulator, which means it works within
+//! the grid — the live block and whatever of the previous one has not scrolled
+//! away. A finished block's rows are no longer in the grid, so a drag cannot
+//! reach across two of them. Copying a whole finished block is exact and needs
+//! no selection at all: [`BlockRows::to_text`].
 
+mod blocks;
 mod emulator;
+mod harvest;
 pub mod input;
+mod marks;
 mod pty;
 pub mod selection;
 mod snapshot;
@@ -70,8 +84,11 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+pub use crate::blocks::{Block, BlockId, BlockState, IgnoreReason, LiveBlock};
 pub use crate::emulator::{Emulator, TerminalEvent};
+pub use crate::harvest::{BlockRows, RowCombining, StyleRun};
 pub use crate::input::{InputModes, Key, Modifiers};
+pub use crate::marks::{PromptKind, ShellMark};
 pub use crate::pty::{ChildExit, Program, Pty, PtyReader, default_shell};
 pub use crate::selection::{CellSide, GridPoint, SelectionKind, SelectionSpan, ViewportPoint};
 pub use crate::snapshot::{
@@ -184,6 +201,43 @@ impl Terminal {
     pub fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
         self.writer.write_all(bytes)?;
         self.writer.flush()
+    }
+
+    /// Runs a command line: records the block boundary, then writes the line
+    /// followed by the carriage return the Enter key sends.
+    ///
+    /// This is the boundary that does not depend on the shell cooperating. A
+    /// shell with OSC 133 integration reports where its prompt ended and when
+    /// the command started; a shell without it reports nothing, and this is
+    /// then the only thing that knows a command was run at all — and it knows
+    /// the exact text, where a mark-driven block only has what was echoed.
+    pub fn submit(&mut self, line: &str) -> io::Result<()> {
+        self.emulator.command_submitted(line);
+        self.write(line.as_bytes())?;
+        self.write(b"\r")
+    }
+
+    /// The finished blocks, oldest first. Empty until the first command ends.
+    pub fn blocks(&self) -> &[Block] {
+        self.emulator.blocks()
+    }
+
+    /// One finished block by id, or `None` once it has been evicted.
+    pub fn block(&self, id: BlockId) -> Option<&Block> {
+        self.emulator.block(id)
+    }
+
+    /// How many blocks have been dropped off the front of the list. A list
+    /// that caches per-block geometry can compare this against what it saw
+    /// last to learn that the front moved.
+    pub fn blocks_evicted(&self) -> usize {
+        self.emulator.blocks_evicted()
+    }
+
+    /// The block everything arriving now belongs to. Also on every
+    /// [`Snapshot`], which is where a renderer should read it.
+    pub fn live_block(&self) -> LiveBlock {
+        self.emulator.live_block()
     }
 
     /// Sends a key press, encoded for whichever modes the child has asked for.
@@ -334,8 +388,7 @@ impl Terminal {
             return Ok(None);
         };
         self.exit = Some(exit.clone());
-        self.emulator
-            .push_event(TerminalEvent::ChildExited(exit.clone()));
+        self.emulator.child_exited(exit.clone());
         Ok(Some(exit))
     }
 
@@ -364,8 +417,7 @@ impl Terminal {
         let exit = self.pty.wait()?;
         if self.exit.is_none() {
             self.exit = Some(exit.clone());
-            self.emulator
-                .push_event(TerminalEvent::ChildExited(exit.clone()));
+            self.emulator.child_exited(exit.clone());
         }
         Ok(exit)
     }

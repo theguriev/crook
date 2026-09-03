@@ -14,19 +14,46 @@
 //! back to one pane is indistinguishable from one that never split — no
 //! divider, `in_split_pane == false`.
 //!
-//! # The field
+//! # The output, and what draws it
 //!
-//! Under the grid, and only on the normal screen, is the pane's command input:
-//! a bordered box that reads as a text field, where the next command is
-//! composed before any of it reaches the shell. It grows downwards as the line
-//! wraps or gains lines and the grid gives up the space, which is why it is a
-//! plain child of the column and the grid is the flexible one.
+//! A pane's output is one of two elements, and [`pane_surface::of`] says
+//! which. Ordinarily it is [`BlockList`]: the commands that have finished, as
+//! a virtualising list, with the open one at the end. A full-screen program —
+//! the alternate screen, or anything that has been running on the primary
+//! screen for longer than a blink — gets [`TerminalElement`] and the whole
+//! pane instead, because a pager with a text field under it is a text field
+//! nobody can use. So does a shell with no command marks at all, whose one
+//! open block has already grown past the top of the emulator's viewport:
+//! there is no block structure to draw, and the honest rendering is the grid.
 //!
-//! Whether it is drawn at all is [`input_keys::shows_input`], the visible half
-//! of the rule [`input_keys::route`] states: a program that has taken the alt
-//! screen is not reading a line, so there is no line to compose and every key
-//! goes to it instead. The settings page is the other pane without one: it has
-//! no shell to send a line to, and every control on it is a click.
+//! The grid gets the *whole* pane, with no composer under it, and that is not
+//! a preference: [`PaneSizer`] tells the pty how many rows the pane holds, and
+//! a grid laid out above a composer has fewer rows than that to draw them in,
+//! so the newest ones — the prompt, the line being echoed — end up under the
+//! field and are never painted.
+//!
+//! # The composer
+//!
+//! Under the output, and it is **not a box**. No border, no radius, no fill of
+//! its own and no margin: it sits on the pane's own ground, in the terminal's
+//! font, sharing the list's left gutter, so the command inside a block and the
+//! line being typed under it start at the same x. The only thing that ever
+//! separates it from the output is a one-pixel rule in the same role and the
+//! same full-bleed extent as the rule the list draws between two blocks — and
+//! that rule is drawn only when there is output cut off underneath it, which
+//! is why the seam is invisible until it means something.
+//!
+//! It grows downwards as the line wraps or gains lines and the output gives up
+//! the space, which is why it is a plain child of the column and the output is
+//! the flexible one.
+//!
+//! # Where the pty learns its size
+//!
+//! [`PaneSizer`], from the *pane's* rectangle and never from the output's box.
+//! The output's box moves whenever the composer appears or hides, and a
+//! `SIGWINCH` on each of those frames is a storm at programs that handle them
+//! badly. Reporting the pane also means a full-screen program that fills the
+//! pane fits.
 //!
 //! # When there is no terminal
 //!
@@ -36,28 +63,47 @@
 //! "no shell" is a much worse answer than "the login shell is not executable".
 
 use std::sync::Arc;
+use std::time::Instant;
 
-use crook_terminal::Snapshot;
+use crook_terminal::{Snapshot, TerminalSize};
+use crookui_core::element::SizeConstraint;
+use crookui_core::elements::Padding;
+use crookui_core::event::DispatchedEvent;
 use crookui_core::fonts::{Properties, Weight};
+use crookui_core::geometry::{Point, Vector2F, vec2f};
 use crookui_core::prelude::*;
+use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 
-use crate::input_keys;
+use crate::pane_blocks::HEIGHT_TOLERANCE;
+use crate::pane_surface::{self, Surface};
 use crate::tab::{Pane, PaneId, SplitAxis, TabAction};
 use crate::terminal_font::CellFont;
 use crate::terminal_model::TerminalHandle;
 use crate::theme::theme;
 
 use super::action::WorkspaceAction;
-use super::input_element::CommandInput;
+use super::block_list::{self, BlockList};
+use super::input_element::{CommandInput, Ink};
+use super::pane_output::Keys;
 use super::settings_page;
-use super::terminal_element::{Keys, TerminalElement, color};
+use super::terminal_element::{TerminalElement, color};
 use super::view::Workspace;
 
-/// The gap between a pane's edge and the grid inside it.
+/// The gap between a pane's edge and the text inside it, left and right.
 ///
-/// Every logical pixel here is a column or a row the shell does not get, which
-/// is why it is small.
-pub(super) const GRID_PADDING: f32 = 8.;
+/// Every logical pixel here is a column the shell does not get. It is paid
+/// anyway, and it is paid *once*: the list insets its blocks by it, the grid
+/// container insets the grid by it, the composer insets its own text by it,
+/// and [`PaneSizer`] takes it off the pane before it works out how many
+/// columns to tell the pty about. One number, four uses, which is the whole of
+/// why a command echoed by the shell lands under the one that was typed.
+pub(super) const GUTTER: f32 = block_list::GUTTER;
+
+/// The gap between a pane's top and bottom edges and the grid inside it.
+///
+/// A tenth of a cell, which is Warp's vertical grid padding. Small, because
+/// unlike the gutter this one is measured in rows.
+pub(super) const GRID_VERTICAL_PADDING: f32 = 2.;
 
 /// The line between two panes, and the whole of what separates them.
 ///
@@ -67,14 +113,29 @@ pub(super) const GRID_PADDING: f32 = 8.;
 /// that and only when the thin one is in use.
 const DIVIDER_THICKNESS: f32 = 1.;
 
-/// How round the input field's box is.
+/// The rule between two blocks, and above the composer.
 ///
-/// Tighter than the panel around it, which is what makes it read as something
-/// inside the panel rather than as a second panel.
-pub(super) const FIELD_RADIUS: f32 = 6.;
+/// One pixel, in [`Theme::overlay_2`](crate::theme::Theme::overlay_2) — the
+/// foreground at ten per cent, translucent rather than flattened, so it
+/// composites over whatever background the shell has actually made. The
+/// composer's rule and the list's dividers are the same width, the same colour
+/// and the same full-bleed extent, which is what makes the composer read as
+/// one more block rather than as a footer.
+pub(super) const RULE: f32 = 1.;
 
-/// The gap between the field's border and the line being composed.
-pub(super) const FIELD_PADDING: f32 = 6.;
+/// The space between the composer's rule and the line being composed, in
+/// lines.
+///
+/// A block's own `padding_top`, so the composer's first row sits exactly one
+/// block-padding below its rule, as a block's first row does below its
+/// divider.
+const COMPOSER_PADDING_TOP: f32 = 1.1;
+
+/// The space under the composer's last row, in pixels.
+///
+/// Warp's `editor_bottom_padding`, and the pane's own bottom inset: nothing
+/// else pads the bottom of a pane.
+pub(super) const COMPOSER_PADDING_BOTTOM: f32 = 20.;
 
 pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
     let Some(tab) = workspace.tabs().active() else {
@@ -203,7 +264,10 @@ fn panel(
             Align::new(content).top_left().finish(),
         )
         .with_background_color(ground)
-        .with_uniform_padding(if is_settings { 0. } else { GRID_PADDING })
+        // **No padding.** Every inset a pane has is applied by the surface
+        // inside it, because the two lines that have to run edge to edge — the
+        // rule between two blocks and the rule above the composer — would
+        // otherwise be inset by it and would stop reading as the same line.
         .finish()
     })
     // Warp wraps every leaf of its tree in the same handler, dispatching
@@ -221,10 +285,11 @@ fn panel(
 /// The shell's own background, whatever the shell has made of it. That matters
 /// more than it looks: `crook_palette` starts a grid on the pane's colour
 /// precisely so an untouched screen and the pane around it are one surface,
-/// and a pane painted in anything else turns [`GRID_PADDING`] into a visible
-/// frame around the grid — which is exactly what a rounded card was, minus the
+/// and a pane painted in anything else turns [`GUTTER`] into a visible frame
+/// around the grid — which is exactly what a rounded card was, minus the
 /// rounding. A shell that sets its own background with OSC 11 moves the pane
-/// with it, for the same reason.
+/// with it, for the same reason, and it carries the composer too, because the
+/// composer fills nothing of its own.
 ///
 /// The fallback is the palette's default rather than a colour of this module's
 /// choosing: a pane with no shell yet is about to have one, and it should not
@@ -233,8 +298,8 @@ fn pane_ground(terminal: Option<&(TerminalHandle, Arc<Snapshot>)>) -> Color {
     terminal.map_or(theme().surface, |(_, snapshot)| color(snapshot.background))
 }
 
-/// The pane's grid and the field under it, or an explanation of why it has
-/// neither.
+/// The pane's output and the composer under it, or an explanation of why it
+/// has neither.
 ///
 /// The terminal is passed in rather than looked up again: `panel` has already
 /// asked for it, because the pane is painted in the background this same
@@ -256,95 +321,290 @@ fn contents(
         return notice(workspace, pane, reason);
     };
 
+    let id = pane.id();
     let alt_screen = snapshot.alt_screen;
-    let mut grid = TerminalElement::new(snapshot, font.clone()).with_terminal(handle.clone(), keys);
-    // The grid reads the field's line to tell an end of input from a delete,
-    // so it is given the field even on the screen that does not draw one.
-    if let Some(input) = workspace.input(pane.id()) {
-        grid = grid.with_input(input.clone());
+    // Read before the snapshot is handed to whichever surface draws it: the
+    // composer is painted in the colours the *shell* resolved, not the
+    // theme's, so that a shell which changed them takes the field with it.
+    let ink = Ink::of(&snapshot);
+    let surface = pane_surface::of(&snapshot, Instant::now());
+    let output = match surface.surface {
+        Surface::Blocks => blocks(workspace, id, &handle, snapshot, font.clone(), keys, app),
+        Surface::Grid => grid(workspace, id, &handle, snapshot, font.clone(), keys),
+    };
+
+    // The pty is told the *pane's* size, so it is measured here — outside the
+    // column, where the composer appearing and hiding cannot move the box the
+    // measurement comes from.
+    if !surface.composer {
+        return PaneSizer::new(handle, font, output).finish();
+    }
+
+    // The output is the flexible one and the composer is not, so the composer
+    // is measured first and the output divides what is left. That is the whole
+    // of "the output gives up the space rather than the composer overflowing".
+    let column = Flex::column()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        // The panel *is* the room there is. A composer grown past it — a
+        // six-line command in a pane on a laptop — would be drawn over the
+        // pane below it with the output squeezed to nothing above, so it is
+        // measured again against what is left instead. Its own ceiling is the
+        // other half of this: see `input_element::row_budget`.
+        .with_no_overflow()
+        .with_child(Expanded::new(1., output).finish())
+        .with_child(composer(
+            workspace,
+            id,
+            handle.clone(),
+            font.clone(),
+            ComposerState {
+                focused: keys == Keys::All,
+                alt_screen,
+                cut_off: is_cut_off(workspace, id),
+                ink,
+            },
+        ))
+        .finish();
+    PaneSizer::new(handle, font, column).finish()
+}
+
+/// Whether there is output cut off under the composer, which is the only thing
+/// that draws the rule above it.
+///
+/// That is exactly "the list is scrolled off its own bottom": while it is
+/// following the end there is nothing below the fold and no seam is wanted.
+/// The answer comes from the last layout, so the rule appears on the frame
+/// after the wheel that earned it — one frame of a hairline, against a second
+/// layout pass on every scroll.
+///
+/// The list is the only surface this is ever asked about: the grid is drawn
+/// without a composer, so there is no seam to rule. See [`pane_surface::of`].
+fn is_cut_off(workspace: &Workspace, pane: PaneId) -> bool {
+    workspace
+        .pane_blocks(pane)
+        .is_some_and(|view| view.max_offset() - view.offset() > HEIGHT_TOLERANCE)
+}
+
+/// The pane's finished commands as a list, with the open one at the end.
+///
+/// Full width and full bleed: the list insets its own rows by [`GUTTER`] so
+/// that its dividers, its washes and its copy control can reach the pane's
+/// edges — which is what makes the composer's rule and a block divider the
+/// same line rather than two lines of different lengths.
+fn blocks(
+    workspace: &Workspace,
+    pane: PaneId,
+    handle: &TerminalHandle,
+    snapshot: Arc<Snapshot>,
+    font: CellFont,
+    keys: Keys,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let history = workspace.terminal_blocks(pane, app).unwrap_or_default();
+    let view = workspace.pane_blocks(pane).cloned().unwrap_or_default();
+    let mut list =
+        BlockList::new(history, snapshot, font, view).with_terminal(handle.clone(), keys);
+    // The list reads the composer's line to tell an end of input from a
+    // delete, so it is given it here for the same reason the grid is.
+    if let Some(input) = workspace.input(pane) {
+        list = list.with_input(input.clone());
     }
     // The gesture outlives this element by design: a press and the drag that
     // follows it are separated by however many frames the pointer takes to
     // move, and every one of them throws this tree away.
-    if let Some(interaction) = workspace.interaction(pane.id()) {
-        grid = grid.with_selection(
-            pane.id(),
+    if let Some(interaction) = workspace.interaction(pane) {
+        list = list.with_selection(
+            pane,
             interaction.selection.clone(),
             workspace.clipboard().clone(),
         );
     }
-    let grid = grid.finish();
-    if !input_keys::shows_input(alt_screen) {
-        return grid;
-    }
+    list.finish()
+}
 
-    // The grid is the flexible one and the field is not, so the field is
-    // measured first and the grid divides what is left. That is the whole of
-    // "the grid gives up the space rather than the field overflowing".
-    Flex::column()
-        .with_main_axis_size(MainAxisSize::Max)
-        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        // The panel *is* the room there is. A field grown past it — a six-line
-        // command in a pane on a laptop — would be drawn over the panel's own
-        // border and over the pane below it, with the grid squeezed to nothing
-        // above it, so the field is measured again against what is left
-        // instead. Its own ceiling is the other half of this: see `row_budget`.
-        .with_no_overflow()
-        .with_child(Expanded::new(1., grid).finish())
-        .with_child(field(
-            workspace,
-            pane.id(),
-            handle,
-            font,
-            FieldState {
-                focused: keys == Keys::All,
-                alt_screen,
-            },
-        ))
+/// The pane's output as one grid: a full-screen program, or a shell with no
+/// command marks.
+fn grid(
+    workspace: &Workspace,
+    pane: PaneId,
+    handle: &TerminalHandle,
+    snapshot: Arc<Snapshot>,
+    font: CellFont,
+    keys: Keys,
+) -> Box<dyn Element> {
+    let mut grid = TerminalElement::new(snapshot, font).with_terminal(handle.clone(), keys);
+    if let Some(input) = workspace.input(pane) {
+        grid = grid.with_input(input.clone());
+    }
+    if let Some(interaction) = workspace.interaction(pane) {
+        grid = grid.with_selection(
+            pane,
+            interaction.selection.clone(),
+            workspace.clipboard().clone(),
+        );
+    }
+    // The grid's own gutter, rather than the pane's: the pane has none, so
+    // that the composer's rule can run edge to edge.
+    Container::new(grid.finish())
+        .with_horizontal_padding(GUTTER)
+        .with_vertical_padding(GRID_VERTICAL_PADDING)
         .finish()
 }
 
-/// What the field is drawn as: whether it has the keys, and which screen the
-/// pane is on.
+/// What the composer is drawn as: whether it has the keys, which screen the
+/// pane is on, and whether anything is cut off above it.
 #[derive(Copy, Clone)]
-struct FieldState {
+struct ComposerState {
     focused: bool,
     alt_screen: bool,
+    cut_off: bool,
+    ink: Ink,
 }
 
-/// The pane's command input, in the box that makes it read as a text field.
-fn field(
+/// The pane's command input, on the pane's own ground and in the pane's own
+/// font.
+///
+/// **No box.** No background, no corner radius, no side or bottom border, no
+/// margin, and no focus ring — the caret is the whole of the focus
+/// affordance, which is Warp's answer and the reason its composer does not
+/// read as a widget bolted under the output. What is left is one conditional
+/// hairline along the top, at the width and in the role the list draws between
+/// two blocks, and the same gutter the output uses.
+fn composer(
     workspace: &Workspace,
     pane: PaneId,
     handle: TerminalHandle,
     font: CellFont,
-    state: FieldState,
+    state: ComposerState,
 ) -> Box<dyn Element> {
     let Some(input) = workspace.input(pane) else {
         // Unreachable: an open pane always has one, for the same reason it
         // always has its mouse state.
-        log::error!("pane {pane:?} has no input state and its field was skipped");
+        log::error!("pane {pane:?} has no input state and its composer was skipped");
         return Empty::new().finish();
     };
 
-    let composing = CommandInput::new(input.clone(), font, workspace.clipboard().clone())
+    let cell = font.metrics().height;
+    let mut composing = CommandInput::new(input.clone(), font, workspace.clipboard().clone())
         .with_terminal(handle, state.focused, state.alt_screen)
-        .finish();
+        .with_ink(state.ink);
+    // So that Enter brings the list back to the block the command is about to
+    // make, however far up somebody had scrolled to read.
+    if let Some(view) = workspace.pane_blocks(pane) {
+        composing = composing.with_blocks(view.clone());
+    }
+    let composing = composing.finish();
 
-    // Darker than the panel it sits in rather than lighter, which is what a
-    // text field looks like on a dark ground: a well to type into.
-    let border = if state.focused {
-        theme().accent
-    } else {
-        theme().border
-    };
+    let rule = if state.cut_off { RULE } else { 0. };
     Container::new(composing)
-        .with_background_color(theme().ground)
-        .with_border(Border::all(1.).with_border_color(border))
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(FIELD_RADIUS)))
-        .with_margin_top(GRID_PADDING)
-        .with_uniform_padding(FIELD_PADDING)
+        .with_border(Border::top(rule).with_border_color(theme().overlay_2))
+        .with_padding(Padding {
+            // Nothing above the line when there is no rule above it: the
+            // composer is then simply the next row of the terminal, directly
+            // under the prompt the shell drew, and a gap there would be the
+            // seam this whole arrangement exists to remove. When there *is* a
+            // rule, it gets a block's own padding_top so that the composer
+            // sits under its line exactly as a block sits under its divider —
+            // measured from the line, because an inset border has already
+            // taken its pixel out of the box.
+            top: if state.cut_off {
+                (COMPOSER_PADDING_TOP * cell - rule).max(0.)
+            } else {
+                0.
+            },
+            left: GUTTER,
+            bottom: COMPOSER_PADDING_BOTTOM,
+            right: GUTTER,
+        })
         .finish()
+}
+
+/// Resizes a pane's pty from the pane's own rectangle, and draws its child
+/// inside it.
+///
+/// **This is the only place a pty is resized**, and the rectangle it is
+/// measured from is the pane's rather than the output's. The output's box
+/// changes whenever the composer appears, hides or grows a line, and resizing
+/// the child on each of those sends a storm of `SIGWINCH`s at programs that
+/// handle them badly. Reporting the pane also means a full-screen program that
+/// fills the pane fits it.
+///
+/// Everything but the resize is pass-through: the child is laid out at this
+/// element's own box, painted at its origin, and offered every event first.
+struct PaneSizer {
+    handle: TerminalHandle,
+    font: CellFont,
+    child: Box<dyn Element>,
+    size: Option<Vector2F>,
+    origin: Option<Point>,
+}
+
+impl PaneSizer {
+    /// Wraps `child`, resizing `handle` to whatever box this is given.
+    fn new(handle: TerminalHandle, font: CellFont, child: Box<dyn Element>) -> Self {
+        Self {
+            handle,
+            font,
+            child,
+            size: None,
+            origin: None,
+        }
+    }
+}
+
+impl Element for PaneSizer {
+    fn layout(
+        &mut self,
+        constraint: SizeConstraint,
+        ctx: &mut LayoutContext,
+        app: &AppContext,
+    ) -> Vector2F {
+        // A parent that leaves an axis open has no pane rectangle to offer,
+        // and the smallest acceptable extent is then the only number in the
+        // question — the same answer the surfaces inside give.
+        let size = vec2f(
+            bounded(constraint.max.x(), constraint.min.x()),
+            bounded(constraint.max.y(), constraint.min.y()),
+        );
+        let metrics = self.font.metrics();
+        // The pane minus the insets every surface applies, so the count the
+        // pty is told does not change when the surface does.
+        let (columns, rows) = metrics.grid_for(
+            size.x() - GUTTER * 2.,
+            size.y() - GRID_VERTICAL_PADDING * 2.,
+        );
+        self.handle.resize(
+            TerminalSize::new(columns, rows)
+                .with_cell_size(metrics.width.round() as u16, metrics.height.round() as u16),
+        );
+
+        self.size = Some(size);
+        self.child.layout(SizeConstraint::strict(size), ctx, app);
+        size
+    }
+
+    fn paint(&mut self, origin: Vector2F, ctx: &mut PaintContext, app: &AppContext) {
+        self.origin = Some(Point::from_vec2f(origin, ctx.scene.z_index()));
+        self.child.paint(origin, ctx, app);
+    }
+
+    fn dispatch_event(
+        &mut self,
+        event: &DispatchedEvent,
+        ctx: &mut EventContext,
+        app: &AppContext,
+    ) -> bool {
+        self.child.dispatch_event(event, ctx, app)
+    }
+
+    fn size(&self) -> Option<Vector2F> {
+        self.size
+    }
+
+    fn origin(&self) -> Option<Point> {
+        self.origin
+    }
 }
 
 /// What a panel with no grid says.
@@ -369,6 +629,11 @@ fn notice(workspace: &Workspace, pane: &Pane, reason: String) -> Box<dyn Element
                 .finish(),
         )
         .finish()
+}
+
+/// An extent to lay out at, given a maximum that may be unbounded.
+fn bounded(max: f32, min: f32) -> f32 {
+    if max.is_finite() { max } else { min }
 }
 
 /// A hairline between two panes.

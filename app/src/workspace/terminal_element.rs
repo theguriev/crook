@@ -27,10 +27,21 @@
 //! than wrong: the row would be silently short, and copying the screen would
 //! disagree with looking at it.
 //!
-//! Layout is also where the pty learns how big it is. The element is told what
-//! space it has, divides it by the cell, and resizes the terminal — but only
-//! when the whole number of columns or rows actually moved, because a resize is
-//! a syscall, a `SIGWINCH`, and a full-screen program redrawing itself.
+//! # When a pane draws this rather than a list of blocks
+//!
+//! Three cases, and [`crate::pane_surface`] states all three: a full-screen
+//! program on the alternate screen, a command that has been running on the
+//! primary screen for longer than a blink, and a shell with no command marks
+//! whose one open block has already grown past the top of the viewport. The
+//! first two get the whole pane and every key; the third keeps its composer
+//! and scrolls through the emulator's own history, exactly as every pane did
+//! before blocks existed.
+//!
+//! **The pty is not resized here.** It is resized from the pane's rectangle,
+//! by `body::PaneSizer`, because this element's box moves whenever the
+//! composer appears or hides — see that type for the whole argument. What is
+//! left here is the consequence: a snapshot measured for the grid the last
+//! frame had is refreshed during layout rather than painted into the new box.
 //!
 //! # Selecting the output
 //!
@@ -56,8 +67,8 @@
 use std::sync::Arc;
 
 use crook_terminal::{
-    CellFlags, CellSide, Cursor, CursorShape, Rgb, SelectionKind, Snapshot, SnapshotCell,
-    TerminalSize, ViewportPoint,
+    CellFlags, CellSide, Cursor, CursorShape, Rgb, RowCombining, Snapshot, SnapshotCell,
+    ViewportPoint,
 };
 use crookui_core::AppContext;
 use crookui_core::element::{Element, SizeConstraint};
@@ -67,16 +78,15 @@ use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 use crookui_core::scene::Scene;
 
 use crate::clipboard::Clipboard;
-use crate::input_keys::{self, Platform, Route};
 use crate::pane_input::PaneInput;
 use crate::pane_selection::PaneSelection;
+use crate::pane_surface;
 use crate::tab::PaneId;
 use crate::terminal_font::{CellFont, CellMetrics};
-use crate::terminal_keys;
 use crate::terminal_model::TerminalHandle;
 use crate::theme::theme;
 
-use super::action::WorkspaceAction;
+use super::pane_output::{Keys, Output, Typed, selection_kind};
 
 /// How thick the rules a cell can carry are, as a fraction of the font size.
 ///
@@ -95,67 +105,20 @@ const STRIKEOUT_HEIGHT_RATIO: f32 = 0.28;
 /// How wide the beam cursor and the hollow block's outline are drawn.
 const CURSOR_STROKE: f32 = 2.;
 
-/// What a pane's grid does with the keys that reach the window.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum Keys {
-    /// Nothing: some other pane is the focused one.
-    None,
-    /// Only the keys that interrupt, end and suspend a command.
-    ///
-    /// What a focused pane still takes while a modal menu is open over the
-    /// window. The menu freezes everything under it, and a `sleep 30` that
-    /// could not be interrupted until somebody found the mouse would be the
-    /// menu taking away the one key a terminal must never lose.
-    Signals,
-    /// Everything the routing rule gives the shell.
-    All,
-}
-
 /// One pane's terminal grid.
 pub struct TerminalElement {
-    /// The grid to paint. Replaced during layout when a resize moved it, so a
-    /// frame that changed the column count draws the new one rather than the
-    /// old one stretched over it.
+    /// The grid to paint. Replaced during layout when the pane resized the pty
+    /// under it, so a frame that changed the column count draws the new grid
+    /// rather than the old one stretched over it.
     snapshot: Arc<Snapshot>,
     font: CellFont,
 
-    /// The terminal behind the grid, when there is a live one.
-    ///
-    /// `None` draws a snapshot and nothing else — no resize, no typing — which
-    /// is what a test does, and what a pane whose shell has gone would do.
-    handle: Option<TerminalHandle>,
-
-    /// How much of the keyboard this pane's grid takes.
-    ///
-    /// Decided by the workspace rather than here, because it is the workspace
-    /// that knows which pane is focused and whether a menu is up over it. See
-    /// [`crate::terminal_keys`] for the other half of the same line.
-    keys: Keys,
-
-    /// The line being composed under this grid, when there is a field.
-    ///
-    /// Read at the moment a key arrives rather than baked in when the frame
-    /// was built, because it decides what Ctrl-D means: an end of input on an
-    /// empty line, and a delete over a written one.
-    input: Option<PaneInput>,
-
-    /// The pointer gesture that selects text out of this grid, and where a
-    /// copy of it goes.
-    ///
-    /// `None` for a grid nobody can select from: a test painting a snapshot,
-    /// or a pane with no terminal behind it to ask what is selected.
-    mouse: Option<Mouse>,
+    /// The keyboard and the selection, which a block list answers exactly the
+    /// same way. See [`Output`].
+    output: Output,
 
     size: Option<Vector2F>,
     origin: Option<Point>,
-}
-
-/// What the grid needs to be selectable: which pane this is, the gesture the
-/// workspace keeps for it, and somewhere for the copy to go.
-struct Mouse {
-    pane: PaneId,
-    gesture: PaneSelection,
-    clipboard: Clipboard,
 }
 
 impl TerminalElement {
@@ -164,27 +127,23 @@ impl TerminalElement {
         Self {
             snapshot,
             font,
-            handle: None,
-            keys: Keys::None,
-            input: None,
-            mouse: None,
+            output: Output::detached(),
             size: None,
             origin: None,
         }
     }
 
-    /// Attaches the terminal the snapshot came from, so the grid can resize the
-    /// pty it measures and type into it as far as `keys` allows.
+    /// Attaches the terminal the snapshot came from, so the grid can be typed
+    /// into as far as `keys` allows.
     pub fn with_terminal(mut self, handle: TerminalHandle, keys: Keys) -> Self {
-        self.handle = Some(handle);
-        self.keys = keys;
+        self.output = self.output.with_terminal(handle, keys);
         self
     }
 
     /// Attaches the field under this grid, whose line decides what Ctrl-D
     /// means.
     pub fn with_input(mut self, input: PaneInput) -> Self {
-        self.input = Some(input);
+        self.output = self.output.with_input(input);
         self
     }
 
@@ -197,128 +156,17 @@ impl TerminalElement {
         gesture: PaneSelection,
         clipboard: Clipboard,
     ) -> Self {
-        self.mouse = Some(Mouse {
-            pane,
-            gesture,
-            clipboard,
-        });
+        self.output = self.output.with_selection(pane, gesture, clipboard);
         self
     }
 
-    /// The typed keystroke, if this pane is the one that should have it and the
-    /// shell is the half of the pane it belongs to.
+    /// The typed keystroke, if this pane is the one that should have it and
+    /// the shell is the half of the pane it belongs to.
     fn type_key(&self, event: &Event, ctx: &mut EventContext) -> bool {
-        let Event::KeyDown { keystroke, chars } = event else {
-            return false;
-        };
-        if self.keys == Keys::None {
-            return false;
-        }
-        let Some(handle) = self.handle.as_ref() else {
-            return false;
-        };
-
-        // The whole policy is [`input_keys::route`]: a selection in the output
-        // owns the copy chord, on the alt screen the program has every key, on
-        // the normal screen the shell has only the ones that interrupt, end and
-        // suspend, and the input field below has the rest.
-        //
-        // A modal menu suspends the selection's claim rather than the menu's
-        // own filter below: while one is up, the three keys a running command
-        // has to keep hearing mean what they always mean, and `ctrl-c` cannot
-        // be spent on the clipboard by a selection nobody can see the pointer
-        // on any more. A grid with nowhere to copy *to* reports the same, so
-        // the interrupt is never taken by a chord that could not have answered
-        // it.
-        let modal = self.keys == Keys::Signals;
-        let can_copy = !modal && self.mouse.is_some();
-        let pane = input_keys::Pane {
-            alt_screen: self.snapshot.alt_screen,
-            line_is_empty: self
-                .input
-                .as_ref()
-                .is_none_or(|input| input.editor().is_empty()),
-            grid_has_selection: can_copy && handle.has_selection(),
-        };
-        let route = input_keys::route(keystroke, chars, pane, Platform::current());
-
-        if route == Route::CopyOutput {
-            return self.copy_selection(handle, ctx);
-        }
-        // **Typing releases the selection**, whichever half of the pane the key
-        // belongs to: a line going into the field under a highlight nobody is
-        // aiming at any more is the same stale highlight as one left over a
-        // screen that has scrolled. A key the keymap has no meaning for changes
-        // nothing and so releases nothing.
-        if route != Route::Ignored && pane.grid_has_selection {
-            self.release_selection(ctx);
-        }
-
-        if !route.reaches_the_shell() {
-            return false;
-        }
-        // A modal menu takes the rest away: everything but the three keys a
-        // running command has to keep hearing.
-        if modal && !input_keys::is_signal(keystroke) {
-            return false;
-        }
-
-        let Some((key, modifiers)) = terminal_keys::key_for(keystroke, chars) else {
-            return false;
-        };
-        handle.send_key(key, modifiers)
+        self.output.type_key(event, self.snapshot.alt_screen, ctx) != Typed::Ignored
     }
 
-    /// Puts what is selected in the output on the clipboard and lets go of it.
-    ///
-    /// Letting go is not tidiness. Off macOS this chord is also SIGINT, and the
-    /// selection is the only thing standing between a person and an interrupt
-    /// key that no longer interrupts — so the very next press of it does. It is
-    /// also the only sign a copy happened at all: the highlight goes away.
-    ///
-    /// It goes away even on the copy that could not be made — a machine with no
-    /// clipboard at all, or one whose clipboard another process was holding.
-    /// **That is deliberate, and it is the lesser of two bad answers.** Keeping
-    /// the selection would be more truthful about the copy, and it would also
-    /// hand the same selection the next press of this chord, and the one after
-    /// it: on a machine where the clipboard never opens, that is a terminal
-    /// whose interrupt never works again. A copy that did not happen costs a
-    /// highlight and a line in the log; one that disarmed the interrupt would
-    /// cost the pane.
-    fn copy_selection(&self, handle: &TerminalHandle, ctx: &mut EventContext) -> bool {
-        let Some(mouse) = self.mouse.as_ref() else {
-            return false;
-        };
-        if !handle
-            .selection_text()
-            .is_some_and(|copied| mouse.clipboard.write(&copied))
-        {
-            log::warn!("the selection could not be put on the clipboard; letting go of it anyway");
-        }
-        self.release_selection(ctx);
-        true
-    }
-
-    /// Asks for the selection to be let go of, once this keystroke is done
-    /// with.
-    ///
-    /// Dispatched rather than done here, and [`WorkspaceAction::ReleaseSelection`]
-    /// carries the reason: the field under this grid routes the same keystroke
-    /// against the same question a moment later, and a grid that had already
-    /// changed the answer would have it route as though nothing were selected.
-    fn release_selection(&self, ctx: &mut EventContext) {
-        let Some(mouse) = self.mouse.as_ref() else {
-            return;
-        };
-        ctx.dispatch_typed_action(WorkspaceAction::ReleaseSelection(mouse.pane));
-    }
-
-    /// Starts a selection where a press landed, in the units the click count
-    /// asks for: a character, a word, or a whole line.
-    ///
-    /// Alt makes it a block, which is how a column is taken out of aligned
-    /// output — `ls -l`, a table, a diff — without the rest of every line
-    /// coming with it.
+    /// Starts a selection where a press landed.
     fn press(
         &self,
         position: Vector2F,
@@ -326,56 +174,33 @@ impl TerminalElement {
         modifiers: Modifiers,
         ctx: &mut EventContext,
     ) -> bool {
-        let Some(mouse) = self.mouse.as_ref() else {
+        let Some((at, side)) = self.cell_at(position) else {
             return false;
         };
-        let (Some(handle), Some((at, side))) = (self.handle.as_ref(), self.cell_at(position))
-        else {
-            return false;
-        };
-
-        let kind = match (click_count, modifiers.alt) {
-            (1, true) => SelectionKind::Block,
-            // A press that is never dragged anywhere leaves an *empty* simple
-            // selection, which is no selection at all — so a plain click on the
-            // output is also how the last one is let go of.
-            (1, _) => SelectionKind::Simple,
-            (2, _) => SelectionKind::Semantic,
-            _ => SelectionKind::Lines,
-        };
-        handle.start_selection(kind, at, side);
-        mouse.gesture.begin();
-        ctx.notify();
-        true
+        self.output
+            .press(at, side, selection_kind(click_count, modifiers.alt), ctx)
     }
 
     /// Drags the open end of the selection to the pointer, scrolling the
     /// viewport when the pointer has left the grid.
     fn drag(&self, position: Vector2F, ctx: &mut EventContext) -> bool {
-        let Some(mouse) = self.mouse.as_ref() else {
-            return false;
-        };
         // Deliberately not hit-tested: dragging *past* the pane is how a
-        // selection is taken to the end of a line, and how it is taken past the
-        // end of the screen. What keeps this pane's grid out of a drag that
-        // began in the field, or in the pane beside it, is that only the pane
-        // the press landed on has a gesture open.
-        if !mouse.gesture.is_dragging() {
+        // selection is taken to the end of a line, and how it is taken past
+        // the end of the screen. What keeps this pane's grid out of a drag
+        // that began in the field, or in the pane beside it, is that only the
+        // pane the press landed on has a gesture open.
+        if !self.output.is_dragging() {
             return false;
         }
-        let (Some(handle), Some((at, side))) = (self.handle.as_ref(), self.cell_at(position))
-        else {
+        let Some((at, side)) = self.cell_at(position) else {
             return false;
         };
-
-        handle.drag_selection(at, side, self.autoscroll(position));
-        ctx.notify();
-        true
+        self.output.drag(at, side, self.autoscroll(position), ctx)
     }
 
     /// Ends the gesture, reporting whether this pane had one.
     fn release(&self) -> bool {
-        self.mouse.as_ref().is_some_and(|mouse| mouse.gesture.end())
+        self.output.release()
     }
 
     /// The cell of the viewport a window position lands on, and which half of
@@ -461,7 +286,7 @@ impl TerminalElement {
             return false;
         }
 
-        let Some(handle) = self.handle.as_ref() else {
+        let Some(handle) = self.output.handle() else {
             return false;
         };
         let height = self.font.metrics().height;
@@ -488,17 +313,20 @@ impl Element for TerminalElement {
             bounded(constraint.max.y(), constraint.min.y()),
         );
 
-        let metrics = self.font.metrics();
-        let (columns, rows) = metrics.grid_for(size.x(), size.y());
-        if let Some(handle) = self.handle.as_ref() {
-            let resized = handle.resize(
-                TerminalSize::new(columns, rows)
-                    .with_cell_size(metrics.width.round() as u16, metrics.height.round() as u16),
-            );
-            // Only when the grid actually moved. The snapshot this element was
-            // built with was measured for the old one, and painting it into the
-            // new box would show a frame of the wrong width.
-            if resized {
+        // **The pty is not resized here.** It is resized from the pane's own
+        // rectangle, by `body::PaneSizer`, because this element's box moves
+        // whenever the composer appears or hides and a `SIGWINCH` per such
+        // frame is a storm at programs that handle them badly.
+        //
+        // What is left is the consequence: the pane resized the terminal
+        // *before* this was laid out, so the snapshot this frame was built
+        // with may have been measured for the grid the last frame had.
+        // Painting it into the new box would draw a frame of the wrong width.
+        if let Some(handle) = self.output.handle() {
+            let (columns, rows) = self.font.metrics().grid_for(size.x(), size.y());
+            let stale = usize::from(columns) != self.snapshot.columns
+                || usize::from(rows) != self.snapshot.rows;
+            if stale {
                 self.snapshot = handle.snapshot();
             }
         }
@@ -517,8 +345,8 @@ impl Element for TerminalElement {
         // the normal screen that is the field below, so the shell's own cursor
         // is drawn as the outline an unfocused terminal gets: two filled block
         // cursors in one pane say nothing about which of them is listening.
-        let owns_caret =
-            self.keys == Keys::All && !input_keys::shows_input(self.snapshot.alt_screen);
+        let owns_caret = self.output.keys() == Keys::All
+            && pane_surface::of(&self.snapshot, std::time::Instant::now()).output_owns_caret();
         paint_grid(
             &self.snapshot,
             &self.font,
@@ -658,33 +486,18 @@ fn paint_grid(
         // in its own ink. Selecting text changes its ground, never its colour.
         paint_selection(snapshot, row, columns, origin.x(), top, metrics, scene);
         paint_rules(cells, origin.x(), top, metrics, scene);
-
-        for (column, cell) in cells.iter().enumerate() {
-            // The trailing half of a double-width character: its background
-            // belongs to the pair and its glyph was drawn a column ago.
-            if cell.flags.contains(CellFlags::WIDE_SPACER) || is_blank(cell.c) {
-                continue;
-            }
-
-            let pen = vec2f(
-                origin.x() + column as f32 * metrics.width,
-                top + metrics.baseline,
-            );
-            let foreground = color(if inverted == Some((row, column)) {
-                snapshot.background
-            } else {
-                cell.foreground
-            });
-            let face = font.face(cell.flags);
-            paint_cell(cell.c, pen, face, foreground, font, metrics, scene);
-
-            // Combining marks are drawn from the same pen position the
-            // character was: a mark glyph carries its own offset from the
-            // character it sits on, and no column of its own to sit in.
-            for mark in snapshot.zerowidth(row, column) {
-                paint_cell(*mark, pen, face, foreground, font, metrics, scene);
-            }
-        }
+        paint_glyphs(
+            cells,
+            &RowMarks::Snapshot { snapshot, row },
+            origin.x(),
+            top,
+            font,
+            Ink {
+                ground: snapshot.background,
+                inverted: inverted.and_then(|(at, column)| (at == row).then_some(column)),
+            },
+            scene,
+        );
     }
 
     if let (Some(cursor), Some(shape)) = (snapshot.cursor.as_ref(), shape)
@@ -692,6 +505,91 @@ fn paint_grid(
         && cursor.column < columns
     {
         paint_cursor(cursor, shape, origin, metrics, scene);
+    }
+}
+
+/// Where a row's zero-width characters come from.
+///
+/// A combining accent belongs to the cell before it and has no column of its
+/// own, so it is stored beside the row rather than in it — and the two stores
+/// a row can come out of keep it differently. This is the one difference
+/// between painting a live row and a harvested one, and it is why the rest of
+/// the cell path is shared rather than written twice.
+pub(super) enum RowMarks<'a> {
+    /// A live row's, looked up per column in the snapshot it belongs to.
+    Snapshot {
+        /// The snapshot holding the row.
+        snapshot: &'a Snapshot,
+        /// Which of its rows this is.
+        row: usize,
+    },
+    /// A harvested row's, which arrive already scoped to the row.
+    Block(&'a [RowCombining]),
+}
+
+impl RowMarks<'_> {
+    /// The characters stacked on one cell of the row.
+    fn at(&self, column: usize) -> &[char] {
+        match self {
+            Self::Snapshot { snapshot, row } => snapshot.zerowidth(*row, column),
+            Self::Block(marks) => marks
+                .iter()
+                .find(|entry| entry.column == column)
+                .map_or(&[], |entry| &entry.characters),
+        }
+    }
+}
+
+/// What decides a glyph's colour beyond the cell's own.
+#[derive(Copy, Clone)]
+pub(super) struct Ink {
+    /// The colour behind the row, which a character under a filled cursor is
+    /// drawn in so that it does not disappear into the fill.
+    pub(super) ground: Rgb,
+    /// The column that cursor is on, when it is on this row.
+    pub(super) inverted: Option<usize>,
+}
+
+/// Draws one row's characters, and whatever is stacked on them.
+///
+/// The monospace fast path, and the only one: a harvested block's row is
+/// materialised into a scratch `Vec<SnapshotCell>` and handed straight to this,
+/// so a finished command and a live one are drawn by the same code. Everything
+/// that makes an idle screen cheap is here — a blank cell draws nothing, the
+/// trailing half of a double-width character draws nothing, and a glyph is
+/// placed by multiplying a column by a fixed advance rather than by shaping.
+pub(super) fn paint_glyphs(
+    cells: &[SnapshotCell],
+    marks: &RowMarks<'_>,
+    left: f32,
+    top: f32,
+    font: &CellFont,
+    ink: Ink,
+    scene: &mut Scene,
+) {
+    let metrics = font.metrics();
+    for (column, cell) in cells.iter().enumerate() {
+        // The trailing half of a double-width character: its background
+        // belongs to the pair and its glyph was drawn a column ago.
+        if cell.flags.contains(CellFlags::WIDE_SPACER) || is_blank(cell.c) {
+            continue;
+        }
+
+        let pen = vec2f(left + column as f32 * metrics.width, top + metrics.baseline);
+        let foreground = color(if ink.inverted == Some(column) {
+            ink.ground
+        } else {
+            cell.foreground
+        });
+        let face = font.face(cell.flags);
+        paint_cell(cell.c, pen, face, foreground, font, metrics, scene);
+
+        // Combining marks are drawn from the same pen position the character
+        // was: a mark glyph carries its own offset from the character it sits
+        // on, and no column of its own to sit in.
+        for mark in marks.at(column) {
+            paint_cell(*mark, pen, face, foreground, font, metrics, scene);
+        }
     }
 }
 
@@ -736,7 +634,7 @@ fn shape_of(cursor: &Cursor, owns_caret: bool) -> CursorShape {
 /// Adjacent cells sharing a colour become one rectangle. A line of `ls --color`
 /// is a handful of runs; painting it per cell would be one instanced quad per
 /// column, most of them invisible.
-fn paint_backgrounds(
+pub(super) fn paint_backgrounds(
     cells: &[SnapshotCell],
     ground: Rgb,
     left: f32,
@@ -810,7 +708,7 @@ fn paint_selection(
 /// right from its middle does not. Outside the row the answer is its first cell
 /// on the left and its last on the right, which is what a drag that has left
 /// the pane means.
-fn column_at(x: f32, width: f32, columns: usize) -> (usize, CellSide) {
+pub(super) fn column_at(x: f32, width: f32, columns: usize) -> (usize, CellSide) {
     if x < 0. {
         return (0, CellSide::Left);
     }
@@ -834,7 +732,7 @@ fn column_at(x: f32, width: f32, columns: usize) -> (usize, CellSide) {
 /// two hundred abutting rectangles of identical height and colour where one
 /// would do — a megabyte of instance data per frame, per pane, for a page that
 /// is not even moving.
-fn paint_rules(
+pub(super) fn paint_rules(
     cells: &[SnapshotCell],
     left: f32,
     top: f32,
@@ -895,7 +793,7 @@ fn rule_runs(
     }
 }
 
-/// Draws the cursor in `shape`.
+/// Draws the cursor in `shape`, at the cell the viewport puts it in.
 fn paint_cursor(
     cursor: &Cursor,
     shape: CursorShape,
@@ -903,13 +801,44 @@ fn paint_cursor(
     metrics: CellMetrics,
     scene: &mut Scene,
 ) {
-    let cell = RectF::new(
+    paint_cursor_in(
+        cursor,
+        shape,
         vec2f(
             origin.x() + cursor.column as f32 * metrics.width,
             origin.y() + cursor.row as f32 * metrics.height,
         ),
-        vec2f(metrics.width, metrics.height),
+        metrics,
+        scene,
     );
+}
+
+/// Draws the cursor at a cell somebody else placed.
+///
+/// What the block list needs: the open block's rows are drawn where the *list*
+/// puts them, which is not where the viewport would, so the caller has already
+/// done the arithmetic. `owns_caret` is whether typing would go here — a
+/// surface that is not listening draws an outline where a listening one draws
+/// the filled block the program asked for.
+pub(super) fn paint_cursor_at(
+    cursor: &Cursor,
+    owns_caret: bool,
+    at: Vector2F,
+    metrics: CellMetrics,
+    scene: &mut Scene,
+) {
+    paint_cursor_in(cursor, shape_of(cursor, owns_caret), at, metrics, scene);
+}
+
+/// Draws the cursor in `shape`, in the cell whose top-left corner is `at`.
+fn paint_cursor_in(
+    cursor: &Cursor,
+    shape: CursorShape,
+    at: Vector2F,
+    metrics: CellMetrics,
+    scene: &mut Scene,
+) {
+    let cell = RectF::new(at, vec2f(metrics.width, metrics.height));
     let ink = color(cursor.color);
 
     let bounds = match shape {

@@ -11,7 +11,7 @@ use std::fs;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use crookui_core::event::{Event, Keystroke, Modifiers, MouseButton, ScrollDelta};
 use crookui_core::executor::{Background, LocalQueue};
@@ -539,10 +539,30 @@ impl Harness {
 
     /// Opens a shell in every pane, the way the window delegate does at
     /// startup. Returns false when the machine has no shell to open.
+    ///
+    /// **With no command marks.** A shell that reports no boundaries keeps the
+    /// whole session in one open block, which is the state a drag across the
+    /// output can select in — see `block_list`, where selection is still the
+    /// emulator's and therefore reaches the open block only. It is also a real
+    /// state a person is in, on any shell the integration has no snippet for.
+    /// The tests that are *about* blocks ask for marks with
+    /// [`Self::start_terminals_with_marks`].
     fn start_terminals(&mut self) -> bool {
+        self.start_shells(false)
+    }
+
+    /// The same, with the command marks a block list is built out of.
+    fn start_terminals_with_marks(&mut self) -> bool {
+        self.start_shells(true)
+    }
+
+    fn start_shells(&mut self, marks: bool) -> bool {
         let workspace = &self.workspace;
         self.app.update(|ctx| {
-            workspace.update(ctx, |workspace, ctx| workspace.start_terminals(ctx));
+            workspace.update(ctx, |workspace, ctx| {
+                workspace.set_shell_marks(marks, ctx);
+                workspace.start_terminals(ctx);
+            });
         });
 
         let Some(pane) = self.focused_pane_id() else {
@@ -823,9 +843,33 @@ fn close_boxes(scene: &Scene) -> Vec<RectF> {
         .collect()
 }
 
-/// The input fields that are currently drawn, by their rounded boxes.
-fn field_boxes(scene: &Scene) -> Vec<RectF> {
-    rects_rounded_by(scene, Radius::Pixels(crate::workspace::body::FIELD_RADIUS))
+/// The composers that are currently drawn, by the box each one paints.
+///
+/// There is no box, and that is exactly how one is found: the composer paints
+/// a rect with no fill, no radius and no side borders — one top edge and
+/// nothing else, which is the whole of its chrome. A settings page's theme
+/// cards carry the same top-only edge, so the second half of the test is that
+/// a composer runs the full width of a pane: it is a direct child of the
+/// pane's column, and its rule is full-bleed for exactly that reason.
+fn composer_boxes(scene: &Scene) -> Vec<RectF> {
+    let panels = panel_boxes(scene);
+    visible_rects(scene)
+        .filter(|(rect, _)| {
+            rect.background == Fill::None
+                && rect.corner_radius == CornerRadius::default()
+                && rect.border.top
+                && !rect.border.left
+                && !rect.border.bottom
+                && !rect.border.right
+        })
+        .map(|(_, bounds)| bounds)
+        .filter(|bounds| {
+            panels.iter().any(|panel| {
+                (panel.min_x() - bounds.min_x()).abs() < 0.5
+                    && (panel.max_x() - bounds.max_x()).abs() < 0.5
+            })
+        })
+        .collect()
 }
 
 /// The button that opens another tab, by its rounded box.
@@ -1329,7 +1373,7 @@ fn selected_chips(scene: &Scene) -> Vec<RectF> {
 /// panel are painted in. So it is found by what it is *not*: filled like a
 /// terminal, and neither bordered (the header's underline, the panel's right
 /// edge) nor rounded (the usage chip, and the well a pane composes its next
-/// command in — see [`field_boxes`] for that one).
+/// command in — see [`composer_boxes`] for that one).
 ///
 /// The one other thing that matches is the grid's own ground, painted inside
 /// the pane it belongs to, so a rect contained in another is dropped. Without
@@ -4044,6 +4088,8 @@ fn a_settings_pane_can_be_split_beside_a_session() {
 mod shells {
     use std::time::Duration;
 
+    use crook_terminal::BlockState;
+
     use super::*;
     use crate::clipboard::Clipboard;
 
@@ -4062,34 +4108,126 @@ mod shells {
         harness.focused_pane_id()
     }
 
+    /// A pane whose shell reports command boundaries, or `None` on a machine
+    /// where none could be started.
+    fn marked_shell(harness: &mut Harness) -> Option<PaneId> {
+        if !harness.start_terminals_with_marks() {
+            return None;
+        }
+        harness.focused_pane_id()
+    }
+
+    /// Waits for the shell to report that it is *at* a prompt.
+    ///
+    /// Not merely for it to have printed something. A pty echoes what is
+    /// written to it whether or not a child has read it yet, and a command
+    /// submitted into the block that is still open from before the first
+    /// prompt is a command the shell never reports a boundary for.
+    fn await_prompt(harness: &mut Harness, pane: PaneId) {
+        harness.wait_for("the shell never reached a prompt", |harness| {
+            harness
+                .workspace
+                .read(&harness.app, |workspace, app| {
+                    let (_, snapshot) = workspace.terminal(pane, app)?;
+                    Some(snapshot.live_block.state == BlockState::AtPrompt)
+                })
+                .unwrap_or_default()
+        });
+        harness.frame();
+    }
+
     /// The panel of the one pane, which is the ground it paints that is not a
     /// field.
     fn panel_of_the_pane(harness: &mut Harness) -> RectF {
         let scene = harness.frame();
-        let fields = field_boxes(&scene);
+        let fields = composer_boxes(&scene);
         panel_boxes(&scene)
             .into_iter()
             .find(|panel| !fields.iter().any(|field| field.origin() == panel.origin()))
             .expect("a pane draws a panel")
     }
 
-    /// The point in the window where a cell of the one pane's grid is drawn.
+    /// The point in the window where a cell of the one pane's output is drawn.
     ///
     /// `across` is how far into the cell horizontally, in cells: a tenth is the
     /// left half of it, which is the side a selection starts before, and nine
     /// tenths is the right half, which is the side it ends after.
+    ///
+    /// `row` is a viewport row either way, because the pane's shell reports no
+    /// command marks here and the open block therefore holds the whole
+    /// session. Where those rows are drawn is not the same on both surfaces:
+    /// the grid puts row zero at the top of the pane, and the list bottom-
+    /// aligns the open block against the composer, so the composer is measured
+    /// rather than assumed.
     fn grid_cell(harness: &mut Harness, row: usize, column: usize, across: f32) -> Vector2F {
         let panel = panel_of_the_pane(harness);
         let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
-        panel.origin()
-            + vec2f(
-                crate::workspace::body::GRID_PADDING,
-                crate::workspace::body::GRID_PADDING,
-            )
+
+        let top = if draws_blocks(harness) {
+            let scene = harness.frame();
+            let composer = composer_boxes(&scene)
+                .first()
+                .copied()
+                .expect("a pane on the normal screen draws a composer");
+            composer.min_y() - live_rows(harness) as f32 * cell.height
+        } else {
+            panel.min_y() + crate::workspace::body::GRID_VERTICAL_PADDING
+        };
+
+        vec2f(panel.min_x() + crate::workspace::body::GUTTER, top)
             + vec2f(
                 (column as f32 + across) * cell.width,
                 (row as f32 + 0.5) * cell.height,
             )
+    }
+
+    /// Whether the one pane is drawing its output as a list of blocks rather
+    /// than as one grid.
+    fn draws_blocks(harness: &Harness) -> bool {
+        let Some(pane) = harness.focused_pane_id() else {
+            return false;
+        };
+        harness
+            .workspace
+            .read(&harness.app, |workspace, app| {
+                let (_, snapshot) = workspace.terminal(pane, app)?;
+                Some(
+                    crate::pane_surface::of(&snapshot, std::time::Instant::now()).surface
+                        == crate::pane_surface::Surface::Blocks,
+                )
+            })
+            .unwrap_or_default()
+    }
+
+    /// The middle of the composer's first text row, which is where a click
+    /// aimed at the line being composed lands.
+    fn composer_text(harness: &mut Harness) -> Vector2F {
+        let scene = harness.frame();
+        let composer = composer_boxes(&scene)
+            .first()
+            .copied()
+            .expect("a pane on the normal screen draws a composer");
+        let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
+        vec2f(
+            composer.min_x() + crate::workspace::body::GUTTER + cell.width * 0.5,
+            composer.max_y() - crate::workspace::body::COMPOSER_PADDING_BOTTOM - cell.height * 0.5,
+        )
+    }
+
+    /// How many rows the one pane's open block holds.
+    fn live_rows(harness: &Harness) -> usize {
+        let Some(pane) = harness.focused_pane_id() else {
+            return 0;
+        };
+        harness
+            .workspace
+            .read(&harness.app, |workspace, app| {
+                let (_, snapshot) = workspace.terminal(pane, app)?;
+                let live = &snapshot.live_block;
+                (live.bottom_row >= live.top_row)
+                    .then(|| (live.bottom_row - live.top_row.max(0)) as usize + 1)
+            })
+            .unwrap_or_default()
     }
 
     /// Drags a selection from the left of one cell to the right of another.
@@ -4280,8 +4418,11 @@ mod shells {
 
         drag_across(&mut harness, (row, 0), (row, 4));
         assert!(harness.terminal_selection(pane).is_some());
-        let field = field_boxes(&harness.frame())[0];
-        harness.click(center(field), MouseButton::Left);
+        // The composer's first text row. Its box carries twenty pixels of
+        // bottom padding — the pane's own bottom inset — so the middle of the
+        // box is under the line rather than on it.
+        let at = composer_text(&mut harness);
+        harness.click(at, MouseButton::Left);
         assert_eq!(
             harness.terminal_selection(pane),
             None,
@@ -4629,7 +4770,7 @@ mod shells {
             return;
         };
         harness.frame();
-        let Some(clipboard) = working_clipboard(&harness) else {
+        let Some((clipboard, _system)) = working_clipboard(&harness) else {
             return;
         };
         let row = run_and_find(&mut harness, "echo 'COPY ME' | tr A-Z a-z", "copy me");
@@ -4654,13 +4795,25 @@ mod shells {
     /// A headless runner and an X session with nothing serving the selection
     /// both have none, and there is nothing to assert about a copy on a machine
     /// where a copy cannot happen — [`crate::clipboard`] says so at length.
-    fn working_clipboard(harness: &Harness) -> Option<Clipboard> {
+    fn working_clipboard(harness: &Harness) -> Option<(Clipboard, MutexGuard<'static, ()>)> {
+        // **One at a time.** These are the tests that put text on the
+        // *machine's* clipboard, and on macOS that is one `NSPasteboard`
+        // shared by every thread in the process: two of them reading and
+        // writing it at once crashes inside the Objective-C runtime, which
+        // arrives as a segmentation fault in whichever test happened to be
+        // holding it. The lock orders them and costs a few milliseconds.
+        static SYSTEM: Mutex<()> = Mutex::new(());
+        // The lock guards an ordering rather than an invariant, so a test that
+        // panicked while holding it left nothing for the next one to be
+        // careful of.
+        let held = SYSTEM.lock().unwrap_or_else(PoisonError::into_inner);
+
         let clipboard = harness
             .workspace
             .read(&harness.app, |workspace, _| workspace.clipboard().clone());
         clipboard.write("crook: nothing was copied over this");
         (clipboard.read().as_deref() == Some("crook: nothing was copied over this"))
-            .then_some(clipboard)
+            .then_some((clipboard, held))
     }
 
     /// Types `text` a key at a time, the way a person does.
@@ -4767,7 +4920,7 @@ mod shells {
             return;
         };
         assert_eq!(
-            field_boxes(&harness.frame()).len(),
+            composer_boxes(&harness.frame()).len(),
             1,
             "a pane on the normal screen draws a field"
         );
@@ -4779,7 +4932,7 @@ mod shells {
         });
 
         assert!(
-            field_boxes(&harness.frame()).is_empty(),
+            composer_boxes(&harness.frame()).is_empty(),
             "the field outlived the screen it belongs to"
         );
         type_line(&mut harness, "q");
@@ -4808,22 +4961,10 @@ mod shells {
             2,
             "the settings page and the session should be side by side"
         );
-        // The settings page's own controls share the field's corner radius, so
-        // the fill is what tells a field from a switch: the field is the well
-        // in the pane's own ground, and nothing on the settings page is.
-        let scene = harness.frame();
-        let fields: Vec<RectF> = visible_rects(&scene)
-            .filter(|(rect, _)| {
-                rect.corner_radius.get_top_left()
-                    == Radius::Pixels(crate::workspace::body::FIELD_RADIUS)
-                    && rect.background == Fill::Solid(theme().ground)
-            })
-            .map(|(_, bounds)| bounds)
-            .collect();
         assert_eq!(
-            fields.len(),
+            composer_boxes(&harness.frame()).len(),
             1,
-            "either the settings pane was given a field or the session lost one"
+            "either the settings pane was given a composer or the session lost one"
         );
     }
 
@@ -4838,12 +4979,14 @@ mod shells {
         harness.type_field(pane, "echo hello");
 
         let scene = harness.frame();
-        let field = field_boxes(&scene)[0];
+        let field = composer_boxes(&scene)[0];
         let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
-        // Inside the border and the padding, then past the prompt.
-        let text_left =
-            field.min_x() + 1. + crate::workspace::body::FIELD_PADDING + cell.width * 2.;
-        let middle = field.min_y() + 1. + crate::workspace::body::FIELD_PADDING + cell.height * 0.5;
+        // Column zero, which is the output's column zero: the gutter is the
+        // composer's own padding and there is no prompt glyph past it.
+        let text_left = field.min_x() + crate::workspace::body::GUTTER;
+        let middle = field.max_y() - crate::workspace::body::COMPOSER_PADDING_BOTTOM
+            + cell.height * 0.5
+            - cell.height;
 
         harness.click(
             vec2f(text_left + cell.width * 5., middle),
@@ -4920,7 +5063,7 @@ mod shells {
             "the split pane took the line the other one was composing"
         );
         assert_eq!(
-            field_boxes(&harness.frame()).len(),
+            composer_boxes(&harness.frame()).len(),
             2,
             "each panel draws its own field"
         );
@@ -5177,10 +5320,12 @@ mod shells {
     }
 
     #[test]
-    fn only_the_field_draws_a_caret_while_the_field_has_the_keys() {
-        // Two filled block cursors in one pane — the shell's at its prompt and
-        // the field's under it — say nothing about which of them is listening,
-        // and the steady one is the wrong one.
+    fn only_the_composer_draws_a_caret_while_the_composer_has_the_keys() {
+        // Two cursors in one pane — the shell's at its prompt and the
+        // composer's under it — say nothing about which of them is listening,
+        // and the steady one is the wrong one. The block list therefore draws
+        // no cursor at all, and the composer's is a bar in the terminal's own
+        // cursor colour.
         let mut harness = Harness::panel(1);
         let Some(pane) = one_shell(&mut harness) else {
             return;
@@ -5191,20 +5336,20 @@ mod shells {
         let scene = harness.frame();
         let carets: Vec<_> = visible_rects(&scene)
             .filter(|(rect, bounds)| {
-                rect.background == Fill::Solid(theme().accent)
-                    && (bounds.width() - cell.width).abs() < 0.5
-                    && (bounds.height() - cell.height).abs() < 0.5
+                rect.background == Fill::Solid(theme().terminal.cursor)
+                    && bounds.width() < cell.width
+                    && bounds.height() <= cell.height
             })
             .collect();
-        assert_eq!(carets.len(), 1, "one caret, in the field");
+        assert_eq!(carets.len(), 1, "one caret, in the composer");
 
         assert!(
-            visible_rects(&scene).any(|(rect, bounds)| {
-                rect.background == Fill::None
-                    && rect.border.width > 0.
+            !visible_rects(&scene).any(|(rect, bounds)| {
+                rect.border.width > 0.
                     && (bounds.width() - cell.width).abs() < 0.5
+                    && (bounds.height() - cell.height).abs() < 0.5
             }),
-            "the shell's own cursor is not drawn at all, hollow or otherwise"
+            "the shell's own cursor was drawn as well, hollow or otherwise"
         );
     }
 
@@ -5214,15 +5359,20 @@ mod shells {
         // six-line command used to be laid out past the panel it sits in —
         // over the border, over the pane below and off the bottom of the
         // window — with the grid above squeezed to no rows at all.
+        // A shell that reports its boundaries, so that the pane is drawing the
+        // block list and not the grid: an un-integrated shell whose one open
+        // block has scrolled past the top of the viewport is drawn as a plain
+        // grid, and a grid has no composer to measure. See `pane_surface::of`.
         let mut harness = Harness::panel(1);
-        let Some(pane) = one_shell(&mut harness) else {
+        let Some(pane) = marked_shell(&mut harness) else {
             return;
         };
+        await_prompt(&mut harness, pane);
         harness.type_field(pane, "one\ntwo\nthree\nfour\nfive\nsix\nseven\neight");
 
         let scene = harness.frame_sized(vec2f(600., 200.));
         let panel = panel_boxes(&scene)[0];
-        let field = field_boxes(&scene)[0];
+        let field = composer_boxes(&scene)[0];
         let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
 
         assert!(
@@ -5233,8 +5383,428 @@ mod shells {
         );
         assert!(
             field.min_y() - panel.min_y() >= cell.height,
-            "the grid was squeezed to nothing to make room for the field"
+            "the output was squeezed to nothing to make room for the composer"
         );
+    }
+
+    /// The surface a shell with command marks gets: one item per command,
+    /// hoverable, copyable, and with a rule under it only when something is
+    /// cut off.
+    ///
+    /// These are the only tests that ask for the integration, and they are
+    /// worth a real shell for the reason the rest of this module is: the whole
+    /// point of a block is that the *shell* said where it ended.
+    mod blocks {
+        use super::*;
+        use crate::pane_blocks::{PaneBlocks, ScrollPosition};
+
+        /// Runs `command` through the composer and waits for the block it
+        /// makes, reporting how many blocks the pane then has.
+        ///
+        /// Through the composer, not the pty: submitting is half of what marks
+        /// a boundary, and a write that went round it would prove the shell's
+        /// half only.
+        ///
+        /// The wait is for a *closed* block carrying this command, not merely
+        /// for the count to grow: the shell prints its next prompt in the same
+        /// breath, and a wait that stopped at the first change would read a
+        /// block that had not been given its exit status yet.
+        fn run(harness: &mut Harness, pane: PaneId, command: &str) -> usize {
+            await_prompt(harness, pane);
+            harness.type_field(pane, command);
+            harness.press("enter", Modifiers::default(), "\r");
+
+            let wanted = command.to_owned();
+            harness.wait_for("the command never became a block", move |harness| {
+                harness
+                    .workspace
+                    .read(&harness.app, |workspace, app| {
+                        let blocks = workspace.terminal_blocks(pane, app)?;
+                        Some(
+                            blocks
+                                .iter()
+                                .any(|block| block.command.as_deref() == Some(wanted.as_str())),
+                        )
+                    })
+                    .unwrap_or_default()
+            });
+            harness.frame();
+            block_count(harness, pane)
+        }
+
+        fn block_count(harness: &Harness, pane: PaneId) -> usize {
+            harness
+                .workspace
+                .read(&harness.app, |workspace, app| {
+                    Some(workspace.terminal_blocks(pane, app)?.len())
+                })
+                .unwrap_or_default()
+        }
+
+        /// The text of one finished block, oldest first.
+        fn block_text(harness: &Harness, pane: PaneId, index: usize) -> String {
+            harness
+                .workspace
+                .read(&harness.app, |workspace, app| {
+                    let blocks = workspace.terminal_blocks(pane, app)?;
+                    Some(blocks.get(index)?.rows.to_text())
+                })
+                .unwrap_or_default()
+        }
+
+        /// Hovers the block at `index` and returns the frame that follows.
+        fn hover_block(harness: &mut Harness, pane: PaneId, index: usize) -> Rc<Scene> {
+            harness.workspace_update(|workspace, ctx| {
+                assert!(
+                    workspace.hover_block(pane, index, ctx),
+                    "there is no block {index} to hover"
+                );
+            });
+            harness.frame()
+        }
+
+        /// The copy controls drawn in a frame, by their rounded plate.
+        ///
+        /// Bounded to the pane, because the button that opens another tab is
+        /// the same square with the same radius in the header above it.
+        fn copy_controls(scene: &Scene, panel: RectF) -> Vec<RectF> {
+            visible_rects(scene)
+                .filter(|(rect, bounds)| {
+                    rect.corner_radius.get_top_left() == Radius::Pixels(5.)
+                        && (bounds.width() - bounds.height()).abs() < 0.5
+                        && bounds.width() > 20.
+                        && bounds.width() < 32.
+                })
+                .map(|(_, bounds)| bounds)
+                .filter(|bounds| panel.contains_point(center(*bounds)))
+                .collect()
+        }
+
+        #[test]
+        fn a_command_becomes_a_block_with_a_divider_above_it() {
+            // The whole feature, end to end: a real shell says where its
+            // command started and finished, and the pane draws one item per
+            // command with a hairline between them.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, "echo ALPHA") == 0 {
+                return;
+            }
+            run(&mut harness, pane, "echo BETA");
+
+            assert!(
+                block_text(&harness, pane, 0).contains("ALPHA"),
+                "the first command's output is in the first block"
+            );
+            assert!(
+                !block_text(&harness, pane, 0).contains("BETA"),
+                "and the next command's is not"
+            );
+
+            // One rule per boundary: above the second block and above the open
+            // one, and never along the very top of the pane. The open block
+            // has to have drawn its prompt first — an item that has printed
+            // nothing has no height and therefore no edge to rule.
+            await_prompt(&mut harness, pane);
+            let scene = harness.frame();
+            let panel = panel_of_the_pane(&mut harness);
+            let rules: Vec<_> = visible_rects(&scene)
+                .filter(|(rect, bounds)| {
+                    rect.background == Fill::Solid(theme().overlay_2)
+                        && (bounds.width() - panel.width()).abs() < 0.5
+                        && bounds.height() <= 1.5
+                })
+                .collect();
+            assert!(
+                rules.len() >= 2,
+                "two blocks and an open one need two dividers, not {}",
+                rules.len()
+            );
+            assert!(
+                rules
+                    .iter()
+                    .all(|(_, bounds)| bounds.min_y() > panel.min_y() + 0.5),
+                "a rule along the top of the pane separates the pane from nothing"
+            );
+        }
+
+        #[test]
+        fn a_failed_command_is_washed_in_the_theme_s_red() {
+            // Failure is visible without reading: scanning a long session for
+            // what broke is a glance rather than a search.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, "false") == 0 {
+                return;
+            }
+
+            let scene = harness.frame();
+            let red = theme().terminal.normal[1];
+            let stripe = visible_rects(&scene)
+                .find(|(rect, bounds)| rect.background == Fill::Solid(red) && bounds.width() < 8.)
+                .map(|(_, bounds)| bounds);
+            assert!(
+                stripe.is_some(),
+                "a block that failed carries a stripe down its left edge"
+            );
+            assert!(
+                visible_rects(&scene).any(|(rect, _)| {
+                    matches!(rect.background, Fill::Solid(fill)
+                        if (fill.r, fill.g, fill.b) == (red.r, red.g, red.b) && fill.a < 255)
+                }),
+                "and a wash over the whole of it"
+            );
+        }
+
+        #[test]
+        fn hovering_a_block_reveals_a_copy_control_that_takes_that_block_and_no_other() {
+            // What scrollback cannot do: one click, and exactly that command
+            // and its output — no neighbour's text, no over-selection, no
+            // trailing blank rows.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, "echo ALPHA") == 0 {
+                return;
+            }
+            run(&mut harness, pane, "echo BETA");
+
+            let panel = panel_of_the_pane(&mut harness);
+            assert!(
+                copy_controls(&harness.frame(), panel).is_empty(),
+                "nothing is hovered, so no control is drawn"
+            );
+
+            let scene = hover_block(&mut harness, pane, 0);
+            let controls = copy_controls(&scene, panel);
+            assert_eq!(controls.len(), 1, "one control, on the hovered block");
+
+            let Some((clipboard, _system)) = working_clipboard(&harness) else {
+                return;
+            };
+            let at = center(controls[0]);
+            harness.click(at, MouseButton::Left);
+
+            let copied = clipboard.read().unwrap_or_default();
+            assert!(
+                copied.contains("ALPHA"),
+                "the block that was copied: {copied:?}"
+            );
+            assert!(
+                !copied.contains("BETA"),
+                "its neighbour came with it: {copied:?}"
+            );
+            assert_eq!(
+                copied,
+                copied.trim_end(),
+                "the block's trailing blank rows came with it"
+            );
+        }
+
+        #[test]
+        fn the_rule_above_the_composer_appears_only_when_something_is_cut_off() {
+            // Warp's rule, and the reason the seam is invisible until it means
+            // something: while the list is following its own end there is
+            // nothing below the fold to separate the composer from.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, "echo ALPHA") == 0 {
+                return;
+            }
+
+            let seam = |harness: &mut Harness| {
+                let scene = harness.frame();
+                composer_boxes(&scene)
+                    .first()
+                    .map(|composer| composer.height())
+                    .expect("a pane on the normal screen draws a composer")
+            };
+
+            let flush = seam(&mut harness);
+
+            // Enough output to overflow the pane, then a scroll up: now a
+            // block really is cut off underneath.
+            run(&mut harness, pane, "seq 1 200");
+            harness.workspace_update(|workspace, ctx| {
+                assert!(
+                    workspace.scroll_blocks(pane, -20., ctx),
+                    "the list had nothing to scroll"
+                );
+            });
+
+            assert!(
+                seam(&mut harness) > flush,
+                "the rule takes a pixel out of the composer's box, and it is not there when the \
+                 list is at its own end"
+            );
+        }
+
+        #[test]
+        fn only_the_rows_in_view_are_painted_however_long_the_block_is() {
+            // The whole reason this is not a `Scrollable`: a frame costs a
+            // screenful, not a session.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, "seq 1 400") == 0 {
+                return;
+            }
+
+            let scene = harness.frame();
+            let digits = scene.layers().flat_map(|layer| layer.glyphs.iter()).count();
+            assert!(
+                digits < 2000,
+                "a four-hundred-line block painted {digits} glyphs; only the rows in view \
+                 should have been drawn"
+            );
+        }
+
+        #[test]
+        fn a_finished_block_keeps_the_colours_it_printed_in() {
+            // The store keeps every cell's background and every underline, and
+            // a block that lost them when its command ended would turn `git
+            // diff`, `grep --color`, `ls` and a powerlevel10k prompt — which is
+            // almost entirely background — into flat text one prompt later.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, "printf '\\033[41mRED\\033[0m\\n'") == 0 {
+                return;
+            }
+
+            let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
+            let red = theme().terminal.normal[1];
+            let scene = harness.frame();
+            let fills: Vec<_> = visible_rects(&scene)
+                .filter(|(rect, bounds)| {
+                    rect.background == Fill::Solid(red)
+                        && (bounds.height() - cell.height).abs() < 1.
+                        && bounds.width() > cell.width
+                })
+                .collect();
+            assert!(
+                !fills.is_empty(),
+                "the finished block was painted without the background it printed on"
+            );
+        }
+
+        #[test]
+        fn running_a_command_brings_the_list_back_to_its_own_end() {
+            // Enter means the person is done reading history. Without this the
+            // view stays where it was scrolled to and nothing on screen answers
+            // the command they just ran.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, "seq 1 200") == 0 {
+                return;
+            }
+
+            harness.workspace_update(|workspace, ctx| {
+                assert!(
+                    workspace.scroll_blocks(pane, -40., ctx),
+                    "the list had nothing to scroll"
+                );
+            });
+            harness.frame();
+            let scrolled = harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.pane_blocks(pane).map(PaneBlocks::position)
+            });
+            assert!(
+                matches!(scrolled, Some(ScrollPosition::Fixed(_))),
+                "the list did not stay where it was scrolled to: {scrolled:?}"
+            );
+
+            run(&mut harness, pane, "echo AFTER");
+            let after = harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.pane_blocks(pane).map(PaneBlocks::position)
+            });
+            assert_eq!(
+                after,
+                Some(ScrollPosition::FollowBottom),
+                "the command ran and the view never came back to it"
+            );
+        }
+
+        #[test]
+        fn a_block_taller_than_the_pane_still_offers_its_copy_control() {
+            // The control used to be pinned to the block's own top edge, which
+            // for the blocks most worth copying is a point above the window:
+            // painted outside the clip, and clickable nowhere.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, "seq 1 400") == 0 {
+                return;
+            }
+
+            let panel = panel_of_the_pane(&mut harness);
+            let scene = hover_block(&mut harness, pane, 0);
+            assert_eq!(
+                copy_controls(&scene, panel).len(),
+                1,
+                "a block whose top has scrolled out of view drew no control"
+            );
+        }
+
+        #[test]
+        fn the_control_follows_the_list_when_it_moves_under_a_still_pointer() {
+            // A wheel, and a command finishing, both put a different block
+            // under a pointer that has not moved. A control left on the block
+            // that *was* there is an affordance pointing at output a click
+            // would not copy.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, "echo ONE") == 0 {
+                return;
+            }
+            run(&mut harness, pane, "seq 1 200");
+
+            let panel = panel_of_the_pane(&mut harness);
+            let near_the_top = vec2f(panel.min_x() + panel.width() / 2., panel.min_y() + 8.);
+            harness.move_to(near_the_top);
+            harness.frame();
+            let over_the_tall_one = harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.pane_blocks(pane).and_then(PaneBlocks::hovered)
+            });
+
+            harness.workspace_update(|workspace, ctx| {
+                workspace.scroll_blocks(pane, -1000., ctx);
+            });
+            harness.frame();
+            let over_the_first = harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.pane_blocks(pane).and_then(PaneBlocks::hovered)
+            });
+
+            assert!(over_the_tall_one.is_some() && over_the_first.is_some());
+            assert_ne!(
+                over_the_tall_one, over_the_first,
+                "the list scrolled to its top and the control stayed on the block that had \
+                 been under the pointer"
+            );
+        }
     }
 }
 
