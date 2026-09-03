@@ -13,7 +13,7 @@ use crate::core::{
     App, AppContext, Entity, TypedActionView, View, ViewContext, ViewHandle, WindowId,
 };
 use crate::element::{Element, ParentElement};
-use crate::event::{Event, Modifiers, MouseButton};
+use crate::event::{Event, Modifiers, MouseButton, ScrollDelta};
 use crate::fonts::{FamilyId, FontId, LineStyle, StyleAndFont};
 use crate::geometry::{Color, RectF, Vector2F, vec2f};
 use crate::platform::TextLayoutSystem;
@@ -86,6 +86,10 @@ type BuildElement = Box<dyn Fn(&TestView) -> Box<dyn Element>>;
 struct TestView {
     build: BuildElement,
     mouse: MouseStateHandle,
+    /// The scroll offset a [`Scrollable`] test hands back each render, kept
+    /// here for the reason every other handle is: an element tree does not
+    /// survive a repaint, and scrolling causes one.
+    scroll: ScrollStateHandle,
     actions: Vec<TestAction>,
 }
 
@@ -94,6 +98,7 @@ impl TestView {
         Self {
             build: Box::new(build),
             mouse: MouseStateHandle::default(),
+            scroll: ScrollStateHandle::default(),
             actions: Vec::new(),
         }
     }
@@ -182,6 +187,20 @@ impl Harness {
             position,
             modifiers: Modifiers::default(),
         });
+    }
+
+    /// Turns the wheel `lines` clicks, positive being away from the user.
+    fn scroll(&mut self, position: Vector2F, lines: f32) {
+        self.dispatch(Event::ScrollWheel {
+            position,
+            delta: ScrollDelta::Lines(vec2f(0., lines)),
+            modifiers: Modifiers::default(),
+        });
+    }
+
+    /// The scroll state the root view is holding.
+    fn scroll_state(&self) -> ScrollStateHandle {
+        self.root.read(&self.app, |view, _| view.scroll.clone())
     }
 }
 
@@ -647,4 +666,159 @@ fn an_overlay_that_records_no_hit_rect_lets_clicks_through_to_what_it_covers() {
     harness.root.read(&harness.app, |view, _| {
         assert_eq!(view.actions, [TestAction::Clicked]);
     });
+}
+
+#[test]
+fn a_scrollable_keeps_the_box_it_was_given_however_tall_its_child_is() {
+    let mut harness =
+        Harness::new(|view| Scrollable::new(view.scroll.clone(), marker(80., 400.)).finish());
+
+    let scene = harness.build_scene(vec2f(100., 100.));
+
+    let state = *harness.scroll_state().lock();
+    assert_eq!(
+        state.max_offset(),
+        300.,
+        "the child asked for 400 in a 100px box, so 300 of it is off screen"
+    );
+    assert!(state.is_scrollable());
+    assert_eq!(
+        rects(&scene)[0].bounds,
+        RectF::new(Vector2F::zero(), vec2f(80., 400.)),
+        "the child is painted at its own height and clipped, not squashed into the box"
+    );
+}
+
+#[test]
+fn the_wheel_moves_the_content_and_stops_at_the_end() {
+    let mut harness =
+        Harness::new(|view| Scrollable::new(view.scroll.clone(), marker(80., 400.)).finish());
+    harness.build_scene(vec2f(100., 100.));
+
+    // Positive-up at the wheel, so one click away from the user moves the
+    // content up by one line.
+    harness.scroll(vec2f(50., 50.), -2.);
+    let scene = harness.build_scene(vec2f(100., 100.));
+
+    assert_eq!(harness.scroll_state().lock().offset(), 40.);
+    assert_eq!(
+        rects(&scene)[0].bounds.origin(),
+        vec2f(0., -40.),
+        "the child paints above the box by exactly the offset"
+    );
+
+    harness.scroll(vec2f(50., 50.), -100.);
+    harness.build_scene(vec2f(100., 100.));
+    assert_eq!(
+        harness.scroll_state().lock().offset(),
+        300.,
+        "a wheel past the end lands on the last pixel of content, not beyond it"
+    );
+}
+
+#[test]
+fn a_wheel_over_content_that_fits_is_left_for_something_else_to_handle() {
+    let mut harness =
+        Harness::new(|view| Scrollable::new(view.scroll.clone(), marker(80., 40.)).finish());
+    harness.build_scene(vec2f(100., 100.));
+
+    harness.scroll(vec2f(50., 50.), -3.);
+
+    let state = *harness.scroll_state().lock();
+    assert!(!state.is_scrollable());
+    assert_eq!(state.offset(), 0.);
+}
+
+#[test]
+fn a_window_that_grew_taller_clamps_the_offset_back_into_its_content() {
+    let mut harness =
+        Harness::new(|view| Scrollable::new(view.scroll.clone(), marker(80., 400.)).finish());
+    harness.build_scene(vec2f(100., 100.));
+
+    harness.scroll(vec2f(50., 50.), -20.);
+    harness.build_scene(vec2f(100., 100.));
+    assert_eq!(harness.scroll_state().lock().offset(), 300.);
+
+    // The same content in a box three times taller has only 40px to hide, and
+    // an offset of 300 would leave the list showing nothing at all.
+    harness.build_scene(vec2f(100., 360.));
+    assert_eq!(harness.scroll_state().lock().offset(), 40.);
+}
+
+#[test]
+fn the_thumb_is_painted_only_while_there_is_something_to_scroll() {
+    let mut harness = Harness::new(|view| {
+        Scrollable::new(view.scroll.clone(), marker(80., 400.))
+            .with_scrollbar(Color::WHITE)
+            .finish()
+    });
+
+    let scene = harness.build_scene(vec2f(100., 100.));
+    let thumb = rects(&scene)[1].bounds;
+    assert_eq!(
+        thumb.origin(),
+        vec2f(74., 2.),
+        "the thumb rides the right edge of the box the scrollable settled on — \
+         the child's 80px, not the window's 100 — inset, and starts at the top"
+    );
+    assert_eq!(
+        thumb.size(),
+        vec2f(4., 24.),
+        "a quarter of the content is on screen, so the thumb is at its floor"
+    );
+
+    let mut harness = Harness::new(|view| {
+        Scrollable::new(view.scroll.clone(), marker(80., 40.))
+            .with_scrollbar(Color::WHITE)
+            .finish()
+    });
+    let scene = harness.build_scene(vec2f(100., 100.));
+    assert_eq!(
+        rects(&scene).len(),
+        1,
+        "a list that fits paints its child and no thumb"
+    );
+}
+
+#[test]
+fn a_control_scrolled_out_of_the_box_is_neither_drawn_nor_clickable() {
+    let mut harness = Harness::new(|view| {
+        Scrollable::new(
+            view.scroll.clone(),
+            Flex::column()
+                .with_main_axis_size(MainAxisSize::Min)
+                .with_child(marker(80., 100.))
+                .with_child(
+                    Hoverable::new(view.mouse.clone(), |_| marker(80., 40.))
+                        .on_click(|_, ctx, _| ctx.dispatch_typed_action(TestAction::Clicked))
+                        .finish(),
+                )
+                .finish(),
+        )
+        .finish()
+    });
+    harness.build_scene(vec2f(100., 100.));
+
+    // The button is at y 100..140, entirely below a 100px box.
+    harness.press(vec2f(40., 120.), MouseButton::Left);
+    harness.release(vec2f(40., 120.), MouseButton::Left);
+    assert!(
+        harness
+            .root
+            .read(&harness.app, |view, _| view.actions.is_empty()),
+        "a click below the clip must not reach the button hanging out of it"
+    );
+
+    // Scrolled up by 60, the button occupies y 40..80 and is over the box.
+    harness.scroll(vec2f(50., 50.), -3.);
+    harness.build_scene(vec2f(100., 100.));
+    harness.press(vec2f(40., 60.), MouseButton::Left);
+    harness.release(vec2f(40., 60.), MouseButton::Left);
+    assert_eq!(
+        harness
+            .root
+            .read(&harness.app, |view, _| view.actions.len()),
+        1,
+        "the same button, scrolled into view, takes the click"
+    );
 }
