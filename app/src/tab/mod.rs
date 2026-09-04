@@ -30,11 +30,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::settings::Granularity;
 
+mod group;
 mod pane;
 
 #[cfg(test)]
 mod tests;
 
+pub use group::{GroupId, TabGroup};
 pub use pane::{Direction, Pane, PaneEffect, PaneGroup, PaneId, SplitAxis};
 
 /// A tab's identity, stable for as long as the tab exists.
@@ -199,6 +201,16 @@ pub struct Tab {
     id: TabId,
     name: String,
     panes: PaneGroup,
+    /// The group this tab belongs to, if it is in one.
+    ///
+    /// Warp's `TabData::group_id`, and it is one `Option` rather than a list
+    /// of members held by the group for the reason [`group`] gives: the tabs
+    /// are already an ordered vector, and a second list of the same tabs is a
+    /// second answer to what order they are in.
+    ///
+    /// Private and written only by [`TabStrip`], which is the one thing that
+    /// can keep a group's members contiguous while writing it.
+    group: Option<GroupId>,
 }
 
 impl Tab {
@@ -209,12 +221,18 @@ impl Tab {
             id: TabId::next(),
             name: title.clone(),
             panes: PaneGroup::new(title),
+            group: None,
         }
     }
 
     /// This tab's identity, for as long as it is open.
     pub fn id(&self) -> TabId {
         self.id
+    }
+
+    /// The group this tab is in, if it is in one.
+    pub fn group(&self) -> Option<GroupId> {
+        self.group
     }
 
     /// What the tab is called, whatever its panes are called.
@@ -268,6 +286,47 @@ impl Tab {
 pub enum TabAction {
     /// Open a tab after the active one and select it.
     New,
+    /// Open a tab in the same group as `tab`, making a group of the two when
+    /// it has none, and select it.
+    ///
+    /// What a worktree opens into, and the whole reason groups exist. The
+    /// checkout beside the one a person asked from belongs *with* it: same
+    /// repository, one branch over. Splitting the tab said that by putting two
+    /// agents in one rectangle, which is a different claim — that they are two
+    /// halves of one screen — and it is the wrong one.
+    NewInGroupOf(TabId),
+    /// Put a tab somewhere else in the list: into a group, out of one, or at
+    /// another place among its neighbours.
+    ///
+    /// The one action a drop dispatches. `before` names the tab it lands in
+    /// front of and `None` means last; `group` is the group it joins and
+    /// `None` means none. The two are clamped against each other rather than
+    /// trusted — see [`TabStrip::slot_for`] — so a target computed from a
+    /// pointer position cannot break a group's contiguity however coarse the
+    /// geometry that produced it.
+    MoveTab {
+        /// The tab being moved.
+        tab: TabId,
+        /// The group it lands in, or `None` to leave whatever group it is in.
+        group: Option<GroupId>,
+        /// The tab it lands in front of, or `None` for the end.
+        before: Option<TabId>,
+    },
+    /// Move a whole group's block of tabs in front of `before`, or to the end.
+    ///
+    /// A block only ever lands between blocks: `before` is snapped to the
+    /// start of whatever block holds it, because a group dropped into the
+    /// middle of another group is the one arrangement the panel cannot draw.
+    MoveGroup {
+        /// The group being moved.
+        group: GroupId,
+        /// The tab whose block it lands in front of, or `None` for the end.
+        before: Option<TabId>,
+    },
+    /// Fold a group's members away behind its heading, or show them again.
+    ToggleGroup(GroupId),
+    /// Close every tab of a group. When they are all of them, the window goes.
+    CloseGroup(GroupId),
     /// Close a tab, whether or not it is the active one.
     Close(TabId),
     /// Make a tab the active one.
@@ -331,6 +390,14 @@ pub enum TabEffect {
 #[derive(Debug)]
 pub struct TabStrip {
     tabs: Vec<Tab>,
+    /// The groups any of those tabs belong to.
+    ///
+    /// Holds no membership and no order of its own — both are the tabs' — so
+    /// there is nothing here to keep in step with the vector above. A group
+    /// nobody is in is not a group: [`Self::prune`] drops it the moment its
+    /// last member leaves, which is what stops an empty heading from
+    /// outliving the work it named.
+    groups: Vec<TabGroup>,
     /// The active tab's *identity*. Storing a position here is what forces
     /// every mutation to patch it; storing an identity means most mutations
     /// need no repair at all.
@@ -363,6 +430,7 @@ impl TabStrip {
         let id = tab.id();
         Self {
             tabs: vec![tab],
+            groups: Vec::new(),
             active: id,
             mru: vec![id],
             opened: 1,
@@ -381,6 +449,7 @@ impl TabStrip {
     pub(crate) fn empty() -> Self {
         Self {
             tabs: Vec::new(),
+            groups: Vec::new(),
             active: TabId::next(),
             mru: Vec::new(),
             opened: 0,
@@ -536,6 +605,335 @@ impl TabStrip {
         rows
     }
 
+    /// Every group with a tab in it.
+    pub fn groups(&self) -> impl Iterator<Item = &TabGroup> {
+        self.groups.iter()
+    }
+
+    /// The group with this id, if it still holds a tab.
+    pub fn group(&self, id: GroupId) -> Option<&TabGroup> {
+        self.groups.iter().find(|group| group.id() == id)
+    }
+
+    /// The tabs of a group, in strip order. Contiguous, always.
+    pub fn members(&self, group: GroupId) -> impl Iterator<Item = &Tab> {
+        self.tabs
+            .iter()
+            .filter(move |tab| tab.group() == Some(group))
+    }
+
+    /// The strip as the panel draws it: each group's members under the group,
+    /// and every ungrouped tab on its own.
+    ///
+    /// This is the one place the contiguity invariant is *spent* rather than
+    /// kept. Because members are contiguous, one walk in strip order produces
+    /// the blocks in strip order with no sorting and no second pass — and a
+    /// panel built from it cannot draw a tab twice or leave one out, whatever
+    /// a drag did a frame ago.
+    pub fn blocks(&self) -> Vec<Block> {
+        let mut blocks: Vec<Block> = Vec::with_capacity(self.tabs.len());
+
+        for tab in &self.tabs {
+            match blocks.last_mut() {
+                Some(block) if block.group.is_some() && block.group == tab.group() => {
+                    block.tabs.push(tab.id());
+                }
+                _ => blocks.push(Block {
+                    group: tab.group(),
+                    tabs: vec![tab.id()],
+                }),
+            }
+        }
+
+        blocks
+    }
+
+    /// Renames a group.
+    ///
+    /// Crate-private and outside [`Self::apply`], for the reason
+    /// [`Self::adopt`] is: an action is `Copy` and a name is a `String`. The
+    /// vector is not touched, so nothing here can break the invariant `apply`
+    /// exists to keep.
+    pub(crate) fn rename_group(&mut self, id: GroupId, name: impl Into<String>) {
+        if let Some(group) = self.groups.iter_mut().find(|group| group.id() == id) {
+            group.set_name(name);
+        }
+    }
+
+    /// Rebuilds a group a session file described, out of tabs already adopted.
+    ///
+    /// The restoring path's counterpart to [`Self::adopt`], and it has the
+    /// same shape for the same reason: a file cannot be trusted to have
+    /// written a group whose members were contiguous, so this gathers them
+    /// rather than assuming them. A group naming no tab that came back is not
+    /// created at all.
+    pub(crate) fn adopt_group(&mut self, name: String, collapsed: bool, members: &[TabId]) {
+        let members: Vec<TabId> = members
+            .iter()
+            .copied()
+            .filter(|id| self.get(*id).is_some())
+            .collect();
+        let Some(&first) = members.first() else {
+            return;
+        };
+
+        let mut group = TabGroup::new(name);
+        group.set_collapsed(collapsed);
+        let id = group.id();
+        self.groups.push(group);
+
+        for member in &members {
+            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id() == *member) {
+                tab.group = Some(id);
+            }
+        }
+
+        // Gathered at the first member's place, so a hand-edited file that
+        // scattered them cannot produce a strip the panel is unable to draw.
+        let at = self.index_of(first).unwrap_or(self.tabs.len());
+        let moving: Vec<Tab> = {
+            let mut moving = Vec::with_capacity(members.len());
+            let mut index = 0;
+            while index < self.tabs.len() {
+                if self.tabs[index].group() == Some(id) {
+                    moving.push(self.tabs.remove(index));
+                } else {
+                    index += 1;
+                }
+            }
+            moving
+        };
+        let at = at.min(self.tabs.len());
+        for (offset, tab) in moving.into_iter().enumerate() {
+            self.tabs.insert(at + offset, tab);
+        }
+        self.repair(None);
+    }
+
+    /// The half-open range of the vector a group's members occupy.
+    ///
+    /// `None` for a group with nothing in it, which is a group about to be
+    /// pruned. Correct *because* members are contiguous: the first and last
+    /// positions bound every member between them.
+    fn run_of(&self, group: GroupId) -> Option<std::ops::Range<usize>> {
+        let first = self
+            .tabs
+            .iter()
+            .position(|tab| tab.group() == Some(group))?;
+        let last = self
+            .tabs
+            .iter()
+            .rposition(|tab| tab.group() == Some(group))?;
+        Some(first..last + 1)
+    }
+
+    /// Where a tab joining `group` in front of `before` actually goes.
+    ///
+    /// The clamp the drop targets are trusted through. A pointer between two
+    /// rows says two things that can disagree — which gap it is in, and which
+    /// group's band it is over — and the honest resolution is to believe the
+    /// group and move the gap, because the group is what the person is aiming
+    /// at and the gap is only how far their hand got. So:
+    ///
+    /// * joining a group, the slot is pulled into that group's run;
+    /// * joining none, a slot *inside* somebody's run is pushed out to its
+    ///   nearer end, rather than splitting them.
+    ///
+    /// Either way the result is a position no group's contiguity survives by
+    /// luck.
+    fn slot_for(&self, group: Option<GroupId>, before: Option<TabId>) -> usize {
+        let raw = before
+            .and_then(|id| self.index_of(id))
+            .unwrap_or(self.tabs.len());
+
+        match group {
+            // Into a group that still has members: inside its run, wherever
+            // in it the pointer got to. A group whose only member is the tab
+            // being moved has no run left, and the raw slot is as good an
+            // answer as there is.
+            Some(group) => match self.run_of(group) {
+                Some(run) => raw.clamp(run.start, run.end),
+                None => raw,
+            },
+            // Into no group: never between two members of one. The nearer end
+            // wins, so a drop just past a group's first member lands above the
+            // group rather than teleporting to the bottom of it.
+            None => match self.tabs.get(raw).and_then(Tab::group) {
+                Some(landed_in) => match self.run_of(landed_in) {
+                    Some(run) if raw > run.start => {
+                        if raw - run.start <= run.end - raw {
+                            run.start
+                        } else {
+                            run.end
+                        }
+                    }
+                    _ => raw,
+                },
+                None => raw,
+            },
+        }
+    }
+
+    /// Moves one tab, joining `group` and landing in front of `before`.
+    fn move_tab(&mut self, tab: TabId, group: Option<GroupId>, before: Option<TabId>) -> TabEffect {
+        let Some(from) = self.index_of(tab) else {
+            return TabEffect::Unchanged;
+        };
+        // A group that has been pruned since the frame the drag started on is
+        // not a group to join. Naming no group is always legal.
+        if group.is_some_and(|id| self.group(id).is_none()) {
+            return TabEffect::Unchanged;
+        }
+        let left = self.tabs[from].group();
+        if before == Some(tab) {
+            // "In front of itself" is where it already is.
+            return TabEffect::Unchanged;
+        }
+
+        let mut moving = self.tabs.remove(from);
+        moving.group = group;
+        let at = self.slot_for(group, before);
+        let unchanged = at == from && left == group;
+        self.tabs.insert(at, moving);
+
+        if unchanged {
+            return TabEffect::Unchanged;
+        }
+        if let Some(left) = left.filter(|left| Some(*left) != group) {
+            self.prune(left);
+        }
+        self.repair(None);
+        TabEffect::Changed
+    }
+
+    /// Moves a whole group's block in front of `before`'s block.
+    fn move_group(&mut self, group: GroupId, before: Option<TabId>) -> TabEffect {
+        let Some(run) = self.run_of(group) else {
+            return TabEffect::Unchanged;
+        };
+        // A block dropped on itself has not moved, and a block dropped on one
+        // of its own members would be asked to land inside itself.
+        if before.is_some_and(|id| self.tabs[run.clone()].iter().any(|tab| tab.id() == id)) {
+            return TabEffect::Unchanged;
+        }
+
+        // Snapped to the start of whatever block holds `before`: a group only
+        // ever lands between blocks.
+        let at = match before.and_then(|id| self.index_of(id)) {
+            Some(index) => match self.tabs[index].group().and_then(|id| self.run_of(id)) {
+                Some(landed_in) => landed_in.start,
+                None => index,
+            },
+            None => self.tabs.len(),
+        };
+        // Both ends of its own run are where it already is: dropping a block
+        // just above itself and dropping it just below itself are the same
+        // arrangement, and reporting either as a change repaints the window
+        // for nothing.
+        if at == run.start || at == run.end {
+            return TabEffect::Unchanged;
+        }
+
+        let moving: Vec<Tab> = self.tabs.drain(run.clone()).collect();
+        // Everything after the run has shifted left by its length.
+        let at = if at > run.start {
+            at - moving.len()
+        } else {
+            at
+        };
+        for (offset, tab) in moving.into_iter().enumerate() {
+            self.tabs.insert(at + offset, tab);
+        }
+        self.repair(None);
+        TabEffect::Changed
+    }
+
+    /// Opens a tab in `anchor`'s group, making one of the two when it has no
+    /// group yet.
+    fn new_in_group_of(&mut self, anchor: TabId) -> TabEffect {
+        let Some(index) = self.index_of(anchor) else {
+            return TabEffect::Unchanged;
+        };
+
+        let group = match self.tabs[index].group() {
+            Some(group) => group,
+            None => {
+                // Named after the tab it was made around, which is the only
+                // name there is at this point and a better one than "New
+                // Group": the heading says which piece of work the checkouts
+                // under it belong to. Its *displayed* title, so a tab whose
+                // agent has named its own work lends the group that name
+                // rather than the "agent 3" nobody chose. A caller that knows
+                // the repository renames it — see [`Self::rename_group`].
+                let anchor = &self.tabs[index];
+                let name = match anchor.title() {
+                    "" => anchor.name().to_owned(),
+                    title => title.to_owned(),
+                };
+                let group = TabGroup::new(name);
+                let id = group.id();
+                self.groups.push(group);
+                self.tabs[index].group = Some(id);
+                id
+            }
+        };
+
+        self.opened += 1;
+        let mut tab = Tab::new(format!("agent {}", self.opened));
+        tab.group = Some(group);
+        let id = tab.id();
+        // After the group's last member. A worktree is the newest thing in the
+        // group, and the alternative — beside the tab it was asked from — puts
+        // it in the middle of checkouts made before it.
+        let at = self.run_of(group).map_or(index + 1, |run| run.end);
+        self.tabs.insert(at, tab);
+        self.repair(Some(id));
+        TabEffect::Changed
+    }
+
+    /// Closes every tab of a group.
+    fn close_group(&mut self, group: GroupId) -> TabEffect {
+        let members: Vec<TabId> = self.members(group).map(Tab::id).collect();
+        if members.is_empty() {
+            return TabEffect::Unchanged;
+        }
+        // Closing every tab there is closes the window, and it says so once
+        // rather than closing tabs until `close` refuses and leaves a group
+        // half gone.
+        if members.len() >= self.tabs.len() {
+            return TabEffect::CloseWindow;
+        }
+
+        for member in members {
+            self.close(member);
+        }
+        TabEffect::Changed
+    }
+
+    /// The group a tab hopped into `to` lands in: the one *both* of its new
+    /// neighbours are in, and otherwise none.
+    ///
+    /// Called with the tab already lifted out of the vector, so `to` is a gap
+    /// between two tabs that are staying put. Landing between two members of
+    /// one group is the only way into a group and the only way to stay in one;
+    /// every other gap is outside every group, which is exactly the reading
+    /// that keeps a run unbroken.
+    fn neighbouring_group(&self, to: usize) -> Option<GroupId> {
+        let before = to
+            .checked_sub(1)
+            .and_then(|index| self.tabs.get(index))
+            .and_then(Tab::group);
+        let after = self.tabs.get(to).and_then(Tab::group);
+        (before == after).then_some(before).flatten()
+    }
+
+    /// Drops a group nobody is in any more.
+    fn prune(&mut self, group: GroupId) {
+        if self.members(group).next().is_none() {
+            self.groups.retain(|held| held.id() != group);
+        }
+    }
+
     /// Applies an action. The only way the strip changes.
     pub fn apply(&mut self, action: TabAction) -> TabEffect {
         match action {
@@ -544,14 +942,39 @@ impl TabStrip {
                 let tab = Tab::new(format!("agent {}", self.opened));
                 let id = tab.id();
                 // After the active tab, which is where a person who just
-                // branched off what they were doing expects to find it.
-                let at = self
-                    .index_of(self.active)
-                    .map_or(self.tabs.len(), |i| i + 1);
+                // branched off what they were doing expects to find it — and
+                // past the rest of its group when it is in one, because a tab
+                // that belongs to nothing cannot be dropped into the middle of
+                // tabs that belong together. Warp's `clamp_to_unpinned_region`
+                // is the same move for its own reason.
+                let at = match self.index_of(self.active) {
+                    Some(index) => match self.tabs[index].group().and_then(|id| self.run_of(id)) {
+                        Some(run) => run.end,
+                        None => index + 1,
+                    },
+                    None => self.tabs.len(),
+                };
                 self.tabs.insert(at, tab);
                 self.repair(Some(id));
                 TabEffect::Changed
             }
+
+            TabAction::NewInGroupOf(anchor) => self.new_in_group_of(anchor),
+
+            TabAction::MoveTab { tab, group, before } => self.move_tab(tab, group, before),
+
+            TabAction::MoveGroup { group, before } => self.move_group(group, before),
+
+            TabAction::ToggleGroup(id) => {
+                let Some(group) = self.groups.iter_mut().find(|group| group.id() == id) else {
+                    return TabEffect::Unchanged;
+                };
+                let collapsed = group.is_collapsed();
+                group.set_collapsed(!collapsed);
+                TabEffect::Changed
+            }
+
+            TabAction::CloseGroup(group) => self.close_group(group),
 
             TabAction::Close(id) => self.close(id),
 
@@ -658,7 +1081,13 @@ impl TabStrip {
             return TabEffect::CloseWindow;
         }
 
-        self.tabs.remove(index);
+        let closed = self.tabs.remove(index);
+        // A heading with nothing under it is not a group. Pruned here rather
+        // than by whoever called `close`, because this is the one place a tab
+        // ever leaves the vector.
+        if let Some(group) = closed.group() {
+            self.prune(group);
+        }
         // `repair` prefers whoever is at the front of the MRU list once the
         // closed tab is gone, so closing the active tab needs no successor
         // computed here and closing any other tab needs nothing at all.
@@ -681,8 +1110,19 @@ impl TabStrip {
         // Remove-and-insert rather than swap, so the same code moves a tab one
         // slot or ten. Nothing needs repairing afterwards, because `active`
         // names the tab that just moved rather than the slot it was in.
-        let tab = self.tabs.remove(from);
+        let mut tab = self.tabs.remove(from);
+        // A tab hopped past the end of its group leaves it, and one hopped
+        // into somebody else's joins theirs. That is what the keyboard has to
+        // mean once there are groups: the alternative is a shortcut that can
+        // put a tab between two members of a group it is not in, which is the
+        // one arrangement the panel cannot draw.
+        let left = tab.group();
+        tab.group = self.neighbouring_group(to);
+        let joined = tab.group();
         self.tabs.insert(to, tab);
+        if let Some(left) = left.filter(|left| Some(*left) != joined) {
+            self.prune(left);
+        }
         self.repair(None);
         TabEffect::Changed
     }
@@ -713,6 +1153,22 @@ impl TabStrip {
         self.mru.retain(|id| *id != chosen);
         self.mru.insert(0, chosen);
     }
+}
+
+/// One run of the strip the panel draws as a unit: a group with its members,
+/// or a single tab that is in no group.
+///
+/// Warp's `render_groups` builds the same thing inline and calls the halves
+/// `grouped` and `ungrouped`; naming it makes the panel's loop one `match`
+/// instead of a state machine, and makes "the blocks are in strip order" a
+/// thing [`TabStrip::blocks`] can be tested for without a window.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Block {
+    /// The group these tabs belong to, or `None` for a lone ungrouped tab.
+    pub group: Option<GroupId>,
+    /// Its tabs, in strip order. Never empty; exactly one when `group` is
+    /// `None`.
+    pub tabs: Vec<TabId>,
 }
 
 /// What a change inside one tab's panes means to the strip.

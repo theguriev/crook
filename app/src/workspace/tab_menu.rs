@@ -27,18 +27,24 @@
 //!
 //! So this menu is not a worktree *manager*. It is a way to open one:
 //!
-//! * the repository's worktrees, each of which opens a pane in it *inside the
-//!   tab the menu was opened on* — or brings forward the pane already there;
+//! * the repository's worktrees, each of which opens a tab in it *in the group
+//!   the tab the menu was opened on belongs to* — or brings forward the pane
+//!   already there;
 //! * a way to make one, which asks for a branch name and nothing else;
 //! * a way to remove one, offered only for a checkout nothing is working in.
 //!
 //! The branches of one repository stay together because of that second half.
-//! A tab is the repository and its panes are its checkouts: the panel draws
-//! them under one group header — which appears by itself the moment a tab
-//! holds a second pane, so there is no group to make first and none to tidy
-//! away when one of them closes — and the body shows them side by side. A tab
-//! of its own for each checkout would file the branch away from the work it
-//! came out of, with nothing left in the list to say the two were related.
+//! A [group](crate::tab::TabGroup) is the repository and its tabs are its
+//! checkouts: the panel folds them under one heading — which is made the
+//! moment the second checkout arrives and pruned when its last member closes,
+//! so there is no group to make first and none to tidy away. A loose tab for
+//! each checkout would file the branch away from the work it came out of, with
+//! nothing left in the list to say the two were related.
+//!
+//! It used to open a *pane* instead, splitting the tab, and that was a
+//! different and wrong claim: two agents sharing a rectangle and a keyboard is
+//! something a person asks for when they want to watch two things at once, not
+//! what "give this branch a checkout of its own" means.
 //!
 //! herdr's shape, which is the tool this was modelled on: there a worktree is
 //! not a thing you administer but a workspace with a git checkout behind it,

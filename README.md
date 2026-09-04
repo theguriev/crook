@@ -24,6 +24,14 @@ Seven features, and the page that configures them:
   filters nothing else — the active tab stays active and a filtered-out tab goes on printing.
   `cmd-k` (`ctrl-shift-k` off macOS) puts the keyboard in it from anywhere in the window,
   Enter opens the top match, and Escape gives the keyboard back to the shell.
+
+  Tabs that belong together are folded into a **group**: a heading with a chevron, a count and
+  a close button, and its tabs indented under it. A worktree opened from a tab makes one out of
+  the two of them, which is what says the two checkouts are one piece of work. Drag a row into a
+  group to add it, out of one to take it out, and a heading to move the whole block; the panel
+  draws a line where the drop will land, and a group whose last tab leaves it goes away by
+  itself. A group is not a split screen — the tabs in it are still one at a time, and splitting
+  a tab is still `cmd-d` (`ctrl-shift-d` off macOS), asked for on purpose.
 - **The window's own title bar.** There is no strip of system chrome above Crook. The window is
   opened with the application's frame, so the header *is* the title bar: dragging its empty
   space moves the window and a double click maximises it. On macOS that surface carries
@@ -138,7 +146,8 @@ Seven features, and the page that configures them:
   other tabs are in, and the rest. Choosing one opens a tab there — or brings forward the tab
   already in it, because two agents editing one checkout is exactly what a worktree exists to
   prevent. `New worktree…` asks for a branch name, fills one in that nothing is using, shows
-  where the checkout will go, and opens a tab in it. Removal is offered only for a checkout
+  where the checkout will go, and opens a tab in it — folded into a group with the tab that
+  asked for it. Removal is offered only for a checkout
   that is not locked, not the main one, and not one a tab is working in; it says what it will
   delete first, and it never deletes the branch. Checkouts go in a store of Crook's own —
   neither inside the repository, where git will happily let you put one and every build and

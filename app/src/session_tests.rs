@@ -309,3 +309,121 @@ fn test_a_window_size_a_person_could_not_see_is_refused() {
         assert_eq!(session.window_size(), None, "{size:?}");
     }
 }
+
+/// The blocks a strip draws, as each group's name and its tabs' names.
+fn shape(strip: &TabStrip) -> Vec<(Option<String>, Vec<String>)> {
+    strip
+        .blocks()
+        .into_iter()
+        .map(|block| {
+            (
+                block
+                    .group
+                    .and_then(|id| strip.group(id))
+                    .map(|group| group.name().to_owned()),
+                block
+                    .tabs
+                    .iter()
+                    .filter_map(|id| strip.get(*id))
+                    .map(|tab| tab.name().to_owned())
+                    .collect(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn test_a_group_comes_back_with_its_name_its_members_and_its_fold() {
+    let mut strip = TabStrip::new();
+    strip.apply(TabAction::New);
+    let first = strip.iter().next().expect("a first tab").id();
+    strip.apply(TabAction::NewInGroupOf(first));
+    let group = strip.get(first).and_then(Tab::group).expect("grouped");
+    strip.rename_group(group, "crook");
+    strip.apply(TabAction::ToggleGroup(group));
+    let before = shape(&strip);
+
+    let restored = Session::of(&strip, None)
+        .restore()
+        .expect("there was something to restore");
+
+    assert_eq!(shape(&restored), before);
+    assert_eq!(
+        restored.groups().count(),
+        1,
+        "the group came back once, or not at all"
+    );
+    assert!(
+        restored.groups().next().expect("a group").is_collapsed(),
+        "a group folded away came back open"
+    );
+}
+
+#[test]
+fn test_a_file_that_scattered_a_group_gathers_it_again() {
+    // A session file is a file a person can edit, and members that are not
+    // contiguous are a strip the panel cannot draw. Gathered at the first
+    // member's place rather than refused: a window is better than no window.
+    let session = Session {
+        tabs: vec![
+            TabSnapshot {
+                name: "one".to_owned(),
+                panes: vec![PaneSnapshot::default()],
+                group: Some(0),
+                ..TabSnapshot::default()
+            },
+            TabSnapshot {
+                name: "two".to_owned(),
+                panes: vec![PaneSnapshot::default()],
+                group: None,
+                ..TabSnapshot::default()
+            },
+            TabSnapshot {
+                name: "three".to_owned(),
+                panes: vec![PaneSnapshot::default()],
+                group: Some(0),
+                ..TabSnapshot::default()
+            },
+        ],
+        groups: vec![GroupSnapshot {
+            name: "scattered".to_owned(),
+            collapsed: false,
+        }],
+        ..Session::default()
+    };
+
+    let restored = session.restore().expect("three tabs");
+
+    assert_eq!(
+        shape(&restored),
+        vec![
+            (
+                Some("scattered".to_owned()),
+                vec!["one".to_owned(), "three".to_owned()]
+            ),
+            (None, vec!["two".to_owned()]),
+        ]
+    );
+}
+
+#[test]
+fn test_a_group_naming_no_tab_that_came_back_is_not_created() {
+    let session = Session {
+        tabs: vec![TabSnapshot {
+            name: "alone".to_owned(),
+            panes: vec![PaneSnapshot::default()],
+            group: Some(9),
+            ..TabSnapshot::default()
+        }],
+        groups: vec![GroupSnapshot {
+            name: "empty".to_owned(),
+            collapsed: false,
+        }],
+        ..Session::default()
+    };
+
+    let restored = session.restore().expect("one tab");
+
+    assert_eq!(restored.groups().count(), 0);
+    assert_eq!(shape(&restored), vec![(None, vec!["alone".to_owned()])]);
+}

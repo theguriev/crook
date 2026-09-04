@@ -430,7 +430,15 @@ fn status_disc(status: Option<AgentStatus>) -> Box<dyn Element> {
 }
 
 /// A fixed square, holding the close button or holding nothing.
-fn close_slot(action: TabAction, state: MouseStateHandle, visible: bool) -> Box<dyn Element> {
+///
+/// A group's heading takes the same one: it is the same gesture on the same
+/// kind of thing, and a second close button drawn a second way is how the two
+/// end up different sizes.
+pub(super) fn close_slot(
+    action: TabAction,
+    state: MouseStateHandle,
+    visible: bool,
+) -> Box<dyn Element> {
     let inner: Box<dyn Element> = if visible {
         Hoverable::new(state, move |state| {
             let hovered = state.is_hovered();

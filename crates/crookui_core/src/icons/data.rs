@@ -14,6 +14,12 @@ use super::Segment::{self, Close, Cubic, Line, Move};
 /// Lucide's `check`.
 pub(super) static CHECK: &[Segment] = &[Move(20.0, 6.0), Line(9.0, 17.0), Line(4.0, 12.0)];
 
+/// Lucide's `chevron-down`.
+pub(super) static CHEVRON_DOWN: &[Segment] = &[Move(6.0, 9.0), Line(12.0, 15.0), Line(18.0, 9.0)];
+
+/// Lucide's `chevron-right`.
+pub(super) static CHEVRON_RIGHT: &[Segment] = &[Move(9.0, 18.0), Line(15.0, 12.0), Line(9.0, 6.0)];
+
 /// Lucide's `copy`.
 pub(super) static COPY: &[Segment] = &[
     Move(10.0, 8.0),
@@ -216,6 +222,8 @@ pub(super) static X: &[Segment] = &[
 /// three columns of the same row and a test walks it end to end.
 pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [
     (Lucide::Check, "check", CHECK),
+    (Lucide::ChevronDown, "chevron-down", CHEVRON_DOWN),
+    (Lucide::ChevronRight, "chevron-right", CHEVRON_RIGHT),
     (Lucide::Copy, "copy", COPY),
     (Lucide::GitBranch, "git-branch", GIT_BRANCH),
     (Lucide::Info, "info", INFO),
@@ -229,7 +237,7 @@ pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [
 ];
 
 /// How many there are.
-pub const ICONS: usize = 11;
+pub const ICONS: usize = 13;
 
 /// The icons Crook draws, from Lucide.
 ///
@@ -241,6 +249,14 @@ pub enum Lucide {
     ///
     /// Lucide's [`check`](https://lucide.dev/icons/check).
     Check,
+    /// An open group's heading in the tabs panel: click to fold it away.
+    ///
+    /// Lucide's [`chevron-down`](https://lucide.dev/icons/chevron-down).
+    ChevronDown,
+    /// A folded group's heading, in the same place.
+    ///
+    /// Lucide's [`chevron-right`](https://lucide.dev/icons/chevron-right).
+    ChevronRight,
     /// The control that takes a block's text, on the block the pointer is on.
     ///
     /// Lucide's [`copy`](https://lucide.dev/icons/copy).

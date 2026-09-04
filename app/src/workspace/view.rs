@@ -41,7 +41,8 @@ use crate::settings::{
     DEFAULT_FONT_SIZE, Density, FONT_SIZE_STEP, GeneralOptions, Granularity, Settings, TabOptions,
 };
 use crate::tab::{
-    AgentSession, AgentStatus, Direction, Pane, PaneId, Tab, TabAction, TabEffect, TabId, TabStrip,
+    AgentSession, AgentStatus, Direction, GroupId, Pane, PaneId, Tab, TabAction, TabEffect,
+    TabGroup, TabId, TabStrip,
 };
 use crate::terminal_font::CellFont;
 use crate::terminal_model::{BlockHistory, TerminalHandle, TerminalModel, TerminalUpdate};
@@ -58,6 +59,7 @@ use super::action::{
 };
 use super::settings_page::SettingsState;
 use super::tab_menu::{Contents, Mode as WorktreeMode, TabMenuState};
+use super::tabs_panel::drag::{Carried, PanelDrag};
 use super::tabs_panel::geometry::RowGeometry;
 use super::tabs_panel::search::SearchState;
 use super::theme_panel::{Mode, ThemePanelState};
@@ -122,6 +124,23 @@ pub(super) struct TabInteraction {
     pub(super) container: MouseStateHandle,
     /// The tab's name above them, which only a split tab draws.
     pub(super) header: MouseStateHandle,
+}
+
+/// What the mouse is doing to one group's chrome in the panel.
+///
+/// Keyed by [`GroupId`] and separate from [`TabInteraction`] for the reason
+/// that one is separate from a row's: a group's heading lifts, and its close
+/// button lights, while the pointer is over the *group* — which is one piece
+/// of state for however many tabs are folded under it.
+#[derive(Default)]
+pub(super) struct GroupInteraction {
+    /// The box around the heading and its members.
+    pub(super) container: MouseStateHandle,
+    /// The heading itself, which folds the group away and is what a drag
+    /// picks the whole block up by.
+    pub(super) heading: MouseStateHandle,
+    /// The cross at its right, which closes every tab in the group.
+    pub(super) close: MouseStateHandle,
 }
 
 /// The options menu: whether it is up, and what the mouse is doing to each of
@@ -454,6 +473,15 @@ pub struct Workspace {
     /// while the pointer is over *any* of the tab's rows, which is one piece
     /// of state for several rows rather than one per row.
     tab_chrome: HashMap<TabId, TabInteraction>,
+    /// The same, for each group's heading and the box around its members.
+    group_chrome: HashMap<GroupId, GroupInteraction>,
+    /// The row or heading being dragged in the panel, and where every row was
+    /// drawn on the last frame. See [`PanelDrag`](super::tabs_panel::drag).
+    ///
+    /// On the workspace rather than in the element tree for the reason every
+    /// mouse state is: a press is half a gesture, and the tree that saw it is
+    /// thrown away before the pointer has moved.
+    panel_drag: PanelDrag,
     settings: Settings,
     /// Which build this is, for the settings page's About section. Carried
     /// rather than looked up: nothing else in the view layer knows which
@@ -649,6 +677,8 @@ impl Workspace {
             system_is_dark: true,
             interactions: HashMap::new(),
             tab_chrome: HashMap::new(),
+            group_chrome: HashMap::new(),
+            panel_drag: PanelDrag::new(),
             settings,
             channel,
             options,
@@ -968,10 +998,10 @@ impl Workspace {
     ///
     /// Every pane rather than every tab's focused one, and that is what makes
     /// "this checkout is already open" a true answer: a worktree opened from a
-    /// tab now lands in a pane *beside* the one that asked for it, so the tab
-    /// whose row a person is looking at is very often not the pane the branch
-    /// is in. Asking the focused pane only would offer to remove a checkout an
-    /// agent is working in, and would open a second pane on it a moment later.
+    /// tab lands in a tab *beside* the one that asked for it, folded under the
+    /// same heading, and a tab of its own can be split like any other. Asking
+    /// the focused panes only would offer to remove a checkout an agent is
+    /// working in, and would open a second agent on it a moment later.
     pub(super) fn pane_directories(&self) -> Vec<(PaneId, PathBuf)> {
         self.tabs
             .panes()
@@ -1506,7 +1536,7 @@ impl Workspace {
                     // company of the checkout it came from.
                     None => match opened_on {
                         Some(tab) => {
-                            self.open_pane_in(tab, path, ctx);
+                            self.open_tab_in_group_of(tab, path, ctx);
                         }
                         None => {
                             self.open_tab_in(path, ctx);
@@ -1750,11 +1780,11 @@ impl Workspace {
                     if answering {
                         workspace.close_tab_menu(ctx);
                     }
-                    // Beside the tab it was asked for, which is what
-                    // `open_pane_in` falls back out of if that tab has closed
-                    // in the meantime.
+                    // In the group of the tab it was asked for, which is what
+                    // `open_tab_in_group_of` falls back out of if that tab has
+                    // closed in the meantime.
                     match opened_on {
-                        Some(tab) => workspace.open_pane_in(tab, path, ctx),
+                        Some(tab) => workspace.open_tab_in_group_of(tab, path, ctx),
                         None => workspace.open_tab_in(path, ctx),
                     };
                 }
@@ -2673,25 +2703,27 @@ impl Workspace {
         self.settle(effect, ctx)
     }
 
-    /// Opens a pane whose shell starts in `directory`, inside `tab`.
+    /// Opens a tab whose shell starts in `directory`, in `tab`'s group.
     ///
-    /// What the worktree menu opens into. A worktree opened from a tab belongs
-    /// *with* that tab: it is the same repository, one checkout over, and the
-    /// panel says so by drawing the two under one group header — which is a
-    /// header that appears the moment the second pane arrives, so there is no
-    /// group to make first and none to tidy away when one of them closes. The
-    /// alternative, a tab of its own, puts the branch somewhere else in the
-    /// list with nothing left to say where it came from.
+    /// What the worktree menu opens into, and **it is a tab and not a pane**.
+    /// A worktree opened from a tab belongs *with* that tab: it is the same
+    /// repository, one checkout over, and the panel says so by folding the two
+    /// under one heading. It used to say so by splitting the tab, and that was
+    /// the wrong claim: a split puts two agents in one rectangle, half a
+    /// window each, sharing a keyboard — which is a thing a person asks for
+    /// when they want to watch two things at once, not what "give this branch
+    /// a checkout of its own" means. Belonging together and being on screen
+    /// together are two different statements and only the first one was ever
+    /// true here.
     ///
-    /// [`TabAction::Split`] is about the active tab, so the tab named here
-    /// becomes the active one first. That is not a workaround: a person who
-    /// asked a tab for a worktree is about to be looking at it, and the split
-    /// focuses what it made.
+    /// The group is made the moment the second checkout arrives and pruned
+    /// when its last member closes, so there is no group to make first and
+    /// none to tidy away.
     ///
-    /// A tab that closed while git was checking the worktree out gets the tab
-    /// this used to open every time. The checkout happened and it is still
-    /// what was asked for; only the place to put it has gone.
-    pub fn open_pane_in(
+    /// A tab that closed while git was checking the worktree out gets a tab of
+    /// its own, as it always did. The checkout happened and it is still what
+    /// was asked for; only the place to put it has gone.
+    pub fn open_tab_in_group_of(
         &mut self,
         tab: TabId,
         directory: PathBuf,
@@ -2701,8 +2733,7 @@ impl Workspace {
             return self.open_tab_in(directory, ctx);
         }
 
-        self.tabs.apply(TabAction::Select(tab));
-        let effect = self.tabs.apply(TabAction::Split(Direction::Right));
+        let effect = self.tabs.apply(TabAction::NewInGroupOf(tab));
 
         // The directory before the shells are synced, for the reason
         // `open_tab_in` writes it there: syncing is the moment a pty's
@@ -2711,6 +2742,18 @@ impl Workspace {
             && let Some(pane) = self.tabs.pane_mut(pane)
         {
             pane.session_mut().working_directory = Some(directory);
+        }
+
+        // The repository is a better heading than the tab the group was made
+        // around: what the checkouts under it have in common is the repository,
+        // and the tab's own name is already on its row. Only when the menu
+        // read one — it is the menu's own answer, and a group named after the
+        // tab is what the strip already fell back to.
+        if let (Some(group), Some(repository)) = (
+            self.tabs.get(tab).and_then(Tab::group),
+            self.tab_menu.repository.clone(),
+        ) {
+            self.tabs.rename_group(group, repository);
         }
 
         self.settle(effect, ctx)
@@ -2974,6 +3017,16 @@ impl Workspace {
         self.tab_chrome.get(&id)
     }
 
+    /// The same, for one group's heading and the box around its members.
+    pub(super) fn group_chrome(&self, id: GroupId) -> Option<&GroupInteraction> {
+        self.group_chrome.get(&id)
+    }
+
+    /// The panel's drag: what is being carried, and where the rows are.
+    pub(super) fn panel_drag(&self) -> PanelDrag {
+        self.panel_drag.clone()
+    }
+
     /// Whether this row should be showing its detail card.
     ///
     /// Never while the options menu is up. Warp tears its sidecar down when
@@ -3048,6 +3101,26 @@ impl Workspace {
         // A closed tab's entry would otherwise outlive it, and the next tab to
         // reuse nothing at all would still be paying for the map.
         self.tab_chrome.retain(|id, _| tabs.contains(id));
+
+        let groups: Vec<GroupId> = self.tabs.groups().map(TabGroup::id).collect();
+        for id in &groups {
+            self.group_chrome.entry(*id).or_default();
+        }
+        self.group_chrome.retain(|id, _| groups.contains(id));
+
+        // A drag whose subject has gone is a drag with nothing to drop. It
+        // happens for one reason and it is a real one: an agent's tab can
+        // close while somebody is holding it, and a gesture left running would
+        // draw a line for a row nobody can see and then dispatch a move that
+        // resolves to nothing.
+        let carried_is_gone = match self.panel_drag.carrying() {
+            Some(Carried::Tab(tab)) => !tabs.contains(&tab),
+            Some(Carried::Group(group)) => !groups.contains(&group),
+            None => false,
+        };
+        if carried_is_gone {
+            self.panel_drag.cancel();
+        }
 
         let open: Vec<PaneId> = self.tabs.panes().map(|(_, pane)| pane.id()).collect();
 
