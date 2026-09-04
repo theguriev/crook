@@ -141,7 +141,17 @@ impl Harness {
     /// anything at all when there is none.
     fn with_settings(tabs: usize, settings: Settings) -> Self {
         let queue = LocalQueue::new();
-        let mut app = App::new(queue.foreground(), Arc::new(Background::new(1)));
+        // Two, not one, and for the reason `crate::PARKED_WORKERS` exists: a
+        // task that waits on a timer holds its worker for the whole cycle, so
+        // a pool of one has nothing left to run anything else on. A harness
+        // with a single worker passed for as long as no test started such a
+        // chain — and then failed, twenty seconds at a time and in a test
+        // about a shell title, the day the terminal model grew one.
+        //
+        // Two rather than the application's `PARKED_WORKERS + 1`: a test
+        // starts at most the model's own chain, and a pool of five per harness
+        // is five OS threads per test for workers nothing ever schedules onto.
+        let mut app = App::new(queue.foreground(), Arc::new(Background::new(2)));
         app.update(|ctx| ctx.add_singleton_model(UsageModel::new));
 
         let quit_requests = Rc::new(Cell::new(0));
@@ -3930,8 +3940,9 @@ fn the_themes_folder_is_not_polled_while_the_panel_is_closed() {
     let before = harness.theme_names().len();
     fs::write(themes.path().join("my_own.yaml"), theme_file_text()).expect("writable");
 
-    // Long enough that a poll would have run several times.
-    harness.settle_for(std::time::Duration::from_millis(2500), |_| false);
+    // Two poll intervals, which is one more than it takes for a poll that was
+    // running to have noticed. Longer would only make the suite slower.
+    harness.settle_for(super::view::THEMES_POLL * 2, |_| false);
 
     assert_eq!(
         harness.theme_names().len(),
@@ -5025,6 +5036,38 @@ mod shells {
                 &character.to_string(),
             );
         }
+    }
+
+    #[test]
+    fn a_pane_whose_pty_is_held_open_by_a_background_process_still_closes() {
+        // End-of-file on the pty master is what the reader learns a session is
+        // over by, and something other than the shell can hold the far end
+        // open. Before the child was asked directly, this pane sat there
+        // showing a dead shell until somebody closed it by hand.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+        harness.wait_for("the shell never printed anything", |harness| {
+            !harness.terminal_text(pane).trim().is_empty()
+        });
+
+        // A process that outlives the shell and keeps the slave descriptor.
+        type_line(&mut harness, "sleep 30 &");
+        harness.press("enter", Modifiers::default(), "");
+        harness.wait_for("the background job never started", |harness| {
+            harness.terminal_text(pane).contains(char::is_numeric)
+        });
+
+        type_line(&mut harness, "exit");
+        harness.press("enter", Modifiers::default(), "");
+
+        // The shell is gone; the pty is not. The window closes because the
+        // *child* was asked, not because anything reached end of file.
+        harness.wait_for("the pane never noticed its shell had exited", |harness| {
+            harness.quit_requests() > 0
+        });
     }
 
     #[test]
@@ -6378,6 +6421,85 @@ fn the_row_height_the_panel_scrolls_by_is_the_height_it_draws() {
         "rows are drawn {drawn} apart and scrolled by {}",
         crate::workspace::theme_panel::ROW_HEIGHT
     );
+}
+
+/// The tabs panel scrolling to the row a selection landed on.
+mod panel_autoscroll {
+    use super::*;
+
+    /// How far the panel's list is scrolled.
+    fn offset(harness: &Harness) -> f32 {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.panel_scroll().lock().offset()
+        })
+    }
+
+    /// A panel with enough tabs that the list is longer than the window.
+    fn crowded() -> Harness {
+        let mut harness = Harness::panel(1);
+        for _ in 0..30 {
+            harness.dispatch_action(TabAction::New);
+        }
+        harness.frame();
+        harness
+    }
+
+    #[test]
+    fn selecting_a_tab_off_the_bottom_brings_its_row_into_view() {
+        // Without this, the keyboard moves the selection to a row nobody can
+        // see and the panel looks as though the chord did nothing.
+        let mut harness = crowded();
+        let first = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tabs().iter().next().expect("a first tab").id()
+        });
+
+        harness.dispatch_action(TabAction::Select(first));
+        harness.frame();
+        assert_eq!(offset(&harness), 0., "the first row is at the top");
+
+        let last = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tabs().iter().last().expect("a last tab").id()
+        });
+        harness.dispatch_action(TabAction::Select(last));
+        harness.frame();
+
+        assert!(
+            offset(&harness) > 0.,
+            "the last row was selected and the list never moved"
+        );
+    }
+
+    #[test]
+    fn a_row_already_in_view_does_not_move_the_list() {
+        // A selection that scrolled every time would fight the wheel: reading
+        // down the list and clicking what you find would jump it.
+        let mut harness = crowded();
+        let last = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tabs().iter().last().expect("a last tab").id()
+        });
+        harness.dispatch_action(TabAction::Select(last));
+        harness.frame();
+        let settled = offset(&harness);
+
+        // The same tab again, and then a frame: nothing has moved.
+        harness.dispatch_action(TabAction::Select(last));
+        harness.frame();
+
+        assert_eq!(offset(&harness), settled);
+    }
+
+    #[test]
+    fn the_header_strip_layout_scrolls_nothing() {
+        // There is no panel in that layout, and the scroll state behind it is
+        // not something a tab selection should be writing into.
+        let mut harness = Harness::new(1);
+        for _ in 0..30 {
+            harness.dispatch_action(TabAction::New);
+        }
+        harness.frame();
+
+        assert_eq!(offset(&harness), 0.);
+    }
 }
 
 /// Restoring a window: the strip comes back, and everything the workspace

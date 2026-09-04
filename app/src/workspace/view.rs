@@ -13,7 +13,7 @@ use std::time::Duration;
 /// immediate, slow enough that a folder of fifty themes is a directory walk
 /// somebody would have to go looking for in a profiler. It costs nothing at
 /// all while the panel is closed — see [`Workspace::watch_themes`].
-const THEMES_POLL: Duration = Duration::from_millis(750);
+pub(super) const THEMES_POLL: Duration = Duration::from_millis(750);
 
 use crook_terminal::Snapshot;
 use crookui_core::elements::MouseStateHandle;
@@ -50,6 +50,7 @@ use crate::{Channel, WINDOW_CHROME};
 
 use super::action::{OptionsAction, SettingsAction, ThemeAction, WorkspaceAction};
 use super::settings_page::{Section, SettingsState};
+use super::tabs_panel::geometry::RowGeometry;
 use super::theme_panel::{Mode, ThemePanelState};
 use super::usage_chip::UsageChip;
 use super::{body, header_toolbar, tabs_panel};
@@ -372,6 +373,10 @@ pub struct Workspace {
     /// a scroll offset that lived in it would snap back to the top on the
     /// frame the scroll itself caused.
     panel_scroll: ScrollStateHandle,
+    /// Where the panel drew each of its rows on the last frame, so that a
+    /// selection made with the keyboard can be scrolled to. See
+    /// [`RowGeometry`](super::tabs_panel::geometry::RowGeometry).
+    panel_rows: RowGeometry,
     /// The row the pointer is on, if the detail card is armed.
     hovered_row: Option<PaneId>,
     /// The home directory, resolved once.
@@ -452,6 +457,7 @@ impl Workspace {
             themes_directory: crate::theme::user_themes_directory(),
             save_generation: Arc::new(AtomicU64::new(0)),
             panel_scroll: ScrollStateHandle::default(),
+            panel_rows: RowGeometry::new(),
             hovered_row: None,
             home: std::env::home_dir(),
             new_tab: MouseStateHandle::default(),
@@ -774,6 +780,44 @@ impl Workspace {
     /// How far the tabs panel's list has been scrolled.
     pub(super) fn panel_scroll(&self) -> ScrollStateHandle {
         self.panel_scroll.clone()
+    }
+
+    /// Where the panel's rows were drawn on the last frame.
+    pub(super) fn panel_rows(&self) -> RowGeometry {
+        self.panel_rows.clone()
+    }
+
+    /// Brings the focused pane's row into view in the tabs panel.
+    ///
+    /// The gap that used to be written down in `tabs_panel`'s module docs:
+    /// selecting a tab from the keyboard moved the selection whether or not
+    /// its row was on screen. What it needed was a scrollable that can be told
+    /// to make a particular child visible, and what that needs is somewhere
+    /// for the children to say where they ended up — which is
+    /// [`RowGeometry`](super::tabs_panel::geometry::RowGeometry).
+    ///
+    /// Against the row boxes the *last* frame recorded, which is right: the
+    /// rows do not move when the selection does, so a frame that has not been
+    /// drawn yet would report the same offsets. A row that was never drawn —
+    /// the first selection of a session, before any frame — scrolls nowhere,
+    /// and the next selection finds it.
+    fn scroll_row_into_view(&self) {
+        if self.options.layout != Layout::Vertical {
+            return;
+        }
+        let Some(pane) = self.tabs.focused_pane_id() else {
+            return;
+        };
+        let Some(row) = self.panel_rows.get(pane) else {
+            return;
+        };
+
+        let mut scroll = self.panel_scroll.lock();
+        if let Some(offset) =
+            tabs_panel::geometry::scroll_for(row, scroll.offset(), scroll.viewport())
+        {
+            scroll.scroll_to(offset);
+        }
     }
 
     /// Whether the settings page is open — which is to say, whether a pane is
@@ -1457,8 +1501,10 @@ impl Workspace {
         // After the strip has moved, so "which pane is being looked at" is the
         // answer for the state the frame is about to draw. Every action comes
         // through here, which is what makes looking at a pane the one and only
-        // thing that quiets its bell.
+        // thing that quiets its bell — and what brings the row it selected
+        // into view whichever gesture selected it.
         self.attend(ctx);
+        self.scroll_row_into_view();
 
         // An action that changed nothing repaints nothing: holding down
         // cmd-alt-left on the leftmost tab must not put the window on a

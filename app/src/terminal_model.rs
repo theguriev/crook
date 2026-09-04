@@ -65,9 +65,13 @@
 //! started it. Nothing can make that read return: the slave is open in another
 //! process and the reader's own descriptor is a duplicate of the master, so the
 //! thread parks until the orphan exits, holding a descriptor and nothing else.
-//! For the same reason a shell that exits *behind* such a process leaves its
-//! pane open, because end-of-file on the master is the only signal this design
-//! has that a session is over.
+//!
+//! What that used to cost as well was the *pane*: end-of-file on the master was
+//! the only signal this design had that a session was over, so a shell that
+//! exited behind such a process left its pane sitting there showing a dead
+//! prompt. [`TerminalModel::watch_children`] asks the children directly instead,
+//! once a second and in one task for the whole model, so the pane closes when
+//! the shell does whatever the pty is doing.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -113,6 +117,13 @@ const READ_CHUNK: usize = 16 * 1024;
 /// practice means the child has exited — but "has exited" and "has been reaped"
 /// are a scheduling decision apart, and the exit status is worth a short wait.
 const REAP_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// How often the shells are asked whether they are still alive.
+///
+/// A second: fast enough that a pane whose pty is held open by a background
+/// process closes while somebody is still looking at it, and one `waitpid` per
+/// pane per second is nothing. See [`TerminalModel::watch_children`].
+const CHILD_POLL: Duration = Duration::from_secs(1);
 
 /// How long the reader sleeps between attempts to reap.
 const REAP_INTERVAL: Duration = Duration::from_millis(5);
@@ -224,6 +235,14 @@ pub struct TerminalModel {
     /// The colours every terminal resolves its cells against.
     palette: Palette,
 
+    /// Whether the chain that asks the shells whether they are still alive is
+    /// already running.
+    ///
+    /// One for the whole model rather than one per pane, and this is the flag
+    /// that keeps it that way: every session that opens asks for the chain, and
+    /// only the first one starts it. See [`Self::watch_children`].
+    watching_children: bool,
+
     /// Whether a pane installs command marks into the shell it opens.
     ///
     /// On, and the seam a setting hangs on when there is one. Off is not a
@@ -278,6 +297,7 @@ impl TerminalModel {
             failures: HashMap::new(),
             live: false,
             palette: crook_palette(),
+            watching_children: false,
             shell_marks: true,
             flusher: Arc::new(Flusher::default()),
             flushing: false,
@@ -498,7 +518,80 @@ impl TerminalModel {
             },
         );
         self.watch(pane, ctx);
+        self.watch_children(ctx);
         ctx.notify();
+    }
+
+    /// Notices that a shell has exited even though its pty has not.
+    ///
+    /// **The one thing end-of-file cannot tell us.** The reader thread learns a
+    /// session is over by the pty master going quiet, and something other than
+    /// the shell can hold the far end open: a `sleep 60 &`, a dev server
+    /// started with an `&`, an `ssh -f`. The shell exits, the descriptor stays
+    /// open, and the reader parks on it for as long as that process lives —
+    /// leaving a pane sitting there showing a dead shell.
+    ///
+    /// So the child is asked directly. It is a poll, at a second, and that is
+    /// a deliberate trade: the alternative is moving the child onto a thread of
+    /// its own to block in `wait`, and the moment the child is reaped anywhere
+    /// but under this lock, a `kill` racing it can signal whatever process id
+    /// the system has since handed out. A `waitpid` with `WNOHANG` once a
+    /// second costs nothing and cannot do that.
+    ///
+    /// **One chain for the whole model**, not one per pane, and that is not a
+    /// tidiness point. A task that sleeps holds its worker for the whole cycle
+    /// — see `PARKED_WORKERS` in `crate` — so a chain per pane would park a
+    /// worker per pane, and a window with more panes than the machine has
+    /// cores would have no worker left to run anything else on.
+    ///
+    /// The chain ends when the last session does, which is what stops a closed
+    /// window from going on asking about shells that are gone.
+    fn watch_children(&mut self, ctx: &mut ModelContext<Self>) {
+        if self.sessions.is_empty() || self.watching_children {
+            return;
+        }
+        self.watching_children = true;
+
+        let shared: Vec<_> = self
+            .sessions
+            .iter()
+            .map(|(pane, session)| (*pane, session.shared.clone()))
+            .collect();
+
+        let asking = ctx.background().spawn(async move {
+            thread::sleep(CHILD_POLL);
+            shared
+                .into_iter()
+                .filter(|(_, session)| {
+                    // Under the terminal's own lock, like every other
+                    // `try_wait` — the exit is cached there, and that cache is
+                    // what stops a later kill from signalling a stranger.
+                    match session.lock().try_wait() {
+                        Ok(exit) => exit.is_some(),
+                        Err(error) => {
+                            log::debug!("could not check on a shell: {error:#}");
+                            false
+                        }
+                    }
+                })
+                .map(|(pane, _)| pane)
+                .collect::<Vec<_>>()
+        });
+
+        ctx.spawn(asking, move |model, exited, ctx| {
+            model.watching_children = false;
+            for pane in exited {
+                if model.sessions.contains_key(&pane) {
+                    // The same close every other path takes: the workspace is
+                    // what knows a tab's last pane takes the tab, and the last
+                    // tab the window. Nothing here removes the session — the
+                    // close comes back round through `sync`.
+                    ctx.emit(TerminalUpdate::Closed(pane));
+                }
+            }
+            model.watch_children(ctx);
+        })
+        .detach();
     }
 
     /// Starts the shared repaint thread, once.

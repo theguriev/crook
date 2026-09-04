@@ -45,14 +45,17 @@
 //!
 //! [`Scrollable`] keeps the half of [`Clipped`] that mattered — a row that
 //! overflows is neither painted over the body nor hit-tested there — and adds
-//! the wheel. What it does not add is auto-scroll: selecting a tab from the
-//! keyboard — `cmd-alt-left/right` on macOS, `ctrl-pageup/pagedown` off it —
-//! moves the selection whether or not the row is on screen, and does not bring
-//! it into view. Warp scrolls to its selected
-//! tab, which needs a scrollable that can be told "make this child visible",
-//! and that means an element that knows where its children ended up. It is a
-//! real gap and it is written down here rather than faked with a guess at the
-//! row's offset.
+//! the wheel.
+//!
+//! It also scrolls to the row a selection lands on, which is what Warp does
+//! and what `cmd-alt-left/right` — `ctrl-pageup/pagedown` off macOS — needs to
+//! be usable at all. A `Scrollable` can be told to scroll to an offset and
+//! cannot be asked where a particular child is, and the rows are not a fixed
+//! height anyway: the density changes them, the granularity changes how many
+//! there are, and a group header sits above each tab's. So the rows write down
+//! where they were painted, in [`geometry`], and the workspace reads the one
+//! it needs. The offsets are the *last* frame's, which is right: rows do not
+//! move when a selection does.
 
 use crookui_core::elements::Padding;
 use crookui_core::fonts::FamilyId;
@@ -68,6 +71,7 @@ use super::action::WorkspaceAction;
 use super::controls;
 use super::view::Workspace;
 
+pub(super) mod geometry;
 mod row;
 
 /// Warp's `PANEL_WIDTH`.
@@ -122,9 +126,16 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
                 .with_child(
                     Expanded::new(
                         1.,
-                        Scrollable::new(workspace.panel_scroll(), list(workspace, app))
-                            .with_scrollbar(theme().overlay_3)
-                            .finish(),
+                        Scrollable::new(
+                            workspace.panel_scroll(),
+                            // Inside the scrollable and outside every row,
+                            // which is what makes a row's offset measurable
+                            // from the content rather than from the window.
+                            geometry::Content::new(workspace.panel_rows(), list(workspace, app))
+                                .finish(),
+                        )
+                        .with_scrollbar(theme().overlay_3)
+                        .finish(),
                     )
                     .finish(),
                 )
@@ -282,7 +293,14 @@ fn panes_tab(
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
         .with_spacing(GROUP_ITEM_SPACING);
     for pane in panes {
-        rows.add_child(row::render(workspace, tab, *pane, app));
+        rows.add_child(
+            geometry::Tracked::new(
+                *pane,
+                workspace.panel_rows(),
+                row::render(workspace, tab, *pane, app),
+            )
+            .finish(),
+        );
     }
 
     let body = Container::new(rows.finish())
@@ -356,7 +374,14 @@ fn tabs_tab(
     // pane has gone. The other panes are simply not listed: no count, no
     // expander, and the row silently re-targets as focus moves inside the tab.
     for pane in panes {
-        rows.add_child(row::render(workspace, tab, *pane, app));
+        rows.add_child(
+            geometry::Tracked::new(
+                *pane,
+                workspace.panel_rows(),
+                row::render(workspace, tab, *pane, app),
+            )
+            .finish(),
+        );
     }
     let rows = rows.finish();
 

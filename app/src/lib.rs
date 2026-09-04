@@ -549,13 +549,19 @@ THE INPUT FIELD:
 
 /// How many workers are parked on a timer at any moment.
 ///
-/// Three: the usage poll between readings, the git gather between cycles, and
-/// the caret blink between halves of its phase. Each is one background task for
-/// the whole cycle — the wait *and* the work — so each holds its worker across
-/// the wait rather than yielding it, and none is ever counted as idle. Raise
-/// this when a fourth such chain appears, and see the test at the bottom of
-/// this file for what happens if it is not raised.
-const PARKED_WORKERS: usize = 3;
+/// Four: the usage poll between readings, the git gather between cycles, the
+/// caret blink between halves of its phase, and the one that asks the shells
+/// whether they are still alive. Each is one background task for the whole
+/// cycle — the wait *and* the work — so each holds its worker across the wait
+/// rather than yielding it, and none is ever counted as idle. Raise this when a
+/// fifth such chain appears, and see the test at the bottom of this file for
+/// what happens if it is not raised.
+///
+/// The number is a count of *chains*, never of panes. That is why the child
+/// check is one task for the whole terminal model rather than one per session:
+/// a chain per pane would park a worker per pane, and a window with more panes
+/// than the machine has cores would have nothing left to run a save on.
+const PARKED_WORKERS: usize = 4;
 
 /// A pool with a worker left over once both poll chains are asleep.
 ///
