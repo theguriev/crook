@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use super::*;
 use crook_plugin_api::{
-    ABI_VERSION, Answer, Capability, Manifest, Method, Node, Request, Size, Tone, to_bytes,
+    ABI_VERSION, Answer, Capability, Manifest, Method, Node, Render, Request, Size, Subject,
+    TabFacts, Tone, to_bytes,
 };
 
 /// Where a module's constant data starts. Below it is the bump allocator's
@@ -42,6 +43,14 @@ fn tree() -> Node {
             tone: Tone::Success,
         },
     ])
+}
+
+/// What the host asks for when the slot is drawn once and is about nothing.
+fn for_slot(slot: &str) -> Render {
+    Render {
+        slot: slot.into(),
+        subject: None,
+    }
 }
 
 /// `bytes` as a wasm data-segment string.
@@ -348,8 +357,66 @@ fn a_render_comes_back_as_a_tree() {
     sandbox.build().expect("it should build");
 
     assert_eq!(
-        sandbox.render("header.right").expect("it should render"),
+        sandbox
+            .render(&for_slot("header.right"))
+            .expect("it should render"),
         tree()
+    );
+}
+
+#[test]
+fn a_render_carries_what_it_is_about_and_not_only_where_it_goes() {
+    // The whole of ABI 3, proven from the guest's side: what arrives at
+    // `crook_render` is the encoded request, subject and all, rather than the
+    // slot name it used to be. The module answers with a meter whose fraction
+    // is the number of bytes it was handed, which is the one thing a module
+    // written in wasm text can say about a postcard value without decoding it
+    // — and it is enough, because a request carrying a subject is longer than
+    // the same request without one.
+    let body = with_strings(
+        r#"
+        (func (export "crook_build") (result i32) (i32.const 0))
+        (func (export "crook_render") (param $at i32) (param $len i32) (result i64)
+          ;; Node::Meter { fraction, tone }: variant 8, four bytes of f32, and
+          ;; the tone.
+          (i32.store8 (i32.const 2048) (i32.const 8))
+          (f32.store (i32.const 2049) (f32.convert_i32_u (local.get $len)))
+          (i32.store8 (i32.const 2053) (i32.const 0))
+          (i64.or (i64.shl (i64.const 2048) (i64.const 32)) (i64.const 6)))
+        (func (export "crook_run") (param i32 i32) (result i32) (i32.const 0))
+        "#,
+    );
+    let (mut sandbox, _) = open(&module(&body, ABI_VERSION)).expect("it should open");
+    let bare = for_slot("tab.row.mark");
+    let about_a_row = Render {
+        slot: "tab.row.mark".into(),
+        subject: Some(Subject::Tab(TabFacts {
+            key: 0x0123_4567_89ab_cdef,
+            tab: None,
+            place: None,
+        })),
+    };
+
+    let (
+        Ok(Node::Meter {
+            fraction: bare_len, ..
+        }),
+        Ok(Node::Meter {
+            fraction: with_len, ..
+        }),
+    ) = (sandbox.render(&bare), sandbox.render(&about_a_row))
+    else {
+        panic!("both renders should come back as a meter");
+    };
+
+    assert_eq!(
+        bare_len as usize,
+        to_bytes(&bare).expect("a request should encode").len(),
+        "the guest was handed something other than the whole request"
+    );
+    assert!(
+        with_len > bare_len,
+        "the subject did not cross: {with_len} against {bare_len}"
     );
 }
 
@@ -386,7 +453,7 @@ fn an_answer_that_points_outside_its_own_memory_is_refused() {
     let (mut sandbox, _) = open(&module(&body, ABI_VERSION)).expect("it should open");
 
     let problem = sandbox
-        .render("header.right")
+        .render(&for_slot("header.right"))
         .expect_err("it should be refused");
 
     assert!(matches!(problem, Problem::Answer(_)), "{problem:?}");
@@ -407,7 +474,7 @@ fn an_answer_longer_than_any_answer_could_be_is_refused_before_it_is_allocated()
     let (mut sandbox, _) = open(&module(&body, ABI_VERSION)).expect("it should open");
 
     let problem = sandbox
-        .render("header.right")
+        .render(&for_slot("header.right"))
         .expect_err("it should be refused");
 
     assert!(matches!(problem, Problem::Answer(_)), "{problem:?}");
@@ -432,7 +499,7 @@ fn an_answer_that_is_not_what_it_should_be_is_refused() {
     let (mut sandbox, _) = open(&module(&body, ABI_VERSION)).expect("it should open");
 
     let problem = sandbox
-        .render("header.right")
+        .render(&for_slot("header.right"))
         .expect_err("it should be refused");
 
     assert!(matches!(problem, Problem::Answer(_)), "{problem:?}");
@@ -448,7 +515,9 @@ fn each_call_gets_its_own_budget() {
 
     for _ in 0..100 {
         assert_eq!(
-            sandbox.render("header.right").expect("it should render"),
+            sandbox
+                .render(&for_slot("header.right"))
+                .expect("it should render"),
             tree()
         );
     }

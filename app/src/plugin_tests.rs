@@ -356,3 +356,46 @@ fn a_name_in_the_disabled_list_that_answers_to_nothing_costs_nothing() {
         assert!(host.refused().is_empty());
     });
 }
+
+#[test]
+fn the_marks_on_a_tab_row_are_slots_and_a_release_binary_leaves_them_empty() {
+    // Declared by `crook/tabs` and filled by nobody in the box, which is the
+    // shape `header.right` has: the disc a row draws is the *host's* answer to
+    // an empty slot rather than a contribution competing with a plugin's. See
+    // `plugins::tabs` for why that difference matters.
+    with_host(|host| {
+        let mark = crate::plugins::tabs::TAB_ROW_MARK;
+        let badge = crate::plugins::tabs::TAB_ROW_BADGE;
+
+        assert_eq!(host.row_slot_named("tab.row.mark"), Some(mark));
+        assert_eq!(host.row_slot_named("tab.row.badge"), Some(badge));
+        assert!(host.rows().is_empty(mark));
+        assert!(host.rows().is_empty(badge));
+        // And they are not in the other registry, so a plugin that contributed
+        // an ordinary element to one is told the slot does not exist there
+        // rather than drawing something with no way to ask which row it is on.
+        assert_eq!(host.slot_named("tab.row.mark"), None);
+        assert!(host.audit().is_empty(), "{:?}", host.audit());
+    });
+}
+
+#[test]
+fn a_row_contribution_goes_back_out_with_the_plugin_that_made_it() {
+    // The guard, for the registry the tab rows use. Every other registration
+    // in this file is proven the same way, and a second registry is a second
+    // place for one to be left behind.
+    with_host(|host| {
+        let mark = crate::plugins::tabs::TAB_ROW_MARK;
+        let who = PluginId::parse("crook/host").expect("a literal that parses");
+
+        host.contribute_row(mark, "mark", 0, |_, _, _| None);
+        assert_eq!(
+            host.rows().contributors(mark),
+            vec![(who.clone(), EntryId::new("mark"))]
+        );
+
+        host.unload(&who);
+
+        assert!(host.rows().is_empty(mark), "the contribution outlived it");
+    });
+}

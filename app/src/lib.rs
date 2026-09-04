@@ -1530,6 +1530,7 @@ fn seed_snapshot_tabs(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace
                     lines_removed,
                 },
             ),
+            worktree: false,
         };
 
         workspace.update_session(*id, ctx, |session| {
@@ -1550,7 +1551,12 @@ fn seed_snapshot_tabs(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace
     if let Some(last) = workspace.tabs().iter().map(Tab::id).last() {
         workspace.apply(TabAction::NewInGroupOf(last), ctx);
         if let Some(pane) = workspace.tabs().focused_pane_id() {
-            let directory = root.join(WORKTREE.directory);
+            // A checkout of its own, beside the one it was cut from, because
+            // that is what a worktree *is*: git facts are recorded per
+            // directory, so two rows sharing a path would show one row's
+            // branch on both — and, now that a row's mark can be a plugin's,
+            // one row's mark on both.
+            let directory = root.with_file_name("crook-atlas").join(WORKTREE.directory);
             workspace.update_session(pane, ctx, |session| {
                 session.derived_title = Some(WORKTREE.title.to_owned());
                 session.status = WORKTREE.status;
@@ -1567,6 +1573,9 @@ fn seed_snapshot_tabs(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace
                             lines_removed,
                         },
                     ),
+                // The one seeded row that is one, which is what makes a
+                // plugin that marks worktrees visible in a demo window.
+                worktree: true,
             };
             workspace
                 .git()

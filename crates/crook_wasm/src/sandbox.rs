@@ -3,7 +3,7 @@
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crook_plugin_api::{ABI_VERSION, Answer, Manifest, Node, Registered, Request};
+use crook_plugin_api::{ABI_VERSION, Answer, Manifest, Node, Registered, Render, Request};
 use wasmi::{Caller, Engine, Instance, Linker, Memory, Module, Store, TypedFunc};
 
 use crate::host::Registry;
@@ -219,9 +219,18 @@ impl Sandbox {
         }
     }
 
-    /// Asks what it wants drawn in one slot.
-    pub fn render(&mut self, slot: &str) -> Result<Node, Problem> {
-        let (pointer, length) = self.write(slot.as_bytes(), self.fuel.render)?;
+    /// Asks what it wants drawn in one slot, for one subject.
+    ///
+    /// The subject is the host's answer to a slot that is drawn more than
+    /// once: a mark in the tab panel is asked for once per row, and a plugin
+    /// told only the slot name would have to give every row the same mark.
+    /// What is *in* a subject is decided above this file — see the
+    /// application's `plugins::wasm`, which is where a grant is compared
+    /// against what a plugin asked to be allowed to know.
+    pub fn render(&mut self, render: &Render) -> Result<Node, Problem> {
+        let bytes =
+            crook_plugin_api::to_bytes(render).map_err(|why| Problem::Answer(why.to_string()))?;
+        let (pointer, length) = self.write(&bytes, self.fuel.render)?;
         let packed =
             self.call::<(i32, i32), i64>(exports::RENDER, (pointer, length), self.fuel.render)?;
         let bytes = self.read(packed)?;

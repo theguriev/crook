@@ -46,8 +46,6 @@ mod view;
 #[cfg(test)]
 mod tests;
 
-use crookui_core::icons::Lucide;
-
 use crate::theme::theme;
 
 pub use action::{
@@ -70,14 +68,6 @@ pub(crate) const CLOSE_BUTTON_SIZE: f32 = 16.;
 /// Smaller than the square it sits in, the way every icon in this interface
 /// is: the button is the box, the icon is what it says.
 pub(crate) const CLOSE_ICON_SIZE: f32 = 12.;
-
-/// The mark a settings row leads with, where a session's row carries its
-/// status.
-///
-/// One constant for the panel's settings row and the button that chooses that
-/// section, because they are the same symbol standing for the same thing and
-/// two copies of it is how they end up different.
-pub(crate) const GEAR_ICON: Lucide = Lucide::Settings;
 
 /// Breaks `text` into lines of at most `max_chars` characters each.
 ///

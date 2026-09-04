@@ -315,10 +315,7 @@ fn gather(dir: &Path, with_diff: bool) -> GitFacts {
     if with_diff {
         git::gather(dir)
     } else {
-        GitFacts {
-            branch: git::current_branch(dir),
-            diff: None,
-        }
+        git::facts_without_diff(dir)
     }
 }
 
@@ -340,6 +337,7 @@ mod tests {
         GitFacts {
             branch: Some(Head::Branch(branch.to_owned())),
             diff: Some(DiffStats::default()),
+            worktree: false,
         }
     }
 

@@ -25,7 +25,7 @@ use crookui_core::elements::{Padding, Paragraph};
 use crookui_core::fonts::FamilyId;
 use crookui_core::prelude::*;
 
-use crook_plugin::{EntryId, Manifest, PluginId};
+use crook_plugin::{EntryId, Manifest, PluginId, SlotId, Slots};
 
 use crate::theme::theme;
 use crate::workspace::settings_page::{named, widgets};
@@ -373,17 +373,23 @@ fn section(title: &str, rows: Vec<widgets::Entry>, ui: FamilyId) -> Box<dyn Elem
 /// there, and for nobody else.
 fn problems(workspace: &Workspace, plugin: &PluginId) -> Vec<String> {
     let host = workspace.host();
-    let slots = host.slots();
     host.audit()
         .into_iter()
         .filter(|complaint| {
             complaint.names(plugin)
-                || complaint
-                    .slot()
-                    .is_some_and(|slot| slots.contributors(slot).iter().any(|(by, _)| by == plugin))
+                || complaint.slot().is_some_and(|slot| {
+                    contributes_to(host.slots(), slot, plugin)
+                        || contributes_to(host.rows(), slot, plugin)
+                })
         })
         .map(|complaint| complaint.to_string())
         .collect()
+}
+
+/// Whether this plugin put something in that slot, in whichever registry the
+/// slot lives in.
+fn contributes_to<C: 'static>(slots: &Slots<C>, slot: SlotId, plugin: &PluginId) -> bool {
+    slots.contributors(slot).iter().any(|(by, _)| by == plugin)
 }
 
 /// Where this plugin has put something, in words.
@@ -392,7 +398,18 @@ fn problems(workspace: &Workspace, plugin: &PluginId) -> Vec<String> {
 /// cannot claim to draw something it did not contribute, and one that
 /// contributed something it forgot to mention is listed anyway.
 fn draws(workspace: &Workspace, plugin: &PluginId) -> Vec<String> {
-    let slots = workspace.host().slots();
+    let host = workspace.host();
+    // Both registries, because a plugin's card should say what it draws and
+    // not what kind of slot it drew it in: a mark on every tab row is the
+    // loudest thing a plugin can put on screen, and listing only the slots
+    // that are drawn once would leave it out.
+    let mut lines = drawn_in(host.slots(), plugin);
+    lines.extend(drawn_in(host.rows(), plugin));
+    lines
+}
+
+/// The lines for one registry.
+fn drawn_in<C: 'static>(slots: &Slots<C>, plugin: &PluginId) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     for slot in slots.declared() {
         let mine: Vec<EntryId> = slots

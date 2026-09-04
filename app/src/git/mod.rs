@@ -47,6 +47,14 @@ pub struct GitFacts {
     pub branch: Option<Head>,
     /// Working-tree line changes against `HEAD`.
     pub diff: Option<DiffStats>,
+    /// Whether this is a linked worktree rather than the checkout the
+    /// repository was cloned into.
+    ///
+    /// Free, in the sense that matters: [`discover`] already knows both git
+    /// directories by the time it answers, and telling them apart is a
+    /// comparison rather than another walk. `false` outside a repository, for
+    /// the same reason `branch` is `None` there.
+    pub worktree: bool,
 }
 
 /// The branch `dir` is on, if it is in a repository.
@@ -55,6 +63,24 @@ pub struct GitFacts {
 /// reads one small file, and spawns nothing.
 pub fn current_branch(dir: &Path) -> Option<Head> {
     discover(dir).and_then(|layout| read_head(&layout.git_dir))
+}
+
+/// Everything about `dir` that can be had without running git.
+///
+/// The half of [`gather`] that costs a walk and one small file, for the times
+/// a row is drawn before the diff has come home — and the only place that
+/// answers whether a directory is a linked worktree, because that is a
+/// property of the layout rather than of anything git has to be asked.
+pub fn facts_without_diff(dir: &Path) -> GitFacts {
+    let Some(layout) = discover(dir) else {
+        return GitFacts::default();
+    };
+
+    GitFacts {
+        branch: read_head(&layout.git_dir),
+        diff: None,
+        worktree: layout.is_linked_worktree(),
+    }
 }
 
 /// Everything about the repository `dir` sits in.
@@ -72,6 +98,7 @@ pub fn gather(dir: &Path) -> GitFacts {
     GitFacts {
         branch: read_head(&layout.git_dir),
         diff: layout.work_tree.as_deref().and_then(diff_stats_blocking),
+        worktree: layout.is_linked_worktree(),
     }
 }
 
