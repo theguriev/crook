@@ -5376,9 +5376,19 @@ fn turning_the_login_shell_off_reaches_the_thing_that_opens_shells() {
     // at the model that starts the shell, before the next one is started. A
     // setting written to a file and read by nobody is the shape of bug this
     // catches.
+    // Which way the switch starts is the platform's answer and not one to
+    // hard-code: a login shell is what every terminal on macOS gives you and
+    // what none of them give you on Linux, and `login_by_default` is where
+    // that is argued. What this test is about is the wire between the switch
+    // and the model, which is the same either way round.
+    let out_of_the_box = crate::shell_integration::login_by_default();
     let mut harness = Harness::new(1);
-    assert!(harness.general().login_shell, "on, out of the box");
-    assert!(harness.shell_login(), "and the model was told at startup");
+    assert_eq!(harness.general().login_shell, out_of_the_box);
+    assert_eq!(
+        harness.shell_login(),
+        out_of_the_box,
+        "the model was told at startup"
+    );
 
     harness.open_settings_page();
     harness.select_settings_section(Section::Shell);
@@ -5387,9 +5397,10 @@ fn turning_the_login_shell_off_reaches_the_thing_that_opens_shells() {
     assert_eq!(switches.len(), 1, "one switch on the shell page");
     harness.click(center(switches[0]), MouseButton::Left);
 
-    assert!(!harness.general().login_shell);
-    assert!(
-        !harness.shell_login(),
+    assert_eq!(harness.general().login_shell, !out_of_the_box);
+    assert_eq!(
+        harness.shell_login(),
+        !out_of_the_box,
         "the switch wrote the file and left the shells alone"
     );
 }
@@ -8493,12 +8504,14 @@ mod text_size {
 
     /// The chord, sent the way the window delegate sends a bound keystroke.
     ///
-    /// Through [`platform_chord`] rather than a bare Control: zoom is Command
-    /// on macOS, so hard-coding Control made these four tests unable to pass
-    /// on a Mac at all. Shift is don't-care for the zoom bindings off macOS,
-    /// which is why the chord every other test uses fits this one too.
+    /// [`settings_chord`] rather than [`platform_chord`], because the zoom
+    /// chords are the same exception the settings chord is: they carry no
+    /// Shift. Off macOS the Shift is don't-care on `=` and `-` — it is what
+    /// reaches the `+` and `_` printed on those keys — but *not* on `0`, where
+    /// Shift is `)` and nothing is bound. A helper that sent Shift could only
+    /// ever test two of the three, which is what it was doing.
     fn zoom(harness: &mut Harness, key: &str) -> bool {
-        harness.press_key(key, platform_chord())
+        harness.press_key(key, settings_chord())
     }
 
     #[test]
