@@ -100,6 +100,30 @@ impl Completions {
         prefix.into_iter().collect()
     }
 
+    /// The candidates that still answer `word`, in the order the shell gave
+    /// them and without repeats.
+    ///
+    /// **Prefix, and nothing cleverer.** A fuzzy match is worth having where
+    /// there is a list to show what it matched; offered one at a time in the
+    /// line itself — see
+    /// [`TextInput::suggestion`](crate::text_input::TextInput::suggestion) —
+    /// a candidate that shares no start with what was typed reads as the field
+    /// having invented something. Case is ignored, because a person typing
+    /// `car` for `Cargo.toml` has typed the start of it.
+    ///
+    /// Repeats are dropped because `compgen -c` lists a command once per
+    /// directory of `PATH` that holds it, and stepping through the same name
+    /// four times is four presses that appear to do nothing.
+    pub fn matching(&self, word: &str) -> Vec<&str> {
+        let mut kept: Vec<&str> = Vec::new();
+        for candidate in &self.candidates {
+            if starts_with_ignoring_case(candidate, word) && !kept.contains(&candidate.as_str()) {
+                kept.push(candidate);
+            }
+        }
+        kept
+    }
+
     /// What to insert in place of `word`, or `None` when there is nothing to
     /// add.
     ///
@@ -111,6 +135,13 @@ impl Completions {
         let prefix = self.common_prefix();
         (prefix.len() > word.len() && prefix.starts_with(word)).then_some(prefix)
     }
+}
+
+/// Whether `word` is the start of `candidate` but for case.
+fn starts_with_ignoring_case(candidate: &str, word: &str) -> bool {
+    let mut left = candidate.chars();
+    word.chars()
+        .all(|typed| left.next().is_some_and(|c| c.eq_ignore_ascii_case(&typed)))
 }
 
 /// Reads an answer the shell has written, or `None` when there is nothing

@@ -29,8 +29,8 @@ use std::time::{Duration, Instant};
 use crookui_core::geometry::RectF;
 
 use crate::clipboard::Clipboard;
-use crate::completion::Completions;
-use crate::editor::{Editor, Selection};
+use crate::completion::{self, Completions};
+use crate::editor::{Editor, Motion, Selection};
 use crate::input_keys::Intent;
 
 /// How long the caret stays solid, and then hidden, before it flips again.
@@ -99,13 +99,30 @@ struct Inner {
 struct CompletionState {
     /// The number of the last request sent. Zero before any.
     asked: u64,
-    /// The candidates the last *matching* answer carried, and the word they
-    /// were for.
+    /// What the shell offered that Tab has not typed yet, if anything.
+    offered: Option<Offer>,
+}
+
+/// The candidates a Tab turned up, and which of them is being offered.
+///
+/// **There is no list on screen.** A shell prints its candidates in columns
+/// and every terminal that has tried to improve on that has ended up with a
+/// panel: a second surface, in a second type, that appears under whatever a
+/// person is reading. So the answer is offered the way the history is — one
+/// candidate at a time, in dim ink after the caret, in the line itself — and
+/// Tab steps through the rest.
+#[derive(Debug)]
+struct Offer {
+    /// The word the shell was asked about.
     ///
-    /// Kept so the list can be drawn under the field, and dropped the moment
-    /// the line changes: a list of what `car` could become is nonsense under a
-    /// line that now says `cargo b`.
-    showing: Option<(String, Completions)>,
+    /// What says whether the answer is still about the line on screen: typing
+    /// on past it narrows the same answer, and anything else means the shell
+    /// was asked a question nobody is asking any more.
+    stem: String,
+    /// What it answered.
+    answer: Completions,
+    /// Which of the candidates that still match is being shown.
+    at: usize,
 }
 
 /// The text an input method is composing, before it becomes text.
@@ -165,6 +182,19 @@ impl Default for TextInput {
 }
 
 impl TextInput {
+    /// An empty input that starts with the shell's own history behind it: the
+    /// field a pane composes in.
+    ///
+    /// Every other field in the window — the palette's, the settings rail's,
+    /// the search box above the tabs — is [`Self::new`], because none of them
+    /// is a command line and a person's shell history has nothing to say about
+    /// what they are filtering. See [`crate::shell_history`].
+    pub fn for_pane() -> Self {
+        let input = Self::new();
+        input.edit(|editor| editor.seed_history(crate::shell_history::user_history().to_vec()));
+        input
+    }
+
     /// An empty input with nothing typed into it.
     pub fn new() -> Self {
         Self(Rc::new(Inner {
@@ -201,16 +231,17 @@ impl TextInput {
     pub fn ask_for_completions(&self) -> u64 {
         let mut completion = self.0.completion.borrow_mut();
         completion.asked += 1;
-        completion.showing = None;
+        completion.offered = None;
         completion.asked
     }
 
     /// Applies an answer, reporting whether anything on screen changed.
     ///
-    /// Three outcomes, and they are the three every shell's Tab has. One
-    /// candidate is inserted whole. Several insert as much as they agree on.
-    /// An answer that adds nothing to what is typed is *shown* instead, which
-    /// is the only useful thing left to do with it.
+    /// The three outcomes every shell's Tab has, with the third one moved into
+    /// the line: one candidate is typed whole, several type as much as they
+    /// agree on, and what is still ambiguous after that is *offered* — the
+    /// first of the candidates in dim ink after the caret, with Tab stepping
+    /// to the next. No list, on purpose: see [`Offer`].
     ///
     /// An answer whose number is not the one this field is waiting for is
     /// dropped: it is about a line that has since been typed past.
@@ -222,32 +253,142 @@ impl TextInput {
             }
         }
 
-        let word = crate::completion::word_at_end(&self.line_to_caret()).to_owned();
-        if let Some(whole) = answer.insertion(&word) {
-            let addition = whole[word.len()..].to_owned();
-            self.0.completion.borrow_mut().showing = None;
-            self.edit(|editor| editor.insert(&addition));
-            return true;
-        }
+        let stem = completion::word_at_end(&self.line_to_caret()).to_owned();
+        let typed = answer.insertion(&stem).is_some_and(|whole| {
+            self.edit(|editor| editor.insert(&whole[stem.len()..]));
+            true
+        });
 
-        let showing = (answer.candidates.len() > 1).then_some((word, answer));
+        // Against the word as it stands *after* that insertion, which is the
+        // word an offer has to add to: Tab on `Car` with `Cargo.toml` and
+        // `Cargo.lock` types `Cargo.` and what is left to offer is the rest of
+        // one of the two.
+        let line = self.line_to_caret();
+        let word = completion::word_at_end(&line);
+        let offered = if answer.matching(word).len() > 1 {
+            Some(Offer {
+                stem,
+                answer,
+                at: 0,
+            })
+        } else {
+            None
+        };
+
         let mut completion = self.0.completion.borrow_mut();
-        if completion.showing == showing {
+        // A frame is owed for the insertion as much as for the offer: a Tab
+        // that typed the rest of a word and left nothing ambiguous has still
+        // changed the line.
+        let changed = typed || offered.is_some() || completion.offered.is_some();
+        completion.offered = offered;
+        changed
+    }
+
+    /// Steps to the next candidate the shell offered, reporting whether there
+    /// was one to step through.
+    ///
+    /// It wraps. A person pressing Tab through four candidates has no reason
+    /// to be stopped at the fourth and made to press something else.
+    pub fn cycle_completion(&self, forward: bool) -> bool {
+        let line = self.line_to_caret();
+        let word = completion::word_at_end(&line);
+        let mut completion = self.0.completion.borrow_mut();
+        let Some(offer) = completion.offered.as_mut() else {
+            return false;
+        };
+        if !word.starts_with(&offer.stem) {
             return false;
         }
-        completion.showing = showing;
+
+        let total = offer.answer.matching(word).len();
+        if total < 2 {
+            return false;
+        }
+        offer.at = if forward {
+            (offer.at + 1) % total
+        } else {
+            (offer.at + total - 1) % total
+        };
+        drop(completion);
+        // The caret is solid while a person is stepping through candidates,
+        // for the same reason it is solid while they type.
+        self.edit(|_| ());
         true
     }
 
-    /// The candidates to draw under the field, if any are still relevant.
+    /// Forgets what the shell offered, reporting whether there was anything.
     ///
-    /// Dropped the moment the word under the caret is no longer the one they
-    /// were for: a list of what `car` could become is nonsense under a line
-    /// that now says `cargo b`.
-    pub fn showing_completions(&self) -> Option<Completions> {
+    /// The request number moves on with it, so an answer already in flight
+    /// cannot put back an offer that has been overtaken — by a submitted line,
+    /// or by the interrupt that threw the line away.
+    pub fn forget_completions(&self) -> bool {
+        let mut completion = self.0.completion.borrow_mut();
+        let had = completion.offered.take().is_some();
+        completion.asked += 1;
+        had
+    }
+
+    /// What would be added to the line if the suggestion were taken, drawn
+    /// after the caret in dim ink.
+    ///
+    /// Two sources, and the order is what makes them one feature. A candidate
+    /// the shell offered comes first: Tab is a question somebody has just
+    /// asked, and the answer to it outranks anything recalled. Otherwise it is
+    /// the newest command in the history that starts with this line — zsh's
+    /// `autosuggestions` and Warp's ghost text, which are the same thing.
+    ///
+    /// Only ever at the very end of the line, because text after the caret is
+    /// text the suggestion would be standing in front of.
+    pub fn suggestion(&self) -> Option<String> {
+        self.offered_completion()
+            .or_else(|| self.0.editor.borrow().suggestion().map(str::to_owned))
+    }
+
+    /// The tail of the candidate being offered, if one still answers the word
+    /// under the caret.
+    fn offered_completion(&self) -> Option<String> {
+        let editor = self.0.editor.borrow();
+        if !editor.selection().is_empty() || editor.caret() != editor.text().len() {
+            return None;
+        }
+        drop(editor);
+
+        let line = self.line_to_caret();
+        let word = completion::word_at_end(&line);
         let completion = self.0.completion.borrow();
-        let (word, answer) = completion.showing.as_ref()?;
-        (crate::completion::word_at_end(&self.line_to_caret()) == word).then(|| answer.clone())
+        let offer = completion.offered.as_ref()?;
+        if !word.starts_with(&offer.stem) {
+            return None;
+        }
+
+        let matching = offer.answer.matching(word);
+        let candidate = matching.get(offer.at.min(matching.len().checked_sub(1)?))?;
+        candidate
+            .strip_prefix(word)
+            .filter(|rest| !rest.is_empty())
+            .map(str::to_owned)
+    }
+
+    /// Types the suggestion, all of it or one word, reporting whether there
+    /// was one.
+    ///
+    /// The right arrow at the end of a line, which is otherwise a keystroke
+    /// that does nothing at all — there is nowhere further right to go — and
+    /// the word arrow for the same reason.
+    pub fn accept_suggestion(&self, whole: bool) -> bool {
+        let Some(suggestion) = self.suggestion() else {
+            return false;
+        };
+        let taken = if whole {
+            suggestion
+        } else {
+            first_word(&suggestion).to_owned()
+        };
+        self.edit(|editor| editor.insert(&taken));
+        // What was offered has been typed, and what is left of the answer is
+        // about a word that is now whole.
+        self.forget_completions();
+        true
     }
 
     /// Whether an input method is mid-composition here.
@@ -340,14 +481,46 @@ impl TextInput {
 
     /// Applies one keyboard intent, returning the line to send when it was
     /// Enter and `None` otherwise.
+    ///
+    /// **Three keys mean something else while a suggestion stands after the
+    /// caret**, and that is decided here rather than in
+    /// [`crate::input_keys`]. Which keystrokes reach the field at all is a
+    /// question about the *pane* — a selection, the alternate screen, a signal
+    /// — and what the field then does with one is a question about the field,
+    /// exactly as the bare Up key being a line or a history entry has always
+    /// been the editor's rule and not the keymap's.
+    ///
+    /// Right takes the whole suggestion, the word arrow takes one word of it,
+    /// and the line-end chord takes it whole as well. All three would
+    /// otherwise do nothing at all: a suggestion only ever stands at the end
+    /// of the line, and there is nowhere further right to go from there.
     pub fn apply(&self, intent: Intent, clipboard: &Clipboard) -> Option<String> {
-        self.edit(|editor| apply(intent, clipboard, editor))
+        match intent {
+            Intent::Move(Motion::Right | Motion::LineEnd) if self.suggestion().is_some() => {
+                self.accept_suggestion(true);
+                return None;
+            }
+            Intent::Move(Motion::WordRight) if self.suggestion().is_some() => {
+                self.accept_suggestion(false);
+                return None;
+            }
+            _ => {}
+        }
+
+        let submitted = self.edit(|editor| apply(intent, clipboard, editor));
+        if submitted.is_some() {
+            // The line has gone to the shell, so candidates for a word in it
+            // are candidates for nothing.
+            self.forget_completions();
+        }
+        submitted
     }
 
     /// Throws the half-written line away: what Ctrl-C means, on the field's
     /// side of the same keystroke the shell is interrupted by.
     pub fn abandon(&self) {
         self.edit(Editor::clear);
+        self.forget_completions();
     }
 
     /// Whether the caret is drawn at this instant.
@@ -434,7 +607,11 @@ fn apply(intent: Intent, clipboard: &Clipboard, editor: &mut Editor) -> Option<S
         // shell and the answer comes back frames later on a channel of its
         // own; the element that saw the keystroke is what sends the question,
         // because it is the only thing holding the terminal to ask.
-        Complete => {}
+        // Neither is an edit. Tab's question goes to the shell through a
+        // channel of its own — the element that saw the keystroke sends it,
+        // being the only thing holding the terminal to ask — and stepping
+        // through what came back is the field's, above.
+        Complete | CompleteBackwards => {}
         Newline => editor.insert_newline(),
         Submit => return Some(editor.submit()),
         Backspace => editor.backspace(),
@@ -475,6 +652,20 @@ fn apply(intent: Intent, clipboard: &Clipboard, editor: &mut Editor) -> Option<S
     None
 }
 
+/// The first word of a suggestion, with the space that follows it.
+///
+/// What the word arrow takes: a suggestion is a whole command line and taking
+/// `git commit --amend --no-edit` when what was wanted was `git commit` is why
+/// every shell that offers one offers this too. The space comes with the word
+/// so that the next press starts on the next one.
+fn first_word(suggestion: &str) -> &str {
+    let leading = suggestion.len() - suggestion.trim_start_matches(' ').len();
+    match suggestion[leading..].find(' ') {
+        Some(at) => &suggestion[..leading + at + 1],
+        None => suggestion,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,6 +676,159 @@ mod tests {
         let input = TextInput::new();
         input.edit(|editor| editor.set_text(text));
         input
+    }
+
+    /// The candidates a shell might have answered with.
+    fn answer(candidates: &[&str]) -> Completions {
+        Completions {
+            candidates: candidates.iter().map(|c| (*c).to_owned()).collect(),
+            truncated: false,
+        }
+    }
+
+    /// Asks, and answers, in one step: the round trip a Tab makes.
+    fn answered(input: &TextInput, candidates: &[&str]) {
+        let serial = input.ask_for_completions();
+        input.take_completions(serial, answer(candidates));
+    }
+
+    #[test]
+    fn tab_types_what_is_certain_and_offers_the_rest_after_the_caret() {
+        // A shell's Tab, with its third case moved into the line: what every
+        // candidate agrees on is typed, and the ambiguity that is left is one
+        // candidate standing after the caret rather than a list under it.
+        let input = holding("cargo C");
+        answered(&input, &["Cargo.toml", "Cargo.lock"]);
+
+        assert_eq!(input.editor().text(), "cargo Cargo.");
+        assert_eq!(input.suggestion().as_deref(), Some("toml"));
+    }
+
+    #[test]
+    fn tab_again_steps_to_the_next_candidate_and_wraps() {
+        let input = holding("cargo C");
+        answered(&input, &["Cargo.toml", "Cargo.lock"]);
+
+        assert!(input.cycle_completion(true));
+        assert_eq!(input.suggestion().as_deref(), Some("lock"));
+        assert!(input.cycle_completion(true));
+        assert_eq!(
+            input.suggestion().as_deref(),
+            Some("toml"),
+            "four candidates and four presses come back to the first"
+        );
+        assert!(input.cycle_completion(false));
+        assert_eq!(input.suggestion().as_deref(), Some("lock"), "and back");
+        assert_eq!(
+            input.editor().text(),
+            "cargo Cargo.",
+            "none of which typed anything"
+        );
+    }
+
+    #[test]
+    fn typing_on_narrows_what_is_offered_and_a_new_word_drops_it() {
+        let input = holding("car");
+        answered(&input, &["cargo", "carbon", "cartridge"]);
+        assert_eq!(input.suggestion().as_deref(), Some("go"));
+
+        input.edit(|editor| editor.insert("t"));
+        assert_eq!(
+            input.suggestion().as_deref(),
+            Some("ridge"),
+            "the candidates the word has ruled out are not stepped through"
+        );
+
+        input.edit(|editor| editor.insert(" b"));
+        assert_eq!(
+            input.suggestion(),
+            None,
+            "a new word is a question this answer cannot answer"
+        );
+        assert!(
+            !input.cycle_completion(true),
+            "and there is nothing left to step through"
+        );
+    }
+
+    #[test]
+    fn a_candidate_the_shell_offered_outranks_one_the_history_remembers() {
+        // Tab is a question somebody has just asked. What comes back to it
+        // outranks anything recalled.
+        let input = holding("car");
+        input.edit(|editor| editor.seed_history(vec!["carbon --dry-run".to_owned()]));
+        assert_eq!(input.suggestion().as_deref(), Some("bon --dry-run"));
+
+        answered(&input, &["cargo", "cartridge"]);
+        assert_eq!(input.suggestion().as_deref(), Some("go"));
+    }
+
+    #[test]
+    fn the_right_arrow_takes_what_is_offered_and_the_word_arrow_takes_one_word() {
+        let clipboard = Clipboard::new();
+        let input = holding("git ");
+        input.edit(|editor| editor.seed_history(vec!["git commit --amend".to_owned()]));
+
+        assert_eq!(input.suggestion().as_deref(), Some("commit --amend"));
+        input.apply(Intent::Move(Motion::WordRight), &clipboard);
+        assert_eq!(
+            input.editor().text(),
+            "git commit ",
+            "one word, with the space that follows it"
+        );
+
+        input.apply(Intent::Move(Motion::Right), &clipboard);
+        assert_eq!(input.editor().text(), "git commit --amend");
+        assert_eq!(
+            input.suggestion(),
+            None,
+            "and there is nothing left to suggest"
+        );
+    }
+
+    #[test]
+    fn taking_a_candidate_leaves_nothing_to_step_through() {
+        let clipboard = Clipboard::new();
+        let input = holding("car");
+        answered(&input, &["cargo", "carbon"]);
+
+        input.apply(Intent::Move(Motion::Right), &clipboard);
+        assert_eq!(input.editor().text(), "cargo");
+        assert!(
+            !input.cycle_completion(true),
+            "the word is whole, and the rest of the answer was about half of it"
+        );
+    }
+
+    #[test]
+    fn a_line_that_has_gone_to_the_shell_forgets_what_was_offered() {
+        let clipboard = Clipboard::new();
+        let input = holding("car");
+        answered(&input, &["cargo", "carbon"]);
+
+        assert_eq!(
+            input.apply(Intent::Submit, &clipboard).as_deref(),
+            Some("car"),
+            "what was offered was never in the line, so Enter sends what was typed"
+        );
+        assert_eq!(input.suggestion(), None);
+    }
+
+    #[test]
+    fn a_suggestion_stands_only_at_the_end_of_a_line_nobody_is_selecting() {
+        let input = holding("git ");
+        input.edit(|editor| editor.seed_history(vec!["git status".to_owned()]));
+        assert_eq!(input.suggestion().as_deref(), Some("status"));
+
+        input.edit(|editor| editor.move_caret(Motion::Left));
+        assert_eq!(
+            input.suggestion(),
+            None,
+            "text after the caret is what a suggestion would be standing in front of"
+        );
+
+        input.edit(|editor| editor.select_all());
+        assert_eq!(input.suggestion(), None);
     }
 
     #[test]

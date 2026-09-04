@@ -125,12 +125,19 @@ pub enum Intent {
     Undo,
     /// Step forward one undone edit.
     Redo,
-    /// Ask the shell what the word before the caret could become.
+    /// Ask the shell what the word before the caret could become, or step to
+    /// the next candidate it already offered.
     ///
     /// Not an edit: nothing changes until the shell answers, and the answer
     /// arrives frames later on a channel of its own. See
     /// [`crate::completion`].
     Complete,
+    /// Step *back* through the candidates: Shift-Tab.
+    ///
+    /// It asks nothing. There has to be an answer to step through, and a
+    /// Shift-Tab with none is a keystroke about a list that was never asked
+    /// for.
+    CompleteBackwards,
 }
 
 /// Where a keystroke goes.
@@ -369,6 +376,10 @@ fn named_intent(key: &str, modifiers: Modifiers, platform: Platform) -> Option<I
         // to the shell through a channel of its own and the answer comes back
         // the same way. A tab *character* is still not typed — no terminal has
         // ever let one into a command line, and the field measures in cells.
+        // Backwards through what Tab turned up, and nothing where there is
+        // nothing: see [`Intent::CompleteBackwards`]. Before the arm below it,
+        // because `plain` allows Shift.
+        "tab" if plain(modifiers) && modifiers.shift => Some(Intent::CompleteBackwards),
         "tab" if plain(modifiers) => Some(Intent::Complete),
 
         "backspace" => Some(match () {
@@ -926,6 +937,11 @@ mod tests {
                 route(&keystroke("tab", none()), "\t", composing(), platform),
                 Route::Edit(Intent::Complete),
                 "a tab character has never been typeable into a command line"
+            );
+            assert_eq!(
+                route(&keystroke("tab", shift()), "\t", composing(), platform),
+                Route::Edit(Intent::CompleteBackwards),
+                "and Shift-Tab steps back through what it turned up"
             );
             assert_eq!(
                 route(

@@ -82,17 +82,16 @@ use crook_terminal::{Snapshot, TerminalSize};
 use crookui_core::element::SizeConstraint;
 use crookui_core::elements::Padding;
 use crookui_core::event::{DispatchedEvent, Event, MouseButton};
-use crookui_core::fonts::{FamilyId, Properties, Weight};
+use crookui_core::fonts::{Properties, Weight};
 use crookui_core::geometry::{Point, Vector2F, vec2f};
 use crookui_core::prelude::*;
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 
-use crate::completion::Completions;
 use crate::pane_blocks::PaneBlocks;
 use crate::pane_split::{DividerDrag, Drag, PaneExtent};
 use crate::pane_surface::{self, Surface};
 use crate::tab::{Pane, PaneId, SplitAxis, TabAction};
-use crate::terminal_font::{CellFont, CellMetrics};
+use crate::terminal_font::CellFont;
 use crate::terminal_model::TerminalHandle;
 use crate::theme::theme;
 
@@ -546,23 +545,13 @@ fn composer(
         composing = composing.with_selection(interaction.selection.clone());
     }
 
-    // The candidates go *under* the field, which is where every shell puts
-    // them: the line being typed stays where it was and the list appears below
-    // it, so nothing a person is reading moves.
-    let composing: Box<dyn Element> = match input.showing_completions() {
-        Some(answer) => Flex::column()
-            .with_main_axis_size(MainAxisSize::Min)
-            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_child(composing.finish())
-            .with_child(candidates(
-                &answer,
-                workspace.fonts().monospace,
-                font.metrics(),
-                state.ink,
-            ))
-            .finish(),
-        None => composing.finish(),
-    };
+    // **Nothing is drawn under the field.** What the shell offered stands
+    // after the caret, in the line itself — see
+    // [`TextInput::suggestion`](crate::text_input::TextInput::suggestion) —
+    // because a list under the composer is a surface that appears and
+    // disappears under whatever a person is reading, and it took the output
+    // with it every time.
+    let composing: Box<dyn Element> = composing.finish();
 
     let rule = if state.cut_off { RULE } else { 0. };
     Container::new(composing)
@@ -587,47 +576,6 @@ fn composer(
         })
         .finish()
 }
-
-/// What a line could become, listed under the field.
-///
-/// **A list rather than a menu**, which is what bash, zsh and fish all print
-/// when Tab is ambiguous: the candidates appear, the line stays where it was,
-/// and the next keystroke narrows them. A menu with a selection in it would
-/// need the arrow keys, which this field spends on its history, and a state
-/// machine for a gesture nobody asked for yet.
-///
-/// It is drawn in the terminal's own font and ink, because it is about the
-/// line above it and that line is set in the terminal's type.
-fn candidates(
-    answer: &Completions,
-    family: FamilyId,
-    metrics: CellMetrics,
-    ink: Ink,
-) -> Box<dyn Element> {
-    let mut text = answer.candidates.join("  ");
-    if answer.truncated {
-        // A `compgen -c` on a full PATH is thousands of entries. Saying so is
-        // more use than printing the first two hundred and stopping.
-        text.push_str("  …");
-    }
-
-    Container::new(
-        Text::new(text, family, metrics.font_size)
-            .with_color(ink.text.with_alpha(CANDIDATE_ALPHA))
-            .finish(),
-    )
-    .with_margin_top(metrics.height * CANDIDATE_GAP)
-    .finish()
-}
-
-/// How much of the terminal's foreground the candidate list is drawn in.
-///
-/// De-emphasised, because it is not part of the line: a person is reading what
-/// they typed, and the list is a hint under it.
-const CANDIDATE_ALPHA: u8 = 160;
-
-/// The gap between the line and the list, in rows.
-const CANDIDATE_GAP: f32 = 0.4;
 
 /// Resizes a pane's pty from the pane's own rectangle, and draws its child
 /// inside it.

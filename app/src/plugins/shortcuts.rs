@@ -278,6 +278,19 @@ fn in_a_pane(workspace: &Workspace) -> Category {
                 "up / down",
             ),
             key(
+                "Complete the word, and step through what the shell offered",
+                &["completion", "complete", "tab", "suggest"],
+                "tab / shift+tab",
+            ),
+            key(
+                "Take the suggestion standing after the caret",
+                &["autosuggest", "ghost", "history", "completion", "accept"],
+                match crate::input_keys::Platform::current() {
+                    crate::input_keys::Platform::Mac => "right / alt+right for one word",
+                    crate::input_keys::Platform::Other => "right / ctrl+right for one word",
+                },
+            ),
+            key(
                 "Interrupt, suspend, end the input",
                 &["signal", "sigint", "ctrl-c", "ctrl-d", "ctrl-z"],
                 "ctrl+c / ctrl+z / ctrl+d",

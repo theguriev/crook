@@ -28,6 +28,42 @@ impl History {
         &self.entries
     }
 
+    /// Puts the lines a shell has already run at the bottom of the history,
+    /// oldest first.
+    ///
+    /// **A pane opens knowing what this person runs.** Without it the Up key
+    /// in a fresh pane reaches nothing and the suggestion after the caret
+    /// never appears until the same command has been run twice in the same
+    /// pane, which is the wrong half of the feature: the commands worth
+    /// offering are the ones from yesterday. See
+    /// [`crate::shell_history`], which is where the file is read.
+    ///
+    /// Only ever into an empty history, and any walk in progress is abandoned
+    /// with it: seeding is what a pane does before anybody has typed in it.
+    pub fn seed(&mut self, lines: Vec<String>) {
+        self.reset();
+        self.entries = lines;
+        let over = self.entries.len().saturating_sub(CAPACITY);
+        self.entries.drain(..over);
+    }
+
+    /// What the newest line starting with `line` would add to it, or `None`
+    /// when nothing in the history does.
+    ///
+    /// The newest rather than the most frequent, which is zsh's
+    /// `autosuggestions` default and the only rule that is predictable: a
+    /// person who has just corrected a command wants the correction offered,
+    /// not the version they ran nine times before it.
+    pub fn suggestion(&self, line: &str) -> Option<&str> {
+        if line.is_empty() {
+            return None;
+        }
+        self.entries
+            .iter()
+            .rev()
+            .find_map(|entry| entry.strip_prefix(line).filter(|rest| !rest.is_empty()))
+    }
+
     /// Records a submitted line and ends any walk.
     ///
     /// Blank lines are not recorded: pressing Enter on an empty prompt is how
