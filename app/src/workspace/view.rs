@@ -15,7 +15,7 @@ use std::time::Duration;
 /// all while the panel is closed — see [`Workspace::watch_themes`].
 pub(super) const THEMES_POLL: Duration = Duration::from_millis(750);
 
-use crook_terminal::Snapshot;
+use crook_terminal::{Rows, Snapshot};
 use crookui_core::elements::MouseStateHandle;
 use crookui_core::event::Keystroke;
 use crookui_core::fonts::FamilyId;
@@ -29,12 +29,12 @@ use crate::git_model::GitModel;
 use crate::input_keys::{self, Binding, Platform};
 use crate::keymap::Keymap;
 use crate::pane_blocks::PaneBlocks;
-use crate::pane_input::{CARET_PHASE, PaneInput};
 use crate::pane_link::PaneLink;
 use crate::pane_selection::PaneSelection;
 use crate::pane_split::{DividerDrag, PaneExtent};
 use crate::pane_surface;
 use crate::platform_insets::{LayoutInsets, TabsPlacement, layout_insets};
+use crate::selection::{Blocks, Cells};
 use crate::settings::{
     DEFAULT_FONT_SIZE, Density, FONT_SIZE_STEP, GeneralOptions, Granularity, Layout, Settings,
     TabOptions,
@@ -44,6 +44,7 @@ use crate::tab::{
 };
 use crate::terminal_font::CellFont;
 use crate::terminal_model::{BlockHistory, TerminalHandle, TerminalModel, TerminalUpdate};
+use crate::text_input::{CARET_PHASE, TextInput};
 use crate::theme::creator::Draft;
 use crate::theme::{Available, theme};
 use crate::usage_model::UsageModel;
@@ -279,7 +280,7 @@ pub struct Workspace {
     /// One per pane and never one per tab: a split gives the new pane a field
     /// of its own, with its own undo stack and its own history, which is what
     /// makes two panes of the same tab two places to work rather than one.
-    inputs: HashMap<PaneId, PaneInput>,
+    inputs: HashMap<PaneId, TextInput>,
     /// The system clipboard every field copies to and pastes from. One for the
     /// window: see [`Clipboard`].
     clipboard: Clipboard,
@@ -863,6 +864,22 @@ impl Workspace {
         }
     }
 
+    /// What is in the settings page's search box, for a test to read back.
+    pub fn settings_search_text(&self) -> String {
+        self.page.search.editor().text().to_owned()
+    }
+
+    /// Types `query` into the settings page's search box, for a run that was
+    /// asked to start with something searched for.
+    ///
+    /// Straight into the editor rather than through a keystroke each: what the
+    /// box does with a keystroke is insert a character, and a snapshot wants
+    /// the state that leaves rather than the path to it.
+    pub fn type_into_settings_search(&mut self, query: &str, ctx: &mut ViewContext<Self>) {
+        self.page.search.edit(|editor| editor.set_text(query));
+        ctx.notify();
+    }
+
     /// Whether the options menu is up.
     pub fn is_options_menu_open(&self) -> bool {
         self.menu.open
@@ -1176,12 +1193,17 @@ impl Workspace {
         let Some(pane) = self.tabs.focused_pane_id() else {
             return false;
         };
+        // The settings page's search box is the other field that blinks, and
+        // it is the one field that is not a pane's — so it is asked about
+        // separately, in the one state it can have the keyboard in.
+        if self.page.search.has_keys() {
+            return true;
+        }
         self.terminal(pane, app).is_some_and(|(_, snapshot)| {
             pane_surface::of(&snapshot, std::time::Instant::now()).composer
         })
     }
 
-    /// The command line being composed in a pane.
     /// How many pixels a pane last measured along the axis its split divides.
     ///
     /// Written by the element that lays it out and read by the divider beside
@@ -1214,7 +1236,8 @@ impl Workspace {
         input.has_keys().then(|| input.caret_rect()).flatten()
     }
 
-    pub(super) fn input(&self, pane: PaneId) -> Option<&PaneInput> {
+    /// The command line being composed in a pane.
+    pub(super) fn input(&self, pane: PaneId) -> Option<&TextInput> {
         self.inputs.get(&pane)
     }
 
@@ -1311,8 +1334,41 @@ impl Workspace {
     }
 
     /// What is selected in a pane's output, or `None` when nothing is.
+    ///
+    /// Resolved against the blocks rather than read out of the emulator: a
+    /// selection names a block and a row of it, and all but the newest of
+    /// those left the grid when their commands ended.
+    ///
+    /// Against the space the gesture was made in rather than the surface the
+    /// pane is showing now. The two are the same for as long as a selection
+    /// lives — a pane that changes surface lets go of it — and asking the
+    /// selection is what makes that a fact rather than a hope.
     pub fn terminal_selection(&self, pane: PaneId, app: &AppContext) -> Option<String> {
-        self.terminals.as_ref(app).handle(pane)?.selection_text()
+        let interaction = self.interaction(pane)?;
+        let selection = interaction.selection.selection()?;
+        let model = self.terminals.as_ref(app);
+        let snapshot = model.snapshot(pane)?;
+
+        if interaction.selection.cells() == Cells::Grid {
+            let handle = model.handle(pane)?;
+            let slack = snapshot.rows;
+            let (first, last) = (
+                selection
+                    .anchor
+                    .row
+                    .min(selection.head.row)
+                    .saturating_sub(slack),
+                selection.anchor.row.max(selection.head.row) + slack,
+            );
+            let (rows, at) = handle.harvest_rows(first, last);
+            return selection.text(&Blocks::one(
+                selection.anchor.block,
+                Rows::Stored(&rows),
+                at,
+            ));
+        }
+        let blocks = model.blocks(pane)?;
+        selection.text(&Blocks::list(&blocks, &snapshot))
     }
 
     /// Selects the first occurrence of `text` in a pane's output, reporting
@@ -1323,15 +1379,43 @@ impl Workspace {
     /// to be in, and nobody is holding anything down in a headless run. See
     /// `--select-output`.
     pub fn select_in_output(&self, pane: PaneId, text: &str, ctx: &mut ViewContext<Self>) -> bool {
+        self.select_in_output_through(pane, text, text, ctx)
+    }
+
+    /// Selects from the first occurrence of `from` to the first occurrence of
+    /// `to`, reporting whether the output was showing both.
+    ///
+    /// Two markers because one string cannot name a region that crosses a
+    /// block boundary without spelling out the prompt between them, and a
+    /// prompt is whatever `PS1` was. See `--select-through`.
+    pub fn select_in_output_through(
+        &self,
+        pane: PaneId,
+        from: &str,
+        to: &str,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
         let model = self.terminals.as_ref(ctx);
-        let (Some(handle), Some(snapshot)) = (model.handle(pane), model.snapshot(pane)) else {
+        let (Some(blocks), Some(snapshot)) = (model.blocks(pane), model.snapshot(pane)) else {
             return false;
         };
-        let Some((from, to)) = snapshot.find(text) else {
+        let cells = if Self::grid_surface(&snapshot) {
+            Cells::Grid
+        } else {
+            Cells::List
+        };
+        let addressed = match cells {
+            Cells::Grid => Blocks::grid(&snapshot, snapshot.live_block.id),
+            Cells::List => Blocks::list(&blocks, &snapshot),
+        };
+        let Some(found) = addressed.find_through(from, to) else {
+            return false;
+        };
+        let Some(interaction) = self.interaction(pane) else {
             return false;
         };
 
-        handle.select_cells(from, to);
+        interaction.selection.select(found, snapshot.columns, cells);
         ctx.notify();
         true
     }
@@ -1343,12 +1427,18 @@ impl Workspace {
     /// under it route one keystroke against one answer, and this is what runs
     /// after both of them have had it.
     fn release_selection(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
-        let Some(handle) = self.terminals.as_ref(ctx).handle(pane) else {
+        let Some(interaction) = self.interaction(pane) else {
             return;
         };
-        if handle.clear_selection() {
+        if interaction.selection.clear() {
             ctx.notify();
         }
+    }
+
+    /// Whether a pane showing `snapshot` draws one grid rather than a list of
+    /// blocks, which is the one thing a selection is resolved differently for.
+    fn grid_surface(snapshot: &Snapshot) -> bool {
+        pane_surface::of(snapshot, std::time::Instant::now()).surface == pane_surface::Surface::Grid
     }
 
     /// Starts the git gather chain. Call once, after the window exists.
@@ -1804,6 +1894,16 @@ impl Workspace {
         });
         self.sync_input_keys();
 
+        // The query lives exactly as long as the page it filters. The page's
+        // *section* deliberately outlives its pane — closing the tab and
+        // opening it again comes back to where you were — but a filter must
+        // not: a settings page that came back showing four rows out of thirty
+        // would read as broken rather than as filtered, and the box that
+        // explains why is at the top of a rail somebody has to look at.
+        if self.tabs.settings_pane().is_none() {
+            self.page.search.edit(crate::editor::Editor::clear);
+        }
+
         // A row that has gone cannot receive the hover-out that would clear
         // this, and a card anchored to a row that no longer paints would hang
         // in the frame with nothing under it.
@@ -1830,6 +1930,21 @@ impl Workspace {
         for (id, input) in &self.inputs {
             input.set_has_keys(Some(*id) == listening);
         }
+
+        // The settings page's search box, which is the one field that is not a
+        // pane's. It has the keyboard whenever the focused pane is the page it
+        // is part of, which is Warp's rule — there the search field is what
+        // the settings pane focuses when it opens — and it is the only rule
+        // available: there is nothing else on that page that takes a key, so
+        // "focus is somewhere else on the page" is not a state that exists.
+        //
+        // Note which question this asks. `listening` is the *focused* pane,
+        // and the settings page draws no field of its own through `inputs`, so
+        // the two never both have the keyboard.
+        let settings_focused = listening
+            .and_then(|id| self.tabs.pane(id))
+            .is_some_and(|pane| pane.is_settings());
+        self.page.search.set_has_keys(settings_focused);
     }
 
     /// Tells the git model which directories the strip is showing.

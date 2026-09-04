@@ -71,7 +71,7 @@
 //!
 //! # What it does not own
 //!
-//! Not the text: that is the [`PaneInput`] the workspace keeps per pane, which
+//! Not the text: that is the [`TextInput`] the workspace keeps per pane, which
 //! is what survives this element being thrown away and rebuilt on every frame.
 //! Not the keymap either — see [`crate::input_keys`], which is also where the
 //! decision to hand a keystroke to the shell instead is made.
@@ -94,10 +94,13 @@ use crate::clipboard::Clipboard;
 use crate::editor::Editor;
 use crate::input_keys::{self, Intent, Platform, Route};
 use crate::pane_blocks::{PaneBlocks, ScrollCause};
-use crate::pane_input::{PaneInput, Preedit};
+use crate::pane_selection::PaneSelection;
+use crate::selection::Cells;
 use crate::tab::PaneId;
 use crate::terminal_font::{CellFont, CellMetrics};
 use crate::terminal_model::TerminalHandle;
+use crate::text_input::Preedit;
+use crate::text_input::TextInput;
 use crate::theme::theme;
 
 use super::action::WorkspaceAction;
@@ -167,7 +170,7 @@ impl Default for Ink {
 
 /// One pane's command input.
 pub struct CommandInput {
-    input: PaneInput,
+    input: TextInput,
     font: CellFont,
     clipboard: Clipboard,
     ink: Ink,
@@ -178,13 +181,18 @@ pub struct CommandInput {
     /// Which pane this field belongs to, for the actions that name one.
     pane: Option<PaneId>,
 
+    /// What the pane's output has selected, which this element does two things
+    /// with: it never takes the copy chord away from it, and clicking in here
+    /// lets go of it.
+    selection: Option<PaneSelection>,
+
     /// The list above this composer, which a submitted line returns to its own
     /// end.
     blocks: Option<PaneBlocks>,
 
     /// Whether this pane's field was the one listening when the frame was
     /// built. The caret's business and the prompt's; a keystroke asks
-    /// [`PaneInput::has_keys`] instead, because by then this is a frame old.
+    /// [`TextInput::has_keys`] instead, because by then this is a frame old.
     focused: bool,
 
     /// Whether the program on the far end owns the screen. Passed to
@@ -211,7 +219,7 @@ pub struct CommandInput {
 
 impl CommandInput {
     /// A field over `input`, attached to no shell and listening to nothing.
-    pub fn new(input: PaneInput, font: CellFont, clipboard: Clipboard) -> Self {
+    pub fn new(input: TextInput, font: CellFont, clipboard: Clipboard) -> Self {
         Self {
             input,
             font,
@@ -219,6 +227,7 @@ impl CommandInput {
             ink: Ink::default(),
             terminal: None,
             pane: None,
+            selection: None,
             blocks: None,
             focused: false,
             alt_screen: false,
@@ -257,6 +266,13 @@ impl CommandInput {
     /// rather than called, and an action has to say which pane it is about.
     pub fn for_pane(mut self, pane: PaneId) -> Self {
         self.pane = Some(pane);
+        self
+    }
+
+    /// Attaches what the output above has selected, which owns the copy chord
+    /// for as long as it exists.
+    pub fn with_selection(mut self, selection: PaneSelection) -> Self {
+        self.selection = Some(selection);
         self
     }
 
@@ -309,10 +325,13 @@ impl CommandInput {
             // first, and it *does* let go of the selection it copies — but
             // through an action, applied once every element has routed. See
             // `WorkspaceAction::ReleaseSelection`.
+            // The list's space, because that is the only surface a composer
+            // is ever under: the grid never has one. A selection left over
+            // from the grid is one this pane is no longer drawing.
             grid_has_selection: self
-                .terminal
+                .selection
                 .as_ref()
-                .is_some_and(TerminalHandle::has_selection),
+                .is_some_and(|selection| selection.has_selection_in(Cells::List)),
         };
         match input_keys::route(keystroke, chars, pane, Platform::current()) {
             // Not an edit: the line goes to the shell and the answer comes
@@ -395,8 +414,8 @@ impl CommandInput {
         // pointer is anywhere near, is a person's next `cmd-c` copying the
         // wrong one — and the caret they just placed is where they are now
         // looking.
-        if let Some(terminal) = self.terminal.as_ref() {
-            terminal.clear_selection();
+        if let Some(selection) = self.selection.as_ref() {
+            selection.clear();
         }
         self.input
             .press(self.offset_at(position - bounds.origin()), click_count);
@@ -1032,7 +1051,7 @@ fn columns_for(width: f32, metrics: CellMetrics) -> usize {
 /// selection and the caret all go through it, so none of the three can end up
 /// a column or a row away from the other two.
 fn paint_input(
-    input: &PaneInput,
+    input: &TextInput,
     font: &CellFont,
     origin: Vector2F,
     rows: &Rows,

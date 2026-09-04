@@ -85,8 +85,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crook_terminal::{
-    Block, CellSide, Key, Modifiers, MouseButton, MouseEventKind, MouseModes, Palette, Rgb,
-    SelectionKind, Snapshot, Terminal, TerminalEvent, TerminalOptions, TerminalSize, ViewportPoint,
+    Block, BlockId, BlockRows, Key, Modifiers, MouseButton, MouseEventKind, MouseModes, Palette,
+    Rgb, Snapshot, Terminal, TerminalEvent, TerminalOptions, TerminalSize,
 };
 use crookui_core::geometry::Color;
 use crookui_core::prelude::*;
@@ -197,6 +197,12 @@ pub struct BlockHistory {
 }
 
 impl BlockHistory {
+    /// A history holding `blocks`, oldest first, `evicted` of which have
+    /// already been dropped off the front.
+    pub fn new(blocks: Vec<Arc<Block>>, evicted: usize) -> Self {
+        Self { blocks, evicted }
+    }
+
     /// The blocks, oldest first.
     pub fn iter(&self) -> impl ExactSizeIterator<Item = &Arc<Block>> {
         self.blocks.iter()
@@ -215,6 +221,15 @@ impl BlockHistory {
     /// Whether no command has finished yet.
     pub fn is_empty(&self) -> bool {
         self.blocks.is_empty()
+    }
+
+    /// Where a block is in the list, or `None` once it has been evicted.
+    ///
+    /// A binary search, because ids are handed out in order and never reused:
+    /// a selection resolved against a session with ten thousand blocks behind
+    /// it costs a handful of comparisons rather than a walk.
+    pub fn position(&self, id: BlockId) -> Option<usize> {
+        self.blocks.binary_search_by_key(&id, |block| block.id).ok()
     }
 
     /// How many blocks have been dropped off the front.
@@ -949,11 +964,12 @@ impl TerminalHandle {
         &self,
         kind: MouseEventKind,
         button: Option<MouseButton>,
-        at: ViewportPoint,
+        row: usize,
+        column: usize,
         modifiers: Modifiers,
     ) -> bool {
         self.drive(
-            |terminal| match terminal.send_mouse(kind, button, at, modifiers) {
+            |terminal| match terminal.send_mouse(kind, button, row, column, modifiers) {
                 Ok(sent) => sent,
                 Err(error) => {
                     log::debug!("could not send a pointer gesture to a shell: {error}");
@@ -1007,59 +1023,17 @@ impl TerminalHandle {
         self.drive(|terminal| terminal.scroll_lines(delta));
     }
 
-    /// Starts a selection where a press landed, replacing any there was.
-    pub fn start_selection(&self, kind: SelectionKind, at: ViewportPoint, side: CellSide) {
-        self.drive(|terminal| terminal.start_selection(kind, at, side));
-    }
-
-    /// Drags the open end of the selection to where the pointer is, scrolling
-    /// the viewport by `scroll` lines first.
+    /// Copies rows out of the grid into the store a finished block's rows live
+    /// in, numbered from the oldest line of the scrollback.
     ///
-    /// The two happen together because they are one gesture: a drag past the
-    /// bottom of the pane moves the viewport *and* takes the selection with it,
-    /// and doing them in two calls would take the terminal's lock twice and
-    /// publish a frame in between with the screen scrolled and the selection
-    /// still on the row the pointer left.
-    pub fn drag_selection(&self, at: ViewportPoint, side: CellSide, scroll: i32) {
-        self.drive(|terminal| {
-            if scroll != 0 {
-                terminal.scroll_lines(scroll);
-            }
-            terminal.update_selection(at, side);
-        });
-    }
-
-    /// Selects from one cell of the viewport to another, as `--select-output`
-    /// and the tests do, neither of which has a pointer to aim.
-    pub fn select_cells(&self, from: ViewportPoint, to: ViewportPoint) {
-        self.drive(|terminal| {
-            terminal.start_selection(SelectionKind::Simple, from, CellSide::Left);
-            terminal.update_selection(to, CellSide::Right);
-        });
-    }
-
-    /// Drops the selection, reporting whether there was one to drop.
-    pub fn clear_selection(&self) -> bool {
-        self.drive(|terminal| {
-            let had = terminal.has_selection();
-            terminal.clear_selection();
-            had
-        })
-    }
-
-    /// Whether there is anything selected in this pane's output.
-    ///
-    /// Asked of the terminal rather than of a snapshot, because the answer
-    /// decides what `ctrl-c` means and a snapshot is a frame old: the one
-    /// keystroke that must never be wrong about this is the one that stops a
-    /// running command.
-    pub fn has_selection(&self) -> bool {
-        self.0.lock().has_selection()
-    }
-
-    /// What is selected, or `None` when nothing is.
-    pub fn selection_text(&self) -> Option<String> {
-        self.0.lock().selection_text()
+    /// What a pane drawing one grid copies a selection out of. The rows a drag
+    /// covered may have scrolled out of the viewport since — a snapshot only
+    /// ever holds the viewport — so they come back out of the emulator, into
+    /// exactly the store the block list already knows how to read. Also
+    /// reports the row the answer starts at, which is later than `first` when
+    /// the history has already dropped the line it named.
+    pub fn harvest_rows(&self, first: usize, last: usize) -> (BlockRows, usize) {
+        self.0.lock().harvest_rows(first, last)
     }
 
     /// Runs `work` against the terminal and republishes what it draws.
@@ -1324,7 +1298,7 @@ impl Shared {
                 .map(|block| Arc::new(block.clone())),
         );
 
-        *held = Arc::new(BlockHistory { blocks, evicted });
+        *held = Arc::new(BlockHistory::new(blocks, evicted));
     }
 
     fn take_events(&self) -> Vec<TerminalEvent> {

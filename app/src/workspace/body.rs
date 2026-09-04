@@ -554,6 +554,12 @@ fn composer(
     if let Some(view) = workspace.pane_blocks(pane) {
         composing = composing.with_blocks(view.clone());
     }
+    // The output's selection outranks this field's for the copy chord, and a
+    // click in here lets go of it. Both need the same one the output has.
+    if let Some(interaction) = workspace.interaction(pane) {
+        composing = composing.with_selection(interaction.selection.clone());
+    }
+
     // The candidates go *under* the field, which is where every shell puts
     // them: the line being typed stays where it was and the list appears below
     // it, so nothing a person is reading moves.

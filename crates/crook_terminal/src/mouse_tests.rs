@@ -18,18 +18,15 @@ fn x10_clicks() -> MouseModes {
     }
 }
 
-fn at(row: usize, column: usize) -> ViewportPoint {
-    ViewportPoint::new(row, column)
-}
-
 fn encoded(
     kind: MouseEventKind,
     button: Option<MouseButton>,
-    point: ViewportPoint,
+    row: usize,
+    column: usize,
     modifiers: Modifiers,
     modes: MouseModes,
 ) -> Option<String> {
-    encode(kind, button, point, modifiers, modes).map(|bytes| {
+    encode(kind, button, row, column, modifiers, modes).map(|bytes| {
         // Every encoding this module produces is ASCII, so a lossy conversion
         // cannot lose anything and makes a failure readable.
         String::from_utf8_lossy(&bytes).into_owned()
@@ -50,7 +47,8 @@ fn test_nothing_is_reported_until_a_program_asks() {
             encode(
                 kind,
                 Some(MouseButton::Left),
-                at(0, 0),
+                0,
+                0,
                 Modifiers::NONE,
                 MouseModes::NONE
             ),
@@ -65,7 +63,8 @@ fn test_the_sgr_form_counts_from_one_and_names_the_button_on_release() {
     let press = encoded(
         MouseEventKind::Press,
         Some(MouseButton::Left),
-        at(0, 0),
+        0,
+        0,
         Modifiers::NONE,
         sgr_clicks(),
     );
@@ -75,7 +74,8 @@ fn test_the_sgr_form_counts_from_one_and_names_the_button_on_release() {
     let elsewhere = encoded(
         MouseEventKind::Press,
         Some(MouseButton::Right),
-        at(9, 41),
+        9,
+        41,
         Modifiers::NONE,
         sgr_clicks(),
     );
@@ -86,7 +86,8 @@ fn test_the_sgr_form_counts_from_one_and_names_the_button_on_release() {
     let release = encoded(
         MouseEventKind::Release,
         Some(MouseButton::Right),
-        at(9, 41),
+        9,
+        41,
         Modifiers::NONE,
         sgr_clicks(),
     );
@@ -98,7 +99,8 @@ fn test_the_x10_form_cannot_say_which_button_came_up() {
     let press = encode(
         MouseEventKind::Press,
         Some(MouseButton::Middle),
-        at(0, 0),
+        0,
+        0,
         Modifiers::NONE,
         x10_clicks(),
     );
@@ -108,7 +110,8 @@ fn test_the_x10_form_cannot_say_which_button_came_up() {
     let release = encode(
         MouseEventKind::Release,
         Some(MouseButton::Middle),
-        at(0, 0),
+        0,
+        0,
         Modifiers::NONE,
         x10_clicks(),
     );
@@ -122,7 +125,8 @@ fn test_a_coordinate_past_the_x10_limit_clamps_rather_than_wrapping() {
     let bytes = encode(
         MouseEventKind::Press,
         Some(MouseButton::Left),
-        at(0, 299),
+        0,
+        299,
         Modifiers::NONE,
         x10_clicks(),
     )
@@ -134,7 +138,8 @@ fn test_a_coordinate_past_the_x10_limit_clamps_rather_than_wrapping() {
     let sgr = encoded(
         MouseEventKind::Press,
         Some(MouseButton::Left),
-        at(0, 299),
+        0,
+        299,
         Modifiers::NONE,
         sgr_clicks(),
     );
@@ -152,7 +157,8 @@ fn test_the_modifiers_are_the_bits_xterm_gave_them() {
     let bytes = encoded(
         MouseEventKind::Press,
         Some(MouseButton::Left),
-        at(0, 0),
+        0,
+        0,
         held,
         sgr_clicks(),
     );
@@ -174,7 +180,8 @@ fn test_motion_is_reported_only_to_a_program_that_asked_for_it() {
         encoded(
             MouseEventKind::Motion,
             Some(MouseButton::Left),
-            at(2, 4),
+            2,
+            4,
             Modifiers::NONE,
             dragging,
         )
@@ -186,7 +193,8 @@ fn test_motion_is_reported_only_to_a_program_that_asked_for_it() {
         encode(
             MouseEventKind::Motion,
             None,
-            at(2, 4),
+            2,
+            4,
             Modifiers::NONE,
             dragging
         ),
@@ -205,7 +213,8 @@ fn test_motion_is_reported_only_to_a_program_that_asked_for_it() {
         encoded(
             MouseEventKind::Motion,
             None,
-            at(2, 4),
+            2,
+            4,
             Modifiers::NONE,
             all_motion
         )
@@ -222,7 +231,8 @@ fn test_the_wheel_is_a_press_and_never_a_release() {
         encoded(
             MouseEventKind::Press,
             Some(MouseButton::WheelUp),
-            at(0, 0),
+            0,
+            0,
             Modifiers::NONE,
             sgr_clicks(),
         )
@@ -233,7 +243,8 @@ fn test_the_wheel_is_a_press_and_never_a_release() {
         encoded(
             MouseEventKind::Press,
             Some(MouseButton::WheelDown),
-            at(0, 0),
+            0,
+            0,
             Modifiers::NONE,
             sgr_clicks(),
         )
@@ -244,7 +255,8 @@ fn test_the_wheel_is_a_press_and_never_a_release() {
         encode(
             MouseEventKind::Release,
             Some(MouseButton::WheelUp),
-            at(0, 0),
+            0,
+            0,
             Modifiers::NONE,
             sgr_clicks(),
         ),

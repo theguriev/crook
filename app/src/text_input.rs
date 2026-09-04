@@ -1,12 +1,20 @@
-//! One pane's command input, as the view holds it between frames.
+//! A text field's state, as the view holds it between frames.
 //!
 //! The element tree is thrown away and rebuilt every time a view re-renders,
 //! so nothing that has to survive a keystroke can live in it — and an editor is
 //! nothing but state that survives keystrokes. It lives here instead, behind an
-//! [`Rc`], and the workspace keeps one per pane and hands a clone to the
+//! [`Rc`], and the workspace keeps one per field and hands a clone to the
 //! element each frame. That is the same arrangement
 //! [`MouseStateHandle`](crookui_core::elements::MouseStateHandle) uses, for the
 //! same reason.
+//!
+//! There are two kinds of field: the composer under every pane, one per pane,
+//! and the settings page's search box. Nothing here is a pane's — the file was
+//! called `pane_input.rs` while a pane was the only thing that could hold one —
+//! except [`TextInput::apply`]\'s [`Submit`](crate::input_keys::Intent::Submit)
+//! arm, which hands back a line for somebody else to send, and
+//! [`TextInput::abandon`]. A field with nowhere to send a line simply does not
+//! ask for that intent.
 //!
 //! What is kept is the editor, the drag a press started, when the person using
 //! it last did something — which is the whole of the caret blink, because a
@@ -32,12 +40,12 @@ use crate::input_keys::Intent;
 /// shorter one is a real cost rather than a preference.
 pub const CARET_PHASE: Duration = Duration::from_millis(530);
 
-/// One pane's input field: its editor, and what the mouse is doing to it.
+/// One text field: its editor, and what the mouse is doing to it.
 ///
 /// Cheap to clone — it is an [`Rc`] — because the element that draws it takes
 /// one every frame.
 #[derive(Clone)]
-pub struct PaneInput(Rc<Inner>);
+pub struct TextInput(Rc<Inner>);
 
 struct Inner {
     editor: RefCell<Editor>,
@@ -45,7 +53,7 @@ struct Inner {
     drag: Cell<Option<Drag>>,
     /// When this input was last used, which is what the caret blinks against.
     active_since: Cell<Instant>,
-    /// Whether this pane's field is the one the keyboard belongs to.
+    /// Whether this field is the one the keyboard belongs to.
     ///
     /// Here rather than in the element, because the element is a frame old by
     /// the time a keystroke reaches it: focus moves, or a pane closes, and the
@@ -150,13 +158,13 @@ enum Granularity {
     Line,
 }
 
-impl Default for PaneInput {
+impl Default for TextInput {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl PaneInput {
+impl TextInput {
     /// An empty input with nothing typed into it.
     pub fn new() -> Self {
         Self(Rc::new(Inner {
@@ -473,8 +481,8 @@ mod tests {
     use crate::editor::Motion;
 
     /// An input holding `text`, with the caret at the end.
-    fn holding(text: &str) -> PaneInput {
-        let input = PaneInput::new();
+    fn holding(text: &str) -> TextInput {
+        let input = TextInput::new();
         input.edit(|editor| editor.set_text(text));
         input
     }

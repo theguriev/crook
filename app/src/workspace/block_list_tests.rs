@@ -76,7 +76,7 @@ fn the_open_block_is_the_rows_its_anchor_names_and_no_others() {
     emulator.advance(b"\x1b]133;A\x07$ ");
 
     let snapshot = emulator.snapshot();
-    let (first, last) = live_rows(&snapshot).expect("the new prompt is on screen");
+    let (first, last) = snapshot.live_rows().expect("the new prompt is on screen");
     assert!(
         first > 0,
         "the finished block is above the open one, at rows the list must not draw"
@@ -94,7 +94,7 @@ fn an_open_block_that_has_printed_nothing_takes_no_room_at_all() {
 
     let snapshot = emulator.snapshot();
     assert_eq!(
-        live_rows(&snapshot),
+        snapshot.live_rows(),
         None,
         "the block closed and the next one has printed nothing"
     );
@@ -109,7 +109,7 @@ fn the_open_block_of_a_shell_with_no_marks_is_the_whole_screen() {
     emulator.advance(b"one\r\ntwo\r\nthree");
 
     let snapshot = emulator.snapshot();
-    let (first, last) = live_rows(&snapshot).expect("something is on screen");
+    let (first, last) = snapshot.live_rows().expect("something is on screen");
     assert_eq!((first, last), (0, 2));
     assert_eq!(live_height(&snapshot, true), PADDING_TOP + 3.);
     assert_eq!(
@@ -187,7 +187,7 @@ fn the_composer_starts_one_column_after_the_prompt_s_last_cell() {
     // And it is the same cell the shell itself would use, which is what makes
     // the composed line land under the echoed one.
     let snapshot = emulator.snapshot();
-    let (_, last) = live_rows(&snapshot).expect("the prompt is on screen");
+    let (_, last) = snapshot.live_rows().expect("the prompt is on screen");
     assert_eq!(
         snapshot.live_block.prompt_end.map(|end| end.row),
         Some(last as i32),
@@ -206,7 +206,7 @@ fn a_shell_that_reports_nothing_keeps_the_composer_on_its_own_row() {
     // The list is unchanged by that: one open block holding everything, drawn
     // exactly as it was, with the composer under its last row.
     let snapshot = emulator.snapshot();
-    assert_eq!(live_rows(&snapshot), Some((0, 0)));
+    assert_eq!(snapshot.live_rows(), Some((0, 0)));
     assert_eq!(live_height(&snapshot, true), PADDING_TOP + 1.);
 }
 

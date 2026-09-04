@@ -4,10 +4,11 @@
 //! id and a cell is half the font size — so an assertion here is about the grid
 //! rather than about which fonts the machine running it happens to have.
 
-use crook_terminal::{CellCombining, GridPoint, LiveBlock, SelectionSpan};
+use crook_terminal::{BlockId, CellCombining, LiveBlock};
 use crookui_core::scene::{ClipBounds, Fill, Glyph, Rect};
 
 use super::*;
+use crate::selection::Place;
 use crate::terminal_font::CELL_FONT_SIZE;
 
 /// The colours a hand-built snapshot uses, chosen so none of them collides.
@@ -50,24 +51,35 @@ fn snapshot(lines: &[&str], columns: usize) -> Snapshot {
         alt_screen: false,
         live_block: LiveBlock::default(),
         title: None,
-        selection: None,
     }
 }
 
-/// The same, with a run of cells selected from one grid point to another.
-fn selected(lines: &[&str], columns: usize, start: (i32, usize), end: (i32, usize)) -> Snapshot {
-    Snapshot {
-        selection: Some(SelectionSpan {
-            start: GridPoint::new(start.0, start.1),
-            end: GridPoint::new(end.0, end.1),
+/// A region from one cell to another, in the numbering a grid selection uses:
+/// rows counted from the oldest line the scrollback holds.
+fn region(start: (usize, usize), end: (usize, usize)) -> (BlockId, Region) {
+    let id = LiveBlock::default().id;
+    (
+        id,
+        Region {
+            start: Place::new(id, start.0, start.1),
+            end: Place::new(id, end.0, end.1),
             block: false,
-        }),
-        ..snapshot(lines, columns)
-    }
+        },
+    )
 }
 
 /// Paints a snapshot into a scene big enough for all of it.
 fn painted(snapshot: &Snapshot) -> Scene {
+    paint(snapshot, None, true)
+}
+
+/// The same, with a region highlighted.
+fn painted_selected(snapshot: &Snapshot, selected: (BlockId, Region)) -> Scene {
+    paint(snapshot, Some(selected), true)
+}
+
+/// Paints a snapshot at its natural size.
+fn paint(snapshot: &Snapshot, selected: Option<(BlockId, Region)>, owns_caret: bool) -> Scene {
     let font = font();
     let metrics = font.metrics();
     let size = vec2f(
@@ -77,7 +89,15 @@ fn painted(snapshot: &Snapshot) -> Scene {
 
     let mut scene = Scene::new(1.);
     scene.start_layer(ClipBounds::None);
-    paint_grid(snapshot, &font, Vector2F::zero(), size, true, &mut scene);
+    paint_grid(
+        snapshot,
+        &font,
+        Vector2F::zero(),
+        size,
+        owns_caret,
+        selected,
+        &mut scene,
+    );
     scene.stop_layer();
     scene
 }
@@ -230,6 +250,7 @@ fn a_cursor_scrolled_out_of_the_visible_grid_is_not_drawn() {
         Vector2F::zero(),
         vec2f(metrics.width, metrics.height * 2.),
         true,
+        None,
         &mut scene,
     );
 
@@ -281,18 +302,7 @@ fn a_grid_fills_the_space_it_is_given_even_when_the_parent_is_unbounded() {
 
 /// Paints a snapshot at its natural size, as an unfocused pane would.
 fn painted_unfocused(snapshot: &Snapshot) -> Scene {
-    let font = font();
-    let metrics = font.metrics();
-    let size = vec2f(
-        snapshot.columns as f32 * metrics.width,
-        snapshot.rows as f32 * metrics.height,
-    );
-
-    let mut scene = Scene::new(1.);
-    scene.start_layer(ClipBounds::None);
-    paint_grid(snapshot, &font, Vector2F::zero(), size, false, &mut scene);
-    scene.stop_layer();
-    scene
+    paint(snapshot, None, false)
 }
 
 #[test]
@@ -435,7 +445,7 @@ fn a_selected_run_is_one_rectangle_and_the_text_on_it_is_untouched() {
     // colour the shell asked for.
     let font = font();
     let metrics = font.metrics();
-    let scene = painted(&selected(&["hello world"], 11, (0, 6), (0, 10)));
+    let scene = painted_selected(&snapshot(&["hello world"], 11), region((0, 6), (0, 10)));
 
     let highlight = selection_rects(&scene);
     assert_eq!(highlight.len(), 1, "one rectangle for one run of cells");
@@ -461,7 +471,10 @@ fn a_selection_over_several_rows_fills_each_of_them_to_its_edge() {
     // the text between them is.
     let font = font();
     let metrics = font.metrics();
-    let scene = painted(&selected(&["abcd", "efgh", "ijkl"], 4, (0, 2), (2, 1)));
+    let scene = painted_selected(
+        &snapshot(&["abcd", "efgh", "ijkl"], 4),
+        region((0, 2), (2, 1)),
+    );
 
     let highlight = selection_rects(&scene);
     assert_eq!(highlight.len(), 3, "one run per row");
@@ -481,20 +494,25 @@ fn a_screen_with_nothing_selected_pays_nothing_for_the_highlight() {
 
 #[test]
 fn a_selection_made_in_the_scrollback_is_drawn_against_the_lines_it_holds() {
-    // The display offset. Viewport row zero is `display_offset` lines above the
-    // live bottom line, so a span on line -2 is drawn on the top row of a
-    // viewport scrolled two lines back and nowhere at all when it is not.
-    let mut scrolled = selected(&["abcd", "efgh"], 4, (-2, 0), (-2, 3));
+    // A grid selection is numbered from the oldest line of the scrollback, so
+    // the same region is the top row of a viewport scrolled two lines back and
+    // nowhere at all once it has scrolled to the live output. That numbering is
+    // the whole of "a selection made four screens back must not highlight the
+    // live output".
+    let mut scrolled = snapshot(&["abcd", "efgh"], 4);
+    scrolled.history_len = 2;
+    let region = region((0, 0), (0, 3));
+
     scrolled.display_offset = 2;
     assert_eq!(
-        selection_rects(&painted(&scrolled)).len(),
+        selection_rects(&painted_selected(&scrolled, region)).len(),
         1,
         "the selected line is the top row of this viewport"
     );
 
     scrolled.display_offset = 0;
     assert!(
-        selection_rects(&painted(&scrolled)).is_empty(),
+        selection_rects(&painted_selected(&scrolled, region)).is_empty(),
         "scrolling back to the live output left the highlight behind on screen"
     );
 }

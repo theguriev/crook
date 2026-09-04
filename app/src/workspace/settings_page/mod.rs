@@ -36,13 +36,26 @@
 //! do to every pane, and a settings pane is not special enough to have its
 //! own.
 //!
-//! # What it does not have
+//! # Search
 //!
-//! **Search.** Warp's is the most interesting behaviour on its settings page —
-//! one field filtering the rail and the content together, with per-widget
-//! keyword blobs and match counts beside each page. It needs a text input, and
-//! `crookui_core` has none. At four pages and eleven controls there is also
-//! nothing to find: the whole surface fits in two screens.
+//! Warp's is the most interesting behaviour on its settings page, and it is
+//! here: one field at the top of the rail filtering the rail and the content
+//! together, per-widget keyword blobs, and a match count beside each page.
+//! See [`search`] for what "matches" means and [`field`] for the box itself,
+//! which is the first text input in Crook that is not a pane's.
+//!
+//! Two deliberate differences from Warp, both of which are the same
+//! disagreement. Warp matches a query against the keyword blob **only**, so
+//! typing a page's own name does not reliably find that page and typing a
+//! row's own label does not reliably find that row; here the label, the line
+//! under it, the value on its right, the category and the page all count as
+//! words the row is found by, and the keywords are what is *added* to them.
+//! And Warp moves the rail's selection when the page you are on filters out,
+//! which loses where you were; here the selection never moves on its own —
+//! which page is shown is worked out from the query, so clearing the box puts
+//! you back.
+//!
+//! # What it does not have
 //!
 //! **A settings-file footer.** Warp's rail ends in "Open settings file", and
 //! an inline alert when that file failed to parse. Crook's file cannot fail
@@ -50,7 +63,9 @@
 //! so there is nothing to alert about, and the path is on the About page for
 //! anyone who wants to open it themselves.
 
+mod field;
 mod pages;
+mod search;
 mod widgets;
 
 use std::collections::HashMap;
@@ -59,7 +74,11 @@ use crookui_core::elements::{MouseStateHandle, Padding};
 use crookui_core::prelude::*;
 
 use crate::settings::{Density, Granularity, Layout, PrimaryInfo, Subtitle};
+use crate::text_input::TextInput;
 use crate::theme::theme;
+
+use search::Query;
+use widgets::Category;
 
 use super::action::{SettingsAction, WorkspaceAction};
 use super::view::Workspace;
@@ -176,6 +195,8 @@ pub(super) enum Control {
     ThemeRow,
     /// The row around it, which is what opens the Themes panel.
     ThemeRowButton,
+    /// The rail's search box.
+    Search,
 }
 
 /// Which page the rail has selected, and what the mouse is doing to each of
@@ -196,6 +217,15 @@ pub(super) struct SettingsState {
     pub(super) section: Section,
     /// How far the content column has been scrolled.
     pub(super) scroll: ScrollStateHandle,
+    /// What has been typed into the rail's search box.
+    ///
+    /// Not cleared when the page changes — a query narrows every page at once,
+    /// so clicking through the rail while searching is browsing the answers —
+    /// but cleared when the pane closes. A filter that came back with the page
+    /// would be a settings page that had silently lost most of its rows, and
+    /// the box that explains why is at the top of a rail somebody has to look
+    /// at to find out.
+    pub(super) search: TextInput,
     /// One mouse state per control, created the first time that control is
     /// drawn and kept for as long as the window lives.
     ///
@@ -217,6 +247,11 @@ impl SettingsState {
             .clone()
     }
 
+    /// What has been typed, ready to match rows against.
+    fn query(&self) -> Query {
+        Query::new(self.search.editor().text())
+    }
+
     /// Forgets every hover and press the page was holding.
     ///
     /// Called when the page closes. Every control on it is about to stop
@@ -232,13 +267,92 @@ impl SettingsState {
 }
 
 /// The whole page: the rail, and the page it has selected.
+///
+/// # What the search does to this
+///
+/// One query filters the rail and the page at the same time, which is Warp's
+/// design and the only one that makes sense: a rail that still listed every
+/// page while the page beside it held two rows would be telling you the
+/// opposite of what the field is for.
+///
+/// So while something is being searched for, **every** page is built — the
+/// rail says how many rows each of them holds, and it cannot say that about a
+/// page it has not built. Four pages of about thirty rows once per frame is a
+/// rounding error beside the frame they are part of, and at rest only the page
+/// on screen is built at all.
 pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
+    let state = workspace.settings_page();
+    let query = state.query();
+
+    let built: Vec<(Section, Vec<Category>)> = if query.is_empty() {
+        vec![(state.section, pages::of(workspace, state.section, app))]
+    } else {
+        Section::ALL
+            .into_iter()
+            .map(|section| (section, pages::of(workspace, section, app)))
+            .collect()
+    };
+
+    let counts: Vec<(Section, usize)> = built
+        .iter()
+        .map(|(section, categories)| (*section, matches_in(categories, &query, section.label())))
+        .collect();
+    let showing = showing(state.section, &counts, &query);
+    let categories = built
+        .into_iter()
+        .find(|(section, _)| *section == showing)
+        .map(|(_, categories)| categories)
+        .unwrap_or_default();
+
     Flex::row()
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_child(rail(workspace))
-        .with_child(Expanded::new(1., content(workspace, app)).finish())
+        .with_child(rail(workspace, showing, &counts, &query))
+        .with_child(Expanded::new(1., content(workspace, categories, showing, &query)).finish())
         .finish()
+}
+
+/// How many of a page's rows a query is looking for.
+fn matches_in(categories: &[Category], query: &Query, page: &str) -> usize {
+    categories
+        .iter()
+        .map(|category| {
+            category
+                .entries
+                .iter()
+                .filter(|entry| entry.words.is_some())
+                .filter(|entry| entry.matches(query, &[page, category.title]))
+                .count()
+        })
+        .sum()
+}
+
+/// Which page the content actually shows.
+///
+/// The one the rail has selected, unless the search has emptied it — in which
+/// case the first page that has anything, because a page that has gone blank
+/// under you while its neighbours have answers is a search that looks broken.
+///
+/// Computed rather than assigned, which is the whole difference from Warp's:
+/// Warp moves the selection when a page filters out, and has then lost where
+/// you were. Here the selection never moves on its own, so clearing the box
+/// puts you back on the page you were reading.
+fn showing(selected: Section, counts: &[(Section, usize)], query: &Query) -> Section {
+    if query.is_empty() {
+        return selected;
+    }
+    if counts
+        .iter()
+        .any(|(section, found)| *section == selected && *found > 0)
+    {
+        return selected;
+    }
+
+    counts
+        .iter()
+        .find(|(_, found)| *found > 0)
+        .map(|(section, _)| *section)
+        .unwrap_or(selected)
 }
 
 /// The rail: the four pages, and what this build is.
@@ -247,15 +361,52 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
 /// right border instead, which is what Warp's rail is too. A filled rail
 /// inside a rounded panel would also have to know the panel's corner radius to
 /// avoid painting square into it.
-fn rail(workspace: &Workspace) -> Box<dyn Element> {
+fn rail(
+    workspace: &Workspace,
+    showing: Section,
+    counts: &[(Section, usize)],
+    query: &Query,
+) -> Box<dyn Element> {
     let ui = workspace.fonts().ui;
+    let state = workspace.settings_page();
 
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
 
+    column.add_child(
+        Container::new(
+            field::SearchField::new(
+                state.search.clone(),
+                workspace.clipboard().clone(),
+                workspace.fonts(),
+                state.control(Control::Search),
+            )
+            .finish(),
+        )
+        .with_margin_bottom(10.)
+        .finish(),
+    );
+
     for section in Section::ALL {
-        column.add_child(rail_row(workspace, section, ui));
+        let found = counts
+            .iter()
+            .find(|(page, _)| *page == section)
+            .map(|(_, found)| *found);
+
+        // A page with nothing in it is not listed at all while something is
+        // being searched for. Warp drops it too, and the alternative — a row
+        // that says "(0)" — is a row whose only purpose is to be declined.
+        if !query.is_empty() && found.unwrap_or(0) == 0 {
+            continue;
+        }
+        column.add_child(rail_row(
+            workspace,
+            section,
+            section == showing,
+            found.filter(|_| !query.is_empty()),
+            ui,
+        ));
     }
 
     // Warp's rail ends in a button that opens the settings file. Crook's ends
@@ -294,18 +445,21 @@ fn rail(workspace: &Workspace) -> Box<dyn Element> {
     .finish()
 }
 
-/// One page's row in the rail.
-fn row_of_rail_is_selected(workspace: &Workspace, section: Section) -> bool {
-    workspace.settings_page().section == section
-}
-
 fn rail_row(
     workspace: &Workspace,
     section: Section,
+    selected: bool,
+    found: Option<usize>,
     ui: crookui_core::fonts::FamilyId,
 ) -> Box<dyn Element> {
-    let selected = row_of_rail_is_selected(workspace, section);
     let state = workspace.settings_page().control(Control::Section(section));
+    // Warp's `Features (3)`: the count is part of the label rather than a
+    // badge beside it, which is what keeps a rail of counted and uncounted
+    // rows from having two different shapes.
+    let label = match found {
+        Some(found) => format!("{} ({found})", section.label()),
+        None => section.label().to_owned(),
+    };
 
     Hoverable::new(state, move |mouse| {
         let (background, color) = if selected {
@@ -317,7 +471,7 @@ fn rail_row(
         };
 
         Container::new(
-            Text::new(section.label(), ui, widgets::LABEL_SIZE)
+            Text::new(label.clone(), ui, widgets::LABEL_SIZE)
                 .with_color(color)
                 .finish(),
         )
@@ -343,24 +497,27 @@ fn rail_row(
 /// Warp keeps the page title inside the scroll area. Here it is above it and
 /// stays put, because a pane that can be a hundred pixels tall should not have
 /// to scroll to find out which page it is on.
-fn content(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
+fn content(
+    workspace: &Workspace,
+    categories: Vec<Category>,
+    showing: Section,
+    query: &Query,
+) -> Box<dyn Element> {
     let settings = workspace.settings_page();
     let ui = workspace.fonts().ui;
+    let body = page(categories, showing, query, ui).unwrap_or_else(|| nothing_found(query, ui));
 
     Container::new(
         Flex::column()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_child(centred(widgets::page_title(settings.section.label(), ui)))
+            .with_child(centred(widgets::page_title(showing.label(), ui)))
             .with_child(
                 Expanded::new(
                     1.,
-                    Scrollable::new(
-                        settings.scroll.clone(),
-                        centred(pages::render(workspace, settings.section, app)),
-                    )
-                    .with_scrollbar(theme().overlay_3)
-                    .finish(),
+                    Scrollable::new(settings.scroll.clone(), centred(body))
+                        .with_scrollbar(theme().overlay_3)
+                        .finish(),
                 )
                 .finish(),
             )
@@ -375,6 +532,92 @@ fn content(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
         // difference.
         right: CONTENT_PADDING - SCROLLBAR_GUTTER,
     })
+    .finish()
+}
+
+/// One page's categories, filtered, or `None` when the query emptied it.
+///
+/// The divider above a category is decided here rather than at the call site,
+/// because which category is first is a property of what survived.
+fn page(
+    categories: Vec<Category>,
+    section: Section,
+    query: &Query,
+    ui: crookui_core::fonts::FamilyId,
+) -> Option<Box<dyn Element>> {
+    let mut column = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+    let mut drawn = 0;
+
+    for category in categories {
+        let rows: Vec<Box<dyn Element>> = category
+            .entries
+            .into_iter()
+            .filter(|entry| entry.matches(query, &[section.label(), category.title]))
+            .map(|entry| entry.element)
+            .collect();
+
+        if rows.is_empty() {
+            continue;
+        }
+        column.add_child(widgets::category_element(
+            category.title,
+            drawn == 0,
+            rows,
+            ui,
+        ));
+        drawn += 1;
+    }
+
+    (drawn > 0).then(|| column.finish())
+}
+
+/// What the page says when the query found nothing anywhere.
+///
+/// Warp's two lines, which are the two things worth saying: that the search
+/// is the reason the page is empty, and that the way out is different words.
+fn nothing_found(query: &Query, ui: crookui_core::fonts::FamilyId) -> Box<dyn Element> {
+    let _ = query;
+
+    let line = |text: &'static str, size: f32, color: Color| {
+        let mut column = Flex::column()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Start);
+        for text in super::wrap(text, 60) {
+            column.add_child(
+                Text::new(text, ui, size)
+                    .with_color(color)
+                    .with_line_height_ratio(1.45)
+                    .finish(),
+            );
+        }
+        column.finish()
+    };
+
+    Container::new(
+        Flex::column()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Start)
+            .with_child(line(
+                "No settings match your search.",
+                widgets::LABEL_SIZE,
+                theme().text_primary,
+            ))
+            .with_child(
+                Container::new(line(
+                    "Try different keywords, or check for a typo.",
+                    widgets::DESCRIPTION_SIZE,
+                    theme().text_muted,
+                ))
+                .with_margin_top(6.)
+                .finish(),
+            )
+            .finish(),
+    )
+    .with_background_color(theme().overlay_1)
+    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
+    .with_uniform_padding(16.)
     .finish()
 }
 

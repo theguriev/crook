@@ -41,17 +41,26 @@ Six features, and the page that configures them:
   not a session. **This needs shell integration**, which Crook installs into zsh, bash and
   fish by itself; see below for what a shell without it looks like.
   [`docs/blocks.md`](docs/blocks.md) is the map of the whole surface.
-- **Output you can select and copy.** Drag across a pane's output to select it, double click
-  for a word, triple click for a line, alt-drag for a column; the drag keeps going when the
-  pointer leaves the pane, a drag past the top or bottom edge scrolls the screen under the
-  pointer, and the selection stays on its own text while the shell prints more underneath.
+- **Output you can select and copy, across every command in it.** Drag across a pane's output
+  to select it, double click for a word, triple click for a line, alt-drag for a column; the
+  drag keeps going when the pointer leaves the pane, a drag past the top or bottom edge scrolls
+  the list under the pointer, and the selection stays on its own text while the shell prints
+  more underneath and while the list scrolls over it. **A selection is a block, a row of that
+  block and a column** rather than a cell of the grid, so it spans the commands that have
+  finished as well as the one still running: a drag from one block into the next copies the
+  ends partially and the blocks between them whole, joined with one newline and none of the
+  padding between them. A line the terminal folded comes back as the one line it is, trailing
+  blanks stay behind, and a double-width character copies as one character.
   `cmd-c` — `ctrl-c` or `ctrl-shift-c` off macOS — copies it and lets it go, so the next
   `ctrl-c` interrupts the shell the way it always has. The half-written command line in the
-  field below is left exactly where it was: a copy is not an interrupt. **A selection lives in
-  the block that is still running** — its cells are the only ones still in the emulator, which
-  is what keeps a selection anchored to its own text while output arrives — so a drag cannot
-  cross two finished commands. Copying a *finished* block needs no selection: that is what its
-  hover control is for.
+  field below is left exactly where it was: a copy is not an interrupt. Copying a *whole*
+  finished block still needs no selection at all: that is what its hover control is for, and it
+  takes exactly what dragging across that whole block takes.
+  A pane that is drawing one grid rather than a list — the alternate screen, or a command that
+  has printed past the top of the viewport — is selectable in the same way, over its scrollback
+  as well as its screen. What no selection survives is the picture under it changing: resizing
+  the pane re-wraps the rows, and crossing between the list and the grid renumbers them, so the
+  selection is let go of rather than re-read against text nobody selected.
 - **A command line that behaves like a text field.** Under each pane's output is the line
   being composed — not a box and not a raw terminal line: no border, no fill, no focus ring,
   on the pane's own ground, in the terminal's own font and colours, at the same column zero as
@@ -107,15 +116,24 @@ Six features, and the page that configures them:
   and About. Every option on it is one the application actually reads; there is nothing there
   that does not do something. Changes apply on the click and are written to
   `<config>/crook/settings.json`, which is the same eight keys the gear menu writes plus the
-  theme, the terminal's type size and — set in the file rather than on the page — its font
-  family. The type size is also on `cmd/ctrl-plus`, `-minus` and `-0`, and every pane resizes
-  with it: a pane's columns and rows are its box divided by a cell, so the ptys follow.
+  theme, the light and dark pair it follows the desktop between, the terminal's type size,
+  whether the tabs come back, and — set in the file rather than on the page — its font family.
+  The type size is also on `cmd/ctrl-plus`, `-minus` and `-0`, and every pane resizes with it:
+  a pane's columns and rows are its box divided by a cell, so the ptys follow. Bindings a
+  person writes down live beside it, in `keymap.json`.
   It is the one pane with no shell under it and no field: every control on it is a click.
 
-Everything else is out of scope on purpose. There is no keymap system and no telemetry, and
-OSC 8 hyperlinks are not read — though a URL a program *printed* is clickable, because the
-scan that finds one works the same on a finished block as on the live grid, which an OSC 8
-carried on the grid alone would not. Blocks are stage one — no cross-block or
+  At the top of its rail is a **search box**, and it narrows both halves of the page at once:
+  the rail keeps only the pages that hold an answer and says how many each of them holds, and
+  the page keeps only the rows that are one. A row is found by its own name, by the line under
+  it, by the value on its right — so `cmd-w` finds "Close the focused pane" and a path finds
+  the settings file — by the page and category it is in, and by a hand-written list of the
+  words somebody would actually type: nothing on the "Tab placement" row says *sidebar*.
+
+Everything else is out of scope on purpose. There is no telemetry, and OSC 8 hyperlinks are
+not read — though a URL a program *printed* is clickable, because the scan that finds one
+works the same on a finished block as on the live grid, which an OSC 8 carried on the grid
+alone would not. Blocks are stage one — no
 block-level selection, no keyboard navigation between blocks, no sticky header,
 no jump-to-bottom, and the shell's prompt stays on its own row rather than being lifted into
 the composer; [`docs/blocks.md`](docs/blocks.md) lists those and says what each would touch.

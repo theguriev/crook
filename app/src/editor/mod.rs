@@ -50,7 +50,7 @@ use self::history::History;
 use self::undo::{Revision, UndoStack};
 
 mod history;
-mod text;
+pub(crate) mod text;
 mod undo;
 
 #[cfg(test)]

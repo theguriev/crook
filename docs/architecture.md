@@ -420,6 +420,45 @@ the machine happened to have, which is a flat gear on one machine and a colour e
 next. Everything a font would not draw was built out of `Container`s: the two density marks
 in the gear menu were seven rectangles, and the git branch beside a tab title was three.
 
+### The second text field
+
+For most of Crook's life there was exactly one place to type: the composer
+under a pane. That element draws in the terminal's cell grid so it lines up
+with the output above it, draws its first row on the shell's own prompt row,
+takes its colours from the pty's palette, sends its line to a shell, and routes
+its keys through a policy whose first three rules are about a selection, an
+alternate screen and a signal. Two files said, in as many words, that a second
+field was a refactor of the input layer rather than a feature: the Themes panel
+has no search box, and the settings page had none either.
+
+The settings page's rail now has one, and the refactor turned out to be three
+seams rather than a rewrite.
+
+- **The state was never a pane's.** `app/src/text_input.rs` — called
+  `pane_input.rs` while a pane was the only thing that could hold one — is an
+  editor, a caret blink, a drag, and one `has_keys` flag, behind an `Rc` so it
+  survives the element tree that draws it. Two of its lines assume a shell:
+  the one that hands back a line to send, and the one that throws a line away.
+  A field with nowhere to send a line simply never asks for those.
+- **The keymap was never a pane's either.** `input_keys::route` is the keyboard
+  policy of a *pane*; `input_keys::intent` under it is the platform's text
+  editing — word movement, the line ends, the clipboard chords, undo, and the
+  emacs bindings macOS puts in every text field — with no pane in it. Making it
+  `pub` is the whole of what the search box needed to get all of that from the
+  same table the composer gets it from, which is what stops the two drifting.
+- **The painting is not shared, and should not be.** The composer is drawn in
+  cells because it has to line up with a grid. A search box in a sidebar is
+  drawn through the shaper, like every label beside it, and gets its caret
+  position from the shaped line rather than from a column times a cell width.
+  Those are two different elements, and each is short.
+
+What is still missing is a *focus* concept: which field has the keyboard is one
+boolean per field, written by `Workspace::sync_input_keys` whenever focus could
+have moved. The rule for the new one is Warp's — the box has the keyboard
+whenever the focused pane is the settings page — and it holds because there is
+nothing else on that page that takes a key. A third field, or a second one on
+the same surface, is where that stops being enough.
+
 ### One trap worth knowing now
 
 `cosmic-text`'s `ShapeLine::new` panics on multi-paragraph text. A tab title derived from
@@ -663,12 +702,7 @@ finished part of the sum is rebuilt only when a command ends. Scroll position is
 cannot die silently, and every mutation names its cause — a wheel, a resize, a submit, a key
 that reached the pty — in one function.
 
-**What it does not do yet** is in `docs/blocks.md`, and one entry belongs here because someone
-will hit it: **selection is still the emulator's**, so it works inside the block that is still
-running and nowhere else. A finished block's cells are not in the emulator to drag across —
-that is the price of owning them — and copying a whole finished block needs no selection,
-which is what its hover control is for. Cross-block selection is stage two and must be one
-implementation, not two that have to agree.
+**What it does not do yet** is in `docs/blocks.md`. Selecting text across it is below.
 
 ### The command line is an input field
 
@@ -703,44 +737,110 @@ a keystroke is: positions are byte offsets on grapheme boundaries, movements arr
 already-resolved `Motion`, and clipboard text goes in and out as a `String`. That is what
 makes the whole behaviour of the input — every movement from every position, undo grouping,
 history, grapheme-aware deletion — testable in microseconds with no window, no GPU and no
-fonts. `app/src/pane_input.rs` is the per-pane state the element tree is rebuilt around;
+fonts. `app/src/text_input.rs` is the per-pane state the element tree is rebuilt around;
 `app/src/workspace/input_element.rs` draws it on the grid's own cell metrics.
 
 ### Selecting the output
 
-The output is selectable with the pointer, and it is the emulator's own model that makes it so
-— which is also exactly why a selection reaches the block that is still running and no other:
-a finished block's cells have been harvested out of the emulator, and this is what they would
-have to still be in. `alacritty_terminal` already has a `Selection` — four kinds (a plain
-drag, a block, a word, a line), a `side` so a selection ends *between* two characters, and
-`Selection::rotate`, which `Term` calls on every path that scrolls the grid. That last one is
-the whole reason the selection is stored in `Term::selection` rather than beside it: a
-selection made around a word stays around that word while a build prints a hundred more lines
-underneath it, and a copy kept anywhere else would be wrong the first time a `\n` arrived.
-`crates/crook_terminal/src/selection.rs` is a vocabulary over it — `SelectionKind`,
-`CellSide`, and two point types — and nothing above the crate ever names an alacritty type.
+A selection spans every block in a pane, and there is exactly **one implementation** of it.
+There were briefly two — the emulator's, which is where selection started, and the list, which
+is where the blocks moved to — and the result was the bug that made this section worth
+rewriting: the moment a command finished, its rows were harvested out of the grid and its
+output stopped being selectable. Everything a person had already run, which is the whole
+reason to look at a terminal, could not be dragged across. Two implementations is where the
+disagreements live; there is one, in `app/src/selection.rs`.
 
-**The two point types are not fussiness.** A `ViewportPoint` is a cell of what is *on screen*
-and a `GridPoint` is a cell of the *text*, with negative lines for scrollback; the display
-offset is the distance between them and it moves whenever the shell prints while somebody is
-scrolled back. A mouse produces the first, a selection is stored in the second, and confusing
-them is exactly the bug where a selection dragged out four screens into the history highlights
-the live output instead. They are separate types so the conversion — which happens inside the
-emulator, under its own lock, at the moment the press lands — cannot be skipped.
+**An anchor is a place in the list, not a cell of the grid**: a block id, a row of that block,
+a column, and which side of the cell the pointer is in. That is what makes it hold still. A
+block id is handed out once and never reused; a block's rows never move within it. A command
+running below adds an item rather than shifting rows, the emulator scrolling changes which
+viewport row the open block's row seven is drawn on but not that it is row seven, and closing
+a block copies its rows into the store in the order they were already in — so the anchors that
+were made before any of that name the same characters after all of it. Ids increase with
+position in the list, so ordering two anchors is a tuple comparison, "is this row inside the
+selection" is two of them, and the open block — always the newest — always sorts last.
 
-**On the snapshot it is a span, not a flag on every cell.** A selection changes on pointer
-moves that change nothing the shell printed. A per-cell `selected` bool lives inside
-`Snapshot::cells`, and the only way to change something in `cells` is to *build* `cells` — a
-walk of the grid with a palette resolution per cell, ten thousand of them, for every pixel the
-pointer travels while a button is held. A span sits beside the cells instead, so the emulator
-hands back the very cells it already built with two new points next to them. It is compared in
-`same_content` like everything else, because a highlight *is* drawn content: a renderer that
-skipped a frame on an unchanged revision would leave the old highlight under a pointer that
-had moved on. So the revision stays honest and costs one comparison of two points.
+**The open block is not a second code path.** It is the last item of the same list with its
+rows read out of the `Snapshot` rather than out of a store, and `crook_terminal::Rows` is the
+one type that knows the difference: how many rows, how wide, one cell, how long the line
+actually is, whether the terminal folded it, and write these columns out as text. Six
+questions, answered twice each and nowhere else. Everything above it — the region, the
+highlight, the copy — is written once.
 
-The gesture — "is the button that went down on this grid still down?" — is the one piece the
-emulator cannot hold, because it never hears about a button, and the element cannot hold it
-either, because the tree is rebuilt between the press and the drag. It lives in
+**A grid is a list of one block.** The alternate screen and an overflowing block have no
+finished blocks to address, so they address as a single item whose rows are numbered from the
+oldest line the scrollback still holds; the wheel then moves the viewport without renaming
+anything, which is the same property block ids give the list. Copying reads those rows back
+out of the emulator through `Terminal::harvest_rows` — into the very store a finished block's
+rows live in — so a drag through the scrollback copies text the snapshot never held, through
+the same walk.
+
+**The two numberings do not mix, and the surface can change under a selection.** A block counts
+its rows from its own first; a grid counts from the oldest line of the history. The same pair
+of numbers therefore names different characters on the two surfaces, so which space an anchor
+was minted in is part of it — `selection::Cells` — and nothing resolves a selection against the
+other one. A pane crosses between them without being asked to: a command that prints past the
+top of the viewport falls back to the grid mid-drag, and a full-screen program does it with no
+output at all. The selection is let go of when that happens, for the reason a resize lets go of
+it: the picture it was drawn on is gone. Keeping it would be worse than losing it — the
+highlight is not on screen, and an invisible selection that still owns the copy chord is an
+interrupt spent on nothing.
+
+**One thing here is knowingly not stable.** Grid rows are numbered from the oldest line the
+history holds, and that line only stays the same line while the scrollback is still filling.
+Once it is full — ten thousand lines by default — every new line drops the oldest, and a
+selection held on the grid slides one row up the text per line printed. The count of dropped
+lines is not something alacritty keeps and cannot be recovered from what it exposes; the same
+limit is why a block's own anchor clamps at the oldest line rather than tracking further back.
+`selection::grid_first_row` says so, and a test pins the behaviour so that it changes on
+purpose.
+
+**What a word is, now that the emulator is not answering.** One UAX #29 word-bound segment of
+the folded line under the pointer, from `editor::text::word_range_at` — the same function the
+composer's own double click uses. One rule in one place, so double-clicking a path in the
+output and double-clicking it in the line being typed take the same thing. It crosses a fold,
+because a fold is where the *terminal* put a long line; it never crosses a block, because that
+is a different command.
+
+**Copying** walks the blocks between the two ends, taking the ends partially and the ones
+between them whole, and joins the pieces with a single newline — so the padding, the dividers
+and the copy controls contribute nothing and you get the text you saw without the gutter.
+Inside a block, a row the terminal folded runs on into the next with no break in the text,
+trailing blanks stay behind because they are a grid having to hold something rather than
+anything anybody typed, and a double-width character copies as the one character it is. A
+selection ends at cells, so nothing appends a trailing newline. The block's own copy control
+is the same walk over the same region — the whole block, with the blank rows at its end
+trimmed off — rather than a second way through the store. Two walks is how the control came to
+break a wrapped path into three lines while a drag over the same block did not.
+
+**The highlight is one rectangle per row, drawn under the glyphs**, so selected text keeps its
+own colour — selecting changes a cell's ground, never its ink. Between two selected blocks it
+bridges the gap: a selection running out of one block into the next is one continuous run of
+text with a line break in it, which is what a selection across two paragraphs is, and a
+highlight with a hole in it at every boundary would read as several selections that happen to
+touch. The band takes the columns of the row it continues rather than the pane's width, so it
+lines up with the rows either side of it — and an alt-drag, which takes the same few columns
+out of every row it crosses, bridges as the column it is rather than as a bar across the
+padding. Nothing in the gap is copied. The highlight is also cut down to the columns the pane
+is actually drawing: a block keeps the width it was harvested at, so a pane narrowed since
+holds rows it cannot draw, and only the picture is short — the copy still takes the whole row,
+because those cells are the block's text.
+
+**A resize lets go of it.** Changing the column count re-wraps every row the open block holds,
+so the cells a selection named hold other text afterwards. There is no honest way to
+re-anchor that, and a highlight left over re-wrapped rows is a copy of something nobody
+selected.
+
+**The press is not the selection.** A click that is never dragged anywhere selects nothing at
+all, which is what makes a plain click on the output *clear* the last selection rather than
+leave a one-cell highlight where it landed. So `PaneSelection` keeps two things: the press
+that is open — one anchor and a kind, from the button going down until it comes up — and the
+selection, which is only ever stored once it covers cells. Whoever moves it has the blocks to
+resolve it against and passes the answer in, so "is anything selected?", which is the question
+`ctrl-c` is settled by, is a `bool` read rather than a walk of the blocks. It is asked of a
+surface — a selection the pane is not drawing answers no — because the whole point of the
+question is whether there is a highlight the person can see. The press itself cannot live in
+the element, because the tree is rebuilt between the press and the drag; both live in
 `app/src/pane_selection.rs`, per pane, beside the input field's state and for the same reason.
 
 **And the gesture, once open, is not hit-tested.** A press is: a menu open over a pane must not
@@ -754,33 +854,21 @@ selection. What keeps a neighbour's drag out is `PaneSelection`, not the layer: 
 the press landed on has a gesture to continue.
 
 **Two elements route each keystroke, so nothing may change the answer between them.** A pane's
-grid and the field under it are siblings in a `Flex`, which hands the same `KeyDown` to both —
-the grid first. Both ask `TerminalHandle::has_selection` to route it, and both act on a
-different half of the answer. So the grid does not release what it copies where it copies it:
-it dispatches `WorkspaceAction::ReleaseSelection`, and actions are applied once the whole tree
-has seen the event. A grid that released it in place would have the field read the same
-`ctrl-c` as the interrupt it is with *nothing* selected, and throw away the half-written
-command line; on macOS the field's own `cmd-c` would then overwrite the clipboard the grid had
-just written. The invariant is worth stating plainly: **nothing may change what is selected in
-the output while a keystroke is being dispatched.**
+output and the field under it are siblings in a `Flex`, which hands the same `KeyDown` to both
+— the output first. Both ask the same `PaneSelection` whether anything is selected, and both
+act on a different half of the answer. So the output does not release what it copies where it
+copies it: it dispatches `WorkspaceAction::ReleaseSelection`, and actions are applied once the
+whole tree has seen the event. An output that released it in place would have the field read
+the same `ctrl-c` as the interrupt it is with *nothing* selected, and throw away the
+half-written command line; on macOS the field's own `cmd-c` would then overwrite the clipboard
+the output had just written. The invariant is worth stating plainly: **nothing may change what
+is selected in the output while a keystroke is being dispatched.**
 
-**Two places where the range the emulator hands back has to be checked.** `SelectionRange::new`
-asserts `start <= end` and everything downstream relies on it, but `Selection::range_block`
-builds one without going through the constructor: it moves the start a column right when the
-drag began on the right of a cell and the end a column left when it ended on the left of one,
-and never checks the two did not cross. An alt-drag whose ends share a column comes back
-inverted — covering no cell, so nothing is highlighted, while `has_selection` still says there
-is something to copy and off macOS spends the interrupt on it — and on the *last* column the
-start lands on `columns`, one past the row, which `Term::line_to_string` then indexes the row
-with and panics. `snapshot::selection_of` drops such a range, and `Emulator::selection_text`
-asks it rather than the terminal, so the text and the highlight come from one decision.
-
-**A double-width character is highlighted across both of its columns.** Its glyph is drawn
-once, from the first, across the width of two, and copying already treats the pair as one
-character. So `Snapshot::is_selected` lights both in either direction — reaching the trailing
-half takes the character, and reaching the character takes the column its right half is drawn
-in — or a drag that stopped in the middle of a CJK glyph would cut it down the middle while
-`cmd-c` took the whole of it.
+**A double-width character is one character in two columns.** Its glyph is drawn once, from
+the first, across the width of two. So the region grows to whole characters before either the
+highlight or the copy is taken from it — reaching the trailing half takes the character, and
+reaching the character takes the column its right half is drawn in — and the two cannot
+disagree, because they are the same range.
 
 ### Where the keyboard line is drawn
 
@@ -1069,7 +1157,7 @@ The omission is search: Warp filters the rail and the content together from one 
 widget, with match counts. That needs a text input, and what Crook has is half of one. The
 model is there and is general — `app/src/editor` draws nothing, touches no clipboard and
 knows no keystroke — but the only element that draws it is `CommandInput`, which measures in
-terminal cells against a `CellFont` and reads a pane's `PaneInput`. `crookui_core` still has
+terminal cells against a `CellFont` and reads a pane's `TextInput`. `crookui_core` still has
 no text field of its own, so the gap here is an element, not a model.
 
 **A theme *system* the size of Warp's.** Themes themselves are in — see below — but Warp's
@@ -1184,7 +1272,7 @@ platforms, and treat a build script as the cost it is.
 | Themes | 21 built in, gradients, images, a creator, OS sync, hot reload | 13 built in, the same file format, a creator without the image, no OS sync |
 | Theme chooser | a 240px docked panel with search and virtualisation | a 248px docked panel, no search, every row built |
 | Icons | its own `WarpIcon` and `UiIcon` sets, rendered from SVG | Lucide, vendored as path commands, one distance-field rasterizer (§4) |
-| Settings UI | a pane, 16 pages, search over ~800 widgets | a pane, 4 pages, no search |
+| Settings UI | a pane, 16 pages, search over ~800 widgets | a pane, 4 pages, search over 30 (§4) |
 
 The through-line: Crook keeps every *architectural* idea from Warp and rejects almost every
 *build-system* one. The architecture is what makes a GPU terminal tractable in Rust. The build

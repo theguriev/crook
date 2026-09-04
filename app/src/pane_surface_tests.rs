@@ -20,7 +20,6 @@ fn snapshot(live_block: LiveBlock, alt_screen: bool) -> Snapshot {
         alt_screen,
         live_block,
         title: None,
-        selection: None,
     }
 }
 

@@ -44,7 +44,6 @@
 //! has a caller in Crook yet, and both are one variant and one branch away.
 
 use crate::input::Modifiers;
-use crate::selection::ViewportPoint;
 
 /// A pointer button, as a terminal names one.
 ///
@@ -183,8 +182,13 @@ const X10_RELEASE: u8 = 3;
 /// The bytes a pointer gesture sends, or `None` when the child has not asked
 /// to hear about it.
 ///
-/// `at` is a cell of the viewport, zero-based; the protocol counts from one, so
-/// the conversion happens here and exactly once.
+/// `row` and `column` are a cell of the viewport, zero-based; the protocol
+/// counts from one, so the conversion happens here and exactly once.
+///
+/// Two plain numbers rather than a point type, and that is the honest shape:
+/// this is the *screen* the program is drawing on, which is the one address
+/// space a selection deliberately no longer uses — see
+/// [`crate::selection`] — so there is no shared type left to name it with.
 ///
 /// A wheel notch is only ever a [`MouseEventKind::Press`]: there is no release
 /// of a wheel, and a caller that sent one would make every scroll two events to
@@ -193,7 +197,8 @@ const X10_RELEASE: u8 = 3;
 pub fn encode(
     kind: MouseEventKind,
     button: Option<MouseButton>,
-    at: ViewportPoint,
+    row: usize,
+    column: usize,
     modifiers: Modifiers,
     modes: MouseModes,
 ) -> Option<Vec<u8>> {
@@ -206,8 +211,8 @@ pub fn encode(
 
     let code = button_code(kind, button, modifiers, modes.sgr);
     // The protocol is one-based, and a cell of the viewport is not.
-    let column = at.column + 1;
-    let row = at.row + 1;
+    let column = column + 1;
+    let row = row + 1;
 
     Some(if modes.sgr {
         // The final byte is what says press or release, which is the whole

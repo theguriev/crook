@@ -45,31 +45,40 @@
 //!
 //! # Selecting the output
 //!
-//! The grid is the other selectable surface in a pane. A press starts a
-//! selection at the cell under it — a character, a word on the second click, a
-//! line on the third, a block with Alt — a drag takes it out, and a drag that
-//! leaves the top or the bottom edge scrolls the viewport under the pointer so
-//! that a selection can run past the screen it began on.
+//! The grid is the other selectable surface in a pane, and it is selected with
+//! exactly the same machinery as the list: **a grid is a list of one block.**
+//! A press starts a selection at the cell under it — a character, a word on the
+//! second click, a line on the third, a block with Alt — a drag takes it out,
+//! and a drag that leaves the top or the bottom edge scrolls the viewport under
+//! the pointer so that a selection can run past the screen it began on. The
+//! anchors, the region and the copy are all [`crate::selection`]; what is here
+//! is the arithmetic between a pixel and a cell.
 //!
-//! **None of the selection is kept here.** The cells belong to the emulator,
-//! which is what keeps them anchored to their text while the shell prints more
-//! underneath — see [`crook_terminal::selection`] — and the *gesture* belongs
-//! to the workspace, because a press and the drag that answers it are separated
-//! by every frame the pointer takes to move and this element is thrown away on
-//! each of them. What is here is the arithmetic between a pixel and a cell, the
-//! rectangles the highlight is drawn as, and the four rules that let go of a
-//! selection: typing, clicking into the field, clicking somewhere else in the
-//! output, and the pane closing. The fifth thing that could and must not is the
-//! shell printing, which is why nothing in the paint path touches it.
+//! The one thing this surface has to do that the list does not is *number* its
+//! rows. A block's rows are its own and never move; the grid's move under a
+//! viewport that scrolls, so a row is numbered from the oldest line the
+//! scrollback still holds — see [`crate::selection::grid_first_row`] — and
+//! copying reads those rows back out of the emulator, into the very store a
+//! finished block's rows live in. That is what lets a drag through the
+//! scrollback copy text the snapshot never held.
+//!
+//! **None of the selection is kept here**, because a press and the drag that
+//! answers it are separated by every frame the pointer takes to move and this
+//! element is thrown away on each of them. It belongs to the workspace, in a
+//! [`PaneSelection`]. The rules that let go of one are typing, clicking into
+//! the field, clicking somewhere else in the output, and the pane closing. The
+//! fifth thing that could and must not is the shell printing, which is why
+//! nothing in the paint path touches it.
 //!
 //! [`Line`]: crookui_core::text_layout::Line
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use crook_terminal::url::{self, Url};
 use crook_terminal::{
-    CellFlags, CellSide, Cursor, CursorShape, MouseEventKind, Rgb, RowCombining, Snapshot,
-    SnapshotCell, ViewportPoint,
+    BlockId, CellFlags, CellSide, Cursor, CursorShape, MouseEventKind, Rgb, RowCombining, Rows,
+    SelectionKind, Snapshot, SnapshotCell,
 };
 // Both crates have a `MouseButton` and they are different types: one is what a
 // window reported, the other is what a terminal protocol names. Keeping the
@@ -87,13 +96,14 @@ use crookui_core::scene::Scene;
 use crate::browser;
 use crate::clipboard::Clipboard;
 use crate::input_keys::Platform;
-use crate::pane_input::PaneInput;
 use crate::pane_link::{LinkRow, LinkSpan, PaneLink};
-use crate::pane_selection::{Gesture, PaneSelection};
+use crate::pane_selection::PaneSelection;
 use crate::pane_surface;
+use crate::selection::{Anchor, Blocks, Cells, Item, Region, Selection, grid_first_row};
 use crate::tab::PaneId;
 use crate::terminal_font::{CellFont, CellMetrics};
 use crate::terminal_model::TerminalHandle;
+use crate::text_input::TextInput;
 use crate::theme::theme;
 
 use super::pane_output::{Keys, Output, Typed, selection_kind};
@@ -224,7 +234,7 @@ impl TerminalElement {
 
     /// Attaches the field under this grid, whose line decides what Ctrl-D
     /// means.
-    pub fn with_input(mut self, input: PaneInput) -> Self {
+    pub fn with_input(mut self, input: TextInput) -> Self {
         self.output = self.output.with_input(input);
         self
     }
@@ -238,7 +248,9 @@ impl TerminalElement {
         gesture: PaneSelection,
         clipboard: Clipboard,
     ) -> Self {
-        self.output = self.output.with_selection(pane, gesture, clipboard);
+        self.output = self
+            .output
+            .with_selection(pane, gesture, clipboard, Cells::Grid);
         self
     }
 
@@ -286,19 +298,17 @@ impl TerminalElement {
             return None;
         }
 
-        let (at, _) = self.cell_at(position)?;
-        if at.row >= self.snapshot.rows {
+        // The *viewport's* row, because that is what the snapshot is indexed
+        // by. A selection's anchor names a row of the text instead, which is a
+        // different number the moment anything has scrolled.
+        let (row, column) = self.viewport_cell_at(position)?;
+        if row >= self.snapshot.rows {
             return None;
         }
         // One `char` per cell, which is what `url::at` counts in.
-        let text: String = self
-            .snapshot
-            .row(at.row)
-            .iter()
-            .map(|cell| cell.c)
-            .collect();
-        let url = url::at(&text, at.column)?;
-        Some((at.row, url))
+        let text: String = self.snapshot.row(row).iter().map(|cell| cell.c).collect();
+        let url = url::at(&text, column)?;
+        Some((row, url))
     }
 
     /// Opens the link under the pointer, reporting whether there was one.
@@ -307,6 +317,29 @@ impl TerminalElement {
             return false;
         };
         browser::open(&url.uri)
+    }
+
+    /// The grid as the one block a selection addresses.
+    ///
+    /// Under the name the anchors already carry rather than the one the open
+    /// block has now: there is exactly one item, so its identity is whatever
+    /// the selection called it, and a block closing under a grid that is still
+    /// up does not throw the highlight away.
+    fn addressed(&self) -> Blocks<'_> {
+        let id = self
+            .output
+            .selection()
+            .map_or(self.snapshot.live_block.id, |selection| {
+                selection.anchor.block
+            });
+        Blocks::grid(&self.snapshot, id)
+    }
+
+    /// Whether the selection this gesture would make covers any cells.
+    fn covers(&self, kind: SelectionKind, anchor: Anchor, head: Anchor) -> bool {
+        Selection::new(kind, anchor, head)
+            .region(&self.addressed())
+            .is_some()
     }
 
     /// The typed keystroke, if this pane is the one that should have it and
@@ -325,11 +358,11 @@ impl TerminalElement {
         modifiers: Modifiers,
         ctx: &mut EventContext,
     ) -> bool {
-        let Some((at, side)) = self.cell_at(position) else {
+        let Some(at) = self.anchor_at(position) else {
             return false;
         };
 
-        if self.report(MouseEventKind::Press, reported(button), at, modifiers) {
+        if self.report(MouseEventKind::Press, reported(button), position, modifiers) {
             self.output.begin_reporting();
             return true;
         }
@@ -340,8 +373,10 @@ impl TerminalElement {
         if button != MouseButton::Left {
             return false;
         }
+        let kind = selection_kind(click_count, modifiers.alt);
+        let covers = self.covers(kind, at, at);
         self.output
-            .press(at, side, selection_kind(click_count, modifiers.alt), ctx)
+            .press(kind, at, covers, self.snapshot.columns, ctx)
     }
 
     /// Hands a gesture to the program in this pane, if it asked for the mouse.
@@ -355,16 +390,20 @@ impl TerminalElement {
         &self,
         kind: MouseEventKind,
         button: Option<ReportedButton>,
-        at: ViewportPoint,
+        position: Vector2F,
         modifiers: Modifiers,
     ) -> bool {
         if modifiers.shift {
             return false;
         }
+        let Some((row, column)) = self.viewport_cell_at(position) else {
+            return false;
+        };
         self.output.report_mouse(
             kind,
             button,
-            at,
+            row,
+            column,
             ReportedModifiers {
                 shift: false,
                 control: modifiers.ctrl,
@@ -389,10 +428,12 @@ impl TerminalElement {
         // window is still a drag, and `vim` resizing a split needs to hear
         // about the row the pointer is level with.
         if self.output.is_reporting() {
-            let Some((at, _)) = self.cell_at(position) else {
-                return false;
-            };
-            return self.report(MouseEventKind::Motion, reported(button), at, modifiers);
+            return self.report(
+                MouseEventKind::Motion,
+                reported(button),
+                position,
+                modifiers,
+            );
         }
 
         // Deliberately not hit-tested: dragging *past* the pane is how a
@@ -400,13 +441,21 @@ impl TerminalElement {
         // the end of the screen. What keeps this pane's grid out of a drag
         // that began in the field, or in the pane beside it, is that only the
         // pane the press landed on has a gesture open.
-        if !self.output.is_dragging() {
-            return false;
-        }
-        let Some((at, side)) = self.cell_at(position) else {
+        let Some((kind, anchor)) = self.output.pressed() else {
             return false;
         };
-        self.output.drag(at, side, self.autoscroll(position), ctx)
+        // The viewport moves and the selection does not go with it: a row is
+        // numbered from the oldest line of the scrollback, so scrolling the
+        // screen under a drag brings *more* rows within reach rather than
+        // renaming the ones already taken.
+        if let Some(handle) = self.output.handle() {
+            handle.scroll_lines(self.autoscroll(position));
+        }
+        let Some(at) = self.anchor_at(position) else {
+            return false;
+        };
+        let covers = self.covers(kind, anchor, at);
+        self.output.drag(at, covers, ctx)
     }
 
     /// Reports a pointer move that no button is behind, for a program that
@@ -416,7 +465,10 @@ impl TerminalElement {
     /// began here, so a pointer crossing a neighbouring pane is not this one's
     /// to report.
     fn moved(&self, position: Vector2F, modifiers: Modifiers) -> bool {
-        if self.output.is_open() || !self.output.mouse_modes().motion {
+        if self.output.is_dragging()
+            || self.output.is_reporting()
+            || !self.output.mouse_modes().motion
+        {
             return false;
         }
         if !self
@@ -425,29 +477,29 @@ impl TerminalElement {
         {
             return false;
         }
-        let Some((at, _)) = self.cell_at(position) else {
-            return false;
-        };
-        self.report(MouseEventKind::Motion, None, at, modifiers)
+        self.report(MouseEventKind::Motion, None, position, modifiers)
     }
 
     /// Ends the gesture, reporting whether this pane had one.
+    ///
+    /// A press a program took and a press that was dragging a selection are
+    /// two different gestures with one button, and the release belongs to
+    /// whichever of them was open.
     fn release(&self, button: MouseButton, position: Vector2F, modifiers: Modifiers) -> bool {
-        match self.output.release() {
-            Gesture::None => false,
-            Gesture::Selecting => true,
-            Gesture::Reporting => {
-                let Some((at, _)) = self.cell_at(position) else {
-                    return true;
-                };
-                self.report(MouseEventKind::Release, reported(button), at, modifiers);
-                true
-            }
+        if self.output.end_reporting() {
+            self.report(
+                MouseEventKind::Release,
+                reported(button),
+                position,
+                modifiers,
+            );
+            return true;
         }
+        self.output.release()
     }
 
-    /// The cell of the viewport a window position lands on, and which half of
-    /// it the pointer is on.
+    /// Which cell of the grid a window position lands on, and which side of it
+    /// the pointer is on.
     ///
     /// Clamped into the grid rather than refused outside it, because a drag
     /// that has left the pane is still selecting: past the right edge means the
@@ -455,13 +507,41 @@ impl TerminalElement {
     /// clamps to is the one [`Self::autoscroll`] is about to scroll under the
     /// pointer.
     ///
-    /// The answer is a cell of the *screen*, not of the text. Turning one into
-    /// the other needs the display offset, which only the emulator has and
-    /// which moves whenever the shell prints while the viewport is scrolled
-    /// back — so that conversion happens under the terminal's own lock at the
-    /// moment the press lands, and a selection dragged out four screens into
-    /// the scrollback cannot end up on the live output.
-    fn cell_at(&self, position: Vector2F) -> Option<(ViewportPoint, CellSide)> {
+    /// The row it answers is not the row of the *screen*. It is numbered from
+    /// the oldest line the scrollback holds, which is what keeps a selection on
+    /// the text it was dragged across while the viewport moves over it — and
+    /// it is the same numbering [`Self::addressed`] hands the region.
+    /// The cell of the *viewport* a window position lands on.
+    ///
+    /// Not an [`Anchor`], and the difference is the whole reason both exist. An
+    /// anchor names a row of the *text*, numbered so that it stays on its own
+    /// characters while the viewport scrolls under it; the mouse protocol names
+    /// a row of the *screen*, because that is what the program drawing on it is
+    /// addressing. A drag through the scrollback needs the first; `htop` needs
+    /// the second.
+    ///
+    /// Clamped into the grid rather than refused outside it, for the reason a
+    /// drag is: a pointer that has left the pane is still pointing at the row
+    /// it is level with.
+    fn viewport_cell_at(&self, position: Vector2F) -> Option<(usize, usize)> {
+        let bounds = self.bounds()?;
+        let metrics = self.font.metrics();
+        let (fitting_columns, fitting_rows) = metrics.grid_for(bounds.width(), bounds.height());
+        let columns = usize::from(fitting_columns).min(self.snapshot.columns);
+        let rows = usize::from(fitting_rows).min(self.snapshot.rows);
+        if columns == 0 || rows == 0 {
+            return None;
+        }
+
+        let local = position - bounds.origin();
+        let (column, _) = column_at(local.x(), metrics.width, columns);
+        let row = (local.y() / metrics.height)
+            .floor()
+            .clamp(0., (rows - 1) as f32) as usize;
+        Some((row, column))
+    }
+
+    fn anchor_at(&self, position: Vector2F) -> Option<Anchor> {
         let bounds = self.bounds()?;
         let metrics = self.font.metrics();
         let (fitting_columns, fitting_rows) = metrics.grid_for(bounds.width(), bounds.height());
@@ -476,7 +556,18 @@ impl TerminalElement {
         let row = (local.y() / metrics.height)
             .floor()
             .clamp(0., (rows - 1) as f32) as usize;
-        Some((ViewportPoint::new(row, column), side))
+        let id = self
+            .output
+            .selection()
+            .map_or(self.snapshot.live_block.id, |selection| {
+                selection.anchor.block
+            });
+        Some(Anchor::new(
+            id,
+            grid_first_row(&self.snapshot) + row,
+            column,
+            side,
+        ))
     }
 
     /// How far to scroll before a drag lands, when the pointer has left the top
@@ -560,9 +651,7 @@ impl TerminalElement {
         // through, so it lands on nothing — which is the honest answer, and
         // better than a program scrolling when somebody asked it not to.
         if !modifiers.shift {
-            if let Some(at) = self.cell_at(*position).map(|(at, _)| at)
-                && self.report_wheel(lines, at, *modifiers)
-            {
+            if self.report_wheel(lines, *position, *modifiers) {
                 return true;
             }
             if self.output.alternate_scroll(lines) {
@@ -579,7 +668,7 @@ impl TerminalElement {
     /// One report per line, because a notch is what the protocol counts and
     /// there is no way to say "three" in one. Bounded, so that a trackpad
     /// fling cannot turn into hundreds of writes down a pty.
-    fn report_wheel(&self, lines: i32, at: ViewportPoint, modifiers: Modifiers) -> bool {
+    fn report_wheel(&self, lines: i32, position: Vector2F, modifiers: Modifiers) -> bool {
         let button = if lines > 0 {
             ReportedButton::WheelUp
         } else {
@@ -589,7 +678,7 @@ impl TerminalElement {
         let notches = lines.unsigned_abs().min(MAX_WHEEL_NOTCHES);
         let mut sent = false;
         for _ in 0..notches {
-            sent |= self.report(MouseEventKind::Press, Some(button), at, modifiers);
+            sent |= self.report(MouseEventKind::Press, Some(button), position, modifiers);
         }
         sent
     }
@@ -624,6 +713,10 @@ impl Element for TerminalElement {
                 self.snapshot = handle.snapshot();
             }
         }
+        // A resize re-wraps every row under a selection and a fall back to
+        // this surface renumbers them, so a selection that survives neither is
+        // let go of here. See `Output::laid_out`.
+        self.output.laid_out(self.snapshot.columns);
 
         self.size = Some(size);
         size
@@ -641,12 +734,16 @@ impl Element for TerminalElement {
         // cursors in one pane say nothing about which of them is listening.
         let owns_caret = self.output.keys() == Keys::All
             && pane_surface::of(&self.snapshot, std::time::Instant::now()).output_owns_caret();
+        let selected = self.output.selection().and_then(|selection| {
+            Some((selection.anchor.block, selection.region(&self.addressed())?))
+        });
         paint_grid(
             &self.snapshot,
             &self.font,
             origin,
             size,
             owns_caret,
+            selected,
             ctx.scene,
         );
 
@@ -806,12 +903,16 @@ fn bounded(max: f32, min: f32) -> f32 {
 /// cursor's business and nothing else's: a grid that is not listening draws an
 /// outline where a listening one draws the filled block the program asked for,
 /// which is how every terminal with splits says which shell has the keyboard.
+///
+/// `selected` is the region to highlight and the name the grid answers to
+/// while it is selected, both resolved by the caller.
 fn paint_grid(
     snapshot: &Snapshot,
     font: &CellFont,
     origin: Vector2F,
     size: Vector2F,
     owns_caret: bool,
+    selected: Option<(BlockId, Region)>,
     scene: &mut Scene,
 ) {
     let metrics = font.metrics();
@@ -838,6 +939,23 @@ fn paint_grid(
         .filter(|_| shape == Some(CursorShape::Block))
         .map(|cursor| (cursor.row, cursor.column));
 
+    let first = grid_first_row(snapshot);
+    // The grid as the one item a selection addresses, which is what carries
+    // the numbering its rows are in: screen row zero is `first`, not zero.
+    let selected = selected.map(|(id, region)| {
+        (
+            Item {
+                id,
+                rows: Rows::Live {
+                    snapshot,
+                    top: 0,
+                    count: rows,
+                },
+                first,
+            },
+            region,
+        )
+    });
     for (row, cells) in snapshot.iter_rows().enumerate().take(rows) {
         let top = origin.y() + row as f32 * metrics.height;
         let cells = &cells[..columns];
@@ -847,7 +965,18 @@ fn paint_grid(
         // highlight is translucent, so it takes the colour of whatever the
         // shell painted the cell and the character is still drawn on top of it
         // in its own ink. Selecting text changes its ground, never its colour.
-        paint_selection(snapshot, row, columns, origin.x(), top, metrics, scene);
+        if let Some(selected) = selected
+            .and_then(|(item, region)| region.columns_on(&item, first + row))
+            .filter(|selected| selected.start < columns)
+        {
+            paint_selection(
+                selected.start..selected.end.min(columns),
+                origin.x(),
+                top,
+                metrics,
+                scene,
+            );
+        }
         paint_rules(cells, origin.x(), top, metrics, scene);
         paint_glyphs(
             cells,
@@ -1028,40 +1157,24 @@ pub(super) fn paint_backgrounds(
 
 /// Fills the cells of one row that are inside the selection.
 ///
-/// Merged into runs the way the backgrounds are: a selected line is one
-/// rectangle, not eighty, and a selection dragged over a screenful of `cat` is
-/// a rectangle per row.
+/// One rectangle: the region gives one run of columns per row, so a selected
+/// line costs a quad rather than eighty.
 fn paint_selection(
-    snapshot: &Snapshot,
-    row: usize,
-    columns: usize,
+    columns: Range<usize>,
     left: f32,
     top: f32,
     metrics: CellMetrics,
     scene: &mut Scene,
 ) {
-    if snapshot.selection.is_none() {
+    if columns.is_empty() {
         return;
     }
-
-    let mut start = 0;
-    while start < columns {
-        if !snapshot.is_selected(row, start) {
-            start += 1;
-            continue;
-        }
-
-        let end = (start..columns)
-            .find(|column| !snapshot.is_selected(row, *column))
-            .unwrap_or(columns);
-        scene
-            .draw_rect_without_hit_recording(RectF::new(
-                vec2f(left + start as f32 * metrics.width, top),
-                vec2f((end - start) as f32 * metrics.width, metrics.height),
-            ))
-            .with_background(theme().selection);
-        start = end;
-    }
+    scene
+        .draw_rect_without_hit_recording(RectF::new(
+            vec2f(left + columns.start as f32 * metrics.width, top),
+            vec2f(columns.len() as f32 * metrics.width, metrics.height),
+        ))
+        .with_background(theme().selection);
 }
 
 /// Which column a horizontal offset lands on, and which half of it.

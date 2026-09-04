@@ -51,13 +51,13 @@ pub mod git_model;
 pub mod input_keys;
 pub mod keymap;
 pub mod pane_blocks;
-pub mod pane_input;
 pub mod pane_link;
 pub mod pane_selection;
 pub mod pane_split;
 pub mod pane_surface;
 pub mod platform_insets;
 pub mod process;
+pub mod selection;
 pub mod session;
 pub mod settings;
 pub mod shell_integration;
@@ -65,6 +65,7 @@ pub mod tab;
 pub mod terminal_font;
 pub mod terminal_keys;
 pub mod terminal_model;
+pub mod text_input;
 pub mod theme;
 pub mod usage_model;
 pub mod workspace;
@@ -214,6 +215,13 @@ struct Overrides {
     /// extra tab in the strip, which is the point — a snapshot of the
     /// settings page is a snapshot of a window with the settings open in it.
     settings: Option<Section>,
+    /// Type this into the settings page's search box at startup.
+    ///
+    /// Implies `--settings`: a query with no page to filter is nothing to
+    /// look at. Like `--type` for a pane's field, it leaves the text in the
+    /// box rather than doing anything with it, because leaving it there *is*
+    /// what the box does — the page is filtered on every keystroke.
+    search: Option<String>,
     /// Start in this layout rather than the saved one.
     layout: Option<Layout>,
     /// Start with rows standing for this rather than for the saved one.
@@ -255,6 +263,13 @@ struct Overrides {
     /// drags a pointer across the shell's output to take, which is the other
     /// state no unattended run can hold a button down for.
     select_output: Option<String>,
+    /// Carry that selection on to the first occurrence of this.
+    ///
+    /// Two markers rather than one string, because the region worth a picture
+    /// is the one that crosses a block boundary — and naming that in one
+    /// string would mean spelling out the prompt between them, which is
+    /// whatever `PS1` was on the machine taking the picture.
+    select_through: Option<String>,
 }
 
 impl Overrides {
@@ -351,6 +366,15 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 let name = args.next().context("`--theme` needs a name")?;
                 overrides.theme = Some(name);
             }
+            "--search" => {
+                let query = args
+                    .next()
+                    .context("`--search` needs something to search for")?;
+                overrides.search = Some(query);
+                if overrides.settings.is_none() {
+                    overrides.settings = Some(Section::default());
+                }
+            }
             "--settings" => {
                 // The section is optional, and a bare `--settings` opens the
                 // page where a click on the menu entry opens it. Peeking
@@ -397,6 +421,10 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
             "--select-output" => {
                 let text = args.next().context("`--select-output` needs some text")?;
                 overrides.select_output = Some(text);
+            }
+            "--select-through" => {
+                let text = args.next().context("`--select-through` needs some text")?;
+                overrides.select_through = Some(text);
             }
             "--density" => {
                 let mode = args.next().context("`--density` needs a mode")?;
@@ -452,9 +480,13 @@ OPTIONS:
     --select <TEXT>    Select the first occurrence of TEXT in that field
     --select-output <TEXT>
                        Select the first occurrence of TEXT in that pane's output
+    --select-through <TEXT>
+                       Carry that selection on to TEXT, which may be in a later
+                       block: what a drag across several commands takes
     --menu             Start with the tab options menu open
     --settings [PAGE]  Start with a settings tab open, on `appearance`,
                        `usage`, `keys` or `about`
+    --search <TEXT>    Type TEXT into the settings page\'s search box, opening it
     --theme <NAME>     Start in this theme rather than the saved one
     --themes           Start with the Themes panel open
     --new-theme        Start with the Themes panel making a theme
@@ -640,6 +672,9 @@ fn apply_overrides(
     }
     if let Some(section) = overrides.settings {
         workspace.open_settings_page(section, ctx);
+    }
+    if let Some(query) = &overrides.search {
+        workspace.type_into_settings_search(query, ctx);
     }
     if overrides.themes {
         workspace.open_theme_panel(overrides.creating, ctx);
@@ -892,6 +927,8 @@ struct Composed {
     selected: Option<String>,
     /// The text to select in the pane's output, above the field.
     selected_output: Option<String>,
+    /// How far to carry that selection, when it runs past its own marker.
+    selected_through: Option<String>,
 }
 
 impl Composed {
@@ -901,6 +938,7 @@ impl Composed {
             text: overrides.type_text.clone(),
             selected: overrides.select.clone(),
             selected_output: overrides.select_output.clone(),
+            selected_through: overrides.select_through.clone(),
         }
     }
 
@@ -927,10 +965,13 @@ fn compose_pane(app: &mut App, workspace: &ViewHandle<Workspace>, pane: PaneId, 
             {
                 log::warn!("`--select` found no {selected:?} in the field to select");
             }
-            if let Some(selected) = asked.selected_output.as_deref()
-                && !workspace.select_in_output(pane, selected, ctx)
-            {
-                log::warn!("`--select-output` found no {selected:?} in the output to select");
+            if let Some(selected) = asked.selected_output.as_deref() {
+                let through = asked.selected_through.as_deref().unwrap_or(selected);
+                if !workspace.select_in_output_through(pane, selected, through, ctx) {
+                    log::warn!(
+                        "`--select-output` found no {selected:?}..{through:?} in the output"
+                    );
+                }
             }
         });
     });
@@ -1722,7 +1763,9 @@ mod tests {
                 "--select",
                 "hi",
                 "--select-output",
-                "printed"
+                "printed",
+                "--select-through",
+                "later"
             ])
             .expect("valid"),
             Startup::Window {
@@ -1731,6 +1774,7 @@ mod tests {
                     type_text: Some("echo hi".to_owned()),
                     select: Some("hi".to_owned()),
                     select_output: Some("printed".to_owned()),
+                    select_through: Some("later".to_owned()),
                     ..Overrides::default()
                 }
             }
@@ -1770,6 +1814,7 @@ mod tests {
         assert!(parse(&["--type"]).is_err());
         assert!(parse(&["--select"]).is_err());
         assert!(parse(&["--select-output"]).is_err());
+        assert!(parse(&["--select-through"]).is_err());
         assert!(parse(&["--frames", "soon"]).is_err());
         assert!(parse(&["--tabs"]).is_err());
     }
