@@ -52,6 +52,7 @@ pub mod pane_blocks;
 pub mod pane_input;
 pub mod pane_link;
 pub mod pane_selection;
+pub mod pane_split;
 pub mod pane_surface;
 pub mod platform_insets;
 pub mod process;

@@ -22,6 +22,7 @@ use crate::pane_blocks::PaneBlocks;
 use crate::pane_input::{CARET_PHASE, PaneInput};
 use crate::pane_link::PaneLink;
 use crate::pane_selection::PaneSelection;
+use crate::pane_split::{DividerDrag, PaneExtent};
 use crate::pane_surface;
 use crate::platform_insets::{LayoutInsets, TabsPlacement, layout_insets};
 use crate::settings::{Density, GeneralOptions, Granularity, Layout, Settings, TabOptions};
@@ -81,6 +82,9 @@ pub(super) struct PaneInteraction {
     pub(super) selection: PaneSelection,
     /// The link under the pointer in the pane's output. See [`PaneLink`].
     pub(super) links: PaneLink,
+    /// How many pixels the pane last measured along the split's axis. See
+    /// [`PaneExtent`].
+    pub(super) extent: PaneExtent,
     /// Where the pane's block list is scrolled to and what the pointer is
     /// over. See [`PaneBlocks`].
     pub(super) blocks: PaneBlocks,
@@ -265,6 +269,11 @@ pub struct Workspace {
     /// The system clipboard every field copies to and pastes from. One for the
     /// window: see [`Clipboard`].
     clipboard: Clipboard,
+
+    /// The divider drag in progress, shared by every divider in the window so
+    /// that only one can be dragged at a time. See
+    /// [`DividerDrag`](crate::pane_split::DividerDrag).
+    divider_drag: DividerDrag,
     interactions: HashMap<PaneId, PaneInteraction>,
     /// What the mouse is doing to each tab's chrome in the panel.
     ///
@@ -390,6 +399,7 @@ impl Workspace {
             terminals,
             inputs: HashMap::new(),
             clipboard: Clipboard::new(),
+            divider_drag: DividerDrag::new(),
             interactions: HashMap::new(),
             tab_chrome: HashMap::new(),
             settings,
@@ -957,6 +967,26 @@ impl Workspace {
     }
 
     /// The command line being composed in a pane.
+    /// How many pixels a pane last measured along the axis its split divides.
+    ///
+    /// Written by the element that lays it out and read by the divider beside
+    /// it, which is the only way a drag in pixels can become the share the
+    /// pane group keeps. A pane with no entry yet reports zero, which is the
+    /// state a divider reads as "nothing to drag against".
+    pub(super) fn pane_extent(&self, pane: PaneId) -> PaneExtent {
+        self.interactions
+            .get(&pane)
+            .map_or_else(PaneExtent::new, |interaction| interaction.extent.clone())
+    }
+
+    /// The divider drag in progress anywhere in the window.
+    ///
+    /// One for the window rather than one per divider, which is what makes
+    /// "only one divider can be dragged at a time" a fact rather than a rule.
+    pub(super) fn divider_drag(&self) -> &DividerDrag {
+        &self.divider_drag
+    }
+
     /// Where the caret of the field with the keyboard was last painted.
     ///
     /// What the window puts an input method's candidate list beside. `None`
@@ -1471,6 +1501,7 @@ impl Workspace {
                     body: MouseStateHandle::default(),
                     selection: PaneSelection::new(),
                     links: PaneLink::new(),
+                    extent: PaneExtent::new(),
                     blocks: PaneBlocks::new(),
                 });
             self.inputs.entry(*id).or_default();

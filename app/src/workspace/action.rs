@@ -15,7 +15,7 @@ use crate::tab::{PaneId, TabAction};
 use super::settings_page::Section;
 
 /// Everything the header dispatches.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum WorkspaceAction {
     /// Something happened to the strip. Applied by `TabStrip::apply`.
     Tab(TabAction),

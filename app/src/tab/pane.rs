@@ -124,7 +124,29 @@ pub const SETTINGS_TITLE: &str = "Settings";
 pub struct Pane {
     id: PaneId,
     content: PaneContent,
+    /// How large a share of the split this pane takes.
+    ///
+    /// One for a pane nobody has resized, which is what makes a fresh split an
+    /// even one. A divider dragged between two panes moves weight from one to
+    /// the other and leaves every other pane's alone — the two of them are the
+    /// only ones whose extent the drag changed.
+    ///
+    /// A weight rather than a fraction, because that is what a flex layout
+    /// takes and because it survives a pane being closed: three equal panes
+    /// that lose one leave two weights of 1, and the layout divides what is
+    /// left between them.
+    flex: f32,
 }
+
+/// The share a pane nobody has resized takes.
+pub const DEFAULT_FLEX: f32 = 1.;
+
+/// The smallest share a pane may be dragged down to.
+///
+/// A divider that could take a pane to zero would make it disappear with no
+/// way to get it back — the divider would be on top of its neighbour, and the
+/// pane behind it would have no edge left to grab.
+const MIN_FLEX: f32 = 0.08;
 
 impl Pane {
     /// A pane over a new session named `title`.
@@ -132,6 +154,7 @@ impl Pane {
         Self {
             id: PaneId::next(),
             content: PaneContent::Agent(AgentSession::new(title)),
+            flex: DEFAULT_FLEX,
         }
     }
 
@@ -140,7 +163,13 @@ impl Pane {
         Self {
             id: PaneId::next(),
             content: PaneContent::Settings,
+            flex: DEFAULT_FLEX,
         }
+    }
+
+    /// How large a share of the split this pane takes.
+    pub fn flex(&self) -> f32 {
+        self.flex
     }
 
     /// This pane's identity, for as long as it is open.
@@ -391,6 +420,59 @@ impl PaneGroup {
         // closed pane is gone, so closing the focused pane needs no successor
         // computed here and closing any other needs nothing at all.
         self.repair(None);
+        PaneEffect::Changed
+    }
+
+    /// Moves the divider between two adjacent panes.
+    ///
+    /// `leading` is the share of the pair that goes to the first of them, from
+    /// zero to one; the two keep the weight they had between them, so every
+    /// other pane in the split is untouched and the group still adds up to
+    /// what the layout was already dividing.
+    ///
+    /// The pair is checked for adjacency rather than trusted: a divider knows
+    /// its own neighbours, but an action is a value and can arrive after the
+    /// panes it names have moved or closed.
+    pub fn resize(&mut self, before: PaneId, after: PaneId, leading: f32) -> PaneEffect {
+        let (Some(first), Some(second)) = (self.index_of(before), self.index_of(after)) else {
+            return PaneEffect::Unchanged;
+        };
+        if second != first + 1 {
+            return PaneEffect::Unchanged;
+        }
+
+        let total = self.panes[first].flex + self.panes[second].flex;
+        let leading = (total * leading).clamp(MIN_FLEX, (total - MIN_FLEX).max(MIN_FLEX));
+        let trailing = (total - leading).max(MIN_FLEX);
+
+        // A drag that would not move anything by a pixel is not a change, and
+        // reporting one would repaint the window at pointer-move rate.
+        if (self.panes[first].flex - leading).abs() < f32::EPSILON
+            && (self.panes[second].flex - trailing).abs() < f32::EPSILON
+        {
+            return PaneEffect::Unchanged;
+        }
+
+        self.panes[first].flex = leading;
+        self.panes[second].flex = trailing;
+        PaneEffect::Changed
+    }
+
+    /// Gives every pane an equal share again.
+    ///
+    /// What a double click on a divider does, and the only way back to an even
+    /// split once one has been dragged.
+    pub fn even_out(&mut self) -> PaneEffect {
+        if self
+            .panes
+            .iter()
+            .all(|pane| (pane.flex - DEFAULT_FLEX).abs() < f32::EPSILON)
+        {
+            return PaneEffect::Unchanged;
+        }
+        for pane in &mut self.panes {
+            pane.flex = DEFAULT_FLEX;
+        }
         PaneEffect::Changed
     }
 
