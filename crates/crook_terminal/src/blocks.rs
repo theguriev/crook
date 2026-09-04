@@ -195,6 +195,17 @@ pub struct Block {
     /// Everything the block put on screen: its prompt, its command line and
     /// its output, as the grid held them.
     pub rows: BlockRows,
+    /// Which row of [`Self::rows`] the command's own output starts on: the
+    /// rows before it are the prompt and the line that was echoed at it.
+    ///
+    /// `None` when nothing said. Only the `C` mark can say — it is the moment
+    /// the shell stops echoing and starts printing — so a block that never ran
+    /// (`Submitted` for the rest of the session), a shell with no integration
+    /// and everything harvested off the alternate screen have no answer here
+    /// and are not given a guessed one. Half of a block is not the half a
+    /// reader meant, and "the output is everything after the first row" is
+    /// wrong for every multi-line prompt there is.
+    pub output_from: Option<usize>,
 }
 
 impl Block {
@@ -556,6 +567,13 @@ struct OpenBlock {
     top: Anchor,
     /// Where the echoed command line starts, set by the `B` mark.
     command_start: Option<Anchor>,
+    /// The first row the command itself printed on, set by the `C` mark.
+    ///
+    /// An anchor rather than a row number for the reason [`Self::top`] is one:
+    /// output scrolling under it moves every grid line, and the row this names
+    /// has to be the same row afterwards. It becomes [`Block::output_from`]
+    /// when the block is harvested, measured from the block's own first row.
+    output_start: Option<Anchor>,
     command: Option<String>,
     working_directory: Option<PathBuf>,
     started_at: Option<Instant>,
@@ -585,6 +603,7 @@ impl BlockTracker {
                 state: BlockState::Unknown,
                 top: Anchor::Top,
                 command_start: None,
+                output_start: None,
                 command: None,
                 working_directory: None,
                 started_at: None,
@@ -743,6 +762,13 @@ impl BlockTracker {
 
         self.open.top = Anchor::at(line, 0, term);
         self.open.command_start = None;
+        // And where its output began, for the same reason: a reflow moved
+        // every line the anchor was measured against, so the row it names is
+        // no longer the row the command started printing on. The block keeps
+        // its rows and loses only the boundary inside them, which is the
+        // recoverable direction — an entry that cannot say where the output
+        // starts offers nothing rather than the wrong half.
+        self.open.output_start = None;
     }
 
     /// Looks the signal up in [`TABLE`] and does what the cell says.
@@ -801,6 +827,31 @@ impl BlockTracker {
                 {
                     self.open.started_at = Some(Instant::now());
                 }
+                // And where it is running, for a block that opened before the
+                // shell had said. Every block but the first learns its
+                // directory when it opens — the shell reported one at the
+                // prompt before it — and the first one of a session opens
+                // before a byte has arrived, so it would otherwise be the one
+                // block in the list that cannot say where its command ran.
+                //
+                // Where the command *starts* rather than where it ends: a
+                // `cd` inside the command moves the shell, and the answer to
+                // "where was this run" is the directory it was typed in.
+                if matches!(state, BlockState::Submitted | BlockState::Executing)
+                    && self.open.working_directory.is_none()
+                {
+                    self.open.working_directory = working_directory.map(Path::to_path_buf);
+                }
+                // `C` is the one moment anything knows where the echo of the
+                // command ends and the command's own output begins: the shell
+                // has finished echoing and has printed nothing yet, so the row
+                // it would print on next is the first row of the output. The
+                // first one wins — a second `C` for the same command is
+                // ignored by the table anyway — and a state entered by any
+                // other signal records nothing.
+                if state == BlockState::Executing && self.open.output_start.is_none() {
+                    self.open.output_start = Some(Anchor::at(cursor_line(term) + 1, 0, term));
+                }
                 self.open.state = state;
             }
             Transition::Close(state) => {
@@ -853,6 +904,16 @@ impl BlockTracker {
         // on screen around nothing.
         let worth_keeping = self.open.command.is_some() || !rows.is_blank();
         if worth_keeping {
+            // Where the output starts, as a row of the block rather than a
+            // line of the grid: the two differ by exactly the block's top, and
+            // the block is the only address that survives the harvest. Beyond
+            // the last row it is clamped away entirely rather than clamped to
+            // the end — a command that printed nothing has no output to offer,
+            // and an empty answer is a truer one than the last row.
+            let output_from = self.open.output_start.and_then(|anchor| {
+                let from = usize::try_from(anchor.line(term) - top).ok()?;
+                (from <= rows.rows()).then_some(from)
+            });
             self.finished.push(Block {
                 id: self.open.id,
                 state,
@@ -862,6 +923,7 @@ impl BlockTracker {
                 started_at: self.open.started_at,
                 finished_at: Some(Instant::now()),
                 rows,
+                output_from,
             });
             if self.finished.len() > MAX_BLOCKS {
                 // A batch at a time, because a `Vec` shifts everything left on
@@ -927,6 +989,7 @@ impl BlockTracker {
             state,
             top: Anchor::at(top, 0, term),
             command_start: None,
+            output_start: None,
             command: None,
             working_directory: working_directory.map(Path::to_path_buf),
             started_at: None,

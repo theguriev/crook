@@ -40,6 +40,28 @@ pub(super) static COPY: &[Segment] = &[
     Cubic(15.1, 2.0, 16.0, 2.9, 16.0, 4.0),
 ];
 
+/// Lucide's `ellipsis-vertical`.
+pub(super) static ELLIPSIS_VERTICAL: &[Segment] = &[
+    Move(13.0, 12.0),
+    Cubic(13.0, 12.5523, 12.5523, 13.0, 12.0, 13.0),
+    Cubic(11.4477, 13.0, 11.0, 12.5523, 11.0, 12.0),
+    Cubic(11.0, 11.4477, 11.4477, 11.0, 12.0, 11.0),
+    Cubic(12.5523, 11.0, 13.0, 11.4477, 13.0, 12.0),
+    Close,
+    Move(13.0, 5.0),
+    Cubic(13.0, 5.5523, 12.5523, 6.0, 12.0, 6.0),
+    Cubic(11.4477, 6.0, 11.0, 5.5523, 11.0, 5.0),
+    Cubic(11.0, 4.4477, 11.4477, 4.0, 12.0, 4.0),
+    Cubic(12.5523, 4.0, 13.0, 4.4477, 13.0, 5.0),
+    Close,
+    Move(13.0, 19.0),
+    Cubic(13.0, 19.5523, 12.5523, 20.0, 12.0, 20.0),
+    Cubic(11.4477, 20.0, 11.0, 19.5523, 11.0, 19.0),
+    Cubic(11.0, 18.4477, 11.4477, 18.0, 12.0, 18.0),
+    Cubic(12.5523, 18.0, 13.0, 18.4477, 13.0, 19.0),
+    Close,
+];
+
 /// Lucide's `git-branch`.
 pub(super) static GIT_BRANCH: &[Segment] = &[
     Move(15.0, 6.0),
@@ -307,6 +329,11 @@ pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [
     (Lucide::ChevronDown, "chevron-down", CHEVRON_DOWN),
     (Lucide::ChevronRight, "chevron-right", CHEVRON_RIGHT),
     (Lucide::Copy, "copy", COPY),
+    (
+        Lucide::EllipsisVertical,
+        "ellipsis-vertical",
+        ELLIPSIS_VERTICAL,
+    ),
     (Lucide::GitBranch, "git-branch", GIT_BRANCH),
     (Lucide::Info, "info", INFO),
     (Lucide::LayoutGrid, "layout-grid", LAYOUT_GRID),
@@ -324,7 +351,7 @@ pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [
 ];
 
 /// How many there are.
-pub const ICONS: usize = 18;
+pub const ICONS: usize = 19;
 
 /// The icons Crook draws, from Lucide.
 ///
@@ -348,6 +375,10 @@ pub enum Lucide {
     ///
     /// Lucide's [`copy`](https://lucide.dev/icons/copy).
     Copy,
+    /// The control that opens a block's menu, beside that one.
+    ///
+    /// Lucide's [`ellipsis-vertical`](https://lucide.dev/icons/ellipsis-vertical).
+    EllipsisVertical,
     /// The mark that says a line is a branch and not a path.
     ///
     /// Lucide's [`git-branch`](https://lucide.dev/icons/git-branch).

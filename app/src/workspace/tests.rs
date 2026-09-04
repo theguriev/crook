@@ -42,7 +42,8 @@ use crate::theme::theme;
 use crate::window_controls::{Recorder, Request, WindowState};
 
 use super::{
-    Fonts, Opening, OptionsAction, QuitRequest, SettingsAction, TabMenuAction, ThemeAction,
+    BlockAction, Fonts, Opening, OptionsAction, QuitRequest, SettingsAction, TabMenuAction,
+    ThemeAction,
     Workspace, WorkspaceAction, WorktreeAction, tab_options_menu, tabs_panel,
 };
 
@@ -8727,12 +8728,16 @@ mod shells {
             harness.frame()
         }
 
-        /// The copy controls drawn in a frame, by their rounded plate.
+        /// The controls drawn on a block in a frame, left to right, by their
+        /// rounded plate.
         ///
         /// Bounded to the pane, because the button that opens another tab is
-        /// the same square with the same radius in the header above it.
-        fn copy_controls(scene: &Scene, panel: RectF) -> Vec<RectF> {
-            visible_rects(scene)
+        /// the same square with the same radius in the header above it. Sorted
+        /// by where they are rather than by the order they were painted in:
+        /// which is the copy square and which is the menu is a thing about the
+        /// picture.
+        fn block_controls(scene: &Scene, panel: RectF) -> Vec<RectF> {
+            let mut controls: Vec<RectF> = visible_rects(scene)
                 .filter(|(rect, bounds)| {
                     rect.corner_radius.get_top_left() == Radius::Pixels(5.)
                         && (bounds.width() - bounds.height()).abs() < 0.5
@@ -8741,7 +8746,51 @@ mod shells {
                 })
                 .map(|(_, bounds)| bounds)
                 .filter(|bounds| panel.contains_point(center(*bounds)))
-                .collect()
+                .collect();
+            controls.sort_by(|left, right| left.min_x().total_cmp(&right.min_x()));
+            controls
+        }
+
+        /// Opens the menu on the block at `index`, the way pressing its dots
+        /// does, and returns the frame that follows.
+        fn open_block_menu(harness: &mut Harness, pane: PaneId, index: usize) -> Rc<Scene> {
+            harness.workspace_update(|workspace, ctx| {
+                assert!(
+                    workspace.open_block_menu_at(pane, index, ctx),
+                    "there is no block {index} to open a menu on"
+                );
+            });
+            harness.frame()
+        }
+
+        /// The popup the block menu is drawn in, by its width and its corner.
+        fn block_menu_box(scene: &Scene) -> RectF {
+            visible_rects(scene)
+                .filter(|(rect, bounds)| {
+                    rect.corner_radius.get_top_left() == Radius::Pixels(6.)
+                        && (bounds.width() - 260.).abs() < 1.
+                })
+                .map(|(_, bounds)| bounds)
+                .next()
+                .expect("no block menu is up")
+        }
+
+        /// Clicks the entry of the block menu that says `label`.
+        ///
+        /// Found inside the popup's own box rather than anywhere in the frame:
+        /// the menu is drawn over a shell's output, and a line built from both
+        /// would be a line neither of them drew.
+        fn click_menu_entry(harness: &mut Harness, label: &str) {
+            let scene = harness.frame();
+            let popup = block_menu_box(&scene);
+            let row = text_lines(&scene, |at| {
+                at.x() >= popup.min_x() && at.x() <= popup.max_x()
+            })
+            .into_iter()
+            .find(|(_, line)| line.trim() == label)
+            .unwrap_or_else(|| panic!("no entry of the block menu says {label:?}"));
+            harness.click(row.0 + vec2f(4., 4.), MouseButton::Left);
+            harness.frame();
         }
 
         #[test]
@@ -8843,17 +8892,26 @@ mod shells {
 
             let panel = panel_of_the_pane(&mut harness);
             assert!(
-                copy_controls(&harness.frame(), panel).is_empty(),
+                block_controls(&harness.frame(), panel).is_empty(),
                 "nothing is hovered, so no control is drawn"
             );
 
             let scene = hover_block(&mut harness, pane, 0);
-            let controls = copy_controls(&scene, panel);
-            assert_eq!(controls.len(), 1, "one control, on the hovered block");
+            let controls = block_controls(&scene, panel);
+            assert_eq!(
+                controls.len(),
+                2,
+                "two controls, on the hovered block: the copy square and the dots"
+            );
             assert_eq!(
                 icons_in(&scene, controls[0], Lucide::Copy).len(),
                 1,
-                "the control's plate is empty: it says nothing about what it does"
+                "the left plate is empty: it says nothing about what it does"
+            );
+            assert_eq!(
+                icons_in(&scene, controls[1], Lucide::EllipsisVertical).len(),
+                1,
+                "the right plate is empty: nothing says a menu opens there"
             );
 
             let Some((clipboard, _system)) = working_clipboard(&harness) else {
@@ -8876,6 +8934,141 @@ mod shells {
                 copied.trim_end(),
                 "the block's trailing blank rows came with it"
             );
+        }
+
+        #[test]
+        fn the_dots_open_a_menu_that_copies_the_command_and_the_output_apart() {
+            // The whole of what a block menu is for: the two halves of a block
+            // that a pointer cannot take apart. A drag over the output catches
+            // the prompt at one end and the shell's next line at the other,
+            // and these two are exact because the marks said where the command
+            // ended.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, "echo ALPHA") == 0 {
+                return;
+            }
+            let Some((clipboard, _system)) = working_clipboard(&harness) else {
+                return;
+            };
+
+            open_block_menu(&mut harness, pane, 0);
+            assert!(
+                harness.a_popup_is_open(),
+                "the menu is a popup, and the window has to know one is up"
+            );
+            click_menu_entry(&mut harness, "Copy command");
+
+            let copied = clipboard.read().unwrap_or_default();
+            assert_eq!(copied, "echo ALPHA", "the command line, and only it");
+            assert!(
+                !harness.a_popup_is_open(),
+                "an entry that has run leaves the menu up"
+            );
+
+            open_block_menu(&mut harness, pane, 0);
+            click_menu_entry(&mut harness, "Copy output");
+            let copied = clipboard.read().unwrap_or_default();
+            assert_eq!(
+                copied, "ALPHA",
+                "what the command printed, without the prompt or the line it was typed on"
+            );
+        }
+
+        #[test]
+        fn the_menu_brings_the_block_it_is_open_on_to_the_top_of_the_pane() {
+            // A block taller than the window is read from its own first row,
+            // and finding that row by turning the wheel is how somebody scrolls
+            // past it twice.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, "seq 1 200") == 0 {
+                return;
+            }
+            run(&mut harness, pane, "echo AFTER");
+
+            let at_the_end = harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.pane_blocks(pane).map(PaneBlocks::position)
+            });
+            assert!(
+                matches!(at_the_end, Some(ScrollPosition::FollowBottom)),
+                "a session that has just run a command follows its end: {at_the_end:?}"
+            );
+
+            open_block_menu(&mut harness, pane, 0);
+            click_menu_entry(&mut harness, "Scroll to top of block");
+
+            let moved = harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.pane_blocks(pane).map(PaneBlocks::position)
+            });
+            assert!(
+                matches!(moved, Some(ScrollPosition::Fixed(lines)) if lines.abs() < 0.5),
+                "the first block starts at the top of the list, so the list is at line zero: \
+                 {moved:?}"
+            );
+        }
+
+        #[test]
+        fn running_a_command_again_puts_it_back_in_the_field_and_sends_nothing() {
+            // A menu that ran a command would be a menu that runs the `rm`
+            // somebody opened it to read. What it does instead is type.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, "echo ALPHA") == 0 {
+                return;
+            }
+            let before = block_count(&harness, pane);
+
+            open_block_menu(&mut harness, pane, 0);
+            click_menu_entry(&mut harness, "Run again");
+
+            let field = harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .input(pane)
+                    .map(|input| input.editor().text().to_owned())
+            });
+            assert_eq!(
+                field.as_deref(),
+                Some("echo ALPHA"),
+                "the command is in the field, waiting for an Enter that is the person's"
+            );
+            assert_eq!(
+                block_count(&harness, pane),
+                before,
+                "nothing was sent, so no block was made"
+            );
+        }
+
+        #[test]
+        fn escape_takes_the_block_menu_down() {
+            // Every modal popup in the window answers Escape, and the workspace
+            // claims the key before the pane under it can type one.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, "echo ALPHA") == 0 {
+                return;
+            }
+
+            open_block_menu(&mut harness, pane, 0);
+            assert_eq!(
+                harness.action_for("escape", Modifiers::default()),
+                Some(WorkspaceAction::Block(BlockAction::CloseMenu)),
+            );
+
+            harness.press("escape", Modifiers::default(), "\x1b");
+            assert!(!harness.a_popup_is_open(), "Escape left the menu up");
         }
 
         #[test]
@@ -9029,9 +9222,9 @@ mod shells {
             let panel = panel_of_the_pane(&mut harness);
             let scene = hover_block(&mut harness, pane, 0);
             assert_eq!(
-                copy_controls(&scene, panel).len(),
-                1,
-                "a block whose top has scrolled out of view drew no control"
+                block_controls(&scene, panel).len(),
+                2,
+                "a block whose top has scrolled out of view drew no controls"
             );
         }
 
@@ -9649,8 +9842,8 @@ mod shells {
                 };
                 let panel = panel_of_the_pane(&mut harness);
                 let scene = hover_block(&mut harness, pane, 0);
-                let controls = copy_controls(&scene, panel);
-                assert_eq!(controls.len(), 1, "one control, on the hovered block");
+                let controls = block_controls(&scene, panel);
+                assert_eq!(controls.len(), 2, "the controls, on the hovered block");
                 harness.click(center(controls[0]), MouseButton::Left);
 
                 let whole = clipboard.read().unwrap_or_default();

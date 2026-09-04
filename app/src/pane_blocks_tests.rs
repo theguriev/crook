@@ -149,17 +149,26 @@ fn hovering_reports_only_the_changes() {
     assert_eq!(list.hovered(), None);
 
     let block = a_block();
+    assert!(list.hover(Some(block), None), "the pointer entered a block");
+    assert!(!list.hover(Some(block), None), "and did not move off it");
     assert!(
-        list.hover(Some(block), false),
-        "the pointer entered a block"
+        list.hover(Some(block), Some(Control::Copy)),
+        "and then onto its copy control"
     );
-    assert!(!list.hover(Some(block), false), "and did not move off it");
-    assert!(list.hover(Some(block), true), "and then onto its control");
-    assert!(list.is_on_control());
-
-    assert!(list.hover(None, true), "the pointer left the list");
+    assert_eq!(list.on_control(), Some(Control::Copy));
     assert!(
-        !list.is_on_control(),
+        list.hover(Some(block), Some(Control::Menu)),
+        "and then along to the dots beside it, which is a different control"
+    );
+    assert_eq!(list.on_control(), Some(Control::Menu));
+
+    assert!(
+        list.hover(None, Some(Control::Menu)),
+        "the pointer left the list"
+    );
+    assert_eq!(
+        list.on_control(),
+        None,
         "a control with no block under it is not hovered"
     );
 }
@@ -170,7 +179,7 @@ fn a_control_is_clicked_only_where_it_was_pressed() {
     assert_eq!(list.release_control(), None, "no press, no click");
 
     let block = a_block();
-    list.press_control(block);
-    assert_eq!(list.release_control(), Some(block));
+    list.press_control(block, Control::Menu);
+    assert_eq!(list.release_control(), Some((block, Control::Menu)));
     assert_eq!(list.release_control(), None, "and the press is spent");
 }

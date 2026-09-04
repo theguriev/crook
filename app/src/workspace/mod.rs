@@ -25,6 +25,7 @@
 
 mod action;
 mod block_list;
+mod block_menu;
 mod body;
 mod controls;
 mod header_toolbar;
@@ -50,8 +51,8 @@ mod tests;
 use crate::theme::theme;
 
 pub use action::{
-    OptionsAction, SearchAction, SettingsAction, TabMenuAction, ThemeAction, WindowAction,
-    WorkspaceAction, WorktreeAction,
+    BlockAction, BlockEdge, BlockPart, OptionsAction, SearchAction, SettingsAction, TabMenuAction,
+    ThemeAction, WindowAction, WorkspaceAction, WorktreeAction,
 };
 pub use block_list::BlockList;
 pub use input_element::CommandInput;

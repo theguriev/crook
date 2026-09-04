@@ -1,0 +1,290 @@
+//! The menu a block opens: everything that can be done to one command.
+//!
+//! # The gesture
+//!
+//! Three dots at the top right of the block the pointer is on, beside the
+//! square that copies it. Warp's arrangement, and the reason for two controls
+//! rather than one is Warp's too: copying a block is the thing people do over
+//! and over, so it keeps a click of its own, and everything else is a list
+//! they read.
+//!
+//! It is not the pane's context menu. A secondary click in the output belongs
+//! to the shell — a program that reads the mouse is drawn on the grid, where
+//! the press is forwarded to it — and a menu that opened there would take a
+//! button away from every full-screen program a person runs. The dots are a
+//! control of Crook's own, on a surface Crook owns, and they appear on exactly
+//! the block they are about.
+//!
+//! # What is in it, and what is not
+//!
+//! Eight entries, in three groups: what the block's text can be copied as,
+//! what is known *about* the block, and the two ways of moving the list to it.
+//! Every one of them is something Crook can already answer for. Warp's menu is
+//! longer, and what is missing from this one is missing because there is
+//! nothing behind it yet rather than because it was not wanted: there is no
+//! session to share, no workflow to save a command as, no bookmark, no
+//! per-block filter and no find-within-block. Adding a row that opened a
+//! dialogue saying "not yet" would be worse than the row not being there.
+//!
+//! **A row that cannot act is drawn and disabled rather than dropped.** A
+//! block that ran in a directory nothing reported has no working directory to
+//! copy, and a block whose shell never sent the `C` mark cannot say which of
+//! its rows are output. Both are common enough — an `ssh`, a container, a
+//! shell with no integration — that a menu which changed length between blocks
+//! would be a menu whose rows move under the pointer. Warp greys the same rows
+//! for the same reason.
+//!
+//! # The two rules a popup only half-works without
+//!
+//! They are [`tab_options_menu`](super::tab_options_menu)'s, and they are
+//! written out there: the root is a [`Container`] with a background, because a
+//! container is the only element that records a hit rect; and the popup is
+//! painted one layer above its own [`Dismiss`](crookui_core::elements::Dismiss)
+//! underlay, so a press on its padding is covered rather than a dismissal.
+//!
+//! Where this menu differs is what a click does: **every entry closes it.**
+//! The options menu is a panel of preferences somebody changes three of at a
+//! time; this is a list of things to do, each done once.
+
+use crookui_core::elements::{MouseStateHandle, Padding};
+use crookui_core::fonts::FamilyId;
+use crookui_core::prelude::*;
+
+use crate::theme::theme;
+
+use super::action::{BlockAction, BlockEdge, BlockPart, WorkspaceAction};
+use super::block_list::{CONTROL_INSET, CONTROL_OFFSET, CONTROL_SIZE};
+use super::view::Workspace;
+
+/// How wide the popup is.
+///
+/// The options menu's 200 would cut "Scroll to bottom of block" in half, and a
+/// menu whose longest row is its whole width has no margin for a theme whose
+/// interface font runs wider. This is the worktree menu's 260, which is the
+/// other width the application already uses.
+const MENU_WIDTH: f32 = 260.;
+
+/// The popup's corner radius, which is every other popup's.
+const MENU_RADIUS: f32 = 6.;
+
+/// The inset around every row. Dividers are full-bleed and are not inset,
+/// which is the one thing easiest to get backwards.
+const ROW_INSET: f32 = 12.;
+
+/// The size of a row's label.
+const LABEL_SIZE: f32 = 12.;
+
+/// The space above and below a row's label.
+const ROW_PADDING: f32 = 5.;
+
+/// The whole popup.
+pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
+    let menu = workspace.block_menu();
+    let ui = workspace.fonts().ui;
+
+    let mut column = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+
+    // What the block's text can be copied as. The first row is what the square
+    // beside the dots does, spelled out — a menu that left it out would be a
+    // menu missing the one thing everything else in the group is a variation
+    // of.
+    column.add_child(row(
+        "Copy",
+        true,
+        menu.copy.clone(),
+        BlockAction::Copy(BlockPart::Whole),
+        ui,
+    ));
+    column.add_child(row(
+        "Copy command",
+        menu.command.is_some(),
+        menu.copy_command.clone(),
+        BlockAction::Copy(BlockPart::Command),
+        ui,
+    ));
+    column.add_child(row(
+        "Copy output",
+        menu.output_from.is_some(),
+        menu.copy_output.clone(),
+        BlockAction::Copy(BlockPart::Output),
+        ui,
+    ));
+
+    // What is known about the block rather than printed by it. Both come from
+    // where the shell said it was when the block opened, which is why they are
+    // a group of their own.
+    column.add_child(divider());
+    column.add_child(row(
+        "Copy working directory",
+        menu.directory.is_some(),
+        menu.copy_directory.clone(),
+        BlockAction::Copy(BlockPart::Directory),
+        ui,
+    ));
+    column.add_child(row(
+        "Copy git branch",
+        menu.branch.is_some(),
+        menu.copy_branch.clone(),
+        BlockAction::Copy(BlockPart::Branch),
+        ui,
+    ));
+
+    // Put the command back in the field, unsent. "Run again" rather than
+    // "Re-run", because it does not run anything: the shell is handed nothing
+    // and the person presses Enter, which is the only honest way for a menu to
+    // offer a command a second time.
+    column.add_child(divider());
+    column.add_child(row(
+        "Run again",
+        menu.command.is_some(),
+        menu.rerun.clone(),
+        BlockAction::Rerun,
+        ui,
+    ));
+
+    // And the two ways of moving the list to the block, which are what a block
+    // taller than the window is read with.
+    column.add_child(divider());
+    column.add_child(row(
+        "Scroll to top of block",
+        true,
+        menu.scroll_top.clone(),
+        BlockAction::ScrollTo(BlockEdge::Top),
+        ui,
+    ));
+    column.add_child(row(
+        "Scroll to bottom of block",
+        true,
+        menu.scroll_bottom.clone(),
+        BlockAction::ScrollTo(BlockEdge::Bottom),
+        ui,
+    ));
+
+    ConstrainedBox::new(
+        Container::new(column.finish())
+            .with_vertical_padding(6.)
+            .with_background_color(theme().surface_raised)
+            .with_border(Border::all(1.).with_border_color(theme().overlay_1))
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(MENU_RADIUS)))
+            .finish(),
+    )
+    .with_width(MENU_WIDTH)
+    .finish()
+}
+
+/// The gap between the dots and the menu hanging off them.
+///
+/// The same four pixels the menu on a tab leaves under its row.
+const MENU_GAP: f32 = 4.;
+
+/// Where the popup hangs: its top-right corner on the bottom-right corner of
+/// the dots that opened it.
+///
+/// The corner comes from where the control was last *painted*, because there
+/// is nothing else in a frame that knows: the button is drawn by the list
+/// rather than built as an element, so its rectangle exists in the scene and
+/// not in the tree. That is a frame behind, which cannot show — the block a
+/// menu is up on keeps its controls painted, and a modal underlay means
+/// nothing under it can scroll while it is up.
+///
+/// Without a corner to hang off — a menu opened by
+/// [`--block-menu`](crate::Overrides) before anything has been painted — it
+/// hangs from the list's own top-right, where the topmost block's controls
+/// are, so an unattended picture is still a picture of a menu on a block.
+pub(super) fn anchor(at: Option<Vector2F>) -> AnchorTo {
+    match at {
+        Some(corner) => AnchorTo {
+            parent: Corner::TopLeft,
+            child: Corner::TopRight,
+            offset: corner + vec2f(0., MENU_GAP),
+            keep_on_screen: true,
+            keep_clear_of_parent: false,
+        },
+        None => AnchorTo {
+            parent: Corner::TopRight,
+            child: Corner::TopRight,
+            offset: vec2f(-CONTROL_INSET, CONTROL_OFFSET + CONTROL_SIZE + MENU_GAP),
+            keep_on_screen: true,
+            keep_clear_of_parent: false,
+        },
+    }
+}
+
+/// One entry: a label, and what pressing it dispatches.
+///
+/// A row that cannot act takes the muted role and no hover of its own, and its
+/// press dispatches nothing — rather than being a `Hoverable` with an empty
+/// handler, which would still light up under the pointer and still claim the
+/// press. Nothing about it invites a click.
+fn row(
+    label: &'static str,
+    enabled: bool,
+    state: MouseStateHandle,
+    action: BlockAction,
+    ui: FamilyId,
+) -> Box<dyn Element> {
+    if !enabled {
+        // The hover state a disabled row is not using is dropped, so that a
+        // row which becomes pressable again on the next block does not come
+        // back lit under a pointer that has moved away.
+        state.lock().reset_interaction_state();
+        return plate(
+            Text::new(label, ui, LABEL_SIZE)
+                .with_color(theme().text_muted)
+                .finish(),
+            Color::TRANSPARENT,
+        );
+    }
+
+    Hoverable::new(state, move |mouse| {
+        let background = if mouse.is_hovered() {
+            theme().overlay_1
+        } else {
+            Color::TRANSPARENT
+        };
+        plate(
+            Text::new(label, ui, LABEL_SIZE)
+                .with_color(theme().text_primary)
+                .finish(),
+            background,
+        )
+    })
+    .on_click(move |_, ctx, _| {
+        ctx.dispatch_typed_action(WorkspaceAction::Block(action));
+    })
+    .finish()
+}
+
+/// The box a row's label sits in, which is the same box whether the row can be
+/// pressed or not — so a disabled row is a row of the same height in the same
+/// place, and the menu does not change shape between two blocks.
+fn plate(label: Box<dyn Element>, background: Color) -> Box<dyn Element> {
+    Container::new(label)
+        .with_padding(Padding {
+            left: ROW_INSET,
+            right: ROW_INSET,
+            top: ROW_PADDING,
+            bottom: ROW_PADDING,
+        })
+        .with_background_color(background)
+        .finish()
+}
+
+/// The hairline between two groups: full-bleed, in the role every other
+/// divider in the application uses.
+fn divider() -> Box<dyn Element> {
+    Container::new(
+        ConstrainedBox::new(
+            Container::new(Empty::new().finish())
+                .with_background_color(theme().overlay_2)
+                .finish(),
+        )
+        .with_height(1.)
+        .finish(),
+    )
+    .with_margin_top(6.)
+    .with_margin_bottom(6.)
+    .finish()
+}

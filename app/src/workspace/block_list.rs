@@ -68,7 +68,7 @@ use crookui_core::scene::{ClipBounds, CornerRadius, Radius, Scene};
 
 use crate::browser;
 use crate::clipboard::Clipboard;
-use crate::pane_blocks::{PaneBlocks, ScrollCause};
+use crate::pane_blocks::{Control, PaneBlocks, ScrollCause};
 use crate::pane_link::{LinkRow, LinkSpan, PaneLink};
 use crate::pane_selection::PaneSelection;
 use crate::pane_surface;
@@ -79,6 +79,7 @@ use crate::terminal_model::{BlockHistory, TerminalHandle};
 use crate::text_input::TextInput;
 use crate::theme::theme;
 
+use super::action::{BlockAction, WorkspaceAction};
 use super::pane_output::{Keys, Output, Typed, selection_kind};
 use super::terminal_element::{self, Ink, RowMarks, color};
 
@@ -122,24 +123,31 @@ const STRIPE: f32 = 5.;
 /// still output rather than red text.
 const WASH_ALPHA: u8 = 26;
 
-/// The side of the square copy control.
-const CONTROL_SIZE: f32 = 26.;
+/// The side of each square control.
+pub(super) const CONTROL_SIZE: f32 = 26.;
 
-/// How far the control's right edge sits in from the pane's, which is what
-/// keeps it clear of the thumb.
-const CONTROL_INSET: f32 = 12.;
+/// How far the rightmost control's right edge sits in from the pane's, which
+/// is what keeps it clear of the thumb.
+pub(super) const CONTROL_INSET: f32 = 12.;
 
-/// How far below a block's top edge the control sits.
+/// The space between the two controls.
+///
+/// Narrow enough that they read as one group about the block under them,
+/// wide enough that the plate behind a hovered one is a plate rather than half
+/// of a longer bar.
+const CONTROL_GAP: f32 = 4.;
+
+/// How far below a block's top edge the controls sit.
 ///
 /// Warp's `overflow_offset`. Below the divider rather than on it, and above
 /// the first row, so the control lands on the block's prompt line and never on
 /// its output.
-const CONTROL_OFFSET: f32 = 12.;
+pub(super) const CONTROL_OFFSET: f32 = 12.;
 
 /// How round the control's plate is.
 const CONTROL_RADIUS: f32 = 5.;
 
-/// The icon inside that plate, centred.
+/// The icon inside a plate, centred.
 ///
 /// Two overlapping sheets, which used to be two rectangles here because there
 /// was no icon system to ask — see `crookui_core::icons`. Lucide's `copy` is
@@ -184,6 +192,12 @@ pub struct BlockList {
     /// the move that finds one and the frame that underlines it are different
     /// frames. `None` for a list nothing can be clicked in.
     links: Option<PaneLink>,
+    /// The block whose menu is up, when one is up over this list.
+    ///
+    /// The workspace's answer rather than this element's: the menu is an
+    /// element the workspace builds, and what the list does with the fact is
+    /// keep the block's controls painted under it.
+    menu: Option<BlockId>,
 }
 
 /// Where one item's rows are painted, and which of them are on screen.
@@ -230,6 +244,7 @@ impl BlockList {
             view,
             output: Output::detached(),
             links: None,
+            menu: None,
             size: None,
             origin: None,
             window: Vec::new(),
@@ -424,14 +439,16 @@ impl BlockList {
         });
     }
 
-    /// The rectangle a block's copy control is drawn in, given where the block
-    /// starts.
+    /// The rectangle one of a block's controls is drawn in, given where the
+    /// block starts.
     ///
     /// Measured from the *pane's* right edge, which is this element's — it is
-    /// laid out full width and applies the gutter itself — so the control
-    /// clears the thumb rather than landing under it the first time a session
-    /// grows long enough to scroll.
-    fn control_at(&self, origin: Vector2F, item: Visible) -> RectF {
+    /// laid out full width and applies the gutter itself — so the controls
+    /// clear the thumb rather than landing under it the first time a session
+    /// grows long enough to scroll. The menu is the outermost of them, which
+    /// is where every application that has both puts it: the row reads
+    /// "these, and then everything else".
+    fn control_at(&self, origin: Vector2F, item: Visible, control: Control) -> RectF {
         let size = self.size.unwrap_or_default();
         // Below the block's top edge, or below the top of the *visible* part
         // of it when that edge has scrolled out of the list — a block taller
@@ -443,20 +460,24 @@ impl BlockList {
         let top = (item.top.max(0.) + CONTROL_OFFSET)
             .min(lowest)
             .max(item.top.max(0.));
+        let from_right = match control {
+            Control::Menu => CONTROL_INSET,
+            Control::Copy => CONTROL_INSET + CONTROL_SIZE + CONTROL_GAP,
+        };
 
         RectF::new(
-            origin + vec2f(size.x() - CONTROL_INSET - CONTROL_SIZE, top),
+            origin + vec2f(size.x() - from_right - CONTROL_SIZE, top),
             vec2f(CONTROL_SIZE, CONTROL_SIZE),
         )
     }
 
-    /// Which item a window position is over, and whether it is over that
-    /// item's copy control.
+    /// Which item a window position is over, and which of that item's controls
+    /// it is on, if it is on one at all.
     ///
     /// `None` for a position outside the list, and for the open block: there
     /// is nothing to copy out of a command that has not finished, and its rows
     /// are still in the grid where the pointer can select them.
-    fn item_at(&self, position: Vector2F) -> Option<(Visible, bool)> {
+    fn item_at(&self, position: Vector2F) -> Option<(Visible, Option<Control>)> {
         let bounds = self.bounds()?;
         if !bounds.contains_point(position) {
             return None;
@@ -469,11 +490,11 @@ impl BlockList {
         if item.index == self.live_index() {
             return None;
         }
-        Some((
-            *item,
-            self.control_at(bounds.origin(), *item)
-                .contains_point(position),
-        ))
+        let control = [Control::Copy, Control::Menu].into_iter().find(|control| {
+            self.control_at(bounds.origin(), *item, *control)
+                .contains_point(position)
+        });
+        Some((*item, control))
     }
 
     /// Which cell of the list a window position lands on, and which side of it
@@ -540,6 +561,13 @@ impl BlockList {
     /// the workspace keeps for it.
     pub fn with_links(mut self, links: PaneLink) -> Self {
         self.links = Some(links);
+        self
+    }
+
+    /// Says which block's menu is up over this list, so its controls stay
+    /// drawn under it.
+    pub fn with_menu(mut self, block: Option<BlockId>) -> Self {
+        self.menu = block;
         self
     }
 
@@ -704,7 +732,7 @@ impl BlockList {
         true
     }
 
-    /// Follows the pointer, so that the block under it shows its copy control.
+    /// Follows the pointer, so that the block under it shows its controls.
     fn hover(&self, position: Vector2F, ctx: &mut EventContext) -> bool {
         self.view.point(Some(position));
         if self.rehover() {
@@ -715,7 +743,7 @@ impl BlockList {
         false
     }
 
-    /// Puts the copy control on whichever block is under the pointer *now*,
+    /// Puts the controls on whichever block is under the pointer *now*,
     /// reporting whether that changed.
     ///
     /// Asked on every pointer move and again on every paint, because the list
@@ -732,11 +760,10 @@ impl BlockList {
         };
         let over = self.item_at(at);
         let block = over.map(|(item, _)| self.id(item.index));
-        self.view.hover(block, over.is_some_and(|(_, on)| on))
+        self.view.hover(block, over.and_then(|(_, on)| on))
     }
 
-    /// Presses either a block's copy control or a selection into the open
-    /// block.
+    /// Presses one of a block's controls, or a selection into the open block.
     fn press(&self, event: &Event, ctx: &mut EventContext) -> bool {
         let Event::MouseDown {
             button: MouseButton::Left,
@@ -748,8 +775,8 @@ impl BlockList {
             return false;
         };
 
-        if let Some((item, true)) = self.item_at(*position) {
-            self.view.press_control(self.id(item.index));
+        if let Some((item, Some(control))) = self.item_at(*position) {
+            self.view.press_control(self.id(item.index), control);
             ctx.notify();
             return true;
         }
@@ -781,15 +808,40 @@ impl BlockList {
             .press(kind, at, covers, self.snapshot.columns, ctx)
     }
 
-    /// Copies a block whose control was pressed and released, or ends a
-    /// selection gesture.
+    /// Runs the control that was pressed and released, or ends a selection
+    /// gesture.
     fn release(&self, position: Vector2F, ctx: &mut EventContext) -> bool {
-        if let Some(pressed) = self.view.release_control() {
-            // Only where it went down, which is what every other button in the
-            // application does.
-            let on_it = matches!(self.item_at(position), Some((item, true)) if self.id(item.index) == pressed);
-            if on_it && self.copy_block(pressed) {
-                ctx.notify();
+        if let Some((pressed, control)) = self.view.release_control() {
+            // Only where it went down, and only on the same control: a press
+            // that slid from the copy square onto the dots is not a click on
+            // either, which is what every other button in the application
+            // does.
+            let on_it = matches!(
+                self.item_at(position),
+                Some((item, Some(now))) if self.id(item.index) == pressed && now == control
+            );
+            if on_it {
+                match control {
+                    Control::Copy => {
+                        if self.copy_block(pressed) {
+                            ctx.notify();
+                        }
+                    }
+                    // Dispatched rather than done here: what a menu is and
+                    // where it hangs belongs to the workspace, and this
+                    // element holds no `&mut` on it. The same arrangement the
+                    // selection's release is made with.
+                    Control::Menu => {
+                        if let Some(pane) = self.output.pane() {
+                            ctx.dispatch_typed_action(WorkspaceAction::Block(
+                                BlockAction::OpenMenu {
+                                    pane,
+                                    block: pressed,
+                                },
+                            ));
+                        }
+                    }
+                }
             }
             return true;
         }
@@ -820,20 +872,7 @@ impl BlockList {
 
     /// One whole block as a copy of it would read.
     fn whole_block(&self, id: BlockId) -> Option<String> {
-        let blocks = self.addressed();
-        let item = blocks.item(blocks.index_of(id)?)?;
-        let last = item.rows.count().checked_sub(1)?;
-        Selection::new(
-            SelectionKind::Simple,
-            Anchor::new(id, 0, 0, CellSide::Left),
-            Anchor::new(
-                id,
-                last,
-                item.rows.columns().saturating_sub(1),
-                CellSide::Right,
-            ),
-        )
-        .text(&blocks)
+        block_text(&self.addressed(), id, 0)
     }
 
     /// Paints one item of the list.
@@ -1146,41 +1185,61 @@ impl BlockList {
         }
     }
 
-    /// Paints the copy control on the hovered block.
+    /// Paints the controls on the hovered block, or on the block whose menu is
+    /// up.
+    ///
+    /// The menu keeps them on screen for as long as it is up, and that is not
+    /// decoration. A modal menu takes the pointer away from the list
+    /// underneath, so the hover it opened from is gone by the next frame — and
+    /// the button a menu is hanging off must not be one that has just
+    /// disappeared. It is also where the menu's own corner is measured from:
+    /// see [`PaneBlocks::set_menu_at`].
     fn paint_control(&self, origin: Vector2F, ctx: &mut PaintContext) {
-        let Some(hovered) = self.view.hovered() else {
+        let Some(shown) = self.menu.or_else(|| self.view.hovered()) else {
+            self.view.set_menu_at(None);
             return;
         };
         let Some(item) = self
             .window
             .iter()
-            .find(|item| self.id(item.index) == hovered && item.index != self.live_index())
+            .find(|item| self.id(item.index) == shown && item.index != self.live_index())
         else {
+            self.view.set_menu_at(None);
             return;
         };
 
-        let bounds = self.control_at(origin, *item);
-        let plate = if self.view.is_on_control() {
-            theme().overlay_3
-        } else {
-            theme().overlay_1
-        };
-        // Hit-recorded, so that a press on it is a press on the control rather
-        // than on the block's text underneath.
-        ctx.scene
-            .draw_rect_with_hit_recording(bounds)
-            .with_background(plate)
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CONTROL_RADIUS)));
+        for control in [Control::Copy, Control::Menu] {
+            let bounds = self.control_at(origin, *item, control);
+            // The dots stay lit while their menu is up, because they are what
+            // it belongs to.
+            let held = self.menu == Some(shown) && control == Control::Menu;
+            let plate = if held || self.view.on_control() == Some(control) {
+                theme().overlay_3
+            } else {
+                theme().overlay_1
+            };
+            // Hit-recorded, so that a press on it is a press on the control
+            // rather than on the block's text underneath.
+            ctx.scene
+                .draw_rect_with_hit_recording(bounds)
+                .with_background(plate)
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CONTROL_RADIUS)));
 
-        let inset = (CONTROL_SIZE - CONTROL_ICON_SIZE) / 2.;
-        ctx.scene.draw_icon(
-            IconKey::new(Lucide::Copy, CONTROL_ICON_SIZE),
-            RectF::new(
-                bounds.origin() + Vector2F::splat(inset),
-                Vector2F::splat(CONTROL_ICON_SIZE),
-            ),
-            theme().text_muted,
-        );
+            let inset = (CONTROL_SIZE - CONTROL_ICON_SIZE) / 2.;
+            ctx.scene.draw_icon(
+                IconKey::new(icon_of(control), CONTROL_ICON_SIZE),
+                RectF::new(
+                    bounds.origin() + Vector2F::splat(inset),
+                    Vector2F::splat(CONTROL_ICON_SIZE),
+                ),
+                theme().text_muted,
+            );
+
+            if control == Control::Menu {
+                self.view
+                    .set_menu_at(Some(bounds.origin() + bounds.size() - origin));
+            }
+        }
     }
 
     /// Paints the thumb, in the geometry the general-purpose scrollable uses.
@@ -1210,6 +1269,50 @@ impl BlockList {
             ))
             .with_background(theme().overlay_3)
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(THUMB_WIDTH / 2.)));
+    }
+}
+
+/// One block's rows from `from` to its last, as a copy of them would read.
+///
+/// **Through the region a drag over the block makes**, rather than through a
+/// walk of the store: the block's control, the block's menu and a selection
+/// have to agree about where a folded line ends, and the way to make three
+/// answers one is to have one implementation. `from` is what makes it serve
+/// both of the menu's copies — zero is the whole block, and a block's
+/// [`output_from`](crook_terminal::Block::output_from) is what it printed.
+///
+/// A row past the block's last is an empty string rather than nothing at all:
+/// a command that printed nothing has an output, and it is empty.
+pub(super) fn block_text(blocks: &Blocks<'_>, id: BlockId, from: usize) -> Option<String> {
+    let item = blocks.item(blocks.index_of(id)?)?;
+    let last = item.rows.count().checked_sub(1)?;
+    if from > last {
+        return Some(String::new());
+    }
+    Selection::new(
+        SelectionKind::Simple,
+        Anchor::new(id, from, 0, CellSide::Left),
+        Anchor::new(
+            id,
+            last,
+            item.rows.columns().saturating_sub(1),
+            CellSide::Right,
+        ),
+    )
+    .text(blocks)
+}
+
+/// The icon inside a control's plate.
+///
+/// Lucide's `copy` is two overlapping sheets and its `ellipsis-vertical` is
+/// the three dots every application on every desktop opens a menu about the
+/// thing beside them with. Neither is a picture of Crook's: an icon somebody
+/// has to learn is an icon that says nothing on a surface they are meeting for
+/// the first time.
+fn icon_of(control: Control) -> Lucide {
+    match control {
+        Control::Copy => Lucide::Copy,
+        Control::Menu => Lucide::EllipsisVertical,
     }
 }
 
@@ -1348,7 +1451,7 @@ impl Element for BlockList {
             // The pointer is over something else, so nothing here is hovered.
             if matches!(event.raw_event(), Event::MouseMoved { .. }) {
                 self.view.point(None);
-                if self.view.hover(None, false) {
+                if self.view.hover(None, None) {
                     ctx.notify();
                 }
             }

@@ -742,3 +742,165 @@ fn test_the_prompt_end_is_part_of_what_a_repaint_is_worth() {
     );
     assert!(!after.same_content(&before));
 }
+
+/// The rows of a finished block from where its output starts, as text.
+///
+/// What "Copy output" takes, spelled out here rather than reached for through
+/// the application: the point of these tests is the boundary, and a helper
+/// that computed it a second way would agree with itself rather than with the
+/// tracker.
+fn output_text(block: &Block) -> Option<String> {
+    let from = block.output_from?;
+    let mut text = String::new();
+    for row in from..block.rows.rows() {
+        if row > from {
+            text.push('\n');
+        }
+        text.push_str(block.rows.text(row));
+    }
+    Some(text)
+}
+
+#[test]
+fn test_a_block_knows_which_of_its_rows_are_the_command_s_own_output() {
+    let mut emulator = emulator();
+    emulator.advance(format!("{A}$ {B}echo hi\r\n{C}hi\r\n\x1b]133;D;0\x07").as_bytes());
+
+    let [block] = emulator.blocks() else {
+        panic!("one finished block, got {}", emulator.blocks().len());
+    };
+    assert_eq!("$ echo hi\nhi", block.rows.to_text());
+    assert_eq!(
+        Some(1),
+        block.output_from,
+        "the prompt and the echoed line are row zero; `C` landed on row one"
+    );
+    assert_eq!(Some("hi".to_owned()), output_text(block));
+}
+
+#[test]
+fn test_a_prompt_of_two_rows_keeps_both_of_them_out_of_the_output() {
+    // Every prompt framework anybody uses draws two lines, and "the output is
+    // everything after the first row" is wrong for all of them. The boundary
+    // comes from the mark, so the number of rows above it is whatever the
+    // shell drew.
+    let mut emulator = emulator();
+    emulator.advance(format!("{A}~/work\r\n$ {B}ls\r\n{C}a\r\nb\r\n\x1b]133;D;0\x07").as_bytes());
+
+    let [block] = emulator.blocks() else {
+        panic!("one finished block, got {}", emulator.blocks().len());
+    };
+    assert_eq!("~/work\n$ ls\na\nb", block.rows.to_text());
+    assert_eq!(Some(2), block.output_from);
+    assert_eq!(Some("a\nb".to_owned()), output_text(block));
+}
+
+#[test]
+fn test_a_command_that_printed_nothing_has_an_empty_output_rather_than_a_row() {
+    let mut emulator = emulator();
+    emulator.advance(format!("{A}$ {B}true\r\n{C}\x1b]133;D;0\x07").as_bytes());
+
+    let [block] = emulator.blocks() else {
+        panic!("one finished block, got {}", emulator.blocks().len());
+    };
+    assert_eq!("$ true", block.rows.to_text());
+    assert_eq!(
+        Some(1),
+        block.output_from,
+        "one past the last row it has, which is an empty range rather than a \
+         row of somebody else's text"
+    );
+    assert_eq!(Some(String::new()), output_text(block));
+}
+
+#[test]
+fn test_output_that_scrolled_the_screen_keeps_its_boundary() {
+    // The anchor moves with the history exactly as the block's own top does,
+    // and the two are subtracted from each other — so a command that printed
+    // more than the screen holds still says its output starts on row one.
+    let mut emulator = emulator();
+    emulator.advance(format!("{A}$ {B}seq\r\n{C}").as_bytes());
+    for line in 0..12 {
+        emulator.advance(format!("{line}\r\n").as_bytes());
+    }
+    emulator.advance(b"\x1b]133;D;0\x07");
+
+    let [block] = emulator.blocks() else {
+        panic!("one finished block, got {}", emulator.blocks().len());
+    };
+    assert_eq!(Some(1), block.output_from);
+    assert_eq!(
+        Some("0\n1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n11".to_owned()),
+        output_text(block),
+        "everything the command printed, and not the line it was typed on"
+    );
+}
+
+#[test]
+fn test_a_block_that_never_ran_says_nothing_about_where_its_output_starts() {
+    // Three ways to have no `C`, and none of them is given a guess: a line
+    // submitted into a shell that never answered, a session with no marks at
+    // all, and a command whose block was reflowed by a resize while it ran.
+    let mut submitted = emulator();
+    submitted.advance(format!("{A}$ {B}").as_bytes());
+    submitted.command_submitted("ssh far-away");
+    // A completion is the only signal that closes a block a submit opened —
+    // a prompt arriving there is the redraw a transient prompt makes.
+    submitted.advance(b"\x1b]133;D;0\x07");
+    assert_eq!(
+        vec![None],
+        submitted
+            .blocks()
+            .iter()
+            .map(|block| block.output_from)
+            .collect::<Vec<_>>(),
+        "nothing came back, so nothing said where the output would start"
+    );
+
+    let mut silent = emulator();
+    silent.advance(b"$ echo hi\r\nhi\r\n");
+    silent.advance(format!("{A}$ ").as_bytes());
+    assert_eq!(
+        vec![None],
+        silent
+            .blocks()
+            .iter()
+            .map(|block| block.output_from)
+            .collect::<Vec<_>>(),
+    );
+
+    let mut resized = emulator();
+    resized.advance(format!("{A}$ {B}ls\r\n{C}a\r\n").as_bytes());
+    resized.resize(TerminalSize::new(30, 6));
+    resized.advance(b"\x1b]133;D;0\x07");
+    assert_eq!(
+        vec![None],
+        resized
+            .blocks()
+            .iter()
+            .map(|block| block.output_from)
+            .collect::<Vec<_>>(),
+        "the reflow moved every line the anchor was measured against"
+    );
+}
+
+#[test]
+fn the_first_block_of_a_session_still_knows_where_its_command_ran() {
+    // A block learns its directory when it opens, from what the shell last
+    // reported — and the first block of a session opens before a byte has
+    // arrived. Left at that it would be the one block in the list that cannot
+    // say where its command was run, which is exactly the block a person is
+    // most likely to still be looking at.
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b]7;file://host/tmp\x07");
+    emulator.advance(format!("{A}$ {B}ls\r\n{C}a\r\n\x1b]133;D;0\x07").as_bytes());
+
+    let [block] = emulator.blocks() else {
+        panic!("one finished block, got {}", emulator.blocks().len());
+    };
+    assert_eq!(
+        Some(std::path::Path::new("/tmp")),
+        block.working_directory.as_deref(),
+        "the directory the command was typed in"
+    );
+}

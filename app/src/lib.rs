@@ -322,6 +322,16 @@ struct Overrides {
     /// A hover is a state that only exists while a pointer is over something,
     /// which is the other thing no unattended run can hold still.
     hover_block: Option<usize>,
+    /// Open the menu on the finished block at this index.
+    ///
+    /// A menu is the fourth of these states, and it needs one thing the other
+    /// three do not: a frame of its own before it opens. The dots the menu
+    /// hangs off are painted by the list rather than built as an element, so
+    /// where they are is something only a paint pass knows — see
+    /// [`block_menu::anchor`](crate::workspace::block_menu). The block is
+    /// hovered, a frame is drawn, and the menu opens onto the corner that
+    /// frame recorded.
+    block_menu: Option<usize>,
     /// Pick this row of the tabs panel up and carry it, without letting go.
     ///
     /// The third state no unattended run can hold still, after a hovered row
@@ -383,6 +393,7 @@ impl Overrides {
             || self.type_text.is_some()
             || self.select_output.is_some()
             || self.hover_block.is_some()
+            || self.block_menu.is_some()
             || self.scroll_blocks.is_some()
     }
 }
@@ -578,6 +589,11 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 overrides.hover_block =
                     Some(index.parse().context("`--hover-block` takes a number")?);
             }
+            "--block-menu" => {
+                let index = args.next().context("`--block-menu` needs an index")?;
+                overrides.block_menu =
+                    Some(index.parse().context("`--block-menu` takes a number")?);
+            }
             "--scroll-blocks" => {
                 let lines = args.next().context("`--scroll-blocks` needs a count")?;
                 overrides.scroll_blocks =
@@ -677,7 +693,8 @@ OPTIONS:
     --run <COMMAND>    Type COMMAND into the first pane's input field at startup,
                        send it, and report what the shell printed. Repeatable:
                        one command is one block
-    --hover-block <N>  Hover the Nth finished block, so its copy control is drawn
+    --hover-block <N>  Hover the Nth finished block, so its controls are drawn
+    --block-menu <N>   Open the menu on the Nth finished block
     --scroll-blocks <N>
                        Scroll the first pane's block list up by N lines
     --type <TEXT>      Leave TEXT in the first pane's input field, unsent
@@ -1211,6 +1228,26 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
         // are on screen to be hovered.
         frame(&mut app, &mut presenter);
         aim_at_blocks(&mut app, &workspace, pane, &overrides);
+
+        // And then, for a menu, a second frame between the hover and the
+        // opening: the corner a menu hangs from is where the dots were last
+        // *painted*, and nothing has painted them until the block under them
+        // is hovered. See `Overrides::block_menu`.
+        if let Some(index) = overrides.block_menu {
+            app.update(|ctx| {
+                workspace.update(ctx, |workspace, ctx| {
+                    workspace.hover_block(pane, index, ctx);
+                });
+            });
+            frame(&mut app, &mut presenter);
+            app.update(|ctx| {
+                workspace.update(ctx, |workspace, ctx| {
+                    if !workspace.open_block_menu_at(pane, index, ctx) {
+                        log::warn!("`--block-menu` found no block {index} to open a menu on");
+                    }
+                });
+            });
+        }
     }
 
     // A frame first, and then the gesture: a press has to land on a row, and
