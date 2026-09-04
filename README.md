@@ -15,7 +15,7 @@ dropped, and why.
 
 ## v1 scope
 
-Seven features, and the page that configures them:
+Eight features, and the page that configures them:
 
 - **Tabs.** Open, close, switch, reorder. One agent session per tab, with a derived title.
   They live in a panel down the left edge or in a strip across the header, and the gear menu
@@ -119,12 +119,24 @@ Seven features, and the page that configures them:
   into the pane's own scratch, sends a key the snippet bound, and the snippet writes the
   answer back and says so with an escape sequence carrying only the request's number. fish
   answers with `complete -C`, which is its real completion; bash with `compgen`; zsh with its
-  own hashes and globs. One candidate is inserted whole, several insert as much as they agree
-  on, and an ambiguous answer is listed under the line — which is what every shell does.
+  own hashes and globs. One candidate is typed whole and several type as much as they agree
+  on, which is what every shell's Tab does — and what is still ambiguous after that is
+  **offered rather than listed**: the first candidate stands after the caret in dim ink, Tab
+  steps to the next and Shift-Tab back, the right arrow takes it, and typing on rules out the
+  candidates that no longer match without asking the shell anything. There is no menu and no
+  panel. A list under the composer is a surface that appears and disappears under whatever a
+  person is reading, and it takes the output with it every time.
   **Without it Crook is a plain terminal**: one continuous stream of output drawn as a grid,
   scrolled through the emulator's own scrollback, with every key going straight to the shell.
   No blocks, no per-command copy, and no composer — everything else, including selection and
   copying, works exactly as it does with it.
+- **The rest of the command, before you type it.** A pane opens with your shell's own history
+  behind it — zsh's, bash's or fish's file, read once and never written — so the up arrow in a
+  fresh tab reaches yesterday's commands, and the newest one that starts with what you have
+  typed stands after the caret in the same dim ink a completion does. The right arrow takes
+  it, the word arrow takes one word of it, and typing anything else leaves it behind. It is
+  drawn rather than typed: nothing is in the line until you take it, and it never makes the
+  composer grow a row.
 - **Themes**, in a panel of their own. Thirteen built in — Crook Dark, Crook Light, Midnight,
   and ten of the palettes Omarchy dresses a desktop in (Catppuccin, Everforest, Gruvbox,
   Kanagawa, Nord, Rosé Pine, Tokyo Night and three more, each its own project's, read from

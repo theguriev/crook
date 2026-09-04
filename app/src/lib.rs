@@ -62,6 +62,7 @@ pub mod process;
 pub mod selection;
 pub mod session;
 pub mod settings;
+pub mod shell_history;
 pub mod shell_integration;
 pub mod tab;
 pub mod terminal_font;

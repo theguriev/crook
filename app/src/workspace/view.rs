@@ -3183,7 +3183,10 @@ impl Workspace {
                     extent: PaneExtent::new(),
                     blocks: PaneBlocks::new(),
                 });
-            self.inputs.entry(*id).or_default();
+            // Not `or_default`: a pane's field opens with this person's own
+            // shell history behind it, which is what the Up key reaches and
+            // what the suggestion after the caret is made of.
+            self.inputs.entry(*id).or_insert_with(TextInput::for_pane);
         }
         self.interactions.retain(|id, _| open.contains(id));
         // A closed pane's half-written command line goes with it. Keeping it

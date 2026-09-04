@@ -109,6 +109,14 @@ use super::terminal_element::color;
 /// The tallest the composer ever grows, in rows.
 const MAX_ROWS: usize = 8;
 
+/// How much of the terminal's foreground a suggestion is drawn in.
+///
+/// The same weight the menu's unmatched text carries, and for the same reason:
+/// it is not part of the line. A person has to be able to tell at a glance
+/// what they have typed from what is merely on offer, and the only thing
+/// saying so is this.
+const SUGGESTION_ALPHA: u8 = 110;
+
 /// How thick the rule under a composition is, as a fraction of the cell.
 const PREEDIT_RULE_RATIO: f32 = 0.06;
 
@@ -340,8 +348,22 @@ impl CommandInput {
             // session's scratch directory is — and this element holds a
             // handle to the terminal and nothing else.
             Route::Edit(Intent::Complete) => {
+                // An answer already in hand is what Tab steps through. Asking
+                // the shell the question it has just answered would put the
+                // offer back to the first candidate while somebody was
+                // stepping past it.
+                if self.input.cycle_completion(true) {
+                    ctx.notify();
+                    return true;
+                }
                 if let Some(id) = self.pane {
                     ctx.dispatch_typed_action(WorkspaceAction::Complete(id));
+                }
+                true
+            }
+            Route::Edit(Intent::CompleteBackwards) => {
+                if self.input.cycle_completion(false) {
+                    ctx.notify();
                 }
                 true
             }
@@ -625,6 +647,7 @@ impl Element for CommandInput {
             &self.font,
             origin,
             rows,
+            self.size.map_or(0., Vector2F::x),
             self.focused,
             self.ink,
             ctx.scene,
@@ -1050,11 +1073,16 @@ fn columns_for(width: f32, metrics: CellMetrics) -> usize {
 /// knows the first row may start part-way along the row above. The glyphs, the
 /// selection and the caret all go through it, so none of the three can end up
 /// a column or a row away from the other two.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the whole of what a field is drawn from, and it is drawn in one place"
+)]
 fn paint_input(
     input: &TextInput,
     font: &CellFont,
     origin: Vector2F,
     rows: &Rows,
+    width: f32,
     focused: bool,
     ink: Ink,
     scene: &mut Scene,
@@ -1098,6 +1126,27 @@ fn paint_input(
         }
     }
 
+    // The suggestion standing after the caret, drawn before the caret so the
+    // caret sits on its first character exactly as it sits on a typed one.
+    // Never under a composition: an input method is already showing what it
+    // would insert there.
+    if composing.is_none()
+        && let Some(suggestion) = input.suggestion()
+    {
+        paint_suggestion(
+            &suggestion,
+            text,
+            caret_offset,
+            rows,
+            origin,
+            width,
+            metrics,
+            ink.text.with_alpha(SUGGESTION_ALPHA),
+            font,
+            scene,
+        );
+    }
+
     // The rule under a composition, drawn before the caret so the caret sits
     // over it. It is what says the text above it is not text yet: an input
     // method's own candidate list is somewhere else on screen entirely, and
@@ -1139,6 +1188,56 @@ fn paint_input(
             ))
             .with_background(ink.caret)
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CARET_WIDTH / 2.)));
+    }
+}
+
+/// Draws what the history would add to the line, after the caret and in dim
+/// ink.
+///
+/// **It is not text.** It is not in the editor, nothing was laid out for it —
+/// the field is as tall as what has actually been typed — and it is therefore
+/// cut off at the edge of the row it starts on rather than wrapping onto a row
+/// the field has not been given. A suggestion that made the composer grow a
+/// line would move the output above it on every keystroke, for text nobody has
+/// typed; a shell's own autosuggestion is the same trade, drawn on the row the
+/// cursor is on.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the same eight things `paint_input` draws with, one of them a colour it resolved"
+)]
+fn paint_suggestion(
+    suggestion: &str,
+    text: &str,
+    caret: usize,
+    rows: &Rows,
+    origin: Vector2F,
+    width: f32,
+    metrics: CellMetrics,
+    color: Color,
+    font: &CellFont,
+    scene: &mut Scene,
+) {
+    let Some((row, mut column)) = rows.place(text, caret) else {
+        return;
+    };
+    let at = origin + rows.offset(row, metrics);
+    let columns = ((width - rows.indent(row, metrics)) / metrics.width)
+        .floor()
+        .max(0.) as usize;
+
+    for grapheme in suggestion.graphemes(true) {
+        let wide = cells(grapheme);
+        if column + wide > columns {
+            return;
+        }
+        let pen = vec2f(
+            at.x() + column as f32 * metrics.width,
+            at.y() + metrics.baseline,
+        );
+        for character in grapheme.chars() {
+            paint_character(character, pen, color, font, scene);
+        }
+        column += wide;
     }
 }
 

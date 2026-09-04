@@ -231,6 +231,28 @@ impl Editor {
         self.history.entries()
     }
 
+    /// Puts the shell's own history behind this field's. See
+    /// [`History::seed`].
+    pub fn seed_history(&mut self, lines: Vec<String>) {
+        self.history.seed(lines);
+    }
+
+    /// What the history would add to the line, to be drawn after the caret
+    /// without being typed.
+    ///
+    /// Offered only at the very end of the line and with nothing selected: a
+    /// suggestion is text standing where the next character would go, and one
+    /// drawn in the middle of a line would be standing in front of the rest of
+    /// it. A line that has been walked back to out of the history suggests
+    /// nothing either — it *is* a history entry, and there is nothing left of
+    /// it to offer.
+    pub fn suggestion(&self) -> Option<&str> {
+        if !self.selection.is_empty() || self.selection.head != self.text.len() {
+            return None;
+        }
+        self.history.suggestion(&self.text)
+    }
+
     // --- Placing the caret ---------------------------------------------------
 
     /// Puts the caret at `offset`, snapped onto a grapheme boundary and
