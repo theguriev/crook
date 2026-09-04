@@ -260,8 +260,6 @@ pub enum SettingsAction {
     /// By index rather than by name, because this enum is `Copy`; see
     /// [`Workspace::field`](crate::workspace::Workspace::field).
     FocusField(Option<usize>),
-    /// "Show the usage chip", which is also what starts and stops the poll.
-    ToggleUsageChip,
     /// Put every tab option back to the value a fresh install opens with.
     ResetTabOptions,
     /// Set the terminal's type size, in logical pixels.

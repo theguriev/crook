@@ -29,7 +29,6 @@ mod plugins_page;
 pub mod settings;
 mod shell;
 mod shortcuts;
-mod usage;
 pub mod wasm;
 pub mod window;
 
@@ -41,12 +40,11 @@ pub fn defaults() -> Vec<Box<dyn Plugin>> {
         Box::new(window::Window),
         Box::new(header::Header),
         Box::new(settings::Settings),
-        // The rail's order is these five, and it is the `order` each of them
+        // The rail's order is these four, and it is the `order` each of them
         // asks for rather than this list — a plugin that adds a page cannot
         // be made to load in the right place in somebody else's list.
         Box::new(appearance::Appearance),
         Box::new(shell::Shell),
-        Box::new(usage::Usage),
         Box::new(shortcuts::Shortcuts),
         Box::new(plugins_page::Plugins::new()),
         Box::new(about::About),

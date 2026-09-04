@@ -21,7 +21,7 @@
 //! reached through a settings-schema system that gives every key a type, a
 //! default, a migration path and a cloud-sync policy. Crook has none of that,
 //! and seven keys do not earn it. JSON is what `serde_json` — already in the
-//! workspace for the usage client — reads and writes with no further
+//! workspace for a plugin's manifest — reads and writes with no further
 //! dependency and no schema, and it is the format in which "keep the keys this
 //! build did not recognise" is a [`Map`] rather than a parser. The leaf key
 //! names are Warp's, so the two files say the same thing about the same
@@ -222,11 +222,12 @@ pub fn subtitle_options_for(primary: PrimaryInfo) -> [Subtitle; 2] {
 
 /// Everything the settings page writes that is not about the tab strip.
 ///
-/// One switch, and that is not an accident of scheduling. Crook has a window,
-/// a tab strip and a usage chip; every option that could be offered about the
-/// first two is already in [`TabOptions`], and the chip has exactly one
-/// question worth asking about it. Warp's settings hold roughly eight hundred
-/// keys behind a schema system, a migration path and a cloud-sync policy —
+/// Four switches, and that is not an accident of scheduling. Crook has a
+/// window and a tab strip; every option that could be offered about the strip
+/// is already in [`TabOptions`], and what a plugin wants asked about itself
+/// belongs to that plugin rather than here. Warp's settings hold roughly eight
+/// hundred keys behind a schema system, a migration path and a cloud-sync
+/// policy —
 /// `docs/architecture.md` is explicit that a `serde` struct in a file is the
 /// right answer until there are ten of them, and this is the second struct,
 /// not the beginning of a schema.
@@ -261,16 +262,6 @@ pub struct GeneralOptions {
     /// tabs, splits and the directories their shells were in. No output is
     /// restored and no process is: see [`crate::session`].
     pub restore_session: bool,
-    /// Whether the header carries the Claude Code usage chip.
-    ///
-    /// Off is not merely a hidden pill: the chip is the only thing that reads
-    /// the usage endpoint, so turning it off is also what stops Crook talking
-    /// to the network at all. That is why this is a setting rather than a
-    /// matter of taste about a header, and why [`Workspace`] gates the poll on
-    /// it rather than rendering nothing and polling anyway.
-    ///
-    /// [`Workspace`]: crate::workspace::Workspace
-    pub show_usage_chip: bool,
     /// Whether a pane's shell is started as a *login* shell.
     ///
     /// A login shell reads `/etc/zprofile`, `~/.zprofile` and `~/.zlogin` on
@@ -300,14 +291,14 @@ pub struct GeneralOptions {
 }
 
 impl Default for GeneralOptions {
-    /// The chip on, because it is half of what Crook v1 is for, and the type
-    /// size the body panel already printed its one monospace line at.
+    /// The tabs coming back, because that is what makes a terminal a place,
+    /// and the type size the body panel already printed its one monospace line
+    /// at.
     fn default() -> Self {
         Self {
             font_size: DEFAULT_FONT_SIZE,
             use_system_theme: false,
             restore_session: true,
-            show_usage_chip: true,
             login_shell: crate::shell_integration::login_by_default(),
         }
     }
@@ -528,7 +519,7 @@ impl Settings {
         // Two independent parses of the same object rather than one parse of a
         // struct holding both, because the two groups fail independently: a
         // hand-edited `display_granularity` that names nothing must not take
-        // the usage chip down with it.
+        // the type size down with it.
         let tab_options = parse_group(&document, &path, "tab options");
         let general = parse_group(&document, &path, "general options");
         // Not through `parse_group`: a theme name is one string rather than a
@@ -731,7 +722,7 @@ impl Settings {
     /// overwritten by their current values.
     ///
     /// Both groups are flat in the same object, which is what lets a person
-    /// find `show_usage_chip` beside `font_size` in a file they opened in an
+    /// find `start_login_shell` beside `font_size` in a file they opened in an
     /// editor. It also means the two structs may not name the same key twice —
     /// the later `extend` would silently win — and that is a thing to check
     /// when a third group appears rather than a thing to defend against here.
@@ -1206,9 +1197,6 @@ mod tests {
                 "show_details_on_hover",
                 "show_diff_stats",
                 "show_pr_link",
-                // Crook's own, and the one key in the file with no Warp
-                // spelling to match: Warp has no usage chip.
-                "show_usage_chip",
                 // The chosen theme's name, which is a string rather than an
                 // option with a type: see `Settings::theme`.
                 "theme",
@@ -1359,11 +1347,11 @@ mod tests {
         let written: Map<String, Value> =
             serde_json::from_str(&contents).expect("the file should be a JSON object");
 
-        // Seven tab options, five general ones and three theme names, and
+        // Seven tab options, four general ones and three theme names, and
         // nothing else: the 8KB key the file started with is gone. The font
         // family is not among them — an absent key is what "no preference"
         // is, so a save writes no `font_family` unless one was chosen.
-        assert_eq!(15, written.len());
+        assert_eq!(14, written.len());
         assert!(!contents.contains("padding"));
         assert_eq!(
             everything_flipped(),
@@ -1477,6 +1465,11 @@ mod tests {
         // The half of the switch that is not on screen. A list that only held
         // the plugins that are *on* would go stale the day the build gains
         // one, which is why the file records the exceptions.
+        //
+        // The name is one this build no longer carries, and deliberately so:
+        // this module knows nothing about which plugins exist, and a fixture
+        // that named a real one would let a lookup creep in without any test
+        // noticing.
         let scratch = ScratchDirectory::new("disabled-plugins");
         let mut settings = Settings::load(scratch.settings_file());
         assert!(settings.disabled_plugins().is_empty());

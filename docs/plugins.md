@@ -9,6 +9,20 @@ else below is still a proposal.*
 Kept up to date as phases land, so that a plan nobody re-reads does not quietly become a
 description of something that was never built.
 
+- **The usage chip is no longer in the binary.** It was the first extraction and the worked
+  example for everything below, and it has been deleted: `crates/crook_usage`, the model, the
+  chip, the panel, its settings page and its two named actions. What it needed to work — a
+  file on disk, one host on the network, a timer and a picture — is exactly what a plugin
+  from *outside* needs, and a feature only Crook itself can carry is a feature that proves
+  nothing about the API this document is about. Where every paragraph below says
+  `crook/usage`, it is recording what that plugin was rather than what is there now; the
+  artwork stayed, in `crookui_core::icons::art`, because it is the host's to draw.
+
+  Two things went with it and are worth naming rather than discovering. The **week behind the
+  number** — tokens per model, per day and per project — came from scanning a few hundred
+  megabytes of transcripts under `~/.claude/projects`; that is native work, and no sandbox on
+  the thread that draws should be asked for it. And the **macOS Keychain** read shelled out to
+  `security`, which nothing outside the binary can do.
 - **Phase 0 — the kernel: done.** `crates/crook_plugin` (identities, manifest, slots with
   cardinality, named actions, `Registration` guards, the audit), `app/src/plugin.rs` (the
   contribution and handler types, `Host`, `Plugin`, `load`), and `app/src/plugins/` with two
@@ -289,7 +303,7 @@ that such requests are rare: nearly everything that looks native is a missing sl
 host query.
 
 Each native plugin sits behind a cargo feature, so somebody building from source can build a
-Crook without the Themes panel or the usage chip. The shipped binary is the default set, whole.
+Crook without the Themes panel. The shipped binary is the default set, whole.
 
 This tier has no sandbox and needs none: it is the codebase, reviewed like the codebase.
 

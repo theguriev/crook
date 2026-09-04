@@ -5,7 +5,7 @@ A terminal whose unit of work is an agent, not a tab.
 Every terminal ever written treats a shell session as the thing you open, arrange and close.
 Crook treats an *agent* as that thing. A tab is one agent's workspace: its transcript, its
 working directory, its state, its budget. The tab strip is therefore a list of what is
-currently being worked on, and the header tells you what that work is costing.
+currently being worked on, and the header carries whatever says what that work is costing.
 
 Crook copies the architecture of [Warp](https://www.warp.dev) — an Entity/Handle application
 core, immutable `View::render`, constraint-based layout, a `Scene` display list handed to a
@@ -46,9 +46,14 @@ Eight features, and the page that configures them:
   desktop's own shortcuts and the window plugin's commands. Crook still finds its own resize
   edges there. **That half has never been run** — see
   [`docs/architecture.md`](docs/architecture.md) §3 for exactly what was checked instead.
-- **A Claude Code usage chip** in the header, showing how much of the current session's token
-  budget is spent and when it resets. It reads the session Claude Code already stores locally
-  (`~/.claude/.credentials.json`, plus the macOS Keychain) and polls the usage endpoint.
+- **A Claude Code usage chip — no longer.** It was one of the features on this list: a pirate
+  in the header saying how much of the session's token budget is spent, a panel of limits
+  under him, a model with its own poll chain and a settings page that turned all of it off. It
+  is gone from the binary, and nothing here replaces it. What it needed to work — one file,
+  one host, a timer and a picture — is exactly what a plugin from outside needs, and a feature
+  only Crook itself can carry is a feature that proves nothing about the plugin API. So it
+  left. The artwork stayed: the pirate is `crookui_core`'s, and the host draws him for
+  whatever asks.
 - **A shell in every pane.** A real pseudo-terminal and a real xterm-compatible emulator:
   colour, bold and italic faces, underline and strikeout, the alternate screen, ten thousand
   lines of scrollback, `SIGWINCH` on resize, and titles and working directories the shell
@@ -171,9 +176,10 @@ Eight features, and the page that configures them:
 - **A settings page**, which opens the way a shell does: `cmd/ctrl-,` — or the View options
   menu's last entry — puts it in a **tab of its own**, listed beside the work it
   configures, splittable next to that work, and closed by the same × and the same close chord
-  (`cmd-w`, `ctrl-shift-w` off macOS) as any other pane. Five pages: Appearance, Shell, Usage,
-  Keyboard Shortcuts and About. Every option on it is one the application actually reads;
-  there is nothing there that does not do something. Changes apply on the click and are
+  (`cmd-w`, `ctrl-shift-w` off macOS) as any other pane. Four pages: Appearance, Shell,
+  Keyboard Shortcuts and About — and a plugin's page arrives on the same rail beside them.
+  Every option on it is one the application actually reads; there is nothing there that does
+  not do something. Changes apply on the click and are
   written to `<config>/crook/settings.json`, which is the same eight keys that menu writes plus the
   theme, the light and dark pair it follows the desktop between, the terminal's type size,
   whether the tabs come back, and — set in the file rather than on the page — its font family.
@@ -367,10 +373,13 @@ release-only feature combination does not compile — cheaply, and without produ
 app/                     the `crook` library, plus two ~20-line channel binaries
 crates/crookui_core/     entities, handles, contexts, elements, layout, Scene   (MIT)
 crates/crookui/          winit windowing, wgpu renderer, cosmic-text font stack (MIT)
-crates/crook_usage/      Claude Code credentials and usage polling              (MIT)
+crates/crook_plugin/     identities, manifests, slots and registration guards   (MIT)
+crates/crook_plugin_api/ the wire a sandboxed plugin and its host share         (MIT)
+crates/crook_wasm/       the wasmi sandbox: fuel, memory, and checked bytes     (MIT)
 crates/crook_terminal/   pty, emulator, and the snapshot the renderer draws     (MIT)
 docs/architecture.md     the design, and the reasoning behind each divergence
 docs/blocks.md           the block surface: what draws it, and what it does not do yet
+docs/plugins.md          the two plugin tiers, and what each of them may do
 script/                  bootstrap, run, bundle
 ```
 
@@ -399,9 +408,11 @@ that repository is AGPL-3.0. Crook stays clear of the AGPL half:
 - `crookui` and `crookui_core` port real code and shaders from Warp's two MIT crates. MIT
   permits that and asks one thing in return — that the copyright notice travel with the code.
   `LICENSE-MIT` therefore carries Denver Technologies' notice alongside this project's.
-- `crook_usage` descends from a Claude Code usage indicator written for a personal fork of
-  Warp and never contributed upstream. It is its author's own work, licensed here by that
-  author, and it borrows nothing from Warp beyond the shape of the surrounding app.
+- The **pirate** — the artwork in `crates/crookui_core/src/icons/art.rs`, and the four
+  `usage_*` theme roles beside it — descends from a Claude Code usage indicator written for a
+  personal fork of Warp and never contributed upstream. It is its author's own work, licensed
+  here by that author, and it borrows nothing from Warp beyond the shape of the surrounding
+  app. The chip that used to draw it has been taken out; what stayed behind is the picture.
 - `app/` was written against a description of how Warp's tab strip and header behave, not by
   copying either. Where its comments mention Warp they are recording a divergence — an
   index-versus-identity bug not inherited, a public field not repeated.

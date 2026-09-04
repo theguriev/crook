@@ -85,7 +85,7 @@ entity is **not** removed immediately — its id is pushed onto a dropped-set, a
 later, when the effect queue is flushed.
 
 That split is not an optimization; it is the thing that makes callbacks safe. Dropping the
-last `ModelHandle<UsageModel>` from inside an event callback must make every surviving
+last `ModelHandle<GitModel>` from inside an event callback must make every surviving
 `WeakModelHandle::upgrade()` return `None` *right then*, even though the entity is still
 physically in the map (you may be standing on its stack frame). Consulting the dropped-set
 rather than the map gives you exactly that.
@@ -486,9 +486,9 @@ the stroke width; there is no subpixel bucket, because an icon is snapped to the
 both axes where a glyph is snapped only vertically. Nothing is rasterized twice, and the whole
 set at the three sizes the chrome uses is a few dozen kilobytes of atlas.
 
-The one place the stroke rule does not reach is the usage chip, whose mark is a *picture*: a
-Pac-Man pirate in an eyepatch, three frames of him, drawn in the same 24-unit grid as
-`crookui_core::icons::art`. Three things follow from that, and each is smaller than it sounds.
+The one place the stroke rule does not reach is the artwork in
+`crookui_core::icons::art`, whose mark is a *picture*: a Pac-Man pirate in an eyepatch, three
+frames of him, drawn in the same 24-unit grid as the icons. Three things follow from that, and each is smaller than it sounds.
 A picture needs a **fill**, which is `raster::fill` — signed area accumulated per edge and run
 along each row, no sorted crossing list and no winding rule to configure, in about forty lines
 beside the distance field rather than in place of it. A picture has **more than one colour**,

@@ -44,9 +44,9 @@
 //! This module owns the *section* — the rail, the search field, the scrolling
 //! column, and the rule about which page is showing — and none of the pages.
 //! They are contributed to `settings.page`, which `crook/settings` declares,
-//! and each of the five Crook ships belongs to the plugin whose feature it
-//! configures: the Usage page is `crook/usage`'s, so somebody who disables
-//! that plugin loses the page along with the chip.
+//! and each of the four Crook ships belongs to the plugin whose feature it
+//! configures: the Appearance page is `crook/appearance`'s, so somebody who
+//! disables that plugin loses the page along with the themes.
 //!
 //! What that costs is written down where it is paid. A page is named by a key
 //! (`owner/entry`) rather than by a variant of an enum, so the rail's order is

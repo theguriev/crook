@@ -49,7 +49,6 @@ use crate::terminal_model::{BlockHistory, TerminalHandle, TerminalModel, Termina
 use crate::text_input::{CARET_PHASE, TextInput};
 use crate::theme::creator::Draft;
 use crate::theme::{Available, theme};
-use crate::usage_model::UsageModel;
 use crate::window_controls::WindowHandle;
 use crate::{Channel, WINDOW_CHROME};
 
@@ -410,7 +409,6 @@ pub struct Workspace {
     /// The faces and the cell every pane's grid is drawn with, resolved once at
     /// startup because measuring one is a search through the font database.
     cell_font: CellFont,
-    usage: ModelHandle<UsageModel>,
     git: ModelHandle<GitModel>,
     /// The shells behind the panes.
     terminals: ModelHandle<TerminalModel>,
@@ -615,7 +613,6 @@ impl Workspace {
             channel,
             plugins,
         } = opening;
-        let usage = UsageModel::handle(ctx);
 
         let git = ctx.add_model(GitModel::new);
         // A branch that arrives, or a diff count that changes, repaints the
@@ -678,7 +675,6 @@ impl Workspace {
             focused_field: std::cell::RefCell::new(HashMap::new()),
             fonts,
             cell_font,
-            usage,
             git,
             terminals,
             inputs: HashMap::new(),
@@ -869,17 +865,6 @@ impl Workspace {
     /// Which build this is: `dev` or `stable`.
     pub fn channel(&self) -> &'static str {
         self.channel.name()
-    }
-
-    /// The usage model, for the settings page's live reading.
-    /// The usage model, whose poll this workspace starts and stops.
-    ///
-    /// Public for the tests, which is the honest reason: what the workspace
-    /// still owns of the usage feature is the poll's switch — `crook/usage`
-    /// owns the chip and the page — and a test asserting that a hidden chip
-    /// stops polling has to be able to ask.
-    pub fn usage(&self) -> &ModelHandle<UsageModel> {
-        &self.usage
     }
 
     /// The settings page's state.
@@ -2002,9 +1987,9 @@ impl Workspace {
     /// starts or stops whatever they gate.
     ///
     /// The mirror of [`Self::set_options`] for the other group, and it has one
-    /// job that one does not: two of these switches are also models', so the
-    /// models are told before the file is written. A person who turns the chip
-    /// off has said they do not want Crook talking to the network, and waiting
+    /// job that one does not: one of these switches is also a model's, so the
+    /// model is told before the file is written. A person who changed what the
+    /// next shell is started as has said so about the next shell, and waiting
     /// for a background save to land before acting on that would be the wrong
     /// order to do two things in.
     fn set_general(&mut self, general: GeneralOptions, ctx: &mut ViewContext<Self>) {
@@ -2013,9 +1998,6 @@ impl Workspace {
         }
 
         self.settings.set_general(general);
-        self.usage.update(ctx, |model, ctx| {
-            model.set_wanted(general.show_usage_chip, ctx);
-        });
         // The shells already running keep the startup they were given; there is
         // no way to read a file into a shell that has drawn its prompt. This
         // decides the next one opened.
@@ -2185,19 +2167,6 @@ impl Workspace {
             return;
         };
         self.hover_row(pane, true, ctx);
-    }
-
-    /// Starts the usage poll chain, if anything is going to show what it
-    /// reads. Call once, after the window exists.
-    ///
-    /// Gated on the same switch the chip is, and gated *here* rather than at
-    /// the call site: "nothing displays the reading" and "do not fetch the
-    /// reading" have to be one statement, or a build that hides the chip goes
-    /// on polling forever because somebody added a second entry point.
-    pub fn start_usage_poll(&self, ctx: &mut ViewContext<Self>) {
-        let wanted = self.general().show_usage_chip;
-        self.usage
-            .update(ctx, |model, ctx| model.set_wanted(wanted, ctx));
     }
 
     /// Opens a shell in every pane, and in every pane opened from now on.
@@ -2550,9 +2519,9 @@ impl Workspace {
 
     /// Starts the git gather chain. Call once, after the window exists.
     ///
-    /// Separate from [`Self::new`] for the reason the usage poll is: a
-    /// headless snapshot and a test render the real view tree without ever
-    /// spawning a subprocess or parking a worker thread.
+    /// Separate from [`Self::new`] for the reason the shells are: a headless
+    /// snapshot and a test render the real view tree without ever spawning a
+    /// subprocess or parking a worker thread.
     pub fn start_git_poll(&self, ctx: &mut ViewContext<Self>) {
         let wants_diff = wants_diff_stats(self.options);
         self.git.update(ctx, |model, ctx| {
@@ -3553,11 +3522,6 @@ impl Workspace {
                 self.focus_field(index);
                 self.sync_input_keys();
                 ctx.notify();
-            }
-            SettingsAction::ToggleUsageChip => {
-                let mut general = self.general();
-                general.show_usage_chip = !general.show_usage_chip;
-                self.set_general(general, ctx);
             }
             SettingsAction::ResetTabOptions => {
                 // Through `set_options` like every other write, so the reset

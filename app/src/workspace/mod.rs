@@ -9,14 +9,14 @@
 //! and the panel is the one Crook is built around.
 //!
 //! [`Workspace`] owns the state — the tab strip, the mouse state each control
-//! keeps between renders, the handle to the usage model — and the sibling
-//! modules own the pixels. They are free functions over `&Workspace`, not
-//! views of their own, because a header that cannot hold state cannot drift
-//! out of sync with the strip it draws.
+//! keeps between renders, the handles to the models behind the panes — and the
+//! sibling modules own the pixels. They are free functions over `&Workspace`,
+//! not views of their own, because a header that cannot hold state cannot
+//! drift out of sync with the strip it draws.
 //!
 //! Views that belong to a feature rather than to the chrome do not live here
-//! at all any more: the usage chip is a view, and it is in `plugins::usage`
-//! beside the plugin that makes it.
+//! at all any more: what a plugin pins to the header is the plugin's view,
+//! built by the plugin that makes it, and this module never learns its name.
 //!
 //! [`Workspace`]'s own action type is [`WorkspaceAction`], which carries the
 //! strip's vocabulary and the options menu's side by side. A view handles

@@ -1,17 +1,17 @@
 //! Crook: a terminal whose unit of work is an agent.
 //!
 //! This is the application. Everything below it is general — [`crookui_core`]
-//! is a UI framework, [`crookui`] is a renderer and a window, [`crook_usage`]
-//! is a client for one endpoint — and everything here is Crook: a strip of
-//! agent sessions, a header that shows how much Claude is left, and the wiring
-//! that turns one into pixels and the other into a number.
+//! is a UI framework, [`crookui`] is a renderer and a window, [`crook_wasm`]
+//! is a sandbox for one guest — and everything here is Crook: a strip of
+//! agent sessions, a header a plugin pins things to, and the wiring that turns
+//! one into pixels and the other into a place to put them.
 //!
 //! # What a run looks like
 //!
 //! 1. Resolve the fonts, because a family id is needed before any view exists.
 //! 2. Open the event loop, which hands back the main-thread executor.
-//! 3. Build the [`App`], register the [`UsageModel`] singleton, add the window
-//!    with a [`Workspace`] root, and start the poll chain.
+//! 3. Build the [`App`], add the window with a [`Workspace`] root, and start
+//!    the poll chains.
 //! 4. Point the app's invalidation callback at the window's redraw request,
 //!    which is the only thing that makes a frame happen.
 //!
@@ -70,7 +70,6 @@ pub mod terminal_keys;
 pub mod terminal_model;
 pub mod text_input;
 pub mod theme;
-pub mod usage_model;
 pub mod window_controls;
 pub mod workspace;
 
@@ -92,14 +91,12 @@ use crookui_core::geometry::{Vector2F, vec2f};
 use crookui_core::platform::TextLayoutSystem;
 use crookui_core::prelude::*;
 use crookui_core::scene::Scene;
-use crookui_core::{AddSingletonModel as _, App, Presenter, WindowId};
+use crookui_core::{App, Presenter, WindowId};
 
 use crate::platform_insets::{ControlLayout, WindowChrome};
-use crate::plugin::ActionName;
 use crate::settings::{Density, Granularity, Settings};
 use crate::tab::{AgentStatus, Direction, PaneId, Tab, TabAction};
 use crate::terminal_font::{CELL_FONT_SIZE, CellFont};
-use crate::usage_model::UsageModel;
 use crate::window_controls::{Detached, WindowHandle, WindowState};
 use crate::workspace::{Fonts, Opening, QuitRequest, Workspace};
 
@@ -132,10 +129,6 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long the grid has to stop changing before a `--run` calls it finished.
 const RUN_QUIET: Duration = Duration::from_millis(400);
-
-/// The named command `--usage-panel` dispatches. The panel belongs to a
-/// plugin, so this is the only handle anything outside it has on the panel.
-const USAGE_PANEL_ACTION: &str = "crook/usage/panel";
 
 /// How far `--carry` carries a row when the command line did not say.
 ///
@@ -280,22 +273,6 @@ struct Overrides {
     granularity: Option<Granularity>,
     /// Start in this density rather than the saved one.
     density: Option<Density>,
-    /// Start with the usage panel open under the chip.
-    ///
-    /// The panel is a popover, which is the one kind of surface no unattended
-    /// run can hold up on its own — and it is also the one that reads the
-    /// local transcripts, so `--snapshot` waits for that read before drawing
-    /// the frame.
-    usage_panel: bool,
-    /// Show this percentage in the usage chip rather than reading one.
-    ///
-    /// The chip's own override, and the only way to take a picture of it: what
-    /// it draws comes from a session on the machine taking the picture, so a
-    /// run on a machine that has never opened Claude Code draws a dash, and a
-    /// run on one that has draws whatever that person happens to have spent.
-    /// Whole percent rather than a fraction, because the chip rounds to one
-    /// anyway.
-    usage: Option<u8>,
     /// Type these into the first pane's shell at startup, in order, waiting
     /// for what each one prints. See the module docs for why a frame budget
     /// alone is not enough.
@@ -504,16 +481,6 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                     .context("`--section` needs the name on a section's button")?;
                 overrides.section = Some(name);
             }
-            "--usage-panel" => overrides.usage_panel = true,
-            "--usage" => {
-                let percent = args.next().context("`--usage` needs a percentage")?;
-                let percent: u8 = percent.parse().context("`--usage` takes 0 to 100")?;
-                // Refused rather than clamped: a run that asked for 140 asked
-                // for something the chip cannot draw, and a picture that came
-                // back saying 100% would look like it had worked.
-                anyhow::ensure!(percent <= 100, "`--usage` takes 0 to 100");
-                overrides.usage = Some(percent);
-            }
             "--hover" => overrides.hover = true,
             "--run" => {
                 let command = args.next().context("`--run` needs a command")?;
@@ -644,7 +611,7 @@ OPTIONS:
                        block: what a drag across several commands takes
     --menu             Start with the tab options menu open
     --settings [PAGE]  Start with a settings tab open, on `appearance`,
-                       `shell`, `usage`, `keys` or `about`
+                       `shell`, `keys` or `about`
     --find <TEXT>      Type TEXT into the tabs panel\'s search box, filtering the list
     --search <TEXT>    Type TEXT into the settings page\'s search box, opening it
     --theme <NAME>     Start in this theme rather than the saved one
@@ -652,8 +619,6 @@ OPTIONS:
     --new-worktree     Start with that menu making a worktree
     --themes           Start with the Themes panel open
     --new-theme        Start with the Themes panel making a theme
-    --usage <PERCENT>  Show PERCENT in the usage chip rather than reading a session
-    --usage-panel      Start with the usage panel open under the chip
     --hover            Start with the first row's detail card up
     --carry <N>        Pick the Nth row of the tabs panel up and hold it there,
                        for a picture of a drag in flight
@@ -770,14 +735,20 @@ THE INPUT FIELD:
 
 /// How many workers are parked on a timer at any moment.
 ///
-/// Five: the usage poll between readings, the git gather between cycles, the
-/// caret blink between halves of its phase, the one that asks the shells
-/// whether they are still alive, and the themes folder being re-read while the
-/// Themes panel is open. Each is one background task for the whole cycle — the
-/// wait *and* the work — so each holds its worker across the wait rather than
-/// yielding it, and none is ever counted as idle. All five can be parked at
-/// once: a window with shells in it, the usage chip on and the panel open is
-/// an ordinary afternoon. Raise this when a sixth such chain appears.
+/// Four: the git gather between cycles, the caret blink between halves of its
+/// phase, the one that asks the shells whether they are still alive, and the
+/// themes folder being re-read while the Themes panel is open. Each is one
+/// background task for the whole cycle — the wait *and* the work — so each
+/// holds its worker across the wait rather than yielding it, and none is ever
+/// counted as idle. All four can be parked at once: a window with shells in it
+/// and the Themes panel open is an ordinary afternoon. Raise this when a fifth
+/// such chain appears.
+///
+/// It was five until the usage chip left the binary; its poll was the one that
+/// went. A plugin that polls is a chain again the moment one is installed, and
+/// nothing here can count those at startup, because a plugin is installed by
+/// dropping a file in a directory. The spare below is what keeps the first of
+/// them from costing anybody a save.
 ///
 /// The number is a count of *chains*, never of panes. That is why the child
 /// check is one task for the whole terminal model rather than one per session:
@@ -789,7 +760,7 @@ THE INPUT FIELD:
 /// draw the frame in which that command takes the pane. It is bounded by
 /// `pane_surface::LONG_RUNNING` — fifty milliseconds — rather than by a poll
 /// interval, so what it can cost a save queued behind it is a fiftieth of a
-/// second rather than the fifteen the usage poll could. Sizing the pool for a
+/// second rather than the fifteen a poll could. Sizing the pool for a
 /// pane count is not possible; keeping the wait short is.
 ///
 /// **The test at the bottom of this file cannot check this number.** It builds
@@ -798,7 +769,7 @@ THE INPUT FIELD:
 /// about how many chains there really are. Counting them is what this comment
 /// is for, and the themes poll is here because it went uncounted for as long
 /// as the comment was the only thing that could have counted it.
-const PARKED_WORKERS: usize = 5;
+const PARKED_WORKERS: usize = 4;
 
 /// A pool with a worker left over once every chain that parks is asleep.
 ///
@@ -917,19 +888,6 @@ fn apply_overrides(
     if let Some(layout) = overrides.controls {
         workspace.override_control_layout(layout, ctx);
     }
-    if let Some(percent) = overrides.usage {
-        UsageModel::handle(ctx).update(ctx, |model, ctx| model.show_reading(percent, ctx));
-    }
-    // By name rather than through a method on the workspace, because the panel
-    // is a plugin's and the workspace does not know it exists. This is what a
-    // named command buys beyond a keymap line.
-    if overrides.usage_panel {
-        let name = ActionName::parse(USAGE_PANEL_ACTION).expect("a literal that parses");
-        match workspace.host().action(&name) {
-            Some(action) => workspace.run_action(action, ctx),
-            None => log::warn!("nothing answers to {USAGE_PANEL_ACTION}; is the plugin off?"),
-        }
-    }
     if overrides.worktrees {
         workspace.open_tab_menu_for_snapshot(ctx);
         if overrides.creating_worktree {
@@ -1030,14 +988,13 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
     let text_layout: Arc<dyn TextLayoutSystem> = Arc::new(font_db.text_layout());
 
     // A local queue stands in for the event loop. Nothing is spawned onto it
-    // unless `--run` asked for it: neither the usage poll nor the git gather is
-    // started, so the frame is the same on a build machine with no Claude Code
-    // session, no network and no repository — and it uses ephemeral settings,
-    // so it is also the same whatever options the person running it happens to
+    // unless `--run` asked for it: neither the git gather nor a sandboxed
+    // plugin's poll is started, so the frame is the same on a build machine
+    // with no network and no repository — and it uses ephemeral settings, so
+    // it is also the same whatever options the person running it happens to
     // have.
     let queue = LocalQueue::new();
     let mut app = App::new(queue.foreground(), background_pool());
-    app.update(|ctx| ctx.add_singleton_model(UsageModel::new));
 
     let quit: QuitRequest = Rc::new(|| {});
     let settings = Settings::ephemeral();
@@ -1119,13 +1076,6 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
         aim_at_blocks(&mut app, &workspace, pane, &overrides);
     }
 
-    // The panel's week comes off the disk on a background thread, so a frame
-    // drawn the instant it opened would be a picture of "Reading this
-    // machine's transcripts…" rather than of the panel.
-    if overrides.usage_panel {
-        await_usage_history(&queue, &mut app);
-    }
-
     // A frame first, and then the gesture: a press has to land on a row, and
     // where the rows are is a thing only a paint pass knows.
     if overrides.carries() {
@@ -1160,29 +1110,6 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
 
     println!("wrote {} ({width}x{height})", path.display());
     Ok(())
-}
-
-/// Pumps the queue until the usage panel has a week to draw.
-///
-/// The read is one pass over the transcripts written inside the window, which
-/// is a tenth of a second on a busy machine — but it is on another thread, and
-/// a snapshot is one frame with nothing after it to redraw. Times out rather
-/// than hanging: a machine with no transcripts has nothing to wait for, and
-/// the panel says so itself.
-fn await_usage_history(queue: &LocalQueue, app: &mut App) {
-    let deadline = Instant::now() + RUN_TIMEOUT;
-    while Instant::now() < deadline {
-        queue.run_until_parked();
-        let read = app.update(|ctx| {
-            let usage = ctx.get_singleton_model_handle::<UsageModel>();
-            !usage.as_ref(ctx).is_reading_history() && usage.as_ref(ctx).history().is_some()
-        });
-        if read {
-            return;
-        }
-        std::thread::sleep(RUN_POLL);
-    }
-    log::warn!("the transcripts were still being read after {RUN_TIMEOUT:?}");
 }
 
 /// Opens the shells and reports the pane the command line is aimed at.
@@ -1513,9 +1440,9 @@ fn seed_snapshot_tabs(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace
             diff: Some((6, 214, 37)),
         },
         Seeded {
-            title: "write the usage chip",
+            title: "sandbox the plugin host",
             status: AgentStatus::NeedsInput,
-            directory: "crates/crook_usage/src",
+            directory: "crates/crook_wasm/src",
             branch: "main",
             diff: Some((1, 12, 0)),
         },
@@ -1757,7 +1684,6 @@ impl Shell {
         session: crate::session::Session,
     ) -> Self {
         let mut app = App::new(platform.foreground.clone(), background_pool());
-        app.update(|ctx| ctx.add_singleton_model(UsageModel::new));
 
         let proxy = platform.proxy.clone();
         let window: WindowHandle = Rc::new(RealWindow(platform.window.clone()));
@@ -1801,7 +1727,6 @@ impl Shell {
                 // a density the command line asked for has to be in place by
                 // then or the first cycle gathers the wrong half.
                 apply_overrides(workspace, &launch.overrides, ctx);
-                workspace.start_usage_poll(ctx);
                 workspace.start_git_poll(ctx);
                 workspace.start_caret_blink(ctx);
                 // Last, because it opens a shell in every pane there is and the
@@ -2136,36 +2061,6 @@ mod tests {
                 overrides: Overrides::default()
             }
         );
-    }
-
-    #[test]
-    fn a_usage_percentage_is_a_number_or_it_is_an_error() {
-        assert_eq!(
-            parse(&["--usage", "82"]).expect("valid"),
-            Startup::Window {
-                frames: None,
-                overrides: Overrides {
-                    usage: Some(82),
-                    ..Overrides::default()
-                }
-            }
-        );
-        // A percentage is 0 to 100. Refusing 140 is the same answer as
-        // refusing "eighty": a picture of a chip reading 140% would be a
-        // picture of a bug rather than of the chip.
-        assert_eq!(
-            parse(&["--usage-panel"]).expect("valid"),
-            Startup::Window {
-                frames: None,
-                overrides: Overrides {
-                    usage_panel: true,
-                    ..Overrides::default()
-                }
-            }
-        );
-        assert!(parse(&["--usage", "140"]).is_err());
-        assert!(parse(&["--usage", "eighty"]).is_err());
-        assert!(parse(&["--usage"]).is_err());
     }
 
     #[test]
