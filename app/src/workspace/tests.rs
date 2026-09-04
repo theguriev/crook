@@ -812,7 +812,14 @@ impl Harness {
 }
 
 /// How long a test waits for a shell to do as it was told.
-const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+///
+/// Generous, and it has to be. What is being waited for is a real shell
+/// starting, sourcing somebody's rc files and printing a prompt — on a machine
+/// running as many of these tests at once as it has cores, with a real process
+/// behind each. The number bounds a *failure*, never a pass: a test that is
+/// going to succeed does so in a second, and one that is going to fail is
+/// wrong however long it waits.
+const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The modifier that means "this is an application command" on this platform.
 ///
@@ -5036,6 +5043,37 @@ mod shells {
                 &character.to_string(),
             );
         }
+    }
+
+    #[test]
+    fn tab_completes_a_path_the_shell_can_see_and_crook_cannot() {
+        // **The whole feature, end to end, and the point of doing it this
+        // way.** The completion is the shell's: it is computed by the shell in
+        // the pane, against the directory that shell is in, by the shell's own
+        // machinery. Crook writes the question, sends a key, and splices the
+        // answer back into a line the shell has never seen.
+        let directory = Scratch::new();
+        fs::write(directory.path().join("distinctive-name.txt"), "").expect("writable");
+
+        let mut harness = Harness::panel(1);
+        let Some(pane) = marked_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+        await_prompt(&mut harness, pane);
+
+        // Into the directory the file is in, so the answer can only have come
+        // from the shell: nothing in Crook knows where that shell is.
+        type_line(&mut harness, &format!("cd {}", directory.path().display()));
+        harness.press("enter", Modifiers::default(), "");
+        await_prompt(&mut harness, pane);
+
+        type_line(&mut harness, "cat disti");
+        harness.press("tab", Modifiers::default(), "\t");
+
+        harness.wait_for("the shell never completed the path", |harness| {
+            harness.field_text(pane).contains("distinctive-name.txt")
+        });
     }
 
     #[test]

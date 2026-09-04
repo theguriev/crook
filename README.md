@@ -72,6 +72,14 @@ Six features, and the page that configures them:
   side of an `ssh`, not a container, and not a shell it has no snippet for (`pwsh`, `nu`,
   `ksh`, `tcsh`) — and on those machines the same text can be pasted at the end of the rc file
   by hand: it is `app/src/shell_integration/crook.zsh` and its two siblings.
+
+  It also **answers**, which is what makes Tab work. Command marks are an announcement and
+  completion is a question, so there is a second channel beside them: Crook writes the line
+  into the pane's own scratch, sends a key the snippet bound, and the snippet writes the
+  answer back and says so with an escape sequence carrying only the request's number. fish
+  answers with `complete -C`, which is its real completion; bash with `compgen`; zsh with its
+  own hashes and globs. One candidate is inserted whole, several insert as much as they agree
+  on, and an ambiguous answer is listed under the line — which is what every shell does.
   **Without it Crook is a plain terminal**: one continuous stream of output drawn as a grid,
   scrolled through the emulator's own scrollback, with every key going straight to the shell.
   No blocks, no per-command copy, and no composer — everything else, including selection and
@@ -104,10 +112,10 @@ Six features, and the page that configures them:
   with it: a pane's columns and rows are its box divided by a cell, so the ptys follow.
   It is the one pane with no shell under it and no field: every control on it is a click.
 
-Everything else is out of scope on purpose. There is no keymap system, no persistence, no
-telemetry, and no mouse reporting or IME composition. The shell integration reports command
-boundaries and nothing else, so there is still no completion: Tab does nothing in the field,
-because the shell has never seen the partial line. Blocks are stage one — no cross-block or
+Everything else is out of scope on purpose. There is no keymap system and no telemetry, and
+OSC 8 hyperlinks are not read — though a URL a program *printed* is clickable, because the
+scan that finds one works the same on a finished block as on the live grid, which an OSC 8
+carried on the grid alone would not. Blocks are stage one — no cross-block or
 block-level selection, no keyboard navigation between blocks, no sticky header,
 no jump-to-bottom, and the shell's prompt stays on its own row rather than being lifted into
 the composer; [`docs/blocks.md`](docs/blocks.md) lists those and says what each would touch.

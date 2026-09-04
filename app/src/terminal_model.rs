@@ -91,6 +91,7 @@ use crook_terminal::{
 use crookui_core::geometry::Color;
 use crookui_core::prelude::*;
 
+use crate::completion::{self, Completions};
 use crate::pane_surface;
 use crate::shell_integration;
 use crate::tab::PaneId;
@@ -166,6 +167,12 @@ pub enum TerminalUpdate {
     /// about the tab strip rather than about the grid: a bell in a pane nobody
     /// is looking at is the only interesting kind.
     Bell(PaneId),
+    /// The shell answered a completion request, and this is what it said.
+    ///
+    /// The serial is the request's, echoed back through the shell: pressing
+    /// Tab twice quickly leaves two outstanding, and only the answer to the
+    /// second is about the line on screen.
+    Completions(PaneId, u64, Completions),
 }
 
 /// The finished blocks of one pane, as the surface holds them.
@@ -393,6 +400,37 @@ impl TerminalModel {
     ///
     /// The pty buffers it, so this works before the shell has finished starting:
     /// what is written now is read when it gets there.
+    /// Asks a pane's shell what a half-typed line could become.
+    ///
+    /// Writes the question into the session's own scratch and sends the key
+    /// press the integration snippet bound to it — see [`crate::completion`]
+    /// for why the line travels in a file rather than in the escape sequence.
+    ///
+    /// Reports whether the question was asked at all. `false` is a pane with
+    /// no shell, or one running a shell Crook could not install its
+    /// integration into: there is nothing bound to the key and nothing would
+    /// ever answer, so the caller must not sit waiting for one.
+    pub fn request_completions(&self, pane: PaneId, serial: u64, line_to_caret: &str) -> bool {
+        let Some(session) = self.sessions.get(&pane) else {
+            return false;
+        };
+        let Some(request) = session._integration.completion_request() else {
+            return false;
+        };
+
+        // Written before the key is sent, and that ordering is the whole of the
+        // handshake: the snippet reads the file the moment the key arrives.
+        if let Err(error) = std::fs::write(
+            &request,
+            completion::request_text(serial, line_to_caret).as_bytes(),
+        ) {
+            log::debug!("could not write a completion request: {error}");
+            return false;
+        }
+
+        session.shared.request_completions()
+    }
+
     pub fn type_into(&self, pane: PaneId, text: &str) {
         let Some(session) = self.sessions.get(&pane) else {
             log::warn!("nothing to type into: pane {pane:?} has no terminal");
@@ -687,6 +725,18 @@ impl TerminalModel {
                 // being readable anyway, so this is only ever early notice.
                 TerminalEvent::Exit => log::debug!("the shell in pane {pane:?} asked to close"),
                 TerminalEvent::Bell => updates.push(TerminalUpdate::Bell(pane)),
+                // The escape sequence says only that an answer is ready; the
+                // answer itself is a file, in a directory this session owns.
+                TerminalEvent::Completions(serial) => {
+                    if let Some(answer) = session
+                        ._integration
+                        .completion_answer()
+                        .as_deref()
+                        .and_then(completion::read_answer)
+                    {
+                        updates.push(TerminalUpdate::Completions(pane, serial, answer));
+                    }
+                }
                 // The clipboard belongs to the window, so this is carried up
                 // rather than answered here. An empty write is dropped: it is
                 // what a program clearing its own selection sends, and putting
@@ -1219,6 +1269,17 @@ impl Shared {
 
     fn publish_state(&self) -> MutexGuard<'_, PublishState> {
         self.publish.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Sends the key press that asks an integrated shell for completions.
+    fn request_completions(&self) -> bool {
+        match self.lock().request_completions() {
+            Ok(()) => true,
+            Err(error) => {
+                log::debug!("could not ask a shell for completions: {error}");
+                false
+            }
+        }
     }
 
     fn snapshot(&self) -> Arc<Snapshot> {

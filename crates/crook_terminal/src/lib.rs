@@ -102,6 +102,14 @@ pub use crate::snapshot::{
 /// How much output a terminal remembers above the viewport.
 const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
 
+/// The key press that asks an integrated shell for completions.
+///
+/// A `CSI n ~` with a number nothing has ever assigned, which is what makes it
+/// bindable: every shell's line editor can be told what `\e[6339~` means, and
+/// none of them already thinks it means something. See
+/// [`Terminal::request_completions`].
+pub const COMPLETION_REQUEST: &[u8] = b"\x1b[6339~";
+
 /// Everything a new terminal needs to know.
 #[derive(Clone, Debug, Default)]
 pub struct TerminalOptions {
@@ -306,6 +314,31 @@ impl Terminal {
             self.send_key(key, Modifiers::NONE)?;
         }
         Ok(true)
+    }
+
+    /// Asks the shell for completions of a line it cannot see.
+    ///
+    /// **The one thing OSC 133 is not.** Command marks are an announcement:
+    /// the shell says where a prompt began and how a command ended, and never
+    /// answers a question. Completion is a question — "what could this line
+    /// become?" — and the answer belongs to the shell, which owns the
+    /// `PATH` hashing, the `complete` definitions and the glob rules that make
+    /// one right.
+    ///
+    /// The line does not travel in this sequence, and that is deliberate. What
+    /// travels is a *key*, one the integration snippet has bound to a function
+    /// of its own; the line itself is a file the caller wrote and the snippet
+    /// reads. An escape sequence carrying a command line would have to escape
+    /// every character a shell can hold — a semicolon, a quote, a newline, a
+    /// byte that is not UTF-8 at all — and the answer coming back would have
+    /// the same problem twice over, in a shell that may have no `base64` to
+    /// solve it with.
+    ///
+    /// A shell with no integration binds nothing, so this types an unknown
+    /// escape sequence at a prompt: the line editor discards it and beeps at
+    /// worst. Nothing is echoed and no line is submitted.
+    pub fn request_completions(&mut self) -> io::Result<()> {
+        self.write(COMPLETION_REQUEST)
     }
 
     /// Sends pasted text.

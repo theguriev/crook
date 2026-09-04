@@ -22,6 +22,69 @@ CROOK_SHELL_INTEGRATION=1
 
 __crook_mark() { builtin printf '\e]133;%s\a' "$1" }
 
+# Completion, which is the one thing the marks cannot do: they are an
+# announcement, and this is a question with an answer.
+#
+# The line does not arrive in the key sequence. It is in a file Crook wrote — a
+# command line can hold a semicolon, a newline and bytes that are not UTF-8, and
+# escaping all of them past a shell and past an OSC parser twice over is a
+# protocol nobody should have to debug. The answer goes back the same way, and
+# the escape sequence carries only the request's number.
+#
+# **This is the weakest of the three, and the reason is zsh's.** Its completion
+# system is a ZLE thing: `_main_complete` runs inside a widget, against the
+# widget's own buffer, and reports through `compstate` rather than returning
+# anything. There is no `compgen` to ask and no `complete -C` to ask with, so
+# what this offers is commands, files and variables — the answers zsh's own
+# expansion gives — and not the `_git`, `_docker` and `_ssh` definitions that
+# make zsh's completion what it is. It is written down here rather than
+# discovered.
+__crook_complete() {
+	[[ -n ${CROOK_SCRATCH-} ]] || return 0
+	local request="$CROOK_SCRATCH/complete.in"
+	local answer="$CROOK_SCRATCH/complete.out"
+	[[ -f $request ]] || return 0
+
+	local content serial line
+	content=$(<"$request")
+	serial=${content%%$'\n'*}
+	# The rest is the line up to the caret, newlines and all.
+	line=${content#*$'\n'}
+	[[ $line == "$content" ]] && line=''
+
+	local word=${line##* }
+	local prefix=${line%$word}
+	local -a candidates=()
+
+	if [[ -z ${prefix//[[:space:]]/} ]]; then
+		# Commands: the same hash, functions, builtins and PATH zsh completes
+		# from. `(k)` takes the keys of the hash rather than its paths.
+		candidates=(${(k)commands[(I)$word*]} ${(k)functions[(I)$word*]} ${(k)builtins[(I)$word*]})
+	elif [[ $word == \$* ]]; then
+		candidates=(\$${^${(k)parameters[(I)${word#\$}*]}})
+	else
+		# `(N)` makes a glob that matches nothing expand to nothing rather than
+		# to itself, and `-/` puts a slash on a directory — which is what makes
+		# an inserted completion carry on being completable.
+		candidates=(${~word}*(N) ${~word}*(N-/))
+	fi
+
+	# Sorted and de-duplicated: the two globs above overlap on directories, and
+	# the caller shows this list to a person.
+	builtin printf '%s\n' ${(ou)candidates} >"$answer"
+	builtin printf '\e]6339;%s\a' "$serial"
+}
+
+# A widget rather than a `bindkey -s`, because the work is a function and the
+# line editor must not be handed anything to insert. `zle -R` is not needed:
+# nothing here prints where the person can see it.
+zle -N __crook_complete
+# Every keymap a person could be typing in: `main` is whichever of emacs and
+# viins is in force, and `viins` is named as well for a shell that switches
+# after this runs.
+bindkey '\e[6339~' __crook_complete
+bindkey -M viins '\e[6339~' __crook_complete 2>/dev/null
+
 # %{...%} is how zsh is told a stretch of prompt occupies no columns. Without
 # it the shell miscounts the prompt width and every long line the user types
 # wraps in the wrong place — which reads as a terminal bug, not a shell one.

@@ -57,6 +57,13 @@ pub enum WorkspaceAction {
     /// of them. **Nothing may change what is selected in the output while a
     /// keystroke is being dispatched.**
     ReleaseSelection(PaneId),
+    /// Ask this pane's shell what the word before the caret could become.
+    ///
+    /// An action rather than a call, for the reason `ReleaseSelection` is one:
+    /// the element that saw Tab holds the field but not the terminal *model*,
+    /// and it is the model that knows where this session's scratch directory
+    /// is. See [`crate::completion`].
+    Complete(PaneId),
 }
 
 impl From<TabAction> for WorkspaceAction {

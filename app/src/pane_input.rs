@@ -21,6 +21,7 @@ use std::time::{Duration, Instant};
 use crookui_core::geometry::RectF;
 
 use crate::clipboard::Clipboard;
+use crate::completion::Completions;
 use crate::editor::{Editor, Selection};
 use crate::input_keys::Intent;
 
@@ -66,6 +67,15 @@ struct Inner {
     /// about what was actually typed, and only the drawing has to know.
     preedit: RefCell<Preedit>,
 
+    /// The completion request this field is waiting for an answer to, and what
+    /// the last answer said.
+    ///
+    /// The serial is what makes a stale answer discardable: pressing Tab twice
+    /// quickly leaves two requests outstanding, the shell answers both, and
+    /// only the second is about the line on screen. It counts up and never
+    /// resets, so no answer can be mistaken for a later one.
+    completion: RefCell<CompletionState>,
+
     /// Where the caret was last painted, in window coordinates.
     ///
     /// Written by the element that draws the field and read by the window,
@@ -74,6 +84,20 @@ struct Inner {
     /// line at the width the field was given, and nothing else in the
     /// application knows either.
     caret_rect: Cell<Option<RectF>>,
+}
+
+/// What this field has asked the shell, and what it last heard back.
+#[derive(Debug, Default)]
+struct CompletionState {
+    /// The number of the last request sent. Zero before any.
+    asked: u64,
+    /// The candidates the last *matching* answer carried, and the word they
+    /// were for.
+    ///
+    /// Kept so the list can be drawn under the field, and dropped the moment
+    /// the line changes: a list of what `car` could become is nonsense under a
+    /// line that now says `cargo b`.
+    showing: Option<(String, Completions)>,
 }
 
 /// The text an input method is composing, before it becomes text.
@@ -141,6 +165,7 @@ impl PaneInput {
             active_since: Cell::new(Instant::now()),
             has_keys: Cell::new(false),
             preedit: RefCell::new(Preedit::default()),
+            completion: RefCell::new(CompletionState::default()),
             caret_rect: Cell::new(None),
         }))
     }
@@ -148,6 +173,73 @@ impl PaneInput {
     /// What an input method is composing in this field, if anything.
     pub fn preedit(&self) -> Ref<'_, Preedit> {
         self.0.preedit.borrow()
+    }
+
+    /// The line as far as the caret, which is the question a completion
+    /// answers.
+    ///
+    /// The prefix rather than the whole line and an offset, because that is
+    /// what every shell's completion takes — `complete -C` in fish and
+    /// `compgen` in bash both complete the end of what they are given.
+    pub fn line_to_caret(&self) -> String {
+        let editor = self.0.editor.borrow();
+        editor.text()[..editor.caret()].to_owned()
+    }
+
+    /// Records that a completion has been asked for, and returns its number.
+    ///
+    /// Counts up and never resets, so an answer to a request two keystrokes
+    /// ago cannot be mistaken for the answer to this one.
+    pub fn ask_for_completions(&self) -> u64 {
+        let mut completion = self.0.completion.borrow_mut();
+        completion.asked += 1;
+        completion.showing = None;
+        completion.asked
+    }
+
+    /// Applies an answer, reporting whether anything on screen changed.
+    ///
+    /// Three outcomes, and they are the three every shell's Tab has. One
+    /// candidate is inserted whole. Several insert as much as they agree on.
+    /// An answer that adds nothing to what is typed is *shown* instead, which
+    /// is the only useful thing left to do with it.
+    ///
+    /// An answer whose number is not the one this field is waiting for is
+    /// dropped: it is about a line that has since been typed past.
+    pub fn take_completions(&self, serial: u64, answer: Completions) -> bool {
+        {
+            let completion = self.0.completion.borrow();
+            if completion.asked != serial {
+                return false;
+            }
+        }
+
+        let word = crate::completion::word_at_end(&self.line_to_caret()).to_owned();
+        if let Some(whole) = answer.insertion(&word) {
+            let addition = whole[word.len()..].to_owned();
+            self.0.completion.borrow_mut().showing = None;
+            self.edit(|editor| editor.insert(&addition));
+            return true;
+        }
+
+        let showing = (answer.candidates.len() > 1).then_some((word, answer));
+        let mut completion = self.0.completion.borrow_mut();
+        if completion.showing == showing {
+            return false;
+        }
+        completion.showing = showing;
+        true
+    }
+
+    /// The candidates to draw under the field, if any are still relevant.
+    ///
+    /// Dropped the moment the word under the caret is no longer the one they
+    /// were for: a list of what `car` could become is nonsense under a line
+    /// that now says `cargo b`.
+    pub fn showing_completions(&self) -> Option<Completions> {
+        let completion = self.0.completion.borrow();
+        let (word, answer) = completion.showing.as_ref()?;
+        (crate::completion::word_at_end(&self.line_to_caret()) == word).then(|| answer.clone())
     }
 
     /// Whether an input method is mid-composition here.
@@ -330,6 +422,11 @@ fn apply(intent: Intent, clipboard: &Clipboard, editor: &mut Editor) -> Option<S
 
     match intent {
         Insert(text) => editor.insert(&text),
+        // Not an edit, and deliberately nothing here. The line goes to the
+        // shell and the answer comes back frames later on a channel of its
+        // own; the element that saw the keystroke is what sends the question,
+        // because it is the only thing holding the terminal to ask.
+        Complete => {}
         Newline => editor.insert_newline(),
         Submit => return Some(editor.submit()),
         Backspace => editor.backspace(),

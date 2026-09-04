@@ -995,12 +995,35 @@ bash and fish it starts (`app/src/shell_integration`, and "Blocks" in §7), whic
 that says where a command starts and ends. Warp's channel does more than that, and the two
 things still missing are worth naming rather than discovering:
 
-- **No completion.** Tab does nothing in the field, because the shell has never seen the
-  partial line and has nothing to complete. There is no way to fake it: completion is the
-  shell's, and reaching it means either sending the line for the shell to edit — which is the
-  design the field replaced — or a request/response channel to the shell, which OSC 133 is
-  not. VS Code's private `OSC 633` is that channel; adding one means a snippet that answers as
-  well as announces, and a protocol between the two.
+- **Completion is in**, and it took the second channel this paragraph used to ask for. OSC 133
+  is an announcement — the shell says where a prompt began and how a command ended — and
+  completion is a *question*, so there is a second protocol beside it, in `app/src/completion.rs`
+  and the three snippets.
+
+  The question is a **file**: Crook writes the line up to the caret into the session's own
+  scratch and sends `ESC [ 6339 ~`, a key the snippet has bound. The answer is a file too, and
+  the `ESC ] 6339 ; n BEL` that says it is ready carries nothing but the request's number. A
+  command line can hold a semicolon, a newline and bytes that are not UTF-8, and escaping every
+  one of them past a shell *and* past an OSC parser — twice, on the way back — is a protocol
+  nobody should have to debug, in a shell that may have no `base64` to do it with. The number is
+  what makes a stale answer discardable: pressing Tab twice quickly leaves two outstanding, and
+  only the second is about the line on screen.
+
+  What each shell can answer differs, and the difference is the shells'. **fish** answers with
+  `complete -C`, which is the real question and every `complete` definition it has. **bash**
+  answers with `compgen`: its own command, file and variable completion, but *not* the `_git`
+  and `_docker` functions `bash-completion` installs — driving one means setting `COMP_WORDS`,
+  `COMP_CWORD`, `COMP_LINE` and `COMP_POINT` by hand and calling a function whose name has to be
+  dug out of `complete -p`, and getting any of it wrong runs somebody's completion script
+  against a line it was never given. **zsh** is the weakest: its completion system runs inside a
+  ZLE widget and reports through `compstate` rather than returning anything, so there is nothing
+  to ask from outside one, and what the snippet offers is commands, files and variables out of
+  zsh's own hashes and globs.
+
+  What Crook does with an answer is what every shell's Tab does: one candidate is inserted
+  whole, several insert as much as they agree on, and an answer that adds nothing is listed
+  under the field instead. A list rather than a menu — a menu with a selection in it would want
+  the arrow keys, which the field spends on its history.
 - **A password prompt is composed in the clear — in one remaining case.** `sudo`, `ssh` and
   `read -s` turn echo off and read a line on the *normal* screen. With marks this is now
   handled by the rule that hides the composer: the prompt happens while a command is running,

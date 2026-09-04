@@ -92,13 +92,15 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::clipboard::Clipboard;
 use crate::editor::Editor;
-use crate::input_keys::{self, Platform, Route};
+use crate::input_keys::{self, Intent, Platform, Route};
 use crate::pane_blocks::{PaneBlocks, ScrollCause};
 use crate::pane_input::{PaneInput, Preedit};
+use crate::tab::PaneId;
 use crate::terminal_font::{CellFont, CellMetrics};
 use crate::terminal_model::TerminalHandle;
 use crate::theme::theme;
 
+use super::action::WorkspaceAction;
 use super::terminal_element::color;
 
 /// The tallest the composer ever grows, in rows.
@@ -173,6 +175,9 @@ pub struct CommandInput {
     /// The shell a submitted line is sent to, when there is one.
     terminal: Option<TerminalHandle>,
 
+    /// Which pane this field belongs to, for the actions that name one.
+    pane: Option<PaneId>,
+
     /// The list above this composer, which a submitted line returns to its own
     /// end.
     blocks: Option<PaneBlocks>,
@@ -213,6 +218,7 @@ impl CommandInput {
             clipboard,
             ink: Ink::default(),
             terminal: None,
+            pane: None,
             blocks: None,
             focused: false,
             alt_screen: false,
@@ -241,6 +247,16 @@ impl CommandInput {
     /// here returns it to its own end.
     pub fn with_blocks(mut self, blocks: PaneBlocks) -> Self {
         self.blocks = Some(blocks);
+        self
+    }
+
+    /// Says which pane this field belongs to, for the actions that name one.
+    ///
+    /// A completion is the only one today: the question needs the terminal
+    /// model rather than the handle this element holds, so it is dispatched
+    /// rather than called, and an action has to say which pane it is about.
+    pub fn for_pane(mut self, pane: PaneId) -> Self {
+        self.pane = Some(pane);
         self
     }
 
@@ -299,6 +315,17 @@ impl CommandInput {
                 .is_some_and(TerminalHandle::has_selection),
         };
         match input_keys::route(keystroke, chars, pane, Platform::current()) {
+            // Not an edit: the line goes to the shell and the answer comes
+            // back frames later. Dispatched rather than called, because the
+            // question needs the terminal *model* — only it knows where this
+            // session's scratch directory is — and this element holds a
+            // handle to the terminal and nothing else.
+            Route::Edit(Intent::Complete) => {
+                if let Some(id) = self.pane {
+                    ctx.dispatch_typed_action(WorkspaceAction::Complete(id));
+                }
+                true
+            }
             Route::Edit(intent) => {
                 if let Some(line) = self.input.apply(intent, &self.clipboard) {
                     self.send(&line);

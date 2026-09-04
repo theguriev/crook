@@ -1425,6 +1425,33 @@ impl Workspace {
         self.update_session(pane, ctx, |session| session.status = AgentStatus::Idle);
     }
 
+    /// Asks a pane's shell what the word before its caret could become.
+    ///
+    /// The workspace rather than the field, because the question needs the
+    /// terminal *model*: the line goes into a file in the session's own
+    /// scratch, and only the model knows where that is.
+    fn request_completions(&self, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        let Some(input) = self.inputs.get(&pane) else {
+            return;
+        };
+
+        let serial = input.ask_for_completions();
+        let line = input.line_to_caret();
+        let asked = self.terminals.update(ctx, |model, _| {
+            model.request_completions(pane, serial, &line)
+        });
+
+        if !asked {
+            // A shell with no integration binds nothing, so nothing will ever
+            // answer. Saying so once beats a field that looks as though it is
+            // thinking.
+            log::debug!("pane {pane:?} has no shell that can answer a completion");
+        }
+        // The list that was showing has gone either way — `ask_for_completions`
+        // dropped it — so the frame is worth drawing.
+        ctx.notify();
+    }
+
     /// Applies what a pane's shell did.
     ///
     /// A title and a working directory go into the session, which is what makes
@@ -1468,6 +1495,15 @@ impl Workspace {
                 true
             }
             TerminalUpdate::Bell(pane) => self.ring(*pane, ctx),
+            TerminalUpdate::Completions(pane, serial, answer) => {
+                let Some(input) = self.inputs.get(pane) else {
+                    return;
+                };
+                if input.take_completions(*serial, answer.clone()) {
+                    ctx.notify();
+                }
+                true
+            }
         };
 
         if !reported {
@@ -2434,6 +2470,7 @@ impl TypedActionView for Workspace {
             WorkspaceAction::Theme(action) => self.apply_theme_action(action, ctx),
             WorkspaceAction::HoverRow { pane, entered } => self.hover_row(pane, entered, ctx),
             WorkspaceAction::ReleaseSelection(pane) => self.release_selection(pane, ctx),
+            WorkspaceAction::Complete(pane) => self.request_completions(pane, ctx),
         }
     }
 }

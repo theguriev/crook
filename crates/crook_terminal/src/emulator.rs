@@ -68,6 +68,20 @@ pub enum TerminalEvent {
     ChildExited(ChildExit),
     /// The child asked for text to be put on the system clipboard with OSC 52.
     ClipboardStore(String),
+    /// The shell has answered a completion request, and the answer is waiting
+    /// where the asker put the question.
+    ///
+    /// The number is the request's, echoed back: a person who pressed Tab
+    /// twice quickly has two requests outstanding, and only the answer to the
+    /// second one is about the line they are looking at.
+    ///
+    /// Nothing here reads the answer. It is a file, in a directory this crate
+    /// has never heard of — the scratch the shell integration owns — which is
+    /// exactly why the payload is a serial rather than the candidates: an
+    /// escape sequence carrying filenames would need an encoding, and a shell
+    /// that has to base64 its own output needs a `base64` this machine may not
+    /// have.
+    Completions(u64),
 }
 
 /// Collects `Term`'s events so they can be handled after parsing, rather than
@@ -114,6 +128,7 @@ impl EventListener for EventProxy {
 struct OscWatcher {
     working_directory: Option<PathBuf>,
     mark: Option<ShellMark>,
+    completions: Option<u64>,
 }
 
 impl Perform for OscWatcher {
@@ -125,6 +140,15 @@ impl Perform for OscWatcher {
                 }
             }
             Some(&b"133") => self.mark = ShellMark::parse(params),
+            // Crook's own, and the number is deliberately far from anything
+            // standardised: nothing but a shell Crook itself set up emits it,
+            // and a stream that happens to contain one costs a caller a look
+            // at a file it wrote.
+            Some(&COMPLETIONS_OSC) if params.len() >= 2 => {
+                self.completions = str::from_utf8(params[1])
+                    .ok()
+                    .and_then(|serial| serial.parse().ok());
+            }
             _ => {}
         }
     }
@@ -136,6 +160,13 @@ impl Perform for OscWatcher {
         self.mark.is_some()
     }
 }
+
+/// The OSC number a shell answers a completion request on.
+///
+/// Crook's own. VS Code took 633 for the same job and its own protocol; this
+/// is far enough away from every number anything standardised uses that a
+/// stream carrying one came from a shell Crook set up.
+const COMPLETIONS_OSC: &[u8] = b"6339";
 
 /// Reads the payload of OSC 7, which is a `file://` URL or a bare path.
 ///
@@ -707,6 +738,10 @@ impl Emulator {
                 | Event::MouseCursorDirty
                 | Event::Wakeup => {}
             }
+        }
+
+        if let Some(serial) = self.osc_watcher.completions.take() {
+            self.events.push(TerminalEvent::Completions(serial));
         }
 
         if let Some(directory) = self.osc_watcher.working_directory.take()
