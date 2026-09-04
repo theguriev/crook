@@ -31,7 +31,9 @@ use crate::platform_insets::{ControlLayout, WindowChrome};
 use crate::settings::{
     Density, GeneralOptions, Granularity, PrimaryInfo, Settings, Subtitle, TabOptions,
 };
-use crate::tab::{AgentSession, AgentStatus, Direction, Pane, PaneId, Tab, TabAction, TabId};
+use crate::tab::{
+    AgentSession, AgentStatus, Direction, GroupId, Pane, PaneId, Tab, TabAction, TabId,
+};
 use crate::terminal_font::{CELL_FONT_SIZE, CellFont};
 use crate::theme::theme;
 use crate::usage_model::UsageModel;
@@ -759,6 +761,20 @@ impl Harness {
     fn active_id(&self) -> TabId {
         self.workspace
             .read(&self.app, |workspace, _| workspace.tabs().active_id())
+    }
+
+    /// The group a tab is folded into, if it is in one.
+    fn group_of(&self, tab: TabId) -> Option<GroupId> {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.tabs().get(tab).and_then(Tab::group)
+        })
+    }
+
+    /// The tabs of a group, in strip order.
+    fn members_of(&self, group: GroupId) -> Vec<TabId> {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.tabs().members(group).map(Tab::id).collect()
+        })
     }
 
     /// Where the menu lists the checkout under `root`, if it lists one.
@@ -3271,12 +3287,14 @@ fn the_cross_on_a_row_asks_about_removing_it_rather_than_opening_it() {
 }
 
 #[test]
-fn making_a_worktree_checks_it_out_and_opens_a_pane_beside_the_tab() {
+fn making_a_worktree_checks_it_out_and_opens_a_tab_in_the_group() {
     // The whole feature with a real repository and a real `git worktree add`
     // at the end of it: the menu reads the repository, the creator names a
-    // branch nothing is using, git checks it out, and a pane opens whose shell
-    // would start there — *inside the tab the menu was opened on*, which is
-    // what puts the two checkouts under one group header in the panel.
+    // branch nothing is using, git checks it out, and a *tab* opens whose
+    // shell would start there — folded under one heading with the tab the menu
+    // was opened on, and never a second pane inside it. Belonging together and
+    // sharing a rectangle are two different claims and only the first is
+    // true.
     //
     // Asserted against the workspace's own state rather than against pixels.
     // A glyph under a popup is still in the scene — the tab behind this menu
@@ -3325,17 +3343,25 @@ fn making_a_worktree_checks_it_out_and_opens_a_pane_beside_the_tab() {
 
     assert_eq!(
         harness.tab_ids().len(),
-        tabs,
-        "the checkout opened a tab of its own instead of joining the one that asked"
+        tabs + 1,
+        "the checkout did not open a tab"
     );
     assert_eq!(
         harness.panes_of(tab).len(),
-        2,
-        "the tab the menu was opened on did not become the group holding both checkouts"
+        1,
+        "the tab the menu was opened on was split instead of grouped"
+    );
+    let group = harness
+        .group_of(tab)
+        .expect("the tab the menu was opened on was not put in a group");
+    assert_eq!(
+        harness.members_of(group),
+        harness.tab_ids(),
+        "both checkouts are folded under one heading, in strip order"
     );
 
-    // A pane, in a directory that is really there, which git really knows is a
-    // worktree of the repository the menu was opened on.
+    // A pane of the new tab, in a directory that is really there, which git
+    // really knows is a worktree of the repository the menu was opened on.
     let opened = harness
         .workspace
         .read(&harness.app, |workspace, _| workspace.pane_directories())
@@ -3502,14 +3528,14 @@ fn escape_takes_the_menu_down_and_enter_never_removes_a_checkout() {
 }
 
 #[test]
-fn showing_a_checkout_opens_it_beside_the_tab_and_never_twice() {
+fn showing_a_checkout_opens_it_in_the_group_and_never_twice() {
     // The other half of the same rule, on the path that opens a checkout that
     // already exists. Two things it has to get right, and the second is what
-    // the first one costs: a checkout opens as a pane *in the tab that asked*,
-    // so "is this one already open" can no longer be asked of the tabs'''
-    // focused panes — the branch is very often in the pane beside the row
-    // somebody is looking at, and a menu that missed it would put a second
-    // agent in the same checkout.
+    // the first one costs: a checkout opens as a tab in the *group* the tab
+    // that asked belongs to, so "is this one already open" is asked of every
+    // pane in the window rather than of the tabs' focused ones — the branch is
+    // very often in a tab beside the row somebody is looking at, and a menu
+    // that missed it would put a second agent in the same checkout.
     let scratch = Scratch::new();
     let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
         eprintln!("skipped: no git here to make a repository with");
@@ -3542,9 +3568,9 @@ fn showing_a_checkout_opens_it_beside_the_tab_and_never_twice() {
     // Away again, so the row has a checkout nothing is working in to show.
     let made = harness
         .focused_pane_id()
-        .expect("the split focused its pane");
+        .expect("the new tab focused its pane");
     harness.dispatch_action(TabAction::ClosePane(made));
-    assert_eq!(harness.panes_of(tab).len(), 1, "the pane did not close");
+    assert_eq!(harness.tab_ids().len(), 1, "the tab did not close");
 
     harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
     harness.wait_for("both checkouts to be read", |harness| {
@@ -3558,15 +3584,19 @@ fn showing_a_checkout_opens_it_beside_the_tab_and_never_twice() {
     harness.dispatch_worktree(WorktreeAction::Show(index));
 
     assert_eq!(
-        harness.panes_of(tab).len(),
-        2,
-        "the checkout did not open beside the tab its menu was opened on"
+        harness.tab_ids().len(),
+        tabs + 1,
+        "the checkout did not open a tab"
     );
     assert_eq!(
-        harness.tab_ids().len(),
-        tabs,
-        "the checkout opened a tab of its own"
+        harness.panes_of(tab).len(),
+        1,
+        "the tab its menu was opened on was split instead of grouped"
     );
+    let group = harness
+        .group_of(tab)
+        .expect("the checkout did not join the tab that asked for it");
+    assert_eq!(harness.members_of(group).len(), 2);
     let opened = harness.focused_pane_id().expect("a tab has a focused pane");
     assert_ne!(opened, first, "the pane it opened is not the focused one");
 
@@ -3580,8 +3610,8 @@ fn showing_a_checkout_opens_it_beside_the_tab_and_never_twice() {
     harness.dispatch_worktree(WorktreeAction::Show(index));
 
     assert_eq!(
-        harness.panes_of(tab).len(),
-        2,
+        harness.tab_ids().len(),
+        tabs + 1,
         "a second agent was opened in a checkout that was already open"
     );
     assert_eq!(
@@ -4498,6 +4528,268 @@ fn clicking_a_panel_row_focuses_the_pane_it_stands_for() {
     assert_eq!(harness.active_id(), ids[0]);
     assert_eq!(harness.focused_pane_id(), Some(panes[0]));
     assert_eq!(harness.tab_ids(), ids, "selecting closed something");
+}
+
+/// The panel's tabs, as a group of the first two and every other tab loose.
+///
+/// Made the way the only thing that makes a group makes one: a worktree opened
+/// from a tab. `NewInGroupOf` is what that dispatches once git has finished.
+impl Harness {
+    fn grouped_panel(tabs: usize) -> (Self, GroupId) {
+        let mut harness = Self::panel(tabs);
+        let first = harness.tab_ids()[0];
+        harness.dispatch_action(TabAction::NewInGroupOf(first));
+        let group = harness
+            .group_of(first)
+            .expect("the tab was not put in a group");
+        harness.frame();
+        (harness, group)
+    }
+}
+
+/// Where a group's heading is: the chevron that folds it away is the only
+/// thing on it that is neither text nor another row.
+fn panel_heading(scene: &Scene) -> RectF {
+    let panel = panel_box(scene);
+    let chevrons: Vec<RectF> = [Lucide::ChevronDown, Lucide::ChevronRight]
+        .into_iter()
+        .flat_map(|icon| icons_in(scene, panel, icon))
+        .collect();
+
+    assert_eq!(chevrons.len(), 1, "expected one heading, got {chevrons:?}");
+    chevrons[0]
+}
+
+/// The line the panel draws where a drop would land, if it is drawing one.
+fn insertion_lines(scene: &Scene) -> Vec<RectF> {
+    let panel = panel_box(scene);
+    visible_rects(scene)
+        .filter(|(rect, bounds)| {
+            rect.background == Fill::Solid(theme().accent)
+                && bounds.max_x() <= panel.max_x()
+                && bounds.height() < 4.
+        })
+        .map(|(_, bounds)| bounds)
+        .collect()
+}
+
+impl Harness {
+    /// Picks a point up and puts it down at another, the way a hand does:
+    /// press, travel, release.
+    fn drag(&mut self, from: Vector2F, to: Vector2F) {
+        self.hold(from, 1);
+        // Two moves, because the first is what turns the press into a drag and
+        // a gesture that arrived in one jump is not one a person can make.
+        self.drag_to(from + (to - from) * 0.5);
+        self.drag_to(to);
+        self.let_go(to);
+    }
+}
+
+/// A point inside a row, clear of its close button.
+fn inside(row: RectF) -> Vector2F {
+    row.origin() + vec2f(40., row.height() / 2.)
+}
+
+#[test]
+fn dragging_a_row_onto_a_group_folds_it_into_it() {
+    // What the panel is for, end to end: a tab picked up with the pointer and
+    // dropped on a group belongs to that group afterwards.
+    let (mut harness, group) = Harness::grouped_panel(3);
+    let loose = *harness.tab_ids().last().expect("three tabs and a worktree");
+    let rows = panel_rows(&harness.frame());
+    let members = harness.members_of(group).len();
+
+    // From the last row onto the lower half of the group's first member,
+    // which is the gap between the two members.
+    let onto = rows[0].origin() + vec2f(40., rows[0].height() * 0.75);
+    harness.drag(inside(rows[3]), onto);
+
+    assert_eq!(harness.group_of(loose), Some(group));
+    assert_eq!(harness.members_of(group).len(), members + 1);
+    assert_eq!(
+        harness.tab_ids().len(),
+        4,
+        "a drag closed or opened something"
+    );
+}
+
+#[test]
+fn dragging_a_member_out_of_a_group_leaves_it() {
+    let (mut harness, group) = Harness::grouped_panel(2);
+    let member = harness.members_of(group)[1];
+    let rows = panel_rows(&harness.frame());
+
+    // Onto the top of the last row, which is below the group entirely.
+    let last = *rows.last().expect("three rows");
+    harness.drag(inside(rows[1]), last.origin() + vec2f(40., 2.));
+
+    assert_eq!(harness.group_of(member), None);
+    assert_eq!(harness.members_of(group).len(), 1);
+}
+
+#[test]
+fn dragging_a_heading_moves_the_whole_group() {
+    let (mut harness, group) = Harness::grouped_panel(3);
+    let members = harness.members_of(group);
+    let scene = harness.frame();
+    let rows = panel_rows(&scene);
+    let heading = panel_heading(&scene);
+
+    // Past the last row, which is the one gap under everything.
+    let last = *rows.last().expect("four rows");
+    harness.drag(center(heading), last.origin() + vec2f(40., last.height()));
+
+    let order = harness.tab_ids();
+    assert_eq!(
+        &order[order.len() - members.len()..],
+        members.as_slice(),
+        "the group did not land at the end, in one piece: {order:?}"
+    );
+    assert_eq!(
+        harness.members_of(group),
+        members,
+        "the block lost or gained a member on the way"
+    );
+}
+
+#[test]
+fn a_drag_draws_a_line_where_the_drop_would_land() {
+    // The only thing a drag draws, and the only way a person knows what
+    // letting go will do.
+    let (mut harness, _) = Harness::grouped_panel(2);
+    let rows = panel_rows(&harness.frame());
+    let last = *rows.last().expect("three rows");
+
+    harness.hold(inside(rows[0]), 1);
+    assert!(
+        insertion_lines(&harness.frame()).is_empty(),
+        "a press that has not travelled is still a click"
+    );
+
+    harness.drag_to(last.origin() + vec2f(40., last.height()));
+
+    let lines = insertion_lines(&harness.frame());
+    assert_eq!(lines.len(), 1, "expected one line, got {lines:?}");
+    assert!(
+        lines[0].min_y() > last.min_y(),
+        "the line is not under the row the pointer is over"
+    );
+
+    harness.let_go(last.origin() + vec2f(40., last.height()));
+    assert!(
+        insertion_lines(&harness.frame()).is_empty(),
+        "the line outlived the gesture"
+    );
+}
+
+#[test]
+fn a_row_let_go_of_outside_the_panel_stays_where_it_was() {
+    // There is no line drawn out over the terminal to have promised anything,
+    // so letting go there has to do nothing. A list that reordered itself
+    // because somebody released the button in the wrong half of the window
+    // would be a list nobody could trust with a drag.
+    let (mut harness, group) = Harness::grouped_panel(2);
+    let member = harness.members_of(group)[1];
+    let order = harness.tab_ids();
+    let rows = panel_rows(&harness.frame());
+    let outside = vec2f(WINDOW.x() - 40., rows[0].min_y());
+
+    harness.drag(inside(rows[1]), outside);
+
+    assert_eq!(harness.tab_ids(), order);
+    assert_eq!(harness.group_of(member), Some(group));
+}
+
+#[test]
+fn a_press_that_does_not_travel_still_selects_the_row() {
+    // The whole risk of putting a drag on a row: the click has to survive it.
+    let (mut harness, _) = Harness::grouped_panel(2);
+    let rows = panel_rows(&harness.frame());
+    let panes = harness.pane_ids();
+
+    harness.hold(inside(rows[2]), 1);
+    // A pixel of wobble, which every hand has.
+    harness.drag_to(inside(rows[2]) + vec2f(0., 1.));
+    harness.let_go(inside(rows[2]));
+
+    assert_eq!(harness.focused_pane_id(), Some(panes[2]));
+}
+
+#[test]
+fn clicking_a_heading_folds_the_group_away_and_back() {
+    let (mut harness, _) = Harness::grouped_panel(2);
+    let scene = harness.frame();
+    let heading = panel_heading(&scene);
+    let rows = panel_rows(&scene).len();
+
+    harness.click(center(heading), MouseButton::Left);
+
+    let folded = panel_rows(&harness.frame());
+    assert_eq!(
+        folded.len(),
+        rows - 2,
+        "the group's members did not fold away"
+    );
+    assert_eq!(
+        harness.pane_ids().len(),
+        rows,
+        "folding a group away closed something"
+    );
+
+    let folded_heading = panel_heading(&harness.frame());
+    harness.click(center(folded_heading), MouseButton::Left);
+    assert_eq!(panel_rows(&harness.frame()).len(), rows);
+}
+
+#[test]
+fn dragging_a_heading_does_not_also_fold_the_group() {
+    // A press on a heading is a click and half a drag, and only the pointer's
+    // next move says which. One gesture must not be both.
+    let (mut harness, group) = Harness::grouped_panel(3);
+    let scene = harness.frame();
+    let heading = panel_heading(&scene);
+    let last = *panel_rows(&scene).last().expect("four rows");
+
+    harness.drag(center(heading), last.origin() + vec2f(40., last.height()));
+
+    assert!(
+        !harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .group(group)
+                .is_some_and(crate::tab::TabGroup::is_collapsed)
+        }),
+        "the drag folded the group away as well as moving it"
+    );
+}
+
+#[test]
+fn the_heading_closes_every_tab_in_the_group() {
+    let (mut harness, group) = Harness::grouped_panel(3);
+    let members = harness.members_of(group);
+    let survivors: Vec<TabId> = harness
+        .tab_ids()
+        .into_iter()
+        .filter(|tab| !members.contains(tab))
+        .collect();
+
+    // The cross only draws while the pointer is on the heading, exactly as a
+    // row's does.
+    let heading = panel_heading(&harness.frame());
+    harness.move_to(center(heading));
+    let scene = harness.frame();
+    let crosses = icons_in(&scene, panel_box(&scene), Lucide::X);
+    let cross = crosses
+        .iter()
+        .find(|bounds| bounds.min_y() < heading.max_y() && bounds.max_y() > heading.min_y())
+        .copied()
+        .expect("the heading drew no close button while it was hovered");
+
+    harness.click(center(cross), MouseButton::Left);
+
+    assert_eq!(harness.tab_ids(), survivors);
+    assert!(harness.group_of(survivors[0]).is_none());
 }
 
 #[test]

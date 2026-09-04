@@ -903,13 +903,19 @@ a person a menu they did not ask for every time they reached for the tab they we
 The model is [herdr](https://herdr.dev)'s, which is the tool this borrows from rather than
 Warp: there a worktree is not a thing you administer but a workspace with a git checkout
 behind it, and creating one *opens* it. So the menu lists the repository's checkouts and
-opens a pane in whichever one is chosen — or brings forward the pane already there, because
-two agents in one worktree is the thing the feature exists to prevent. The pane opens *in the
-tab the menu was opened on*, which is what keeps one repository's branches together: the
-panel draws a tab holding more than one pane under a group header, so the second checkout
-makes the group and the last one to close takes it away again. Its `--base` is
+opens a **tab** in whichever one is chosen — or brings forward the pane already there, because
+two agents in one worktree is the thing the feature exists to prevent. The tab opens in the
+*group* the tab the menu was opened on belongs to, making the group out of the two of them if
+there is not one yet, which is what keeps one repository's branches together. Its `--base` is
 deliberately not taken: a worktree made from anything other than the head you are looking at
 is a question a menu cannot ask well.
+
+It opened a *pane* first, splitting the tab, and that was the wrong claim made in the right
+place. Belonging together and being on screen together are two different statements: a split
+puts two agents in one rectangle, half a window each, which is what a person asks for when
+they want to watch two things at once — not what "give this branch a checkout of its own"
+means. A group says the first without saying the second, so that is what a worktree opens
+into now, and splitting a tab went back to being a thing a person asks for on purpose.
 
 Three things about it are load-bearing.
 
@@ -1297,13 +1303,27 @@ cell-grid element trait, a measure/arrange/paint presenter over a character buff
 continuation handling — call it 2,000 lines. Crucially it means **no change to the core**,
 which is the entire reason for the `crookui_core` / `crookui` split.
 
-**Tab groups, pinning, tear-off.** Each of these converts index arithmetic into
-range arithmetic. Groups add a "cannot cross the group boundary" branch to every move and a
-"prune the empty group" branch to every close. Pinning splits the tab vector into two implicit
-regions that every insertion has to clamp against. Cross-window drag — ghost slots, detached placeholders, collapsed source slots, a drag-preview
-window — is the single largest source of complexity in Warp's tab code. Crook v1 has a `Vec`
-of tabs, an active index, and an MRU list; the close and hop index fixups are ported verbatim
+**Pinning and tear-off.** Both convert index arithmetic into range arithmetic. Pinning splits
+the tab vector into two implicit regions that every insertion has to clamp against.
+Cross-window drag — ghost slots, detached placeholders, collapsed source slots, a drag-preview
+window — is the single largest source of complexity in Warp's tab code. Crook has a `Vec` of
+tabs, an active id, and an MRU list; the close and hop index fixups are ported verbatim
 because that is where tab bugs actually live, and they are unit-tested with no window.
+
+**Tab groups shipped**, and they were the cheapest of the three because the estimate above
+named the right two branches and there turned out to be only one more. Membership is one
+`Option<GroupId>` on the tab — Warp's shape — and the group holds a name and a fold and no
+membership at all, so there is no second ordering to disagree with the vector's. Everything
+that could break a group's contiguity is one function, `slot_for`: a target names a group and
+a neighbour, and the two are clamped against each other rather than trusted, which is what
+lets a drop be computed from a pointer position by a pure function that is allowed to be
+approximately right. The drag itself needed no new element in `crookui_core` — a press is
+noted, moves past a threshold become a gesture, and the row that was picked up is the one that
+reads the boxes every row wrote down during paint — and it draws one line between two rows
+rather than Warp's detached overlay that follows the cursor.
+
+Groups exist because worktrees needed them: a checkout opened from a tab has to land somewhere
+that says it belongs with that tab, and the answer that was there before was a split.
 
 Vertical tabs turned out to be the cheapest of the four and shipped as the default: they are a
 second renderer over the same `TabStrip::rows`, not a second model, so `app/src/workspace/`

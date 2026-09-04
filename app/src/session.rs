@@ -47,7 +47,7 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::settings::{atomic_write, config_directory};
-use crate::tab::{Pane, PaneGroup, SplitAxis, Tab, TabStrip};
+use crate::tab::{Pane, PaneGroup, SplitAxis, Tab, TabGroup, TabId, TabStrip};
 
 /// The file the last session is remembered in.
 const SESSION_FILE: &str = "session.json";
@@ -82,6 +82,25 @@ pub struct Session {
     /// which is what a `--snapshot` run leaves — and for a file that predates
     /// this key.
     pub window: Option<[f32; 2]>,
+    /// The groups those tabs were folded under, in the order they first
+    /// appeared in the list.
+    ///
+    /// Membership is written on the tab, as a position in here, for the same
+    /// reason it lives on the live [`Tab`]: the tabs are already an ordered
+    /// list, and a second list of the same tabs written into the same file is
+    /// a second answer nothing stops from disagreeing with the first — and
+    /// this one is a file a person can edit.
+    pub groups: Vec<GroupSnapshot>,
+}
+
+/// One group: what its heading said, and whether it was folded away.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GroupSnapshot {
+    /// What the heading said.
+    pub name: String,
+    /// Whether its members were folded away behind it.
+    pub collapsed: bool,
 }
 
 /// One tab: what it was called, and the panes it held.
@@ -97,6 +116,13 @@ pub struct TabSnapshot {
     pub focused: usize,
     /// The panes, in render order.
     pub panes: Vec<PaneSnapshot>,
+    /// The group this tab was in, as a position in
+    /// [`Session::groups`](Session::groups).
+    ///
+    /// `None` for an ungrouped tab and for a file that predates this key. A
+    /// position out of range is read as `None` rather than refused: a tab in
+    /// no group is a better answer than no window.
+    pub group: Option<usize>,
 }
 
 /// One pane: where its shell was, and how much of the split it took.
@@ -143,6 +169,16 @@ impl Session {
     pub fn of(strip: &TabStrip, window: Option<[f32; 2]>) -> Self {
         let mut tabs = Vec::with_capacity(strip.len());
         let mut active = 0;
+        // In first-appearance order, which for a contiguous run is list order.
+        // The tabs below name one by its position here.
+        let groups: Vec<crate::tab::GroupId> = strip.groups().map(TabGroup::id).collect();
+        let group_snapshots: Vec<GroupSnapshot> = strip
+            .groups()
+            .map(|group| GroupSnapshot {
+                name: group.name().to_owned(),
+                collapsed: group.is_collapsed(),
+            })
+            .collect();
 
         for tab in strip.iter() {
             let panes: Vec<_> = tab.panes().iter().map(PaneSnapshot::of).collect();
@@ -164,6 +200,9 @@ impl Session {
                 horizontal: tab.panes().axis() == SplitAxis::Horizontal,
                 focused,
                 panes,
+                group: tab
+                    .group()
+                    .and_then(|id| groups.iter().position(|held| *held == id)),
             });
         }
 
@@ -171,6 +210,7 @@ impl Session {
             tabs,
             active,
             window,
+            groups: group_snapshots,
         }
     }
 
@@ -183,16 +223,33 @@ impl Session {
     pub fn restore(&self) -> Option<TabStrip> {
         let mut strip = TabStrip::empty();
         let mut opened: usize = 0;
+        // Which tabs each group named, gathered as they come back so that a
+        // group can be made once out of the tabs that actually restored.
+        let mut members: Vec<Vec<TabId>> = vec![Vec::new(); self.groups.len()];
 
         for snapshot in self.tabs.iter().take(MAX_TABS) {
             let Some(tab) = snapshot.restore() else {
                 continue;
             };
+            let id = tab.id();
             strip.adopt(tab);
             opened += 1;
+
+            if let Some(group) = snapshot.group
+                && let Some(members) = members.get_mut(group)
+            {
+                members.push(id);
+            }
         }
         if opened == 0 {
             return None;
+        }
+
+        // After every tab, because a group is made out of tabs that are
+        // already in the strip — and in file order, so the groups come back in
+        // the order the panel drew them.
+        for (group, members) in self.groups.iter().zip(members) {
+            strip.adopt_group(group.name.clone(), group.collapsed, &members);
         }
 
         // Clamped rather than refused: the index names the tab that would have

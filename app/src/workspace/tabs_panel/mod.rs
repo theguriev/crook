@@ -65,7 +65,7 @@ use crookui_core::prelude::*;
 use crookui_core::elements::MouseStateHandle;
 
 use crate::settings::Granularity;
-use crate::tab::{PaneId, Tab, TabAction, TabId};
+use crate::tab::{GroupId, PaneId, Tab, TabAction, TabId};
 use crate::theme::theme;
 
 use super::action::WorkspaceAction;
@@ -74,6 +74,7 @@ use super::settings_page::search::Query;
 use super::title_bar;
 use super::view::Workspace;
 
+pub(crate) mod drag;
 pub(super) mod geometry;
 mod row;
 pub(crate) mod search;
@@ -113,6 +114,47 @@ const TABS_MODE_ITEM_SPACING: f32 = 4.;
 /// The group header's text size. Ten, like the `Compact` subtitle and the
 /// metadata line, and unlike everything else in a row.
 const GROUP_HEADER_SIZE: f32 = 10.;
+
+/// Warp's `TAB_GROUP_MEMBER_INDENT`: how far a group's members sit in from its
+/// heading.
+///
+/// The whole of what says they are its members. Warp also has a colour per
+/// group and Crook does not, so this carries the meaning on its own — which is
+/// why it is an indent a person can see rather than the four pixels that would
+/// read as a rounding error.
+const MEMBER_INDENT: f32 = 12.;
+
+/// The radius a group's card takes in `Tabs` granularity, where a tab is a
+/// card too. Warp's `ROW_CORNER_RADIUS`, which is the rows' own.
+const GROUP_RADIUS: f32 = 4.;
+
+/// The heading's own name line, which is a row's title size rather than the
+/// ten of the line under it.
+const HEADING_SIZE: f32 = 12.;
+
+/// Warp's `TAB_GROUP_ICON_SIZE`: the chevron that says which way the group
+/// folds.
+const HEADING_ICON_SIZE: f32 = 16.;
+
+/// The square it is centred in: a row's leading icon, so the heading's name
+/// starts somewhere near the column its members' names are in. Warp's
+/// `VERTICAL_TABS_ICON_SIZE`.
+const HEADING_ICON_SLOT: f32 = 24.;
+
+/// The gap between that slot and the name. Warp's `ICON_WITH_STATUS_GAP`,
+/// which is the gap on a row.
+const HEADING_ICON_GAP: f32 = 8.;
+
+/// How thick the line that says where a drop will land is, and how much room
+/// it takes between two rows.
+///
+/// Warp's `GROUP_INSERTION_INDICATOR_HEIGHT` and
+/// `GROUP_INSERTION_TARGET_HEIGHT`. The slot is taller than the line so that
+/// the rows part around it rather than the line being drawn over one of them:
+/// a list that does not move tells you nothing about where the gap is.
+const INSERTION_LINE_HEIGHT: f32 = 2.;
+/// See [`INSERTION_LINE_HEIGHT`].
+const INSERTION_SLOT_HEIGHT: f32 = 8.;
 
 /// The padding around the empty state, and the size it is set in.
 const EMPTY_STATE_PADDING: f32 = 12.;
@@ -174,7 +216,13 @@ pub(super) fn tab_list(workspace: &Workspace, app: &AppContext) -> Box<dyn Eleme
         // Inside the scrollable and outside every row, which is what makes a
         // row's offset measurable from the content rather than from the
         // window.
-        geometry::Content::new(workspace.panel_rows(), list(workspace, app)).finish(),
+        geometry::Content::new(
+            workspace.panel_rows(),
+            // Outside every row and inside the scrollable, for the reason the
+            // content wrapper is: the rows record their boxes against it.
+            drag::Frame::new(workspace.panel_drag(), list(workspace, app)).finish(),
+        )
+        .finish(),
     )
     .with_scrollbar(theme().overlay_3)
     .finish()
@@ -330,8 +378,14 @@ fn control_bar(workspace: &Workspace) -> Box<dyn Element> {
     )
 }
 
-/// The tabs the search left, wrapped in whichever chrome the granularity asks
-/// for.
+/// The tabs the search left, gathered into blocks and wrapped in whichever
+/// chrome the granularity asks for.
+///
+/// A block is a group with its members, or a tab that is in no group — see
+/// [`TabStrip::blocks`](crate::tab::TabStrip::blocks). Walking those rather
+/// than the tabs is what makes the heading and its members one element instead
+/// of a run of rows that happen to be adjacent, and it is the only reason the
+/// panel can draw a fold at all.
 fn list(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
     let granularity = workspace.options().granularity;
     let query = workspace.panel_search().query();
@@ -345,36 +399,377 @@ fn list(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
         return empty_state(workspace.fonts().ui, &query);
     }
 
-    let last = rows.len() - 1;
+    let blocks = blocks_of(workspace, rows);
+    // Where a drop right now would land, which is the only thing a drag draws.
+    let pending = workspace.panel_drag().pending();
+    let last = blocks.len().saturating_sub(1);
+
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
 
-    match granularity {
-        Granularity::Panes => {
-            for (index, (tab, panes)) in rows.into_iter().enumerate() {
-                column.add_child(panes_tab(workspace, tab, &panes, index == last, app));
-            }
-            // No spacing and no padding: `Panes` separates tabs with hairlines
-            // rather than with gaps, and a gap here would show the panel's
-            // ground through every separator.
-            column.finish()
+    for (index, block) in blocks.into_iter().enumerate() {
+        let is_last = index == last;
+        if let Some(first) = block.tabs.first().map(|(tab, _)| *tab)
+            && drag::line_above_block(pending, first)
+        {
+            column.add_child(insertion_line(false));
         }
-        Granularity::Tabs => {
-            for (tab, panes) in rows {
-                column.add_child(tabs_tab(workspace, tab, &panes, app));
-            }
 
-            Container::new(column.with_spacing(TABS_MODE_ITEM_SPACING).finish())
-                .with_padding(Padding {
-                    top: 0.,
-                    left: GROUP_HORIZONTAL_PADDING,
-                    bottom: GROUP_HORIZONTAL_PADDING,
-                    right: GROUP_HORIZONTAL_PADDING,
-                })
-                .finish()
+        match block.group {
+            Some(group) => {
+                column.add_child(group_block(
+                    workspace,
+                    group,
+                    &block.tabs,
+                    is_last,
+                    pending,
+                    app,
+                ));
+            }
+            None => {
+                for (tab, panes) in &block.tabs {
+                    column.add_child(tab_block(workspace, *tab, panes, None, is_last, app));
+                }
+            }
         }
     }
+
+    if drag::line_at_end(pending) {
+        column.add_child(insertion_line(false));
+    }
+
+    match granularity {
+        // No spacing and no padding: `Panes` separates tabs with hairlines
+        // rather than with gaps, and a gap here would show the panel's ground
+        // through every separator.
+        Granularity::Panes => column.finish(),
+        Granularity::Tabs => Container::new(column.with_spacing(TABS_MODE_ITEM_SPACING).finish())
+            .with_padding(Padding {
+                top: 0.,
+                left: GROUP_HORIZONTAL_PADDING,
+                bottom: GROUP_HORIZONTAL_PADDING,
+                right: GROUP_HORIZONTAL_PADDING,
+            })
+            .finish(),
+    }
+}
+
+/// One block of the panel: a group with the rows that survived the search, or
+/// a single ungrouped tab.
+struct PanelBlock {
+    group: Option<GroupId>,
+    tabs: Vec<(TabId, Vec<PaneId>)>,
+}
+
+/// The surviving rows, gathered into the blocks the strip says they form.
+///
+/// The strip is asked rather than the rows re-walked, so the panel's idea of
+/// what is grouped is the strip's idea and there is no second rule here to
+/// disagree with it. A group whose every member the search filtered away
+/// produces no block at all: a heading over nothing is a claim that there is
+/// something under it.
+fn blocks_of(workspace: &Workspace, rows: Vec<(TabId, Vec<PaneId>)>) -> Vec<PanelBlock> {
+    workspace
+        .tabs()
+        .blocks()
+        .into_iter()
+        .filter_map(|block| {
+            let tabs: Vec<(TabId, Vec<PaneId>)> = block
+                .tabs
+                .iter()
+                .filter_map(|tab| rows.iter().find(|(id, _)| id == tab).cloned())
+                .collect();
+            (!tabs.is_empty()).then_some(PanelBlock {
+                group: block.group,
+                tabs,
+            })
+        })
+        .collect()
+}
+
+/// One tab, at whichever granularity, as a thing that can be picked up.
+///
+/// The two granularities draw a tab differently enough to be two functions —
+/// see [`panes_tab`] and [`tabs_tab`] — and they are picked up identically,
+/// which is why the grip goes on out here.
+fn tab_block(
+    workspace: &Workspace,
+    tab: TabId,
+    panes: &[PaneId],
+    group: Option<GroupId>,
+    is_last: bool,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let Some(chrome) = workspace.tab_chrome(tab) else {
+        log::error!("tab {tab:?} has no interaction state and was skipped");
+        return Empty::new().finish();
+    };
+
+    let element = match workspace.options().granularity {
+        Granularity::Panes => panes_tab(
+            workspace,
+            tab,
+            panes,
+            group.is_none() && is_last,
+            group.is_some(),
+            app,
+        ),
+        Granularity::Tabs => tabs_tab(workspace, tab, panes, app),
+    };
+
+    drag::Handle::new(
+        drag::Grip::Tab { tab, group },
+        workspace.panel_drag(),
+        chrome.container.clone(),
+        element,
+    )
+    .finish()
+}
+
+/// A group: its heading, and its members under it unless it is folded away.
+///
+/// The container is Warp's `render_grouped_tab_container`, with the members
+/// indented past it so that "these belong together" is said by the indent
+/// rather than by a colour. A member skips its own outer chrome — in `Panes`
+/// the hairlines that separate tabs — because the group is already providing
+/// it; that is Warp's `uses_outer_group_container = !in_tab_group && …`.
+fn group_block(
+    workspace: &Workspace,
+    group: GroupId,
+    members: &[(TabId, Vec<PaneId>)],
+    is_last: bool,
+    pending: Option<TabAction>,
+    app: &AppContext,
+) -> Box<dyn Element> {
+    let Some(data) = workspace.tabs().group(group) else {
+        log::error!("group {group:?} came from `blocks` and is not in the strip");
+        return Empty::new().finish();
+    };
+    let Some(chrome) = workspace.group_chrome(group) else {
+        log::error!("group {group:?} has no interaction state and was skipped");
+        return Empty::new().finish();
+    };
+    let granularity = workspace.options().granularity;
+    let collapsed = data.is_collapsed();
+    let holds_the_active_tab = members
+        .iter()
+        .any(|(tab, _)| workspace.tabs().is_active(*tab));
+
+    let mut column = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_child(heading(
+            workspace,
+            group,
+            data.name(),
+            members.len(),
+            collapsed,
+        ));
+
+    if !collapsed {
+        let mut rows = Flex::column()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_spacing(match granularity {
+                Granularity::Panes => 0.,
+                Granularity::Tabs => TABS_MODE_ITEM_SPACING,
+            });
+
+        for (tab, panes) in members {
+            if drag::line_above_member(pending, group, *tab) {
+                rows.add_child(insertion_line(true));
+            }
+            rows.add_child(tab_block(workspace, *tab, panes, Some(group), false, app));
+        }
+        if drag::line_ends_group(pending, group) {
+            rows.add_child(insertion_line(true));
+        }
+
+        column.add_child(
+            Container::new(rows.finish())
+                .with_padding(Padding {
+                    top: 0.,
+                    left: MEMBER_INDENT,
+                    bottom: GROUP_BODY_BOTTOM_PADDING,
+                    right: 0.,
+                })
+                .finish(),
+        );
+    }
+
+    let column = column.finish();
+    let heading_state = chrome.container.clone();
+
+    Hoverable::new(heading_state, move |mouse| {
+        let lit = holds_the_active_tab || mouse.is_hovered();
+        let container = Container::new(column).with_background_color(if lit {
+            theme().overlay_1
+        } else {
+            Color::TRANSPARENT
+        });
+
+        match granularity {
+            // The chrome a tab wears in this mode, one level up: hairlines
+            // rather than a card, so the list still has no gaps in it.
+            Granularity::Panes => container
+                .with_border(
+                    Border::new(1.)
+                        .with_sides(true, false, is_last, false)
+                        .with_border_color(theme().overlay_1),
+                )
+                .finish(),
+            Granularity::Tabs => container
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(GROUP_RADIUS)))
+                .finish(),
+        }
+    })
+    .finish()
+}
+
+/// A group's heading: a chevron saying which way it folds, its name, and how
+/// many tabs are under it.
+///
+/// Clicking it folds the group away and back — Warp's, and the gesture every
+/// disclosure in every sidebar has. The close button beside it closes every
+/// tab in the group, which is the only way to put a group down in one gesture
+/// once the tabs inside it are the work rather than the panes.
+fn heading(
+    workspace: &Workspace,
+    group: GroupId,
+    name: &str,
+    members: usize,
+    collapsed: bool,
+) -> Box<dyn Element> {
+    let Some(chrome) = workspace.group_chrome(group) else {
+        return Empty::new().finish();
+    };
+    let ui = workspace.fonts().ui;
+    let name = name.to_owned();
+    let count = if members == 1 {
+        "1 tab".to_owned()
+    } else {
+        format!("{members} tabs")
+    };
+    let close = chrome.close.clone();
+    let guard = chrome.close.clone();
+    let state = chrome.heading.clone();
+
+    let element = Hoverable::new(state.clone(), move |mouse| {
+        let hovered = mouse.is_hovered();
+        Container::new(
+            Flex::row()
+                .with_main_axis_size(MainAxisSize::Max)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_spacing(HEADING_ICON_GAP)
+                .with_child(
+                    // Centred in a slot the size of a row's leading icon, which
+                    // is Warp's line for Warp's reason: it is what brings the
+                    // name on the heading into something like the column its
+                    // members' names are in.
+                    ConstrainedBox::new(
+                        Align::new(
+                            Icon::new(
+                                if collapsed {
+                                    Lucide::ChevronRight
+                                } else {
+                                    Lucide::ChevronDown
+                                },
+                                HEADING_ICON_SIZE,
+                            )
+                            .with_color(if hovered {
+                                theme().text_primary
+                            } else {
+                                theme().text_muted
+                            })
+                            .finish(),
+                        )
+                        .finish(),
+                    )
+                    .with_width(HEADING_ICON_SLOT)
+                    .with_height(HEADING_ICON_SLOT)
+                    .finish(),
+                )
+                .with_child(
+                    Expanded::new(
+                        1.,
+                        Flex::column()
+                            .with_main_axis_size(MainAxisSize::Min)
+                            .with_cross_axis_alignment(CrossAxisAlignment::Start)
+                            .with_child(
+                                Text::new(name.clone(), ui, HEADING_SIZE)
+                                    .with_color(theme().text_primary)
+                                    .finish(),
+                            )
+                            .with_child(
+                                Text::new(count.clone(), ui, GROUP_HEADER_SIZE)
+                                    .with_color(theme().text_muted)
+                                    .finish(),
+                            )
+                            .finish(),
+                    )
+                    .finish(),
+                )
+                .with_child(row::close_slot(
+                    TabAction::CloseGroup(group),
+                    close.clone(),
+                    hovered,
+                ))
+                .finish(),
+        )
+        .with_horizontal_padding(GROUP_HORIZONTAL_PADDING)
+        .with_vertical_padding(GROUP_HEADER_VERTICAL_PADDING)
+        .finish()
+    })
+    .on_click(move |_, ctx, _| {
+        // The close button is a descendant, so a release over it hit-tests
+        // true for both — the row's own guard, for the same reason.
+        if guard.lock().is_hovered() {
+            return;
+        }
+        ctx.dispatch_typed_action(WorkspaceAction::Tab(TabAction::ToggleGroup(group)));
+    })
+    .finish();
+
+    drag::Handle::new(
+        drag::Grip::Heading { group, collapsed },
+        workspace.panel_drag(),
+        state,
+        element,
+    )
+    .finish()
+}
+
+/// The line that says where a drop will land.
+///
+/// Two pixels of the accent colour in the gap between two rows, inset to the
+/// indentation of whatever it is joining — so a drop *into* a group reads
+/// differently from a drop between blocks, which is the one thing the line has
+/// to be able to say. Warp draws exactly this, at exactly this inset.
+fn insertion_line(in_group: bool) -> Box<dyn Element> {
+    ConstrainedBox::new(
+        Container::new(
+            Container::new(Empty::new().finish())
+                .with_background_color(theme().accent)
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+                    INSERTION_LINE_HEIGHT / 2.,
+                )))
+                .finish(),
+        )
+        .with_padding(Padding {
+            top: (INSERTION_SLOT_HEIGHT - INSERTION_LINE_HEIGHT) / 2.,
+            left: if in_group {
+                0.
+            } else {
+                GROUP_HORIZONTAL_PADDING
+            },
+            bottom: (INSERTION_SLOT_HEIGHT - INSERTION_LINE_HEIGHT) / 2.,
+            right: GROUP_HORIZONTAL_PADDING,
+        })
+        .finish(),
+    )
+    .with_height(INSERTION_SLOT_HEIGHT)
+    .finish()
 }
 
 /// Every row the panel draws, gathered under the tab that owns it.
@@ -422,6 +817,7 @@ fn panes_tab(
     tab: TabId,
     panes: &[PaneId],
     is_last: bool,
+    in_group: bool,
     app: &AppContext,
 ) -> Box<dyn Element> {
     let Some(chrome) = workspace.tab_chrome(tab) else {
@@ -475,6 +871,14 @@ fn panes_tab(
     }
     column.add_child(body);
     let column = column.finish();
+
+    // A member of a group wears none of this: the group's own container is
+    // already the box around it, and a second lift inside the first reads as
+    // two nested cards. Warp's `uses_outer_group_container = !in_tab_group &&
+    // …` is the same line.
+    if in_group {
+        return column;
+    }
 
     Hoverable::new(chrome.container.clone(), move |mouse| {
         Container::new(column)

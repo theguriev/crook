@@ -1381,6 +1381,16 @@ fn seed_snapshot_tabs(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace
         },
     ];
 
+    /// The checkout that joins the second tab's group: what a worktree opened
+    /// from a tab looks like once it is one.
+    const WORKTREE: Seeded = Seeded {
+        title: "try the atlas rewrite",
+        status: AgentStatus::Running,
+        directory: "docs",
+        branch: "eugen/atlas-rewrite",
+        diff: Some((3, 88, 12)),
+    };
+
     workspace.apply(TabAction::New, ctx);
     workspace.apply(TabAction::New, ctx);
 
@@ -1422,6 +1432,38 @@ fn seed_snapshot_tabs(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace
         workspace
             .git()
             .update(ctx, |model, ctx| model.record(directory, facts, ctx));
+    }
+
+    // And a worktree opened from the last tab, which is the gesture groups
+    // exist for: a second checkout of the same work, folded under one heading
+    // beside the tab it came from. After the sessions above, so the group
+    // takes its heading from what that tab's agent has called its work rather
+    // than from the name nobody chose.
+    if let Some(last) = workspace.tabs().iter().map(Tab::id).last() {
+        workspace.apply(TabAction::NewInGroupOf(last), ctx);
+        if let Some(pane) = workspace.tabs().focused_pane_id() {
+            let directory = root.join(WORKTREE.directory);
+            workspace.update_session(pane, ctx, |session| {
+                session.derived_title = Some(WORKTREE.title.to_owned());
+                session.status = WORKTREE.status;
+                session.working_directory = Some(directory.clone());
+            });
+            let facts = git::GitFacts {
+                branch: Some(git::Head::Branch(WORKTREE.branch.to_owned())),
+                diff: WORKTREE
+                    .diff
+                    .map(
+                        |(files_changed, lines_added, lines_removed)| git::DiffStats {
+                            files_changed,
+                            lines_added,
+                            lines_removed,
+                        },
+                    ),
+            };
+            workspace
+                .git()
+                .update(ctx, |model, ctx| model.record(directory, facts, ctx));
+        }
     }
 
     // The split tab's first pane: the body then shows two panels, one of them
