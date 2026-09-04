@@ -26,6 +26,16 @@
 //! The cycle ends where it starts, on a shut mouth, so a pirate whose refresh
 //! finished mid-bite is never left frozen half-open.
 //!
+//! # The pill
+//!
+//! There is no outline around it. The header it sits in is `surface` and so
+//! was the pill's resting ground, which left the border drawing a box around
+//! a pirate for no reason other than that it could — the mark reads as a
+//! button on its own. What is left is a ground that appears under the cursor
+//! and darkens on the press, so the chip is a pirate until someone reaches
+//! for it. The refresh a click asks for is still visible without a line
+//! lighting up: that is what the chomping mouth is for.
+//!
 //! # What a click does
 //!
 //! It opens [`panel`], and on the way asks for both halves of what the panel
@@ -308,14 +318,6 @@ impl View for UsageChip {
         let label_color = pill_color(model.snapshot(), model.problem());
         let pirate = self.pirate(model.problem());
 
-        // Only a person's own click lights the border. A background poll that
-        // did this would put the header on a repaint timer for no one.
-        let outline = if model.is_busy_for_user() {
-            theme().accent
-        } else {
-            theme().border
-        };
-
         let ui = self.fonts.ui;
 
         let pill = Hoverable::new(self.mouse.clone(), move |state| {
@@ -351,13 +353,15 @@ impl View for UsageChip {
 
             Container::new(content)
                 .with_background_color(background)
-                .with_border(Border::all(1.).with_border_color(outline))
                 .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
+                // A pixel more on every side than the pill carried when it had
+                // an outline, because a border widened the box: the ground the
+                // hover paints now ends where the line used to be drawn.
                 .with_padding(Padding {
-                    top: 3.,
-                    left: 6.,
-                    bottom: 3.,
-                    right: 10.,
+                    top: 4.,
+                    left: 7.,
+                    bottom: 4.,
+                    right: 11.,
                 })
                 .finish()
         })
