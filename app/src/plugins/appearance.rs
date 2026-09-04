@@ -15,7 +15,7 @@ use crook_plugin::{Manifest, PluginId, Tier};
 
 use crate::plugin::{BuildError, Host, Plugin};
 use crate::settings::{
-    Density, FONT_SIZE_STEP, Granularity, Layout, PrimaryInfo, TabOptions, resolve_subtitle,
+    Density, FONT_SIZE_STEP, Granularity, PrimaryInfo, TabOptions, resolve_subtitle,
     subtitle_options_for,
 };
 use crate::workspace::settings_page::search::Words;
@@ -57,38 +57,6 @@ fn appearance(workspace: &Workspace) -> Vec<Category> {
     let options = workspace.options();
     let ui = workspace.fonts().ui;
     let state = workspace.settings_page();
-
-    let placement = widgets::row(
-        Words::new("Tab placement")
-            .with_description("Where the list of what you are working on lives.")
-            .with_keywords(&[
-                "sidebar",
-                "strip",
-                "header",
-                "vertical",
-                "horizontal",
-                "left",
-            ]),
-        true,
-        widgets::segmented(
-            vec![
-                Segment {
-                    label: "Side panel",
-                    selected: options.layout == Layout::Vertical,
-                    command: Some(OptionsAction::SetLayout(Layout::Vertical).into()),
-                    state: state.control(keyed("layout", Layout::Vertical)),
-                },
-                Segment {
-                    label: "Header strip",
-                    selected: options.layout == Layout::Horizontal,
-                    command: Some(OptionsAction::SetLayout(Layout::Horizontal).into()),
-                    state: state.control(keyed("layout", Layout::Horizontal)),
-                },
-            ],
-            ui,
-        ),
-        ui,
-    );
 
     let granularity = widgets::row(
         Words::new("View as")
@@ -158,7 +126,7 @@ fn appearance(workspace: &Workspace) -> Vec<Category> {
     vec![
         widgets::category("Theme", theme_category(workspace)),
         widgets::category("Text", text_category(workspace)),
-        widgets::category("Tabs", vec![placement, granularity, density, restore]),
+        widgets::category("Tabs", vec![granularity, density, restore]),
         widgets::category("Rows", rows_category(workspace)),
     ]
 }

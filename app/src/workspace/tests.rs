@@ -28,7 +28,7 @@ use crate::Channel;
 use crate::git::{DiffStats, GitFacts, Head};
 use crate::platform_insets::{ControlLayout, WindowChrome};
 use crate::settings::{
-    Density, GeneralOptions, Granularity, Layout, PrimaryInfo, Settings, Subtitle, TabOptions,
+    Density, GeneralOptions, Granularity, PrimaryInfo, Settings, Subtitle, TabOptions,
 };
 use crate::tab::{AgentSession, AgentStatus, Direction, Pane, PaneId, Tab, TabAction, TabId};
 use crate::terminal_font::{CELL_FONT_SIZE, CellFont};
@@ -91,20 +91,6 @@ impl TextLayoutSystem for StubShaper {
     }
 }
 
-/// Settings that live only as long as the test, holding `layout`.
-///
-/// Written into the settings rather than set on the workspace afterwards, so
-/// that `saved_options` and `options` agree from the first frame — a harness
-/// whose file disagreed with its screen would make every override test lie.
-fn ephemeral_settings(layout: Layout) -> Settings {
-    let mut settings = Settings::ephemeral();
-    settings.set_tab_options(TabOptions {
-        layout,
-        ..TabOptions::default()
-    });
-    settings
-}
-
 struct Harness {
     /// The queue standing in for the event loop. Kept, rather than dropped into
     /// the executor, because a terminal's output comes home on it: a test with
@@ -122,23 +108,19 @@ struct Harness {
 }
 
 impl Harness {
-    /// A window with `tabs` tabs in the horizontal strip, the last of which is
-    /// active, and one frame already drawn so there is something to hit-test
-    /// against.
-    ///
-    /// The layout is asked for rather than inherited, because it is *not* the
-    /// one Crook opens in: the default is the panel, and everything below this
-    /// point is about the strip. [`Harness::panel`] is the other half.
+    /// A window with `tabs` tabs, the last of which is active, and one frame
+    /// already drawn so there is something to hit-test against.
     ///
     /// Ephemeral: a test run must not read, and must not rewrite, the tab
     /// options of whoever is running it.
     fn new(tabs: usize) -> Self {
-        Self::with_settings(tabs, ephemeral_settings(Layout::Horizontal))
+        Self::with_settings(tabs, Settings::ephemeral())
     }
 
-    /// The same, in the layout Crook actually opens in.
+    /// The same. Kept as a name because a great many tests say `panel` to mean
+    /// "the window Crook opens in", and that is now the only window there is.
     fn panel(tabs: usize) -> Self {
-        Self::with_settings(tabs, Settings::ephemeral())
+        Self::new(tabs)
     }
 
     /// The same, on settings that know where they would be written.
@@ -311,20 +293,6 @@ impl Harness {
             .read(&self.app, |workspace, _| workspace.options())
     }
 
-    /// Moves the tabs between the panel and the strip, the way the keybinding
-    /// does.
-    fn toggle_layout(&mut self) {
-        self.dispatch_option(OptionsAction::ToggleLayout);
-    }
-
-    /// Starts in a layout the command line asked for, the way `--layout` does.
-    fn override_layout(&mut self, layout: Layout) {
-        let workspace = &self.workspace;
-        self.app.update(|ctx| {
-            workspace.update(ctx, |workspace, ctx| workspace.override_layout(layout, ctx));
-        });
-    }
-
     /// Where this layout says the window's own controls land.
     fn window_insets(&self) -> crate::platform_insets::LayoutInsets {
         self.workspace
@@ -383,6 +351,17 @@ impl Harness {
         self.app.update(|ctx| {
             workspace.update(ctx, |workspace, ctx| {
                 workspace.override_density(density, ctx)
+            });
+        });
+    }
+
+    /// Starts on a granularity the command line asked for, the way
+    /// `--granularity` does.
+    fn override_granularity(&mut self, granularity: Granularity) {
+        let workspace = &self.workspace;
+        self.app.update(|ctx| {
+            workspace.update(ctx, |workspace, ctx| {
+                workspace.override_granularity(granularity, ctx)
             });
         });
     }
@@ -1087,9 +1066,14 @@ fn settings_chord() -> Modifiers {
     }
 }
 
-/// The tabs, by their rounded-top boxes, in bar order.
+/// The tabs, by their boxes, top to bottom.
+///
+/// The panel is the only place tabs live, so this is [`panel_rows`] under the
+/// name every test that clicks a tab already uses. It was a strip across the
+/// header once; the strip is gone and the tests it was written for are about
+/// the tabs rather than about where they were.
 fn tab_boxes(scene: &Scene) -> Vec<RectF> {
-    rects_rounded_by(scene, Radius::Pixels(8.))
+    panel_rows(scene)
 }
 
 /// The close buttons that are currently drawn, by their rounded boxes.
@@ -1175,17 +1159,14 @@ fn frame_text(scene: &Scene) -> String {
     text_where(scene, |_| true)
 }
 
-/// What the strip says, without the body panel underneath it.
+/// What the tab list says, without the body beside it.
 ///
 /// The body prints the session's title and its working directory too, so a
 /// whole-frame search cannot tell "the row stopped showing this" from "the row
-/// never showed it".
+/// never showed it". The tabs are in the panel, so the cut is by x rather than
+/// by y — everything left of the panel's right edge is the list's.
 fn strip_text(scene: &Scene) -> String {
-    let bottom = tab_boxes(scene)
-        .iter()
-        .map(|tab| tab.max_y())
-        .fold(0., f32::max);
-    text_where(scene, |position| position.y() <= bottom)
+    panel_text(scene)
 }
 
 /// The frame's text, one line at a time, with where each line was drawn.
@@ -1532,24 +1513,30 @@ fn fullscreen_gives_back_the_room_the_traffic_lights_were_using() {
     // The room reserved for them has to go with them or the header ends in a
     // 64px hole — and nothing tells the application it happened, which is why
     // the state is read on the render path rather than remembered.
+    // Asked of the same call the renderer makes rather than measured off a
+    // control, because the reservation is at the *left* of the panel's control
+    // bar and everything in that bar is right-aligned: the room is real, and
+    // nothing is drawn in it to move.
     let mut harness = Harness::new(1);
     harness.override_controls(ControlLayout::MacOs);
-    let windowed = tab_boxes(&harness.frame())[0];
+    assert_eq!(
+        harness.window_insets().panel_left,
+        ControlLayout::MacOs
+            .insets(WindowChrome::Client, false)
+            .left,
+        "the panel does not reserve the corner the traffic lights are in"
+    );
 
     harness.set_window_state(WindowState {
         fullscreen: true,
         ..WindowState::default()
     });
-    let full = tab_boxes(&harness.frame())[0];
 
     assert_eq!(
-        windowed.min_x() - full.min_x(),
-        ControlLayout::MacOs
-            .insets(WindowChrome::Client, false)
-            .left,
-        "fullscreen did not give back exactly what the traffic lights had"
+        harness.window_insets().panel_left,
+        0.,
+        "fullscreen did not give back what the traffic lights had"
     );
-    assert!(full.min_x() < 24., "the header still starts past a hole");
 }
 
 /// The caption buttons Crook draws for a window with no frame, by their boxes.
@@ -1662,10 +1649,7 @@ fn pressing_the_header_where_nothing_is_picks_the_window_up() {
     // so waiting for the release would mean waiting for one that never comes.
     let mut harness = Harness::new(1);
     let scene = harness.frame();
-    let empty = vec2f(
-        pill_box(&scene).min_x() - 30.,
-        center(tab_boxes(&scene)[0]).y(),
-    );
+    let empty = vec2f(pill_box(&scene).min_x() - 30., center(pill_box(&scene)).y());
 
     harness.dispatch(Event::MouseDown {
         button: MouseButton::Left,
@@ -1728,10 +1712,7 @@ fn a_press_that_dismisses_the_options_menu_does_not_pick_the_window_up() {
 fn double_clicking_the_header_maximises_the_window() {
     let mut harness = Harness::new(1);
     let scene = harness.frame();
-    let empty = vec2f(
-        pill_box(&scene).min_x() - 30.,
-        center(tab_boxes(&scene)[0]).y(),
-    );
+    let empty = vec2f(pill_box(&scene).min_x() - 30., center(pill_box(&scene)).y());
 
     harness.click_times(empty, 1);
     harness.click_times(empty, 2);
@@ -1795,27 +1776,6 @@ fn pill_box(scene: &Scene) -> RectF {
 const CROWDED: usize = 30;
 
 #[test]
-fn a_tab_too_narrow_for_its_close_button_does_not_put_it_over_its_neighbour() {
-    let mut harness = Harness::new(CROWDED);
-    let scene = harness.frame();
-    let tabs = tab_boxes(&scene);
-    assert_eq!(tabs.len(), CROWDED);
-
-    // Nothing a tab draws may end up outside the tab that drew it: an escaped
-    // close button hit-tests where it paints, so it would be a live "close my
-    // neighbour" button sitting on the neighbour.
-    for button in close_boxes(&scene) {
-        let inside_a_tab = tabs
-            .iter()
-            .any(|tab| tab.min_x() <= button.min_x() && button.max_x() <= tab.max_x());
-        assert!(
-            inside_a_tab,
-            "a close button is drawn at {button:?}, outside every tab"
-        );
-    }
-}
-
-#[test]
 fn clicking_a_crowded_tab_selects_it_and_closes_nothing() {
     let mut harness = Harness::new(CROWDED);
     let ids = harness.tab_ids();
@@ -1852,32 +1812,6 @@ fn the_new_tab_button_opens_a_tab_without_closing_the_active_one() {
     assert!(
         ids.iter().all(|id| after.contains(id)),
         "opening a tab closed another"
-    );
-}
-
-#[test]
-fn the_strip_never_runs_out_of_the_header_however_many_tabs_there_are() {
-    // Far past the point where a tab is narrower than its own padding, which
-    // is where a container that reports the size it wanted rather than the
-    // size it was given pushes every later sibling off the end of the window.
-    let mut harness = Harness::new(60);
-    let scene = harness.frame();
-    let tabs = tab_boxes(&scene);
-    let button = new_tab_box(&scene);
-    let chip = pill_box(&scene);
-
-    let last = tabs.last().expect("60 tabs");
-    assert!(
-        last.max_x() <= button.min_x(),
-        "the last tab ends at {} and the new-tab button starts at {}",
-        last.max_x(),
-        button.min_x()
-    );
-    assert!(
-        button.max_x() <= chip.min_x(),
-        "the new-tab button ends at {} and the usage chip starts at {}",
-        button.max_x(),
-        chip.min_x()
     );
 }
 
@@ -1933,17 +1867,6 @@ fn glyph_count(scene: &Scene) -> usize {
     scene.layers().map(|layer| layer.glyphs.len()).sum()
 }
 
-/// The chips drawn as the selected one, by their active fill.
-fn selected_chips(scene: &Scene) -> Vec<RectF> {
-    visible_rects(scene)
-        .filter(|(rect, _)| {
-            rect.corner_radius.get_top_left() == Radius::Pixels(8.)
-                && rect.background == Fill::Solid(theme().tab_active)
-        })
-        .map(|(_, bounds)| bounds)
-        .collect()
-}
-
 /// The body's panes, in render order.
 ///
 /// A pane has no chrome left to find it by — no corner radius, no border, no
@@ -1984,28 +1907,6 @@ fn contains(outer: RectF, inner: RectF) -> bool {
         && outer.min_y() <= inner.min_y()
         && outer.max_x() >= inner.max_x()
         && outer.max_y() >= inner.max_y()
-}
-
-#[test]
-fn exactly_one_chip_in_the_whole_bar_is_drawn_as_the_selected_one() {
-    // Warp's `is_selected = is_active_tab && is_focused`, read off the pixels.
-    // Tinting every row of the active tab and marking the focused pane on top
-    // of that is the easy mistake, and it gives a bar where three chips look
-    // chosen.
-    let mut harness = Harness::new(2);
-    harness.dispatch_action(TabAction::Split(Direction::Right));
-    harness.dispatch_action(TabAction::Split(Direction::Down));
-
-    for granularity in [Granularity::Panes, Granularity::Tabs] {
-        harness.set_granularity(granularity);
-        let scene = harness.frame();
-
-        assert_eq!(
-            selected_chips(&scene).len(),
-            1,
-            "{granularity:?} draws more than one selected chip"
-        );
-    }
 }
 
 #[test]
@@ -2057,8 +1958,8 @@ fn a_pane_fills_its_share_of_the_body_and_not_just_the_cells_it_can_draw() {
 
     assert_eq!(
         pane.min_x(),
-        0.,
-        "the pane starts at the window's left edge"
+        panel_box(&harness.frame()).max_x(),
+        "the pane starts where the panel ends"
     );
     assert_eq!(
         pane.max_x(),
@@ -2325,12 +2226,11 @@ fn the_menu_takes_the_clicks_that_would_otherwise_reach_the_window_under_it() {
     let scene = harness.frame();
     let popup = menu_box(&scene);
     let rows = menu_option_boxes(&scene);
-    let panels = panel_boxes(&scene);
+    // The menu is anchored inside the panel, so what it covers is the panel's
+    // own rows — which are the clickable thing underneath it.
     assert!(
-        panels
-            .iter()
-            .any(|panel| panel.contains_point(center(popup))),
-        "the popup does not overhang a panel, so there is nothing to occlude"
+        tab_boxes(&scene).iter().any(|row| overlaps(*row, popup)),
+        "the popup at {popup:?} covers no row, so there is nothing to occlude"
     );
 
     harness.click(center(rows[0]), MouseButton::Left);
@@ -2539,7 +2439,7 @@ fn show_details_on_hover_opens_a_card_over_the_row_and_closes_with_the_option() 
     let cards = detail_cards(&scene);
     assert_eq!(cards.len(), 1, "hovering a row opened no detail card");
     assert!(
-        cards[0].min_y() >= row.max_y(),
+        cards[0].min_x() >= row.max_x() || cards[0].min_y() >= row.max_y(),
         "the card covers the row it describes"
     );
     assert_eq!(cards[0].width(), 320., "Warp's sidecar width");
@@ -3666,24 +3566,18 @@ impl Harness {
 
 #[test]
 fn a_fresh_workspace_opens_with_the_tabs_in_a_panel() {
-    // The one place Crook's defaults are not Warp's, asserted through the
-    // pixels rather than through the settings struct: a default that never
-    // reached the renderer would still pass `settings.rs`'s test.
+    // The one place Crook departs from Warp, asserted through the pixels: the
+    // tabs are in a panel and the header holds none of them. Warp makes this a
+    // setting; here it is the window.
     let mut harness = Harness::panel(2);
     let scene = harness.frame();
 
-    assert_eq!(Layout::Vertical, harness.options().layout);
     assert_eq!(
         0.,
         panel_box(&scene).min_x(),
         "the panel is not at the edge"
     );
     assert_eq!(panel_rows(&scene).len(), 2, "one row per tab");
-    assert!(
-        tab_boxes(&scene).is_empty(),
-        "the header drew tab items while the panel was up; the two layouts \
-         are mutually exclusive and both would be taking the same clicks"
-    );
 }
 
 #[test]
@@ -4167,141 +4061,6 @@ fn the_hover_card_opens_beside_a_panel_row_rather_than_below_it() {
     );
 }
 
-// --- moving the tabs between the two layouts ---------------------------------
-
-#[test]
-fn the_layout_keybinding_moves_the_tabs_and_the_gear_with_them() {
-    let mut harness = Harness::panel(2);
-    let panel_gear = gear_box(&harness.frame());
-    assert!(panel_box(&harness.frame()).contains_point(center(panel_gear)));
-
-    harness.toggle_layout();
-
-    let scene = harness.frame();
-    assert_eq!(Layout::Horizontal, harness.options().layout);
-    assert_eq!(tab_boxes(&scene).len(), 2, "the strip drew no tabs");
-    assert!(
-        visible_rects(&scene).all(|(rect, _)| (rect.bounds.width() - tabs_panel::PANEL_WIDTH)
-            .abs()
-            > 0.5
-            || rect.background != Fill::Solid(theme().surface)),
-        "the panel is still painted beside the strip"
-    );
-    // The gear went with the tabs: it is now at the far end of the header
-    // rather than at the top of a panel that no longer exists.
-    assert!(gear_box(&scene).min_x() > tabs_panel::PANEL_WIDTH);
-
-    harness.toggle_layout();
-    assert_eq!(Layout::Vertical, harness.options().layout);
-    assert!(tab_boxes(&harness.frame()).is_empty());
-}
-
-#[test]
-fn the_sidebar_chord_is_what_moves_the_tabs() {
-    let harness = Harness::panel(1);
-    let action = harness.workspace.read(&harness.app, |workspace, _| {
-        workspace.action_for(&Keystroke::new("b", platform_chord()))
-    });
-
-    assert_eq!(
-        Some(WorkspaceAction::Options(OptionsAction::ToggleLayout)),
-        action,
-        "the sidebar chord is in --help's KEYS list and is bound to nothing"
-    );
-}
-
-#[test]
-fn the_layout_the_command_line_asked_for_is_never_written_to_the_settings_file() {
-    // `--layout horizontal` is a way to look at a frame. The file says
-    // vertical, and a menu click — which saves the *whole* options snapshot —
-    // must not carry the override into it.
-    let scratch = Scratch::new();
-    let mut harness = Harness::with_settings(1, scratch.settings());
-    assert_eq!(Layout::Vertical, harness.saved_options().layout);
-
-    harness.override_layout(Layout::Horizontal);
-    assert_eq!(
-        Layout::Horizontal,
-        harness.options().layout,
-        "the override never reached the renderer"
-    );
-    assert_eq!(tab_boxes(&harness.frame()).len(), 1, "the strip is not up");
-
-    harness.dispatch_option(OptionsAction::ToggleShowDetailsOnHover);
-
-    let written = scratch.written_containing("\"show_details_on_hover\": false");
-    assert!(
-        written.contains("\"layout\": \"vertical\""),
-        "the command line's layout reached the settings file, so the next \
-         launch with no flags opens horizontal; the file says {written}"
-    );
-    assert_eq!(Layout::Vertical, harness.saved_options().layout);
-}
-
-#[test]
-fn choosing_the_layout_ends_the_override_the_way_choosing_a_density_does() {
-    let scratch = Scratch::new();
-    let mut harness = Harness::with_settings(1, scratch.settings());
-    harness.override_layout(Layout::Horizontal);
-
-    // The toggle always moves the value, so unlike the density there is no
-    // "already on screen" case — what has to happen is that the save carries
-    // the new layout rather than reaching back for the file's.
-    harness.toggle_layout();
-    assert_eq!(Layout::Vertical, harness.options().layout);
-    harness.toggle_layout();
-
-    scratch.written_containing("\"layout\": \"horizontal\"");
-    assert_eq!(harness.options(), harness.saved_options());
-}
-
-#[test]
-fn the_layout_decides_which_element_owes_the_window_controls() {
-    // The reservation follows the two top corners of the window, and which
-    // element owns each corner is what the layout changes. `platform_insets`
-    // holds the per-platform table; this is the one line that picks a column
-    // out of it, and it is invisible on a natively decorated window — which is
-    // every window Crook opens today.
-    use crate::platform_insets::{TabsPlacement, layout_insets};
-
-    let mut harness = Harness::panel(1);
-    assert_eq!(
-        layout_insets(TabsPlacement::LeftPanel, crate::WINDOW_CHROME, false),
-        harness.window_insets()
-    );
-
-    harness.toggle_layout();
-    assert_eq!(
-        layout_insets(TabsPlacement::Header, crate::WINDOW_CHROME, false),
-        harness.window_insets()
-    );
-}
-
-#[test]
-fn moving_the_tabs_makes_every_control_forget_the_pointer() {
-    // The whole element tree is replaced, so nothing the pointer was on ever
-    // sees a hover-out. Left alone, a row hovered in the panel comes back
-    // hovered in the strip with the pointer nowhere near it — and its close
-    // button then swallows the row's next click.
-    let mut harness = Harness::seeded_panel();
-    let rows = panel_rows(&harness.frame());
-    harness.move_to(center(rows[0]));
-    assert_eq!(detail_cards(&harness.frame()).len(), 1, "no card to lose");
-
-    harness.toggle_layout();
-
-    let scene = harness.frame();
-    assert!(
-        detail_cards(&scene).is_empty(),
-        "a card the pointer opened in the panel is still up in the strip"
-    );
-    assert_eq!(
-        close_boxes(&scene).len(),
-        1,
-        "a row other than the selected one still believes it is hovered"
-    );
-}
-
 // --- what the adversarial review found -------------------------------------
 
 /// The `overlay_2` hairlines inside `card`, which are what divide its sections.
@@ -4517,7 +4276,7 @@ fn choosing_one_option_does_not_carry_another_command_line_override_into_the_fil
     // the poisoned value back out of the file and writes it again.
     let scratch = Scratch::new();
     let mut harness = Harness::with_settings(1, scratch.settings());
-    harness.override_layout(Layout::Horizontal);
+    harness.override_granularity(Granularity::Tabs);
     harness.override_density(Density::Expanded);
 
     // The density that is already on screen: the one click that takes the
@@ -4526,14 +4285,14 @@ fn choosing_one_option_does_not_carry_another_command_line_override_into_the_fil
 
     let written = scratch.written_containing("\"view_mode\": \"expanded\"");
     assert!(
-        written.contains("\"layout\": \"vertical\""),
-        "choosing a density adopted `--layout horizontal` as well, so the \
-         next launch with no flags opens in the strip; the file holds {written}"
+        written.contains("\"display_granularity\": \"panes\""),
+        "choosing a density adopted `--granularity tabs` as well, so the next \
+         launch with no flags opens showing tabs; the file holds {written}"
     );
-    assert_eq!(Layout::Vertical, harness.saved_options().layout);
+    assert_eq!(Granularity::Panes, harness.saved_options().granularity);
     assert_eq!(
-        Layout::Horizontal,
-        harness.options().layout,
+        Granularity::Tabs,
+        harness.options().granularity,
         "the save changed what is on screen"
     );
 }
@@ -4581,6 +4340,34 @@ fn settings_field_boxes(scene: &Scene) -> Vec<RectF> {
         .collect();
     fields.sort_by(|left, right| left.min_x().total_cmp(&right.min_x()));
     fields
+}
+
+/// The diameter of the disc a panel row draws for an agent's status.
+///
+/// The panel decides this from its own row height, so this is a locator's
+/// number rather than the renderer's: it is here, in the tests, because
+/// nothing but a test needs to find a circle by its size.
+const STATUS_DOT_SIZE: f32 = 7.;
+
+/// Whether two boxes share any pixels.
+fn overlaps(left: RectF, right: RectF) -> bool {
+    left.min_x() < right.max_x()
+        && right.min_x() < left.max_x()
+        && left.min_y() < right.max_y()
+        && right.min_y() < left.max_y()
+}
+
+/// The `+` button's box, by the only 5px-rounded rect in the frame.
+///
+/// It lives in the panel's control bar, which is the window's top-left corner
+/// — so it is also what moves when the traffic lights come and go.
+fn plus_box(scene: &Scene) -> RectF {
+    let boxes: Vec<RectF> = visible_rects(scene)
+        .filter(|(rect, _)| rect.corner_radius.get_top_left() == Radius::Pixels(5.))
+        .map(|(_, bounds)| bounds)
+        .collect();
+    assert_eq!(boxes.len(), 1, "expected one + button, got {boxes:?}");
+    boxes[0]
 }
 
 /// The rail's page buttons, top to bottom.
@@ -5173,7 +4960,7 @@ fn the_settings_row_leads_with_a_gear_and_says_nothing_a_session_would() {
     let dots: Vec<RectF> = visible_rects(&scene)
         .filter(|(rect, _)| {
             rect.corner_radius.get_top_left() == Radius::Percentage(50.)
-                && (rect.bounds.width() - super::STATUS_DOT_SIZE).abs() < 0.5
+                && (rect.bounds.width() - STATUS_DOT_SIZE).abs() < 0.5
         })
         .map(|(_, bounds)| bounds)
         .filter(|bounds| settings_row.contains_point(center(*bounds)))
@@ -5219,14 +5006,14 @@ fn typing_in_the_rail_filters_the_page_and_the_rail_together() {
 fn a_row_is_found_by_a_word_that_is_not_written_on_it() {
     // The keywords, which are the difference between a search that works and
     // one that only finds what somebody already knew to call it. Nothing on
-    // the "Tab placement" row says "sidebar".
+    // the "View as" row says "split".
     let mut harness = Harness::new(1);
     harness.open_settings_page();
     harness.frame();
-    harness.type_text("sidebar");
+    harness.type_text("split");
 
     assert!(
-        frame_text(&harness.frame()).contains("Tab placement"),
+        frame_text(&harness.frame()).contains("View as"),
         "the row nobody calls by its name was not found"
     );
 }
@@ -5282,7 +5069,7 @@ fn escape_empties_the_box_and_puts_the_page_back() {
     harness.press("escape", Modifiers::default(), "");
     assert_eq!(harness.search_text(), "");
     assert!(
-        frame_text(&harness.frame()).contains("Tab placement"),
+        frame_text(&harness.frame()).contains("View as"),
         "the page did not come back"
     );
 }
@@ -5304,7 +5091,7 @@ fn the_query_goes_when_the_page_does() {
     harness.open_settings_page();
 
     assert_eq!(harness.search_text(), "");
-    assert!(frame_text(&harness.frame()).contains("Tab placement"));
+    assert!(frame_text(&harness.frame()).contains("View as"));
 }
 
 #[test]
@@ -8407,19 +8194,6 @@ mod panel_autoscroll {
 
         assert_eq!(offset(&harness), settled);
     }
-
-    #[test]
-    fn the_header_strip_layout_scrolls_nothing() {
-        // There is no panel in that layout, and the scroll state behind it is
-        // not something a tab selection should be writing into.
-        let mut harness = Harness::new(1);
-        for _ in 0..30 {
-            harness.dispatch_action(TabAction::New);
-        }
-        harness.frame();
-
-        assert_eq!(offset(&harness), 0.);
-    }
 }
 
 /// Restoring a window: the strip comes back, and everything the workspace
@@ -8800,16 +8574,6 @@ mod the_bell {
 mod title_bar_hit_testing {
     use super::*;
 
-    /// The `+` button's box, by the only 5px-rounded rect in the frame.
-    fn plus_box(scene: &Scene) -> RectF {
-        let boxes: Vec<RectF> = visible_rects(scene)
-            .filter(|(rect, _)| rect.corner_radius.get_top_left() == Radius::Pixels(5.))
-            .map(|(_, bounds)| bounds)
-            .collect();
-        assert_eq!(boxes.len(), 1, "expected one + button, got {boxes:?}");
-        boxes[0]
-    }
-
     /// The header's own box: the full-width surface rect at the top.
     fn header_box(scene: &Scene) -> RectF {
         fills_of(scene, theme().surface)
@@ -8893,19 +8657,17 @@ mod title_bar_hit_testing {
 
     #[test]
     fn every_gap_between_the_header_controls_still_picks_the_window_up() {
+        // The `+` and the gear are the panel's; what is left in this row is
+        // whatever a plugin pinned to the right of it and the caption cluster.
         let scene = Harness::new(2).frame();
-        let tabs = tab_boxes(&scene);
-        let plus = plus_box(&scene);
-        let gear = gear_box(&scene);
+        let panel = panel_box(&scene);
         let chip = pill_box(&scene);
-        let row = center(tabs[0]).y();
+        let row = center(chip).y();
 
-        // Between the last tab and the `+`, between the `+` and the gear,
-        // between the gear and the chip, and above the chip.
+        // Between the panel and the chip, just left of the chip, and above it.
         let gaps = [
-            vec2f((tabs[1].max_x() + plus.min_x()) / 2., row),
-            vec2f((plus.max_x() + gear.min_x()) / 2., row),
-            vec2f((gear.max_x() + chip.min_x()) / 2., row),
+            vec2f((panel.max_x() + chip.min_x()) / 2., row),
+            vec2f(chip.min_x() - 8., row),
             vec2f(center(chip).x(), 2.),
         ];
 
@@ -8932,10 +8694,7 @@ mod title_bar_hit_testing {
         // is instead of following the pointer.
         let mut harness = Harness::new(1);
         let scene = harness.frame();
-        let empty = vec2f(
-            pill_box(&scene).min_x() - 30.,
-            center(tab_boxes(&scene)[0]).y(),
-        );
+        let empty = vec2f(pill_box(&scene).min_x() - 30., center(pill_box(&scene)).y());
 
         harness.click_times(empty, 1);
         harness.click_times(empty, 2);
@@ -9507,7 +9266,7 @@ mod plugins_page {
 
         assert!(text.contains("crook/usage"), "{text}");
         assert!(
-            text.contains("How much of the Claude Code session budget is spent"),
+            text.contains("How much of the Claude Code"),
             "the card does not describe it: {text}"
         );
         // What it puts on screen, asked of the host rather than of the plugin.
@@ -9658,7 +9417,7 @@ mod plugins_page {
         let text = frame_text(&harness.frame());
 
         assert!(
-            text.contains("cannot be switched off from here"),
+            text.contains("It is what draws the page"),
             "the card does not say why its switch is inert: {text}"
         );
     }

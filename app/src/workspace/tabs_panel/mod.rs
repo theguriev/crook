@@ -166,9 +166,8 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
 fn control_bar(workspace: &Workspace) -> Box<dyn Element> {
     // The one place in the panel that can be under the window's own controls:
     // on a client-decorated macOS window the traffic lights are in this
-    // corner, which is a fact about the layout rather than about the platform.
-    // With a horizontal strip this reservation belongs to the header instead,
-    // and `layout_insets` is what makes that one decision.
+    // corner, which is a fact about where the tabs are rather than about the
+    // platform. `WindowControlInsets::split` is what makes that one decision.
     let inset = workspace.window_insets().panel_left;
 
     title_bar::draggable(
@@ -179,21 +178,7 @@ fn control_bar(workspace: &Workspace) -> Box<dyn Element> {
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
                 .with_spacing(CONTROL_BAR_SPACING)
                 .with_child(Expanded::new(1., Empty::new().finish()).finish())
-                .with_child(controls::gear_button(
-                    workspace,
-                    AnchorTo {
-                        // Right edges aligned, unlike the strip's. The gear sits
-                        // near the right edge of a 248px column and the menu is
-                        // 200 wide: hung from its left edge it would open across
-                        // the body, and `keep_on_screen` would not pull it back
-                        // because the window has plenty of room to its right.
-                        parent: Corner::BottomRight,
-                        child: Corner::TopRight,
-                        offset: vec2f(0., 4.),
-                        keep_on_screen: true,
-                        keep_clear_of_parent: false,
-                    },
-                ))
+                .with_child(controls::gear_button(workspace))
                 .with_child(controls::new_tab_button(workspace))
                 .finish(),
         )

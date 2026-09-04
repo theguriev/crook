@@ -1,16 +1,14 @@
-//! The two buttons both layouts carry: the gear, and the `+`.
+//! The two buttons the panel's control bar carries: the gear, and the `+`.
 //!
 //! Warp renders these twice, once in the header toolbar and once in the
 //! vertical panel's control bar, and the two copies have drifted — the panel's
 //! gear grew an entrypoint parameter the header's never got. Here there is one
-//! of each, and the only thing a caller chooses is where the menu opens.
+//! of each, in one place, because there is one place tabs live.
 //!
-//! That parameter is not decoration. In the strip the gear sits at the right
-//! end of a full-width header and the menu hangs below it, left edges aligned.
-//! In the panel the gear sits near the right edge of a 248px column, and a
-//! left-aligned 200px menu would open across the body; aligning the two
-//! *right* edges instead keeps it inside the panel it belongs to. Both are
-//! [`AnchorTo`], so neither needs its own function.
+//! The gear sits near the right edge of a 248px column and the menu it opens
+//! is 200 wide, so the menu hangs from the gear's *right* edge: aligned left
+//! it would open across the body, and `keep_on_screen` would not pull it back
+//! because the window has plenty of room to its right.
 
 use crookui_core::elements::Padding;
 use crookui_core::fonts::FamilyId;
@@ -47,14 +45,22 @@ const GEAR_TOOLTIP_WIDTH: f32 = 88.;
 /// whichever of them is in it.
 pub(super) const BUTTON_SIZE: f32 = 24.;
 
-/// The gear, and the menu it opens at `menu_anchor`.
+/// The gear, and the menu it opens under it.
 ///
 /// The [`Stack`] goes here, around the button, rather than at the root: the
 /// menu is anchored to the gear's painted box, and a stack wrapping the whole
 /// window would have nothing to anchor to. The stack is painted before the menu
 /// in the same frame, so the anchor is this frame's rect and the menu never
 /// lags a frame behind the button.
-pub(super) fn gear_button(workspace: &Workspace, menu_anchor: AnchorTo) -> Box<dyn Element> {
+pub(super) fn gear_button(workspace: &Workspace) -> Box<dyn Element> {
+    // Right edges aligned. See this module's own doc.
+    let menu_anchor = AnchorTo {
+        parent: Corner::BottomRight,
+        child: Corner::TopRight,
+        offset: vec2f(0., 4.),
+        keep_on_screen: true,
+        keep_clear_of_parent: false,
+    };
     let ui = workspace.fonts().ui;
     let is_open = workspace.is_options_menu_open();
 

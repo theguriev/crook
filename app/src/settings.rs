@@ -116,40 +116,6 @@ pub enum Density {
     Expanded,
 }
 
-/// Where the tabs live, and therefore how the whole window is arranged.
-///
-/// Warp spells this as the boolean `use_vertical_tabs`, gated behind a feature
-/// flag, and **defaults it to false**. Crook defaults to [`Layout::Vertical`],
-/// and that is the one value in this file that deliberately departs from
-/// Warp's: the person Crook is being built for asked for the panel to be what
-/// a fresh install opens in. It is written down here so the divergence reads
-/// as a decision rather than as a defaults table somebody got wrong.
-///
-/// The key on disk is `layout` rather than Warp's `use_vertical_tabs`, because
-/// a boolean named after one of its two states reads backwards the moment the
-/// other state is the default — `"use_vertical_tabs": true` as the value you
-/// get by *not* writing it is a sentence nobody can check.
-#[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Layout {
-    /// A panel down the left edge, the full height of the window, with the
-    /// header and the body beside it.
-    #[default]
-    Vertical,
-    /// A strip across the header, with the body under it.
-    Horizontal,
-}
-
-impl Layout {
-    /// The other one. What the keybinding and the toggle action produce.
-    pub fn toggled(self) -> Self {
-        match self {
-            Self::Vertical => Self::Horizontal,
-            Self::Horizontal => Self::Vertical,
-        }
-    }
-}
-
 /// Which fact a row leads with — the menu's "Pane title as".
 ///
 /// Warp's `VerticalTabsPrimaryInfo`, under
@@ -397,9 +363,6 @@ impl GeneralOptions {
 // key — or that a person hand-edited a key out of — loads the rest.
 #[serde(default)]
 pub struct TabOptions {
-    /// Where the tabs live. The one option whose default is not Warp's, and
-    /// [`Layout`] says why.
-    pub layout: Layout,
     /// "View as".
     #[serde(rename = "display_granularity")]
     pub granularity: Granularity,
@@ -430,7 +393,6 @@ impl Default for TabOptions {
     /// `bool`'s default is `false`, and Warp's is `true` for all three.
     fn default() -> Self {
         Self {
-            layout: Layout::default(),
             granularity: Granularity::default(),
             density: Density::default(),
             primary_info: PrimaryInfo::default(),
@@ -769,7 +731,7 @@ impl Settings {
     /// overwritten by their current values.
     ///
     /// Both groups are flat in the same object, which is what lets a person
-    /// find `show_usage_chip` beside `layout` in a file they opened in an
+    /// find `show_usage_chip` beside `font_size` in a file they opened in an
     /// editor. It also means the two structs may not name the same key twice —
     /// the later `extend` would silently win — and that is a thing to check
     /// when a third group appears rather than a thing to defend against here.
@@ -1056,7 +1018,6 @@ mod tests {
     /// that quietly loses one cannot pass.
     fn everything_flipped() -> TabOptions {
         TabOptions {
-            layout: Layout::Horizontal,
             granularity: Granularity::Tabs,
             density: Density::Expanded,
             primary_info: PrimaryInfo::Branch,
@@ -1068,13 +1029,8 @@ mod tests {
     }
 
     #[test]
-    fn test_the_defaults_are_warps_defaults_except_for_the_layout() {
+    fn test_the_defaults_are_warps_defaults() {
         let options = TabOptions::default();
-
-        // The deliberate departure, asserted rather than described: Warp opens
-        // horizontal, Crook opens with the panel because that is what was
-        // asked for. A change here is a change of product, not of tidiness.
-        assert_eq!(Layout::Vertical, options.layout);
 
         assert_eq!(Granularity::Panes, options.granularity);
         assert_eq!(Density::Compact, options.density);
@@ -1241,7 +1197,6 @@ mod tests {
                 // Crook's own: Warp keeps the terminal's type size in its
                 // appearance settings, which this file is not a copy of.
                 "font_size",
-                "layout",
                 "light_theme",
                 // Crook's own, and the one key here that changes what the
                 // shell itself is rather than what the window looks like.
@@ -1268,7 +1223,6 @@ mod tests {
         );
         assert_eq!(Some(&Value::from("expanded")), written.get("view_mode"));
         assert_eq!(Some(&Value::from("branch")), written.get("primary_info"));
-        assert_eq!(Some(&Value::from("horizontal")), written.get("layout"));
     }
 
     #[test]
@@ -1405,11 +1359,11 @@ mod tests {
         let written: Map<String, Value> =
             serde_json::from_str(&contents).expect("the file should be a JSON object");
 
-        // Eight tab options, five general ones and three theme names, and
+        // Seven tab options, five general ones and three theme names, and
         // nothing else: the 8KB key the file started with is gone. The font
         // family is not among them — an absent key is what "no preference"
         // is, so a save writes no `font_family` unless one was chosen.
-        assert_eq!(16, written.len());
+        assert_eq!(15, written.len());
         assert!(!contents.contains("padding"));
         assert_eq!(
             everything_flipped(),

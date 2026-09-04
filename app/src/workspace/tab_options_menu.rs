@@ -7,7 +7,8 @@
 //! Warp's; the two places Crook deliberately differs are marked where they
 //! happen.
 //!
-//! One menu serves both layouts. What differs is only which corner it hangs
+//! One menu, hung from the panel's gear. What used to differ between two
+//! layouts was only which corner it hangs
 //! off, and that is [`controls::gear_button`](super::controls)'s parameter
 //! rather than a second copy of this file: the strip's gear aligns the left
 //! edges and the panel's the right ones, because a 200px menu hung leftwards

@@ -180,8 +180,6 @@ pub enum Binding {
     MoveTabLeft,
     /// Move the active tab one place towards the end.
     MoveTabRight,
-    /// Move the tabs between the side panel and the header strip.
-    ToggleLayout,
     /// Open the settings page.
     OpenSettings,
     /// Make the terminal's text bigger.
@@ -285,7 +283,6 @@ pub fn binding(keystroke: &Keystroke, platform: Platform) -> Option<Binding> {
                 ("w", false, false, false) => Some(Binding::ClosePane),
                 ("d", false, false, false) => Some(Binding::SplitRight),
                 ("d", true, false, false) => Some(Binding::SplitDown),
-                ("b", false, false, false) => Some(Binding::ToggleLayout),
                 (",", false, false, false) => Some(Binding::OpenSettings),
                 // Not Cmd-Shift-arrow, which every macOS text field spends on
                 // selecting to the end of a line — the field needs it more
@@ -316,7 +313,6 @@ pub fn binding(keystroke: &Keystroke, platform: Platform) -> Option<Binding> {
                 // Not Ctrl-Shift-D with a Shift already spent: the split pair
                 // takes the two keys next to each other instead.
                 ("e", true) => Some(Binding::SplitDown),
-                ("b", true) => Some(Binding::ToggleLayout),
                 // Ctrl-comma without a Shift: the settings chord is the same
                 // on every platform, and unlike the tab bindings above it has
                 // no field gesture to stay out of the way of.
@@ -1190,7 +1186,6 @@ mod tests {
                 ("w", cmd()),
                 ("d", cmd()),
                 ("d", cmd_shift()),
-                ("b", cmd()),
                 (",", cmd()),
                 ("left", cmd_alt()),
                 ("right", cmd_alt()),
@@ -1214,7 +1209,6 @@ mod tests {
                 ("w", ctrl_shift()),
                 ("d", ctrl_shift()),
                 ("e", ctrl_shift()),
-                ("b", ctrl_shift()),
                 (",", ctrl()),
                 ("pageup", ctrl()),
                 ("pagedown", ctrl()),

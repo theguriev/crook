@@ -257,7 +257,6 @@ pub fn parse_action(name: &str) -> Option<Option<Bound>> {
         "next_tab" => Binding::NextTab,
         "move_tab_left" => Binding::MoveTabLeft,
         "move_tab_right" => Binding::MoveTabRight,
-        "toggle_layout" => Binding::ToggleLayout,
         "open_settings" => Binding::OpenSettings,
         "zoom_in" => Binding::ZoomIn,
         "zoom_out" => Binding::ZoomOut,
@@ -273,7 +272,7 @@ pub fn parse_action(name: &str) -> Option<Option<Bound>> {
 /// so a person reading one and writing the other is reading the same order
 /// twice. What a plugin registers is not here and could not be: it is known
 /// only once the plugins have built, and the page reads it from the host.
-pub const ACTION_NAMES: [&str; 14] = [
+pub const ACTION_NAMES: [&str; 13] = [
     "new_tab",
     "close_pane",
     "split_right",
@@ -282,7 +281,6 @@ pub const ACTION_NAMES: [&str; 14] = [
     "next_tab",
     "move_tab_left",
     "move_tab_right",
-    "toggle_layout",
     "open_settings",
     "zoom_in",
     "zoom_out",
