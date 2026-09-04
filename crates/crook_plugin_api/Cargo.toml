@@ -1,0 +1,23 @@
+[package]
+name = "crook_plugin_api"
+description = "What a sandboxed Crook plugin and its host say to each other."
+authors.workspace = true
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+license = "MIT"
+
+[dependencies]
+# Two, and both are the wire. `serde` derives the shapes and `postcard` is what
+# they cross the sandbox boundary as: a self-describing format would spend
+# bytes on field names on every frame, and JSON would spend them on quotes and
+# commas. Both are pure Rust with no C anywhere, which is the rule
+# `docs/architecture.md` states and the reason `wasmi` was chosen over
+# `wasmtime` in the first place.
+#
+# `default-features = false` on both, because this crate is also compiled into
+# every plugin: a guest is `no_std` and links no allocator it did not bring.
+postcard.workspace = true
+# Not through the workspace, which turns `std` on for everybody else: a guest
+# is `no_std` and this crate is compiled into every one of them.
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"] }

@@ -1,0 +1,19 @@
+[package]
+name = "crook_wasm"
+description = "The sandbox a store plugin runs in."
+authors.workspace = true
+edition.workspace = true
+version.workspace = true
+publish.workspace = true
+license = "MIT"
+
+[dependencies]
+crook_plugin_api.workspace = true
+log.workspace = true
+wasmi.workspace = true
+
+[dev-dependencies]
+# Tests are written in WebAssembly's text format and assembled here, so the
+# host is proven against real modules without a wasm toolchain being installed
+# to run `cargo test`. `wat` is pure Rust and comes with `wasmi` anyway.
+wat = "1"
