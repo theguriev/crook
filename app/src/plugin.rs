@@ -32,7 +32,7 @@ pub use crook_plugin::{
     Slots, Tier,
 };
 
-use crate::workspace::Workspace;
+use crate::workspace::{Fonts, Workspace};
 
 /// What a plugin contributes to a slot: something that can build an element
 /// out of the workspace, every frame.
@@ -58,6 +58,13 @@ pub type ActionHandler = Box<dyn Fn(&mut Workspace, &mut ViewContext<Workspace>)
 /// arrangement Cordis reaches for with a fibre state machine, and here it is
 /// a vector of [`Registration`]s being dropped.
 pub struct Host {
+    /// The families a plugin needs before there is a workspace to ask.
+    ///
+    /// A contribution is handed `&Workspace` and can ask it anything; a plugin
+    /// *building* an entity cannot, because the workspace does not exist until
+    /// every plugin has built. This is the short list of what has to arrive
+    /// the other way, and it is short on purpose.
+    fonts: Fonts,
     slots: Slots<UiContribution>,
     actions: Actions<ActionHandler>,
     /// Whose registrations are being made right now. Set around each plugin's
@@ -70,16 +77,11 @@ pub struct Host {
     refused: Vec<(PluginId, String)>,
 }
 
-impl Default for Host {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Host {
     /// A host with nothing registered.
-    pub fn new() -> Self {
+    pub fn new(fonts: Fonts) -> Self {
         Self {
+            fonts,
             slots: Slots::new(),
             actions: Actions::new(),
             building: None,
@@ -141,6 +143,12 @@ impl Host {
         self.kept.push((who, registration));
     }
 
+    /// The font families, for a plugin building something that draws text
+    /// before the workspace exists.
+    pub fn fonts(&self) -> Fonts {
+        self.fonts
+    }
+
     /// The slots, for the renderers that draw them.
     pub fn slots(&self) -> &Slots<UiContribution> {
         &self.slots
@@ -179,10 +187,10 @@ impl Host {
     }
 
     /// Builds one plugin, filing everything it registers under its own name.
-    fn build_one(&mut self, plugin: &mut dyn Plugin) {
+    fn build_one(&mut self, plugin: &mut dyn Plugin, ctx: &mut ViewContext<Workspace>) {
         let manifest = plugin.manifest();
         self.building = Some(manifest.id.clone());
-        let outcome = plugin.build(self);
+        let outcome = plugin.build(self, ctx);
         self.building = None;
 
         match outcome {
@@ -211,13 +219,24 @@ pub trait Plugin {
     /// What this plugin says about itself.
     fn manifest(&self) -> &'static Manifest;
 
-    /// Registers everything it contributes.
+    /// Registers everything it contributes, and builds whatever it owns.
     ///
-    /// Called once, before the first frame. Returning an error is how a plugin
-    /// declines to load — the host takes back whatever it registered first and
-    /// says so by name; it is never how a plugin reports something a person
-    /// should act on, which is what the log and the plugins page are for.
-    fn build(&mut self, host: &mut Host) -> Result<(), BuildError>;
+    /// Called once, from inside `Workspace::new` and therefore *before* there
+    /// is a workspace — which is why the context is the workspace's own rather
+    /// than something narrower: a plugin that owns a model or a view makes it
+    /// here, keeps the handle, and captures it in the contributions that draw
+    /// it. Nothing is reachable through `ctx` that the workspace itself could
+    /// be asked for, because there is not one yet.
+    ///
+    /// Returning an error is how a plugin declines to load — the host takes
+    /// back whatever it registered first and says so by name; it is never how
+    /// a plugin reports something a person should act on, which is what the log
+    /// and the plugins page are for.
+    fn build(
+        &mut self,
+        host: &mut Host,
+        ctx: &mut ViewContext<Workspace>,
+    ) -> Result<(), BuildError>;
 }
 
 #[cfg(test)]
@@ -231,11 +250,11 @@ mod tests;
 /// anything resolved at runtime: a dependency here is a `use`, and a plugin
 /// that will not compile is a build failure with a name on it rather than a
 /// window that comes up silently missing a feature.
-pub fn load(plugins: Vec<Box<dyn Plugin>>) -> Host {
-    let mut host = Host::new();
+pub fn load(plugins: Vec<Box<dyn Plugin>>, fonts: Fonts, ctx: &mut ViewContext<Workspace>) -> Host {
+    let mut host = Host::new(fonts);
     let mut plugins = plugins;
     for plugin in &mut plugins {
-        host.build_one(plugin.as_mut());
+        host.build_one(plugin.as_mut(), ctx);
     }
 
     for complaint in host.audit() {

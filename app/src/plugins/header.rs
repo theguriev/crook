@@ -13,9 +13,12 @@
 //! becomes a place nobody reads. When two plugins want it, the lowest `order`
 //! is drawn and the audit says so by name.
 
+use crookui_core::prelude::*;
+
 use crook_plugin::{Cardinality, Manifest, PluginId, SlotId, Tier};
 
 use crate::plugin::{BuildError, Host, Plugin};
+use crate::workspace::Workspace;
 
 /// The one item pinned to the right of the header.
 pub const HEADER_RIGHT: SlotId = SlotId::new("header.right");
@@ -28,7 +31,7 @@ impl Plugin for Header {
         manifest()
     }
 
-    fn build(&mut self, host: &mut Host) -> Result<(), BuildError> {
+    fn build(&mut self, host: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
         host.declare_slot(HEADER_RIGHT, Cardinality::Single);
         Ok(())
     }

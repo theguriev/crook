@@ -16,9 +16,9 @@
 //! views of their own, because a header that cannot hold state cannot drift
 //! out of sync with the strip it draws.
 //!
-//! The one exception is [`UsageChip`], which *is* a view. It has its own
-//! action type, and it observes the usage model itself so a reading that lands
-//! repaints a pill rather than the whole header.
+//! Views that belong to a feature rather than to the chrome do not live here
+//! at all any more: the usage chip is a view, and it is in `plugins::usage`
+//! beside the plugin that makes it.
 //!
 //! [`Workspace`]'s own action type is [`WorkspaceAction`], which carries the
 //! strip's vocabulary and the options menu's side by side. A view handles
@@ -43,7 +43,6 @@ mod text_field;
 mod theme_panel;
 mod theme_preview;
 mod title_bar;
-mod usage_chip;
 mod view;
 
 #[cfg(test)]
@@ -62,7 +61,6 @@ pub use pane_output::{Keys, Output};
 pub use settings_page::Section;
 pub use terminal_element::TerminalElement;
 pub(crate) use title_bar::caption_area;
-pub use usage_chip::{UsageChip, UsageChipAction};
 pub use view::{Fonts, QuitRequest, Workspace};
 
 /// The tallest a tab is allowed to get, however few of them there are.
