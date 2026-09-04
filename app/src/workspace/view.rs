@@ -3514,10 +3514,6 @@ impl View for Workspace {
         // window draws its traffic lights — and it is why `window_insets` has
         // a `panel_left` at all.
         //
-        // The Themes panel goes *between* the tabs and the work, which is
-        // where Warp puts its chooser: a docked sibling that pushes the
-        // terminal aside rather than a modal that covers it, so a theme is
-        // judged against a running shell.
         // What the sidebar holds and what the window holds are one answer,
         // asked once: a section builds both halves together, because its list
         // and its detail are two views of the same state. The tabs are the
@@ -3527,10 +3523,7 @@ impl View for Workspace {
                 .host
                 .build_sidebar_section(id, self, app)
                 .unwrap_or_else(|| (Empty::new().finish(), Empty::new().finish())),
-            None => (
-                tabs_panel::tab_list(self, app),
-                self.beside_panel(body::render(self, app), app),
-            ),
+            None => (tabs_panel::tab_list(self, app), body::render(self, app)),
         };
 
         let main = Flex::column()
@@ -3542,7 +3535,7 @@ impl View for Workspace {
         let content = Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_child(tabs_panel::render(self, sidebar))
+            .with_child(tabs_panel::render(self, self.or_theme_panel(sidebar, app)))
             .with_child(Expanded::new(1., main).finish())
             .finish();
 
@@ -3593,22 +3586,19 @@ const OVERLAY_ANCHOR: AnchorTo = AnchorTo {
 };
 
 impl Workspace {
-    /// `work` with the Themes panel beside it, when the panel is up.
+    /// The Themes panel in the sidebar's place, while it is up.
     ///
-    /// One place, called from the one point the whole window shares, so the panel
-    /// cannot end up on a different side of the window depending on where the
-    /// tabs are.
-    fn beside_panel(&self, work: Box<dyn Element>, app: &AppContext) -> Box<dyn Element> {
+    /// One place, called for whatever the section was going to put there —
+    /// which is what keeps the panel from being drawn in one section and
+    /// nowhere in the others. It was a column of its own beside the work once,
+    /// composed inside the tabs' branch of the render, and the bug that made
+    /// was exactly that: opening the chooser from the Appearance page set the
+    /// flag and drew nothing.
+    fn or_theme_panel(&self, sidebar: Box<dyn Element>, app: &AppContext) -> Box<dyn Element> {
         if !self.panel.open {
-            return work;
+            return sidebar;
         }
-
-        Flex::row()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_child(super::theme_panel::render(self, app))
-            .with_child(Expanded::new(1., work).finish())
-            .finish()
+        super::theme_panel::render(self, app)
     }
 }
 
