@@ -21,15 +21,15 @@ Seven features, and the page that configures them:
   They live in a panel down the left edge or in a strip across the header, and the gear menu
   says what a row of them shows.
 - **The window's own title bar.** There is no strip of system chrome above Crook. The window is
-  opened with the application's frame, so the header *is* the title bar and the window's
-  controls sit on Crook's own surface: dragging the header's empty space moves the window and a
-  double click maximises it. On macOS that surface carries AppKit's traffic lights — the bar is
-  made transparent and the content view reaches the top of the window, so the buttons stay
-  exactly where every Mac application has them, and the header reserves the 70px they occupy
-  and takes it back in fullscreen, where macOS moves them away. On Windows and Linux the window
-  has no frame at all, so Crook draws minimise, maximise and close itself, in that platform's
-  own shape, flush with the window's top-right corner, and finds its own resize edges.
-  **Those two halves have never been run** — see
+  opened with the application's frame, so the header *is* the title bar: dragging its empty
+  space moves the window and a double click maximises it. On macOS that surface carries
+  AppKit's traffic lights — the bar is made transparent and the content view reaches the top of
+  the window, so the buttons stay exactly where every Mac application has them, and the header
+  reserves the 70px they occupy and takes it back in fullscreen, where macOS moves them away.
+  Crook draws no caption buttons of its own anywhere: on Windows and Linux the window has no
+  frame at all, the header runs to both corners, and minimising, maximising and closing are the
+  desktop's own shortcuts and the window plugin's commands. Crook still finds its own resize
+  edges there. **That half has never been run** — see
   [`docs/architecture.md`](docs/architecture.md) §3 for exactly what was checked instead.
 - **A Claude Code usage chip** in the header, showing how much of the current session's token
   budget is spent and when it resets. It reads the session Claude Code already stores locally

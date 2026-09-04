@@ -303,10 +303,14 @@ them into the menu-bar overlay.
 **Windows and Linux have no frame at all.** `with_decorations(false)` is the whole of it, and
 everything the frame was doing becomes the application's:
 
-- **The controls.** `workspace/title_bar.rs` draws minimise, maximise-or-restore and close, in
-  the shape the platform draws them: 45×30 squares flush with the top-right corner on Windows,
-  30px circles inset by 8 on GNOME and KDE. The cluster is constrained to exactly the width
-  `platform_insets` reserved, and a test asserts that those two numbers are one number.
+- **The controls: there are none.** Crook drew minimise, maximise-or-restore and close for a
+  while — 45×30 squares on Windows, 30px circles on GNOME and KDE — and they are gone. A
+  frameless window with three buttons in its corner is a second title bar inside the one the
+  desktop already has a shortcut, a gesture and a window menu for, and on a tiling compositor
+  it is three controls that do nothing anyone wants. What is left is the window plugin's
+  `minimise`, `maximise` and `close-window` commands, bindable like any other, and the
+  desktop's own. `platform_insets` therefore reserves nothing at either end on these two
+  platforms, and the header runs to both corners of the window.
 - **Moving it.** `Window::drag_window`, from a press on the header's *empty space* — which is
   not a list of rectangles but whatever the row's own children did not claim, so adding a
   control to the header stops it being draggable there on the same frame.
@@ -318,27 +322,27 @@ everything the frame was doing becomes the application's:
   for it back with `with_undecorated_shadow(true)`. Without it there is no edge of any kind
   between Crook and a dark window behind it.
 
-**Two seams exist only because of this.** The resize border and the caption buttons want the
-same pixels: the border consumes a press before any element sees it, and the close button is in
-the corner a person throws the pointer at without aiming. So the windowing layer is told the box
-the application's own controls are in — `caption_area`, computed from the same metrics the
-buttons are drawn from — and `edge_at` answers "no edge" inside it. The cost is resizing from
-the top-right corner, which is what every client-decorated Windows application gives up. The
-second seam is a release that never arrives: a move or a resize runs inside the window manager's
-own loop, which swallows the button-up that ends it, so the windowing layer forgets every held
-button when a gesture starts — *after* dispatching to the application, because a window move is
-started by the header, inside that dispatch.
+**One seam exists only because of this**, and there used to be two. The one that is gone was the
+resize border against the caption buttons: the border consumes a press before any element sees
+it, and the close button sat in the corner a person throws the pointer at without aiming, so
+`edge_at` was told a box to answer "no edge" inside. With no buttons to protect, the corner is
+the `NorthEast` zone again and `edge_at` is eight zones and nothing else. The seam that remains
+is a release that never arrives: a move or a resize runs inside the window manager's own loop,
+which swallows the button-up that ends it, so the windowing layer forgets every held button when
+a gesture starts — *after* dispatching to the application, because a window move is started by
+the header, inside that dispatch.
 
 **What has never been run.** There is no Windows or Linux machine in this project's loop, so two
 thirds of the above has never opened a window: the borderless window itself, the resize edges,
-the shadow, and the caption buttons acting on a frame that is not macOS's. What was done instead
+the shadow, and the drag and double-click acting on a frame that is not macOS's. What was done
+instead
 is worth stating precisely, so it is not mistaken for more. `--controls macos|windows|linux`
-draws another platform's title bar on this one — the real element tree, real hit-testing, the
-real action path — so all three clusters were laid out, measured, hovered and clicked here;
-`cargo clippy --target x86_64-pc-windows-msvc` and `--target x86_64-unknown-linux-gnu` check
-that both compile and warn nowhere; and the geometry that needs no window — the eight resize
-zones, the corner the border keeps out of, the per-platform reservation — is unit-tested. The
-window those buttons acted on was still a macOS one.
+lays the header out for another platform's controls on this one — the real element tree, real
+hit-testing, the real action path — so every platform's reservation, and the corner that is now
+title bar on all three, was laid out and pressed here; `cargo clippy --target
+x86_64-pc-windows-msvc` and `--target x86_64-unknown-linux-gnu` check that both compile and warn
+nowhere; and the geometry that needs no window — the eight resize zones, the per-platform
+reservation — is unit-tested.
 
 **Two macOS behaviours worth knowing**, both found rather than written. AppKit keeps a drag band
 roughly 28 points tall at the top of a window with a transparent title bar: a *drag* there moves

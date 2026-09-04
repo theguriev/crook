@@ -49,14 +49,6 @@ pub struct WindowOptions {
     pub min_size: Vector2F,
     /// Who draws the title bar the window's controls sit in.
     pub chrome: WindowChrome,
-    /// The box the application draws the window's own controls in, anchored to
-    /// the top-right corner, in logical pixels — `None` where it draws none.
-    ///
-    /// Not something the window is opened with, but a fact about the
-    /// application that only the frame needs: the resize border stops at this
-    /// corner. It belongs beside [`WindowOptions::chrome`] because it is
-    /// decided by the same answer and never changes afterwards.
-    pub caption_buttons: Option<Vector2F>,
     /// Whether the window may be see-through where the scene is.
     pub transparent: bool,
 }
@@ -68,7 +60,6 @@ impl Default for WindowOptions {
             size: vec2f(1024., 640.),
             min_size: vec2f(480., 192.),
             chrome: WindowChrome::default(),
-            caption_buttons: None,
             transparent: true,
         }
     }
@@ -427,10 +418,9 @@ impl App {
         // one is not a window with edges at all.
         let resizable = !self.controls.is_maximized() && !self.controls.is_fullscreen();
         let size = self.with_window(|window| window.logical_size());
-        let caption = self.options.caption_buttons;
         let edge = |position| {
             resizable
-                .then(|| edge_at(position, size, RESIZE_GRAB, caption))
+                .then(|| edge_at(position, size, RESIZE_GRAB))
                 .flatten()
         };
 

@@ -57,7 +57,6 @@ pub use pane_output::{Keys, Output};
 pub(crate) use settings_page::widgets::Category;
 pub use terminal_element::TerminalElement;
 pub use text_field::TextField;
-pub(crate) use title_bar::caption_area;
 pub use view::{Fonts, Opening, QuitRequest, Workspace};
 
 /// The square reserved for a tab's close button, drawn or not.

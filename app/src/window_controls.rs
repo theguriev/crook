@@ -2,10 +2,10 @@
 //!
 //! Crook's header *is* the window's title bar
 //! ([`WINDOW_CHROME`](crate::WINDOW_CHROME)), which means the header has to do
-//! the things a title bar does: move the window when it is dragged, maximise
-//! it when it is double-clicked, and — on the platforms where a client-drawn
-//! title bar means a window with no frame at all — minimise and restore it
-//! from buttons Crook draws itself.
+//! the things a title bar does: move the window when it is dragged and
+//! maximise it when it is double-clicked. The window plugin's commands —
+//! minimise, maximise, close — come through the same seam, which is why there
+//! are more verbs here than the header itself uses.
 //!
 //! None of that can be a call into the windowing layer from the view, for the
 //! same reason [`QuitRequest`](crate::workspace::QuitRequest) is a callback:
@@ -19,19 +19,16 @@
 //! delivered as an event. A window's own state changes for reasons the
 //! application never hears about — the macOS green button, a tiling
 //! compositor, a keyboard shortcut belonging to the desktop — and an
-//! application that cached what it last set would draw a maximise button on a
-//! maximised window. What *is* pushed is the repaint: the shell compares this
-//! between frames and notifies the workspace when it moved, which is what gets
-//! the new answer onto the screen.
+//! application that cached what it last set would hold room for traffic lights
+//! that went into the menu bar an hour ago. What *is* pushed is the repaint:
+//! the shell compares this between frames and notifies the workspace when it
+//! moved, which is what gets the new answer onto the screen.
 
 use std::rc::Rc;
 
-/// What the window is doing that changes what the header must draw.
+/// What the window is doing that changes what the header must lay out.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct WindowState {
-    /// Whether the window fills the work area, so the maximise control is
-    /// really a restore control.
-    pub maximized: bool,
     /// Whether the window has taken over the screen.
     ///
     /// The one that reaches [`platform_insets`](crate::platform_insets):
@@ -62,8 +59,8 @@ pub type WindowHandle = Rc<dyn WindowControls>;
 ///
 /// What the headless paths hold: `--snapshot` renders the real view tree with
 /// no window behind it, and a test window has no frame to move. Every verb is
-/// a no-op and the state is the one a window that cannot be maximised is in,
-/// so the tree that renders is the tree a fresh window renders.
+/// a no-op and the state is the one a window on its own desktop is in, so the
+/// tree that renders is the tree a fresh window renders.
 pub struct Detached;
 
 impl WindowControls for Detached {
@@ -82,8 +79,8 @@ impl WindowControls for Detached {
 ///
 /// A test's window: `start_drag` cannot be observed by looking at a frame, so
 /// the only way to test that pressing the header's empty space drags the
-/// window — and that pressing a *control* in it does not — is to ask the
-/// window afterwards what it was told.
+/// window — and that pressing a control in it does not — is to ask the window
+/// afterwards what it was told.
 #[cfg(test)]
 #[derive(Default)]
 pub struct Recorder {

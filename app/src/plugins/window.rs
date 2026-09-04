@@ -79,8 +79,9 @@ impl Plugin for Window {
         }
 
         // The three that are not bindings, because a window is not a view and
-        // there is no chord for them: they are what the title bar's buttons
-        // send.
+        // there is no chord for them. Now that the title bar draws no buttons,
+        // these commands and the desktop's own shortcuts are the whole of how
+        // a window is minimised, maximised and closed by hand.
         for (name, title, action_value) in [
             ("minimise", "Minimise the window", WindowAction::Minimize),
             (
