@@ -608,6 +608,24 @@ fn keys(workspace: &Workspace) -> Box<dyn Element> {
                      brings this tab forward rather than closing it.",
                     ui,
                 ),
+                widgets::fact(
+                    "Keymap file",
+                    crate::keymap::user_keymap_path()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| {
+                            "nowhere — this machine has no configuration directory".to_owned()
+                        }),
+                    true,
+                    fonts,
+                ),
+                widgets::note(
+                    "A chord in that file wins over the one above it, and \"none\" takes a chord \
+                     away — which is how one is given back to a shell or an editor that wants \
+                     it. It is read when Crook starts. What a pane does with a key is not in it: \
+                     ctrl-c interrupts and ctrl-d ends an input, and a keymap that could take \
+                     one of those away would be one that breaks a terminal.",
+                    ui,
+                ),
                 widgets::note(
                     "The bindings are fixed. Warp has editable keymaps with context predicates; \
                      Crook reads input directly, and the keyboard produces exactly the values the \

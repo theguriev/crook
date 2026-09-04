@@ -49,6 +49,7 @@ pub mod editor;
 pub mod git;
 pub mod git_model;
 pub mod input_keys;
+pub mod keymap;
 pub mod pane_blocks;
 pub mod pane_input;
 pub mod pane_link;

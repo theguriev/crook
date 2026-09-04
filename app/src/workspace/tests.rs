@@ -813,13 +813,16 @@ impl Harness {
 
 /// How long a test waits for a shell to do as it was told.
 ///
-/// Generous, and it has to be. What is being waited for is a real shell
-/// starting, sourcing somebody's rc files and printing a prompt — on a machine
-/// running as many of these tests at once as it has cores, with a real process
-/// behind each. The number bounds a *failure*, never a pass: a test that is
-/// going to succeed does so in a second, and one that is going to fail is
-/// wrong however long it waits.
-const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+/// It bounds a *failure*, never a pass: a test that is going to succeed does so
+/// in a second. What makes it generous is that the thing being waited for is a
+/// real shell starting and sourcing somebody's rc files, on a machine running
+/// as many of these tests at once as it has cores.
+///
+/// The way to make a shell test reliable is not to raise this: it is to wait
+/// for the shell to say something *before* typing at it, so that starting up
+/// and doing as it was told are two waits rather than one. Every test here
+/// that types does that.
+const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// The modifier that means "this is an application command" on this platform.
 ///
@@ -5361,6 +5364,15 @@ mod shells {
         };
         assert_eq!(harness.pane_title(pane), "agent 1");
 
+        // Wait for the shell to *be there* before typing at it. Starting up and
+        // doing as it was told are then two waits of their own rather than one
+        // that has to cover both — which is the difference between a test that
+        // is reliable on a loaded machine and one that is not.
+        harness.frame();
+        harness.wait_for("the shell never printed anything", |harness| {
+            !harness.terminal_text(pane).trim().is_empty()
+        });
+
         harness.type_into(
             pane,
             "printf '\\033]0;deploy the release\\007\\033]7;file:///tmp\\007'\n",
@@ -5500,6 +5512,15 @@ mod shells {
         };
         harness.frame();
         assert_eq!(harness.field_text(pane), "");
+
+        // Wait for the shell to reach its own prompt before sending the end of
+        // input. A `^D` written into a pty the shell has not started reading
+        // yet is read during its startup, where it is not an end of file at
+        // all — which is the difference between this test passing and hanging
+        // for its whole budget.
+        harness.wait_for("the shell never printed anything", |harness| {
+            !harness.terminal_text(pane).trim().is_empty()
+        });
 
         harness.press("d", ctrl(), "d");
         harness.wait_for("the shell never read an end of file", |harness| {

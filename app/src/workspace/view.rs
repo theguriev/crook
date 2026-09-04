@@ -27,6 +27,7 @@ use crate::editor::Selection;
 use crate::git::GitFacts;
 use crate::git_model::GitModel;
 use crate::input_keys::{self, Binding, Platform};
+use crate::keymap::Keymap;
 use crate::pane_blocks::PaneBlocks;
 use crate::pane_input::{CARET_PHASE, PaneInput};
 use crate::pane_link::PaneLink;
@@ -300,6 +301,13 @@ pub struct Workspace {
     /// therefore no frame.
     window_size: Rc<std::cell::Cell<Vector2F>>,
 
+    /// The bindings a person wrote down, consulted before Crook's own.
+    ///
+    /// Read once, at startup, like the theme and the font family: a keymap
+    /// re-read mid-session would change what a key does between the press and
+    /// the release. See [`crate::keymap`].
+    keymap: Keymap,
+
     /// Whether the desktop is set to dark, as of the last thing the window
     /// said about it.
     ///
@@ -429,6 +437,7 @@ impl Workspace {
         });
 
         let options = settings.tab_options();
+        let settings_path = settings.path().map(Path::to_owned);
         let mut workspace = Self {
             tabs: TabStrip::new(),
             fonts,
@@ -441,6 +450,16 @@ impl Workspace {
             clipboard: Clipboard::new(),
             divider_drag: DividerDrag::new(),
             session_generation: Arc::new(AtomicU64::new(0)),
+            // Blocking, and deliberately: one small file, read once, on the
+            // same startup path the settings are read on. A run with no
+            // settings file to write is an ephemeral one — a test, the
+            // headless snapshot — and must not read the keymap of whoever is
+            // running it either.
+            keymap: if settings_path.is_some() {
+                Keymap::for_user()
+            } else {
+                Keymap::new()
+            },
             window_size: Rc::new(std::cell::Cell::new(Vector2F::zero())),
             system_is_dark: true,
             interactions: HashMap::new(),
@@ -1573,7 +1592,17 @@ impl Workspace {
             return Some(action);
         }
 
-        let tab = match input_keys::binding(keystroke, Platform::current())? {
+        // The person's own table first, and only where it has something to
+        // say: a chord it does not mention keeps Crook's binding, and one it
+        // binds to nothing has none at all — which is how a chord is given
+        // back to a shell or an editor that wants it. Nothing here reaches
+        // what a *pane* does with a key; see `crate::keymap`.
+        let bound = match self.keymap.binding(keystroke) {
+            Some(binding) => binding?,
+            None => input_keys::binding(keystroke, Platform::current())?,
+        };
+
+        let tab = match bound {
             Binding::NewTab => TabAction::New,
             // Warp's `pane_group:close_current_session`: the pane goes, and
             // the tab only goes with it when it was the tab's last one.
