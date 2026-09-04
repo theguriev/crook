@@ -1,7 +1,7 @@
 //! Everything Crook remembers between launches, and the file it remembers it
 //! in.
 //!
-//! Two groups. [`TabOptions`] is what the tab strip's gear menu writes — what
+//! Two groups. [`TabOptions`] is what the tab list's options menu writes — what
 //! a row stands for, how tall it is, what its title says, what its second line
 //! says, which chips it carries, and whether hovering it opens a detail card.
 //! Its defaults are Warp's, value for value, because the menu is Warp's: a
@@ -10,7 +10,7 @@
 //! has had its say, and today that is one switch.
 //!
 //! Both are written by the settings page, and [`TabOptions`] is also written
-//! by the gear menu. Neither knows which of the two changed it: a settings
+//! by that menu. Neither knows which of the two changed it: a settings
 //! page that had its own copy of an option would be a second source of truth
 //! for the same key, and the menu and the page would disagree about what the
 //! file says the moment both were open.

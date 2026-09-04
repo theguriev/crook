@@ -505,7 +505,7 @@ What this replaces is worth naming, because it is the argument for having done i
 Before this, a gear was `⚙` and a close button `×` — codepoints, drawn out of whatever font
 the machine happened to have, which is a flat gear on one machine and a colour emoji on the
 next. Everything a font would not draw was built out of `Container`s: the two density marks
-in the gear menu were seven rectangles, and the git branch beside a tab title was three.
+in the tab options menu were seven rectangles, and the git branch beside a tab title was three.
 
 ### The second text field
 

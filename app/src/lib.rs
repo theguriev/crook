@@ -1676,7 +1676,7 @@ struct Shell {
 ///
 /// The whole of the seam: four verbs forwarded to the windowing layer, which
 /// is the only crate in the workspace that knows what a window is. Everything
-/// above it — the header, the panel's control bar, the window plugin's
+/// above it — the header, the panel's title strip, the window plugin's
 /// commands — is written against [`window_controls::WindowControls`] and runs
 /// unchanged with nothing behind it.
 struct RealWindow(PlatformWindow);

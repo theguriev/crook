@@ -1,147 +1,159 @@
-//! The two buttons the panel's control bar carries: the gear, and the `+`.
+//! What the space under the tab list carries: the `+`, and the ground its
+//! options menu opens from.
 //!
-//! Warp renders these twice, once in the header toolbar and once in the
-//! vertical panel's control bar, and the two copies have drifted — the panel's
-//! gear grew an entrypoint parameter the header's never got. Here there is one
-//! of each, in one place, because there is one place tabs live.
+//! Warp's browser ends a list of tabs with the affordance that lengthens it,
+//! and Chrome puts the same button immediately after its last tab. So does
+//! this: a band directly under the last row, the width of a row and lit like
+//! one, with the `+` centred in it. The mark is not the button — a 28px square
+//! is a smaller target than the one in the bar this replaced, and it reads as
+//! a label rather than as something to press — but the band is a band and not
+//! the whole column. The room below it is room, and a button that filled it
+//! would be a three-hundred-pixel target for a thing the list does once.
 //!
-//! The gear sits near the right edge of a 248px column and the menu it opens
-//! is 200 wide, so the menu hangs from the gear's *right* edge: aligned left
-//! it would open across the body, and `keep_on_screen` would not pull it back
-//! because the window has plenty of room to its right.
+//! The gear that used to sit beside the `+` is gone entirely. "View options"
+//! is a menu about the list, so what opens it is a secondary press on this
+//! space — the gesture every desktop already spends on a menu about the thing
+//! under the pointer, and the one this panel was already using for a row's own
+//! menu one layer down. The band answers it too, so the gesture does not have
+//! a hole in the middle of the space it belongs to.
+//!
+//! The menu is 200 wide in a 248px column, so it hangs from the list's *right*
+//! edge: aligned left it would open across the body, and `keep_on_screen`
+//! would not pull it back because the window has plenty of room to its right.
 
-use crookui_core::elements::Padding;
-use crookui_core::fonts::FamilyId;
 use crookui_core::prelude::*;
 
 use crate::tab::TabAction;
 use crate::theme::theme;
 
-use super::GEAR_ICON;
 use super::action::{OptionsAction, WorkspaceAction};
 use super::tab_options_menu;
 use super::view::Workspace;
 
-/// What the gear says it does, while the pointer is on it and the menu is not
-/// up.
-pub(super) const GEAR_TOOLTIP: &str = "View options";
-
-/// The gear itself, inside that slot. Lucide's own 24-unit box scaled to
-/// fourteen, which is the size Warp draws its toolbar icons at.
-const GEAR_ICON_SIZE: f32 = 14.;
-
-/// The gear's hit box: a 16px icon slot with 2px of padding all round.
-const GEAR_BUTTON_SIZE: f32 = 20.;
-
-/// The tooltip's width, fixed so the centring offset below can be a constant.
+/// The `+` itself. Lucide's own 24-unit box scaled to sixteen, which is the
+/// size the panel draws a group's chevron at.
 ///
-/// Wide enough for [`GEAR_TOOLTIP`] at 11px plus its 16px of padding, with
-/// room for an interface font wider than the average; the label is centred
-/// inside it, so slack shows as symmetric margin rather than as a gap on one
-/// side.
-const GEAR_TOOLTIP_WIDTH: f32 = 88.;
+/// Fourteen while it was a toolbar icon beside a gear; it is the only mark in
+/// the space under the list now, and a toolbar's size in the middle of an
+/// empty band reads as something left behind rather than as something to
+/// press.
+const PLUS_ICON_SIZE: f32 = 16.;
 
-/// The square both buttons occupy, so a control bar is the same height
-/// whichever of them is in it.
-pub(super) const BUTTON_SIZE: f32 = 24.;
-
-/// The gear, and the menu it opens under it.
+/// How far the lit band is held off the edges it would otherwise run into:
+/// the last row above it and the panel's own sides.
 ///
-/// The [`Stack`] goes here, around the button, rather than at the root: the
-/// menu is anchored to the gear's painted box, and a stack wrapping the whole
-/// window would have nothing to anchor to. The stack is painted before the menu
-/// in the same frame, so the anchor is this frame's rect and the menu never
-/// lags a frame behind the button.
-pub(super) fn gear_button(workspace: &Workspace) -> Box<dyn Element> {
-    // Right edges aligned. See this module's own doc.
-    let menu_anchor = AnchorTo {
-        parent: Corner::BottomRight,
-        child: Corner::TopRight,
-        offset: vec2f(0., 4.),
-        keep_on_screen: true,
-        keep_clear_of_parent: false,
-    };
-    let ui = workspace.fonts().ui;
-    let is_open = workspace.is_options_menu_open();
+/// [`GROUP_HORIZONTAL_PADDING`](super::tabs_panel), which is the inset a row
+/// takes, so the two line up down both edges — the band under the list is
+/// still part of the list.
+const PLUS_INSET: f32 = 8.;
 
-    let gear_state = workspace.menu().gear.clone();
-    if is_open {
-        // The modal underlay covers the gear while the menu is up, so its
-        // `Hoverable` never sees the pointer leave. Without this the frame
-        // after the menu is dismissed draws a tooltip for a gear the pointer
-        // walked away from several clicks ago.
-        gear_state.lock().reset_interaction_state();
-    }
+/// How deep that band is.
+///
+/// Deep enough to read as a place to press rather than as a line under the
+/// last tab, and no deeper: it is taken off the scroll viewport, so every
+/// pixel here is a row a person with a full list has to scroll for. Forty is
+/// what leaves the eight rows the panel held when a control bar sat over it
+/// instead — see [`tab_list`](super::tabs_panel::tab_list).
+pub(super) const NEW_TAB_HEIGHT: f32 = 40.;
 
-    let gear = Hoverable::new(gear_state, move |state| {
-        // Three states, and the open one is not reachable through this
-        // handler: while the menu is up, the modal underlay covers the gear, so
-        // its `Hoverable` never fires and a second click closes the menu
-        // through the dismiss path instead of toggling it twice.
-        let (glyph, background) = if is_open {
-            (theme().text_primary, theme().overlay_3)
-        } else if state.is_hovered() {
-            (theme().text_muted, theme().overlay_2)
-        } else {
-            (theme().text_muted, Color::TRANSPARENT)
-        };
+/// The corner radius of that ground.
+///
+/// Five rather than the rows' four, which is the radius the `+` has had since
+/// it was in the control bar. It is also what tells the two apart in the
+/// scene: every other rounded box in this panel is a row, a card or a close
+/// button at four.
+const PLUS_RADIUS: f32 = 5.;
 
-        let button = Container::new(
-            ConstrainedBox::new(
-                Align::new(
-                    Icon::new(GEAR_ICON, GEAR_ICON_SIZE)
-                        .with_color(glyph)
-                        .finish(),
-                )
-                .finish(),
+/// The band under the last row, and the `+` centred in it.
+///
+/// The whole band lights up and the whole band answers the press. It is as
+/// wide as a row because it is the end of the list, and the [`Align`] inside
+/// it is what makes that true of the lit ground rather than only of the hit
+/// box: `Align` returns `constraint.max` on a finite axis, so the container
+/// around it measures the band rather than the glyph.
+pub(super) fn new_tab_area(workspace: &Workspace) -> Box<dyn Element> {
+    let band = Hoverable::new(workspace.new_tab_state(), move |state| {
+        let hovered = state.is_hovered();
+        Container::new(
+            Align::new(
+                Icon::new(Lucide::Plus, PLUS_ICON_SIZE)
+                    .with_color(if hovered {
+                        theme().text_primary
+                    } else {
+                        theme().text_muted
+                    })
+                    .finish(),
             )
-            .with_width(16.)
-            .with_height(16.)
             .finish(),
         )
-        .with_uniform_padding(2.)
-        .with_background_color(background)
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
-        .finish();
-
-        // The tooltip belongs to the closed-and-hovered state only. Warp
-        // suppresses it with the same `is_hovered() && !is_popup_open`, and it
-        // has to be suppressed rather than merely unreachable: the gear is the
-        // one thing the popup hangs off, so a tooltip left up would sit
-        // between the button and its own menu.
-        if !state.is_hovered() || is_open {
-            return button;
-        }
-
-        let mut stack = Stack::new().with_child(button);
-        stack.add_anchored_overlay_child(
-            gear_tooltip(ui),
-            AnchorTo {
-                // Warp's `ParentAnchor::BottomMiddle` →
-                // `ChildAnchor::TopMiddle`, 4px below. [`Corner`] has only the
-                // four corners, so the centring is the offset's job, which is
-                // exact because both widths are constants.
-                parent: Corner::BottomLeft,
-                child: Corner::TopLeft,
-                offset: vec2f(-(GEAR_TOOLTIP_WIDTH - GEAR_BUTTON_SIZE) / 2., 4.),
-                keep_on_screen: true,
-                keep_clear_of_parent: false,
-            },
-        );
-        stack.finish()
+        // The row's own hover colour. The `+` used to light up in
+        // `tab_active`, which nothing else in this panel uses and which said
+        // "this is the tab you are in" about a control that is not a tab.
+        .with_background_color(if hovered {
+            theme().overlay_1
+        } else {
+            Color::TRANSPARENT
+        })
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(PLUS_RADIUS)))
+        // A margin rather than the parent's padding: the inset is where the
+        // band stops being *painted*, not where it stops answering. The press
+        // still lands out to the panel's own edge.
+        .with_uniform_margin(PLUS_INSET)
+        .finish()
     })
-    .on_click(|_, ctx, _| {
+    .on_click(|_, ctx, _| ctx.dispatch_typed_action(WorkspaceAction::Tab(TabAction::New)))
+    // The band paints over the ground, so without this the one strip of the
+    // space under the list that opens no menu would be the strip in the middle
+    // of it. Same action, because it is the same gesture on the same space.
+    .on_right_click(|_, ctx, _| {
         ctx.dispatch_typed_action(WorkspaceAction::Options(OptionsAction::TogglePopup));
     })
     .finish();
 
-    let mut stack = Stack::new().with_child(gear);
-    if is_open {
+    ConstrainedBox::new(band)
+        .with_height(NEW_TAB_HEIGHT)
+        .finish()
+}
+
+/// `list` over the ground its secondary press opens the options menu from.
+///
+/// The ground is a sibling *under* the list, not a wrapper around it, and that
+/// is the whole of why this works. A [`Hoverable`] hands an event to its child
+/// and then claims it anyway — the panel says so twice already, where a
+/// container around a tab's rows deliberately carries no click handler — so
+/// one wrapping the list would fire in addition to a row's own press and open
+/// two menus at once. A sibling underneath is asked only for what the list did
+/// not want: [`Stack`] walks its children topmost first and stops at the one
+/// that claims the event, and the ground is covered by every rect a row
+/// painted, so it never answers for a pixel a row is on.
+///
+/// The menu hangs from this box's top-right corner rather than from the `+`,
+/// and the corner is the reason: the `+` moves down the column as tabs are
+/// opened, so a menu hung from it would open somewhere different every time.
+/// This box is the list area, which does not move — and its right edge is
+/// where a 200px menu has to start if it is to stay inside a 248px column, per
+/// this module's own doc. [`AnchorTo`] cannot follow a pointer, so a corner
+/// that holds still is the nearest thing to a menu appearing where it was
+/// asked for.
+pub(super) fn options_ground(workspace: &Workspace, list: Box<dyn Element>) -> Box<dyn Element> {
+    let mut stack = Stack::new()
+        .with_child(
+            Hoverable::new(workspace.panel_ground_state(), |_| Empty::new().finish())
+                .on_right_click(|_, ctx, _| {
+                    ctx.dispatch_typed_action(WorkspaceAction::Options(OptionsAction::TogglePopup));
+                })
+                .finish(),
+        )
+        .with_child(list);
+
+    if workspace.is_options_menu_open() {
         stack.add_anchored_overlay_child(
             Dismiss::new(tab_options_menu::render(workspace))
                 // The rest of the window is inert while the menu is up, which
-                // is what makes re-clicking the gear one toggle rather than
-                // two, and what stops a tab under the menu from hovering.
+                // is what makes a second press on the space under the list one
+                // toggle rather than two — `Dismiss` treats the secondary
+                // button as a dismissal for exactly this case — and what stops
+                // a tab under the menu from hovering.
                 .modal()
                 .on_dismiss(|ctx, _| {
                     // The element only reports; taking the menu down is this
@@ -150,83 +162,15 @@ pub(super) fn gear_button(workspace: &Workspace) -> Box<dyn Element> {
                     ctx.dispatch_typed_action(WorkspaceAction::Options(OptionsAction::TogglePopup));
                 })
                 .finish(),
-            menu_anchor,
+            AnchorTo {
+                parent: Corner::TopRight,
+                child: Corner::TopRight,
+                offset: Vector2F::zero(),
+                keep_on_screen: true,
+                keep_clear_of_parent: false,
+            },
         );
     }
 
-    ConstrainedBox::new(Align::new(stack.finish()).finish())
-        .with_width(BUTTON_SIZE)
-        .with_height(BUTTON_SIZE)
-        .finish()
-}
-
-/// The little panel that names the gear.
-///
-/// The label is centred with a [`Flex`] rather than with an [`Align`], and
-/// that is not a style choice. An anchored overlay child is laid out against
-/// the whole window, and `Align` returns `constraint.max` on every finite
-/// axis — so an `Align` here measured 88 by the window's full height and
-/// painted an 88px bar from the top of the window to the bottom, straight down
-/// the tab list, with the label stranded in the middle of it. A row flex takes
-/// the width it is given and hugs its child's height, which is the only half
-/// of `Align` this wanted.
-fn gear_tooltip(ui: FamilyId) -> Box<dyn Element> {
-    ConstrainedBox::new(
-        Container::new(
-            Flex::row()
-                .with_main_axis_size(MainAxisSize::Max)
-                .with_main_axis_alignment(MainAxisAlignment::Center)
-                .with_child(
-                    Text::new(GEAR_TOOLTIP, ui, 11.)
-                        .with_color(theme().text_primary)
-                        .finish(),
-                )
-                .finish(),
-        )
-        .with_background_color(theme().surface_raised)
-        .with_border(Border::all(1.).with_border_color(theme().overlay_2))
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
-        .with_padding(Padding {
-            top: 4.,
-            left: 8.,
-            bottom: 5.,
-            right: 8.,
-        })
-        .finish(),
-    )
-    .with_width(GEAR_TOOLTIP_WIDTH)
-    .finish()
-}
-
-/// The button that opens another tab.
-pub(super) fn new_tab_button(workspace: &Workspace) -> Box<dyn Element> {
-    ConstrainedBox::new(
-        Hoverable::new(workspace.new_tab_state(), move |state| {
-            let hovered = state.is_hovered();
-            Container::new(
-                Align::new(
-                    Icon::new(Lucide::Plus, GEAR_ICON_SIZE)
-                        .with_color(if hovered {
-                            theme().text_primary
-                        } else {
-                            theme().text_muted
-                        })
-                        .finish(),
-                )
-                .finish(),
-            )
-            .with_background_color(if hovered {
-                theme().tab_active
-            } else {
-                Color::TRANSPARENT
-            })
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(5.)))
-            .finish()
-        })
-        .on_click(|_, ctx, _| ctx.dispatch_typed_action(WorkspaceAction::Tab(TabAction::New)))
-        .finish(),
-    )
-    .with_width(BUTTON_SIZE)
-    .with_height(BUTTON_SIZE)
-    .finish()
+    stack.finish()
 }

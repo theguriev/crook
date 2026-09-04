@@ -244,11 +244,11 @@ pub enum ThemeAction {
 /// What the settings page does that is not writing an option.
 ///
 /// The split is deliberate and it is the page's whole design: every control
-/// that changes a tab option dispatches the [`OptionsAction`] the gear menu
-/// already dispatches, so the two surfaces cannot drift apart. What is left is
-/// this — and none of it is "open" or "close": the settings are a section of
-/// the sidebar, so showing them is [`WorkspaceAction::ShowSection`] and
-/// leaving them is showing another one.
+/// that changes a tab option dispatches the [`OptionsAction`] the tab options
+/// menu already dispatches, so the two surfaces cannot drift apart. What is
+/// left is this — and none of it is "open" or "close": the settings are a
+/// section of the sidebar, so showing them is [`WorkspaceAction::ShowSection`]
+/// and leaving them is showing another one.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum SettingsAction {
     /// Show a different page of the settings in the section already holding
@@ -290,8 +290,9 @@ pub enum SettingsAction {
 /// because each closes over a different enum.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum OptionsAction {
-    /// Open the menu, or close it. The gear button and the dismiss underlay
-    /// both send this, and only one of them can be reached at a time.
+    /// Open the menu, or close it. A secondary press on the empty space around
+    /// the tab list sends this, and so does the dismiss underlay; only one of
+    /// the two can be reached at a time.
     TogglePopup,
     /// "View as".
     SetGranularity(Granularity),

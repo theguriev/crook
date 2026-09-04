@@ -23,7 +23,7 @@ use crate::workspace::{Workspace, settings_page};
 /// The key the Settings section answers to.
 ///
 /// Named here rather than resolved by title, because the window itself has to
-/// be able to show it — `--settings` asks for it, and so does the gear menu's
+/// be able to show it — `--settings` asks for it, and so does the options menu's
 /// last entry.
 pub const SETTINGS_SECTION: &str = "crook/settings/section";
 

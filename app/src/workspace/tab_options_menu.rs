@@ -2,19 +2,16 @@
 //!
 //! Five sections in Warp's order — View as, Density, Pane title as, the
 //! Show/Additional-metadata pair, and Show details on hover — inside a 200px
-//! column that hangs four pixels below the gear button. Every number in here is
-//! Warp's (`app/src/workspace/view/vertical_tabs.rs:5733`), because the menu is
+//! column. Every number in here is Warp's
+//! (`app/src/workspace/view/vertical_tabs.rs:5733`), because the menu is
 //! Warp's; the two places Crook deliberately differs are marked where they
 //! happen.
 //!
-//! One menu, hung from the panel's gear. What used to differ between two
-//! layouts was only which corner it hangs
-//! off, and that is [`controls::gear_button`](super::controls)'s parameter
-//! rather than a second copy of this file: the strip's gear aligns the left
-//! edges and the panel's the right ones, because a 200px menu hung leftwards
-//! off a 248px column opens across the body. Warp has two of these functions
-//! and they have drifted; there is nothing in the popup itself that knows
-//! where it is.
+//! One menu, and it knows nothing about where it opens. Warp hangs it off a
+//! gear and has two copies of this function for the two layouts that gear can
+//! be in, which have drifted; Crook has no gear at all — the menu is about the
+//! list, so the list's own secondary press opens it, and the corner it hangs
+//! from is [`controls::options_ground`](super::controls)'s to choose.
 //!
 //! # Three rules the popup only half-works without
 //!
@@ -33,10 +30,11 @@
 //! preferences panel: change the title field, turn two chips off, and only then
 //! click away.
 //!
-//! **Re-clicking the gear closes it once.** The gear is under the modal
-//! underlay, so its own click handler never fires; the press goes through the
-//! dismiss path instead. Letting the button fire while the popup is open would
-//! toggle twice in one click and leave the menu looking frozen open.
+//! **Pressing the ground again closes it once.** The ground is under the modal
+//! underlay, so its own handler never fires; the press goes through the dismiss
+//! path instead, which takes the secondary button as well as the primary one
+//! for exactly this gesture. Letting the ground fire while the popup is open
+//! would toggle twice in one press and leave the menu looking frozen open.
 //!
 //! Escape does not close it. Warp has no keydown handler anywhere in this path,
 //! and this is a port of Warp's semantics rather than an improvement on them —
