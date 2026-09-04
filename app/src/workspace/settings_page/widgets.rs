@@ -35,7 +35,7 @@
 //! unusable, and a settings page that silently omitted the switch you came
 //! looking for would send you to the file.
 
-use crookui_core::elements::{MouseStateHandle, Padding};
+use crookui_core::elements::{MouseStateHandle, Padding, Paragraph};
 use crookui_core::fonts::{FamilyId, Properties, Weight};
 use crookui_core::prelude::*;
 
@@ -43,7 +43,6 @@ use super::search::{Query, Words};
 use crate::theme::theme;
 
 use super::super::action::WorkspaceAction;
-use super::super::wrap;
 
 /// The size a page's own title is set in.
 ///
@@ -715,57 +714,25 @@ pub(crate) fn fact(
     }
 }
 
-/// How many characters of a note go on one line.
-///
-/// [`Text`] never wraps — it is built for a tab title, not a paragraph — so a
-/// note is a column of lines rather than a paragraph, and the budget is
-/// counted in characters because measuring needs the shaper and this runs
-/// while the element tree is being built. Against the content column's ~500
-/// pixels at 11px, where a character of the interface font averages a little
-/// over half its size, eighty leaves room for a font that runs wider.
-const NOTE_LINE_CHARS: usize = 80;
-
 /// A paragraph of explanation that belongs to a page rather than to a row.
 ///
 /// Unsearchable, deliberately: a note explains the rows around it, so it goes
 /// wherever its category goes and is left out the moment something is being
-/// searched for. [`found_by`] is the version for a paragraph that is itself an
-/// answer.
+/// searched for.
 pub(crate) fn note(text: &str, ui: FamilyId) -> Entry {
     Entry::unsearchable(paragraph(text, ui))
 }
 
-/// The same paragraph, but something a query can find.
-///
-/// For a line that *is* the information — a complaint from the plugin audit,
-/// which is a thing somebody goes looking for rather than an explanation of
-/// the row beside it.
-pub(crate) fn found_by(words: Words, text: &str, ui: FamilyId) -> Entry {
-    Entry {
-        words: Some(words),
-        value: None,
-        element: paragraph(text, ui),
-    }
-}
-
 /// The wrapped, muted lines both of the above are made of.
 fn paragraph(text: &str, ui: FamilyId) -> Box<dyn Element> {
-    let mut column = Flex::column()
-        .with_main_axis_size(MainAxisSize::Min)
-        .with_cross_axis_alignment(CrossAxisAlignment::Start);
-
-    for line in wrap(text, NOTE_LINE_CHARS) {
-        column.add_child(
-            Text::new(line, ui, DESCRIPTION_SIZE)
-                .with_color(theme().text_muted)
-                .with_line_height_ratio(1.45)
-                .finish(),
-        );
-    }
-
-    Container::new(column.finish())
-        .with_margin_bottom(10.)
-        .finish()
+    Container::new(
+        Paragraph::new(text.to_owned(), ui, DESCRIPTION_SIZE)
+            .with_color(theme().text_muted)
+            .with_line_height_ratio(1.45)
+            .finish(),
+    )
+    .with_margin_bottom(10.)
+    .finish()
 }
 
 /// Attaches the click handler, or does not.

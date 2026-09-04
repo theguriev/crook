@@ -51,6 +51,7 @@ use crate::input_keys::{self, Intent, Platform};
 use crate::text_input::TextInput;
 use crate::theme::theme;
 
+use super::action::WorkspaceAction;
 use super::view::Fonts;
 
 /// The field's height, which is the rail's row height plus its padding.
@@ -81,6 +82,14 @@ pub struct TextField {
     /// is with a magnifier; a field whose label is written above it says it
     /// with the label.
     icon: Option<Lucide>,
+    /// What to dispatch when the field is pressed.
+    ///
+    /// The whole of this field's part in deciding who has the keyboard, and it
+    /// is deliberately this small: the field says *it was clicked*, and
+    /// whatever holds the fields decides what that means. A field that set
+    /// `has_keys` on itself would be a field that could not take the keyboard
+    /// away from the one that had it.
+    focus: Option<WorkspaceAction>,
     /// The shaped text, kept from layout for paint and for hit testing.
     line: Option<Line>,
     /// Whether `line` is the placeholder rather than what was typed.
@@ -105,6 +114,7 @@ impl TextField {
             hover,
             placeholder,
             icon: None,
+            focus: None,
             line: None,
             showing_placeholder: false,
             size: None,
@@ -115,6 +125,16 @@ impl TextField {
     /// Puts a mark at the field's left edge.
     pub fn with_icon(mut self, icon: Lucide) -> Self {
         self.icon = Some(icon);
+        self
+    }
+
+    /// What to dispatch when it is pressed.
+    ///
+    /// For a surface with more than one field on it, where a press has to move
+    /// the keyboard. A field with none is a field that is either the only one
+    /// or has the keyboard by some other rule.
+    pub fn with_focus(mut self, action: WorkspaceAction) -> Self {
+        self.focus = Some(action);
         self
     }
 
@@ -340,6 +360,11 @@ impl Element for TextField {
                 click_count,
                 ..
             } if bounds.contains_point(*position) => {
+                // Before the caret moves, because taking the keyboard is what
+                // makes the caret worth moving.
+                if let Some(action) = self.focus {
+                    ctx.dispatch_typed_action(action);
+                }
                 let offset = self.offset_at(position.x() - self.text_origin(bounds.origin()).x());
                 self.input.press(offset, *click_count);
                 ctx.notify();

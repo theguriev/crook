@@ -7,6 +7,7 @@
 //! the bar out from under the cursor.
 
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::fs;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
@@ -598,6 +599,46 @@ impl Harness {
             .read(&self.app, |workspace, app| workspace.shell_login(app))
     }
 
+    /// Presses the Plugins page's own search field.
+    fn click_plugins_search(&mut self) {
+        let boxes = settings_field_boxes(&self.frame());
+        assert_eq!(boxes.len(), 2, "two fields on the Plugins page");
+        self.click(center(boxes[1]), MouseButton::Left);
+        self.frame();
+    }
+
+    /// Presses the rail's search field.
+    fn click_rail_search(&mut self) {
+        let boxes = settings_field_boxes(&self.frame());
+        self.click(center(boxes[0]), MouseButton::Left);
+        self.frame();
+    }
+
+    /// Clicks the row for the plugin called `name` in the Plugins page's list.
+    ///
+    /// By the text on the row, found where it was drawn: the list is filtered
+    /// and reordered by what is registered, so its rows have no fixed places.
+    fn click_plugin(&mut self, name: &str) {
+        let scene = self.frame();
+        // The column the list is in, taken from its own field: the card is to
+        // the right of it and shares baselines with it, so a line built from
+        // both columns is a line neither of them drew.
+        let column = settings_field_boxes(&scene)
+            .into_iter()
+            .nth(1)
+            .expect("the Plugins page has a field of its own");
+
+        let row = text_lines(&scene, |at| {
+            at.x() >= column.min_x() && at.x() <= column.max_x()
+        })
+        .into_iter()
+        .find(|(_, line)| line.trim() == name)
+        .unwrap_or_else(|| panic!("no row in the plugin list says {name:?}"));
+
+        self.click(row.0 + vec2f(4., 4.), MouseButton::Left);
+        self.frame();
+    }
+
     /// Whether somebody clicked the chip and is still waiting.
     fn usage_is_busy_for_user(&self) -> bool {
         self.workspace.read(&self.app, |workspace, ctx| {
@@ -1145,6 +1186,47 @@ fn strip_text(scene: &Scene) -> String {
         .map(|tab| tab.max_y())
         .fold(0., f32::max);
     text_where(scene, |position| position.y() <= bottom)
+}
+
+/// The frame's text, one line at a time, with where each line was drawn.
+///
+/// Glyphs grouped by the row they sit on and sorted along it, which is what
+/// turns "the frame says X" into "X is *here*" — the only way to click on
+/// something a list drew without knowing how tall its rows are or how many
+/// came before it.
+///
+/// A scene has no occlusion, so a line found here may be behind something.
+/// Callers that care filter by position first.
+fn text_lines(scene: &Scene, keep: impl Fn(Vector2F) -> bool) -> Vec<(Vector2F, String)> {
+    let mut rows: HashMap<i32, Vec<(f32, char)>> = HashMap::new();
+    for glyph in scene.layers().flat_map(|layer| layer.glyphs.iter()) {
+        let Some(character) = char::from_u32(glyph.glyph_key.glyph_id) else {
+            continue;
+        };
+        // Filtered *before* grouping, not after: two columns of a page share
+        // baselines, and a line built from both is a line neither of them
+        // drew.
+        if !keep(glyph.position) {
+            continue;
+        }
+        // Rounded, because two glyphs on one line may differ in the last bits
+        // of their baseline after a scale.
+        rows.entry(glyph.position.y().round() as i32)
+            .or_default()
+            .push((glyph.position.x(), character));
+    }
+
+    let mut lines: Vec<(Vector2F, String)> = rows
+        .into_iter()
+        .map(|(y, mut glyphs)| {
+            glyphs.sort_by(|left, right| left.0.total_cmp(&right.0));
+            let x = glyphs.first().map_or(0., |(x, _)| *x);
+            let text: String = glyphs.into_iter().map(|(_, character)| character).collect();
+            (vec2f(x, y as f32), text)
+        })
+        .collect();
+    lines.sort_by(|left, right| left.0.y().total_cmp(&right.0.y()));
+    lines
 }
 
 fn text_where(scene: &Scene, keep: impl Fn(Vector2F) -> bool) -> String {
@@ -4481,6 +4563,24 @@ fn settings_switch_boxes(scene: &Scene) -> Vec<RectF> {
         .collect();
     switches.sort_by(|left, right| left.min_y().total_cmp(&right.min_y()));
     switches
+}
+
+/// The text fields on the settings pane, left to right.
+///
+/// Found by the field's own ground, which nothing else on the page paints:
+/// a rounded box in `overlay_1` exactly [`text_field::HEIGHT`] tall.
+fn settings_field_boxes(scene: &Scene) -> Vec<RectF> {
+    let pane = settings_pane_box(scene);
+    let mut fields: Vec<RectF> = visible_rects(scene)
+        .filter(|(rect, bounds)| {
+            rect.background == Fill::Solid(theme().overlay_1)
+                && (bounds.height() - crate::workspace::text_field::HEIGHT).abs() < 0.5
+                && pane.contains_point(center(*bounds))
+        })
+        .map(|(_, bounds)| bounds)
+        .collect();
+    fields.sort_by(|left, right| left.min_x().total_cmp(&right.min_x()));
+    fields
 }
 
 /// The rail's page buttons, top to bottom.
@@ -9237,109 +9337,6 @@ fn a_settings_page_can_be_reached_by_the_name_on_its_rail_row() {
     assert!(missing.is_none());
 }
 
-#[test]
-fn the_plugins_page_lists_what_the_build_is_made_of() {
-    // The first surface on which "everything is a plugin" is something a
-    // person can see rather than a claim about the source. It lists itself,
-    // which is the honest thing for it to do.
-    let mut harness = Harness::new(1);
-    harness.open_settings_page();
-    harness.select_settings_section("Plugins");
-    let text = frame_text(&harness.frame());
-
-    for name in [
-        "Window commands",
-        "Command palette",
-        "Usage chip",
-        "Plugins",
-    ] {
-        assert!(text.contains(name), "{name} is not listed: {text}");
-    }
-    // Every plugin the binary carries has a switch, and the two that draw
-    // this page say why theirs is inert.
-    assert_eq!(
-        settings_switch_boxes(&harness.frame()).len(),
-        harness
-            .workspace
-            .read(&harness.app, |workspace, _| workspace
-                .host()
-                .available()
-                .len()),
-        "one switch per plugin the binary carries"
-    );
-    assert!(
-        !text.contains("Did not load"),
-        "a plugin in the box failed to load: {text}"
-    );
-    assert!(
-        !text.contains("Problems"),
-        "the plugins in the box have something to complain about: {text}"
-    );
-}
-
-#[test]
-fn a_plugin_switched_off_on_the_plugins_page_leaves_the_window() {
-    // The switch does two things and both matter: the next frame is drawn
-    // without what the plugin contributed, and the answer is written down.
-    // This asserts the first; `Settings` is where the second is tested.
-    let mut harness = Harness::new(1);
-    assert!(
-        frame_text(&harness.frame()).contains("claude"),
-        "the usage chip is not in the header to begin with"
-    );
-
-    harness.open_settings_page();
-    harness.select_settings_section("Plugins");
-    harness.frame();
-    harness.type_text("usage chip");
-    let scene = harness.frame();
-    let switches = settings_switch_boxes(&scene);
-    assert_eq!(switches.len(), 1, "one switch for the usage plugin");
-    harness.click(center(switches[0]), MouseButton::Left);
-
-    assert!(
-        !harness
-            .workspace
-            .read(&harness.app, |workspace, _| workspace.host().is_loaded(
-                &crate::plugin::PluginId::parse("crook/usage").expect("a literal")
-            )),
-        "the plugin is still loaded"
-    );
-    let text = frame_text(&harness.frame());
-    assert!(
-        !text.contains("claude"),
-        "the chip outlived the plugin that contributes it: {text}"
-    );
-    // And the Usage page went with it, because that page was the plugin's
-    // too. Asked of the host rather than counted in the rail, because the
-    // query typed above is still filtering what the rail lists.
-    assert!(
-        harness
-            .workspace
-            .read(&harness.app, |workspace, _| workspace
-                .host()
-                .settings_page_id("crook/usage/page"))
-            .is_none(),
-        "the Usage page outlived its plugin"
-    );
-}
-
-#[test]
-fn the_switch_that_would_take_the_switch_away_is_inert() {
-    // A one-way door whose way back is editing a JSON file. The page says so
-    // rather than offering it.
-    let mut harness = Harness::new(1);
-    harness.open_settings_page();
-    harness.select_settings_section("Plugins");
-    let text = frame_text(&harness.frame());
-
-    assert!(
-        text.contains("This is what draws the page you are on."),
-        "the page does not say which switches are inert: {text}"
-    );
-}
-
-/// A window carrying one plugin that is not in the binary.
 mod sandboxed {
     use super::*;
     use crate::plugins::wasm::tests::{Scratch, install, wasm};
@@ -9396,16 +9393,22 @@ mod sandboxed {
             &wasm("eugen/probe", "header.right", 10),
         );
         let mut harness = harness(&scratch);
-
         harness.open_settings_page();
         harness.select_settings_section("Plugins");
+
+        // In the list beside the ones in the box, and its card says where it
+        // came from — which is the one thing a person needs to tell an
+        // installed plugin from a built-in one.
+        assert!(frame_text(&harness.frame()).contains("Probe"));
+        harness.click_plugin("Probe");
         let text = frame_text(&harness.frame());
 
-        assert!(text.contains("Probe"), "{text}");
         assert!(
             text.contains("A plugin that exists to be looked at."),
             "{text}"
         );
+        assert!(text.contains("Installed, sandboxed"), "{text}");
+        assert!(text.contains("eugen/probe"), "{text}");
     }
 
     #[test]
@@ -9452,6 +9455,211 @@ mod sandboxed {
                     &crate::plugin::PluginId::parse("eugen/probe").expect("a literal")
                 )),
             "the plugin was thrown away over one contribution"
+        );
+    }
+}
+
+/// The Plugins page: a list on the left, a card on the right.
+mod plugins_page {
+    use super::*;
+
+    /// A harness with the settings open on the Plugins page.
+    fn harness() -> Harness {
+        let mut harness = Harness::new(1);
+        harness.open_settings_page();
+        harness.select_settings_section("Plugins");
+        harness.frame();
+        harness
+    }
+
+    #[test]
+    fn the_page_is_a_list_of_every_plugin_beside_a_card_about_one() {
+        let mut harness = harness();
+        let text = frame_text(&harness.frame());
+
+        // Every plugin the binary carries is in the list, whether or not it
+        // is running: a switch you cannot see is a switch you cannot turn
+        // back on.
+        for name in [
+            "Window commands",
+            "Header",
+            "Usage chip",
+            "Command palette",
+            "About",
+        ] {
+            assert!(text.contains(name), "{name} is not in the list: {text}");
+        }
+
+        // And the card is about the first of them, rather than empty: a card
+        // saying "choose something" is a card explaining an interface instead
+        // of being one.
+        assert!(text.contains("crook/window"), "no card: {text}");
+        assert!(text.contains("Built in"), "{text}");
+        assert!(text.contains("Enabled"), "{text}");
+    }
+
+    #[test]
+    fn clicking_a_row_shows_that_plugin() {
+        let mut harness = harness();
+
+        harness.click_plugin("Usage chip");
+        let text = frame_text(&harness.frame());
+
+        assert!(text.contains("crook/usage"), "{text}");
+        assert!(
+            text.contains("How much of the Claude Code session budget is spent"),
+            "the card does not describe it: {text}"
+        );
+        // What it puts on screen, asked of the host rather than of the plugin.
+        assert!(text.contains("header.right"), "{text}");
+        assert!(text.contains("crook/usage/refresh"), "{text}");
+    }
+
+    #[test]
+    fn the_sidebar_field_narrows_the_list() {
+        let mut harness = harness();
+        harness.click_plugins_search();
+        harness.type_text("palette");
+        let text = frame_text(&harness.frame());
+
+        assert!(text.contains("Command palette"), "{text}");
+        assert!(
+            !text.contains("Window commands"),
+            "the list did not narrow: {text}"
+        );
+        // And the rail is untouched: two fields, two jobs.
+        assert_eq!(settings_rail_boxes(&harness.frame()).len(), 6);
+    }
+
+    #[test]
+    fn a_query_that_matches_nothing_says_so() {
+        let mut harness = harness();
+        harness.click_plugins_search();
+        harness.type_text("zzzz");
+
+        assert!(frame_text(&harness.frame()).contains("No plugin matches that."));
+    }
+
+    #[test]
+    fn a_plugin_is_found_by_its_id_and_by_where_it_came_from() {
+        // The two things somebody types that are not the name: the id they
+        // read in a keymap, and the word for a tier.
+        let mut harness = harness();
+        harness.click_plugins_search();
+        harness.type_text("crook/palette");
+        assert!(frame_text(&harness.frame()).contains("Command palette"));
+    }
+
+    #[test]
+    fn the_rail_search_finds_this_page_by_its_title_and_does_not_reach_inside() {
+        // The price of a page that draws itself, written down where it is
+        // paid: the rail's query has no rows to count here, so it finds the
+        // page by its title or not at all — and it does not touch the list.
+        let mut harness = harness();
+
+        harness.type_text("plugins");
+        let text = frame_text(&harness.frame());
+
+        assert_eq!(harness.settings_section(), "Plugins", "{text}");
+        assert!(
+            text.contains("Window commands") && text.contains("Command palette"),
+            "the rail's query filtered the plugin list: {text}"
+        );
+    }
+
+    #[test]
+    fn a_rail_query_this_page_cannot_answer_moves_to_one_that_can() {
+        // The rule the settings page already had, applied to a page with no
+        // rows: a page gone blank under you while its neighbours have answers
+        // is a search that looks broken.
+        let mut harness = harness();
+
+        harness.type_text("density");
+        let text = frame_text(&harness.frame());
+
+        // The *shown* page moves; the selection does not, which is what puts
+        // you back on Plugins when the box is cleared.
+        assert!(text.contains("Density"), "{text}");
+        assert_eq!(harness.settings_section(), "Plugins");
+    }
+
+    #[test]
+    fn the_last_field_pressed_is_the_one_being_typed_into() {
+        // Two fields on one surface, and no focus ring to look at. The rule
+        // has to be one a person can predict.
+        let mut harness = harness();
+
+        harness.click_plugins_search();
+        harness.type_text("pal");
+        assert_eq!(harness.search_text(), "", "the rail's field took it");
+        assert!(!frame_text(&harness.frame()).contains("Window commands"));
+
+        harness.click_rail_search();
+        harness.type_text("plugins");
+        assert_eq!(harness.search_text(), "plugins");
+        // And the plugin list kept what was typed into it.
+        assert!(!frame_text(&harness.frame()).contains("Window commands"));
+    }
+
+    #[test]
+    fn what_a_page_typed_into_does_not_outlive_the_pane() {
+        // The same rule the rail's own box follows: a filter that came back
+        // with the page would be a page that had silently lost most of it.
+        let mut harness = harness();
+        harness.click_plugins_search();
+        harness.type_text("palette");
+        assert!(!frame_text(&harness.frame()).contains("Window commands"));
+
+        let settings = harness.tab_ids()[1];
+        harness.dispatch_action(TabAction::Close(settings));
+        harness.open_settings_page();
+        harness.select_settings_section("Plugins");
+
+        assert!(
+            frame_text(&harness.frame()).contains("Window commands"),
+            "the query outlived the pane"
+        );
+    }
+
+    #[test]
+    fn the_switch_on_the_card_takes_the_plugin_out_of_the_window() {
+        let mut harness = Harness::new(1);
+        assert!(frame_text(&harness.frame()).contains("claude"));
+        harness.open_settings_page();
+        harness.select_settings_section("Plugins");
+        harness.frame();
+        harness.click_plugin("Usage chip");
+
+        let switches = settings_switch_boxes(&harness.frame());
+        assert_eq!(switches.len(), 1, "one switch, on the card");
+        harness.click(center(switches[0]), MouseButton::Left);
+
+        let text = frame_text(&harness.frame());
+        assert!(
+            !text.contains("claude"),
+            "the chip outlived the plugin: {text}"
+        );
+        assert!(
+            text.contains("switched off"),
+            "the card does not say it is off: {text}"
+        );
+        // And the Usage page went with it, because that page was the
+        // plugin's too.
+        assert_eq!(settings_rail_boxes(&harness.frame()).len(), 5);
+    }
+
+    #[test]
+    fn the_switch_that_would_take_the_switch_away_is_inert() {
+        // A one-way door whose way back is editing a JSON file. The card says
+        // so rather than offering it.
+        let mut harness = harness();
+
+        harness.click_plugin("Plugins");
+        let text = frame_text(&harness.frame());
+
+        assert!(
+            text.contains("cannot be switched off from here"),
+            "the card does not say why its switch is inert: {text}"
         );
     }
 }

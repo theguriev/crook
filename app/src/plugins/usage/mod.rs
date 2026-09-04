@@ -95,8 +95,9 @@ impl Plugin for Usage {
 
         // What clicking the pill does, reachable by a chord or by anything
         // else that can name an action.
-        host.register_action(
+        host.register_command(
             ActionName::parse("crook/usage/refresh").expect("a literal"),
+            "Refresh the usage reading",
             {
                 let usage = usage.clone();
                 move |_, ctx| {

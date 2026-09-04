@@ -92,12 +92,12 @@ use crookui_core::prelude::*;
 use crate::text_input::TextInput;
 use crate::theme::theme;
 
-use search::Query;
+use search::{Query, Words};
 use widgets::Category;
 
 use super::action::{SettingsAction, WorkspaceAction};
 use super::view::Workspace;
-use crate::plugin::{Host, PageId};
+use crate::plugin::{BuiltPage, Host, PageId};
 
 /// The widest the content column is allowed to get, before it is centred in
 /// whatever is left.
@@ -201,6 +201,31 @@ pub(crate) struct SettingsState {
     /// the box that explains why is at the top of a rail somebody has to look
     /// at to find out.
     pub(super) search: TextInput,
+    /// Which field on the page has the keyboard: `None` for the rail's search
+    /// box, `Some(index)` for one of [`Self::fields`].
+    ///
+    /// A page may bring a field of its own — the Plugins page brings one — and
+    /// then "which of them is being typed into" is a question the window has
+    /// to have an answer to. The answer is *the last one pressed*, which is
+    /// the only rule a person can predict without a focus ring to look at.
+    ///
+    /// Reset when the page changes, because a field belongs to the page that
+    /// drew it and the next page may have none.
+    focus: std::cell::Cell<Option<usize>>,
+    /// The scroll positions a page brought with it, by a name of its own.
+    ///
+    /// A page that draws itself does its own scrolling and may do it in more
+    /// than one place — the Plugins page scrolls a list and a card
+    /// independently — so one handle per name, made the first time it is
+    /// asked for. The page's own [`Self::scroll`] is the rows layout's and is
+    /// not one of these.
+    scrolls: std::cell::RefCell<HashMap<String, ScrollStateHandle>>,
+    /// The fields a page brought with it, in the order they were first drawn.
+    ///
+    /// Kept here rather than by the page, because `sync_input_keys` has to be
+    /// able to take the keyboard *away* from every one of them and it can only
+    /// reach what the workspace holds.
+    fields: std::cell::RefCell<Vec<(String, TextInput)>>,
     /// One mouse state per control, created the first time that control is
     /// drawn and kept for as long as the window lives.
     ///
@@ -212,6 +237,60 @@ pub(crate) struct SettingsState {
 }
 
 impl SettingsState {
+    /// A scroll position a page brought with it, made the first time it is
+    /// asked for.
+    pub(crate) fn scroll_named(&self, key: &str) -> ScrollStateHandle {
+        self.scrolls
+            .borrow_mut()
+            .entry(key.to_owned())
+            .or_default()
+            .clone()
+    }
+
+    /// A field a page brought with it, made the first time it is drawn.
+    ///
+    /// The index is what an action carries, because
+    /// [`WorkspaceAction`](super::action::WorkspaceAction) is `Copy` and a key
+    /// is a `String` — the same trick an action id and a page id play.
+    pub(crate) fn field(&self, key: &str) -> (usize, TextInput) {
+        let mut fields = self.fields.borrow_mut();
+        if let Some(index) = fields.iter().position(|(known, _)| known == key) {
+            return (index, fields[index].1.clone());
+        }
+        let input = TextInput::new();
+        fields.push((key.to_owned(), input.clone()));
+        (fields.len() - 1, input)
+    }
+
+    /// Which field has the keyboard.
+    pub(crate) fn focus(&self) -> Option<usize> {
+        self.focus.get()
+    }
+
+    /// Moves it.
+    pub(crate) fn set_focus(&self, field: Option<usize>) {
+        self.focus.set(field);
+    }
+
+    /// Tells each field the page brought whether the keyboard is its.
+    ///
+    /// `on` is whether the settings page has the keyboard at all; when it does
+    /// not, none of them do.
+    pub(crate) fn sync_fields(&self, on: bool) {
+        let focus = self.focus.get();
+        for (index, (_, input)) in self.fields.borrow().iter().enumerate() {
+            input.set_has_keys(on && focus == Some(index));
+        }
+    }
+
+    /// Empties every field a page brought, which is what closing the pane
+    /// does. See [`Self::search`] for why a query does not outlive its page.
+    pub(crate) fn clear_fields(&self) {
+        for (_, input) in self.fields.borrow().iter() {
+            input.edit(crate::editor::Editor::clear);
+        }
+    }
+
     /// Which page the rail has selected, resolved against what is loaded.
     pub(crate) fn selected(&self, host: &Host) -> Option<PageId> {
         let chosen = self
@@ -275,16 +354,6 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
         return Empty::new().finish();
     };
 
-    let build = |id: PageId| {
-        host.build_settings_page(id, workspace, app)
-            .unwrap_or_default()
-    };
-    let built: Vec<(PageId, Vec<Category>)> = if query.is_empty() {
-        vec![(selected, build(selected))]
-    } else {
-        pages.iter().map(|(id, _)| (*id, build(*id))).collect()
-    };
-
     let title_of = |id: PageId| {
         pages
             .iter()
@@ -293,27 +362,37 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
             .unwrap_or_default()
     };
 
-    let counts: Vec<(PageId, usize)> = built
+    // While something is being searched for the rail has to say how many rows
+    // each page holds, and it cannot say that about a page it has not built.
+    // A page that draws itself has no rows to count: it is found by its title
+    // or not at all, which is one, or none.
+    let counts: Vec<(PageId, usize)> = pages
         .iter()
-        .map(|(id, categories)| (*id, matches_in(categories, &query, &title_of(*id))))
+        .map(|(id, title)| {
+            if query.is_empty() {
+                return (*id, 0);
+            }
+            if host.settings_page_is_a_view(*id) {
+                let found = usize::from(query.matches(&Words::new(title.clone()), &[]));
+                return (*id, found);
+            }
+            let found = match host.build_settings_page(*id, workspace, app) {
+                Some(BuiltPage::Rows(categories)) => matches_in(&categories, &query, title),
+                _ => 0,
+            };
+            (*id, found)
+        })
         .collect();
+
     let showing = showing(selected, &counts, &query);
-    let categories = built
-        .into_iter()
-        .find(|(id, _)| *id == showing)
-        .map(|(_, categories)| categories)
-        .unwrap_or_default();
+    let body = host.build_settings_page(showing, workspace, app);
 
     Flex::row()
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
         .with_child(rail(workspace, &pages, showing, &counts, &query))
         .with_child(
-            Expanded::new(
-                1.,
-                content(workspace, categories, &title_of(showing), &query),
-            )
-            .finish(),
+            Expanded::new(1., content(workspace, body, &title_of(showing), &query)).finish(),
         )
         .finish()
 }
@@ -391,6 +470,7 @@ fn rail(
                 SEARCH_PLACEHOLDER,
             )
             .with_icon(Lucide::Search)
+            .with_focus(WorkspaceAction::Settings(SettingsAction::FocusField(None)))
             .finish(),
         )
         .with_margin_bottom(10.)
@@ -510,40 +590,59 @@ fn rail_row(
 /// to scroll to find out which page it is on.
 fn content(
     workspace: &Workspace,
-    categories: Vec<Category>,
+    body: Option<BuiltPage>,
     title: &str,
     query: &Query,
 ) -> Box<dyn Element> {
     let settings = workspace.settings_page();
     let ui = workspace.fonts().ui;
-    let body = page(categories, title, query, ui).unwrap_or_else(|| nothing_found(query, ui));
 
-    Container::new(
-        Flex::column()
+    // A page that draws itself gets the whole column and does its own
+    // scrolling: it is a layout rather than a list, and a 560-pixel centred
+    // measure is the one thing it certainly does not want. Its heading is
+    // still this file's, so every page has one in the same place.
+    let column = match body {
+        Some(BuiltPage::View(element)) => Flex::column()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_child(centred(widgets::page_title(title, ui)))
-            .with_child(
-                Expanded::new(
-                    1.,
-                    Scrollable::new(settings.scroll.clone(), centred(body))
-                        .with_scrollbar(theme().overlay_3)
-                        .finish(),
-                )
-                .finish(),
-            )
+            .with_child(widgets::page_title(title, ui))
+            .with_child(Expanded::new(1., element).finish())
             .finish(),
-    )
-    .with_padding(Padding {
-        top: CONTENT_PADDING,
-        bottom: CONTENT_PADDING,
-        left: CONTENT_PADDING,
-        // The gutter makes up the rest of it: the content still stops
-        // `CONTENT_PADDING` from the panel's edge, and the thumb lives in the
-        // difference.
-        right: CONTENT_PADDING - SCROLLBAR_GUTTER,
-    })
-    .finish()
+        other => {
+            let categories = match other {
+                Some(BuiltPage::Rows(categories)) => categories,
+                _ => Vec::new(),
+            };
+            let rows =
+                page(categories, title, query, ui).unwrap_or_else(|| nothing_found(query, ui));
+            Flex::column()
+                .with_main_axis_size(MainAxisSize::Max)
+                .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                .with_child(centred(widgets::page_title(title, ui)))
+                .with_child(
+                    Expanded::new(
+                        1.,
+                        Scrollable::new(settings.scroll.clone(), centred(rows))
+                            .with_scrollbar(theme().overlay_3)
+                            .finish(),
+                    )
+                    .finish(),
+                )
+                .finish()
+        }
+    };
+
+    Container::new(column)
+        .with_padding(Padding {
+            top: CONTENT_PADDING,
+            bottom: CONTENT_PADDING,
+            left: CONTENT_PADDING,
+            // The gutter makes up the rest of it: the content still stops
+            // `CONTENT_PADDING` from the panel's edge, and the thumb lives in the
+            // difference.
+            right: CONTENT_PADDING - SCROLLBAR_GUTTER,
+        })
+        .finish()
 }
 
 /// One page's categories, filtered, or `None` when the query emptied it.

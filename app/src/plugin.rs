@@ -70,12 +70,39 @@ pub type ActionHandler = Box<dyn Fn(&mut Workspace, &mut ViewContext<Workspace>)
 /// back an element would have to be searched by looking at pixels.
 pub(crate) type SettingsContribution = Box<dyn Fn(&Workspace, &AppContext) -> Vec<Category>>;
 
+/// A page that draws itself, rather than handing back rows.
+///
+/// For a page whose shape is not a column of settings: the Plugins page is a
+/// list beside a detail, which is not a thing `Vec<Category>` can describe.
+pub(crate) type ViewContribution = Box<dyn Fn(&Workspace, &AppContext) -> Box<dyn Element>>;
+
+/// What a settings page is made of.
+///
+/// Two kinds, and the difference is who does the searching. Rows are filtered
+/// by the rail's query and counted beside the rail's row, which is what makes
+/// one query narrow the whole page. A view is not: it has no rows to count,
+/// and a page that had both would be two designs in one place.
+pub(crate) enum PageBody {
+    /// Rows, searched and counted by the settings page.
+    Rows(SettingsContribution),
+    /// A page that draws itself, given the whole content column.
+    View(ViewContribution),
+}
+
 /// One page of the settings: what the rail calls it, and what is on it.
 pub(crate) struct SettingsPage {
     /// What the rail row and the page's heading both say.
     pub(crate) title: String,
     /// What is on it.
-    pub(crate) build: SettingsContribution,
+    pub(crate) body: PageBody,
+}
+
+/// One page, built.
+pub(crate) enum BuiltPage {
+    /// Rows for the settings page to filter and lay out.
+    Rows(Vec<Category>),
+    /// A page that has drawn itself.
+    View(Box<dyn Element>),
 }
 
 /// One settings page, as something `Copy`.
@@ -308,6 +335,42 @@ impl Host {
         order: i32,
         build: impl Fn(&Workspace, &AppContext) -> Vec<Category> + 'static,
     ) -> PageId {
+        self.add_page(
+            entry,
+            title,
+            order,
+            PageBody::Rows(Box::new(build) as SettingsContribution),
+        )
+    }
+
+    /// Adds a page that draws itself.
+    ///
+    /// The escape hatch from `Vec<Category>`, for a page whose shape is not a
+    /// column of settings. It costs the rail's search: a view has no rows to
+    /// count, so a query finds it by its title or not at all.
+    pub(crate) fn add_settings_view(
+        &mut self,
+        entry: &str,
+        title: impl Into<String>,
+        order: i32,
+        build: impl Fn(&Workspace, &AppContext) -> Box<dyn Element> + 'static,
+    ) -> PageId {
+        self.add_page(
+            entry,
+            title,
+            order,
+            PageBody::View(Box::new(build) as ViewContribution),
+        )
+    }
+
+    /// What both of the above do.
+    fn add_page(
+        &mut self,
+        entry: &str,
+        title: impl Into<String>,
+        order: i32,
+        body: PageBody,
+    ) -> PageId {
         let who = self.who();
         let key = format!("{who}/{entry}");
         let registration = self.pages.contribute(
@@ -317,7 +380,7 @@ impl Host {
             order,
             SettingsPage {
                 title: title.into(),
-                build: Box::new(build) as SettingsContribution,
+                body,
             },
         );
         self.kept.push((who, registration));
@@ -365,16 +428,37 @@ impl Host {
         self.page_keys.get(id.0).map(String::as_str)
     }
 
-    /// Builds one page's rows, without building the others.
+    /// Builds one page, without building the others.
     pub(crate) fn build_settings_page(
         &self,
         id: PageId,
         workspace: &Workspace,
         app: &AppContext,
-    ) -> Option<Vec<Category>> {
+    ) -> Option<BuiltPage> {
         let index = self.page_index(self.settings_page_key(id)?)?;
         self.pages
-            .at(SETTINGS_PAGE, index, |page| (page.build)(workspace, app))
+            .at(SETTINGS_PAGE, index, |page| match &page.body {
+                PageBody::Rows(build) => BuiltPage::Rows(build(workspace, app)),
+                PageBody::View(build) => BuiltPage::View(build(workspace, app)),
+            })
+    }
+
+    /// Whether a page draws itself, without building it.
+    ///
+    /// For the rail, which counts a page's rows while something is being
+    /// searched for and has none to count for a view.
+    pub(crate) fn settings_page_is_a_view(&self, id: PageId) -> bool {
+        let Some(index) = self
+            .settings_page_key(id)
+            .and_then(|key| self.page_index(key))
+        else {
+            return false;
+        };
+        self.pages
+            .at(SETTINGS_PAGE, index, |page| {
+                matches!(page.body, PageBody::View(_))
+            })
+            .unwrap_or(false)
     }
 
     /// What one page's rail row says.

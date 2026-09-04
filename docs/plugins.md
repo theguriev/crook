@@ -32,7 +32,13 @@ description of something that was never built.
     `crook/usage`, `crook/keys`, `crook/about` — so disabling a plugin takes its page off the
     rail with the rest of it. `--settings <name>` now matches a page's title, so a plugin's
     page is as reachable as one of Crook's.
-  - There is a **Plugins page**, and the switches on it work: `Host::enable` is the other
+  - The **Plugins page** is a list beside a card, which is VS Code's shape: a field and every
+    plugin the binary carries on the left, and on the right whatever the list has selected —
+    what it is, where it came from, what it puts on screen, what it can be asked to do, and
+    the switch. It is a page that *draws itself* (`Host::add_settings_view`) rather than a
+    column of settings rows, which is what a master–detail layout needs and what a
+    `Vec<Category>` cannot describe.
+  - The switches on it work: `Host::enable` is the other
     half of `unload`, `Plugin::ready` is a second pass so a page can offer a switch per
     plugin, and `disabled_plugins` in `settings.json` is where the answer is kept. A plugin
     switched off is carried and not built — its `build` never runs, so it registers nothing
