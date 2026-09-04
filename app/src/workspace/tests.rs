@@ -8969,3 +8969,198 @@ fn the_keys_page_lists_what_a_plugin_registered_and_the_chord_that_reaches_it() 
         "the Keys page does not say what reaches it: {text}"
     );
 }
+
+/// The chord `crook/palette` asks for: the one every editor uses, plus the
+/// Shift that keeps Crook's chords off a bare Ctrl-letter away from macOS.
+fn palette_chord() -> Modifiers {
+    Modifiers {
+        cmd: cfg!(target_os = "macos"),
+        ctrl: !cfg!(target_os = "macos"),
+        shift: true,
+        ..Default::default()
+    }
+}
+
+#[test]
+fn the_palette_opens_on_the_chord_a_plugin_asked_for() {
+    // A chord no `input_keys` table knows about, reaching a surface no
+    // `Workspace` field holds. Both halves are the plugin's.
+    let mut harness = Harness::new(1);
+    assert!(!frame_text(&harness.frame()).contains("Run a command"));
+
+    harness.press("p", palette_chord(), "");
+    let text = frame_text(&harness.frame());
+
+    assert!(
+        text.contains("Run a command"),
+        "the palette did not come up: {text}"
+    );
+    // Every command `crook/window` registered, listed by its title and by the
+    // name a person would bind.
+    assert!(text.contains("New agent tab"), "{text}");
+    assert!(text.contains("crook/window/new-tab"), "{text}");
+}
+
+#[test]
+fn the_palette_lists_what_it_is_told_and_not_its_own_keys() {
+    // The distinction between an action and a command: the arrows and the
+    // Escape are reachable by name and are not rows in a list of things to do.
+    let mut harness = Harness::new(1);
+    harness.press("p", palette_chord(), "");
+
+    let text = frame_text(&harness.frame());
+
+    assert!(text.contains("Command palette"), "{text}");
+    assert!(
+        !text.contains("crook/palette/next"),
+        "the palette offered its own arrow key as a command: {text}"
+    );
+    assert!(
+        !text.contains("crook/palette/run"),
+        "the palette offered its own Enter as a command: {text}"
+    );
+}
+
+#[test]
+fn typing_narrows_the_palette() {
+    let mut harness = Harness::new(1);
+    harness.press("p", palette_chord(), "");
+    harness.frame();
+    harness.type_text("split");
+    let text = frame_text(&harness.frame());
+
+    assert!(text.contains("Split to the right"), "{text}");
+    assert!(
+        !text.contains("New agent tab"),
+        "the list did not narrow: {text}"
+    );
+}
+
+#[test]
+fn a_query_that_matches_nothing_says_so_rather_than_showing_everything() {
+    let mut harness = Harness::new(1);
+    harness.press("p", palette_chord(), "");
+    harness.frame();
+    harness.type_text("zzzz");
+    let text = frame_text(&harness.frame());
+
+    assert!(text.contains("No command matches that."), "{text}");
+    assert!(!text.contains("New agent tab"), "{text}");
+}
+
+#[test]
+fn enter_runs_what_is_selected_and_takes_the_palette_down() {
+    let mut harness = Harness::new(1);
+    assert_eq!(harness.tab_ids().len(), 1);
+
+    harness.press("p", palette_chord(), "");
+    harness.frame();
+    harness.type_text("new agent");
+    harness.frame();
+    harness.press("enter", Modifiers::default(), "");
+    let text = frame_text(&harness.frame());
+
+    assert_eq!(
+        harness.tab_ids().len(),
+        2,
+        "the command did not run: {text}"
+    );
+    assert!(
+        !text.contains("Run a command"),
+        "the palette stayed up: {text}"
+    );
+}
+
+#[test]
+fn the_arrows_move_the_selection_and_enter_runs_the_row_they_are_on() {
+    let mut harness = Harness::new(1);
+    harness.press("p", palette_chord(), "");
+    harness.frame();
+    // Two rows, in title order: "Split downwards" then "Split to the right".
+    harness.type_text("split");
+    harness.frame();
+    harness.press("down", Modifiers::default(), "");
+    harness.frame();
+    harness.press("enter", Modifiers::default(), "");
+    harness.frame();
+
+    assert_eq!(
+        harness.pane_ids().len(),
+        2,
+        "the second row of the list did not run"
+    );
+}
+
+#[test]
+fn escape_takes_the_palette_down_and_gives_the_keyboard_back() {
+    // The half that is not visible: while a surface is up nothing under it is
+    // typing into a shell, and when it goes down the pane has to get the
+    // keyboard back — which is `sync_input_keys`, reached from a plugin.
+    let mut harness = Harness::new(1);
+    let pane = harness.pane_ids()[0];
+    let takes_keys = |harness: &Harness| {
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.pane_takes_keys(pane))
+    };
+    assert!(takes_keys(&harness));
+
+    harness.press("p", palette_chord(), "");
+    assert!(
+        !takes_keys(&harness),
+        "the pane was still typing under an open palette"
+    );
+
+    harness.press("escape", Modifiers::default(), "");
+    let text = frame_text(&harness.frame());
+
+    assert!(!text.contains("Run a command"), "{text}");
+    assert!(takes_keys(&harness), "the pane never got the keyboard back");
+}
+
+#[test]
+fn a_chord_the_window_owns_still_works_over_an_open_palette() {
+    // A surface claims the bare keys it uses and nothing else, so the window's
+    // own chords keep working — which is the rule the Themes panel already
+    // states for its arrow keys.
+    let mut harness = Harness::new(1);
+    harness.press("p", palette_chord(), "");
+
+    harness.press("t", platform_chord(), "");
+
+    assert_eq!(harness.tab_ids().len(), 2);
+}
+
+#[test]
+fn clicking_a_row_runs_it() {
+    let mut harness = Harness::new(1);
+    harness.press("p", palette_chord(), "");
+    harness.frame();
+    harness.type_text("new agent");
+    let scene = harness.frame();
+    let row = palette_selected_row(&scene);
+
+    harness.click(center(row), MouseButton::Left);
+
+    assert_eq!(harness.tab_ids().len(), 2);
+}
+
+/// The band the palette's selected row is drawn in.
+///
+/// Found by what the selection *is* — the only wide `overlay_2` band with the
+/// row radius on it — rather than by the glyphs on the row, because a scene
+/// has no occlusion and the text of the window behind the palette is in it
+/// too.
+fn palette_selected_row(scene: &Scene) -> RectF {
+    let rows: Vec<RectF> = visible_rects(scene)
+        .filter(|(rect, bounds)| {
+            rect.corner_radius.get_top_left() == Radius::Pixels(6.)
+                && rect.background == Fill::Solid(theme().overlay_2)
+                && bounds.width() > 400.
+        })
+        .map(|(_, bounds)| bounds)
+        .collect();
+
+    assert_eq!(rows.len(), 1, "exactly one selected palette row per frame");
+    rows[0]
+}

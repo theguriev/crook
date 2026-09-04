@@ -24,6 +24,10 @@
 //! that fails to build is skipped by name, with one line in the log, and the
 //! window opens without whatever it was contributing.
 
+use std::cell::Cell;
+use std::rc::Rc;
+
+use crookui_core::event::Keystroke;
 use crookui_core::prelude::*;
 use crookui_core::{AppContext, Element};
 
@@ -32,6 +36,7 @@ pub use crook_plugin::{
     Slots, Tier,
 };
 
+use crate::keymap::parse_chord;
 use crate::workspace::{Fonts, Workspace};
 
 /// What a plugin contributes to a slot: something that can build an element
@@ -49,6 +54,41 @@ pub type UiContribution = Box<dyn Fn(&Workspace, &AppContext) -> Box<dyn Element
 /// `Workspace::handle_action` already receives — a named action is the same
 /// thing an enum variant was, addressable by people who cannot add a variant.
 pub type ActionHandler = Box<dyn Fn(&mut Workspace, &mut ViewContext<Workspace>)>;
+
+/// Whether a plugin's floating surface is up.
+///
+/// A palette, a modal, anything that covers the window and has to take the
+/// keyboard away from the pane under it. The plugin holds one of these and
+/// raises it while its surface is showing; the workspace reads it in
+/// `sync_input_keys`, and the host only consults that surface's key claim
+/// while it is raised.
+///
+/// A shared flag rather than a question asked of the plugin, because the thing
+/// that knows is a view the host cannot reach and the thing that asks is a
+/// render that holds no `&mut`.
+#[derive(Clone, Default)]
+pub struct Showing(Rc<Cell<bool>>);
+
+impl Showing {
+    /// Says whether the surface is up.
+    pub fn set(&self, showing: bool) {
+        self.0.set(showing);
+    }
+
+    /// Whether it is.
+    pub fn get(&self) -> bool {
+        self.0.get()
+    }
+}
+
+/// What a surface does with a keystroke while it is up.
+///
+/// It names an action rather than doing anything, which is what keeps one
+/// dispatch path: a key a palette claims and a key somebody bound in their own
+/// file both end as [`WorkspaceAction::Run`](crate::workspace::WorkspaceAction).
+/// A surface that returns `None` lets the keystroke go on to the bindings and
+/// then to the pane.
+pub type KeyClaim = Box<dyn Fn(&Keystroke) -> Option<ActionName>>;
 
 /// A registered action, as something `Copy`.
 ///
@@ -89,6 +129,21 @@ pub struct Host {
     /// registry, not its name out of here — which is what makes the id safe to
     /// hold on to.
     action_names: Vec<ActionName>,
+    /// The actions that are meant to be *offered*, with what to call them.
+    ///
+    /// Every action is reachable by name; a command is one a person should be
+    /// able to find without knowing the name. The arrow keys a palette binds
+    /// to itself are actions and not commands, which is the whole of the
+    /// distinction.
+    commands: Vec<(PluginId, ActionName, String)>,
+    /// The chords a plugin asked for, consulted after the built-in table.
+    ///
+    /// *After*, so a plugin cannot take `cmd-t` away from the tabs by loading
+    /// first. A person's own file still wins over both.
+    suggested: Vec<(PluginId, Keystroke, ActionName)>,
+    /// The floating surfaces plugins own, and what each does with a keystroke
+    /// while it is up.
+    surfaces: Vec<(PluginId, Showing, KeyClaim)>,
     /// Whose registrations are being made right now. Set around each plugin's
     /// `build` so a plugin cannot register in another's name by accident.
     building: Option<PluginId>,
@@ -107,6 +162,9 @@ impl Host {
             slots: Slots::new(),
             actions: Actions::new(),
             action_names: Vec::new(),
+            commands: Vec::new(),
+            suggested: Vec::new(),
+            surfaces: Vec::new(),
             building: None,
             kept: Vec::new(),
             loaded: Vec::new(),
@@ -178,6 +236,97 @@ impl Host {
         }
     }
 
+    /// Registers an action *and* offers it under a title.
+    ///
+    /// The title is what a palette prints, so it is a sentence a person would
+    /// recognise rather than the name — "New agent tab", not
+    /// `crook/window/new-tab`.
+    pub fn register_command(
+        &mut self,
+        action: ActionName,
+        title: impl Into<String>,
+        handler: impl Fn(&mut Workspace, &mut ViewContext<Workspace>) + 'static,
+    ) -> ActionId {
+        let who = self.who();
+        self.commands.push((who, action.clone(), title.into()));
+        self.register_action(action, handler)
+    }
+
+    /// Asks for a chord to reach an action, if nothing else claims it.
+    ///
+    /// A *default*, not a binding: a person's own keymap wins, and so does
+    /// every built-in chord, so a plugin cannot take `cmd-t` from the tabs.
+    /// A chord that does not parse is dropped with a line in the log, exactly
+    /// as one in a keymap file is.
+    pub fn suggest_binding(&mut self, chord: &str, action: ActionName) {
+        let who = self.who();
+        match parse_chord(chord) {
+            Some(keystroke) => self.suggested.push((who, keystroke, action)),
+            None => log::warn!("{who} asked for {chord:?}, which is not a chord"),
+        }
+    }
+
+    /// Registers a floating surface, and what it does with a keystroke.
+    ///
+    /// The flag it hands back is how the plugin says the surface is up; while
+    /// it is down the claim is never consulted and the surface counts for
+    /// nothing.
+    pub fn claim_surface(
+        &mut self,
+        keys: impl Fn(&Keystroke) -> Option<ActionName> + 'static,
+    ) -> Showing {
+        let who = self.who();
+        let showing = Showing::default();
+        self.surfaces
+            .push((who, showing.clone(), Box::new(keys) as KeyClaim));
+        showing
+    }
+
+    /// Whether any plugin's surface is up.
+    ///
+    /// What takes the keyboard away from the focused pane, the same way an
+    /// open menu or the Themes panel does.
+    pub fn a_surface_is_up(&self) -> bool {
+        self.surfaces.iter().any(|(_, showing, _)| showing.get())
+    }
+
+    /// What a surface that is up makes of this keystroke.
+    ///
+    /// The first surface to claim it wins, in load order. Two modal surfaces
+    /// up at once is a bug somewhere else; this is only deciding which of them
+    /// hears the Escape.
+    pub fn keys_for(&self, keystroke: &Keystroke) -> Option<ActionId> {
+        let name = self
+            .surfaces
+            .iter()
+            .filter(|(_, showing, _)| showing.get())
+            .find_map(|(_, _, claim)| claim(keystroke))?;
+        self.action(&name)
+    }
+
+    /// The action a plugin asked to put on this chord, if one did.
+    pub fn suggested_for(&self, keystroke: &Keystroke) -> Option<ActionId> {
+        let name = self
+            .suggested
+            .iter()
+            .find(|(_, chord, _)| chord == keystroke)
+            .map(|(_, _, action)| action)?;
+        self.action(name)
+    }
+
+    /// Every action offered under a title, with who owns it.
+    pub fn commands(&self) -> &[(PluginId, ActionName, String)] {
+        &self.commands
+    }
+
+    /// What an action is called, where it has a title.
+    pub fn title_of(&self, action: &ActionName) -> Option<&str> {
+        self.commands
+            .iter()
+            .find(|(_, name, _)| name == action)
+            .map(|(_, _, title)| title.as_str())
+    }
+
     /// The id for a name, if anything answers to it right now.
     ///
     /// `None` for a name nothing is registered under — a chord bound to a
@@ -239,6 +388,9 @@ impl Host {
     /// before the plugin loaded.
     pub fn unload(&mut self, plugin: &PluginId) {
         self.kept.retain(|(by, _)| by != plugin);
+        self.commands.retain(|(by, _, _)| by != plugin);
+        self.suggested.retain(|(by, _, _)| by != plugin);
+        self.surfaces.retain(|(by, _, _)| by != plugin);
         self.loaded.retain(|manifest| &manifest.id != plugin);
     }
 

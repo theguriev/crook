@@ -19,8 +19,16 @@ description of something that was never built.
   - Named actions are reachable: `crook/usage/refresh` is registered by a plugin, bindable
     from `keymap.json` by its name, dispatched as `WorkspaceAction::Run`, and listed on the
     settings page's Keys page with whatever chord reaches it.
+  - `crook/window` registers every one of Crook's own commands under a name, and owns the
+    `window.overlay` slot — where anything that floats over the whole window goes.
+  - `crook/palette` is the first plugin that is not an extraction: a command palette, built
+    entirely out of what the host already knew. Its rows come from `Host::commands`, its
+    chord from `Host::suggest_binding` (a suggestion — a person's own file and every
+    built-in chord win over it), and its Escape and arrows from `Host::claim_surface`, which
+    names an action rather than doing anything, so they end at `WorkspaceAction::Run` like
+    every other key.
   - Still to move: the worktree menu, the settings sections, the Themes panel, the Omarchy
-    palettes; and the command palette is still to be written.
+    palettes.
 
 ## 0. What was asked for, and what it means
 

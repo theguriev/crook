@@ -60,6 +60,7 @@ pub use input_element::CommandInput;
 pub use pane_output::{Keys, Output};
 pub use settings_page::Section;
 pub use terminal_element::TerminalElement;
+pub use text_field::TextField;
 pub(crate) use title_bar::caption_area;
 pub use view::{Fonts, QuitRequest, Workspace};
 

@@ -22,11 +22,18 @@
 //! arrives early is kept rather than refused.
 
 pub mod header;
+mod palette;
 mod usage;
+pub mod window;
 
 use crate::plugin::Plugin;
 
 /// Every plugin a release binary carries, in load order.
 pub fn defaults() -> Vec<Box<dyn Plugin>> {
-    vec![Box::new(header::Header), Box::new(usage::Usage)]
+    vec![
+        Box::new(window::Window),
+        Box::new(header::Header),
+        Box::new(usage::Usage),
+        Box::new(palette::CommandPalette),
+    ]
 }
