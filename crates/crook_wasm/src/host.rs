@@ -40,6 +40,12 @@ struct Inner {
     tickets: u32,
     /// How long the guest asked to be left alone for.
     timer: Option<Duration>,
+    /// How far this machine's time is from UTC, in minutes east.
+    ///
+    /// Set by the host rather than worked out here: a time zone is a table
+    /// that ships with an operating system, and this crate is four
+    /// dependencies with no clock among them.
+    timezone: i32,
 }
 
 impl Registry {
@@ -113,5 +119,15 @@ impl Registry {
     /// Takes the timer the guest asked for, if it asked for one.
     pub(crate) fn timer(&self) -> Option<Duration> {
         self.0.borrow_mut().timer.take()
+    }
+
+    /// Tells it what this machine's offset from UTC is.
+    pub(crate) fn set_timezone(&self, minutes: i32) {
+        self.0.borrow_mut().timezone = minutes;
+    }
+
+    /// What it was last told.
+    pub(crate) fn timezone(&self) -> i32 {
+        self.0.borrow().timezone
     }
 }

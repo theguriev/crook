@@ -33,6 +33,11 @@ async-executor = "1.14"
 async-task = "4.7"
 blocking = "1.7"
 bytemuck = { version = "1.25", features = ["derive"] }
+# A time zone is a table that ships with an operating system, and the standard
+# library does not read it. One call — how far this machine is from UTC —
+# which a plugin needs before it can say which day something happened on.
+chrono = "0.4"
+
 cosmic-text = "0.19"
 dirs = "6.0"
 env_logger = "0.11"

@@ -74,6 +74,23 @@ const PRESS_PADDING: Padding = Padding {
 /// track a lozenge instead of a rectangle with rounded ends.
 const METER_HEIGHT: f32 = 5.;
 
+/// How tall the tallest column of a [`Node::Bars`] is drawn.
+const BARS_HEIGHT: f32 = 34.;
+
+/// How wide one column is.
+///
+/// Fixed, and much narrower than the share of the row each column is given: a
+/// column as wide as it is tall is a block, and seven blocks in a row read as
+/// a chart of nothing. The space around them is what makes the shape legible.
+const BARS_WIDTH: f32 = 13.;
+
+/// What a column of nothing still gets.
+///
+/// Two pixels, because a day with no work has to be a column of no height
+/// rather than a gap — a chart with a hole in it says the week was shorter
+/// than it was.
+const BARS_FLOOR: f32 = 2.;
+
 /// How thick the hairline is. One pixel, before the display scale, because a
 /// seam that is two is a border.
 const RULE_HEIGHT: f32 = 1.;
@@ -244,11 +261,12 @@ fn element_in(
         } => button(label, action(name), *tone, ui, hovers.take()),
         Node::Meter { fraction, tone } if bounded => meter(*fraction, *tone),
         Node::Rule => rule(),
+        Node::Bars { values, tone } if bounded => bars(values, *tone),
         // The idiomatic spacer, and the only thing in this vocabulary that
         // asks its parent for room rather than reporting a size of its own.
         Node::Fill if bounded => Expanded::new(1., Empty::new().finish()).finish(),
         // A share of an axis nobody bounded. See [`BOUNDED`].
-        Node::Fill | Node::Meter { .. } => unbounded_share(),
+        Node::Fill | Node::Meter { .. } | Node::Bars { .. } => unbounded_share(),
         Node::Note { text, tone } => note(text, *tone, ui),
         Node::Pressable {
             content,
@@ -692,6 +710,53 @@ fn rule() -> Box<dyn Element> {
         right: -PANEL_INSET,
     })
     .finish()
+}
+
+/// A row of columns, each as tall as its share of the tallest.
+///
+/// The tallest is found here rather than asked of the plugin, because a plugin
+/// that had to normalise its own numbers would be a plugin that divides by
+/// zero on a quiet week. Every column takes an equal share of the width and
+/// draws [`BARS_WIDTH`] of it, which is what puts the air between them.
+fn bars(values: &[f32], tone: Tone) -> Box<dyn Element> {
+    let tallest = values
+        .iter()
+        .copied()
+        .filter(|value| value.is_finite())
+        .fold(0., f32::max);
+
+    // Spread evenly, with the gap before the first column and after the last
+    // as wide as the ones between: seven columns pushed against the two ends
+    // of a panel read as two groups rather than as a week.
+    let mut row = Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_main_axis_alignment(MainAxisAlignment::SpaceEvenly)
+        .with_cross_axis_alignment(CrossAxisAlignment::End);
+
+    for value in values {
+        let share = if tallest > 0. && value.is_finite() {
+            (value / tallest).clamp(0., 1.)
+        } else {
+            0.
+        };
+        let height = (share * BARS_HEIGHT).max(BARS_FLOOR);
+
+        row.add_child(
+            ConstrainedBox::new(
+                Container::new(Empty::new().finish())
+                    .with_background_color(colour(tone))
+                    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(1.5)))
+                    .finish(),
+            )
+            .with_width(BARS_WIDTH)
+            .with_height(height)
+            .finish(),
+        );
+    }
+
+    ConstrainedBox::new(row.finish())
+        .with_height(BARS_HEIGHT)
+        .finish()
 }
 
 /// What a tone is, in the theme in force.

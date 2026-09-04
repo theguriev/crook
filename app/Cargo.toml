@@ -39,6 +39,8 @@ crookui_core.workspace = true
 
 anyhow.workspace = true
 arboard.workspace = true
+# What tells a sandboxed plugin which day is which. See the workspace manifest.
+chrono.workspace = true
 # The settings file lives in the platform's configuration directory.
 dirs.workspace = true
 env_logger.workspace = true

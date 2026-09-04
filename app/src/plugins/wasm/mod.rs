@@ -151,6 +151,12 @@ impl Plugin for WasmPlugin {
         host: &mut Host,
         ctx: &mut ViewContext<Workspace>,
     ) -> Result<(), BuildError> {
+        {
+            // Before `build`, because a guest may work out its first question
+            // from what day it is.
+            let minutes = chrono::Local::now().offset().local_minus_utc() / 60;
+            self.sandbox.borrow_mut().set_timezone(minutes);
+        }
         let registered = self
             .sandbox
             .borrow_mut()

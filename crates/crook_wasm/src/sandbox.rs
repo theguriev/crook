@@ -38,22 +38,34 @@ impl Default for Fuel {
             // Generous: this happens once, while a window is opening, and a
             // plugin that reads a file it shipped with is doing it here.
             build: 50_000_000,
-            // A frame at 60Hz is 16ms and this is one contribution in it.
-            // wasmi runs roughly 10^8 simple instructions a second on a laptop
-            // core, so a million is about ten milliseconds of the very worst
-            // case and microseconds of the ordinary one — which is what a
-            // chip that formats a percentage actually costs.
+            // A frame at 60Hz is 16ms and this is one contribution in it. A
+            // million is a little under a millisecond: `portable-dispatch`
+            // wasmi in a release build was measured here at about 1.2 billion
+            // of these a second, and a chip that draws a mark, a percentage
+            // and a panel of totals under it costs a few hundred thousand.
+            //
+            // The number these were first set from — a hundred million a
+            // second — came from a guess and was twelve times pessimistic.
+            // Measuring it changed nothing about the budgets that matter and
+            // everything about what they mean: this one is a millisecond, not
+            // ten.
             render: 1_000_000,
             // A person clicked and is waiting. Slower than a frame is fine;
             // slower than a second is not.
             run: 100_000_000,
             // Nobody is waiting on this one — it is an answer landing or a
-            // timer going off, both off the frame path — but it is also where
-            // a plugin does its real work: parsing the JSON it asked for. Ten
-            // times a frame's budget, which is a hundredth of a second of
-            // interpreter, and a plugin that cannot read its own answer in
-            // that has asked for something too big to be reading every minute.
-            event: 10_000_000,
+            // timer going off, both off the frame path — but it *is* where a
+            // plugin does its real work, and the work is not always small: a
+            // week of totals counted out of three hundred megabytes of
+            // transcripts arrives as a few hundred rows, and taking them in
+            // costs a few million. Forty is about thirty milliseconds, which
+            // is two frames on the one occasion a panel is opened, and far
+            // more than anything that happens every minute.
+            //
+            // It was ten million, which a real week just exceeded — and a
+            // budget a real answer cannot fit in is a feature that works until
+            // somebody has been using the machine for a week.
+            event: 40_000_000,
         }
     }
 }
@@ -223,6 +235,26 @@ impl Sandbox {
             0 => Ok(()),
             other => Err(Problem::Ran(format!("the action answered {other}"))),
         }
+    }
+
+    /// Tells the guest how far this machine's own time is from UTC, in
+    /// minutes east of it.
+    ///
+    /// Set by whoever owns a clock, which is not this crate. Re-set rather
+    /// than read once: an offset changes when the clocks go back and when a
+    /// laptop is opened in another country, and a chart of days drawn against
+    /// the wrong one is wrong in a way nobody would think to check.
+    pub fn set_timezone(&mut self, minutes: i32) {
+        self.registry.set_timezone(minutes);
+    }
+
+    /// How much of the last call's budget was left when it returned.
+    ///
+    /// For finding out what a call actually costs rather than guessing: a
+    /// budget nobody has measured is a budget that is either wasted or about
+    /// to be exceeded on somebody else's machine.
+    pub fn fuel_left(&self) -> u64 {
+        self.store.get_fuel().unwrap_or(0)
     }
 
     /// Everything the guest asked the host to do since it was last asked,
@@ -439,6 +471,12 @@ fn install(linker: &mut Linker<Registry>) -> Result<(), wasmi::Error> {
                 .map(|since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
                 .unwrap_or(0)
         },
+    )?;
+
+    linker.func_wrap(
+        imports::MODULE,
+        imports::TIMEZONE,
+        |caller: Caller<'_, Registry>| -> i32 { caller.data().timezone() },
     )?;
 
     linker.func_wrap(
