@@ -39,9 +39,11 @@
 //!
 //! It scrolls. That is one line here and it was not free: until
 //! `crookui_core` grew a [`Scrollable`], this list was a [`Clipped`] with a
-//! hard ceiling — in the 1024x640 window Crook opens, nine tabs in the default
-//! combination and seven at the other extreme, with every tab past that drawn,
-//! clipped away, and unclickable.
+//! hard ceiling — in the 1024x640 window Crook opens, eight tabs in the
+//! default combination and six at the other extreme, with every tab past that
+//! drawn, clipped away, and unclickable. (Eight and six rather than the nine
+//! and seven they were before the row of section buttons took a strip off the
+//! bottom of the list.)
 //!
 //! [`Scrollable`] keeps the half of [`Clipped`] that mattered — a row that
 //! overflows is neither painted over the body nor hit-tested there — and adds
@@ -114,32 +116,38 @@ const GROUP_HEADER_SIZE: f32 = 10.;
 /// The padding around the empty state, and the size it is set in.
 const EMPTY_STATE_PADDING: f32 = 12.;
 
-/// The whole panel: the control bar, then the list.
-pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
+/// What the sidebar's first button says and draws.
+///
+/// The window's own section, and the only one no plugin contributes: the tabs
+/// are what Crook is, not a thing that was added to it.
+const AGENTS_SECTION_TITLE: &str = "Agents";
+/// See [`AGENTS_SECTION_TITLE`].
+const AGENTS_ICON: Lucide = Lucide::LayoutGrid;
+
+/// The inset around the row of section buttons.
+const SECTION_BAR_PADDING: f32 = 8.;
+
+/// The icon in one of them, and the name under it.
+const SECTION_ICON_SIZE: f32 = 18.;
+/// See [`SECTION_ICON_SIZE`].
+const SECTION_LABEL_SIZE: f32 = 10.;
+
+/// The whole panel: the control bar, whatever the chosen section puts in it,
+/// and the row of buttons that chooses.
+///
+/// `body` is the section's own — the tab list when the tabs are showing, and
+/// the section's sidebar otherwise. It is handed in rather than built here
+/// because the window builds it and its other half together: see
+/// [`SidebarSection`](crate::plugin::SidebarSection).
+pub(super) fn render(workspace: &Workspace, body: Box<dyn Element>) -> Box<dyn Element> {
     ConstrainedBox::new(
         Container::new(
             Flex::column()
                 .with_main_axis_size(MainAxisSize::Max)
                 .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
                 .with_child(control_bar(workspace))
-                // The list takes whatever the control bar left, and scrolls
-                // inside it.
-                .with_child(
-                    Expanded::new(
-                        1.,
-                        Scrollable::new(
-                            workspace.panel_scroll(),
-                            // Inside the scrollable and outside every row,
-                            // which is what makes a row's offset measurable
-                            // from the content rather than from the window.
-                            geometry::Content::new(workspace.panel_rows(), list(workspace, app))
-                                .finish(),
-                        )
-                        .with_scrollbar(theme().overlay_3)
-                        .finish(),
-                    )
-                    .finish(),
-                )
+                .with_child(Expanded::new(1., body).finish())
+                .with_child(sections(workspace))
                 .finish(),
         )
         .with_background_color(theme().surface)
@@ -147,6 +155,125 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
         .finish(),
     )
     .with_width(PANEL_WIDTH)
+    .finish()
+}
+
+/// The tab list, scrolling inside whatever the bars left it.
+pub(super) fn tab_list(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
+    Scrollable::new(
+        workspace.panel_scroll(),
+        // Inside the scrollable and outside every row, which is what makes a
+        // row's offset measurable from the content rather than from the
+        // window.
+        geometry::Content::new(workspace.panel_rows(), list(workspace, app)).finish(),
+    )
+    .with_scrollbar(theme().overlay_3)
+    .finish()
+}
+
+/// The row of buttons at the foot of the panel.
+///
+/// Telegram's shape, and the reason is Telegram's: one column, and what is in
+/// it is chosen by a short row of buttons at the bottom rather than by
+/// navigating away from it. They are not tabs and are not drawn as tabs —
+/// there is no strip, no separators and no bar — because what they switch is
+/// the whole window and a tab does not do that.
+///
+/// The first is the window's own and every other comes from a plugin, in the
+/// order the sections were contributed. A build with the settings plugin
+/// switched off has one button, which is correct: there is nowhere else to go.
+fn sections(workspace: &Workspace) -> Box<dyn Element> {
+    let showing = workspace.showing_section();
+    let mut row = Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_main_axis_alignment(MainAxisAlignment::SpaceEvenly)
+        .with_child(button(
+            workspace,
+            None,
+            AGENTS_SECTION_TITLE,
+            AGENTS_ICON,
+            showing.is_none(),
+        ));
+
+    for (id, title, icon) in workspace.host().sidebar_sections() {
+        row.add_child(button(
+            workspace,
+            Some(id),
+            &title,
+            icon,
+            showing == Some(id),
+        ));
+    }
+
+    Container::new(row.finish())
+        .with_border(Border::top(1.).with_border_color(theme().border))
+        .with_padding(Padding {
+            top: SECTION_BAR_PADDING,
+            bottom: SECTION_BAR_PADDING,
+            left: SECTION_BAR_PADDING,
+            right: SECTION_BAR_PADDING,
+        })
+        .finish()
+}
+
+/// One of those buttons: an icon with its name under it.
+fn button(
+    workspace: &Workspace,
+    section: Option<crate::plugin::SectionId>,
+    title: &str,
+    icon: Lucide,
+    chosen: bool,
+) -> Box<dyn Element> {
+    let key = match section {
+        Some(id) => workspace
+            .host()
+            .sidebar_section_key(id)
+            .unwrap_or_default()
+            .to_owned(),
+        None => "tabs".to_owned(),
+    };
+    let state = workspace.section_button(&key);
+    let label = title.to_owned();
+
+    Hoverable::new(state, move |mouse| {
+        // Three states and only two colours: the chosen one is lit, and
+        // hovering an unchosen one lifts it towards being lit. A background
+        // as well would make this a row of tabs, which is the one thing it
+        // must not read as.
+        let color = if chosen {
+            theme().accent
+        } else if mouse.is_hovered() {
+            theme().text_primary
+        } else {
+            theme().text_muted
+        };
+
+        Container::new(
+            Flex::column()
+                .with_main_axis_size(MainAxisSize::Min)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_child(
+                    Icon::new(icon, SECTION_ICON_SIZE)
+                        .with_color(color)
+                        .finish(),
+                )
+                .with_child(
+                    Container::new(
+                        Text::new(label.clone(), workspace.fonts().ui, SECTION_LABEL_SIZE)
+                            .with_color(color)
+                            .finish(),
+                    )
+                    .with_margin_top(3.)
+                    .finish(),
+                )
+                .finish(),
+        )
+        .with_horizontal_padding(10.)
+        .with_vertical_padding(4.)
+        .finish()
+    })
+    .on_click(move |_, ctx, _| ctx.dispatch_typed_action(WorkspaceAction::ShowSection(section)))
     .finish()
 }
 

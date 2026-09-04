@@ -235,10 +235,7 @@ fn the_settings_rail_is_what_the_plugins_put_in_it() {
             .map(|(_, title)| title)
             .collect();
 
-        assert_eq!(
-            titles,
-            ["Appearance", "Shell", "Usage", "Keys", "Plugins", "About"]
-        );
+        assert_eq!(titles, ["Appearance", "Shell", "Usage", "Keys", "About"]);
     });
 }
 
@@ -263,7 +260,7 @@ fn disabling_a_plugin_takes_its_settings_page_off_the_rail() {
             .into_iter()
             .map(|(_, title)| title)
             .collect();
-        assert_eq!(titles, ["Appearance", "Shell", "Keys", "Plugins", "About"]);
+        assert_eq!(titles, ["Appearance", "Shell", "Keys", "About"]);
     });
 }
 

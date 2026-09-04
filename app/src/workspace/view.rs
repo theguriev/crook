@@ -34,7 +34,8 @@ use crate::pane_selection::PaneSelection;
 use crate::pane_split::{DividerDrag, PaneExtent};
 use crate::pane_surface;
 use crate::platform_insets::{ControlLayout, LayoutInsets, WindowChrome};
-use crate::plugin::{ActionId, Host, PageId, PluginId};
+use crate::plugin::{ActionId, Host, PageId, PluginId, SectionId};
+use crate::plugins::settings::SETTINGS_SECTION;
 use crate::selection::{Blocks, Cells};
 use crate::settings::{
     DEFAULT_FONT_SIZE, Density, FONT_SIZE_STEP, GeneralOptions, Granularity, Settings, TabOptions,
@@ -370,6 +371,31 @@ pub struct Opening {
 /// The window's root view.
 pub struct Workspace {
     tabs: TabStrip,
+    /// One mouse state per section button, made the first time it is drawn.
+    section_buttons: std::cell::RefCell<HashMap<String, MouseStateHandle>>,
+    /// Every text field a section brought with it, in the order they were
+    /// first drawn: which section it belongs to, its own name, and the editor
+    /// behind it.
+    ///
+    /// Held here rather than by the sections, because `sync_input_keys` has to
+    /// be able to take the keyboard *away* from every one of them and it can
+    /// only reach what the workspace holds.
+    fields: std::cell::RefCell<Vec<(String, String, TextInput)>>,
+    /// Which field of each section was pressed last.
+    ///
+    /// Per section, because a section is one screen: the field a person was
+    /// typing into in the settings is not a claim about the plugins. A section
+    /// with nothing recorded gives the keyboard to the first field it drew,
+    /// which for every section Crook ships is its only one.
+    focused_field: std::cell::RefCell<HashMap<String, String>>,
+    /// Which section of the sidebar is showing, by its `owner/entry` key, or
+    /// `None` for the tabs.
+    ///
+    /// A key rather than an id, for the reason the settings page's is: the
+    /// sections come from a slot, so a key whose section has gone — the plugin
+    /// was switched off while it was showing — reads as `None` and the window
+    /// goes back to the tabs.
+    section: Option<String>,
     fonts: Fonts,
     /// The faces and the cell every pane's grid is drawn with, resolved once at
     /// startup because measuring one is a search through the font database.
@@ -583,6 +609,10 @@ impl Workspace {
         let settings_path = settings.path().map(Path::to_owned);
         let mut workspace = Self {
             tabs: TabStrip::new(),
+            section: None,
+            section_buttons: std::cell::RefCell::new(HashMap::new()),
+            fields: std::cell::RefCell::new(Vec::new()),
+            focused_field: std::cell::RefCell::new(HashMap::new()),
             fonts,
             cell_font,
             usage,
@@ -903,7 +933,7 @@ impl Workspace {
             .iter()
             .filter_map(|tab| {
                 let pane = tab.panes().focused()?;
-                Some((tab.id(), pane.session()?.working_directory.clone()?))
+                Some((tab.id(), pane.session().working_directory.clone()?))
             })
             .collect()
     }
@@ -1115,6 +1145,86 @@ impl Workspace {
         self.panel_rows.clone()
     }
 
+    /// A text field belonging to one section, made the first time it is drawn.
+    ///
+    /// The index it hands back is what an action carries, because
+    /// [`WorkspaceAction`] is `Copy` and a field is named by two strings.
+    pub(crate) fn field(&self, section: &str, name: &str) -> (usize, TextInput) {
+        let mut fields = self.fields.borrow_mut();
+        if let Some(index) = fields
+            .iter()
+            .position(|(owner, known, _)| owner == section && known == name)
+        {
+            return (index, fields[index].2.clone());
+        }
+        let input = TextInput::new();
+        fields.push((section.to_owned(), name.to_owned(), input.clone()));
+        let index = fields.len() - 1;
+        drop(fields);
+
+        // Told now rather than at the next `sync_input_keys`. A field is
+        // registered while its section renders, which is *after* the change
+        // that showed the section — so a field left to wait would be inert
+        // until something else moved the focus, and the first thing typed
+        // after switching sections would go nowhere.
+        input.set_has_keys(
+            self.section.as_deref() == Some(section)
+                && self.field_with_keys().as_deref() == Some(name),
+        );
+        (index, input)
+    }
+
+    /// Moves the keyboard to one of them.
+    fn focus_field(&self, index: usize) {
+        let fields = self.fields.borrow();
+        let Some((section, name, _)) = fields.get(index) else {
+            return;
+        };
+        self.focused_field
+            .borrow_mut()
+            .insert(section.clone(), name.clone());
+    }
+
+    /// Which field of the section that is showing has the keyboard.
+    ///
+    /// The one pressed last, or the first that section drew — which is the
+    /// only rule a person can predict with no focus ring to look at, and the
+    /// only one that does not leave a section's single field inert until it is
+    /// clicked.
+    fn field_with_keys(&self) -> Option<String> {
+        let showing = self.section.clone()?;
+        let recorded = self.focused_field.borrow().get(&showing).cloned();
+        recorded.or_else(|| {
+            self.fields
+                .borrow()
+                .iter()
+                .find(|(section, _, _)| *section == showing)
+                .map(|(_, name, _)| name.clone())
+        })
+    }
+
+    /// Empties every field, which is what leaving a section does.
+    fn clear_fields(&self) {
+        for (_, _, input) in self.fields.borrow().iter() {
+            input.edit(crate::editor::Editor::clear);
+        }
+        self.focused_field.borrow_mut().clear();
+    }
+
+    /// The mouse state for one of the sidebar's section buttons, made the
+    /// first time it is drawn.
+    ///
+    /// Keyed by the section's own key so that a plugin switched off and back
+    /// on gets its state back rather than a neighbour's — the same rule the
+    /// settings page's controls follow, for the same reason.
+    pub(super) fn section_button(&self, key: &str) -> MouseStateHandle {
+        self.section_buttons
+            .borrow_mut()
+            .entry(key.to_owned())
+            .or_default()
+            .clone()
+    }
+
     /// Brings the focused pane's row into view in the tabs panel.
     ///
     /// The gap that used to be written down in `tabs_panel`'s module docs:
@@ -1145,35 +1255,83 @@ impl Workspace {
         }
     }
 
-    /// Whether the settings page is open — which is to say, whether a pane is
-    /// holding it.
-    ///
-    /// Asked of the strip rather than of a flag beside it: the pane *is* the
-    /// page, and a second answer kept here would be one more thing to keep
-    /// true through every close.
+    /// Whether the sidebar is showing the settings.
     pub fn is_settings_page_open(&self) -> bool {
-        self.tabs.settings_pane().is_some()
+        self.showing_section().is_some()
+            && self.showing_section() == self.host.sidebar_section_id(SETTINGS_SECTION)
     }
 
-    /// Opens the settings page at `section`, for a run that was asked to start
-    /// on it.
+    /// Shows the settings, at `page`, for a run that was asked to start there.
     ///
-    /// The same two steps a click on the menu entry and a click on the rail
-    /// take, in that order, so a snapshot of the page is a snapshot of the
-    /// real thing rather than of a second code path.
+    /// The same two steps a click on the sidebar's button and a click on the
+    /// rail take, in that order, so a snapshot of the page is a snapshot of
+    /// the real thing rather than of a second code path.
     pub fn open_settings_page(&mut self, page: Option<PageId>, ctx: &mut ViewContext<Self>) {
         if let Some(page) = page {
             self.apply_settings(SettingsAction::Select(page), ctx);
         }
-        if self.apply(TabAction::OpenSettings, ctx) == TabEffect::CloseWindow {
-            // Unreachable: opening a tab never empties the strip.
-            (self.quit)();
+        let settings = self.host.sidebar_section_id(SETTINGS_SECTION);
+        self.show_section(settings, ctx);
+    }
+
+    /// The section whose button says `title`, however it is spelled.
+    ///
+    /// The title rather than the key, because the title is what is written on
+    /// the button and the key is `owner/entry` — nobody types that.
+    pub fn section_named(&self, title: &str) -> Option<SectionId> {
+        self.host
+            .sidebar_sections()
+            .into_iter()
+            .find(|(_, name, _)| name.eq_ignore_ascii_case(title))
+            .map(|(id, _, _)| id)
+    }
+
+    /// Shows one section of the sidebar, or the tabs.
+    pub fn show_section(&mut self, section: Option<SectionId>, ctx: &mut ViewContext<Self>) {
+        let key = section.and_then(|id| self.host.sidebar_section_key(id).map(str::to_owned));
+        if self.section == key {
+            return;
+        }
+        self.section = key;
+        // The sidebar and the window are both about to be replaced, so every
+        // control the pointer was on is about to stop existing without ever
+        // seeing a hover-out — and a field on the section being left must not
+        // go on holding the keyboard.
+        self.forget_section_state();
+        self.clear_fields();
+        self.sync_input_keys();
+        ctx.notify();
+    }
+
+    /// Which section the sidebar is showing, if it is not showing the tabs.
+    pub fn showing_section(&self) -> Option<SectionId> {
+        self.section
+            .as_deref()
+            .and_then(|key| self.host.sidebar_section_id(key))
+    }
+
+    /// Drops what the section being left was holding.
+    fn forget_section_state(&mut self) {
+        self.hovered_row = None;
+        self.page.forget_hover_state();
+        for interaction in self.interactions.values() {
+            interaction.chip.lock().reset_interaction_state();
+            interaction.close.lock().reset_interaction_state();
+            interaction.body.lock().reset_interaction_state();
+        }
+        for chrome in self.tab_chrome.values() {
+            chrome.container.lock().reset_interaction_state();
+            chrome.header.lock().reset_interaction_state();
         }
     }
 
     /// What is in the settings page's search box, for a test to read back.
     pub fn settings_search_text(&self) -> String {
-        self.page.search.editor().text().to_owned()
+        self.field(SETTINGS_SECTION, "search")
+            .1
+            .editor()
+            .text()
+            .to_owned()
     }
 
     /// Types `query` into the settings page's search box, for a run that was
@@ -1183,7 +1341,9 @@ impl Workspace {
     /// box does with a keystroke is insert a character, and a snapshot wants
     /// the state that leaves rather than the path to it.
     pub fn type_into_settings_search(&mut self, query: &str, ctx: &mut ViewContext<Self>) {
-        self.page.search.edit(|editor| editor.set_text(query));
+        self.field(SETTINGS_SECTION, "search")
+            .1
+            .edit(|editor| editor.set_text(query));
         ctx.notify();
     }
 
@@ -1298,8 +1458,7 @@ impl Workspace {
             .tabs
             .get(tab)
             .and_then(|tab| tab.panes().focused())
-            .and_then(|pane| pane.session())
-            .and_then(|session| session.working_directory.clone());
+            .and_then(|pane| pane.session().working_directory.clone());
         let Some(directory) = directory else {
             return;
         };
@@ -1940,7 +2099,12 @@ impl Workspace {
         // The settings page's search box is the other field that blinks, and
         // it is the one field that is not a pane's — so it is asked about
         // separately, in the one state it can have the keyboard in.
-        if self.page.search.has_keys() {
+        if self
+            .fields
+            .borrow()
+            .iter()
+            .any(|(_, _, input)| input.has_keys())
+        {
             return true;
         }
         self.terminal(pane, app).is_some_and(|(_, snapshot)| {
@@ -2221,14 +2385,7 @@ impl Workspace {
             return false;
         };
 
-        // `None` when the pane holds the settings page rather than a session.
-        // A report addressed to it is a report for a session that has been
-        // closed, and it fails the same way: nothing written, `false`
-        // returned.
-        let Some(session) = pane.session_mut() else {
-            return false;
-        };
-        report(session);
+        report(pane.session_mut());
         // A report can move the session somewhere else, and the git facts a
         // row shows are looked up by directory — which is what makes the branch
         // chip follow a shell's `cd`.
@@ -2270,7 +2427,7 @@ impl Workspace {
         let rang = self
             .tabs
             .pane(pane)
-            .and_then(Pane::session)
+            .map(Pane::session)
             .is_some_and(|session| session.status == AgentStatus::NeedsInput);
         if !rang {
             return;
@@ -2374,15 +2531,6 @@ impl Workspace {
     /// a tab that has been closed — and what makes "the strip changed" and
     /// "the window is dirty" the same statement rather than two.
     pub fn apply(&mut self, action: TabAction, ctx: &mut ViewContext<Self>) -> TabEffect {
-        // Opening the settings is one of the two gestures that can precede
-        // choosing a theme — the other is opening the panel — and therefore
-        // one of the two moments worth walking the themes directory. Here
-        // rather than in the action handler, because every way of opening the
-        // page comes through this one call.
-        if action == TabAction::OpenSettings {
-            self.refresh_themes();
-        }
-
         let effect = self.tabs.apply(action);
         self.settle(effect, ctx)
     }
@@ -2401,9 +2549,9 @@ impl Workspace {
         // `New` inserts after the active tab and makes it active, so the
         // focused pane is the one it just made.
         if let Some(pane) = self.tabs.focused_pane_id()
-            && let Some(session) = self.tabs.pane_mut(pane).and_then(Pane::session_mut)
+            && let Some(pane) = self.tabs.pane_mut(pane)
         {
-            session.working_directory = Some(directory);
+            pane.session_mut().working_directory = Some(directory);
         }
 
         self.settle(effect, ctx)
@@ -2518,12 +2666,14 @@ impl Workspace {
             // The sidebar chord every editor uses for the same gesture: move
             // the list of things you are working on out of the way, or back.
             // The binding every application on all three platforms uses for
-            // this, and the one Warp binds `ShowSettings` to. A tab action
-            // rather than a settings one, because what it opens is a tab —
-            // and because a second press must navigate to the page rather
-            // than toggle it away, which is what `OpenSettings` does and a
-            // toggle could not.
-            Binding::OpenSettings => TabAction::OpenSettings,
+            // this, and the one Warp binds `ShowSettings` to. A second press
+            // navigates to the settings rather than toggling them away, which
+            // is what a person pressing it twice means.
+            Binding::OpenSettings => {
+                return Some(WorkspaceAction::ShowSection(
+                    self.host.sidebar_section_id(SETTINGS_SECTION),
+                ));
+            }
             // The zoom chords are not tab actions: they change the font the
             // whole window is drawn in, and the size lives in the settings
             // beside the theme.
@@ -2599,10 +2749,6 @@ impl Workspace {
         self.options.show_details_on_hover
             && !self.a_popup_is_open()
             && self.hovered_row == Some(pane)
-            // The card says what a row had no room for, and the settings row
-            // has nothing behind its one line. `detail_panes` drops the pane
-            // as well; without this the card would still open, empty.
-            && self.tabs.pane(pane).is_some_and(|pane| !pane.is_settings())
     }
 
     /// The home directory every row abbreviates its path against.
@@ -2718,16 +2864,14 @@ impl Workspace {
 
         self.sync_input_keys();
 
-        // The query lives exactly as long as the page it filters. The page's
-        // *section* deliberately outlives its pane — closing the tab and
-        // opening it again comes back to where you were — but a filter must
-        // not: a settings page that came back showing four rows out of thirty
-        // would read as broken rather than as filtered, and the box that
-        // explains why is at the top of a rail somebody has to look at.
-        if self.tabs.settings_pane().is_none() {
-            self.page.search.edit(crate::editor::Editor::clear);
-            self.page.clear_fields();
-            self.page.set_focus(None);
+        // The query lives exactly as long as the section it filters. Which
+        // page the rail has selected deliberately outlives it — coming back to
+        // the settings comes back to where you were — but a filter must not: a
+        // settings page that came back showing four rows out of thirty would
+        // read as broken rather than as filtered, and the box that explains
+        // why is at the top of a rail somebody has to look at.
+        if self.section.is_none() {
+            self.clear_fields();
         }
 
         // A row that has gone cannot receive the hover-out that would clear
@@ -2780,16 +2924,17 @@ impl Workspace {
             .branch
             .set_has_keys(self.tab_menu.mode == WorktreeMode::Creating);
 
-        let settings_focused = listening
-            .and_then(|id| self.tabs.pane(id))
-            .is_some_and(|pane| pane.is_settings());
-        // A page may bring a field of its own, and then exactly one of them is
-        // being typed into: the rail's when nothing else has been pressed, and
-        // whichever was pressed last after that.
-        self.page
-            .search
-            .set_has_keys(settings_focused && self.page.focus().is_none());
-        self.page.sync_fields(settings_focused);
+        // A section's fields take the keyboard while that section is showing,
+        // which is also when no pane is: the sidebar's sections replace the
+        // panes rather than sitting beside them. Exactly one of them is being
+        // typed into — see `field_with_keys`.
+        let showing = self.section.clone();
+        let focused = self.field_with_keys();
+        for (section, name, input) in self.fields.borrow().iter() {
+            input.set_has_keys(
+                showing.as_deref() == Some(section.as_str()) && focused.as_deref() == Some(name),
+            );
+        }
     }
 
     /// Tells the git model which directories the strip is showing.
@@ -2797,7 +2942,7 @@ impl Workspace {
         let directories: Vec<PathBuf> = self
             .tabs
             .panes()
-            .filter_map(|(_, pane)| pane.session()?.working_directory.clone())
+            .filter_map(|(_, pane)| pane.session().working_directory.clone())
             .collect();
         self.git
             .update(ctx, |model, ctx| model.track(directories, ctx));
@@ -2816,22 +2961,10 @@ impl Workspace {
     }
 
     /// The open panes that want a shell, and where each of them is working.
-    ///
-    /// The settings pane is not one of them. Nothing draws a grid for it and
-    /// nothing can type into it, so a shell opened here would be a process
-    /// running for a pane that cannot show it — started when the page opens,
-    /// killed when the tab closes, and visible to nobody in between.
     fn open_panes(&self) -> Vec<(PaneId, Option<PathBuf>)> {
         self.tabs
             .panes()
-            .filter(|(_, pane)| !pane.is_settings())
-            .map(|(_, pane)| {
-                (
-                    pane.id(),
-                    pane.session()
-                        .and_then(|session| session.working_directory.clone()),
-                )
-            })
+            .map(|(_, pane)| (pane.id(), pane.session().working_directory.clone()))
             .collect()
     }
 
@@ -2914,7 +3047,6 @@ impl Workspace {
                 self.page.page = key;
                 // The fields belong to the page that drew them, and the next
                 // page may have none at all.
-                self.page.set_focus(None);
                 // A page is a different set of controls at a different set of
                 // positions. Both of the things that survive a section change
                 // would otherwise be wrong: the scroll offset belongs to the
@@ -2925,10 +3057,10 @@ impl Workspace {
                 ctx.notify();
             }
             SettingsAction::FocusField(field) => {
-                if self.page.focus() == field {
+                let Some(index) = field else {
                     return;
-                }
-                self.page.set_focus(field);
+                };
+                self.focus_field(index);
                 self.sync_input_keys();
                 ctx.notify();
             }
@@ -3386,17 +3518,32 @@ impl View for Workspace {
         // where Warp puts its chooser: a docked sibling that pushes the
         // terminal aside rather than a modal that covers it, so a theme is
         // judged against a running shell.
-        let stacked = Flex::column()
+        // What the sidebar holds and what the window holds are one answer,
+        // asked once: a section builds both halves together, because its list
+        // and its detail are two views of the same state. The tabs are the
+        // window's own section and the only one no plugin contributes.
+        let (sidebar, body) = match self.showing_section() {
+            Some(id) => self
+                .host
+                .build_sidebar_section(id, self, app)
+                .unwrap_or_else(|| (Empty::new().finish(), Empty::new().finish())),
+            None => (
+                tabs_panel::tab_list(self, app),
+                self.beside_panel(body::render(self, app), app),
+            ),
+        };
+
+        let main = Flex::column()
             .with_main_axis_size(MainAxisSize::Max)
             .with_child(header_toolbar::render(self, app))
-            .with_child(Expanded::new(1., self.beside_panel(body::render(self, app), app)).finish())
+            .with_child(Expanded::new(1., body).finish())
             .finish();
 
         let content = Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_child(tabs_panel::render(self, app))
-            .with_child(Expanded::new(1., stacked).finish())
+            .with_child(tabs_panel::render(self, sidebar))
+            .with_child(Expanded::new(1., main).finish())
             .finish();
 
         let window = Container::new(content)
@@ -3488,17 +3635,23 @@ impl TypedActionView for Workspace {
     fn handle_action(&mut self, action: &WorkspaceAction, ctx: &mut ViewContext<Self>) {
         match *action {
             WorkspaceAction::Tab(action) => {
-                // The one tab action the options menu itself dispatches, and
-                // the menu's job is done the moment it does: it is a popup
-                // about the strip, and this puts a page over the body.
-                // The menu is a popup about the strip, and its job is done
-                // the moment its own entry puts a page over the body.
-                if action == TabAction::OpenSettings {
-                    self.close_menu();
-                }
                 if self.apply(action, ctx) == TabEffect::CloseWindow {
                     (self.quit)();
                 }
+            }
+            WorkspaceAction::ShowSection(section) => {
+                // The menu is a popup about the tab list, and its job is done
+                // the moment its own entry puts something else in the sidebar.
+                self.close_menu();
+                if section
+                    .is_some_and(|id| self.host.sidebar_section_key(id) == Some(SETTINGS_SECTION))
+                {
+                    // One of the two gestures that can precede choosing a
+                    // theme — the other is opening the panel — and therefore
+                    // one of the two moments worth walking the themes folder.
+                    self.refresh_themes();
+                }
+                self.show_section(section, ctx);
             }
             WorkspaceAction::Options(action) => self.apply_option(action, ctx),
             WorkspaceAction::Settings(action) => self.apply_settings(action, ctx),

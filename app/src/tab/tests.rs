@@ -226,11 +226,7 @@ fn reporting_progress_into_a_session_cannot_touch_its_panes_identity() {
     // one assignment away from disagreeing with its pane's.
     let (mut strip, ids) = strip(3);
     let pane = focused_pane(&strip, ids[1]);
-    let session = strip
-        .pane_mut(pane)
-        .expect("still open")
-        .session_mut()
-        .expect("an agent pane");
+    let session = strip.pane_mut(pane).expect("still open").session_mut();
 
     session.title = "renamed".to_owned();
     session.status = AgentStatus::Failed;
@@ -268,7 +264,6 @@ fn a_derived_title_replaces_the_one_the_session_was_created_with() {
         .pane_mut(pane)
         .expect("just created")
         .session_mut()
-        .expect("an agent pane")
         .derived_title = Some("port the tab bar".to_owned());
 
     assert_eq!(strip.get(id).map(Tab::title), Some("port the tab bar"));
@@ -545,97 +540,6 @@ fn every_session_a_window_opens_gets_a_name_no_other_session_has_had() {
         "two sessions share a name: {names:?}"
     );
     assert_eq!(names.len(), 5);
-}
-
-#[test]
-fn opening_the_settings_puts_them_in_a_tab_after_the_active_one() {
-    // Where a new tab goes, because it *is* a new tab: after the one somebody
-    // was looking at when they asked for it.
-    let (mut strip, ids) = strip(3);
-    strip.apply(TabAction::Select(ids[0]));
-
-    assert_eq!(TabEffect::Changed, strip.apply(TabAction::OpenSettings));
-
-    let order = order(&strip);
-    assert_eq!(order.len(), 4);
-    assert_eq!(order[0], ids[0]);
-    let settings = order[1];
-    assert_eq!(strip.active_id(), settings, "the new tab was not selected");
-    assert_eq!(
-        strip.get(settings).map(Tab::title),
-        Some(SETTINGS_TITLE),
-        "the tab does not name itself"
-    );
-    assert_eq!(
-        strip.get(settings).and_then(Tab::status),
-        None,
-        "the settings pane reported an agent status"
-    );
-}
-
-#[test]
-fn there_is_never_more_than_one_settings_pane_in_a_window() {
-    // Warp keeps at most one per window and navigates to it; a second press of
-    // `cmd/ctrl-,` must bring the page forward rather than open another copy
-    // of it, and a second copy would also be a second thing writing the same
-    // settings file.
-    let (mut strip, ids) = strip(2);
-    strip.apply(TabAction::OpenSettings);
-    let settings = strip.active_id();
-    let (settings_tab, settings_pane) = strip.settings_pane().expect("just opened");
-    assert_eq!(settings_tab, settings);
-
-    strip.apply(TabAction::Select(ids[0]));
-    assert_eq!(TabEffect::Changed, strip.apply(TabAction::OpenSettings));
-
-    assert_eq!(order(&strip).len(), 3, "a second settings tab was opened");
-    assert_eq!(strip.active_id(), settings);
-    assert_eq!(
-        strip.settings_pane(),
-        Some((settings_tab, settings_pane)),
-        "the pane holding the page was replaced"
-    );
-
-    // And asking for it while it is already in front changes nothing at all,
-    // which is what keeps a held-down binding off the GPU.
-    assert_eq!(TabEffect::Unchanged, strip.apply(TabAction::OpenSettings));
-}
-
-#[test]
-fn a_settings_tab_does_not_consume_an_agent_name() {
-    // The counter names agent sessions. Opening settings between two new tabs
-    // must not skip a number, or the strip reads as though a session had been
-    // opened and closed.
-    let mut strip = TabStrip::new();
-    strip.apply(TabAction::OpenSettings);
-    strip.apply(TabAction::New);
-
-    let names: Vec<&str> = strip.iter().map(Tab::name).collect();
-    assert_eq!(names, ["agent 1", SETTINGS_TITLE, "agent 2"]);
-}
-
-#[test]
-fn closing_the_settings_pane_of_a_split_tab_leaves_the_session_behind() {
-    // A settings pane is a pane: it can be split next to a session, and
-    // closing it is closing one pane of a tab rather than closing the tab.
-    let mut strip = TabStrip::new();
-    strip.apply(TabAction::OpenSettings);
-    let tab = strip.active_id();
-    strip.apply(TabAction::Split(Direction::Right));
-    let (_, settings_pane) = strip.settings_pane().expect("still open");
-
-    assert_eq!(panes_of(&strip, tab).len(), 2);
-    assert_eq!(
-        TabEffect::Changed,
-        strip.apply(TabAction::ClosePane(settings_pane))
-    );
-
-    assert_eq!(strip.settings_pane(), None);
-    assert_eq!(
-        panes_of(&strip, tab).len(),
-        1,
-        "the tab should have kept the session it was split with"
-    );
 }
 
 /// Dragging the boundary between two panes, which is arithmetic on weights and

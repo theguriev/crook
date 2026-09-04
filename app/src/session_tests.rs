@@ -150,22 +150,6 @@ fn test_the_split_axis_survives() {
 }
 
 #[test]
-fn test_the_settings_pane_is_not_remembered() {
-    // It is a thing somebody opened to change a setting. A window that came
-    // back with it still open would be answering a question nobody asked
-    // twice.
-    let mut strip = TabStrip::new();
-    strip.apply(TabAction::OpenSettings);
-    assert!(strip.settings_pane().is_some());
-
-    let session = Session::of(&strip, None);
-    let restored = session.restore().expect("the agent tab is still there");
-
-    assert_eq!(restored.settings_pane(), None);
-    assert_eq!(restored.len(), 1);
-}
-
-#[test]
 fn test_a_working_directory_that_is_gone_is_not_restored() {
     // A repository moved or deleted between two launches. Starting a shell in
     // a directory that is not there is answered by most shells with `/`, which
@@ -178,7 +162,7 @@ fn test_a_working_directory_that_is_gone_is_not_restored() {
     let directory = restored
         .panes()
         .next()
-        .and_then(|(_, pane)| pane.session())
+        .map(|(_, pane)| pane.session())
         .and_then(|session| session.working_directory.clone());
 
     assert_ne!(directory.as_deref(), Some(Path::new("/nowhere/at/all")));
@@ -195,7 +179,7 @@ fn test_a_directory_that_is_still_there_is_restored() {
     let restored_directory = restored
         .panes()
         .next()
-        .and_then(|(_, pane)| pane.session())
+        .map(|(_, pane)| pane.session())
         .and_then(|session| session.working_directory.clone());
 
     assert_eq!(restored_directory.as_deref(), Some(directory.as_path()));

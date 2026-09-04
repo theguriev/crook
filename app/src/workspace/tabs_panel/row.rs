@@ -118,16 +118,13 @@ pub(super) fn render(
         return Empty::new().finish();
     };
 
-    // `None` for the settings pane: see the strip's row, which resolves the
-    // same three the same way.
     let session = pane_data.session();
-    let git = session.and_then(|session| workspace.git_facts(session, app));
+    let git = workspace.git_facts(session, app);
     let status = pane_data.status();
     let home = workspace.home();
 
     // What the row's own right press does, and whether the menu it opens is
-    // up. See the strip's row: the rule is the same in both layouts because it
-    // is about the tab rather than about how the tab is drawn.
+    // up. About the tab rather than about the row that draws it.
     let is_the_tabs_row = tab_data.panes().focused_id() == pane;
     let menu_is_open = is_the_tabs_row && workspace.tab_menu().tab == Some(tab);
     let opens_menu = is_the_tabs_row && git.is_some_and(|facts| facts.branch.is_some());
@@ -146,16 +143,13 @@ pub(super) fn render(
         Granularity::Tabs => TabAction::Close(tab),
     };
 
-    let facts = match session {
-        Some(session) => RowFacts::resolve(session, git, home, PANEL_PATH_CHARS),
-        None => RowFacts::settings(),
-    };
-    let chips = match (session, options.density) {
+    let facts = RowFacts::resolve(session, git, home, PANEL_PATH_CHARS);
+    let chips = match options.density {
         // Warp's `render_compact_pane_row` never calls
         // `render_terminal_right_badges`, which is exactly why the menu hides
         // the two "Show" toggles in this density.
-        (Some(session), Density::Expanded) => Chips::resolve(session, git, options),
-        _ => Chips::default(),
+        Density::Expanded => Chips::resolve(session, git, options),
+        Density::Compact => Chips::default(),
     };
     let body = match options.density {
         Density::Compact => compact_column(&facts, options, ui),
@@ -186,7 +180,7 @@ pub(super) fn render(
                 } else {
                     CrossAxisAlignment::Center
                 })
-                .with_child(status_disc(status))
+                .with_child(status_disc(Some(status)))
                 .with_child(Expanded::new(1., body.column).finish())
                 .with_child(close_slot(close_action, close_state.clone(), show_close))
                 .finish(),
@@ -243,12 +237,9 @@ pub(super) fn render(
     let sections: Vec<DetailSection<'_>> = detail_panes(tab_data, pane, options.granularity)
         .into_iter()
         .map(|pane| DetailSection {
-            // `detail_panes` has already dropped the settings pane.
-            session: pane.session().expect("a card section without a session"),
-            facts: pane
-                .session()
-                .and_then(|session| workspace.git_facts(session, app)),
-            status: pane.status().unwrap_or_default(),
+            session: pane.session(),
+            facts: workspace.git_facts(pane.session(), app),
+            status: pane.status(),
         })
         .collect();
 

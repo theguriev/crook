@@ -27,7 +27,7 @@ pub mod header;
 mod keys;
 mod palette;
 mod plugins_page;
-mod settings;
+pub mod settings;
 mod shell;
 mod usage;
 pub mod wasm;

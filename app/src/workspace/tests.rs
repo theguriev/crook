@@ -38,7 +38,7 @@ use crate::window_controls::{Recorder, Request, WindowState};
 
 use super::{
     Fonts, Opening, OptionsAction, QuitRequest, SettingsAction, ThemeAction, Workspace,
-    WorkspaceAction, WorktreeAction, controls, settings_page, tab_options_menu, tabs_panel,
+    WorkspaceAction, WorktreeAction, controls, tab_options_menu, tabs_panel,
 };
 
 /// Big enough that two tabs both reach their maximum width, so the geometry
@@ -377,10 +377,32 @@ impl Harness {
             .read(&self.app, |workspace, _| workspace.is_options_menu_open())
     }
 
-    /// Opens the settings tab, or brings it forward — the keystroke's action,
-    /// sent the way the gear menu's entry sends it.
+    /// Shows the settings section, the way the sidebar's own button does.
     fn open_settings_page(&mut self) {
-        self.dispatch_action(TabAction::OpenSettings);
+        self.show_section(crate::plugins::settings::SETTINGS_SECTION);
+    }
+
+    /// Shows the section with this key, the way its button does.
+    fn show_section(&mut self, key: &str) {
+        let section = self
+            .workspace
+            .read(&self.app, |workspace, _| {
+                workspace.host().sidebar_section_id(key)
+            })
+            .unwrap_or_else(|| panic!("no sidebar section is called {key:?}"));
+        self.dispatch_workspace_action(WorkspaceAction::ShowSection(Some(section)));
+        self.frame();
+    }
+
+    /// Shows the Plugins section, the way its button does.
+    fn show_plugins(&mut self) {
+        self.show_section("crook/plugins/section");
+    }
+
+    /// Goes back to the tab list.
+    fn show_tabs(&mut self) {
+        self.dispatch_workspace_action(WorkspaceAction::ShowSection(None));
+        self.frame();
     }
 
     /// Runs `change` against the workspace, the way an action handler does.
@@ -578,17 +600,10 @@ impl Harness {
             .read(&self.app, |workspace, app| workspace.shell_login(app))
     }
 
-    /// Presses the Plugins page's own search field.
-    fn click_plugins_search(&mut self) {
+    /// Presses the one text field the showing section drew.
+    fn click_section_field(&mut self) {
         let boxes = settings_field_boxes(&self.frame());
-        assert_eq!(boxes.len(), 2, "two fields on the Plugins page");
-        self.click(center(boxes[1]), MouseButton::Left);
-        self.frame();
-    }
-
-    /// Presses the rail's search field.
-    fn click_rail_search(&mut self) {
-        let boxes = settings_field_boxes(&self.frame());
+        assert_eq!(boxes.len(), 1, "one field on this section");
         self.click(center(boxes[0]), MouseButton::Left);
         self.frame();
     }
@@ -604,8 +619,8 @@ impl Harness {
         // both columns is a line neither of them drew.
         let column = settings_field_boxes(&scene)
             .into_iter()
-            .nth(1)
-            .expect("the Plugins page has a field of its own");
+            .next()
+            .expect("the Plugins section has a field of its own");
 
         let row = text_lines(&scene, |at| {
             at.x() >= column.min_x() && at.x() <= column.max_x()
@@ -687,7 +702,7 @@ impl Harness {
             workspace
                 .tabs()
                 .pane(pane)
-                .and_then(|pane| pane.session()?.working_directory.clone())
+                .and_then(|pane| pane.session().working_directory.clone())
                 .expect("every seeded session has a working directory")
         });
         let facts = GitFacts {
@@ -987,7 +1002,7 @@ impl Harness {
             workspace
                 .tabs()
                 .pane(pane)
-                .and_then(|pane| pane.session()?.working_directory.clone())
+                .and_then(|pane| pane.session().working_directory.clone())
         })
     }
 
@@ -1006,7 +1021,7 @@ impl Harness {
     /// session's working directory.
     fn branch_shown(&self, pane: PaneId) -> Option<Head> {
         self.workspace.read(&self.app, |workspace, app| {
-            let session = workspace.tabs().pane(pane)?.session()?;
+            let session = workspace.tabs().pane(pane)?.session();
             workspace.git_facts(session, app)?.branch.clone()
         })
     }
@@ -2903,16 +2918,24 @@ fn every_mark_in_the_chrome_is_an_icon_rather_than_a_codepoint() {
     // is a mark that will be a different shape on somebody else's machine —
     // or, for the gear, a colour emoji.
     let mut harness = Harness::seeded();
-    harness.open_settings_page();
-    let scene = harness.frame();
 
-    let drawn = icons_of(&scene);
-    for expected in [Lucide::Settings, Lucide::Plus, Lucide::X, Lucide::GitBranch] {
+    // The tab list first: the branch mark is a row's, and rows are only drawn
+    // while the tabs are the section showing.
+    let tabs = icons_of(&harness.frame());
+    for expected in [Lucide::Plus, Lucide::X, Lucide::GitBranch] {
         assert!(
-            drawn.contains(&expected),
-            "the strip draws no {expected:?}, only {drawn:?}"
+            tabs.contains(&expected),
+            "the tab list draws no {expected:?}, only {tabs:?}"
         );
     }
+
+    harness.open_settings_page();
+    let scene = harness.frame();
+    let drawn = icons_of(&scene);
+    assert!(
+        drawn.contains(&Lucide::Settings),
+        "the settings draw no gear, only {drawn:?}"
+    );
 
     let text = frame_text(&scene);
     for codepoint in ['\u{00d7}', '\u{2715}', '\u{2699}', '\u{2713}', '\u{FF0B}'] {
@@ -3341,39 +3364,6 @@ fn making_a_worktree_checks_it_out_and_opens_a_tab_in_it() {
     assert!(
         listed.iter().any(|worktree| worktree.path == opened),
         "git does not know about the checkout that was made: {listed:?}"
-    );
-}
-
-#[test]
-fn the_settings_row_is_marked_with_a_gear_in_both_layouts() {
-    // A gear where an agent's status dot goes, in the strip and in the panel:
-    // the row stands for the page the gear button opens, so it carries that
-    // button's own icon. See
-    // [`the_settings_row_leads_with_a_gear_and_says_nothing_a_session_would`]
-    // for the other half of that row — what it declines to say.
-    let mut strip = Harness::new(1);
-    strip.open_settings_page();
-    let scene = strip.frame();
-    let last_tab = tab_boxes(&scene)
-        .into_iter()
-        .max_by(|left, right| left.min_x().total_cmp(&right.min_x()))
-        .expect("the strip draws the settings tab");
-    assert_eq!(
-        icons_in(&scene, last_tab, Lucide::Settings).len(),
-        1,
-        "the settings tab carries no gear in the strip"
-    );
-
-    let mut panel = Harness::panel(1);
-    panel.open_settings_page();
-    let scene = panel.frame();
-    let last_row = *panel_rows(&scene)
-        .last()
-        .expect("the panel draws the settings row");
-    assert_eq!(
-        icons_in(&scene, last_row, Lucide::Settings).len(),
-        1,
-        "the settings row carries no gear in the panel"
     );
 }
 
@@ -3828,8 +3818,8 @@ fn a_list_longer_than_the_panel_is_clipped_instead_of_painting_over_the_body() {
     // not a font's opinion.
     assert_eq!(
         visible.len(),
-        9,
-        "the default combination fits {} tabs, and the module docs say nine",
+        8,
+        "the default combination fits {} tabs, and the module docs say eight",
         visible.len()
     );
     for (_, on_screen) in &painted {
@@ -3878,7 +3868,7 @@ fn a_list_longer_than_the_panel_is_clipped_instead_of_painting_over_the_body() {
     });
     assert_eq!(
         panel_rows(&harness.frame()).len(),
-        7,
+        6,
         "Panes/Expanded fits a different number than the module docs say"
     );
 }
@@ -4297,19 +4287,18 @@ fn choosing_one_option_does_not_carry_another_command_line_override_into_the_fil
     );
 }
 
-/// The settings pane's panel.
+/// Where the settings are drawn: the window, minus the sidebar and the header.
 ///
-/// The settings page is a pane, so it has no chrome of its own: what bounds it
-/// is the body panel every pane gets. In a window whose active tab is the
-/// settings tab there is exactly one panel, and this is it.
+/// A synthetic box rather than a painted one. The settings are a *section*
+/// now: the rail is in the sidebar and the page is the window's whole body,
+/// which paints no surface of its own — so what bounds the page is the two
+/// things beside it.
 fn settings_pane_box(scene: &Scene) -> RectF {
-    let panels = panel_boxes(scene);
-    assert_eq!(
-        panels.len(),
-        1,
-        "the settings tab holds one pane, so its body has one panel"
-    );
-    panels[0]
+    let panel = panel_box(scene);
+    RectF::new(
+        vec2f(panel.max_x(), 0.),
+        vec2f(WINDOW.x() - panel.max_x(), WINDOW.y()),
+    )
 }
 
 /// The card's switches, top to bottom, by the round track they are painted on.
@@ -4329,25 +4318,16 @@ fn settings_switch_boxes(scene: &Scene) -> Vec<RectF> {
 /// Found by the field's own ground, which nothing else on the page paints:
 /// a rounded box in `overlay_1` exactly [`text_field::HEIGHT`] tall.
 fn settings_field_boxes(scene: &Scene) -> Vec<RectF> {
-    let pane = settings_pane_box(scene);
     let mut fields: Vec<RectF> = visible_rects(scene)
         .filter(|(rect, bounds)| {
             rect.background == Fill::Solid(theme().overlay_1)
                 && (bounds.height() - crate::workspace::text_field::HEIGHT).abs() < 0.5
-                && pane.contains_point(center(*bounds))
         })
         .map(|(_, bounds)| bounds)
         .collect();
     fields.sort_by(|left, right| left.min_x().total_cmp(&right.min_x()));
     fields
 }
-
-/// The diameter of the disc a panel row draws for an agent's status.
-///
-/// The panel decides this from its own row height, so this is a locator's
-/// number rather than the renderer's: it is here, in the tests, because
-/// nothing but a test needs to find a circle by its size.
-const STATUS_DOT_SIZE: f32 = 7.;
 
 /// Whether two boxes share any pixels.
 fn overlaps(left: RectF, right: RectF) -> bool {
@@ -4372,20 +4352,18 @@ fn plus_box(scene: &Scene) -> RectF {
 
 /// The rail's page buttons, top to bottom.
 ///
-/// Found by their rounded box *and* by being in the rail's column, because the
-/// page beside them rounds its one button by the same six pixels.
+/// Found by their rounded box *and* by being in the sidebar, because the page
+/// beside them rounds its one button by the same six pixels. The rail is the
+/// sidebar's body while the settings are showing.
 fn settings_rail_boxes(scene: &Scene) -> Vec<RectF> {
-    let pane = settings_pane_box(scene);
+    let panel = panel_box(scene);
     let mut rows: Vec<RectF> = visible_rects(scene)
         .filter(|(rect, _)| rect.corner_radius.get_top_left() == Radius::Pixels(6.))
         // The search box above them is the same shape, and is outlined where a
         // page button never is.
         .filter(|(rect, _)| rect.border == Border::default())
         .map(|(_, bounds)| bounds)
-        .filter(|bounds| {
-            pane.contains_point(center(*bounds))
-                && center(*bounds).x() < pane.min_x() + settings_page::RAIL_WIDTH
-        })
+        .filter(|bounds| center(*bounds).x() < panel.max_x())
         .collect();
     rows.sort_by(|left, right| left.min_y().total_cmp(&right.min_y()));
     rows
@@ -4406,10 +4384,9 @@ fn settings_button_box(scene: &Scene) -> Option<RectF> {
                 && rect.border.color == Fill::Solid(theme().border)
         })
         .map(|(_, bounds)| bounds)
-        .find(|bounds| {
-            pane.contains_point(center(*bounds))
-                && center(*bounds).x() > pane.min_x() + settings_page::RAIL_WIDTH
-        })
+        // In the page rather than in the sidebar, which the two are now on
+        // opposite sides of.
+        .find(|bounds| pane.contains_point(center(*bounds)))
 }
 
 /// The "Current theme" row on the settings page.
@@ -4847,68 +4824,29 @@ fn a_theme_this_machine_does_not_have_is_refused_rather_than_swapped_for_another
 }
 
 #[test]
-fn the_settings_page_opens_in_a_tab_and_the_binding_brings_that_tab_forward() {
-    // Warp's `open_settings_pane`: one settings pane per window. A second
-    // press is a navigation to it, never a second page and never a toggle —
-    // which is also why the keystroke resolves to a `TabAction` rather than to
-    // anything the settings page owns.
+fn the_settings_chord_shows_the_settings_section_and_a_second_press_keeps_it() {
+    // A second press is a navigation to the settings, never a toggle away
+    // from them: somebody pressing the chord twice means "settings", and a
+    // toggle would answer "the thing you were looking at".
     let mut harness = Harness::new(2);
-    let before = harness.tab_ids();
+    let tabs = harness.tab_ids();
     assert!(!harness.is_settings_page_open());
 
-    assert_eq!(
-        Some(WorkspaceAction::Tab(TabAction::OpenSettings)),
-        harness.action_for(",", settings_chord())
-    );
     assert!(harness.press_key(",", settings_chord()));
-
-    let with_settings = harness.tab_ids();
-    assert_eq!(with_settings.len(), before.len() + 1, "no tab was opened");
     assert!(harness.is_settings_page_open());
-    let settings_tab = harness.active_id();
-    assert!(
-        !before.contains(&settings_tab),
-        "the settings page went into a tab that already existed"
-    );
-    assert!(
-        frame_text(&harness.frame()).contains("Settings"),
-        "the strip does not say which tab it is"
-    );
 
-    // Somewhere else, then back: the same tab, brought forward.
-    harness.dispatch_action(TabAction::Select(before[0]));
     assert!(harness.press_key(",", settings_chord()));
-    assert_eq!(settings_tab, harness.active_id());
-    assert_eq!(
-        with_settings,
-        harness.tab_ids(),
-        "the binding opened a second settings tab"
-    );
-}
-
-#[test]
-fn the_settings_pane_closes_the_way_every_other_pane_does() {
-    // No close button of its own and no Escape binding: the row's ×, a middle
-    // click and the close chord (`cmd-w`, `ctrl-shift-w` off macOS) already
-    // close a pane, and the settings pane is not special enough to have a
-    // fourth way.
-    let mut harness = Harness::new(1);
-    harness.open_settings_page();
-    let settings_tab = harness.active_id();
-    let pane = harness
-        .focused_pane_id()
-        .expect("the settings pane is focused");
-
-    assert_eq!(None, harness.action_for("escape", Modifiers::default()));
-
-    harness.dispatch_action(TabAction::ClosePane(pane));
     assert!(
-        !harness.is_settings_page_open(),
-        "closing the pane left the page open"
+        harness.is_settings_page_open(),
+        "the second press toggled away"
     );
+
+    // And the tabs are untouched: showing the settings opens nothing and
+    // closes nothing.
+    assert_eq!(harness.tab_ids(), tabs);
     assert!(
-        !harness.tab_ids().contains(&settings_tab),
-        "the settings pane was the tab's last one, so the tab should have gone with it"
+        frame_text(&harness.frame()).contains("Appearance"),
+        "the settings are not on screen"
     );
 }
 
@@ -4926,46 +4864,6 @@ fn opening_the_settings_page_from_the_gear_menu_takes_the_menu_down() {
         !harness.is_menu_open(),
         "the menu survived the page opening"
     );
-}
-
-#[test]
-fn the_settings_row_leads_with_a_gear_and_says_nothing_a_session_would() {
-    // The row stands for something that is not an agent: no status colour, no
-    // working directory, no branch. The last of those is a trap the fact table
-    // walks straight into — with "Pane title as: Branch" every arm falls back
-    // to the command, and the compact subtitle *is* the command, so a row
-    // built through it would read "Settings" over "Settings".
-    let mut harness = Harness::new(1);
-    harness.dispatch_option(OptionsAction::SetPrimaryInfo(PrimaryInfo::Branch));
-    harness.open_settings_page();
-
-    let scene = harness.frame();
-    let settings_row = tab_boxes(&scene)
-        .into_iter()
-        .max_by(|left, right| left.min_x().total_cmp(&right.min_x()))
-        .expect("the strip draws the settings tab");
-    let text = text_where(&scene, |position| {
-        settings_row.contains_point(position + vec2f(0., -4.))
-    });
-
-    assert_eq!(
-        text.matches("Settings").count(),
-        1,
-        "the settings row prints its name {} times: {text:?}",
-        text.matches("Settings").count()
-    );
-
-    // No status dot: every colour a dot can be is an agent state, and the
-    // settings pane is not an agent in a fifth one.
-    let dots: Vec<RectF> = visible_rects(&scene)
-        .filter(|(rect, _)| {
-            rect.corner_radius.get_top_left() == Radius::Percentage(50.)
-                && (rect.bounds.width() - STATUS_DOT_SIZE).abs() < 0.5
-        })
-        .map(|(_, bounds)| bounds)
-        .filter(|bounds| settings_row.contains_point(center(*bounds)))
-        .collect();
-    assert!(dots.is_empty(), "the settings row drew a status dot");
 }
 
 #[test]
@@ -5083,11 +4981,9 @@ fn the_query_goes_when_the_page_does() {
     // somebody has to look at to find.
     let mut harness = Harness::new(1);
     harness.open_settings_page();
-    harness.frame();
     harness.type_text("chip");
 
-    harness.dispatch_action(TabAction::Close(harness.active_id()));
-    harness.frame();
+    harness.show_tabs();
     harness.open_settings_page();
 
     assert_eq!(harness.search_text(), "");
@@ -5098,22 +4994,18 @@ fn the_query_goes_when_the_page_does() {
 fn the_box_takes_no_keys_while_a_session_is_the_focused_pane() {
     // The one rule that keeps the box from eating a shell's typing: it has the
     // keyboard when the focused pane is the page it is part of, and never
-    // otherwise. A settings tab open in the strip while somebody works in
-    // another tab must not be collecting their keystrokes.
+    // otherwise. Going back to the tabs must stop it collecting keystrokes.
     let mut harness = Harness::new(2);
     harness.open_settings_page();
-    harness.frame();
     harness.type_text("ab");
     assert_eq!(harness.search_text(), "ab");
 
-    let session = harness.tab_ids()[0];
-    harness.dispatch_action(TabAction::Select(session));
-    harness.frame();
+    harness.show_tabs();
     harness.type_text("cd");
 
     assert_eq!(
         harness.search_text(),
-        "ab",
+        "",
         "the search box collected what was typed into a session"
     );
 }
@@ -5124,7 +5016,7 @@ fn the_rail_switches_pages_and_the_pane_shows_the_one_it_names() {
     harness.open_settings_page();
 
     let rail = settings_rail_boxes(&harness.frame());
-    assert_eq!(rail.len(), 6, "six pages in the rail");
+    assert_eq!(rail.len(), 5, "five pages in the rail");
 
     // The fourth: Keys.
     harness.click(center(rail[3]), MouseButton::Left);
@@ -5142,19 +5034,15 @@ fn the_rail_switches_pages_and_the_pane_shows_the_one_it_names() {
 }
 
 #[test]
-fn the_page_and_the_scroll_position_outlive_the_tab_they_were_in() {
-    // What Warp's per-window pane manager buys by holding its view handle
-    // through a close: coming back to settings comes back to where you were.
-    // Here the state is the workspace's rather than the pane's, which is the
-    // same guarantee with nothing to keep alive.
+fn the_page_and_the_scroll_position_outlive_leaving_the_section() {
+    // Coming back to the settings comes back to where you were. The state is
+    // the workspace's rather than the section's, which is what makes that true
+    // with nothing to keep alive.
     let mut harness = Harness::new(1);
     harness.open_settings_page();
     harness.select_settings_section("About");
-    let pane = harness
-        .focused_pane_id()
-        .expect("the settings pane is focused");
 
-    harness.dispatch_action(TabAction::ClosePane(pane));
+    harness.show_tabs();
     assert!(!harness.is_settings_page_open());
 
     harness.open_settings_page();
@@ -5310,29 +5198,6 @@ fn turning_the_login_shell_off_reaches_the_thing_that_opens_shells() {
         harness.shell_login(),
         !out_of_the_box,
         "the switch wrote the file and left the shells alone"
-    );
-}
-
-#[test]
-fn a_settings_pane_can_be_split_beside_a_session() {
-    // The reason it is a pane at all: Warp's settings can sit next to the
-    // thing being configured. Nothing here special-cases the split — a split
-    // opens an agent session beside whatever pane was focused, and the
-    // settings pane is a pane.
-    let mut harness = Harness::new(1);
-    harness.open_settings_page();
-    harness.dispatch_action(TabAction::Split(Direction::Right));
-
-    let panes = harness.active_pane_ids();
-    assert_eq!(panes.len(), 2, "the settings tab did not split");
-    assert!(
-        harness.is_settings_page_open(),
-        "splitting took the settings page away"
-    );
-    assert_eq!(
-        panel_boxes(&harness.frame()).len(),
-        2,
-        "the body should draw the settings page and the session side by side"
     );
 }
 
@@ -6266,31 +6131,6 @@ mod shells {
             harness.field_text(pane),
             "",
             "a key was typed into a field nobody can see"
-        );
-    }
-
-    #[test]
-    fn the_settings_pane_is_the_one_pane_that_gets_no_field() {
-        // Where the two halves of the body meet. A split settings tab draws
-        // both kinds of pane in the same frame: the session keeps the field it
-        // composes into, and the settings page — no shell, and every control on
-        // it a click — has nothing under it to type in.
-        let mut harness = Harness::new(1);
-        harness.open_settings_page();
-        harness.dispatch_action(TabAction::Split(Direction::Right));
-        if !harness.start_terminals() {
-            return;
-        }
-
-        assert_eq!(
-            harness.active_pane_ids().len(),
-            2,
-            "the settings page and the session should be side by side"
-        );
-        assert_eq!(
-            composer_boxes(&harness.frame()).len(),
-            1,
-            "either the settings pane was given a composer or the session lost one"
         );
     }
 
@@ -8485,7 +8325,7 @@ mod the_bell {
 
     fn status_of(harness: &Harness, pane: PaneId) -> Option<AgentStatus> {
         harness.workspace.read(&harness.app, |workspace, _| {
-            workspace.tabs().pane(pane).and_then(Pane::status)
+            workspace.tabs().pane(pane).map(Pane::status)
         })
     }
 
@@ -9067,7 +8907,7 @@ fn the_settings_rail_lists_the_pages_the_plugins_contributed() {
     let scene = harness.frame();
 
     let rail = settings_rail_boxes(&scene);
-    assert_eq!(rail.len(), 6, "six pages in the rail");
+    assert_eq!(rail.len(), 5, "five pages in the rail");
     // Top to bottom, which is the `order` each plugin asked for.
     assert_eq!(harness.settings_section(), "Appearance");
 
@@ -9152,8 +8992,7 @@ mod sandboxed {
             &wasm("eugen/probe", "header.right", 10),
         );
         let mut harness = harness(&scratch);
-        harness.open_settings_page();
-        harness.select_settings_section("Plugins");
+        harness.show_plugins();
 
         // In the list beside the ones in the box, and its card says where it
         // came from — which is the one thing a person needs to tell an
@@ -9222,12 +9061,10 @@ mod sandboxed {
 mod plugins_page {
     use super::*;
 
-    /// A harness with the settings open on the Plugins page.
+    /// A harness showing the Plugins section of the sidebar.
     fn harness() -> Harness {
         let mut harness = Harness::new(1);
-        harness.open_settings_page();
-        harness.select_settings_section("Plugins");
-        harness.frame();
+        harness.show_plugins();
         harness
     }
 
@@ -9277,7 +9114,7 @@ mod plugins_page {
     #[test]
     fn the_sidebar_field_narrows_the_list() {
         let mut harness = harness();
-        harness.click_plugins_search();
+        harness.click_section_field();
         harness.type_text("palette");
         let text = frame_text(&harness.frame());
 
@@ -9286,14 +9123,18 @@ mod plugins_page {
             !text.contains("Window commands"),
             "the list did not narrow: {text}"
         );
-        // And the rail is untouched: two fields, two jobs.
-        assert_eq!(settings_rail_boxes(&harness.frame()).len(), 6);
+        // And the sidebar is the plugin list rather than the settings rail:
+        // they are two sections, not two halves of one screen.
+        assert!(
+            !frame_text(&harness.frame()).contains("Appearance"),
+            "the settings rail is in the sidebar while the plugins are showing"
+        );
     }
 
     #[test]
     fn a_query_that_matches_nothing_says_so() {
         let mut harness = harness();
-        harness.click_plugins_search();
+        harness.click_section_field();
         harness.type_text("zzzz");
 
         assert!(frame_text(&harness.frame()).contains("No plugin matches that."));
@@ -9304,79 +9145,27 @@ mod plugins_page {
         // The two things somebody types that are not the name: the id they
         // read in a keymap, and the word for a tier.
         let mut harness = harness();
-        harness.click_plugins_search();
+        harness.click_section_field();
         harness.type_text("crook/palette");
         assert!(frame_text(&harness.frame()).contains("Command palette"));
     }
 
     #[test]
-    fn the_rail_search_finds_this_page_by_its_title_and_does_not_reach_inside() {
-        // The price of a page that draws itself, written down where it is
-        // paid: the rail's query has no rows to count here, so it finds the
-        // page by its title or not at all — and it does not touch the list.
+    fn what_a_section_was_typed_into_does_not_outlive_leaving_it() {
+        // The same rule the settings rail's own box follows: a filter that
+        // came back with the section would be a list that had silently lost
+        // most of itself.
         let mut harness = harness();
-
-        harness.type_text("plugins");
-        let text = frame_text(&harness.frame());
-
-        assert_eq!(harness.settings_section(), "Plugins", "{text}");
-        assert!(
-            text.contains("Window commands") && text.contains("Command palette"),
-            "the rail's query filtered the plugin list: {text}"
-        );
-    }
-
-    #[test]
-    fn a_rail_query_this_page_cannot_answer_moves_to_one_that_can() {
-        // The rule the settings page already had, applied to a page with no
-        // rows: a page gone blank under you while its neighbours have answers
-        // is a search that looks broken.
-        let mut harness = harness();
-
-        harness.type_text("density");
-        let text = frame_text(&harness.frame());
-
-        // The *shown* page moves; the selection does not, which is what puts
-        // you back on Plugins when the box is cleared.
-        assert!(text.contains("Density"), "{text}");
-        assert_eq!(harness.settings_section(), "Plugins");
-    }
-
-    #[test]
-    fn the_last_field_pressed_is_the_one_being_typed_into() {
-        // Two fields on one surface, and no focus ring to look at. The rule
-        // has to be one a person can predict.
-        let mut harness = harness();
-
-        harness.click_plugins_search();
-        harness.type_text("pal");
-        assert_eq!(harness.search_text(), "", "the rail's field took it");
-        assert!(!frame_text(&harness.frame()).contains("Window commands"));
-
-        harness.click_rail_search();
-        harness.type_text("plugins");
-        assert_eq!(harness.search_text(), "plugins");
-        // And the plugin list kept what was typed into it.
-        assert!(!frame_text(&harness.frame()).contains("Window commands"));
-    }
-
-    #[test]
-    fn what_a_page_typed_into_does_not_outlive_the_pane() {
-        // The same rule the rail's own box follows: a filter that came back
-        // with the page would be a page that had silently lost most of it.
-        let mut harness = harness();
-        harness.click_plugins_search();
+        harness.click_section_field();
         harness.type_text("palette");
         assert!(!frame_text(&harness.frame()).contains("Window commands"));
 
-        let settings = harness.tab_ids()[1];
-        harness.dispatch_action(TabAction::Close(settings));
-        harness.open_settings_page();
-        harness.select_settings_section("Plugins");
+        harness.show_tabs();
+        harness.show_plugins();
 
         assert!(
             frame_text(&harness.frame()).contains("Window commands"),
-            "the query outlived the pane"
+            "the query outlived the section"
         );
     }
 
@@ -9384,9 +9173,7 @@ mod plugins_page {
     fn the_switch_on_the_card_takes_the_plugin_out_of_the_window() {
         let mut harness = Harness::new(1);
         assert!(frame_text(&harness.frame()).contains("claude"));
-        harness.open_settings_page();
-        harness.select_settings_section("Plugins");
-        harness.frame();
+        harness.show_plugins();
         harness.click_plugin("Usage chip");
 
         let switches = settings_switch_boxes(&harness.frame());
@@ -9403,8 +9190,16 @@ mod plugins_page {
             "the card does not say it is off: {text}"
         );
         // And the Usage page went with it, because that page was the
-        // plugin's too.
-        assert_eq!(settings_rail_boxes(&harness.frame()).len(), 5);
+        // plugin's too. Asked of the host: the sidebar is showing the plugin
+        // list rather than the settings rail.
+        assert!(
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace
+                    .host()
+                    .settings_page_id("crook/usage/page"))
+                .is_none()
+        );
     }
 
     #[test]

@@ -231,6 +231,9 @@ struct Overrides {
     /// looking at is not an option and is never written down. It does put an
     /// extra tab in the strip, which is the point — a snapshot of the
     /// settings page is a snapshot of a window with the settings open in it.
+    /// Start with this section of the sidebar showing, by the name on its
+    /// button.
+    section: Option<String>,
     settings: Option<Option<String>>,
     /// Type this into the settings page's search box at startup.
     ///
@@ -429,6 +432,12 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 }
                 overrides.settings = Some(page);
             }
+            "--section" => {
+                let name = args
+                    .next()
+                    .context("`--section` needs the name on a section's button")?;
+                overrides.section = Some(name);
+            }
             "--hover" => overrides.hover = true,
             "--run" => {
                 let command = args.next().context("`--run` needs a command")?;
@@ -554,6 +563,7 @@ OPTIONS:
     --themes           Start with the Themes panel open
     --new-theme        Start with the Themes panel making a theme
     --hover            Start with the first row's detail card up
+    --section <NAME>   Start showing a sidebar section by the name on its button
     --granularity <M>  Start with rows standing for `panes` or `tabs` rather than as saved
     --density <MODE>   Start in `compact` or `expanded` density rather than the saved one
     --controls <OS>    Draw `macos`, `windows` or `linux` window controls in the
@@ -568,7 +578,7 @@ OPTIONS:
 
 KEYS (macOS):
     cmd-t                      New agent tab
-    cmd-,                      Open the settings tab, or bring it forward
+    cmd-,                      Show the settings
     cmd-d / cmd-shift-d        Split the focused pane to the right / downwards
     cmd-w                      Close the focused pane, and its tab with the last one
     cmd-alt-left/right         Select the previous/next tab
@@ -578,7 +588,7 @@ KEYS (macOS):
 
 KEYS (Linux and Windows):
     ctrl-shift-t               New agent tab
-    ctrl-,                     Open the settings tab, or bring it forward
+    ctrl-,                     Show the settings
     ctrl-shift-d / ctrl-shift-e  Split the focused pane to the right / downwards
     ctrl-shift-w               Close the focused pane, and its tab with the last one
     ctrl-pageup/pagedown       Select the previous/next tab
@@ -759,6 +769,16 @@ fn apply_overrides(
     }
     if overrides.hover {
         workspace.hover_first_row(ctx);
+    }
+    if let Some(name) = overrides.section.clone() {
+        // By the name on the button, because that is the only name a person
+        // ever sees. One nothing answers to is a line in the log and the tabs,
+        // which is the rule every other unreadable input follows.
+        let section = workspace.section_named(&name);
+        if section.is_none() {
+            log::warn!("no sidebar section is called {name:?}");
+        }
+        workspace.show_section(section, ctx);
     }
     if let Some(page) = overrides.settings.clone() {
         // A name nothing answers to opens the page the menu entry opens, with
@@ -1910,6 +1930,7 @@ mod tests {
             "--select-output",
             "--menu",
             "--hover",
+            "--section",
             "--granularity",
             "--density",
         ] {

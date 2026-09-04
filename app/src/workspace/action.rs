@@ -9,7 +9,7 @@
 //! other direction, with one `WorkspaceAction` that carries tab actions and
 //! vertical-tab display options side by side.
 
-use crate::plugin::{ActionId, PageId};
+use crate::plugin::{ActionId, PageId, SectionId};
 use crate::settings::{Density, Granularity, PrimaryInfo, Subtitle};
 use crate::tab::{PaneId, TabAction, TabId};
 
@@ -60,6 +60,12 @@ pub enum WorkspaceAction {
     /// of them. **Nothing may change what is selected in the output while a
     /// keystroke is being dispatched.**
     ReleaseSelection(PaneId),
+    /// Show one section of the sidebar, or `None` for the tab list.
+    ///
+    /// The sections come from a slot, so this carries a
+    /// [`SectionId`](crate::plugin::SectionId) — interned, because the enum is
+    /// `Copy` and a section is named by an `owner/entry` string.
+    ShowSection(Option<SectionId>),
     /// Run a named action, which is what every plugin's is.
     ///
     /// Carried as an id rather than an [`ActionName`](crate::plugin::ActionName)
