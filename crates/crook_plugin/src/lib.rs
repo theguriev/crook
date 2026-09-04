@@ -5,7 +5,11 @@
 //! the application itself does not use is an API nobody has tried to build
 //! anything with. The usage chip, the Themes panel, the worktree menu and the
 //! settings pages are meant to end up on the same registries a stranger's
-//! plugin uses, and each one that moves is a proof.
+//! plugin uses, and each one that moves is a proof. The usage chip moved
+//! twice: onto these registries, and then out of the binary altogether, into a
+//! `.wasm` file in a repository of its own. That second move is the stronger
+//! proof, because a plugin nobody can reach across a boundary to help is the
+//! only kind that can say whether the boundary is wide enough.
 //!
 //! # What is here, and what is deliberately not
 //!
@@ -14,10 +18,13 @@
 //! plus the [`Registration`] guard that takes a contribution back out again.
 //! That is all. There is no `Plugin` trait here and no host: both of those name
 //! Crook's own types, so they live in the application beside the state they
-//! reach. This crate is what a plugin compiles against, which is why it has
-//! **no dependencies at all** — every one it took would be a dependency it
-//! imposed on the whole ecosystem, and a version somebody else's plugin would
-//! have to agree with.
+//! reach. This crate is what a plugin compiles against, so it takes **one
+//! dependency and no more**: every one it takes is a dependency it imposes on
+//! the whole ecosystem, and a version somebody else's plugin has to agree
+//! with. The one is `crook_plugin_api`, which a sandboxed plugin compiles
+//! against anyway — what a plugin may ask to be allowed to do is the wire's
+//! vocabulary, and a second copy of it here is how two lists of capabilities
+//! come to disagree.
 //!
 //! # Registration returns a guard
 //!

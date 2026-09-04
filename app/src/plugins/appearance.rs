@@ -3,7 +3,7 @@
 //! Warp's Appearance page carries eleven categories; the two of them that
 //! describe a tab strip are the two here, plus the text size and the theme.
 //!
-//! # Every control writes through the action the options menu dispatches
+//! # Every control writes through the action the gear menu dispatches
 //!
 //! So the popup and the page cannot disagree about what an option means or
 //! about when it is saved. The two actions that are the page's own are the
@@ -49,6 +49,7 @@ fn manifest() -> &'static Manifest {
         description: "Where the tabs live, what a row says, the text size and the theme.",
         version: env!("CARGO_PKG_VERSION"),
         tier: Tier::Native,
+        capabilities: &[],
     })
 }
 
@@ -294,7 +295,7 @@ fn rows_category(workspace: &Workspace) -> Vec<Entry> {
     let ui = workspace.fonts().ui;
     let state = workspace.settings_page();
 
-    // The two conditions the options menu resolves by hiding controls. The page
+    // The two conditions the gear menu resolves by hiding controls. The page
     // greys them instead, and this is the whole of the difference: one bool
     // read twice, rather than two branches that build different pages.
     let expanded = options.density == Density::Expanded;
@@ -324,7 +325,7 @@ fn rows_category(workspace: &Workspace) -> Vec<Entry> {
     )];
 
     // Against the *resolved* subtitle, so the check is never beside an option
-    // the panel is silently overriding — the same read the options menu does, and
+    // the strip is silently overriding — the same read the gear menu does, and
     // for the same reason.
     let chosen = resolve_subtitle(options.primary_info, options.subtitle);
     rows.push(widgets::choice_group(

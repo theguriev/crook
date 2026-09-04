@@ -1,8 +1,9 @@
 //! One plugin, running.
 
 use std::fmt;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crook_plugin_api::{ABI_VERSION, Manifest, Node, Registered};
+use crook_plugin_api::{ABI_VERSION, Answer, Manifest, Node, Registered, Request};
 use wasmi::{Caller, Engine, Instance, Linker, Memory, Module, Store, TypedFunc};
 
 use crate::host::Registry;
@@ -27,6 +28,8 @@ pub struct Fuel {
     pub render: u64,
     /// What one `crook_run` may spend.
     pub run: u64,
+    /// What one `crook_deliver` or `crook_tick` may spend.
+    pub event: u64,
 }
 
 impl Default for Fuel {
@@ -44,6 +47,13 @@ impl Default for Fuel {
             // A person clicked and is waiting. Slower than a frame is fine;
             // slower than a second is not.
             run: 100_000_000,
+            // Nobody is waiting on this one — it is an answer landing or a
+            // timer going off, both off the frame path — but it is also where
+            // a plugin does its real work: parsing the JSON it asked for. Ten
+            // times a frame's budget, which is a hundredth of a second of
+            // interpreter, and a plugin that cannot read its own answer in
+            // that has asked for something too big to be reading every minute.
+            event: 10_000_000,
         }
     }
 }
@@ -199,7 +209,7 @@ impl Sandbox {
 
     /// Asks what it wants drawn in one slot.
     pub fn render(&mut self, slot: &str) -> Result<Node, Problem> {
-        let (pointer, length) = self.write(slot)?;
+        let (pointer, length) = self.write(slot.as_bytes(), self.fuel.render)?;
         let packed =
             self.call::<(i32, i32), i64>(exports::RENDER, (pointer, length), self.fuel.render)?;
         let bytes = self.read(packed)?;
@@ -208,11 +218,72 @@ impl Sandbox {
 
     /// Runs one of its actions, by the name it registered.
     pub fn run(&mut self, action: &str) -> Result<(), Problem> {
-        let (pointer, length) = self.write(action)?;
+        let (pointer, length) = self.write(action.as_bytes(), self.fuel.run)?;
         match self.call::<(i32, i32), i32>(exports::RUN, (pointer, length), self.fuel.run)? {
             0 => Ok(()),
             other => Err(Problem::Ran(format!("the action answered {other}"))),
         }
+    }
+
+    /// Everything the guest asked the host to do since it was last asked,
+    /// with the ticket each answer must carry.
+    ///
+    /// Drained rather than read: a request handed over twice would be a
+    /// network call made twice, and the second one would be the host's fault.
+    pub fn asked(&mut self) -> Vec<(u32, Request)> {
+        self.registry.asked()
+    }
+
+    /// How long the guest asked to be left alone for, if it asked at all.
+    ///
+    /// Also drained. A timer that stayed set would be a plugin that keeps
+    /// being ticked long after it stopped asking to be.
+    pub fn timer(&mut self) -> Option<Duration> {
+        self.registry.timer()
+    }
+
+    /// Hands the guest the answer to something it asked for.
+    ///
+    /// Whether it *wanted* an answer is [`Sandbox::takes_answers`]: a module
+    /// with no `crook_deliver` gets nothing delivered rather than an error,
+    /// because a plugin that asks for nothing is a perfectly good plugin.
+    pub fn deliver(&mut self, ticket: u32, answer: &Answer) -> Result<(), Problem> {
+        let bytes =
+            crook_plugin_api::to_bytes(answer).map_err(|why| Problem::Answer(why.to_string()))?;
+        let (pointer, length) = self.write(&bytes, self.fuel.event)?;
+        let ticket = i32::try_from(ticket)
+            .map_err(|_| Problem::Answer("the ticket is not a number a guest can hold".into()))?;
+
+        match self.call::<(i32, i32, i32), i32>(
+            exports::DELIVER,
+            (ticket, pointer, length),
+            self.fuel.event,
+        )? {
+            0 => Ok(()),
+            other => Err(Problem::Ran(format!(
+                "it answered {other} to something it asked for"
+            ))),
+        }
+    }
+
+    /// Tells the guest the wait it asked for has passed.
+    pub fn tick(&mut self) -> Result<(), Problem> {
+        match self.call::<(), i32>(exports::TICK, (), self.fuel.event)? {
+            0 => Ok(()),
+            other => Err(Problem::Ran(format!("its tick answered {other}"))),
+        }
+    }
+
+    /// Whether this module has somewhere to put an answer.
+    pub fn takes_answers(&self) -> bool {
+        self.instance
+            .get_func(&self.store, exports::DELIVER)
+            .is_some()
+    }
+
+    /// Whether this module has somewhere to put a tick.
+    pub fn takes_ticks(&self) -> bool {
+        self.instance.get_func(&self.store, exports::TICK).is_some()
     }
 
     /// Calls one export with its own budget.
@@ -238,22 +309,26 @@ impl Sandbox {
             .map_err(|why| Problem::Ran(format!("{name}: {why}")))
     }
 
-    /// Copies `text` into the guest's memory, through the guest's allocator.
+    /// Copies `bytes` into the guest's memory, through the guest's allocator.
     ///
     /// Through *its* allocator, because the host has no idea which bytes of a
     /// guest's memory are free — and a host that wrote wherever it liked would
     /// be corrupting the plugin it is trying to talk to.
-    fn write(&mut self, text: &str) -> Result<(i32, i32), Problem> {
-        let length = i32::try_from(text.len()).map_err(|_| {
-            Problem::Answer("the string is longer than the guest can address".into())
-        })?;
-        let pointer = self.call::<i32, i32>(exports::ALLOC, length, self.fuel.render)?;
+    ///
+    /// The allocation is charged to the budget of the call it is for: putting
+    /// a slot's name in front of a render is part of that render, and a
+    /// megabyte of answer that has to be allocated before `crook_deliver` sees
+    /// it is part of the delivery.
+    fn write(&mut self, bytes: &[u8], fuel: u64) -> Result<(i32, i32), Problem> {
+        let length = i32::try_from(bytes.len())
+            .map_err(|_| Problem::Answer("it is longer than the guest can address".into()))?;
+        let pointer = self.call::<i32, i32>(exports::ALLOC, length, fuel)?;
         let start = usize::try_from(pointer).map_err(|_| {
             Problem::Answer("its allocator answered with a negative address".into())
         })?;
 
         self.memory
-            .write(&mut self.store, start, text.as_bytes())
+            .write(&mut self.store, start, bytes)
             .map_err(|why| Problem::Answer(why.to_string()))?;
         Ok((pointer, length))
     }
@@ -324,6 +399,50 @@ fn install(linker: &mut Linker<Registry>) -> Result<(), wasmi::Error> {
 
     linker.func_wrap(
         imports::MODULE,
+        imports::REQUEST,
+        |mut caller: Caller<'_, Registry>, pointer: i32, length: i32| -> i32 {
+            let Some(bytes) = bytes_at(&mut caller, pointer, length) else {
+                return 0;
+            };
+            let Ok(request) = crook_plugin_api::from_bytes::<Request>(&bytes) else {
+                // Zero rather than a trap, for the reason `string_at` answers
+                // `None`: a plugin that encoded its own request wrongly has a
+                // bug, and its bug must not be the window's.
+                return 0;
+            };
+            caller.data().ask(request) as i32
+        },
+    )?;
+
+    linker.func_wrap(
+        imports::MODULE,
+        imports::TIMER,
+        |caller: Caller<'_, Registry>, millis: i32| -> i32 {
+            let Ok(millis) = u64::try_from(millis) else {
+                return 0;
+            };
+            caller
+                .data()
+                .wants_ticking_in(Duration::from_millis(millis));
+            0
+        },
+    )?;
+
+    linker.func_wrap(
+        imports::MODULE,
+        imports::NOW,
+        |_: Caller<'_, Registry>| -> i64 {
+            // A clock before the epoch is a machine whose clock is wrong, and
+            // zero is a more useful thing to hand a plugin than a panic.
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
+                .unwrap_or(0)
+        },
+    )?;
+
+    linker.func_wrap(
+        imports::MODULE,
         imports::LOG,
         |mut caller: Caller<'_, Registry>, level: i32, text: i32, length: i32| {
             let Some(text) = string_at(&mut caller, text, length) else {
@@ -347,12 +466,22 @@ fn install(linker: &mut Linker<Registry>) -> Result<(), wasmi::Error> {
 /// a bug, and a bug in its logging must not be a bug in the window. The call
 /// does nothing and the frame goes on.
 fn string_at(caller: &mut Caller<'_, Registry>, pointer: i32, length: i32) -> Option<String> {
+    String::from_utf8(bytes_at(caller, pointer, length)?).ok()
+}
+
+/// The same read, for the things that are not text.
+///
+/// Every bound the guest gave is checked against the guest's own memory here,
+/// which is the one place a host function ever looks at it.
+fn bytes_at(caller: &mut Caller<'_, Registry>, pointer: i32, length: i32) -> Option<Vec<u8>> {
     if length < 0 || length as u32 > MAX_ANSWER || pointer < 0 {
         return None;
     }
     let memory = caller.get_export(exports::MEMORY)?.into_memory()?;
     let data = memory.data(&caller);
     let start = pointer as usize;
-    let bytes = data.get(start..start.checked_add(length as usize)?)?;
-    String::from_utf8(bytes.to_vec()).ok()
+    Some(
+        data.get(start..start.checked_add(length as usize)?)?
+            .to_vec(),
+    )
 }

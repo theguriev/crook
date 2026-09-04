@@ -8,10 +8,14 @@
 //! declares a keybinding section the host never learned to read gets silence
 //! instead of an error, and its author finds out from a user.
 //!
-//! For now this is the smallest honest version — enough to name a plugin, place
-//! it in a tier, and print it. Capabilities, the API range, the licence and the
-//! rest of what the store needs arrive with the store, in one schema bump, and
-//! `schema` exists from the first day so that bump is possible.
+//! Capabilities are here for the reason the rest of it is data: a person
+//! cannot refuse what they cannot read, and a manifest that dropped what a
+//! plugin asked for would leave the only honest answer to "what may this do?"
+//! as "install it and find out". They are the first of the bumps `schema`
+//! exists to make possible; the API range, the licence and the rest of what
+//! the store needs still arrive with the store.
+
+use crook_plugin_api::Capability;
 
 use crate::id::PluginId;
 
@@ -50,7 +54,7 @@ impl Tier {
 /// matters and they are the same either way.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Manifest {
-    /// The version of the manifest format itself. One, today.
+    /// The version of the manifest format itself. Two, today.
     pub schema: u32,
     /// Who wrote it and what it is called.
     pub id: PluginId,
@@ -63,9 +67,25 @@ pub struct Manifest {
     pub version: &'static str,
     /// How it runs.
     pub tier: Tier,
+    /// What it wants to be allowed to do, in the order it asked.
+    ///
+    /// The asking, and only the asking: what a person *allowed* is kept in
+    /// the settings, one key per host and per path, and the two are compared
+    /// rather than conflated. That is what makes a plugin whose next version
+    /// wants one more host a plugin the Plugins page can say that about,
+    /// instead of one that quietly inherits an old yes.
+    ///
+    /// Empty for every native plugin, and that is not an omission — what is
+    /// compiled into Crook *is* Crook, and a capability it could ask itself
+    /// for it already has.
+    pub capabilities: &'static [Capability],
 }
 
 impl Manifest {
     /// The current manifest format.
-    pub const SCHEMA: u32 = 1;
+    ///
+    /// **Two**, because a manifest now says what a plugin wants to be allowed
+    /// to do. One could name a plugin and place it in a tier, which is enough
+    /// to list it and not enough to let anybody decide whether to install it.
+    pub const SCHEMA: u32 = 2;
 }

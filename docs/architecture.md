@@ -21,9 +21,9 @@ It assumes a competent Rust engineer who has never read a line of Warp.
 
 ### The problem it solves
 
-A UI is a graph. A tab strip holds tabs; a tab holds an agent session; a header holds a usage
-chip that must repaint when a background poller returns. Expressed directly in Rust — parent
-and child holding references to each other — this is either impossible or it is
+A UI is a graph. A tab strip holds tabs; a tab holds an agent session; a header holds a chip a
+plugin drew, which must repaint when that plugin's background poll returns. Expressed directly
+in Rust — parent and child holding references to each other — this is either impossible or it is
 `Rc<RefCell<T>>` on every node, which gives you reference cycles, runtime borrow panics from
 callbacks that reenter, and a lifetime on every function that touches two nodes at once.
 
@@ -486,9 +486,14 @@ the stroke width; there is no subpixel bucket, because an icon is snapped to the
 both axes where a glyph is snapped only vertically. Nothing is rasterized twice, and the whole
 set at the three sizes the chrome uses is a few dozen kilobytes of atlas.
 
-The one place the stroke rule does not reach is the artwork in
-`crookui_core::icons::art`, whose mark is a *picture*: a Pac-Man pirate in an eyepatch, three
-frames of him, drawn in the same 24-unit grid as the icons. Three things follow from that, and each is smaller than it sounds.
+The one place the stroke rule does not reach is `crookui_core::icons::art`, whose marks are
+*pictures*: a Pac-Man pirate in an eyepatch, three frames of him, drawn in the same 24-unit
+grid as the stroked set. Nothing in the binary draws him for itself — the feature that used to
+is a plugin now, outside the binary, and it asks for a frame by name (`pirate`, `pirate-open`,
+`pirate-wide`) through the second tier's `Node::Icon`. The artwork stays here because the
+*host* is what paints it: a sandboxed plugin ships no pictures, and a picture it could ship
+would be the wrong weight beside everything else on the row. Three things follow from a
+picture, and each is smaller than it sounds.
 A picture needs a **fill**, which is `raster::fill` — signed area accumulated per edge and run
 along each row, no sorted crossing list and no winding rule to configure, in about forty lines
 beside the distance field rather than in place of it. A picture has **more than one colour**,
@@ -505,7 +510,7 @@ What this replaces is worth naming, because it is the argument for having done i
 Before this, a gear was `⚙` and a close button `×` — codepoints, drawn out of whatever font
 the machine happened to have, which is a flat gear on one machine and a colour emoji on the
 next. Everything a font would not draw was built out of `Container`s: the two density marks
-in the tab options menu were seven rectangles, and the git branch beside a tab title was three.
+in the gear menu were seven rectangles, and the git branch beside a tab title was three.
 
 ### The second text field
 
@@ -769,11 +774,12 @@ yet, which is a change to how panes are laid out rather than to how shells are s
 
 ### Who drives it
 
-`app/src/terminal_model.rs`, in the shape `usage_model` and `git_model` established: work off
-the UI thread, delivered on it, `ctx.notify` only when something a viewer could see actually
-changed. Each terminal gets an OS thread of its own rather than a background-pool worker,
-because a pty read blocks for as long as the shell is quiet and the pool is sized for exactly
-the two poll chains that park on timers.
+`app/src/terminal_model.rs`, in the shape `git_model` established and `usage_model` shared
+before it left for a plugin: work off the UI thread, delivered on it, `ctx.notify` only when
+something a viewer could see actually changed. Each terminal gets an OS thread of its own
+rather than a background-pool worker, because a pty read blocks for as long as the shell is
+quiet and the pool is sized for exactly the chains that park on timers — five of them, counted
+one by one in `PARKED_WORKERS`, and a pane is not one.
 
 **Reading and drawing are throttled separately, and conflating them costs three orders of
 magnitude.** A pty master hands out about a kilobyte per `read` however large a buffer it is

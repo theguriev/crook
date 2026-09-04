@@ -23,7 +23,9 @@
 //! on frame one will trap on frame two, and a terminal that finds that out
 //! sixty times a second has stopped working.
 
+mod install;
 mod render;
+mod runtime;
 
 use std::cell::{Cell, RefCell};
 use std::fs;
@@ -37,6 +39,9 @@ use crook_wasm::{Fuel, Sandbox};
 
 use crate::plugin::{BuildError, Host, Plugin};
 use crate::workspace::Workspace;
+
+pub use install::install;
+use runtime::Runtime;
 
 /// The file a plugin's directory has to hold.
 const MODULE_FILE: &str = "plugin.wasm";
@@ -101,6 +106,13 @@ pub fn open(path: &Path) -> Result<WasmPlugin, String> {
         description: String::leak(manifest.description),
         version: String::leak(manifest.version),
         tier: Tier::Wasm,
+        // Carried across rather than dropped on the floor here, which is what
+        // this used to do: what a plugin asks to be allowed to do is the one
+        // thing about it a person has to read *before* deciding anything, and
+        // a capability that never leaves this function is one the Plugins page
+        // cannot show and nobody can refuse. Leaked with the strings above and
+        // for the same reason.
+        capabilities: Vec::leak(manifest.capabilities),
     }));
 
     Ok(WasmPlugin {
@@ -134,12 +146,34 @@ impl Plugin for WasmPlugin {
         self.manifest
     }
 
-    fn build(&mut self, host: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
+    fn build(
+        &mut self,
+        host: &mut Host,
+        ctx: &mut ViewContext<Workspace>,
+    ) -> Result<(), BuildError> {
         let registered = self
             .sandbox
             .borrow_mut()
             .build()
             .map_err(|why| why.to_string())?;
+
+        // What it may do, read once. A grant is changed on the Plugins page
+        // and takes effect when the plugin is built again, which is the same
+        // rule its switch follows: nothing a person allows or forbids should
+        // land on a plugin half way through a frame.
+        let granted = host.granted(&self.manifest.id).to_vec();
+        let runtime = ctx.add_model(|_| {
+            Runtime::new(
+                self.manifest.id.clone(),
+                self.sandbox.clone(),
+                self.failures.clone(),
+                granted,
+            )
+        });
+        // The bridge every model-backed feature in Crook has: an answer that
+        // lands changes what the chip says, and the row around it has to be
+        // laid out again.
+        ctx.observe(&runtime, |_, _, ctx| ctx.notify());
 
         for contribution in registered.contributions {
             let Some(slot) = host.slot_named(&contribution.slot) else {
@@ -158,6 +192,11 @@ impl Plugin for WasmPlugin {
             let failures = self.failures.clone();
             let name = contribution.slot.clone();
             let who = self.manifest.id.clone();
+            // Made once, here, and kept for as long as the contribution is on
+            // screen: a plugin's controls have no identity of their own, so
+            // what remembers that one of them is under the pointer is the
+            // entry they were drawn from. See [`render::Hovers`].
+            let hovers = Rc::new(render::Hovers::default());
             host.contribute(
                 slot,
                 contribution.entry,
@@ -166,11 +205,16 @@ impl Plugin for WasmPlugin {
                     let node = ask(&sandbox, &failures, &who, &name);
                     let host = workspace.host();
                     let prefix = who.clone();
-                    render::element(&node, workspace.fonts().ui, &move |action| {
-                        ActionName::parse(&format!("{prefix}/{action}"))
-                            .ok()
-                            .and_then(|name| host.action(&name))
-                    })
+                    render::element(
+                        &node,
+                        workspace.fonts().ui,
+                        &move |action| {
+                            ActionName::parse(&format!("{prefix}/{action}"))
+                                .ok()
+                                .and_then(|name| host.action(&name))
+                        },
+                        &hovers,
+                    )
                 },
             );
         }
@@ -192,7 +236,8 @@ impl Plugin for WasmPlugin {
             let failures = self.failures.clone();
             let who = self.manifest.id.clone();
             let called = action.name.clone();
-            let run = move |_: &mut Workspace, _: &mut ViewContext<Workspace>| {
+            let runtime = runtime.clone();
+            let run = move |_: &mut Workspace, ctx: &mut ViewContext<Workspace>| {
                 if failures.get() >= GIVE_UP_AFTER {
                     return;
                 }
@@ -206,8 +251,15 @@ impl Plugin for WasmPlugin {
                     },
                     // The guest is already running: an action of its own
                     // reached back into it. Nothing to do but decline.
-                    Err(_) => log::warn!("{who} asked to run {called:?} while it was running"),
+                    Err(_) => {
+                        log::warn!("{who} asked to run {called:?} while it was running");
+                        return;
+                    }
                 }
+                // Whatever pressing it made the plugin ask for. An action is
+                // one of the four calls that reach a context, which is what
+                // makes "the button refreshes the reading" work at all.
+                runtime.update(ctx, |runtime, ctx| runtime.pump(ctx));
             };
 
             match action.title {
@@ -219,6 +271,11 @@ impl Plugin for WasmPlugin {
                 }
             }
         }
+
+        // Everything the build asked for. A plugin that reads a file and then
+        // fetches what the file authorised starts here and carries on by
+        // itself, because a delivery pumps again.
+        runtime.update(ctx, |runtime, ctx| runtime.pump(ctx));
 
         Ok(())
     }

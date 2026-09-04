@@ -647,7 +647,13 @@ impl Workspace {
         // and the ones a person installed are a directory somebody has to have
         // gone and looked in. A window that read a directory would be a window
         // no test could give a plugin to.
-        let host = crate::plugin::load(plugins, settings.disabled_plugins(), fonts, ctx);
+        let host = crate::plugin::load(
+            plugins,
+            settings.disabled_plugins(),
+            settings.plugin_grants().clone(),
+            fonts,
+            ctx,
+        );
 
         let options = settings.tab_options();
         let settings_path = settings.path().map(Path::to_owned);
@@ -932,6 +938,44 @@ impl Workspace {
         }
         // A plugin's surface may have been what was holding the keyboard.
         self.sync_input_keys();
+        ctx.notify();
+    }
+
+    /// Records what one plugin is allowed to do, and remembers the answer.
+    ///
+    /// The whole list every time, because that is what was answered: allowing
+    /// a plugin that now wants a second host is allowing both, and revoking is
+    /// this with nothing in it. What is written down is one key per host and
+    /// per path rather than a yes, which is what lets the Plugins page tell a
+    /// person that a new version is asking for more than they agreed to.
+    ///
+    /// Unlike the switch above it, nothing here reaches the host: a plugin
+    /// reads its grant once, as it is built, so that no request is answered
+    /// against one answer while the frame around it was drawn against another.
+    /// The card says so under the list rather than leaving somebody to work
+    /// out why nothing happened.
+    pub fn set_plugin_granted(
+        &mut self,
+        plugin: &PluginId,
+        keys: Vec<String>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.settings.set_granted(plugin.as_str(), keys.clone());
+        self.save_settings(ctx);
+
+        // Told to the host as well as written down, and then the plugin is
+        // built again — because a plugin reads its grant once, while building,
+        // and a permission that only took effect on the next launch would be a
+        // permission a person presses and watches do nothing. Off and on again
+        // is what the switch beside it already does, and it is correct for the
+        // same reason: a plugin that was off saw nothing happen while it was
+        // off, so there is no state it could have been holding.
+        self.host.set_granted(plugin, keys);
+        if self.host.is_loaded(plugin) {
+            self.host.unload(plugin);
+            self.host.enable(plugin, ctx);
+            self.sync_input_keys();
+        }
         ctx.notify();
     }
 

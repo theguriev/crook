@@ -9,11 +9,24 @@
 //! # What a sandboxed plugin cannot do
 //!
 //! Everything, by default. It has no imports but the handful in [`imports`],
-//! no filesystem, no clock, no network, no random numbers and no way to reach
-//! the host's memory — wasm's linear memory is its own, and the only thing
-//! crossing the boundary is a length and an offset into it, checked on every
-//! read. What it *may* do is what its manifest asked for and a person granted;
-//! nothing here grants anything.
+//! no filesystem, no network, no random numbers and no way to reach the host's
+//! memory — wasm's linear memory is its own, and the only thing crossing the
+//! boundary is a length and an offset into it, checked on every read.
+//!
+//! What it may do instead is *ask*. [`imports::REQUEST`] records a
+//! [`Request`](crook_plugin_api::Request) and hands back a ticket; no socket
+//! is opened and no file is touched inside the call, because a guest call runs
+//! on the thread that draws. The host takes what was asked for afterwards,
+//! decides whether it is inside what a person granted, does the work
+//! somewhere else, and brings the answer back to
+//! [`exports::DELIVER`]. **Nothing here grants anything** — this file cannot
+//! tell an allowed request from a refused one and does not try.
+//!
+//! The exception is the clock. [`imports::NOW`] answers with the wall time and
+//! asks nobody, because a plugin that cannot tell the time cannot say "resets
+//! in forty minutes", and knowing what time it is reveals nothing that is
+//! anybody's to protect. Fuel remains what *bounds* a plugin: the clock is for
+//! what it says, never for how long it may run.
 //!
 //! # Nothing it does may cost a person their window
 //!
@@ -73,6 +86,20 @@ pub mod imports {
     /// `log(level, ptr, len)`, where the level is
     /// 1 error, 2 warn, 3 info, 4 debug — anything else is `info`.
     pub const LOG: &str = "log";
+
+    /// `request(ptr, len) -> i32`, where the bytes are a
+    /// [`Request`](crook_plugin_api::Request) and the answer is the ticket its
+    /// [`Answer`](crook_plugin_api::Answer) will carry — or zero for a request
+    /// that could not be read or that there was no room for.
+    pub const REQUEST: &str = "request";
+
+    /// `timer(millis) -> i32`, asking to be handed to
+    /// [`exports::TICK`](super::exports::TICK) after a wait. A negative wait is
+    /// ignored, and asking twice in one call replaces the first answer.
+    pub const TIMER: &str = "timer";
+
+    /// `now() -> i64`: the wall clock, in milliseconds since the epoch.
+    pub const NOW: &str = "now";
 }
 
 /// The names a guest must export, and what each is for.
@@ -100,6 +127,20 @@ pub mod exports {
 
     /// `crook_run(name_ptr, name_len) -> i32`, zero for "done".
     pub const RUN: &str = "crook_run";
+
+    /// `crook_deliver(ticket, ptr, len) -> i32`, zero for "taken", carrying the
+    /// [`Answer`](crook_plugin_api::Answer) to something the guest asked for.
+    ///
+    /// Optional: a plugin that never asks for anything never needs it, and a
+    /// module that does not export it is a module the host does not deliver
+    /// to rather than one it refuses.
+    pub const DELIVER: &str = "crook_deliver";
+
+    /// `crook_tick() -> i32`, zero for "done": the wait the guest asked for
+    /// with [`imports::TIMER`](super::imports::TIMER) has passed.
+    ///
+    /// Optional, for the same reason [`DELIVER`] is.
+    pub const TICK: &str = "crook_tick";
 }
 
 /// Splits the `(ptr << 32) | len` a guest returns a slice as.

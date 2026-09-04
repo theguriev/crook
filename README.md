@@ -46,14 +46,31 @@ Eight features, and the page that configures them:
   desktop's own shortcuts and the window plugin's commands. Crook still finds its own resize
   edges there. **That half has never been run** — see
   [`docs/architecture.md`](docs/architecture.md) §3 for exactly what was checked instead.
-- **A Claude Code usage chip — no longer.** It was one of the features on this list: a pirate
-  in the header saying how much of the session's token budget is spent, a panel of limits
-  under him, a model with its own poll chain and a settings page that turned all of it off. It
-  is gone from the binary, and nothing here replaces it. What it needed to work — one file,
-  one host, a timer and a picture — is exactly what a plugin from outside needs, and a feature
-  only Crook itself can carry is a feature that proves nothing about the plugin API. So it
-  left. The artwork stayed: the pirate is `crookui_core`'s, and the host draws him for
-  whatever asks.
+- **Plugins, in two tiers, and the second one is not in the binary.** Everything Crook itself
+  does is a plugin on the registries a stranger's plugin uses — the header, the window's
+  thirteen commands, the command palette, every settings page — which is the only way to know
+  the API is enough. Beside that native tier is a **sandboxed** one: a `.wasm` module in the
+  plugins directory, run in an interpreter with no imports but a handful, with no filesystem,
+  no network and no clock of its own. It *describes* what it wants drawn — text, a badge, a
+  meter, a hairline, something pressable, a panel hung under it, one of Crook's own icons by
+  name — and the host paints it, so a plugin names no colour and no pixel and comes out right
+  in a theme written years after it. Anything it wants from the machine it has to **ask** for,
+  and every request is checked against what a person granted on the Plugins page and kept in
+  `settings.json`. A request outside that grant is refused rather than failed, and the refusal
+  carries the sentence the permission dialog says, so a plugin can tell you what to allow
+  instead of that something went wrong.
+
+  **The Claude Code usage chip is the worked example**, and it is the proof, because it used to
+  be one of the features on this list and is now a file. It lives at
+  [github.com/theguriev/crook-pirate](https://github.com/theguriev/crook-pirate) and ships as
+  one 122KB `plugin.wasm`. `crook --install-plugin <path>` checks the module, reads its
+  manifest and puts it where Crook looks; copying it to
+  `<data>/crook/plugins/theguriev.pirate/plugin.wasm` does the same thing by hand. It draws
+  Crook's own pirate — the artwork is the host's, asked for by icon name, and the plugin
+  animates the bite itself by naming a different frame — and it says how much of the session's
+  token budget is spent and when it resets. To do that it asks to read one file,
+  `~/.claude/.credentials.json`, and to reach one host, `api.anthropic.com`. It can reach
+  nothing else, and until somebody says yes it reaches neither.
 - **A shell in every pane.** A real pseudo-terminal and a real xterm-compatible emulator:
   colour, bold and italic faces, underline and strikeout, the alternate screen, ten thousand
   lines of scrollback, `SIGWINCH` on resize, and titles and working directories the shell
@@ -412,7 +429,9 @@ that repository is AGPL-3.0. Crook stays clear of the AGPL half:
   `usage_*` theme roles beside it — descends from a Claude Code usage indicator written for a
   personal fork of Warp and never contributed upstream. It is its author's own work, licensed
   here by that author, and it borrows nothing from Warp beyond the shape of the surrounding
-  app. The chip that used to draw it has been taken out; what stayed behind is the picture.
+  app. The chip that used to draw it is a plugin in a repository of its own now; what stayed
+  behind is the picture, which the host draws on any plugin's behalf when one asks for it by
+  name.
 - `app/` was written against a description of how Warp's tab strip and header behave, not by
   copying either. Where its comments mention Warp they are recording a divergence — an
   index-versus-identity bug not inherited, a public field not repeated.

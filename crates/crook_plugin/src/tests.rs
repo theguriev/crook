@@ -438,3 +438,49 @@ fn one_entry_can_be_reached_by_its_place_in_the_order() {
         "the two orders disagree"
     );
 }
+
+#[test]
+fn a_manifest_says_what_the_plugin_wants_to_be_allowed_to_do() {
+    // The rule this field exists for: what a plugin asks for has to survive
+    // the trip into the manifest the interface reads, or the page that asks a
+    // person to allow something has nothing to show them — and the only
+    // honest answer to "what may this do?" becomes "install it and find out".
+    let manifest = Manifest {
+        schema: Manifest::SCHEMA,
+        id: plugin("eugen/ci-status"),
+        name: "CI status",
+        description: "Whether the build is green.",
+        version: "0.1.0",
+        tier: Tier::Wasm,
+        capabilities: Vec::leak(vec![crook_plugin_api::Capability::Network(vec![
+            "api.github.com".to_owned(),
+        ])]),
+    };
+
+    assert_eq!(
+        manifest.capabilities[0].keys(),
+        vec!["net:api.github.com".to_owned()]
+    );
+}
+
+#[test]
+fn two_manifests_that_ask_for_different_things_are_different_manifests() {
+    // Equality has to notice a changed capability list, because that is the
+    // one difference between two versions of a plugin that a person has to be
+    // asked about again.
+    let quiet = Manifest {
+        schema: Manifest::SCHEMA,
+        id: plugin("eugen/ci-status"),
+        name: "CI status",
+        description: "Whether the build is green.",
+        version: "0.1.0",
+        tier: Tier::Wasm,
+        capabilities: &[],
+    };
+    let curious = Manifest {
+        capabilities: Vec::leak(vec![crook_plugin_api::Capability::Clipboard]),
+        ..quiet.clone()
+    };
+
+    assert_ne!(quiet, curious);
+}

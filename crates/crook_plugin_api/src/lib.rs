@@ -32,7 +32,10 @@
 
 extern crate alloc;
 
+use alloc::boxed::Box;
+use alloc::format;
 use alloc::string::String;
+use alloc::vec;
 use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
@@ -43,7 +46,14 @@ use serde::{Deserialize, Serialize};
 /// decode to something other than what it meant. Adding a variant to an enum
 /// counts: postcard encodes a variant by its index, so an older host reading a
 /// newer plugin's `Node` would read the wrong variant rather than fail.
-pub const ABI_VERSION: u32 = 1;
+///
+/// **2** is the version a plugin can *do* something in. One added
+/// [`Capability`] ([`Capability::ReadFiles`]), the [`Request`]/[`Answer`] pair
+/// that lets a plugin ask the host to reach the network or read a file on its
+/// behalf, and the six [`Node`] variants a panel needs. Version 1 could
+/// describe a badge and register an action, which is a plugin that can say
+/// what it already knew.
+pub const ABI_VERSION: u32 = 2;
 
 /// What a sandboxed plugin says about itself, before any of it runs.
 ///
@@ -92,6 +102,15 @@ pub enum Capability {
     Clipboard,
     /// Keep a little state of its own between runs, in a file the host owns.
     Storage,
+    /// Read files on this machine, and only these paths.
+    ///
+    /// Exact paths rather than a flag, for the reason the network is a list of
+    /// hosts: "this plugin reads your files" is not a thing anybody can
+    /// meaningfully agree to, and `~/.claude/.credentials.json` is. A leading
+    /// `~` is the person's home directory and is the only thing expanded; a
+    /// path holding `..` is refused by the host rather than resolved, so a
+    /// granted path cannot be walked out of.
+    ReadFiles(Vec<String>),
 }
 
 impl Capability {
@@ -113,6 +132,43 @@ impl Capability {
             }
             Self::Clipboard => "Read and change your clipboard".into(),
             Self::Storage => "Keep notes of its own between sessions".into(),
+            Self::ReadFiles(paths) => {
+                let mut sentence = String::from("Read ");
+                for (index, path) in paths.iter().enumerate() {
+                    if index > 0 {
+                        sentence.push_str(", ");
+                    }
+                    sentence.push_str(path);
+                }
+                sentence
+            }
+        }
+    }
+
+    /// What granting this is written down as, one string per thing granted.
+    ///
+    /// A grant is kept as text rather than as this enum, and that is the whole
+    /// mechanism behind "re-prompted on escalation": a plugin that adds a host
+    /// to its [`Network`] list in its next version asks for a key that is not
+    /// in what a person allowed, so it is not granted and the Plugins page can
+    /// say which line is new. Comparing the enums instead would make any
+    /// change to the list a change to one value, and the only honest answer
+    /// then would be to ask about all of it again.
+    ///
+    /// One key per *host* and per *path* for the same reason: allowing
+    /// `api.anthropic.com` should not become allowing whatever a later version
+    /// adds beside it.
+    ///
+    /// [`Network`]: Self::Network
+    pub fn keys(&self) -> Vec<String> {
+        match self {
+            Self::ReadSettings => vec![String::from("settings.read")],
+            Self::ReadTabs => vec![String::from("tabs.read")],
+            Self::ReadWorkingDirectory => vec![String::from("cwd.read")],
+            Self::Network(hosts) => hosts.iter().map(|host| format!("net:{host}")).collect(),
+            Self::Clipboard => vec![String::from("clipboard")],
+            Self::Storage => vec![String::from("storage")],
+            Self::ReadFiles(paths) => paths.iter().map(|path| format!("file:{path}")).collect(),
         }
     }
 }
@@ -209,6 +265,160 @@ pub enum Node {
         /// Which of the theme's tones it takes.
         tone: Tone,
     },
+    /// A bar with part of it filled: how much of a limit is gone, how much of
+    /// a whole something is.
+    ///
+    /// A *fraction*, not a width. The host decides how long a bar is and how
+    /// thick it is drawn, so a plugin cannot produce one that is the wrong
+    /// size in a window it never saw — the same reason there are three text
+    /// sizes and no numbers.
+    Meter {
+        /// Between zero and one; anything outside is clamped by the host
+        /// rather than refused, because a reading that briefly exceeds its own
+        /// limit is a thing that happens and is not worth an empty frame.
+        fraction: f32,
+        /// Which of the theme's tones the filled part takes.
+        tone: Tone,
+    },
+    /// A hairline across whatever holds it: the honest place to put the seam
+    /// between two things that are not the same measurement.
+    Rule,
+    /// Space that takes whatever is left over.
+    ///
+    /// What puts a figure at the far end of a row from its label, which is the
+    /// commonest shape in a panel and the one thing [`Gap`] cannot do: a gap
+    /// is a number of pixels and a row's width is not known to the plugin.
+    Fill,
+    /// Prose, which wraps.
+    ///
+    /// Separate from [`Text`] because wrapping is the difference: a label that
+    /// wraps is a label that was too long, and a note that does not is a note
+    /// with its end cut off.
+    ///
+    /// [`Text`]: Self::Text
+    Note {
+        /// What it says.
+        text: String,
+        /// How much it matters.
+        tone: Tone,
+    },
+    /// Anything at all, made to answer a click.
+    ///
+    /// [`Button`] is a control that looks like one; this is the other half of
+    /// pressing — a chip, a row, a mark — for the times what should be clicked
+    /// is the thing itself rather than a labelled control beside it.
+    ///
+    /// [`Button`]: Self::Button
+    Pressable {
+        /// What is drawn.
+        content: Box<Node>,
+        /// The action a click runs, without the plugin's own prefix.
+        action: String,
+    },
+    /// Something with a panel hung under it.
+    ///
+    /// The one shape here that is not a box in a row, and it earns that: a
+    /// plugin whose whole surface is a chip in the header has nowhere to say
+    /// the rest of what it knows, and a plugin that could open a window would
+    /// be a plugin that can cover the terminal. So the panel is *anchored to
+    /// the contribution* — the host places it, sizes it, gives it its ground
+    /// and its corner, and takes it away again when a click lands outside.
+    ///
+    /// Whether it is up is the plugin's state, not the host's: `panel` is
+    /// `None` on every frame it is shut. Dismissing runs `dismiss`, which is
+    /// how the plugin finds out that a click somewhere else closed it.
+    Anchored {
+        /// What sits in the slot.
+        content: Box<Node>,
+        /// What hangs under it, when anything does.
+        panel: Option<Box<Node>>,
+        /// The action a dismissal runs, without the plugin's own prefix.
+        dismiss: String,
+    },
+}
+
+/// Something a plugin asks the host to do on its behalf.
+///
+/// A sandboxed plugin has no network, no filesystem and no clock of its own —
+/// that is what makes it sandboxed. What it has instead is this: it *asks*,
+/// the host decides whether what it asked for is inside what a person granted,
+/// and the work happens on the host's side of the boundary where it can be
+/// refused, timed out and logged.
+///
+/// Asking never blocks. The call that raises a request gets an integer ticket
+/// back and returns; the answer arrives later at `crook_deliver`, carrying the
+/// same ticket. That is not a convenience — a guest call runs on the thread
+/// that draws, so a request that waited for a socket would be a request that
+/// cost a frame.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Request {
+    /// Reach the network. Needs [`Capability::Network`] naming the host in the
+    /// URL; anything else comes back [`Answer::Refused`].
+    Fetch {
+        /// Which verb.
+        method: Method,
+        /// The whole URL, scheme and all. Only `https` is performed.
+        url: String,
+        /// Headers to send, in order.
+        headers: Vec<(String, String)>,
+        /// The body, for the verbs that carry one.
+        body: Option<Vec<u8>>,
+    },
+    /// Read a file. Needs [`Capability::ReadFiles`] naming exactly this path.
+    ///
+    /// A leading `~` is the person's home directory. There is no listing and
+    /// no writing: a plugin reads the files it said it would read, and a
+    /// capability that could name a directory would be one nobody could
+    /// picture the contents of.
+    ReadFile {
+        /// The path, as it was written in the capability.
+        path: String,
+    },
+}
+
+/// Which HTTP verb a [`Request::Fetch`] is.
+///
+/// Two, because two is what a plugin that reads something needs. A verb that
+/// changes somebody else's state is not something this tier should be able to
+/// reach for without a capability of its own, and there is no such capability
+/// yet.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Method {
+    /// Ask for something.
+    Get,
+    /// Send something and be told what came back.
+    Post,
+}
+
+/// What became of a [`Request`].
+///
+/// Four answers and not one of them is silence: a plugin that asked for
+/// something always finds out what happened to it, because a plugin left
+/// waiting forever is a chip that says "reading…" until the window closes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Answer {
+    /// The request was made and the server answered.
+    ///
+    /// A status the plugin has to read for itself: a 401 is an answer, not a
+    /// failure, and the host has no idea which of them this plugin considers
+    /// one.
+    Fetched {
+        /// What the server said it was.
+        status: u16,
+        /// What it sent.
+        body: Vec<u8>,
+    },
+    /// The file was read.
+    Read {
+        /// What was in it.
+        bytes: Vec<u8>,
+    },
+    /// It was not granted. The sentence says what was asked for, in the same
+    /// words the permission dialog used, so a plugin can tell a person what to
+    /// allow rather than saying "something went wrong".
+    Refused(String),
+    /// It was granted and attempted, and did not work.
+    Failed(String),
 }
 
 /// A gap, in units rather than pixels.

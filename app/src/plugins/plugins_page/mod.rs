@@ -38,6 +38,16 @@
 //! Two switches are drawn inert, and [`HOLDS_THE_PAGE`] says which and why: a
 //! switch that removes the switch is a one-way door whose way back is editing
 //! a JSON file.
+//!
+//! # Allowing is answered here and nowhere else
+//!
+//! A sandboxed plugin's manifest says what it wants to be allowed to do, and
+//! asking is not being granted: until a person answers, every request it makes
+//! is refused. The card is where the answer is given, because it is the only
+//! surface that shows the whole list of what is being agreed to — which is why
+//! `allow-` and `revoke-` are plain actions and not commands. A palette entry
+//! called "Allow the CI plugin" would be a way to allow something without ever
+//! reading it.
 
 mod card;
 mod list;
@@ -48,6 +58,7 @@ use std::rc::Rc;
 use crookui_core::prelude::*;
 
 use crook_plugin::{Manifest, PluginId, Tier};
+use crook_plugin_api::Capability;
 
 use crate::plugin::{ActionName, BuildError, Host, Plugin};
 use crate::workspace::Workspace;
@@ -125,6 +136,26 @@ impl Plugin for Plugins {
                 ctx.notify();
             });
 
+            // Registered only for a plugin that asked for something, so that
+            // a name exists exactly where a control does. Every native plugin
+            // asks for nothing and gets neither.
+            if !manifest.capabilities.is_empty() {
+                let keys = wanted(manifest);
+                let allowing = plugin.clone();
+                host.register_action(action("allow", &plugin), move |workspace, ctx| {
+                    // The whole declared list, every time: this is the answer
+                    // to a card that showed all of it, and it is also what
+                    // prunes a key for something the plugin no longer asks
+                    // for.
+                    workspace.set_plugin_granted(&allowing, keys.clone(), ctx);
+                });
+
+                let revoking = plugin.clone();
+                host.register_action(action("revoke", &plugin), move |workspace, ctx| {
+                    workspace.set_plugin_granted(&revoking, Vec::new(), ctx);
+                });
+            }
+
             if HOLDS_THE_PAGE.contains(&plugin.as_str()) {
                 continue;
             }
@@ -191,6 +222,71 @@ pub(super) fn action(verb: &str, plugin: &PluginId) -> ActionName {
     .expect("a name built from a verb and two names that already parsed")
 }
 
+/// Where a plugin stands with the person looking at it.
+///
+/// Three states rather than a yes and a no, because the third is the one worth
+/// having: a plugin that was allowed something and now asks for more is
+/// neither allowed nor refused, and rounding it to either is exactly what
+/// storing a "yes" instead of a list of keys would have forced.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(super) enum Stance {
+    /// It asked, and nobody has answered yet. What every plugin installs as,
+    /// and what makes asking different from being granted.
+    Unanswered,
+    /// Everything it asks for has been allowed.
+    Allowed,
+    /// It asks for something outside what was allowed — a host added to its
+    /// list, a path it did not name before, a whole capability that is new.
+    Escalated,
+}
+
+/// Every key `manifest` asks for, in the order it asked.
+///
+/// One key per host and per path, which is [`Capability::keys`]'s doing rather
+/// than this page's. It is both what a grant is compared against and what
+/// "Allow" writes down, because a page that spelled the question one way and
+/// the answer another would be a page whose grants stop matching.
+pub(super) fn wanted(manifest: &Manifest) -> Vec<String> {
+    manifest
+        .capabilities
+        .iter()
+        .flat_map(Capability::keys)
+        .collect()
+}
+
+/// What `granted` says about what `wanted` asks for.
+///
+/// A grant holding a key nothing asks for any more is still an allowance and
+/// not an escalation: a plugin whose new version dropped a host has taken
+/// something back, which is not a thing to interrupt anybody about — and the
+/// next "Allow" writes only what is asked for now, so the stale key does not
+/// outlive the next answer.
+pub(super) fn stance(wanted: &[String], granted: &[String]) -> Stance {
+    if granted.is_empty() {
+        Stance::Unanswered
+    } else if wanted
+        .iter()
+        .all(|key| granted.iter().any(|had| had == key))
+    {
+        Stance::Allowed
+    } else {
+        Stance::Escalated
+    }
+}
+
+/// Whether every key of one capability is inside `granted`.
+///
+/// Per capability because a *sentence* is per capability: "Reach a, b" is one
+/// line on the card, and one of its two hosts missing makes the whole line
+/// something that has not been allowed. Marking it any more finely would mean
+/// splitting a sentence somebody has to read.
+pub(super) fn covered(capability: &Capability, granted: &[String]) -> bool {
+    capability
+        .keys()
+        .iter()
+        .all(|key| granted.iter().any(|had| had == key))
+}
+
 /// Built once and leaked; see `header::manifest`.
 fn manifest() -> &'static Manifest {
     static MANIFEST: std::sync::OnceLock<Manifest> = std::sync::OnceLock::new();
@@ -201,6 +297,7 @@ fn manifest() -> &'static Manifest {
         description: "What this build is made of, and what did not load.",
         version: env!("CARGO_PKG_VERSION"),
         tier: Tier::Native,
+        capabilities: &[],
     })
 }
 
@@ -212,3 +309,6 @@ pub(super) fn tier_words(tier: Tier) -> (&'static str, &'static str) {
         Tier::Process => ("external", "Installed, runs as a program"),
     }
 }
+
+#[cfg(test)]
+mod tests;

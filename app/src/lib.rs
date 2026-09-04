@@ -417,6 +417,24 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 println!("{}", shell_integration_text(shell.as_deref())?);
                 return Ok(Startup::Answered);
             }
+            // Answered like `--version` rather than started like `--theme`: a
+            // person installing a plugin is not opening a window, and doing
+            // both would be a window that opened before the plugin it was
+            // asked to carry was in place.
+            "--install-plugin" => {
+                let path = args
+                    .next()
+                    .context("`--install-plugin` needs a path to a plugin.wasm")?;
+                // The path and then the reason, with nothing between them: the
+                // reason already says what is wrong with it, and a line that
+                // said "not a plugin this build can install: not a plugin this
+                // build can run" would be saying it twice.
+                let installed = crate::plugins::wasm::install(std::path::Path::new(&path))
+                    .map_err(anyhow::Error::msg)
+                    .with_context(|| path.clone())?;
+                println!("installed {}", installed.display());
+                return Ok(Startup::Answered);
+            }
             "--snapshot" => {
                 let path = args.next().context("`--snapshot` needs a path")?;
                 snapshot = Some(PathBuf::from(path));
@@ -594,6 +612,10 @@ USAGE:
     crook [OPTIONS]
 
 OPTIONS:
+    --install-plugin <PATH>
+                       Copy a plugin's `.wasm` into the plugins directory and exit,
+                       after checking it is one. What it may then do is nothing
+                       until it is allowed it on the Plugins page
     --snapshot <PATH>  Render one frame of the real view tree to a PNG and exit
     --frames <N>       Draw N frames, then exit; for running unattended
     --run <COMMAND>    Type COMMAND into the first pane's input field at startup,
@@ -735,20 +757,25 @@ THE INPUT FIELD:
 
 /// How many workers are parked on a timer at any moment.
 ///
-/// Four: the git gather between cycles, the caret blink between halves of its
-/// phase, the one that asks the shells whether they are still alive, and the
-/// themes folder being re-read while the Themes panel is open. Each is one
-/// background task for the whole cycle — the wait *and* the work — so each
-/// holds its worker across the wait rather than yielding it, and none is ever
-/// counted as idle. All four can be parked at once: a window with shells in it
-/// and the Themes panel open is an ordinary afternoon. Raise this when a fifth
+/// Five: a sandboxed plugin's timer between ticks, the git gather between
+/// cycles, the caret blink between halves of its phase, the one that asks the
+/// shells whether they are still alive, and the themes folder being re-read
+/// while the Themes panel is open. Each is one background task for the whole
+/// cycle — the wait *and* the work — so each holds its worker across the wait
+/// rather than yielding it, and none is ever counted as idle. All five can be
+/// parked at once: a window with shells in it, a chip polling in the header
+/// and the Themes panel open is an ordinary afternoon. Raise this when a sixth
 /// such chain appears.
 ///
-/// It was five until the usage chip left the binary; its poll was the one that
-/// went. A plugin that polls is a chain again the moment one is installed, and
-/// nothing here can count those at startup, because a plugin is installed by
-/// dropping a file in a directory. The spare below is what keeps the first of
-/// them from costing anybody a save.
+/// The plugin chain is counted once and not per plugin, which is the one
+/// approximation here. Each sandboxed plugin gets a runtime of its own and
+/// each runtime parks its own worker between ticks — see
+/// [`plugins::wasm`](crate::plugins::wasm) — so a person with three installed
+/// has three of these chains rather than one. One is what a machine with the
+/// chip installed actually has, and the spare below is what keeps the second
+/// from costing anybody a save; a fleet of polling plugins would want this
+/// number raised, and there is nothing here that can count them at startup
+/// because a plugin is installed by dropping a file in a directory.
 ///
 /// The number is a count of *chains*, never of panes. That is why the child
 /// check is one task for the whole terminal model rather than one per session:
@@ -760,7 +787,7 @@ THE INPUT FIELD:
 /// draw the frame in which that command takes the pane. It is bounded by
 /// `pane_surface::LONG_RUNNING` — fifty milliseconds — rather than by a poll
 /// interval, so what it can cost a save queued behind it is a fiftieth of a
-/// second rather than the fifteen a poll could. Sizing the pool for a
+/// second rather than the fifteen a plugin's poll could. Sizing the pool for a
 /// pane count is not possible; keeping the wait short is.
 ///
 /// **The test at the bottom of this file cannot check this number.** It builds
@@ -769,7 +796,7 @@ THE INPUT FIELD:
 /// about how many chains there really are. Counting them is what this comment
 /// is for, and the themes poll is here because it went uncounted for as long
 /// as the comment was the only thing that could have counted it.
-const PARKED_WORKERS: usize = 4;
+const PARKED_WORKERS: usize = 5;
 
 /// A pool with a worker left over once every chain that parks is asleep.
 ///

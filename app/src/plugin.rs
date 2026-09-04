@@ -25,6 +25,7 @@
 //! window opens without whatever it was contributing.
 
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crookui_core::event::Keystroke;
@@ -184,6 +185,13 @@ pub struct Host {
     /// every plugin has built. This is the short list of what has to arrive
     /// the other way, and it is short on purpose.
     fonts: Fonts,
+    /// What each plugin has been allowed to do, by `owner/name`.
+    ///
+    /// Here for the reason [`Host::fonts`] is: a plugin that asks for
+    /// something while it is *building* cannot ask the workspace, because the
+    /// workspace does not exist until every plugin has built. This is the
+    /// short list of what has to arrive the other way.
+    grants: BTreeMap<String, Vec<String>>,
     slots: Slots<UiContribution>,
     /// The settings pages, which are a slot of their own because what a
     /// contribution to them *is* is different: rows to be searched rather than
@@ -254,9 +262,10 @@ pub struct Host {
 
 impl Host {
     /// A host with nothing registered.
-    pub fn new(fonts: Fonts) -> Self {
+    pub fn new(fonts: Fonts, grants: BTreeMap<String, Vec<String>>) -> Self {
         Self {
             fonts,
+            grants,
             slots: Slots::new(),
             pages: Slots::new(),
             page_keys: Vec::new(),
@@ -657,6 +666,19 @@ impl Host {
         self.fonts
     }
 
+    /// What this plugin has been allowed to do.
+    ///
+    /// Empty for one nobody has answered for, which is what every plugin
+    /// installs as: a manifest asking for something is not a person allowing
+    /// it. What the keys mean is
+    /// [`Capability::keys`](crook_plugin_api::Capability::keys).
+    pub fn granted(&self, plugin: &PluginId) -> &[String] {
+        self.grants
+            .get(plugin.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
     /// The slot of that name, if one has been declared.
     ///
     /// For a plugin that names a slot with a *string* — which every plugin
@@ -709,6 +731,23 @@ impl Host {
     /// Whether this plugin is loaded right now.
     pub fn is_loaded(&self, plugin: &PluginId) -> bool {
         self.loaded.iter().any(|manifest| manifest.id == *plugin)
+    }
+
+    /// Records what a plugin is allowed to do, for the next time it builds.
+    ///
+    /// Only for the next time: a plugin reads its grant once, while building,
+    /// and holds what it read. So this is half of the answer and
+    /// [`Self::unload`] followed by [`Self::enable`] is the other half — which
+    /// is exactly what switching a plugin off and on again does, and is why a
+    /// new permission needs no restart. Nothing of the plugin's previous life
+    /// survives that, which is what makes it correct rather than merely
+    /// convenient.
+    pub fn set_granted(&mut self, plugin: &PluginId, keys: Vec<String>) {
+        if keys.is_empty() {
+            self.grants.remove(plugin.as_str());
+        } else {
+            self.grants.insert(plugin.as_str().to_owned(), keys);
+        }
     }
 
     /// Builds a plugin that is not loaded, and does nothing to one that is.
@@ -858,10 +897,11 @@ mod tests;
 pub fn load(
     plugins: Vec<Box<dyn Plugin>>,
     disabled: &[String],
+    grants: BTreeMap<String, Vec<String>>,
     fonts: Fonts,
     ctx: &mut ViewContext<Workspace>,
 ) -> Host {
-    let mut host = Host::new(fonts);
+    let mut host = Host::new(fonts, grants);
     let mut plugins = plugins;
     host.carried = plugins.iter().map(|plugin| plugin.manifest()).collect();
     for plugin in &mut plugins {
