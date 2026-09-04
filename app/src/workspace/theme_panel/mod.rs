@@ -35,20 +35,27 @@
 //! flow, in the panel rather than in a modal, because a modal over a panel is
 //! a second floating surface for a five-swatch choice.
 //!
-//! # Where it is, and why it moved
+//! # Where it is
 //!
-//! It is the **sidebar's body** while it is up: the tab list, or the settings
-//! rail, or the plugin list steps aside for it and comes back when the × is
-//! pressed. It was a column of its own between the sidebar and the work, which
-//! is where Warp docks its chooser — and that stopped being right the day the
-//! sidebar grew sections. Three columns in a 1024-wide window left the
-//! settings page too narrow to print its own values, and the panel was drawn
-//! only in the section that happened to compose it, so opening the chooser
-//! from the Appearance page set a flag and drew nothing at all.
+//! **A second sidebar**, between the first one and the work: a docked column
+//! of its own, full height, which is where Warp puts its chooser. The sidebar
+//! keeps whatever it was showing — the tab list, the settings rail, the plugin
+//! list — and the work is pushed aside rather than covered, so a theme is
+//! still judged against real output rather than against a preview card.
 //!
-//! What was worth keeping is kept: the work stays on screen beside it, so a
-//! theme is still judged against real output rather than against a preview
-//! card. It is now *not even pushed aside*.
+//! It spent one commit as the sidebar's *body*, standing in for the section
+//! showing there. That was the fix for a real bug — the panel used to be
+//! composed inside the tabs' own branch of the render, so opening the chooser
+//! from the Appearance page set a flag and drew nothing at all — but it was
+//! the wrong half of it: the panel took the first sidebar's place instead of
+//! taking one of its own. The bug's actual cause is fixed where it lives, in
+//! [`Workspace::render`](super::view::Workspace): the column is composed once,
+//! beside the sidebar, for every section rather than inside one of them.
+//!
+//! The price is the third column, and it is paid by the work: in the
+//! 1024-wide window Crook opens, a settings page with the panel up has 528px
+//! rather than 776 to print its own values in. That is the trade the docked
+//! chooser has always been — the panel is closed the moment a theme is picked.
 //!
 //! The settings page's "Current theme" row opens this rather than listing
 //! themes a second time: one list, one write path.
@@ -70,15 +77,11 @@ use crate::theme::theme;
 use super::action::{ThemeAction, WorkspaceAction};
 use super::view::Workspace;
 
-/// The width a row of this panel has to lay itself out against.
+/// The panel's width, and the width a row of it lays itself out against.
 ///
-/// The sidebar's, because this *is* the sidebar while it is up. It was this
-/// panel's own when it was a column of its own beside the work — Warp's is
-/// 240, and two docked columns of almost the same width read as a mistake, so
-/// it was already the sidebar's number then.
-///
-/// Read rather than measured because a card's size is decided while the
-/// element tree is being built, which is before anything has been laid out.
+/// The sidebar's. Warp's is 240 and the sidebar beside this is 248; two docked
+/// columns of almost the same width read as a mistake, so this is the number
+/// Crook already has.
 const PANEL_WIDTH: f32 = super::tabs_panel::PANEL_WIDTH;
 
 /// The strip at the top that carries the close button, matching the tabs
@@ -195,26 +198,31 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
         Mode::Creating => creator::render(workspace),
     };
 
-    // No width, no ground and no border of its own: this *is* the sidebar's
-    // body while it is up, and the panel around it has all three. It had them
-    // when it was a column of its own beside the work — see this module's own
-    // doc for why it stopped being one.
-    Container::new(
-        Flex::column()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_child(header(workspace))
-            .with_child(title_row(workspace, ui))
-            .with_child(hint(state.mode, ui))
-            .with_child(Expanded::new(1., body).finish())
-            .finish(),
+    // Its own width, its own ground and its own right edge, because it is a
+    // docked column rather than something inside one: the sidebar is to its
+    // left with a border of its own, and the two read as two panels.
+    ConstrainedBox::new(
+        Container::new(
+            Flex::column()
+                .with_main_axis_size(MainAxisSize::Max)
+                .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                .with_child(header(workspace))
+                .with_child(title_row(workspace, ui))
+                .with_child(hint(state.mode, ui))
+                .with_child(Expanded::new(1., body).finish())
+                .finish(),
+        )
+        .with_background_color(theme().surface)
+        .with_border(Border::right(1.).with_border_color(theme().border))
+        .with_padding(Padding {
+            top: 0.,
+            bottom: PANEL_PADDING,
+            left: PANEL_PADDING,
+            right: PANEL_PADDING,
+        })
+        .finish(),
     )
-    .with_padding(Padding {
-        top: 0.,
-        bottom: PANEL_PADDING,
-        left: PANEL_PADDING,
-        right: PANEL_PADDING,
-    })
+    .with_width(PANEL_WIDTH)
     .finish()
 }
 
