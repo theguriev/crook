@@ -51,8 +51,12 @@ use crook_plugin::{Manifest, PluginId, Tier};
 
 use crate::plugin::{ActionName, BuildError, Host, Plugin};
 use crate::workspace::Workspace;
+use crate::workspace::section;
 
 use state::PluginsState;
+
+/// Where the card has been scrolled to.
+const CARD_SCROLL: &str = "plugins.card";
 
 /// The two plugins whose switches are drawn inert.
 ///
@@ -140,13 +144,36 @@ impl Plugin for Plugins {
 /// about *what the list is showing*: a query that filters the chosen plugin
 /// out of the list leaves a card describing something nobody can see, so the
 /// selection falls to the first row that survived.
+///
+/// Both halves are drawn in [`section`]'s frame, which is the frame the
+/// settings are drawn in: the plugin's name is the page title, so it stays put
+/// while the card scrolls, exactly as a settings page's name does.
 fn page(workspace: &Workspace, state: &Rc<PluginsState>) -> (Box<dyn Element>, Box<dyn Element>) {
     let matching = list::matching(workspace);
     let selected = state.showing(&matching);
+    let showing = selected.as_ref().and_then(|id| {
+        workspace
+            .host()
+            .available()
+            .iter()
+            .find(|manifest| manifest.id == *id)
+            .copied()
+    });
+
+    let list = list::render(workspace, &matching, selected.as_ref());
+    // Unreachable while any plugin is loaded, and this page is one.
+    let Some(manifest) = showing else {
+        return (list, Empty::new().finish());
+    };
 
     (
-        list::render(workspace, &matching, selected.as_ref()),
-        card::render(workspace, selected.as_ref()),
+        list,
+        section::content(
+            manifest.name,
+            card::render(workspace, manifest),
+            workspace.settings_page().scroll_named(CARD_SCROLL),
+            workspace.fonts().ui,
+        ),
     )
 }
 

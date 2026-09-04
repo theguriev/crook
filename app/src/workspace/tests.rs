@@ -5344,14 +5344,21 @@ fn settings_switch_boxes(scene: &Scene) -> Vec<RectF> {
     switches
 }
 
-/// The text fields on the settings pane, left to right.
+/// The text fields anywhere in the frame, left to right.
 ///
-/// Found by the field's own ground, which nothing else on the page paints:
-/// a rounded box in `overlay_1` exactly [`text_field::HEIGHT`] tall.
+/// Found by the field's own ground: a rounded box in `overlay_1` exactly
+/// [`text_field::HEIGHT`] tall, **with a border**.
+///
+/// The border is what tells a field from a row of the sidebar, and it is not
+/// decoration in this filter. A hovered row is drawn in `overlay_1` too, and a
+/// row of a section's list is 26.4 tall against the field's 26 — inside the
+/// half-pixel slack this has to allow. Only the field is stroked, in every one
+/// of its three states, so only the field is counted.
 fn settings_field_boxes(scene: &Scene) -> Vec<RectF> {
     let mut fields: Vec<RectF> = visible_rects(scene)
         .filter(|(rect, bounds)| {
             rect.background == Fill::Solid(theme().overlay_1)
+                && rect.border != Border::default()
                 && (bounds.height() - crate::workspace::text_field::HEIGHT).abs() < 0.5
         })
         .map(|(_, bounds)| bounds)
@@ -10353,6 +10360,185 @@ mod plugins_page {
             text.contains("It is what draws the page"),
             "the card does not say why its switch is inert: {text}"
         );
+    }
+}
+
+/// The one shape both sidebar sections are drawn in.
+///
+/// The Settings section and the Plugins section each wrote their own two
+/// halves once, and drifted: see `workspace::section`, which is now the only
+/// place either shape is written down. These pin the parts of it that a
+/// screenshot would otherwise be the only record of.
+mod section_layout {
+    use super::*;
+
+    #[test]
+    fn a_page_with_less_room_than_the_measure_shrinks_to_it() {
+        // The bug: the measure was applied by a flex row of two spacers, and a
+        // flex measures an inflexible child *free along the main axis* — so
+        // the column came back 560 wide however little room it had been given.
+        // Docking the Themes panel leaves the body 528, and every control down
+        // the right of a settings row was laid out past the edge of the window
+        // and clipped away by the scroll.
+        let mut harness = Harness::new(1);
+        harness.open_settings_page();
+        assert!(
+            !settings_switch_boxes(&harness.frame()).is_empty(),
+            "the Appearance page should draw switches to begin with"
+        );
+
+        harness.open_theme_panel();
+        let scene = harness.frame();
+        let pane = settings_pane_box(&scene);
+        let switch = *settings_switch_boxes(&scene)
+            .first()
+            .expect("the page's switches went off the window with the panel up");
+
+        // Clear of the page's own inset, not merely inside the window: a rect
+        // that ran past the edge would have been *clipped* to it by the
+        // scroll, and so would have read as fitting.
+        assert!(
+            switch.max_x() <= pane.max_x() - 20.,
+            "a switch reaches {} in a body that ends at {}, which leaves less \
+             than the page's own padding",
+            switch.max_x(),
+            pane.max_x()
+        );
+    }
+
+    #[test]
+    fn both_sections_draw_their_lists_the_same_way() {
+        // Rows inset by ten pixels and rows inset by eight, one list that
+        // scrolled and one that could not. They are one row now, and this is
+        // what says so without a picture.
+        let mut harness = Harness::new(1);
+        harness.open_settings_page();
+        let rail = settings_rail_boxes(&harness.frame());
+        harness.show_plugins();
+        let list = settings_rail_boxes(&harness.frame());
+
+        let rail = *rail.first().expect("the settings rail has rows");
+        let list = *list.first().expect("the plugins list has rows");
+
+        assert!(
+            (rail.height() - list.height()).abs() < 0.5,
+            "a rail row is {} tall and a list row {}",
+            rail.height(),
+            list.height()
+        );
+        assert!(
+            (rail.min_x() - list.min_x()).abs() < 0.5,
+            "a rail row starts at {} and a list row at {}",
+            rail.min_x(),
+            list.min_x()
+        );
+        assert!(
+            (rail.min_y() - list.min_y()).abs() < 0.5,
+            "the first rail row is at {} and the first list row at {}",
+            rail.min_y(),
+            list.min_y()
+        );
+    }
+
+    #[test]
+    fn a_pages_title_stays_put_while_the_page_scrolls() {
+        // The settings page pinned its heading and the plugins card scrolled
+        // its own away. The frame pins both: a body a hundred pixels tall
+        // should not have to be scrolled to find out what it is a page of.
+        //
+        // Both sections, because the point is that there is one answer — and
+        // each is checked against a line further down the same page, so a page
+        // that simply refused to scroll could not pass.
+        for section in ["Settings", "Plugins"] {
+            let mut harness = Harness::new(1);
+            let (title, below) = match section {
+                "Settings" => {
+                    harness.open_settings_page();
+                    ("Appearance", "Follow the desktop")
+                }
+                _ => {
+                    harness.show_plugins();
+                    (
+                        "Window commands",
+                        "crook/window/close-pane — Close the focused pane",
+                    )
+                }
+            };
+
+            let scene = harness.frame();
+            let title_before = title_line(&scene, title);
+            let below_before = title_line(&scene, below);
+
+            harness.scroll_settings_page(-20.);
+            let scene = harness.frame();
+            let title_after = title_line(&scene, title);
+            let below_after = title_line(&scene, below);
+
+            assert!(
+                below_before.y() - below_after.y() > 1.,
+                "{section}: the page did not scroll, so this proves nothing"
+            );
+            assert!(
+                (title_before.y() - title_after.y()).abs() < 0.5,
+                "{section}: the title moved from {} to {} when the page scrolled",
+                title_before.y(),
+                title_after.y()
+            );
+        }
+    }
+
+    #[test]
+    fn a_plugin_that_is_running_says_so_with_the_pointer_elsewhere() {
+        // The regression this test exists for: the two lists were given one
+        // colour rule, and it was the rail's — lit while selected or hovered,
+        // muted otherwise. That is right for a rail of pages and wrong for a
+        // list of plugins, which is read for what is *running* by somebody
+        // whose pointer is nowhere near it. Every unselected row went muted,
+        // and the only thing left saying a plugin was on was a six-pixel dot.
+        let mut harness = Harness::new(1);
+        harness.show_plugins();
+        let scene = harness.frame();
+        let panel = panel_box(&scene);
+
+        // "Header" is the second row and is loaded, so it is neither the
+        // selected row nor under a pointer this test never moves.
+        let color = label_color(&scene, &panel, "Header");
+        assert_eq!(
+            color,
+            theme().text_primary,
+            "a running plugin's name is drawn in {color:?} with nothing \
+             pointing at it, which is how a switched-off one is drawn"
+        );
+    }
+
+    /// The colour the glyphs of one line in the sidebar are tinted.
+    fn label_color(scene: &Scene, panel: &RectF, label: &str) -> Color {
+        let line = text_lines(scene, |position| position.x() < panel.max_x())
+            .into_iter()
+            .find(|(_, line)| line.trim() == label)
+            .unwrap_or_else(|| panic!("no row in the sidebar reading {label:?}"))
+            .0;
+
+        scene
+            .layers()
+            .flat_map(|layer| layer.glyphs.iter())
+            .find(|glyph| {
+                (glyph.position.y() - line.y()).abs() < 0.5
+                    && (glyph.position.x() - line.x()).abs() < 0.5
+            })
+            .map(|glyph| glyph.color)
+            .expect("the line the text came from has glyphs")
+    }
+
+    /// Where the page's own heading is drawn, which is the copy beside the
+    /// list rather than the one in it.
+    fn title_line(scene: &Scene, title: &str) -> Vector2F {
+        let pane = settings_pane_box(scene);
+        text_lines(scene, |position| position.x() > pane.min_x())
+            .into_iter()
+            .find(|(_, line)| line.trim() == title)
+            .unwrap_or_else(|| panic!("no line on the page reading {title:?}"))
+            .0
     }
 }
 

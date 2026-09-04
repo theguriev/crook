@@ -1,5 +1,6 @@
-//! The root view: the tabs, a header, the active tab's body — and, over all
-//! three when it is up, the settings page.
+//! The root view: a header, and beside the panel down the left edge whatever
+//! the panel's chosen section puts there — the tabs and the active tab's body,
+//! or a section's list and its page.
 //!
 //! The tabs live in a panel down the left edge, the full height of the window,
 //! with the header and the body beside it. There was once a second arrangement
@@ -30,6 +31,7 @@ mod header_toolbar;
 mod input_element;
 mod pane_output;
 mod row_content;
+pub(crate) mod section;
 pub(crate) mod settings_page;
 mod tab_menu;
 mod tab_options_menu;

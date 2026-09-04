@@ -1,41 +1,40 @@
 //! The list of plugins, and the field that narrows it.
 //!
-//! # Its field is the settings page's
+//! The frame is [`section::sidebar`]'s, which is the same frame the settings
+//! rail is drawn in; what is here is only what goes in it.
 //!
-//! A page may bring a field, but it does not *own* one: `sync_input_keys` has
-//! to be able to take the keyboard away from every field on the pane, and it
-//! can only reach what the settings page holds. So the input comes from
-//! [`SettingsState::field`] under a key of this page's own, and pressing it
+//! # Its field is the workspace's
+//!
+//! A section may bring a field, but it does not *own* one: `sync_input_keys`
+//! has to be able to take the keyboard away from every field there is, and it
+//! can only reach what the workspace holds. So the input comes from
+//! [`Workspace::field`] under a key of this page's own, and pressing it
 //! dispatches the action that moves the keyboard to it.
 //!
-//! Two fields on one surface is a thing the settings page did not have before,
-//! and the rule is the one a person can predict with no focus ring to look at:
-//! **the last one pressed is the one being typed into.**
+//! The rule is the one a person can predict with no focus ring to look at:
+//! **the last field pressed is the one being typed into.**
 
-use crookui_core::elements::Padding;
 use crookui_core::fonts::FamilyId;
 use crookui_core::prelude::*;
 
 use crook_plugin::{Manifest, PluginId};
 
 use crate::theme::theme;
+use crate::workspace::section;
 use crate::workspace::settings_page::search::{Query, Words};
 use crate::workspace::settings_page::{named, widgets};
 use crate::workspace::{SettingsAction, TextField, Workspace, WorkspaceAction};
 
 use super::{action, tier_words};
 
-/// The inset around it.
-const PADDING: f32 = 12.;
-
-/// One row's height, which is what makes scrolling to a row arithmetic.
-const ROW_HEIGHT: f32 = 34.;
-
 /// The dot that says whether a plugin is running.
 const DOT: f32 = 6.;
 
 /// What the field says while nothing has been typed.
 const PLACEHOLDER: &str = "Search plugins";
+
+/// Where the list has been scrolled to.
+const LIST_SCROLL: &str = "plugins.list";
 
 /// The section this list is the sidebar of, and the name its field is
 /// registered under.
@@ -65,41 +64,31 @@ pub(super) fn render(
     let settings = workspace.settings_page();
     let ui = workspace.fonts().ui;
     let (index, input) = workspace.field(SECTION, FIELD);
-
-    let mut column = Flex::column()
-        .with_main_axis_size(MainAxisSize::Max)
-        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_child(
-            Container::new(
-                TextField::new(
-                    input,
-                    workspace.clipboard().clone(),
-                    workspace.fonts(),
-                    settings.control(named("plugins.search")),
-                    PLACEHOLDER,
-                )
-                .with_icon(Lucide::Search)
-                .with_focus(WorkspaceAction::Settings(SettingsAction::FocusField(Some(
-                    index,
-                ))))
-                .finish(),
-            )
-            .with_margin_bottom(10.)
-            .finish(),
-        );
-
     let host = workspace.host();
 
-    if matching.is_empty() {
-        column.add_child(
-            Container::new(
-                Text::new("No plugin matches that.", ui, widgets::LABEL_SIZE)
-                    .with_color(theme().text_muted)
-                    .finish(),
-            )
-            .with_uniform_padding(8.)
-            .finish(),
-        );
+    let field = TextField::new(
+        input,
+        workspace.clipboard().clone(),
+        workspace.fonts(),
+        settings.control(named("plugins.search")),
+        PLACEHOLDER,
+    )
+    .with_icon(Lucide::Search)
+    .with_focus(WorkspaceAction::Settings(SettingsAction::FocusField(Some(
+        index,
+    ))))
+    .finish();
+
+    let list = if matching.is_empty() {
+        // Inset to the row's own padding rather than to the list's, so the
+        // line starts where a row's label would have.
+        Container::new(
+            Text::new("No plugin matches that.", ui, widgets::LABEL_SIZE)
+                .with_color(theme().text_muted)
+                .finish(),
+        )
+        .with_uniform_padding(8.)
+        .finish()
     } else {
         let mut rows = Flex::column()
             .with_main_axis_size(MainAxisSize::Min)
@@ -113,27 +102,13 @@ pub(super) fn render(
                 ui,
             ));
         }
-        column.add_child(
-            Expanded::new(
-                1.,
-                Scrollable::new(settings.scroll_named("plugins.list"), rows.finish())
-                    .with_scrollbar(theme().overlay_3)
-                    .finish(),
-            )
-            .finish(),
-        );
-    }
+        rows.finish()
+    };
 
-    // No width and no border of its own: this *is* the sidebar's body now, and
-    // the panel around it is what has both.
-    Container::new(column.finish())
-        .with_padding(Padding {
-            top: PADDING,
-            bottom: PADDING,
-            left: PADDING,
-            right: PADDING,
-        })
-        .finish()
+    // No footer: the build line under the settings rail says which build this
+    // is, and a second copy of it under a list of what the build is made of
+    // would be the same sentence twice.
+    section::sidebar(field, list, settings.scroll_named(LIST_SCROLL), None)
 }
 
 /// Whether a query is looking for this plugin.
@@ -164,64 +139,31 @@ fn row(
     let state = workspace
         .settings_page()
         .control(named(&format!("plugins.row.{}", manifest.id)));
+    // `None` is unreachable: `ready` registers one per plugin. Cheaper to draw
+    // an unclickable row than to prove unreachable from here.
     let command = workspace
         .host()
         .action(&action("show", &manifest.id))
         .map(WorkspaceAction::Run);
 
-    let line = Flex::row()
-        .with_main_axis_size(MainAxisSize::Max)
-        .with_cross_axis_alignment(CrossAxisAlignment::Center)
-        // A filled dot for a plugin that is running and a hollow one for a
-        // plugin that is not, which is the whole of what a row has to say
-        // about a plugin beyond its name.
-        .with_child(dot(on))
-        .with_child(
-            Container::new(
-                Text::new(manifest.name, ui, widgets::LABEL_SIZE)
-                    .with_color(if on {
-                        theme().text_primary
-                    } else {
-                        theme().text_muted
-                    })
-                    .finish(),
-            )
-            .with_margin_left(8.)
-            .finish(),
-        )
-        .finish();
-
-    let hoverable = Hoverable::new(state, move |mouse| {
-        let background = match (selected, mouse.is_hovered()) {
-            (true, _) => theme().overlay_3,
-            (false, true) => theme().overlay_1,
-            (false, false) => Color::TRANSPARENT,
-        };
-        Container::new(line)
-            .with_background_color(background)
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
-            .with_padding(Padding {
-                top: 6.,
-                bottom: 6.,
-                left: 8.,
-                right: 8.,
-            })
-            .with_margin_bottom(2.)
-            .finish()
-    });
-
-    let element = match command {
-        Some(command) => hoverable
-            .on_click(move |_, ctx, _| ctx.dispatch_typed_action(command))
-            .finish(),
-        // Unreachable: `ready` registers one per plugin. Cheaper to draw than
-        // to prove unreachable from here.
-        None => hoverable.finish(),
-    };
-
-    ConstrainedBox::new(element)
-        .with_height(ROW_HEIGHT)
-        .finish()
+    section::row(
+        section::Row {
+            label: manifest.name.to_owned(),
+            // A filled dot for a plugin that is running and a hollow one for a
+            // plugin that is not, which is the whole of what a row has to say
+            // about a plugin beyond its name.
+            leading: Some(dot(on)),
+            selected,
+            emphasis: if on {
+                section::Emphasis::Lit
+            } else {
+                section::Emphasis::Dim
+            },
+            state,
+            command,
+        },
+        ui,
+    )
 }
 
 /// Filled for a plugin that is running, hollow for one that is not.
