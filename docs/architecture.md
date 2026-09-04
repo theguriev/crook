@@ -870,8 +870,11 @@ a person a menu they did not ask for every time they reached for the tab they we
 The model is [herdr](https://herdr.dev)'s, which is the tool this borrows from rather than
 Warp: there a worktree is not a thing you administer but a workspace with a git checkout
 behind it, and creating one *opens* it. So the menu lists the repository's checkouts and
-opens a tab in whichever one is chosen — or brings forward the tab already there, because two
-agents in one worktree is the thing the feature exists to prevent. Its `--base` is
+opens a pane in whichever one is chosen — or brings forward the pane already there, because
+two agents in one worktree is the thing the feature exists to prevent. The pane opens *in the
+tab the menu was opened on*, which is what keeps one repository's branches together: the
+panel draws a tab holding more than one pane under a group header, so the second checkout
+makes the group and the last one to close takes it away again. Its `--base` is
 deliberately not taken: a worktree made from anything other than the head you are looking at
 is a question a menu cannot ask well.
 
@@ -882,7 +885,7 @@ on the background pool when the menu opens and lands through `ctx.spawn` — whi
 menu has a state for "reading" at all. The 15-second poll that feeds the branch chip is not
 involved: this is read once, on a gesture, and thrown away when the menu closes.
 
-**Crook records where a shell is; it never drives it.** A new tab's directory is written onto
+**Crook records where a shell is; it never drives it.** A new pane's directory is written onto
 its session *before* the shells are synced, because that is the moment a pty's cwd is decided
 and the only moment it can be. Nothing ever issues a `cd` into a running pty, and the session
 directory stops being authoritative the instant the shell reports a different one over OSC 7.

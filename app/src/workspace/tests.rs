@@ -734,6 +734,28 @@ impl Harness {
             .read(&self.app, |workspace, _| workspace.tabs().active_id())
     }
 
+    /// Where the menu lists the checkout under `root`, if it lists one.
+    fn worktree_index_under(&self, root: &Path) -> Option<usize> {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace
+                .tab_menu()
+                .worktrees()
+                .iter()
+                .position(|worktree| worktree.path.starts_with(root))
+        })
+    }
+
+    /// The panes of one tab, in render order.
+    fn panes_of(&self, tab: TabId) -> Vec<PaneId> {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace
+                .tabs()
+                .get(tab)
+                .map(|tab| tab.panes().iter().map(Pane::id).collect())
+                .unwrap_or_default()
+        })
+    }
+
     /// Every pane in the window, in bar order.
     fn pane_ids(&self) -> Vec<PaneId> {
         self.workspace.read(&self.app, |workspace, _| {
@@ -3253,16 +3275,19 @@ fn the_cross_on_a_row_asks_about_removing_it_rather_than_opening_it() {
         harness.worktrees_listed().is_some()
     });
     harness.dispatch_worktree(WorktreeAction::StartCreating);
-    let before = harness.tab_ids().len();
+    let before = harness.pane_ids().len();
     harness.dispatch_worktree(WorktreeAction::Create);
     harness.wait_for("the worktree to be checked out", |harness| {
-        harness.tab_ids().len() > before
+        harness.pane_ids().len() > before
     });
 
-    // The tab that opened on it has to go before the × will be offered: a
+    // The pane that opened on it has to go before the × will be offered: a
     // checkout somebody is working in is exactly the one that must not be
     // removable, and that rule is what this test would otherwise trip over.
-    harness.dispatch_action(TabAction::Close(harness.active_id()));
+    let opened = harness
+        .focused_pane_id()
+        .expect("the split focused its pane");
+    harness.dispatch_action(TabAction::ClosePane(opened));
 
     // Back on the first tab's menu, with two checkouts in it now.
     let first = harness.tab_ids()[0];
@@ -3285,7 +3310,7 @@ fn the_cross_on_a_row_asks_about_removing_it_rather_than_opening_it() {
     harness.move_to(center(cross));
     harness.frame();
 
-    let tabs = harness.tab_ids().len();
+    let panes = harness.pane_ids().len();
     harness.click(center(cross), MouseButton::Left);
 
     assert!(
@@ -3293,18 +3318,19 @@ fn the_cross_on_a_row_asks_about_removing_it_rather_than_opening_it() {
         "the × did not open the confirmation"
     );
     assert_eq!(
-        harness.tab_ids().len(),
-        tabs,
-        "the row's own click fired too and opened a tab"
+        harness.pane_ids().len(),
+        panes,
+        "the row's own click fired too and opened a pane"
     );
 }
 
 #[test]
-fn making_a_worktree_checks_it_out_and_opens_a_tab_in_it() {
+fn making_a_worktree_checks_it_out_and_opens_a_pane_beside_the_tab() {
     // The whole feature with a real repository and a real `git worktree add`
     // at the end of it: the menu reads the repository, the creator names a
-    // branch nothing is using, git checks it out, and a tab opens whose shell
-    // would start there.
+    // branch nothing is using, git checks it out, and a pane opens whose shell
+    // would start there — *inside the tab the menu was opened on*, which is
+    // what puts the two checkouts under one group header in the panel.
     //
     // Asserted against the workspace's own state rather than against pixels.
     // A glyph under a popup is still in the scene — the tab behind this menu
@@ -3337,7 +3363,9 @@ fn making_a_worktree_checks_it_out_and_opens_a_tab_in_it() {
         "a fresh repository has one checkout and the menu should say so"
     );
 
-    let before = harness.tab_ids().len();
+    let tab = harness.active_id();
+    let tabs = harness.tab_ids().len();
+    let before = harness.pane_ids().len();
     harness.dispatch_worktree(WorktreeAction::StartCreating);
     assert!(
         harness.worktree_menu_is_creating(),
@@ -3346,24 +3374,125 @@ fn making_a_worktree_checks_it_out_and_opens_a_tab_in_it() {
 
     harness.dispatch_worktree(WorktreeAction::Create);
     harness.wait_for("the worktree to be checked out", |harness| {
-        harness.tab_ids().len() > before
+        harness.pane_ids().len() > before
     });
 
-    // A tab, in a directory that is really there, which git really knows is a
+    assert_eq!(
+        harness.tab_ids().len(),
+        tabs,
+        "the checkout opened a tab of its own instead of joining the one that asked"
+    );
+    assert_eq!(
+        harness.panes_of(tab).len(),
+        2,
+        "the tab the menu was opened on did not become the group holding both checkouts"
+    );
+
+    // A pane, in a directory that is really there, which git really knows is a
     // worktree of the repository the menu was opened on.
     let opened = harness
         .workspace
-        .read(&harness.app, |workspace, _| workspace.tab_directories())
+        .read(&harness.app, |workspace, _| workspace.pane_directories())
         .into_iter()
         .map(|(_, directory)| directory)
         .find(|directory| directory.starts_with(&store))
-        .expect("no tab was opened in the new checkout");
+        .expect("no pane was opened in the new checkout");
     assert!(opened.is_dir(), "{} was not checked out", opened.display());
 
     let listed = crate::git::worktree::list(&repository).expect("the repository still lists");
     assert!(
         listed.iter().any(|worktree| worktree.path == opened),
         "git does not know about the checkout that was made: {listed:?}"
+    );
+}
+
+#[test]
+fn showing_a_checkout_opens_it_beside_the_tab_and_never_twice() {
+    // The other half of the same rule, on the path that opens a checkout that
+    // already exists. Two things it has to get right, and the second is what
+    // the first one costs: a checkout opens as a pane *in the tab that asked*,
+    // so "is this one already open" can no longer be asked of the tabs'''
+    // focused panes — the branch is very often in the pane beside the row
+    // somebody is looking at, and a menu that missed it would put a second
+    // agent in the same checkout.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let tab = harness.active_id();
+    let first = harness.pane_ids()[0];
+    harness.update_session(first, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(first, "main", None);
+    harness.frame();
+
+    // A second checkout to show. Made through the menu, because that is the
+    // only thing that makes one.
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    harness.dispatch_worktree(WorktreeAction::Create);
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.pane_ids().len() > 1
+    });
+
+    // Away again, so the row has a checkout nothing is working in to show.
+    let made = harness
+        .focused_pane_id()
+        .expect("the split focused its pane");
+    harness.dispatch_action(TabAction::ClosePane(made));
+    assert_eq!(harness.panes_of(tab).len(), 1, "the pane did not close");
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("both checkouts to be read", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    let index = harness
+        .worktree_index_under(&store)
+        .expect("the checkout that was made is not in the menu");
+
+    let tabs = harness.tab_ids().len();
+    harness.dispatch_worktree(WorktreeAction::Show(index));
+
+    assert_eq!(
+        harness.panes_of(tab).len(),
+        2,
+        "the checkout did not open beside the tab its menu was opened on"
+    );
+    assert_eq!(
+        harness.tab_ids().len(),
+        tabs,
+        "the checkout opened a tab of its own"
+    );
+    let opened = harness.focused_pane_id().expect("a tab has a focused pane");
+    assert_ne!(opened, first, "the pane it opened is not the focused one");
+
+    // Back on the first pane, so the checkout is open in a pane nobody is
+    // looking at — which is the case the old tab-shaped lookup got wrong.
+    harness.dispatch_action(TabAction::FocusPane(first));
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("both checkouts to be read again", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    harness.dispatch_worktree(WorktreeAction::Show(index));
+
+    assert_eq!(
+        harness.panes_of(tab).len(),
+        2,
+        "a second agent was opened in a checkout that was already open"
+    );
+    assert_eq!(
+        harness.focused_pane_id(),
+        Some(opened),
+        "showing an open checkout did not bring its pane forward"
     );
 }
 

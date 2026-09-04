@@ -18,7 +18,7 @@
 //!
 //! # What it is for
 //!
-//! One agent, one worktree. Crook's unit of work is an agent and a tab is that
+//! One agent, one worktree. Crook's unit of work is an agent and a pane is that
 //! agent's workspace — its transcript, its directory, its state — and a git
 //! worktree is the same statement made on the filesystem: one branch, one
 //! checkout, one place to work that nothing else is standing in. Two agents in
@@ -27,10 +27,18 @@
 //!
 //! So this menu is not a worktree *manager*. It is a way to open one:
 //!
-//! * the repository's worktrees, each of which opens a tab in it — or brings
-//!   forward the tab already there;
+//! * the repository's worktrees, each of which opens a pane in it *inside the
+//!   tab the menu was opened on* — or brings forward the pane already there;
 //! * a way to make one, which asks for a branch name and nothing else;
 //! * a way to remove one, offered only for a checkout nothing is working in.
+//!
+//! The branches of one repository stay together because of that second half.
+//! A tab is the repository and its panes are its checkouts: the panel draws
+//! them under one group header — which appears by itself the moment a tab
+//! holds a second pane, so there is no group to make first and none to tidy
+//! away when one of them closes — and the body shows them side by side. A tab
+//! of its own for each checkout would file the branch away from the work it
+//! came out of, with nothing left in the list to say the two were related.
 //!
 //! herdr's shape, which is the tool this was modelled on: there a worktree is
 //! not a thing you administer but a workspace with a git checkout behind it,
@@ -289,7 +297,7 @@ fn worktree_row(
     let here = holding(worktrees, state.pane_directory.as_deref()) == Some(index);
     let elsewhere = !here
         && workspace
-            .tab_directories()
+            .pane_directories()
             .iter()
             .any(|(_, directory)| holding(worktrees, Some(directory)) == Some(index));
     // Never the main checkout, never one somebody is working in, and never a
@@ -321,7 +329,7 @@ fn worktree_row(
     // `Hoverable` runs its handler whether or not a descendant already
     // handled the release, so without this the × dispatches `AskRemove` and
     // the row dispatches `Show` on top of it — the confirmation is unreachable
-    // and a tab opens in the checkout somebody was asking to delete. The tab
+    // and a pane opens in the checkout somebody was asking to delete. The tab
     // strip's close button is guarded exactly this way, and for exactly this
     // reason.
     let guard = remove.clone();
