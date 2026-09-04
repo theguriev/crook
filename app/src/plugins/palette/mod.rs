@@ -16,7 +16,7 @@
 //!
 //! Escape, Enter and the arrows are claimed through [`Host::claim_surface`],
 //! which names an action rather than doing anything. So they end at
-//! `WorkspaceAction::Run` exactly as a chord out of somebody's `keymap.json`
+//! `WorkspaceAction::Run` exactly as a chord out of somebody's `keybindings.json`
 //! does, there is one dispatch path rather than two, and a person who wants
 //! Ctrl-N to move the selection can bind it.
 //!
@@ -83,8 +83,8 @@ impl Plugin for CommandPalette {
         // chords — see `Host::suggest_binding`.
         host.suggest_binding(
             match Platform::current() {
-                Platform::Mac => "cmd-shift-p",
-                Platform::Other => "ctrl-shift-p",
+                Platform::Mac => "shift+cmd+p",
+                Platform::Other => "ctrl+shift+p",
             },
             action("open"),
         );

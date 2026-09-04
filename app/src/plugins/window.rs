@@ -3,11 +3,12 @@
 //! # Every one of Crook's own commands, by name
 //!
 //! Thirteen of these were variants of a closed enum reachable only by a chord
-//! this file's `input_keys` table knew about. They are the same thirteen — the
+//! a table in `input_keys` knew about. They are the same thirteen — the
 //! handlers come back through [`Workspace::command`], so a palette entry and a
 //! chord cannot drift apart — with names on them, which is what lets a person
-//! bind one in `keymap.json`, another plugin invoke one, and a palette list
-//! them.
+//! bind one in `keybindings.json`, another plugin invoke one, and a palette
+//! list them. [`COMMANDS`] is that list, and the shipped keybindings bind it
+//! by name like anything else.
 //!
 //! They are registered as *commands* rather than as bare actions: each has a
 //! title, because a list of `crook/window/move-tab-left` is not a list a
@@ -37,6 +38,55 @@ use crate::plugin::{BuildError, Host, Plugin};
 /// Anything that floats over the whole window: a palette, a modal.
 pub const WINDOW_OVERLAY: SlotId = SlotId::new("window.overlay");
 
+/// Every command the window has of its own, by name.
+///
+/// One table, read three ways: `build` registers each of them under its name
+/// and its title, [`binding_for`] turns a name back into the thing the
+/// workspace does, and the shipped keybindings in
+/// [`crate::keybindings`] name them. Three tables would be three places for a
+/// command to go missing from — a chord bound to nothing, a palette entry with
+/// no key, a name the settings page cannot print a title for.
+///
+/// The order is the order the shipped keybindings are written in, so a person
+/// reading one and the other is reading the same order twice.
+pub const COMMANDS: [(&str, &str, Binding); 13] = [
+    ("new-tab", "New agent tab", Binding::NewTab),
+    ("close-pane", "Close the focused pane", Binding::ClosePane),
+    ("split-right", "Split to the right", Binding::SplitRight),
+    ("split-down", "Split downwards", Binding::SplitDown),
+    ("previous-tab", "Previous tab", Binding::PreviousTab),
+    ("next-tab", "Next tab", Binding::NextTab),
+    ("move-tab-left", "Move the tab left", Binding::MoveTabLeft),
+    (
+        "move-tab-right",
+        "Move the tab right",
+        Binding::MoveTabRight,
+    ),
+    ("search-tabs", "Search the tabs", Binding::SearchTabs),
+    ("open-settings", "Settings", Binding::OpenSettings),
+    ("zoom-in", "Make the text bigger", Binding::ZoomIn),
+    ("zoom-out", "Make the text smaller", Binding::ZoomOut),
+    ("zoom-reset", "Reset the text size", Binding::ZoomReset),
+];
+
+/// What one of the window's own commands does, by name.
+///
+/// `None` for every other name, which is every plugin's: those are dispatched
+/// through the host like any other action. This exists because the window's
+/// commands can decline — closing a pane when there is no focused one — and a
+/// chord that declines goes on to the shell, which a handler dispatched
+/// through the host has no way to say.
+pub fn binding_for(name: &ActionName) -> Option<Binding> {
+    let (owner, rest) = name.as_str().rsplit_once('/')?;
+    if owner != "crook/window" {
+        return None;
+    }
+    COMMANDS
+        .iter()
+        .find(|(command, _, _)| *command == rest)
+        .map(|(_, _, binding)| *binding)
+}
+
 /// The plugin that owns the window's own commands.
 pub struct Window;
 
@@ -50,28 +100,7 @@ impl Plugin for Window {
         // The sidebar is the window's, so the slot its sections go in is too.
         host.declare_sidebar_slot();
 
-        // The order is the order the settings page's Keys section lists the
-        // bindings in, so a person reading one and the other is reading the
-        // same order twice.
-        for (name, title, binding) in [
-            ("new-tab", "New agent tab", Binding::NewTab),
-            ("close-pane", "Close the focused pane", Binding::ClosePane),
-            ("split-right", "Split to the right", Binding::SplitRight),
-            ("split-down", "Split downwards", Binding::SplitDown),
-            ("previous-tab", "Previous tab", Binding::PreviousTab),
-            ("next-tab", "Next tab", Binding::NextTab),
-            ("move-tab-left", "Move the tab left", Binding::MoveTabLeft),
-            (
-                "move-tab-right",
-                "Move the tab right",
-                Binding::MoveTabRight,
-            ),
-            ("search-tabs", "Search the tabs", Binding::SearchTabs),
-            ("open-settings", "Settings", Binding::OpenSettings),
-            ("zoom-in", "Make the text bigger", Binding::ZoomIn),
-            ("zoom-out", "Make the text smaller", Binding::ZoomOut),
-            ("zoom-reset", "Reset the text size", Binding::ZoomReset),
-        ] {
+        for (name, title, binding) in COMMANDS {
             host.register_command(
                 action(name),
                 title,

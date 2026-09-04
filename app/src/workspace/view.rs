@@ -26,8 +26,8 @@ use crate::clipboard::Clipboard;
 use crate::editor::Selection;
 use crate::git::GitFacts;
 use crate::git_model::GitModel;
-use crate::input_keys::{self, Binding, Platform};
-use crate::keymap::{Bound, Keymap};
+use crate::input_keys::{Binding, Platform};
+use crate::keybindings::{Context, Keybindings, Resolution};
 use crate::pane_blocks::PaneBlocks;
 use crate::pane_link::PaneLink;
 use crate::pane_selection::PaneSelection;
@@ -415,12 +415,26 @@ pub struct Workspace {
     /// therefore no frame.
     window_size: Rc<std::cell::Cell<Vector2F>>,
 
-    /// The bindings a person wrote down, consulted before Crook's own.
+    /// Every chord the window answers to: the shipped table, what the
+    /// plugins asked for, and what a person wrote in `keybindings.json`.
     ///
-    /// Read once, at startup, like the theme and the font family: a keymap
+    /// Read once, at startup, like the theme and the font family: a file
     /// re-read mid-session would change what a key does between the press and
-    /// the release. See [`crate::keymap`].
-    keymap: Keymap,
+    /// the release. See [`crate::keybindings`].
+    keybindings: Keybindings,
+
+    /// The chords of a sequence that has been started but not finished.
+    ///
+    /// Empty almost always. While it is not, every keystroke belongs to the
+    /// sequence — it completes it, or ends it — which is VSCode's chord mode
+    /// and the only state the keyboard has.
+    ///
+    /// Behind a `RefCell` for the reason the window size is behind a `Cell`:
+    /// the window delegate asks what a keystroke means through a *read* of the
+    /// workspace, and half a chord is not a change anything on screen is drawn
+    /// from — it is the keyboard's own state, written down where the next
+    /// press can find it. See [`Self::action_for`], which is the only writer.
+    pending_keys: std::cell::RefCell<Vec<Keystroke>>,
 
     /// Whether the desktop is set to dark, as of the last thing the window
     /// said about it.
@@ -598,6 +612,22 @@ impl Workspace {
 
         let options = settings.tab_options();
         let settings_path = settings.path().map(Path::to_owned);
+
+        // Blocking, and deliberately: one small file, read once, on the same
+        // startup path the settings are read on. A run with no settings file
+        // to write is an ephemeral one — a test, the headless snapshot — and
+        // must not read the keybindings of whoever is running it either; it
+        // still gets the shipped table, because a snapshot with no chords at
+        // all would be a picture of a different application.
+        let mut keybindings = if settings_path.is_some() {
+            Keybindings::for_user()
+        } else {
+            Keybindings::new()
+        };
+        // After the plugins have built, which is the only moment this is
+        // knowable: what a plugin asks for depends on the plugin having
+        // loaded, and one that was switched off asks for nothing.
+        keybindings.set_plugin_rules(host.suggested_rules());
         let mut workspace = Self {
             tabs: TabStrip::new(),
             section: None,
@@ -613,16 +643,8 @@ impl Workspace {
             clipboard: Clipboard::new(),
             divider_drag: DividerDrag::new(),
             session_saves: Arc::default(),
-            // Blocking, and deliberately: one small file, read once, on the
-            // same startup path the settings are read on. A run with no
-            // settings file to write is an ephemeral one — a test, the
-            // headless snapshot — and must not read the keymap of whoever is
-            // running it either.
-            keymap: if settings_path.is_some() {
-                Keymap::for_user()
-            } else {
-                Keymap::new()
-            },
+            keybindings,
+            pending_keys: std::cell::RefCell::new(Vec::new()),
             window_size: Rc::new(std::cell::Cell::new(Vector2F::zero())),
             system_is_dark: true,
             interactions: HashMap::new(),
@@ -885,19 +907,47 @@ impl Workspace {
         actions.with(&name, |handler| handler(self, ctx));
     }
 
-    /// The person's own bindings, for the page that prints them.
-    pub(crate) fn keymap(&self) -> &Keymap {
-        &self.keymap
+    /// Every chord in force, for the page that prints them.
+    pub(crate) fn keybindings(&self) -> &Keybindings {
+        &self.keybindings
     }
 
-    /// Replaces them, which is what re-reading `keymap.json` does.
+    /// Replaces them, which is what re-reading `keybindings.json` does.
     ///
-    /// The bindings are read once at startup today, so this has one caller and
-    /// it is a test. It is not a test-only method: a keymap that can be
-    /// replaced is what "you changed the file, here it is" needs, and there is
-    /// nothing about swapping the table that has to wait for that.
-    pub fn set_keymap(&mut self, keymap: Keymap) {
-        self.keymap = keymap;
+    /// The rules a plugin asked for are put back afterwards, because they are
+    /// not in the file and a reload that dropped them would take the palette's
+    /// chord away. The bindings are read once at startup today, so this has
+    /// one caller and it is a test — but a table that can be replaced is what
+    /// "you changed the file, here it is" needs, and nothing about swapping it
+    /// has to wait for that.
+    pub fn set_keybindings(&mut self, mut keybindings: Keybindings) {
+        keybindings.set_plugin_rules(self.host.suggested_rules());
+        self.keybindings = keybindings;
+        self.pending_keys.borrow_mut().clear();
+    }
+
+    /// What the window is doing, as the keys a `when` clause may name.
+    ///
+    /// Built fresh for every keystroke: each of these is a question about the
+    /// state the key arrived in. The set is small on purpose — every key here
+    /// is one a person can write a clause against, and one that is wrong or
+    /// stale is worse than one that does not exist.
+    pub(crate) fn key_context(&self) -> Context {
+        Context::new()
+            .with_word(
+                "platform",
+                match Platform::current() {
+                    Platform::Mac => "mac",
+                    Platform::Other => "other",
+                },
+            )
+            .with("isMac", Platform::current() == Platform::Mac)
+            .with("paneFocused", self.tabs.focused_pane_id().is_some())
+            .with("settingsFocused", self.is_settings_page_open())
+            .with("searchFocused", self.search_takes_keys())
+            .with("panelOpen", self.panel.open)
+            .with("surfaceVisible", self.host.a_surface_is_up())
+            .with("chordPending", !self.pending_keys.borrow().is_empty())
     }
 
     /// The plugins, and everything they registered.
@@ -2697,7 +2747,22 @@ impl Workspace {
     /// a [`WorkspaceAction`] rather than a [`TabAction`]: one binding moves
     /// the tabs themselves rather than a tab, and giving it its own dispatch
     /// path would be exactly the second code path.
+    ///
+    /// **Ask once per keystroke.** A sequence like `ctrl+k ctrl+s` is spelled
+    /// over two presses, so this writes down the chords of one that is half
+    /// typed — asking twice about the same press is a second press as far as
+    /// the sequence is concerned. The window delegate asks once, which is what
+    /// this is for.
     pub fn action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
+        // **A sequence that has been started owns the next keystroke**, before
+        // anything else in the window can want it. That is what chord mode is:
+        // a person who has pressed the first half of `ctrl+k ctrl+s` is
+        // spelling one binding, and a panel that took the second half would
+        // leave them holding half a chord they cannot finish.
+        if !self.pending_keys.borrow().is_empty() {
+            return self.bound(keystroke);
+        }
+
         // **The panel takes the keyboard while it is up.** Before the bindings
         // and before anything a pane would see: Warp's chooser moves its
         // selection with the arrow keys, and a keystroke that both moved the
@@ -2714,7 +2779,7 @@ impl Workspace {
         // for the same reason the panel is: a palette that is showing owns its
         // arrow keys, and a keystroke that both moved its selection and did
         // something to the window would be worse than either. A surface that
-        // does not claim this keystroke lets it fall through, so `cmd-t` still
+        // does not claim this keystroke lets it fall through, so `cmd+t` still
         // opens a tab over an open palette.
         if let Some(action) = self.host.keys_for(keystroke) {
             return Some(WorkspaceAction::Run(action));
@@ -2732,32 +2797,60 @@ impl Workspace {
             return Some(action);
         }
 
-        // The person's own table first, and only where it has something to
-        // say: a chord it does not mention keeps Crook's binding, and one it
-        // binds to nothing has none at all — which is how a chord is given
-        // back to a shell or an editor that wants it. Nothing here reaches
-        // what a *pane* does with a key; see `crate::keymap`.
-        let bound = match self.keymap.binding(keystroke) {
-            Some(binding) => binding?,
-            None => match input_keys::binding(keystroke, Platform::current()) {
-                Some(binding) => Bound::Builtin(binding),
-                // Last, so that a plugin cannot take a chord from the window
-                // or from the person's own file by loading first.
-                None => {
-                    return self.host.suggested_for(keystroke).map(WorkspaceAction::Run);
-                }
-            },
-        };
+        self.bound(keystroke)
+    }
 
-        match bound {
-            Bound::Builtin(binding) => self.command(binding),
-            // A plugin's action, resolved now rather than when the file was
-            // read: which plugins are loaded is a question with a different
-            // answer at every moment. A name nothing answers to is a chord
-            // that does nothing, and is not passed on to the pane — a person
-            // who bound a chord meant to take it away from the shell.
-            Bound::Named(name) => self.host.action(&name).map(WorkspaceAction::Run),
+    /// What the keybindings make of a keystroke.
+    ///
+    /// The person's file, the shipped table and what the plugins asked for,
+    /// resolved together — see [`crate::keybindings`], which is where the
+    /// order between them is decided. Nothing here reaches what a *pane* does
+    /// with a key: a chord nothing is bound to returns `None` and the
+    /// keystroke goes on to the field and the shell, exactly as it did before
+    /// anybody wrote a binding down.
+    fn bound(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
+        let mut keys = self.pending_keys.borrow().clone();
+        keys.push(keystroke.clone());
+
+        match self.keybindings.resolve(&keys, &self.key_context()) {
+            Resolution::Command(name) => {
+                self.pending_keys.borrow_mut().clear();
+                self.command_named(&name)
+            }
+            // Half a sequence. The keystroke is consumed — it must not reach
+            // the shell, since the person is in the middle of a chord — and
+            // the window waits for the next one.
+            Resolution::Chord => {
+                *self.pending_keys.borrow_mut() = keys;
+                Some(WorkspaceAction::Chord)
+            }
+            // A sequence nothing completes ends the chord and costs the key
+            // that ended it, which is VSCode's behaviour: the alternative is
+            // the second half of an abandoned chord arriving in a shell.
+            Resolution::Nothing => {
+                let waiting = !self.pending_keys.borrow().is_empty();
+                self.pending_keys.borrow_mut().clear();
+                waiting.then_some(WorkspaceAction::Chord)
+            }
         }
+    }
+
+    /// What a command name does, right now.
+    ///
+    /// The window's own thirteen go through [`Self::command`] rather than
+    /// through the host, even though `crook/window` registers every one of
+    /// them: those can *decline* — closing a pane when there is no focused
+    /// one — and a chord that declines goes on to the shell. An action
+    /// dispatched through the host has no way to say so.
+    ///
+    /// A name nothing answers to is a chord that does nothing, and is not
+    /// passed on to the pane: a person who bound a chord meant to take it away
+    /// from the shell.
+    fn command_named(&self, name: &crate::plugin::ActionName) -> Option<WorkspaceAction> {
+        if let Some(binding) = crate::plugins::window::binding_for(name) {
+            return self.command(binding);
+        }
+        self.host.action(name).map(WorkspaceAction::Run)
     }
 
     /// What one of Crook's own commands does, right now.
@@ -3869,6 +3962,11 @@ impl TypedActionView for Workspace {
             WorkspaceAction::ReleaseSelection(pane) => self.release_selection(pane, ctx),
             WorkspaceAction::Complete(pane) => self.request_completions(pane, ctx),
             WorkspaceAction::Run(id) => self.run_action(id, ctx),
+            // The keystroke has already been written down by `action_for`, and
+            // there is nothing on screen that says a chord is half typed —
+            // there is no status bar to say it in. What this arm does is what
+            // the action exists for: swallow the key.
+            WorkspaceAction::Chord => {}
         }
     }
 }

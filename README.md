@@ -147,15 +147,14 @@ Seven features, and the page that configures them:
 - **A settings page**, which opens the way a shell does: `cmd/ctrl-,` — or the gear menu's
   last entry — puts it in a **tab of its own**, listed in the strip beside the work it
   configures, splittable next to that work, and closed by the same × and the same close chord
-  (`cmd-w`, `ctrl-shift-w` off macOS) as any other pane. Four pages: Appearance, Usage, Keys
-  and About. Every option on it is one the application actually reads; there is nothing there
-  that does not do something. Changes apply on the click and are written to
-  `<config>/crook/settings.json`, which is the same eight keys the gear menu writes plus the
+  (`cmd-w`, `ctrl-shift-w` off macOS) as any other pane. Five pages: Appearance, Shell, Usage,
+  Keyboard Shortcuts and About. Every option on it is one the application actually reads;
+  there is nothing there that does not do something. Changes apply on the click and are
+  written to `<config>/crook/settings.json`, which is the same eight keys the gear menu writes plus the
   theme, the light and dark pair it follows the desktop between, the terminal's type size,
   whether the tabs come back, and — set in the file rather than on the page — its font family.
   The type size is also on `cmd/ctrl-plus`, `-minus` and `-0`, and every pane resizes with it:
-  a pane's columns and rows are its box divided by a cell, so the ptys follow. Bindings a
-  person writes down live beside it, in `keymap.json`.
+  a pane's columns and rows are its box divided by a cell, so the ptys follow.
   It is the one pane with no shell under it and no field: every control on it is a click.
 
   At the top of its rail is a **search box**, and it narrows both halves of the page at once:
@@ -164,6 +163,17 @@ Seven features, and the page that configures them:
   it, by the value on its right — so `cmd-w` finds "Close the focused pane" and a path finds
   the settings file — by the page and category it is in, and by a hand-written list of the
   words somebody would actually type: nothing on the "Tab placement" row says *sidebar*.
+
+- **Keybindings**, in VSCode's format and with VSCode's rules, in
+  `<config>/crook/keybindings.json`: a list of `{ "key", "command", "when" }` rules, the last
+  matching rule wins, a `-` in front of a command takes it off a chord, and a key may be a
+  sequence like `"ctrl+k ctrl+s"`. A command is a name — the window's own thirteen are
+  `crook/window/*`, and a plugin's are its own — so anything reachable by name is bindable,
+  including things this build has never heard of. What a *pane* does with a key is not in it:
+  `ctrl-c` interrupts and `ctrl-d` ends an input, and a binding that could take one of those
+  away would be one that breaks a terminal. The **Keyboard Shortcuts** page lists every
+  command, the chord that reaches it and where that chord came from — none of it written down
+  by hand.
 
 Everything else is out of scope on purpose. There is no telemetry, and OSC 8 hyperlinks are
 not read — though a URL a program *printed* is clickable, because the scan that finds one

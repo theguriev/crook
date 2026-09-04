@@ -5,11 +5,14 @@
 //! module makes that decision, and it makes it in one place — [`route`] — so
 //! that the whole policy can be read at once.
 //!
-//! Crook's own chords are here too, in [`binding`], for a reason the field
-//! made unavoidable: a chord the window consumes never reaches [`route`], so
-//! two tables written in two files can quietly take the same keys away from
-//! each other. Side by side they can be tested against each other instead, and
-//! [`tests::no_binding_takes_a_chord_the_field_needs`] is that test.
+//! Crook's own chords are not here. They are keybindings like any other, in
+//! [`crate::keybindings`], where a person's own file can reach them. The
+//! danger that used to keep them in this file is still real — a chord the
+//! window consumes never reaches [`route`], so two tables can quietly take the
+//! same keys away from each other — and it is answered by a test rather than
+//! by proximity: `no_shipped_binding_takes_a_chord_the_input_field_needs`
+//! routes every shipped binding through this module and insists the field has
+//! no use for it.
 //!
 //! # The platform split
 //!
@@ -160,8 +163,13 @@ impl Route {
     }
 }
 
-/// One of Crook's own bindings: a chord the window acts on before any pane
-/// sees it.
+/// One of the window's own commands: something it does before any pane sees
+/// the keystroke.
+///
+/// The chord that reaches one is not here — see [`crate::keybindings`], where
+/// a person's file can move it. This is the *set*, which is closed because
+/// each of these is a thing the workspace itself knows how to do;
+/// [`crate::plugins::window`] puts a name and a title on every one of them.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Binding {
     /// Open a tab.
@@ -195,8 +203,8 @@ pub enum Binding {
 /// **The whole keyboard policy of a pane, in one function.**
 ///
 /// 0. Crook's own bindings never reach here. `Workspace::action_for` consumes
-///    what [`binding`] names, in the window delegate, before any element sees
-///    the event — which is what makes `cmd-t` open a tab everywhere rather
+///    what the keybindings name, in the window delegate, before any element
+///    sees the event — which is what makes `cmd-t` open a tab everywhere rather
 ///    than typing a `t`.
 /// 1. **A selection in the output owns the copy chord while it exists.** There
 ///    are two selections on a pane — the one dragged out of the shell's output
@@ -266,86 +274,6 @@ pub fn route(keystroke: &Keystroke, chars: &str, pane: Pane, platform: Platform)
 /// interrupted.
 pub fn is_signal(keystroke: &Keystroke) -> bool {
     signal(keystroke).is_some()
-}
-
-/// Which of Crook's own bindings this chord is, if it is one.
-///
-/// Consumed by the window delegate, so nothing here ever reaches [`route`] —
-/// which is exactly why the two tables live in one file.
-pub fn binding(keystroke: &Keystroke, platform: Platform) -> Option<Binding> {
-    let modifiers = keystroke.modifiers;
-    let key = keystroke.key.as_str();
-    match platform {
-        Platform::Mac => {
-            if !modifiers.cmd {
-                return None;
-            }
-            match (key, modifiers.shift, modifiers.alt, modifiers.ctrl) {
-                ("t", false, false, false) => Some(Binding::NewTab),
-                ("w", false, false, false) => Some(Binding::ClosePane),
-                ("d", false, false, false) => Some(Binding::SplitRight),
-                ("d", true, false, false) => Some(Binding::SplitDown),
-                // Telegram's chord, which is what the box's placeholder says.
-                // Free on macOS: the field's own emacs bindings are ctrl-keys,
-                // and cmd-k is nobody's here.
-                ("k", false, false, false) => Some(Binding::SearchTabs),
-                (",", false, false, false) => Some(Binding::OpenSettings),
-                // Not Cmd-Shift-arrow, which every macOS text field spends on
-                // selecting to the end of a line — the field needs it more
-                // than the tabs do, and Cmd-Alt-arrow is where a Mac browser
-                // keeps its tabs anyway.
-                ("left", false, true, false) => Some(Binding::PreviousTab),
-                ("right", false, true, false) => Some(Binding::NextTab),
-                ("left", false, false, true) => Some(Binding::MoveTabLeft),
-                ("right", false, false, true) => Some(Binding::MoveTabRight),
-                // The zoom chords every application has. `=` is the unshifted
-                // key `+` is printed on, and both are accepted because which
-                // one the platform reports depends on the layout and on
-                // whether Shift was held.
-                ("=" | "+", _, false, false) => Some(Binding::ZoomIn),
-                ("-" | "_", _, false, false) => Some(Binding::ZoomOut),
-                ("0", false, false, false) => Some(Binding::ZoomReset),
-                _ => None,
-            }
-        }
-        Platform::Other => {
-            if !modifiers.ctrl || modifiers.cmd || modifiers.alt {
-                return None;
-            }
-            match (key, modifiers.shift) {
-                ("t", true) => Some(Binding::NewTab),
-                ("w", true) => Some(Binding::ClosePane),
-                ("d", true) => Some(Binding::SplitRight),
-                // Not Ctrl-Shift-D with a Shift already spent: the split pair
-                // takes the two keys next to each other instead.
-                ("e", true) => Some(Binding::SplitDown),
-                // With the Shift every one of Crook's own chords takes off
-                // macOS, and here it is load-bearing twice over: bare ctrl-k
-                // is the field's "delete to the end of the line", which a
-                // window binding would take away from every pane.
-                ("k", true) => Some(Binding::SearchTabs),
-                // Ctrl-comma without a Shift: the settings chord is the same
-                // on every platform, and unlike the tab bindings above it has
-                // no field gesture to stay out of the way of.
-                (",", false) => Some(Binding::OpenSettings),
-                // The tab chord of every browser and every terminal on Linux
-                // and Windows, and it leaves Ctrl-Shift-arrow to the field,
-                // where it selects by word.
-                ("pageup", false) => Some(Binding::PreviousTab),
-                ("pagedown", false) => Some(Binding::NextTab),
-                ("pageup", true) => Some(Binding::MoveTabLeft),
-                ("pagedown", true) => Some(Binding::MoveTabRight),
-                // The zoom chords, with and without the Shift that reaches the
-                // `+` and `_` printed on the same two keys. Ctrl-minus does
-                // not collide with anything a shell wants: the C0 range has no
-                // code for it, so it was already sending a bare `-`.
-                ("=" | "+", _) => Some(Binding::ZoomIn),
-                ("-" | "_", _) => Some(Binding::ZoomOut),
-                ("0", false) => Some(Binding::ZoomReset),
-                _ => None,
-            }
-        }
-    }
 }
 
 /// One of the three keys the tty reserves.
@@ -1185,143 +1113,6 @@ mod tests {
             assert_eq!(
                 edit("delete", none(), platform),
                 Some(Intent::DeleteForward)
-            );
-        }
-    }
-
-    /// Every chord Crook keeps for itself, per platform.
-    fn bindings(platform: Platform) -> Vec<(&'static str, Modifiers)> {
-        match platform {
-            Platform::Mac => vec![
-                ("t", cmd()),
-                ("w", cmd()),
-                ("d", cmd()),
-                ("d", cmd_shift()),
-                (",", cmd()),
-                ("left", cmd_alt()),
-                ("right", cmd_alt()),
-                (
-                    "left",
-                    Modifiers {
-                        ctrl: true,
-                        ..cmd()
-                    },
-                ),
-                (
-                    "right",
-                    Modifiers {
-                        ctrl: true,
-                        ..cmd()
-                    },
-                ),
-            ],
-            Platform::Other => vec![
-                ("t", ctrl_shift()),
-                ("w", ctrl_shift()),
-                ("d", ctrl_shift()),
-                ("e", ctrl_shift()),
-                (",", ctrl()),
-                ("pageup", ctrl()),
-                ("pagedown", ctrl()),
-                ("pageup", ctrl_shift()),
-                ("pagedown", ctrl_shift()),
-            ],
-        }
-    }
-
-    #[test]
-    fn the_window_takes_the_same_chords_the_help_text_lists() {
-        assert_eq!(
-            binding(&keystroke("t", cmd()), Platform::Mac),
-            Some(Binding::NewTab)
-        );
-        assert_eq!(
-            binding(&keystroke("t", ctrl_shift()), Platform::Other),
-            Some(Binding::NewTab)
-        );
-        assert_eq!(
-            binding(&keystroke("left", cmd_alt()), Platform::Mac),
-            Some(Binding::PreviousTab)
-        );
-        assert_eq!(
-            binding(&keystroke("pagedown", ctrl()), Platform::Other),
-            Some(Binding::NextTab)
-        );
-        for platform in [Platform::Mac, Platform::Other] {
-            for (key, modifiers) in bindings(platform) {
-                assert!(
-                    binding(&keystroke(key, modifiers), platform).is_some(),
-                    "{key} with {modifiers:?} is bound to nothing on {platform:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn no_binding_takes_a_chord_the_field_needs() {
-        // The failure this file exists to make impossible: a binding consumed
-        // in the window delegate never reaches `route`, so a chord in both
-        // tables is a chord the field can never have — silently.
-        for platform in [Platform::Mac, Platform::Other] {
-            for (key, modifiers) in bindings(platform) {
-                assert_eq!(
-                    route(&keystroke(key, modifiers), "", composing(), platform),
-                    Route::Ignored,
-                    "{key} with {modifiers:?} is both a binding and the field's on {platform:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn the_tty_keeps_the_plain_control_chords_off_macos() {
-        // Ctrl-D has to be able to end an input and Ctrl-C to interrupt, so
-        // off macOS nothing of Crook's own can live on a bare Ctrl-letter.
-        for key in ["c", "d", "z", "w", "t", "b"] {
-            assert_eq!(
-                binding(&keystroke(key, ctrl()), Platform::Other),
-                None,
-                "ctrl-{key} is Crook's, and the tty cannot have it"
-            );
-        }
-    }
-
-    #[test]
-    fn the_zoom_chords_are_bound_on_both_platforms() {
-        // Both keys of each pair, because which one the platform reports for
-        // the same physical key depends on the layout and on whether Shift
-        // was held.
-        for (key, expected) in [
-            ("=", Binding::ZoomIn),
-            ("+", Binding::ZoomIn),
-            ("-", Binding::ZoomOut),
-            ("_", Binding::ZoomOut),
-            ("0", Binding::ZoomReset),
-        ] {
-            assert_eq!(
-                binding(&keystroke(key, cmd()), Platform::Mac),
-                Some(expected),
-                "cmd-{key}"
-            );
-            assert_eq!(
-                binding(&keystroke(key, ctrl()), Platform::Other),
-                Some(expected),
-                "ctrl-{key}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_bare_minus_is_not_a_zoom() {
-        // The chord is the modifier. Typing a `-` into a command line must not
-        // resize every pane in the window.
-        for key in ["-", "=", "0", "+"] {
-            assert_eq!(binding(&keystroke(key, none()), Platform::Other), None);
-            assert_eq!(binding(&keystroke(key, none()), Platform::Mac), None);
-            assert_eq!(
-                binding(&keystroke(key, shift()), Platform::Other),
-                None,
-                "shift-{key} types a character"
             );
         }
     }

@@ -49,7 +49,7 @@ pub mod editor;
 pub mod git;
 pub mod git_model;
 pub mod input_keys;
-pub mod keymap;
+pub mod keybindings;
 pub mod pane_blocks;
 pub mod pane_link;
 pub mod pane_selection;
@@ -593,29 +593,43 @@ OPTIONS:
     -V, --version      Print the version and channel
 
 KEYS (macOS):
-    cmd-t                      New agent tab
-    cmd-,                      Show the settings
-    cmd-d / cmd-shift-d        Split the focused pane to the right / downwards
-    cmd-w                      Close the focused pane, and its tab with the last one
-    cmd-alt-left/right         Select the previous/next tab
-    cmd-ctrl-left/right        Move the active tab
-    cmd-plus / cmd-minus       Make the terminal's text bigger / smaller
-    cmd-0                      Put the text back to its default size
+    cmd+t                      New agent tab
+    cmd+,                      Show the settings
+    cmd+d / shift+cmd+d        Split the focused pane to the right / downwards
+    cmd+w                      Close the focused pane, and its tab with the last one
+    cmd+k                      Search the tabs
+    alt+cmd+left/right         Select the previous/next tab
+    ctrl+cmd+left/right        Move the active tab
+    cmd+plus / cmd+minus       Make the terminal's text bigger / smaller
+    cmd+0                      Put the text back to its default size
 
 KEYS (Linux and Windows):
-    ctrl-shift-t               New agent tab
-    ctrl-,                     Show the settings
-    ctrl-shift-d / ctrl-shift-e  Split the focused pane to the right / downwards
-    ctrl-shift-w               Close the focused pane, and its tab with the last one
-    ctrl-pageup/pagedown       Select the previous/next tab
-    ctrl-shift-pageup/pagedown Move the active tab
-    ctrl-plus / ctrl-minus     Make the terminal's text bigger / smaller
-    ctrl-0                     Put the text back to its default size
+    ctrl+shift+t               New agent tab
+    ctrl+,                     Show the settings
+    ctrl+shift+d / ctrl+shift+e  Split the focused pane to the right / downwards
+    ctrl+shift+w               Close the focused pane, and its tab with the last one
+    ctrl+shift+k               Search the tabs
+    ctrl+pageup/pagedown       Select the previous/next tab
+    ctrl+shift+pageup/pagedown Move the active tab
+    ctrl+plus / ctrl+minus     Make the terminal's text bigger / smaller
+    ctrl+0                     Put the text back to its default size
 
     Control-Shift, because a bare ctrl-letter belongs to the program in the
     pane: ctrl-c interrupts it, ctrl-d ends its input and ctrl-w takes back a
     word. The comma is not a letter the tty wants, which is why the settings
     chord is the one entry here that keeps a bare Control.
+
+    Every one of these is a *default*. They are keybindings in VSCode's format
+    and with VSCode's rules, so <config>/crook/keybindings.json overrides any
+    of them:
+
+        [{{ \"key\": \"ctrl+shift+j\", \"command\": \"crook/window/new-tab\" }}]
+
+    The last rule that matches a chord wins, a `-` in front of a command takes
+    it off that chord, a \"when\" clause limits a rule to a condition, and a
+    key may be a sequence like \"ctrl+k ctrl+s\". The Keyboard Shortcuts page
+    in the settings lists every command by name, with the chord that reaches
+    it.
 
 THE OUTPUT:
     A pane's output is a list of commands. Each block holds its prompt, the

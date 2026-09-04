@@ -105,12 +105,12 @@ pub(super) fn render(workspace: &Workspace, showing: Option<&PluginId>) -> Box<d
         if unoffered > 0 {
             // Counted rather than listed. A plugin's own arrow keys are
             // actions and not commands, and a page whose longest section is
-            // somebody's internal wiring is a page nobody reads. The Keys page
-            // lists every one of them.
+            // somebody's internal wiring is a page nobody reads. The Keyboard
+            // Shortcuts page lists every one of them.
             rows.push(widgets::note(
                 &format!(
                     "and {unoffered} more it does not offer, reachable by name \u{2014} the \
-                     Keys page lists them."
+                     Keyboard Shortcuts page lists them."
                 ),
                 ui,
             ));

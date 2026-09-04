@@ -17,8 +17,8 @@ description of something that was never built.
   - `Plugin::build` takes the workspace's `ViewContext`, so a plugin can own a model or a
     view. `crook/usage` owns the `UsageChip`; `Workspace` no longer knows it exists.
   - Named actions are reachable: `crook/usage/refresh` is registered by a plugin, bindable
-    from `keymap.json` by its name, dispatched as `WorkspaceAction::Run`, and listed on the
-    settings page's Keys page with whatever chord reaches it.
+    from `keybindings.json` by its name, dispatched as `WorkspaceAction::Run`, and listed on
+    the settings page's Keyboard Shortcuts page with whatever chord reaches it.
   - `crook/window` registers every one of Crook's own commands under a name, and owns the
     `window.overlay` slot — where anything that floats over the whole window goes.
   - `crook/palette` is the first plugin that is not an extraction: a command palette, built
@@ -29,7 +29,7 @@ description of something that was never built.
     every other key.
   - The settings pages come from a slot. `crook/settings` owns the rail; every page belongs
     to the plugin whose feature it configures — `crook/appearance`, `crook/shell`,
-    `crook/usage`, `crook/keys`, `crook/about` — so disabling a plugin takes its page off the
+    `crook/usage`, `crook/shortcuts`, `crook/about` — so disabling a plugin takes its page off the
     rail with the rest of it. `--settings <name>` now matches a page's title, so a plugin's
     page is as reachable as one of Crook's.
   - The **Plugins page** is a list beside a card, which is VS Code's shape: a field and every
@@ -170,8 +170,10 @@ What that costs a plugin today, concretely:
   subscriber is `Workspace` through a private handle.
 - **No notification primitive, no command palette, no general tooltip.** The bell becomes an
   amber dot, and that is the whole attention model.
-- **Keybindings name one of thirteen built-in actions.** The keymap file is "one file, one
-  table, one rule"; a plugin action cannot be named in it.
+- **Keybindings cannot be edited from the interface.** The file is VSCode's — rules, `when`
+  clauses, chord sequences, removal by name — and the Keyboard Shortcuts page prints what is
+  in force without being able to record a chord into it. That needs a control the settings
+  page does not have.
 - **`AgentStatus::Running` and `Failed` are never set at runtime.** There is no agent runtime
   behind the product's noun. This is the largest empty seam in the tree, and the first thing a
   real plugin ecosystem will want to fill.
@@ -220,12 +222,15 @@ plugin any other way:
   supplies a pure `select`; first non-`None` wins). A contribution is an `Element` builder for
   native plugins and a declarative tree for sandboxed ones (§4).
 - `host.actions` — register a named action (`owner/name`) with a handler. Named actions are
-  what the keymap file, the palette and other plugins address; they replace "add a variant to
-  `WorkspaceAction`". The thirteen built-in bindings become named actions of the core plugins.
+  what the keybindings file, the palette and other plugins address; they replace "add a
+  variant to `WorkspaceAction`". The thirteen built-in bindings are named actions of
+  `crook/window`, bound by the shipped keybindings like anything else.
 - `host.settings` — register a schema under `plugins.<id>` in `settings.json`; the settings
   page renders it. The file already keeps unknown keys, so this is the one place a plugin can
   persist today; the schema is what makes it typed and visible.
-- `host.keymap` — default chords for the plugin's actions; the user's file wins, as it does now.
+- `host.keybindings` — default chords for the plugin's actions, as the weakest layer of the
+  keybindings: the user's file wins, and so does every shipped binding. `Host::suggest_binding`
+  is this, for a native plugin.
 - `host.themes` — a theme pack (files), or a token override with a disposer.
 - `host.panes` — a new pane content type. `PaneContent` becomes `Agent | Settings | Plugin(id)`
   with a trait behind the third arm; the settings pane is the worked example of everything that
@@ -364,7 +369,7 @@ settings = ["read", "write"]
 parks = 1                        # background workers this plugin will hold on a timer
 
 [contributions]                  # everything that is data and needs no code to be read
-keymap = { "eugen/usage-chip/refresh" = "cmd-shift-u" }
+keybindings = [{ key = "shift+cmd+u", command = "eugen/usage-chip/refresh" }]
 settings = "settings.schema.json"
 themes = ["themes/*.yaml"]
 ```

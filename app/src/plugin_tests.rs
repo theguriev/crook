@@ -207,19 +207,26 @@ fn a_surface_that_is_down_claims_nothing() {
 
 #[test]
 fn a_plugins_chord_is_a_suggestion_and_not_a_claim() {
-    // A plugin cannot take a chord the window owns. `crook/palette` asks for
-    // the palette chord and gets it because nothing else wants it; a plugin
-    // asking for the one that opens a tab would be ignored.
+    // A plugin cannot take a chord the window owns. What it asks for is the
+    // weakest layer of the keybindings — see `crate::keybindings` — so
+    // `crook/palette` gets the palette chord because nothing else wants it,
+    // and a plugin asking for the one that opens a tab would be under it.
     with_host(|host| {
         let palette = ActionName::parse("crook/palette/open").expect("a literal");
         let chord = if cfg!(target_os = "macos") {
-            "cmd-shift-p"
+            "shift+cmd+p"
         } else {
-            "ctrl-shift-p"
+            "ctrl+shift+p"
         };
-        let keystroke = crate::keymap::parse_chord(chord).expect("a chord");
 
-        assert_eq!(host.suggested_for(&keystroke), host.action(&palette));
+        let rules = host.suggested_rules();
+        let asked = rules
+            .iter()
+            .find(|rule| rule.command == palette)
+            .expect("the palette asked for a chord");
+
+        assert_eq!(asked.chord(), chord);
+        assert_eq!(asked.source, crate::keybindings::Source::Plugin);
     });
 }
 
@@ -235,7 +242,16 @@ fn the_settings_rail_is_what_the_plugins_put_in_it() {
             .map(|(_, title)| title)
             .collect();
 
-        assert_eq!(titles, ["Appearance", "Shell", "Usage", "Keys", "About"]);
+        assert_eq!(
+            titles,
+            [
+                "Appearance",
+                "Shell",
+                "Usage",
+                "Keyboard Shortcuts",
+                "About"
+            ]
+        );
     });
 }
 
@@ -260,7 +276,10 @@ fn disabling_a_plugin_takes_its_settings_page_off_the_rail() {
             .into_iter()
             .map(|(_, title)| title)
             .collect();
-        assert_eq!(titles, ["Appearance", "Shell", "Keys", "About"]);
+        assert_eq!(
+            titles,
+            ["Appearance", "Shell", "Keyboard Shortcuts", "About"]
+        );
     });
 }
 

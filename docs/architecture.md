@@ -1125,10 +1125,19 @@ disagree, because they are the same range.
 4. **Everything else on the normal screen is the field's**, and a key the keymap has no
    meaning for does nothing rather than leaking into the shell.
 
-**Which chords are Crook's** is the other half of the same file, and it lives there rather
-than in the workspace for a reason the field made unavoidable: a binding consumed in the
-delegate never reaches `route`, so two tables in two modules can silently take the same key
-away from each other. Side by side, a test asserts that no chord is in both.
+**Which chords are Crook's** is `app/src/keybindings.rs`, and it is VSCode's model whole: a
+binding is `{ key, command, when }`, the shipped table and a person's `keybindings.json` are
+the same kind of thing in the same list, the last rule that matches wins, a `-` in front of a
+command takes it off a chord, and a key may be a sequence like `ctrl+k ctrl+s`. A command is
+an action name — the window's own thirteen are `crook/window/*`, registered by a plugin like
+anything else — so nothing enumerates the bindable set and the settings page lists commands it
+has never heard of.
+
+The danger of keeping that table away from `route` is real: a binding consumed in the delegate
+never reaches `route`, so two tables in two modules can silently take the same key away from
+each other. What answers it is a test rather than proximity —
+`no_shipped_binding_takes_a_chord_the_input_field_needs` routes every shipped binding through
+`input_keys` and insists the field has no use for it.
 
 The two platforms differ, and not by taste:
 
@@ -1138,7 +1147,7 @@ The two platforms differ, and not by taste:
   of a line.
 - **Linux and Windows** put them on Control-**Shift**. A bare `ctrl-letter` belongs to the
   tty: `ctrl-c` interrupts, `ctrl-d` ends input, `ctrl-w` erases a word. Tab selection is
-  `ctrl-pageup/pagedown`, which leaves `ctrl-shift-left/right` to the field, where it selects
+  `ctrl+pageup/pagedown`, which leaves `ctrl-shift-left/right` to the field, where it selects
   by word. Copy and undo are `ctrl-shift-c` and `ctrl-shift-z` for the same reason every
   terminal emulator on Linux arrived at.
 
@@ -1434,9 +1443,11 @@ background, and both the chrome and the terminal grid are painted in it. Two bac
 nearly matched is precisely the bug that took two commits to remove from the pane renderer.
 
 **Keymaps.** Warp has editable bindings, fixed bindings, context predicates, and a
-user-remappable keymap. Crook reads input directly. The half worth keeping is already kept:
-keyboard and mouse produce the *same* action values, so a keymap layer can be inserted later
-without touching a single handler.
+user-remappable keymap. Crook has that layer now, and it is VSCode's rather than Warp's —
+`app/src/keybindings.rs`, `keybindings.json`, `when` clauses over a small set of context keys,
+chord sequences, removal by name. It cost nothing at the handlers because the half worth
+keeping was already kept: keyboard and mouse produce the *same* action values, so the layer
+sits above every handler and touches none of them.
 
 **Persistence is in**, in `app/src/session.rs`, and it is exactly the shape this paragraph used
 to prescribe: snapshot types entirely separate from the live ones, holding a title, a directory
