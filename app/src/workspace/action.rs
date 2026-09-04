@@ -144,6 +144,9 @@ pub enum SettingsAction {
     /// "Follow the desktop": whether the theme tracks the system's light or
     /// dark setting.
     ToggleFollowSystemTheme,
+    /// "Bring the tabs back": whether a window opens holding the tabs the last
+    /// one had.
+    ToggleRestoreSession,
 }
 
 /// What the options menu writes.

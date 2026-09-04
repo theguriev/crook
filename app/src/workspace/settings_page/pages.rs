@@ -145,10 +145,27 @@ fn appearance(workspace: &Workspace) -> Box<dyn Element> {
         ui,
     );
 
+    let restore = widgets::row(
+        "Bring the tabs back",
+        Some("Open with the tabs and splits the last window had, in their own directories."),
+        true,
+        widgets::switch(
+            workspace.general().restore_session,
+            Some(SettingsAction::ToggleRestoreSession.into()),
+            state.control(Control::RestoreSession),
+        ),
+        ui,
+    );
+
     page(vec![
         widgets::category("Theme", true, theme_category(workspace), ui),
         widgets::category("Text", false, text_category(workspace), ui),
-        widgets::category("Tabs", false, vec![placement, granularity, density], ui),
+        widgets::category(
+            "Tabs",
+            false,
+            vec![placement, granularity, density, restore],
+            ui,
+        ),
         widgets::category("Rows", false, rows_category(workspace), ui),
     ])
 }

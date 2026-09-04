@@ -164,6 +164,8 @@ pub(super) enum Control {
     ShowUsageChip,
     /// "Follow the desktop".
     FollowSystemTheme,
+    /// "Bring the tabs back".
+    RestoreSession,
     /// The minus of "Text size".
     FontSmaller,
     /// The plus of it.

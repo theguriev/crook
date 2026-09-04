@@ -4153,14 +4153,13 @@ fn a_switch_on_the_page_writes_the_option_the_gear_menu_writes() {
     let scene = harness.frame();
 
     let switches = settings_switch_boxes(&scene);
-    assert_eq!(
-        switches.len(),
-        3,
-        "PR link, diff stats and the detail card, in that order"
-    );
+    // The detail card's is the last switch on the page, whichever others have
+    // scrolled into view above it — the page has grown a switch twice now, and
+    // a fixed index would have to be corrected each time.
+    let detail_card = *switches.last().expect("the page has switches on it");
 
     assert!(harness.options().show_details_on_hover);
-    harness.click(center(switches[2]), MouseButton::Left);
+    harness.click(center(detail_card), MouseButton::Left);
     assert!(
         !harness.options().show_details_on_hover,
         "the switch did not write the option"
@@ -4183,12 +4182,20 @@ fn a_switch_the_density_has_made_inert_is_drawn_and_does_nothing() {
 
     let switches = settings_switch_boxes(&harness.frame());
     let before = harness.options();
-    harness.click(center(switches[0]), MouseButton::Left);
+
+    // The two chip switches are the third and second from the end: the detail
+    // card's is last, and whatever else the page has grown is above them.
+    // Counted from the end rather than the start for the reason the test above
+    // is: a fixed index has to be corrected every time a switch is added.
+    let inert = [switches.len() - 3, switches.len() - 2];
+    for index in inert {
+        harness.click(center(switches[index]), MouseButton::Left);
+    }
 
     assert_eq!(
         before,
         harness.options(),
-        "a compact row has no chips, so its chip switch must not be clickable"
+        "a compact row has no chips, so its chip switches must not be clickable"
     );
 }
 
@@ -6371,6 +6378,93 @@ fn the_row_height_the_panel_scrolls_by_is_the_height_it_draws() {
         "rows are drawn {drawn} apart and scrolled by {}",
         crate::workspace::theme_panel::ROW_HEIGHT
     );
+}
+
+/// Restoring a window: the strip comes back, and everything the workspace
+/// keeps beside it comes back into step.
+mod restoring {
+    use super::*;
+    use crate::session::Session;
+
+    #[test]
+    fn a_restored_strip_brings_the_per_pane_state_with_it() {
+        // The whole risk of replacing the strip wholesale: mouse states, drag
+        // gestures, scroll offsets and input fields are all keyed by pane id,
+        // and every id in a restored strip is new. Nothing in `restore` knows
+        // what that state is — `sync_interactions` does — so this is what
+        // proves the seam holds.
+        let mut source = Harness::new(1);
+        source.dispatch_action(TabAction::Split(Direction::Right));
+        source.dispatch_action(TabAction::New);
+        let session = source.workspace.read(&source.app, |workspace, _| {
+            Session::of(workspace.tabs(), None)
+        });
+
+        let mut harness = Harness::new(1);
+        let strip = session.restore().expect("there was something to restore");
+        harness.workspace_update(|workspace, ctx| workspace.restore(strip, ctx));
+
+        let panes = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .panes()
+                .map(|(_, pane)| pane.id())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(panes.len(), 3, "two tabs, the first split in two");
+
+        for pane in panes {
+            assert!(
+                harness
+                    .workspace
+                    .read(&harness.app, |workspace, _| workspace
+                        .interaction(pane)
+                        .is_some()),
+                "{pane:?} came back with no mouse state"
+            );
+        }
+
+        // And the frame draws, which is the other half of the same claim.
+        harness.frame();
+    }
+
+    #[test]
+    fn the_pane_that_had_the_keyboard_has_it_again() {
+        let mut source = Harness::new(1);
+        source.dispatch_action(TabAction::Split(Direction::Right));
+        let first = source.workspace.read(&source.app, |workspace, _| {
+            workspace
+                .tabs()
+                .panes()
+                .map(|(_, pane)| pane.id())
+                .next()
+                .expect("a first pane")
+        });
+        source.dispatch_action(TabAction::FocusPane(first));
+
+        let session = source.workspace.read(&source.app, |workspace, _| {
+            Session::of(workspace.tabs(), None)
+        });
+
+        let mut harness = Harness::new(1);
+        let strip = session.restore().expect("restored");
+        harness.workspace_update(|workspace, ctx| workspace.restore(strip, ctx));
+        harness.frame();
+
+        let focused = harness.focused_pane_id().expect("a focused pane");
+        let panes = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .panes()
+                .map(|(_, pane)| pane.id())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(Some(focused), panes.first().copied());
+        assert!(
+            harness.pane_takes_keys(),
+            "the restored pane's field was never told it has the keyboard"
+        );
+    }
 }
 
 /// Following the desktop's light or dark setting.

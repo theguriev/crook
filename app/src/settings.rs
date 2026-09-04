@@ -285,6 +285,13 @@ pub struct GeneralOptions {
     /// makes it testable with no window and no desktop: see
     /// [`Settings::theme_for`].
     pub use_system_theme: bool,
+    /// Whether a window comes back holding the tabs the last one had.
+    ///
+    /// On, because it is what makes a terminal a place rather than a fresh
+    /// start every morning, and because what comes back is only the *shape* —
+    /// tabs, splits and the directories their shells were in. No output is
+    /// restored and no process is: see [`crate::session`].
+    pub restore_session: bool,
     /// Whether the header carries the Claude Code usage chip.
     ///
     /// Off is not merely a hidden pill: the chip is the only thing that reads
@@ -304,6 +311,7 @@ impl Default for GeneralOptions {
         Self {
             font_size: DEFAULT_FONT_SIZE,
             use_system_theme: false,
+            restore_session: true,
             show_usage_chip: true,
         }
     }
@@ -752,7 +760,26 @@ fn owned_keys(options: impl Serialize, group: &str) -> Result<Map<String, Value>
 
 /// `<configuration directory>/crook/settings.json`, where there is one.
 pub fn user_settings_path() -> Option<PathBuf> {
-    dirs::config_dir().map(|directory| directory.join(CONFIG_DIRECTORY).join(SETTINGS_FILE))
+    config_directory().map(|directory| directory.join(SETTINGS_FILE))
+}
+
+/// The directory Crook keeps its per-user files in.
+///
+/// `None` on a machine with no configuration directory at all, which is a
+/// machine with no home rather than one that has never run Crook.
+pub fn config_directory() -> Option<PathBuf> {
+    dirs::config_dir().map(|directory| directory.join(CONFIG_DIRECTORY))
+}
+
+/// Writes `contents` to `path` without ever leaving a half-written file there.
+///
+/// The bytes go to a temporary beside the target and only a rename — one
+/// operation the filesystem either does or does not do — puts them in place,
+/// so a crash part-way through leaves whatever was there before intact. Shared
+/// with [`crate::session`], which wants exactly the same promise about a file
+/// that is written far more often than this one.
+pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
+    write_then_rename(&temporary_path(path), path, contents)
 }
 
 /// Reads `path` as a JSON object, treating every way that can fail as an empty
@@ -1127,6 +1154,7 @@ mod tests {
                 "layout",
                 "light_theme",
                 "primary_info",
+                "restore_session",
                 "show_details_on_hover",
                 "show_diff_stats",
                 "show_pr_link",
@@ -1284,11 +1312,11 @@ mod tests {
         let written: Map<String, Value> =
             serde_json::from_str(&contents).expect("the file should be a JSON object");
 
-        // Eight tab options, three general ones and three theme names, and
+        // Eight tab options, four general ones and three theme names, and
         // nothing else: the 8KB key the file started with is gone. The font
         // family is not among them — an absent key is what "no preference"
         // is, so a save writes no `font_family` unless one was chosen.
-        assert_eq!(14, written.len());
+        assert_eq!(15, written.len());
         assert!(!contents.contains("padding"));
         assert_eq!(
             everything_flipped(),

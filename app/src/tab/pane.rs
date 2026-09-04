@@ -172,6 +172,19 @@ impl Pane {
         self.flex
     }
 
+    /// Restores a share a previous session recorded.
+    ///
+    /// Clamped and defaulted past anything unusable, because the number comes
+    /// out of a file: a zero, a negative or a `NaN` would be a pane a flex
+    /// layout gives no space to, which is a pane nobody can see or get back.
+    pub(crate) fn set_flex(&mut self, flex: f32) {
+        self.flex = if flex.is_finite() && flex >= MIN_FLEX {
+            flex
+        } else {
+            DEFAULT_FLEX
+        };
+    }
+
     /// This pane's identity, for as long as it is open.
     pub fn id(&self) -> PaneId {
         self.id

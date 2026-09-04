@@ -287,6 +287,18 @@ pub struct Workspace {
     /// [`DividerDrag`](crate::pane_split::DividerDrag).
     divider_drag: DividerDrag,
 
+    /// Makes the last session save the one that lands. See
+    /// [`Self::save_session`].
+    session_generation: Arc<AtomicU64>,
+
+    /// How big the window was when it was last laid out, in logical pixels.
+    ///
+    /// Written by the delegate, which is the only thing told: the size is an
+    /// argument to `build_scene` and nothing in the view tree ever sees it. A
+    /// cell rather than a field so that recording it costs no `update` and
+    /// therefore no frame.
+    window_size: Rc<std::cell::Cell<Vector2F>>,
+
     /// Whether the desktop is set to dark, as of the last thing the window
     /// said about it.
     ///
@@ -423,6 +435,8 @@ impl Workspace {
             inputs: HashMap::new(),
             clipboard: Clipboard::new(),
             divider_drag: DividerDrag::new(),
+            session_generation: Arc::new(AtomicU64::new(0)),
+            window_size: Rc::new(std::cell::Cell::new(Vector2F::zero())),
             system_is_dark: true,
             interactions: HashMap::new(),
             tab_chrome: HashMap::new(),
@@ -1448,8 +1462,9 @@ impl Workspace {
 
         // An action that changed nothing repaints nothing: holding down
         // cmd-alt-left on the leftmost tab must not put the window on a
-        // key-repeat render loop.
+        // key-repeat render loop — and writes no session file either.
         if effect == TabEffect::Changed {
+            self.save_session(ctx);
             ctx.notify();
         }
         effect
@@ -1856,6 +1871,15 @@ impl Workspace {
                 let follow = !self.general().use_system_theme;
                 self.set_follow_system_theme(follow, ctx);
             }
+            SettingsAction::ToggleRestoreSession => {
+                let mut general = self.general();
+                general.restore_session = !general.restore_session;
+                self.set_general(general, ctx);
+                // Turning it on writes the file now rather than at the next
+                // tab action, so a person who switches it on and closes the
+                // window gets what they asked for.
+                self.save_session(ctx);
+            }
         }
     }
 
@@ -2188,6 +2212,78 @@ impl Workspace {
                 }
             })
             .detach();
+    }
+
+    /// Writes what the window is showing, so the next one can come back to it.
+    ///
+    /// **On a change rather than on the way out**, because there is no reliable
+    /// way out: a window closed by the window manager, a process killed, a
+    /// machine that lost power — none of them runs a shutdown path, and a
+    /// session file written only at exit is one that is missing exactly when
+    /// somebody wanted it. Every mutation of the strip goes through
+    /// [`Self::apply`], which is where this is called from, and those are rare
+    /// enough — a tab opened, a pane closed, a split — that a small file per
+    /// gesture is not worth debouncing.
+    ///
+    /// The same generation trick as the settings save, for the same reason: two
+    /// gestures a millisecond apart must not race each other to the file with
+    /// the earlier one winning.
+    fn save_session(&self, ctx: &mut ViewContext<Self>) {
+        if !self.general().restore_session {
+            return;
+        }
+        let Some(path) = crate::session::user_session_path() else {
+            return;
+        };
+        // An ephemeral run — a test, the headless snapshot — has nowhere to
+        // write its *settings*, and must not write a session file into the
+        // real one's place either.
+        if self.settings.path().is_none() {
+            return;
+        }
+
+        let generation = self.session_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let latest = self.session_generation.clone();
+        let session = crate::session::Session::of(&self.tabs, self.window_size());
+
+        ctx.background()
+            .spawn(async move {
+                if latest.load(Ordering::Relaxed) != generation {
+                    return;
+                }
+                if let Err(error) = session.save_blocking(&path) {
+                    log::warn!("could not save the session: {error:#}");
+                }
+            })
+            .detach();
+    }
+
+    /// How big the window was when it was last laid out, if it has been.
+    fn window_size(&self) -> Option<[f32; 2]> {
+        let size = self.window_size.get();
+        (size.x() >= 1. && size.y() >= 1.).then(|| [size.x(), size.y()])
+    }
+
+    /// Records the window's size, from the frame that is being built.
+    ///
+    /// Set by the delegate rather than reached for, because the size is an
+    /// argument to `build_scene` and nothing in the view tree is told it.
+    pub fn window_size_cell(&self) -> Rc<std::cell::Cell<Vector2F>> {
+        self.window_size.clone()
+    }
+
+    /// Replaces the strip with the one a previous session described.
+    ///
+    /// Everything the workspace keeps *beside* the strip — mouse states, drag
+    /// gestures, scroll offsets, input fields — is keyed by pane id and is
+    /// brought back into step by `sync_interactions`, exactly as it is after
+    /// any other mutation. Nothing here has to know what that state is.
+    pub fn restore(&mut self, strip: TabStrip, ctx: &mut ViewContext<Self>) {
+        self.tabs = strip;
+        self.sync_interactions();
+        self.sync_git(ctx);
+        self.sync_input_keys();
+        ctx.notify();
     }
 }
 

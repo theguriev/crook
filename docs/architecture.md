@@ -1110,10 +1110,25 @@ user-remappable keymap. Crook reads input directly. The half worth keeping is al
 keyboard and mouse produce the *same* action values, so a keymap layer can be inserted later
 without touching a single handler.
 
-**Persistence.** No session or window restore. When it arrives, the shape to copy is Warp's:
-snapshot types entirely separate from live types, containing only serializable fields and none
-of the mouse, drag or handle state — a `Vec<TabSnapshot>` plus an active index, `serde_json`
-to a file next to the config.
+**Persistence is in**, in `app/src/session.rs`, and it is exactly the shape this paragraph used
+to prescribe: snapshot types entirely separate from the live ones, holding a title, a directory
+and a share of a split and nothing else — a `Vec<TabSnapshot>` plus an active index and a
+window size, `serde_json` to a file beside the settings.
+
+Three decisions in it are worth naming. It is written **on every change rather than on the way
+out**, because there is no reliable way out: a window closed by the window manager, a process
+killed, a machine that lost power — none of them runs a shutdown path, and a file written only
+at exit is missing exactly when somebody wanted it. Every id in a restored strip is **minted
+fresh**, so a restored window is indistinguishable from one somebody opened by hand and nothing
+keyed by pane id can collide with a previous process's. And a file this build did not write is
+**bounded rather than validated**: sixty-four tabs and sixteen panes, because there is no
+correct number and a truncated or hand-edited file must not be able to open ten thousand ptys
+before the first frame.
+
+What is *not* remembered is the point: no scrollback, no output, no process. A window that
+redrew yesterday's output over a shell that had never run any of it would be lying about the
+state of the machine. The settings pane is left out too — it is something somebody opened to
+change a setting, not work in progress.
 
 **Telemetry, crash reporting, autoupdate.** All absent. Worth noting that adding Sentry on
 macOS is not a `Cargo.toml` line: Warp's build script downloads an `xcframework` and its

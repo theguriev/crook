@@ -393,6 +393,48 @@ impl TabStrip {
         }
     }
 
+    /// An empty strip, for a caller that is about to fill it.
+    ///
+    /// **The one shape this type otherwise refuses to be in**, and it exists
+    /// for exactly one caller: [`crate::session`], which builds a strip out of
+    /// a file and cannot start from a strip that already has a tab nobody
+    /// asked for. It is `pub(crate)` and paired with [`Self::adopt`]; a strip
+    /// left empty draws no rows and answers `None` to everything, which is why
+    /// the restoring path throws one away rather than opening a window with
+    /// it.
+    pub(crate) fn empty() -> Self {
+        Self {
+            tabs: Vec::new(),
+            active: TabId::next(),
+            mru: Vec::new(),
+            opened: 0,
+        }
+    }
+
+    /// Appends a tab built elsewhere, making it the active one.
+    ///
+    /// The counter moves with it, so the first tab a person opens after a
+    /// restore is named after the ones that came back rather than repeating
+    /// one of their names.
+    pub(crate) fn adopt(&mut self, tab: Tab) {
+        let id = tab.id();
+        self.tabs.push(tab);
+        self.opened += 1;
+        self.repair(Some(id));
+    }
+
+    /// Selects a tab by its position in the bar.
+    ///
+    /// Out of range selects nothing, which leaves whatever `adopt` last made
+    /// active. Positions are the session file's vocabulary and nothing else's:
+    /// every other caller names a tab by identity, for the reason the module
+    /// docs give at length.
+    pub(crate) fn select_index(&mut self, index: usize) {
+        if let Some(id) = self.tabs.get(index).map(Tab::id) {
+            self.repair(Some(id));
+        }
+    }
+
     /// How many tabs there are. Never zero.
     pub fn len(&self) -> usize {
         self.tabs.len()

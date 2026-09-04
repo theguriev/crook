@@ -56,6 +56,7 @@ pub mod pane_split;
 pub mod pane_surface;
 pub mod platform_insets;
 pub mod process;
+pub mod session;
 pub mod settings;
 pub mod shell_integration;
 pub mod tab;
@@ -663,9 +664,21 @@ fn open_window(channel: Channel, frames: Option<u32>, overrides: Overrides) -> R
     let text_layout: Arc<dyn TextLayoutSystem> = Arc::new(font_db.text_layout());
     apply_startup_theme(&settings, &launch.overrides);
 
+    // Read here, before the window exists, because the window opens at the
+    // size it names. An empty one — a first run, an unreadable file, or the
+    // setting turned off — is the default window and one tab, which is exactly
+    // what every launch did before this file existed.
+    let session = if settings.general().restore_session {
+        crate::session::Session::for_user()
+    } else {
+        crate::session::Session::default()
+    };
+
     let options = WindowOptions {
         title: channel.window_title(),
-        size: WINDOW_SIZE,
+        size: session
+            .window_size()
+            .map_or(WINDOW_SIZE, |[width, height]| vec2f(width, height)),
         decorations: WINDOW_CHROME == WindowChrome::Native,
         ..Default::default()
     };
@@ -678,6 +691,7 @@ fn open_window(channel: Channel, frames: Option<u32>, overrides: Overrides) -> R
             settings.clone(),
             text_layout.clone(),
             &launch,
+            session.clone(),
         ))
     })
 }
@@ -1141,6 +1155,13 @@ struct Shell {
     /// The rectangle the input method was last told the caret occupies, so a
     /// frame that did not move it sends no message.
     ime_area: Option<crookui_core::geometry::RectF>,
+    /// Where the workspace reads the window's size from.
+    ///
+    /// The size is an argument to `build_scene` and reaches nothing in the
+    /// view tree, so the delegate writes it down for the one thing that wants
+    /// it: the session file, which is what makes the next window open the size
+    /// this one was.
+    window_size: Rc<std::cell::Cell<Vector2F>>,
 }
 
 /// The state of a `--run` in a windowed session.
@@ -1181,6 +1202,7 @@ impl Shell {
         settings: Settings,
         text_layout: Arc<dyn TextLayoutSystem>,
         launch: &Launch,
+        session: crate::session::Session,
     ) -> Self {
         let mut app = App::new(platform.foreground.clone(), background_pool());
         app.update(|ctx| ctx.add_singleton_model(UsageModel::new));
@@ -1196,8 +1218,20 @@ impl Shell {
         let (window_id, workspace) = app.add_window(|ctx| {
             Workspace::new(fonts, cell_font, settings, launch.channel, quit, ctx)
         });
+        let window_size = workspace.read(&app, |workspace, _| workspace.window_size_cell());
         app.update(|ctx| {
             workspace.update(ctx, |workspace, ctx| {
+                // First of all, because everything below it works on whatever
+                // strip is there: the overrides open a settings page in it,
+                // the git poll reads its directories, and `start_terminals`
+                // opens a shell in every pane it holds.
+                //
+                // A session that describes nothing leaves the strip a fresh
+                // window's, which is what every launch had before there was a
+                // file to read.
+                if let Some(strip) = session.restore() {
+                    workspace.restore(strip, ctx);
+                }
                 // Before the polls, not after: `start_git_poll` decides
                 // whether to pay for `git diff` from the density it finds, and
                 // a density the command line asked for has to be in place by
@@ -1240,6 +1274,7 @@ impl Shell {
             frame_budget: launch.frames,
             run,
             ime_area: None,
+            window_size,
         }
     }
 
@@ -1363,6 +1398,10 @@ impl Shell {
 
 impl WindowDelegate for Shell {
     fn build_scene(&mut self, size: Vector2F, scale_factor: f32) -> Rc<Scene> {
+        // Written down rather than dispatched: it costs nothing, it invalidates
+        // nothing, and it is the only place the window's size is known.
+        self.window_size.set(size);
+
         let window_id = self.window_id;
         let presenter = &mut self.presenter;
 
