@@ -11,6 +11,8 @@ publish = false
 [workspace.dependencies]
 # Local crates.
 crook_plugin = { path = "crates/crook_plugin" }
+crook_plugin_api = { path = "crates/crook_plugin_api" }
+crook_wasm = { path = "crates/crook_wasm" }
 crook_terminal = { path = "crates/crook_terminal" }
 crook_usage = { path = "crates/crook_usage" }
 crookui = { path = "crates/crookui" }
@@ -44,6 +46,10 @@ parking_lot = "0.12"
 # the examples, and the renderer's own tests.
 png = "0.18"
 pollster = "0.4"
+# The wire a sandboxed plugin's answers cross. Not self-describing on purpose:
+# a contribution is decoded once per frame per slot, and field names on the
+# wire would be bytes spent every time on something both sides already know.
+postcard = { version = "1.1", default-features = false, features = ["alloc"] }
 portable-pty = "0.9"
 rustc-hash = "2.1"
 serde = { version = "1.0", features = ["derive"] }
@@ -51,6 +57,11 @@ serde_json = "1.0"
 smallvec = "1.15"
 swash = "0.2"
 thiserror = "2.0"
+# The sandbox a store plugin runs in. Chosen over `wasmtime` for one reason,
+# and it is the reason everything else in this file is chosen: it is pure Rust
+# with no `cc` anywhere in its graph — fourteen crates and not one build script
+# that shells out to a compiler.
+wasmi = { version = "2.0", features = ["portable-dispatch"] }
 unicode-segmentation = "1.13"
 # The same East Asian width table the terminal emulator lays its grid out with,
 # so the input field gives a CJK filename the two columns the shell will echo it

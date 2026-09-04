@@ -38,6 +38,27 @@ description of something that was never built.
     switched off is carried and not built — its `build` never runs, so it registers nothing
     and makes nothing.
   - Still to move: the worktree menu, the Themes panel, the Omarchy palettes.
+- **Phase 2 — in progress.** `crook_plugin_api` is the wire — a manifest, capabilities that
+  each say what they are in a sentence, and a `Node` vocabulary that *describes* rather than
+  paints: no colours, no pixels, tones and sizes the host resolves against the theme in
+  force. `crook_wasm` is the sandbox: a `wasmi` module with no imports but three, per-call
+  fuel budgets, a memory ceiling, and every offset a guest hands back checked against its own
+  memory before it is read. Its tests are real WebAssembly, assembled from text at test time,
+  so a wasm toolchain is not needed to run `cargo test`.
+
+  Two things were **measured rather than assumed**, and both changed a decision:
+
+  - `wasmi` pulls in fourteen crates and not one of them needs a C compiler. Decision 1 in §7
+    is settled: `wasmi` and a bytes ABI, and `docs/architecture.md` keeps its rule.
+  - `wasmi`'s default dispatch backend uses tail calls and relies on the optimiser to turn
+    the recursion into a jump. Unoptimised, it grows the *host* stack per instruction and a
+    guest loop of about ten thousand iterations aborts the process — which no amount of fuel
+    can catch, because an abort is not a trap. The workspace turns on `portable-dispatch`,
+    which dispatches in a loop and cannot grow the stack whatever it is compiled at. The
+    cost is some interpreter speed, for a plugin whose whole job is to format a percentage.
+
+  Still to do: capabilities actually granted and enforced, the host side that turns a `Node`
+  into elements, and a plugin in the box re-implemented as wasm to dogfood the ABI.
 
 ## 0. What was asked for, and what it means
 
