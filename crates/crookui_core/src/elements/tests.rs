@@ -78,6 +78,7 @@ impl TextLayoutSystem for StubShaper {
 enum TestAction {
     Clicked,
     Closed,
+    Menued,
 }
 
 /// How a [`TestView`] renders itself.
@@ -126,6 +127,7 @@ impl TypedActionView for TestView {
         self.actions.push(match action {
             TestAction::Clicked => TestAction::Clicked,
             TestAction::Closed => TestAction::Closed,
+            TestAction::Menued => TestAction::Menued,
         });
     }
 }
@@ -451,6 +453,34 @@ fn a_press_and_release_inside_a_hoverable_dispatches_its_action() {
     harness.press(vec2f(10., 10.), MouseButton::Middle);
     harness.root.read(&harness.app, |view, _| {
         assert_eq!(view.actions, [TestAction::Clicked, TestAction::Closed]);
+    });
+}
+
+#[test]
+fn a_right_press_inside_a_hoverable_dispatches_its_own_action() {
+    // On the press, like the middle button and like every context menu: a
+    // handler that waited for the release would open the menu under a pointer
+    // that has already been let go.
+    let mut harness = Harness::new(|view| {
+        Hoverable::new(view.mouse.clone(), |_| marker(50., 20.))
+            .on_click(|_, ctx, _| ctx.dispatch_typed_action(TestAction::Clicked))
+            .on_right_click(|_, ctx, _| ctx.dispatch_typed_action(TestAction::Menued))
+            .finish()
+    });
+    harness.build_scene(vec2f(100., 50.));
+
+    harness.press(vec2f(10., 10.), MouseButton::Right);
+    harness.root.read(&harness.app, |view, _| {
+        assert_eq!(view.actions, [TestAction::Menued]);
+    });
+
+    // A right press outside is not on this element, and the left button goes
+    // on meaning what it meant.
+    harness.press(vec2f(80., 10.), MouseButton::Right);
+    harness.press(vec2f(10., 10.), MouseButton::Left);
+    harness.release(vec2f(10., 10.), MouseButton::Left);
+    harness.root.read(&harness.app, |view, _| {
+        assert_eq!(view.actions, [TestAction::Menued, TestAction::Clicked]);
     });
 }
 

@@ -125,15 +125,12 @@ pub(super) fn render(
     let status = pane_data.status();
     let home = workspace.home();
 
-    // What the row's own click does, and whether the menu it opens is up. See
-    // the strip's row: the rule is the same in both layouts because it is
-    // about the tab rather than about how the tab is drawn.
+    // What the row's own right press does, and whether the menu it opens is
+    // up. See the strip's row: the rule is the same in both layouts because it
+    // is about the tab rather than about how the tab is drawn.
     let is_the_tabs_row = tab_data.panes().focused_id() == pane;
     let menu_is_open = is_the_tabs_row && workspace.tab_menu().tab == Some(tab);
-    let opens_menu = menu_is_open
-        || (workspace.tabs().is_active(tab)
-            && is_the_tabs_row
-            && git.is_some_and(|facts| facts.branch.is_some()));
+    let opens_menu = is_the_tabs_row && git.is_some_and(|facts| facts.branch.is_some());
 
     // A conjunction, and that is the whole of what `Panes` granularity is for:
     // the active tab's container is lifted while only its focused pane's row
@@ -204,16 +201,18 @@ pub(super) fn render(
         if guard.lock().is_hovered() {
             return;
         }
-        // The row you are already in opens its menu. See the strip's own
-        // click, which is the same rule.
-        ctx.dispatch_typed_action(if opens_menu {
-            WorkspaceAction::Worktree(WorktreeAction::OpenMenu(tab))
-        } else {
-            WorkspaceAction::Tab(TabAction::FocusPane(pane))
-        });
+        ctx.dispatch_typed_action(WorkspaceAction::Tab(TabAction::FocusPane(pane)));
     })
     .on_middle_click(move |_, ctx, _| {
         ctx.dispatch_typed_action(WorkspaceAction::Tab(close_action));
+    })
+    // The secondary button opens the menu. See the strip's own row, which is
+    // the same rule.
+    .on_right_click(move |_, ctx, _| {
+        if !opens_menu {
+            return;
+        }
+        ctx.dispatch_typed_action(WorkspaceAction::Worktree(WorktreeAction::OpenMenu(tab)));
     })
     .on_hover(move |entered, _, ctx, _| {
         ctx.dispatch_typed_action(WorkspaceAction::HoverRow { pane, entered });

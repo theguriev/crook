@@ -106,10 +106,16 @@ impl Element for Dismiss {
         match (self.on_dismiss.as_mut(), event.at_z_index(z_index, ctx)) {
             // Reaching this element's own layer means the press was not
             // covered by the child painted above it: it landed outside.
+            //
+            // The right button dismisses as well as the left. A popup opened
+            // by a right press — the tab's worktree menu is one — would
+            // otherwise be shut only by the *other* button, because a modal
+            // swallows every press it does not treat as a dismissal: pressing
+            // the same button on the same row again would leave the menu up.
             (
                 Some(handler),
                 Some(Event::MouseDown {
-                    button: MouseButton::Left,
+                    button: MouseButton::Left | MouseButton::Right,
                     ..
                 }),
             ) => {
@@ -119,7 +125,7 @@ impl Element for Dismiss {
             (
                 None,
                 Some(Event::MouseDown {
-                    button: MouseButton::Left,
+                    button: MouseButton::Left | MouseButton::Right,
                     ..
                 }),
             ) => {

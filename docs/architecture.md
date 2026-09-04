@@ -780,10 +780,12 @@ else is standing in. Two agents editing one checkout overwrite each other; two a
 worktrees of one repository do not. That is the whole argument for the feature, and it is why
 it is a *menu on a tab* rather than a panel of its own.
 
-Clicking the tab you are already in opens it. That gesture was free — the click dispatched
-`FocusPane` on a pane that was already focused, which resolves to `Unchanged` and repaints
-nothing — and it opens only where the focused pane is inside a repository, which is the same
-promise the branch chip already makes.
+Right-clicking a tab's row opens it, in the strip and in the panel alike — the secondary
+button, because this is a context menu and that is the button a context menu opens with
+everywhere else. It opens only where the focused pane is inside a repository, which is the
+same promise the branch chip already makes. The left button was tried first, on the row you
+were already in, where the click was otherwise free; it cost nothing to dispatch and it cost
+a person a menu they did not ask for every time they reached for the tab they were in.
 
 The model is [herdr](https://herdr.dev)'s, which is the tool this borrows from rather than
 Warp: there a worktree is not a thing you administer but a workspace with a git checkout
@@ -1387,7 +1389,7 @@ platforms, and treat a build script as the cost it is.
 | Theme chooser | a 240px docked panel with search and virtualisation | a 248px docked panel, no search, every row built |
 | Icons | its own `WarpIcon` and `UiIcon` sets, rendered from SVG | Lucide, vendored as path commands, one distance-field rasterizer (§4) |
 | Settings UI | a pane, 16 pages, search over ~800 widgets | a pane, 4 pages, search over 30 (§4) |
-| Git worktrees | none | a menu on the tab you are in, after herdr's model (§7) |
+| Git worktrees | none | a right-click menu on a tab, after herdr's model (§7) |
 
 The through-line: Crook keeps every *architectural* idea from Warp and rejects almost every
 *build-system* one. The architecture is what makes a GPU terminal tractable in Rust. The build
