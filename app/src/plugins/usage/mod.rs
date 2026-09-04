@@ -23,6 +23,14 @@
 //! that turns the chip off and the poll it starts, which are not chip code and
 //! move when there is a `settings.section` slot to move them into.
 //!
+//! # A named action, and what that buys
+//!
+//! `crook/usage/refresh` is the first thing in Crook that can be asked for by
+//! name. It does what clicking the pill does, and the difference is who can
+//! ask: a line in `keymap.json` reading `"cmd-shift-u": "crook/usage/refresh"`
+//! now works, and did not before, because there was no way to name it. Nothing
+//! about the chip changed to make that true — the action is the seam.
+//!
 //! # The setting is still the poll's switch
 //!
 //! Returning [`Empty`] rather than a chip drawn transparently keeps the rule
@@ -35,7 +43,7 @@ use crookui_core::prelude::*;
 
 use crook_plugin::{Manifest, PluginId, Tier};
 
-use crate::plugin::{BuildError, Host, Plugin};
+use crate::plugin::{ActionName, BuildError, Host, Plugin};
 use crate::usage_model::UsageModel;
 use crate::workspace::Workspace;
 
@@ -75,6 +83,15 @@ impl Plugin for Usage {
         // laid out again.
         let usage = UsageModel::handle(ctx);
         ctx.observe(&usage, |_, _, ctx| ctx.notify());
+
+        // What clicking the pill does, reachable by a chord or by anything
+        // else that can name an action.
+        host.register_action(
+            ActionName::parse("crook/usage/refresh").expect("a literal that parses"),
+            move |_, ctx| {
+                usage.update(ctx, |model, ctx| model.refresh_from_user(ctx));
+            },
+        );
 
         host.contribute(HEADER_RIGHT, "chip", 0, move |workspace, _| {
             if !workspace.general().show_usage_chip {

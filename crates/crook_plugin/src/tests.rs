@@ -1,5 +1,8 @@
 //! What the vocabulary and the registries promise.
 
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+
 use super::*;
 
 fn plugin(id: &str) -> PluginId {
@@ -310,4 +313,101 @@ fn a_registry_dropped_before_its_guards_does_not_panic() {
     };
 
     drop(guard);
+}
+
+#[test]
+fn an_actions_handler_can_reach_the_registry_that_is_running_it() {
+    // The obvious thing to write, and a panic until `with` stopped holding the
+    // borrow across the call: a "disable this plugin" button is an action, and
+    // the first thing its handler does is drop the registrations of the plugin
+    // it belongs to — this one included.
+    let registry: Actions<Box<dyn Fn()>> = Actions::new();
+    let owner = plugin("eugen/ci-status");
+    let name = action("eugen/ci-status/refresh");
+
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let reentrant = {
+        let registry = registry.clone();
+        let name = name.clone();
+        let seen = seen.clone();
+        move || {
+            seen.borrow_mut()
+                .push(usize::from(registry.contains(&name)));
+            seen.borrow_mut().push(registry.names().len());
+            // And the registry may be changed from inside a handler.
+            registry
+                .register(
+                    &plugin("eugen/other"),
+                    action("eugen/other/thing"),
+                    Box::new(|| {}),
+                )
+                .keep_forever();
+        }
+    };
+    registry
+        .register(&owner, name.clone(), Box::new(reentrant) as Box<dyn Fn()>)
+        .keep_forever();
+
+    registry.with(&name, |handler| handler());
+
+    assert_eq!(
+        seen.borrow().as_slice(),
+        &[1, 1],
+        "the action was invisible to its own handler"
+    );
+    assert!(registry.contains(&action("eugen/other/thing")));
+    // And it is still there afterwards, run twice as happily as once.
+    assert!(registry.contains(&name));
+    registry.with(&name, |handler| handler());
+}
+
+#[test]
+fn an_action_that_invokes_itself_does_it_once() {
+    // The price of not holding the borrow, written down as a test rather than
+    // left to be discovered: recursion through the registry stops at one hop.
+    let registry: Actions<Box<dyn Fn()>> = Actions::new();
+    let owner = plugin("eugen/loop");
+    let name = action("eugen/loop/again");
+    let runs = Rc::new(Cell::new(0));
+
+    let handler = {
+        let registry = registry.clone();
+        let name = name.clone();
+        let runs = runs.clone();
+        move || {
+            runs.set(runs.get() + 1);
+            registry.with(&name, |handler| handler());
+        }
+    };
+    registry
+        .register(&owner, name.clone(), Box::new(handler) as Box<dyn Fn()>)
+        .keep_forever();
+
+    registry.with(&name, |handler| handler());
+
+    assert_eq!(runs.get(), 1);
+}
+
+#[test]
+fn a_handler_that_unregisters_itself_is_gone_when_it_returns() {
+    let registry: Actions<Box<dyn Fn()>> = Actions::new();
+    let owner = plugin("eugen/once");
+    let name = action("eugen/once/run");
+    let guard = Rc::new(RefCell::new(None::<Registration>));
+
+    let handler = {
+        let guard = guard.clone();
+        move || {
+            // What "disable the plugin that owns this action" does.
+            guard.borrow_mut().take();
+        }
+    };
+    *guard.borrow_mut() = Some(registry.register(&owner, name.clone(), Box::new(handler)));
+
+    registry.with(&name, |handler| handler());
+
+    assert!(
+        !registry.contains(&name),
+        "the handler put itself back after taking itself out"
+    );
 }

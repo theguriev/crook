@@ -9,6 +9,7 @@
 //! other direction, with one `WorkspaceAction` that carries tab actions and
 //! vertical-tab display options side by side.
 
+use crate::plugin::ActionId;
 use crate::settings::{Density, Granularity, Layout, PrimaryInfo, Subtitle};
 use crate::tab::{PaneId, TabAction, TabId};
 
@@ -61,6 +62,12 @@ pub enum WorkspaceAction {
     /// of them. **Nothing may change what is selected in the output while a
     /// keystroke is being dispatched.**
     ReleaseSelection(PaneId),
+    /// Run a named action, which is what every plugin's is.
+    ///
+    /// Carried as an id rather than an [`ActionName`](crate::plugin::ActionName)
+    /// because this enum is `Copy` and a name is a `String`; the host resolves
+    /// one to the other. See [`ActionId`](crate::plugin::ActionId).
+    Run(ActionId),
     /// Ask this pane's shell what the word before the caret could become.
     ///
     /// An action rather than a call, for the reason `ReleaseSelection` is one:

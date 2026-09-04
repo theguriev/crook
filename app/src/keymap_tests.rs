@@ -110,7 +110,10 @@ fn test_a_chord_in_the_file_wins_and_everything_else_is_unchanged() {
     fs::write(&path, r#"{"cmd-k": "new_tab"}"#).expect("writable");
 
     let keymap = Keymap::load(&path);
-    assert_eq!(keymap.binding(&chord("cmd-k")), Some(Some(Binding::NewTab)));
+    assert_eq!(
+        keymap.binding(&chord("cmd-k")),
+        Some(Some(Bound::Builtin(Binding::NewTab)))
+    );
     assert_eq!(
         keymap.binding(&chord("cmd-t")),
         None,
@@ -151,8 +154,14 @@ fn test_a_line_nobody_can_read_costs_one_binding_and_nothing_else() {
     .expect("writable");
 
     let keymap = Keymap::load(&path);
-    assert_eq!(keymap.binding(&chord("cmd-k")), Some(Some(Binding::NewTab)));
-    assert_eq!(keymap.binding(&chord("cmd-m")), Some(Some(Binding::ZoomIn)));
+    assert_eq!(
+        keymap.binding(&chord("cmd-k")),
+        Some(Some(Bound::Builtin(Binding::NewTab)))
+    );
+    assert_eq!(
+        keymap.binding(&chord("cmd-m")),
+        Some(Some(Bound::Builtin(Binding::ZoomIn)))
+    );
     assert_eq!(keymap.binding(&chord("cmd-j")), None);
     assert_eq!(keymap.binding(&chord("cmd-l")), None);
 }
@@ -169,4 +178,84 @@ fn test_a_file_that_is_not_a_keymap_at_all_is_an_empty_one() {
 
     fs::write(&path, "[1, 2, 3]").expect("writable");
     assert!(Keymap::load(&path).is_empty());
+}
+
+#[test]
+fn a_chord_can_be_bound_to_a_plugins_action() {
+    // The whole point of a name. Nothing in this build knows what
+    // `crook/usage/refresh` is at the moment the file is read — the plugins
+    // have not been built — and the binding is kept anyway, because whether
+    // something answers to it is a question with a different answer at every
+    // moment of the window's life.
+    assert_eq!(
+        parse_action("crook/usage/refresh"),
+        Some(Some(Bound::Named(
+            ActionName::parse("crook/usage/refresh").expect("a literal that parses")
+        )))
+    );
+    assert_eq!(
+        parse_action("eugen/ci-status/open"),
+        Some(Some(Bound::Named(
+            ActionName::parse("eugen/ci-status/open").expect("a literal that parses")
+        )))
+    );
+}
+
+#[test]
+fn a_name_that_is_not_an_action_name_is_refused() {
+    // A `/` says "this is a plugin's", so what is checked is the *shape*: two
+    // parts is a plugin id and not an action, and an uppercase part is a name
+    // no plugin can have. Each is a warned-about line and a chord that keeps
+    // Crook's own meaning, rather than a binding that never fires.
+    assert_eq!(parse_action("crook/usage"), None);
+    assert_eq!(parse_action("crook/usage/refresh/now"), None);
+    assert_eq!(parse_action("Crook/Usage/Refresh"), None);
+    assert_eq!(parse_action("/usage/refresh"), None);
+}
+
+#[test]
+fn a_plugins_action_survives_a_trip_through_the_file() {
+    let directory = scratch("plugin-action");
+    let path = directory.join("keymap.json");
+    fs::write(&path, r#"{"cmd-shift-u": "crook/usage/refresh"}"#).expect("a scratch file");
+
+    let keymap = Keymap::load(&path);
+
+    assert_eq!(
+        keymap.binding(&chord("cmd-shift-u")),
+        Some(Some(Bound::Named(
+            ActionName::parse("crook/usage/refresh").expect("a literal that parses")
+        )))
+    );
+}
+
+#[test]
+fn a_chord_is_written_the_way_it_is_read() {
+    // The settings page prints chords, and printing them in a notation the
+    // parser does not accept would be the page teaching a syntax that does not
+    // work.
+    for text in [
+        "cmd-shift-u",
+        "ctrl-alt-delete",
+        "cmd-ctrl-alt-shift-k",
+        "f5",
+        "ctrl--",
+    ] {
+        let keystroke = parse_chord(text).expect("a chord");
+        let written = format_chord(&keystroke);
+
+        assert_eq!(
+            parse_chord(&written),
+            Some(keystroke),
+            "{text:?} was written as {written:?}, which reads as something else"
+        );
+    }
+}
+
+#[test]
+fn a_chord_is_written_in_one_order_however_it_was_typed() {
+    assert_eq!(
+        format_chord(&parse_chord("shift-alt-ctrl-cmd-k").expect("a chord")),
+        "cmd-ctrl-alt-shift-k"
+    );
 }

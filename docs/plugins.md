@@ -1,7 +1,26 @@
 # Plugins: a plan
 
-*A design, not an implementation. Nothing below exists yet. It is written so that the
-decisions it rests on can be argued with before any of it is built.*
+*A design, and now partly an implementation. It is written so that the decisions it rests on
+can be argued with; what has been built is listed under "Where this stands" and everything
+else below is still a proposal.*
+
+## Where this stands
+
+Kept up to date as phases land, so that a plan nobody re-reads does not quietly become a
+description of something that was never built.
+
+- **Phase 0 — the kernel: done.** `crates/crook_plugin` (identities, manifest, slots with
+  cardinality, named actions, `Registration` guards, the audit), `app/src/plugin.rs` (the
+  contribution and handler types, `Host`, `Plugin`, `load`), and `app/src/plugins/` with two
+  plugins in the box: `crook/header`, which owns the `header.right` slot, and `crook/usage`.
+- **Phase 1 — in progress.**
+  - `Plugin::build` takes the workspace's `ViewContext`, so a plugin can own a model or a
+    view. `crook/usage` owns the `UsageChip`; `Workspace` no longer knows it exists.
+  - Named actions are reachable: `crook/usage/refresh` is registered by a plugin, bindable
+    from `keymap.json` by its name, dispatched as `WorkspaceAction::Run`, and listed on the
+    settings page's Keys page with whatever chord reaches it.
+  - Still to move: the worktree menu, the settings sections, the Themes panel, the Omarchy
+    palettes; and the command palette is still to be written.
 
 ## 0. What was asked for, and what it means
 

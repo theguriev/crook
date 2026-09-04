@@ -13,6 +13,8 @@
 //! settings page that offered more than the application has would be a
 //! catalogue of things that do not work.
 
+use std::collections::HashMap;
+
 use crookui_core::prelude::*;
 
 use super::super::action::{OptionsAction, SettingsAction, ThemeAction};
@@ -23,6 +25,7 @@ use super::widgets::{self, Segment};
 use super::widgets::{Category, Entry};
 use super::{Control, Section};
 use crate::input_keys::Platform;
+use crate::keymap::{self, Bound};
 use crate::settings::{
     Density, FONT_SIZE_STEP, Granularity, Layout, PrimaryInfo, TabOptions, resolve_subtitle,
     subtitle_options_for,
@@ -580,6 +583,66 @@ fn usage(workspace: &Workspace, app: &AppContext) -> Vec<Category> {
     ]
 }
 
+/// Everything reachable by name, and the chord that reaches it.
+///
+/// The one part of this page that is not written down in this file. A named
+/// action is registered by a plugin, so what is listed here depends on which
+/// plugins are loaded — which is the whole point of a name: the page can print
+/// a row for something it has never heard of, and a person can bind a chord to
+/// it without anybody adding a variant to an enum.
+fn named_actions(workspace: &Workspace) -> Category {
+    let fonts = workspace.fonts();
+    let keymap = workspace.keymap();
+
+    // Which chord, if any, reaches each name. A name may be bound more than
+    // once; all of them are printed, because a person looking for "why does
+    // this fire" needs to see the second one.
+    let mut bound: HashMap<String, Vec<String>> = HashMap::new();
+    for (keystroke, action) in keymap::bindings(keymap) {
+        if let Some(Bound::Named(name)) = action {
+            bound
+                .entry(name.as_str().to_owned())
+                .or_default()
+                .push(keymap::format_chord(&keystroke));
+        }
+    }
+    // A stable order, since the map's is not one.
+    for chords in bound.values_mut() {
+        chords.sort();
+    }
+
+    let mut entries: Vec<Entry> = workspace
+        .host()
+        .actions()
+        .names()
+        .into_iter()
+        .map(|(action, owner)| {
+            let chords = match bound.get(action.as_str()) {
+                Some(chords) => chords.join(", "),
+                None => "not bound".to_owned(),
+            };
+            widgets::fact(
+                Words::new(action.to_string())
+                    .with_description(format!("From {owner}."))
+                    .with_keywords(&["plugin", "action", "bind", "keymap"]),
+                chords,
+                true,
+                fonts,
+            )
+        })
+        .collect();
+
+    entries.push(widgets::note(
+        "Bind one by putting its name in keymap.json beside a chord — \
+         \"cmd-shift-u\": \"crook/usage/refresh\". A name no loaded plugin answers to is \
+         a chord that does nothing, so a keymap written for a plugin you have not installed \
+         costs you nothing but that one chord.",
+        fonts.ui,
+    ));
+
+    widgets::category("Named actions", entries)
+}
+
 /// The bindings, which are fixed.
 fn keys(workspace: &Workspace) -> Vec<Category> {
     let ui = workspace.fonts().ui;
@@ -812,6 +875,7 @@ fn keys(workspace: &Workspace) -> Vec<Category> {
                 ),
             ],
         ),
+        named_actions(workspace),
     ]
 }
 

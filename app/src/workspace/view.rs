@@ -27,14 +27,14 @@ use crate::editor::Selection;
 use crate::git::GitFacts;
 use crate::git_model::GitModel;
 use crate::input_keys::{self, Binding, Platform};
-use crate::keymap::Keymap;
+use crate::keymap::{Bound, Keymap};
 use crate::pane_blocks::PaneBlocks;
 use crate::pane_link::PaneLink;
 use crate::pane_selection::PaneSelection;
 use crate::pane_split::{DividerDrag, PaneExtent};
 use crate::pane_surface;
 use crate::platform_insets::{ControlLayout, LayoutInsets, TabsPlacement, WindowChrome};
-use crate::plugin::Host;
+use crate::plugin::{ActionId, Host};
 use crate::selection::{Blocks, Cells};
 use crate::settings::{
     DEFAULT_FONT_SIZE, Density, FONT_SIZE_STEP, GeneralOptions, Granularity, Layout, Settings,
@@ -796,6 +796,39 @@ impl Workspace {
     }
 
     /// The plugins, and the slots and actions they registered.
+    /// Runs a plugin's named action.
+    ///
+    /// The registry is cloned out of the host before the handler is called,
+    /// because the handler takes `&mut Workspace` and the host is a field of
+    /// it. What the handler sees is the workspace after everything the
+    /// keystroke or the click did to it, which is the same thing every arm of
+    /// `handle_action` sees.
+    ///
+    /// An id whose plugin has been disabled resolves to nothing and this does
+    /// nothing — see [`ActionId`].
+    pub fn run_action(&mut self, id: ActionId, ctx: &mut ViewContext<Self>) {
+        let Some(name) = self.host.action_name(id).cloned() else {
+            return;
+        };
+        let actions = self.host.actions().clone();
+        actions.with(&name, |handler| handler(self, ctx));
+    }
+
+    /// The person's own bindings, for the page that prints them.
+    pub(super) fn keymap(&self) -> &Keymap {
+        &self.keymap
+    }
+
+    /// Replaces them, which is what re-reading `keymap.json` does.
+    ///
+    /// The bindings are read once at startup today, so this has one caller and
+    /// it is a test. It is not a test-only method: a keymap that can be
+    /// replaced is what "you changed the file, here it is" needs, and there is
+    /// nothing about swapping the table that has to wait for that.
+    pub fn set_keymap(&mut self, keymap: Keymap) {
+        self.keymap = keymap;
+    }
+
     pub(super) fn host(&self) -> &Host {
         &self.host
     }
@@ -2407,7 +2440,17 @@ impl Workspace {
         // what a *pane* does with a key; see `crate::keymap`.
         let bound = match self.keymap.binding(keystroke) {
             Some(binding) => binding?,
-            None => input_keys::binding(keystroke, Platform::current())?,
+            None => Bound::Builtin(input_keys::binding(keystroke, Platform::current())?),
+        };
+
+        let bound = match bound {
+            Bound::Builtin(binding) => binding,
+            // A plugin's action, resolved now rather than when the file was
+            // read: which plugins are loaded is a question with a different
+            // answer at every moment. A name nothing answers to is a chord
+            // that does nothing, and is not passed on to the pane — a person
+            // who bound a chord meant to take it away from the shell.
+            Bound::Named(name) => return self.host.action(&name).map(WorkspaceAction::Run),
         };
 
         let tab = match bound {
@@ -3366,6 +3409,7 @@ impl TypedActionView for Workspace {
             WorkspaceAction::HoverRow { pane, entered } => self.hover_row(pane, entered, ctx),
             WorkspaceAction::ReleaseSelection(pane) => self.release_selection(pane, ctx),
             WorkspaceAction::Complete(pane) => self.request_completions(pane, ctx),
+            WorkspaceAction::Run(id) => self.run_action(id, ctx),
         }
     }
 }
