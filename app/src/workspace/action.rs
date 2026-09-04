@@ -26,6 +26,8 @@ pub enum WorkspaceAction {
     Settings(SettingsAction),
     /// Something happened in the Themes panel.
     Theme(ThemeAction),
+    /// The header was used as what it is: the window's title bar.
+    Window(WindowAction),
     /// The pointer entered a row, or left it.
     ///
     /// Carried as an action rather than written directly, because a hover
@@ -64,6 +66,33 @@ pub enum WorkspaceAction {
     /// and it is the model that knows where this session's scratch directory
     /// is. See [`crate::completion`].
     Complete(PaneId),
+}
+
+/// What the header does as a title bar.
+///
+/// A window is not a view, so none of these ends in the workspace's own state:
+/// they are forwarded to
+/// [`WindowControls`](crate::window_controls::WindowControls) and the answer
+/// comes back as a window that has moved. They are actions all the same, for
+/// the reason every other control's gesture is one — a handler runs while the
+/// element tree is being walked and holds no `&mut Workspace` — and because it
+/// is the only way a test with no window can watch a press turn into a drag.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum WindowAction {
+    /// Pick the window up and move it with the pointer.
+    Drag,
+    /// Fill the work area, or go back to the size before that.
+    ToggleMaximized,
+    /// Put the window wherever this desktop keeps minimised ones.
+    Minimize,
+    /// Close it, which for a one-window application is to quit.
+    Close,
+}
+
+impl From<WindowAction> for WorkspaceAction {
+    fn from(action: WindowAction) -> Self {
+        Self::Window(action)
+    }
 }
 
 impl From<TabAction> for WorkspaceAction {

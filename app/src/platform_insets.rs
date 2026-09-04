@@ -7,11 +7,18 @@
 //! in its own bar and costs the header nothing, while an undecorated window
 //! that draws its own title bar has to leave room for them.
 //!
-//! This is worth its own module and its own tests because it is invisible on
-//! the machine you develop on and wrong on the other two: reserve when there
-//! is nothing to reserve for and the header ends in a 136px hole on Windows
-//! that no one on macOS will ever see; fail to reserve on a client-decorated
-//! window and the first tab sits under the close button.
+//! This is worth its own module and its own tests because two thirds of it is
+//! invisible on whichever machine you develop on: reserve when there is
+//! nothing to reserve for and the header ends in a 136px hole on Windows that
+//! no one on macOS will ever see; fail to reserve and the first tab sits under
+//! the close button on a platform you are not looking at.
+//!
+//! Crook opens a client-decorated window, so every number here is live. What
+//! is reserved is not always the same thing, either: on macOS the room is for
+//! the *system's* traffic lights, painted over Crook's surface by AppKit,
+//! while on Windows and Linux it is the room Crook's own caption buttons are
+//! drawn in — see `workspace::title_bar`, which measures its cluster against
+//! this table so the two can never disagree.
 //!
 //! # Which element the reservation belongs to
 //!
@@ -29,15 +36,12 @@
 
 /// Who draws the window's controls, and therefore whether they overlap the
 /// header.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum WindowChrome {
-    /// The window manager draws a title bar above the client area. Its
-    /// controls are not over Crook's header, so the header owes them nothing.
-    Native,
-    /// The window is borderless and Crook's header *is* the title bar, so the
-    /// controls are drawn over it.
-    Client,
-}
+///
+/// The windowing layer's own enum, because it is one decision and not two:
+/// [`WINDOW_CHROME`](crate::WINDOW_CHROME) is what a window is *opened* with
+/// and what the header reserves for, and a second copy of the type here would
+/// be a second place for those to drift apart.
+pub use crookui::WindowChrome;
 
 /// Room to leave at each end of the header for the window's own controls.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -111,6 +115,19 @@ impl WindowControlInsets {
     }
 }
 
+/// How far into the window macOS's traffic lights reach, in logical pixels.
+///
+/// Measured on the live window rather than taken from a specification: the
+/// three buttons this build's macOS draws span x = 9.0 to 68.5, so 70 is the
+/// first whole point clear of the zoom button. The earlier 64 was four and a
+/// half points short, and only the header's own padding kept the first tab off
+/// the green light.
+///
+/// This is what the lights *occupy*, not what they need around them. The gap
+/// after them is the padding the element beside them was going to have anyway,
+/// which is why it is not added twice.
+const TRAFFIC_LIGHTS: f32 = 70.;
+
 /// Where a platform puts its window controls.
 ///
 /// Named rather than derived at each call site so all three answers can be
@@ -151,9 +168,8 @@ impl ControlLayout {
 
         match self {
             Self::MacOs if fullscreen => WindowControlInsets::NONE,
-            // The three traffic lights plus the margins around them.
             Self::MacOs => WindowControlInsets {
-                left: 64.,
+                left: TRAFFIC_LIGHTS,
                 right: 0.,
             },
             // Three 45px caption buttons plus a pixel of separation. Windows
@@ -180,9 +196,13 @@ pub fn window_control_insets(chrome: WindowChrome, fullscreen: bool) -> WindowCo
 
 /// The same, already divided between the panel and the header.
 ///
-/// The one call a view should make: it answers "how much" and "who pays" in a
-/// single value, so no renderer can get the second half right on the platform
-/// it was written on and wrong on the other two.
+/// "How much" and "who pays" as one value, so no caller can get the second
+/// half right on the platform it was written on and wrong on the other two.
+///
+/// For the platform this build is running on. The workspace composes the same
+/// two calls itself — [`ControlLayout::insets`] then
+/// [`WindowControlInsets::split_for`] — because `--controls` lets it be asked
+/// about a platform that is not this one.
 pub fn layout_insets(
     placement: TabsPlacement,
     chrome: WindowChrome,
@@ -214,12 +234,33 @@ mod tests {
         }
     }
 
+    /// Where the far edge of the zoom button actually is, in logical pixels.
+    ///
+    /// Measured off a screenshot of the running window rather than taken from
+    /// a header file: AppKit draws the three buttons at 9.0..68.5 on this
+    /// build's macOS, and the only way to find that out is to look. The
+    /// reservation has to clear it, and the failure when it does not is silent
+    /// — the first tab creeps under the green light and nothing but the
+    /// header's own padding is holding it off.
+    const MEASURED_TRAFFIC_LIGHTS_END: f32 = 68.5;
+
+    #[test]
+    fn the_reservation_clears_the_last_traffic_light() {
+        let reserved = ControlLayout::MacOs
+            .insets(WindowChrome::Client, false)
+            .left;
+        assert!(
+            reserved >= MEASURED_TRAFFIC_LIGHTS_END,
+            "{reserved} of reservation for lights that reach {MEASURED_TRAFFIC_LIGHTS_END}"
+        );
+    }
+
     #[test]
     fn macos_reserves_the_left_edge_and_gives_it_back_in_fullscreen() {
         assert_eq!(
             ControlLayout::MacOs.insets(WindowChrome::Client, false),
             WindowControlInsets {
-                left: 64.,
+                left: TRAFFIC_LIGHTS,
                 right: 0.
             }
         );
@@ -280,7 +321,7 @@ mod tests {
                 .split_for(TabsPlacement::Header),
             LayoutInsets {
                 panel_left: 0.,
-                header_left: 64.,
+                header_left: TRAFFIC_LIGHTS,
                 header_right: 0.
             }
         );
@@ -289,7 +330,7 @@ mod tests {
                 .insets(WindowChrome::Client, false)
                 .split_for(TabsPlacement::LeftPanel),
             LayoutInsets {
-                panel_left: 64.,
+                panel_left: TRAFFIC_LIGHTS,
                 header_left: 0.,
                 header_right: 0.
             }

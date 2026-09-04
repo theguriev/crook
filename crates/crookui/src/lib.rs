@@ -100,4 +100,6 @@ pub mod windowing;
 
 pub use fonts::{CosmicFontDb, CosmicGlyphs, CosmicTextLayout};
 pub use rendering::render_scene_to_rgba;
-pub use windowing::{Platform, Proxy, WindowDelegate, WindowOptions, run};
+pub use windowing::{
+    Platform, Proxy, ResizeEdge, WindowChrome, WindowControls, WindowDelegate, WindowOptions, run,
+};

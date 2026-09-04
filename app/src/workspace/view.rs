@@ -33,7 +33,7 @@ use crate::pane_link::PaneLink;
 use crate::pane_selection::PaneSelection;
 use crate::pane_split::{DividerDrag, PaneExtent};
 use crate::pane_surface;
-use crate::platform_insets::{LayoutInsets, TabsPlacement, layout_insets};
+use crate::platform_insets::{ControlLayout, LayoutInsets, TabsPlacement, WindowChrome};
 use crate::selection::{Blocks, Cells};
 use crate::settings::{
     DEFAULT_FONT_SIZE, Density, FONT_SIZE_STEP, GeneralOptions, Granularity, Layout, Settings,
@@ -48,9 +48,10 @@ use crate::text_input::{CARET_PHASE, TextInput};
 use crate::theme::creator::Draft;
 use crate::theme::{Available, theme};
 use crate::usage_model::UsageModel;
+use crate::window_controls::{WindowHandle, WindowState};
 use crate::{Channel, WINDOW_CHROME};
 
-use super::action::{OptionsAction, SettingsAction, ThemeAction, WorkspaceAction};
+use super::action::{OptionsAction, SettingsAction, ThemeAction, WindowAction, WorkspaceAction};
 use super::settings_page::{Section, SettingsState};
 use super::tabs_panel::geometry::RowGeometry;
 use super::theme_panel::{Mode, ThemePanelState};
@@ -116,6 +117,24 @@ pub(super) struct TabInteraction {
     pub(super) container: MouseStateHandle,
     /// The tab's name above them, which only a split tab draws.
     pub(super) header: MouseStateHandle,
+}
+
+/// What the mouse is doing to the three controls Crook draws for a window the
+/// window manager has left frameless.
+///
+/// One handle each, like every other control: they are three buttons that
+/// happen to sit together, and a shared handle would light all three up at
+/// once. Always present, even on macOS, where nothing reads them — three
+/// `Arc`s cost less than a field that only exists on two platforms and a
+/// `cfg` on everything that touches it.
+#[derive(Default)]
+pub(super) struct CaptionState {
+    /// The button that sends the window to the taskbar.
+    pub(super) minimize: MouseStateHandle,
+    /// The one that fills the work area, or puts the window back.
+    pub(super) maximize: MouseStateHandle,
+    /// The one that ends the process.
+    pub(super) close: MouseStateHandle,
 }
 
 /// The options menu: whether it is up, and what the mouse is doing to each of
@@ -396,7 +415,18 @@ pub struct Workspace {
     /// render path. It does not change while the process runs.
     home: Option<PathBuf>,
     new_tab: MouseStateHandle,
+    caption: CaptionState,
     quit: QuitRequest,
+    /// The window this is drawn in, for the header to move and maximise.
+    window: WindowHandle,
+    /// Where this build's platform puts a window's controls.
+    ///
+    /// A field rather than [`ControlLayout::host`] read at the point of use,
+    /// so `--controls` can render another platform's title bar on this one.
+    /// The other two thirds of this module's window chrome are invisible on
+    /// whichever machine it is being written on, and a picture of them is the
+    /// only way to look at them without three computers.
+    control_layout: ControlLayout,
 }
 
 impl Workspace {
@@ -408,6 +438,7 @@ impl Workspace {
         settings: Settings,
         channel: Channel,
         quit: QuitRequest,
+        window: WindowHandle,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
         let usage = UsageModel::handle(ctx);
@@ -481,7 +512,10 @@ impl Workspace {
             hovered_row: None,
             home: std::env::home_dir(),
             new_tab: MouseStateHandle::default(),
+            caption: CaptionState::default(),
             quit,
+            window,
+            control_layout: ControlLayout::host(),
         };
         workspace.sync_interactions();
         workspace.sync_git(ctx);
@@ -1053,15 +1087,74 @@ impl Workspace {
     /// second half right on the platform it was written on and wrong on the
     /// other two.
     ///
-    /// Fullscreen is `false` because the windowing layer exposes no way to
-    /// enter it and no way to ask — and under native chrome the answer is the
-    /// same either way.
+    /// Fullscreen is asked of the window itself on every frame, because macOS
+    /// takes the traffic lights away there and the room reserved for them has
+    /// to go with them. See [`WindowControls`](crate::window_controls).
     pub(super) fn window_insets(&self) -> LayoutInsets {
         let placement = match self.options.layout {
             Layout::Vertical => TabsPlacement::LeftPanel,
             Layout::Horizontal => TabsPlacement::Header,
         };
-        layout_insets(placement, WINDOW_CHROME, false)
+        self.control_layout
+            .insets(WINDOW_CHROME, self.window.state().fullscreen)
+            .split_for(placement)
+    }
+
+    /// Who draws this window's controls.
+    ///
+    /// [`WINDOW_CHROME`](crate::WINDOW_CHROME), handed out from here so that a
+    /// renderer asks the workspace about its window rather than reaching for a
+    /// constant halfway down an element tree.
+    pub(super) fn window_chrome(&self) -> WindowChrome {
+        WINDOW_CHROME
+    }
+
+    /// Where this window's controls are, and what shape they are.
+    pub(super) fn control_layout(&self) -> ControlLayout {
+        self.control_layout
+    }
+
+    /// What the window is doing, as of this frame.
+    pub(super) fn window_state(&self) -> WindowState {
+        self.window.state()
+    }
+
+    /// What the mouse is doing to the caption buttons.
+    pub(super) fn caption(&self) -> &CaptionState {
+        &self.caption
+    }
+
+    /// Draws another platform's window controls, the way `--controls` asks.
+    ///
+    /// A way to look at a frame, like `--theme` and `--layout`: it changes
+    /// what this build draws, never what it is. Nothing else moves — the
+    /// window is still the one the real platform opened, and its own controls
+    /// are still wherever that platform put them — so this is for a picture of
+    /// a title bar, not for using one.
+    pub fn override_control_layout(&mut self, layout: ControlLayout, ctx: &mut ViewContext<Self>) {
+        self.control_layout = layout;
+        ctx.notify();
+    }
+
+    /// Does what the header was asked to do as a title bar.
+    ///
+    /// Nothing here notifies, and that is not an oversight: none of these
+    /// changes anything Crook draws. What they change is the *window*, and the
+    /// frame that has to follow — a maximise control that becomes a restore
+    /// control — comes back through `Shell`, which watches the window's own
+    /// state between frames. Repainting here would draw the state that was
+    /// asked for a moment before the window manager decided whether to give
+    /// it.
+    fn apply_window_action(&self, action: WindowAction) {
+        match action {
+            WindowAction::Drag => self.window.start_drag(),
+            WindowAction::ToggleMaximized => self.window.toggle_maximized(),
+            WindowAction::Minimize => self.window.minimize(),
+            // The same request the last tab closing makes. There is one way to
+            // end the process, and a title bar's close button is not a second
+            // one.
+            WindowAction::Close => (self.quit)(),
+        }
     }
 
     /// Drops every mouse state the frame about to be replaced was holding.
@@ -1080,6 +1173,13 @@ impl Workspace {
             chrome.header.lock().reset_interaction_state();
         }
         self.new_tab.lock().reset_interaction_state();
+        for state in [
+            &self.caption.minimize,
+            &self.caption.maximize,
+            &self.caption.close,
+        ] {
+            state.lock().reset_interaction_state();
+        }
     }
 
     /// Opens the options menu, for a run that was asked to start with it up.
@@ -2612,6 +2712,7 @@ impl TypedActionView for Workspace {
             WorkspaceAction::Options(action) => self.apply_option(action, ctx),
             WorkspaceAction::Settings(action) => self.apply_settings(action, ctx),
             WorkspaceAction::Theme(action) => self.apply_theme_action(action, ctx),
+            WorkspaceAction::Window(action) => self.apply_window_action(action),
             WorkspaceAction::HoverRow { pane, entered } => self.hover_row(pane, entered, ctx),
             WorkspaceAction::ReleaseSelection(pane) => self.release_selection(pane, ctx),
             WorkspaceAction::Complete(pane) => self.request_completions(pane, ctx),
