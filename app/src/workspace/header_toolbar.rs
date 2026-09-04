@@ -3,9 +3,10 @@
 //!
 //! What is pinned to the right is whatever a plugin put in
 //! [`HEADER_RIGHT`](crate::plugins::header::HEADER_RIGHT), and this row does
-//! not know what that is. It used to name the usage chip; that chip is now
-//! contributed by the plugin that owns it, and this is the first surface in
-//! Crook that draws something it was given rather than something it imports.
+//! not know what that is — nothing a release binary carries fills it, and a
+//! plugin installed from a file does. This is the first surface in Crook that
+//! draws something it was given rather than something it imports, which is why
+//! an empty slot has to be as ordinary here as a full one.
 //!
 //! One item, not a list, and that is a judgement about the surface: this row is
 //! also the window's title bar, and a line of competing chips across it is how

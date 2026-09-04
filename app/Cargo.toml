@@ -34,15 +34,11 @@ crook_plugin.workspace = true
 crook_plugin_api.workspace = true
 crook_terminal.workspace = true
 crook_wasm.workspace = true
-crook_usage.workspace = true
 crookui.workspace = true
 crookui_core.workspace = true
 
 anyhow.workspace = true
 arboard.workspace = true
-# The usage panel is dated: countdowns to a reset, and a bar per day of the
-# week the transcripts describe.
-chrono.workspace = true
 # The settings file lives in the platform's configuration directory.
 dirs.workspace = true
 env_logger.workspace = true

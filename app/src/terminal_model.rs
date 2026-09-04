@@ -3,9 +3,8 @@
 //! [`crook_terminal`] owns no thread and no timer on purpose: `Terminal` is a
 //! value with methods, and someone else has to decide which thread is allowed to
 //! block on a pty that may say nothing for hours. This is that someone, in the
-//! shape [`crate::usage_model`] and [`crate::git_model`] established — work off
-//! the UI thread, delivered on it, `ctx.notify` when something a viewer could
-//! see actually changed.
+//! shape [`crate::git_model`] established — work off the UI thread, delivered
+//! on it, `ctx.notify` when something a viewer could see actually changed.
 //!
 //! # Why a thread and not the background pool
 //!

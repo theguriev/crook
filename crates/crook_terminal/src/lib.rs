@@ -41,8 +41,9 @@
 //! methods; every one of them runs on the thread that called it and returns.
 //! Deciding which thread reads the pty, how often the grid is repainted and
 //! when the child is reaped is the application's job, in the same way
-//! `crook_usage`'s poller leaves its schedule to whoever drives it — only the
-//! application knows which of its threads is allowed to block.
+//! `crook_wasm` records what a plugin asked for and leaves the doing of it to
+//! whoever drives the sandbox — only the application knows which of its
+//! threads is allowed to block.
 //!
 //! It also draws nothing and knows nothing about fonts, windows or the GPU. The
 //! contract with the renderer is [`Snapshot`], which is plain owned data with

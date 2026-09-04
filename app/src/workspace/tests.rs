@@ -18,12 +18,12 @@ use crookui_core::event::{Event, Keystroke, Modifiers, MouseButton, ScrollDelta}
 use crookui_core::executor::{Background, LocalQueue};
 use crookui_core::fonts::{FamilyId, FontId, LineStyle, StyleAndFont};
 use crookui_core::geometry::{RectF, Vector2F, vec2f};
-use crookui_core::icons::{Art, Mark};
+use crookui_core::icons::Mark;
 use crookui_core::platform::TextLayoutSystem;
 use crookui_core::prelude::*;
 use crookui_core::scene::{CornerRadius, Radius, Rect, Scene};
 use crookui_core::text_layout::{Glyph, Line, Run};
-use crookui_core::{AddSingletonModel as _, App, Presenter, WindowId};
+use crookui_core::{App, Presenter, WindowId};
 
 use crate::Channel;
 use crate::git::{DiffStats, GitFacts, Head};
@@ -36,7 +36,6 @@ use crate::tab::{
 };
 use crate::terminal_font::{CELL_FONT_SIZE, CellFont};
 use crate::theme::theme;
-use crate::usage_model::UsageModel;
 use crate::window_controls::{Recorder, Request, WindowState};
 
 use super::{
@@ -154,7 +153,6 @@ impl Harness {
         // starts at most the model's own chain, and a pool of five per harness
         // is five OS threads per test for workers nothing ever schedules onto.
         let mut app = App::new(queue.foreground(), Arc::new(Background::new(2)));
-        app.update(|ctx| ctx.add_singleton_model(UsageModel::new));
 
         let quit_requests = Rc::new(Cell::new(0));
         let quit: QuitRequest = {
@@ -662,13 +660,6 @@ impl Harness {
         self.frame();
     }
 
-    /// Whether somebody clicked the chip and is still waiting.
-    fn usage_is_busy_for_user(&self) -> bool {
-        self.workspace.read(&self.app, |workspace, ctx| {
-            workspace.usage().as_ref(ctx).is_busy_for_user()
-        })
-    }
-
     /// Reads a keybindings file out of `text` and puts it in force.
     fn bind(&mut self, text: &str) {
         let directory = Scratch::new();
@@ -678,13 +669,6 @@ impl Harness {
         assert!(!keybindings.is_empty(), "nothing in {text:?} was a binding");
 
         self.workspace_update(|workspace, _| workspace.set_keybindings(keybindings));
-    }
-
-    /// Whether the usage poll chain is meant to be running.
-    fn usage_is_wanted(&self) -> bool {
-        self.workspace.read(&self.app, |workspace, ctx| {
-            workspace.usage().as_ref(ctx).is_wanted()
-        })
     }
 
     /// Turns the wheel over the middle of the settings card.
@@ -1388,9 +1372,9 @@ fn checked_rows(scene: &Scene) -> Vec<usize> {
 
 /// Every Lucide icon the frame draws, in paint order.
 ///
-/// Marks that are drawings rather than icons — the usage chip's pirate — are
-/// not in here: they are two layers apiece and nothing that counts icons means
-/// to count them.
+/// Marks that are drawings rather than icons — a sandboxed plugin's pirate —
+/// are not in here: they are two layers apiece and nothing that counts icons
+/// means to count them.
 fn icons_of(scene: &Scene) -> Vec<Lucide> {
     scene
         .layers()
@@ -1400,24 +1384,6 @@ fn icons_of(scene: &Scene) -> Vec<Lucide> {
             Mark::Art(_) => None,
         })
         .collect()
-}
-
-/// Whether the usage chip's pirate is on screen.
-///
-/// The chip has no word on it to look for — it is a picture and a percentage —
-/// so what says it is drawn is its own mark being in the frame.
-fn pirate_is_drawn(scene: &Scene) -> bool {
-    pirate_box(scene).is_some()
-}
-
-/// Where the pirate is, which is the only way to click the chip: everything
-/// else in the pill is a percentage that changes with the reading.
-fn pirate_box(scene: &Scene) -> Option<RectF> {
-    scene
-        .layers()
-        .flat_map(|layer| layer.icons.iter())
-        .find(|drawn| matches!(drawn.icon_key.mark, Mark::Art(Art::PirateFace(_))))
-        .map(|drawn| drawn.bounds)
 }
 
 /// Every icon of one kind painted inside `bounds`.
@@ -1583,16 +1549,20 @@ fn the_first_tab_clears_the_window_controls_this_platform_draws() {
 }
 
 #[test]
-fn the_header_reserves_the_corner_this_platform_puts_its_controls_in_and_no_other() {
+fn the_header_reserves_the_left_corner_this_platform_puts_its_controls_in_and_no_more() {
     // Crook's header *is* the title bar, so something is over it — and only at
     // one end. Reserving at both would leave a hole at whichever end this
     // platform's controls are not, which is the failure nobody sees because it
     // is always the end they are not looking at.
+    //
+    // Only the left end is measurable from a release binary: nothing in the
+    // box is pinned to the right of this row, so the reservation at that end
+    // is checked against what a plugin pins there — see
+    // `sandboxed::what_a_plugin_pins_to_the_header_clears_the_right_corner`.
     let mut harness = Harness::new(1);
     let insets = harness.window_insets();
     let scene = harness.frame();
     let first = tab_boxes(&scene)[0];
-    let chip = pill_box(&scene);
 
     assert!(
         first.min_x() >= insets.header_left,
@@ -1606,16 +1576,6 @@ fn the_header_reserves_the_corner_this_platform_puts_its_controls_in_and_no_othe
         "the first tab starts at {}, further in than the reservation of {}",
         first.min_x(),
         insets.header_left
-    );
-    assert!(
-        WINDOW.x() - chip.max_x() >= insets.header_right,
-        "the chip runs into the {} reserved on the right",
-        insets.header_right
-    );
-    assert!(
-        WINDOW.x() - chip.max_x() < insets.header_right + 24.,
-        "the chip stops {} short of the right edge",
-        WINDOW.x() - chip.max_x()
     );
 }
 
@@ -1655,7 +1615,7 @@ fn pressing_the_header_where_nothing_is_picks_the_window_up() {
     // so waiting for the release would mean waiting for one that never comes.
     let mut harness = Harness::new(1);
     let scene = harness.frame();
-    let empty = vec2f(pill_box(&scene).min_x() - 30., center(pill_box(&scene)).y());
+    let empty = empty_header_point(&scene);
 
     harness.dispatch(Event::MouseDown {
         button: MouseButton::Left,
@@ -1668,18 +1628,22 @@ fn pressing_the_header_where_nothing_is_picks_the_window_up() {
 }
 
 #[test]
-fn pressing_something_in_the_header_does_not_pick_the_window_up() {
+fn pressing_something_in_the_title_bar_does_not_pick_the_window_up() {
     // "Empty" is whatever the row's children did not claim, and this is the
-    // half of that which fails silently: a header that dragged the window from
-    // its own controls would make every tab unclickable, and the tab would
-    // still be highlighted while the window moved.
+    // half of that which fails silently: a title bar that dragged the window
+    // from its own controls would make every tab unclickable, and the tab
+    // would still be highlighted while the window moved.
+    //
+    // The controls are the panel's — the header row itself holds only what a
+    // plugin pinned to it, which on a release build is nothing — and the
+    // panel's own bar is title bar too, so they are what this rule is about.
     let mut harness = Harness::new(2);
     let scene = harness.frame();
     let tab = center(tab_boxes(&scene)[0]);
-    let chip = center(pill_box(&scene));
+    let plus = center(plus_box(&scene));
 
     harness.click(tab, MouseButton::Left);
-    harness.click(chip, MouseButton::Left);
+    harness.click(plus, MouseButton::Left);
 
     assert!(
         harness.window_requests().is_empty(),
@@ -1697,10 +1661,7 @@ fn a_press_that_dismisses_the_options_menu_does_not_pick_the_window_up() {
     let mut harness = Harness::new(1);
     harness.dispatch_option(OptionsAction::TogglePopup);
     let scene = harness.frame();
-    let empty = vec2f(
-        pill_box(&scene).min_x() - 30.,
-        center(tab_boxes(&scene)[0]).y(),
-    );
+    let empty = empty_header_point(&scene);
 
     harness.click_times(empty, 1);
 
@@ -1718,7 +1679,7 @@ fn a_press_that_dismisses_the_options_menu_does_not_pick_the_window_up() {
 fn double_clicking_the_header_maximises_the_window() {
     let mut harness = Harness::new(1);
     let scene = harness.frame();
-    let empty = vec2f(pill_box(&scene).min_x() - 30., center(pill_box(&scene)).y());
+    let empty = empty_header_point(&scene);
 
     harness.click_times(empty, 1);
     harness.click_times(empty, 2);
@@ -1784,17 +1745,37 @@ fn a_platform_that_paints_nothing_over_the_panel_gets_no_strip_at_all() {
     );
 }
 
-/// The usage chip's pill, by its fully-rounded box.
-fn pill_box(scene: &Scene) -> RectF {
+/// The header row, by the one rule that runs across the top of the window.
+///
+/// Found the way a person finds it rather than by what is in it: it starts at
+/// the very top of the window and it is closed off by the single bottom edge
+/// that divides it from the body, which is the only rule anything draws up
+/// there. What a release binary draws *inside* it is nothing at all — the one
+/// place it has is filled by a plugin installed from a file — so a helper that
+/// looked for a control would find the row only on the builds that had one.
+fn header_box(scene: &Scene) -> RectF {
     let boxes: Vec<RectF> = visible_rects(scene)
-        .filter(|(rect, _)| rect.corner_radius.get_top_left() == Radius::Percentage(50.))
+        .filter(|(rect, bounds)| {
+            rect.border == Border::bottom(1.).with_border_color(theme().border)
+                && bounds.min_y() < 0.5
+        })
         .map(|(_, bounds)| bounds)
-        // The status dots are round too, and much smaller.
-        .filter(|bounds| bounds.width() > 40.)
         .collect();
 
-    assert_eq!(boxes.len(), 1, "exactly one usage chip per frame");
+    assert_eq!(boxes.len(), 1, "exactly one header per frame");
     boxes[0]
+}
+
+/// A point in the header where nothing is drawn.
+///
+/// The row holds one item at most — whatever a plugin pinned to the right of
+/// it — and a release binary pins nothing, so its middle is empty space by
+/// construction. Derived from the row's own bounds rather than measured off
+/// something drawn in it, because what is drawn in it is not this build's
+/// decision to make: a test about picking the window up must not start
+/// failing the day somebody installs a plugin.
+fn empty_header_point(scene: &Scene) -> Vector2F {
+    center(header_box(scene))
 }
 
 /// Enough tabs that each one is far narrower than its own contents.
@@ -1898,8 +1879,8 @@ fn glyph_count(scene: &Scene) -> usize {
 /// has not been told otherwise is the same `surface` the header and the tabs
 /// panel are painted in. So it is found by what it is *not*: filled like a
 /// terminal, and neither bordered (the header's underline, the panel's right
-/// edge) nor rounded (the usage chip, and the well a pane composes its next
-/// command in — see [`composer_boxes`] for that one).
+/// edge) nor rounded (the well a pane composes its next command in — see
+/// [`composer_boxes`] for that one).
 ///
 /// The one other thing that matches is the grid's own ground, painted inside
 /// the pane it belongs to, so a rect contained in another is dropped. Without
@@ -6335,10 +6316,10 @@ fn the_rail_switches_pages_and_the_pane_shows_the_one_it_names() {
     harness.open_settings_page();
 
     let rail = settings_rail_boxes(&harness.frame());
-    assert_eq!(rail.len(), 5, "five pages in the rail");
+    assert_eq!(rail.len(), 4, "four pages in the rail");
 
-    // The fourth: Keyboard Shortcuts.
-    harness.click(center(rail[3]), MouseButton::Left);
+    // The third: Keyboard Shortcuts.
+    harness.click(center(rail[2]), MouseButton::Left);
     assert_eq!("Keyboard Shortcuts", harness.settings_section());
 
     let text = frame_text(&harness.frame());
@@ -6455,63 +6436,6 @@ fn the_reset_button_puts_every_tab_option_back_and_then_goes_quiet() {
     assert!(
         settings_button_box(&harness.frame()).is_none(),
         "the reset button kept its outline with nothing left to reset"
-    );
-}
-
-#[test]
-fn clicking_the_chip_opens_the_panel_under_it_and_clicking_again_takes_it_down() {
-    let mut harness = Harness::new(1);
-    assert!(
-        !frame_text(&harness.frame()).contains("Last 7 days"),
-        "the panel should start closed"
-    );
-
-    let pirate = pirate_box(&harness.frame()).expect("the chip is in the header");
-    harness.click(center(pirate), MouseButton::Left);
-
-    let text = frame_text(&harness.frame());
-    assert!(
-        text.contains("Last 7 days"),
-        "the panel did not open on the chip's own mark: {text}"
-    );
-    assert!(
-        pirate_is_drawn(&harness.frame()),
-        "the panel covered the chip that opened it"
-    );
-
-    // The panel is modal, so the second click reaches the dismiss underlay
-    // rather than the chip — which is what makes re-clicking one toggle.
-    harness.click(center(pirate), MouseButton::Left);
-    assert!(
-        !frame_text(&harness.frame()).contains("Last 7 days"),
-        "the panel stayed up when the chip was clicked again"
-    );
-}
-
-#[test]
-fn turning_the_usage_chip_off_takes_the_pill_out_of_the_header_and_stops_the_poll() {
-    let mut harness = Harness::new(1);
-    assert!(harness.general().show_usage_chip);
-    assert!(
-        pirate_is_drawn(&harness.frame()),
-        "the chip should be in the header to start with"
-    );
-
-    harness.open_settings_page();
-    harness.select_settings_section("Usage");
-
-    let switches = settings_switch_boxes(&harness.frame());
-    assert_eq!(switches.len(), 1, "one switch on the usage page");
-    harness.click(center(switches[0]), MouseButton::Left);
-
-    assert!(!harness.general().show_usage_chip);
-    assert!(
-        !harness.usage_is_wanted(),
-        "a hidden chip must not go on polling"
-    );
-    assert!(
-        !pirate_is_drawn(&harness.frame()),
-        "the chip is still in the header"
     );
 }
 
@@ -9826,13 +9750,12 @@ mod title_bar_hit_testing {
     }
 
     #[test]
-    fn the_chip_and_the_tabs_swallow_a_double_click_rather_than_maximising() {
-        for target in ["tab", "chip", "plus"] {
+    fn the_controls_and_the_tabs_swallow_a_double_click_rather_than_maximising() {
+        for target in ["tab", "plus"] {
             let mut harness = Harness::new(2);
             let scene = harness.frame();
             let at = match target {
                 "tab" => center(tab_boxes(&scene)[0]),
-                "chip" => center(pill_box(&scene)),
                 _ => center(plus_box(&scene)),
             };
 
@@ -9850,17 +9773,19 @@ mod title_bar_hit_testing {
     #[test]
     fn every_gap_between_the_header_controls_still_picks_the_window_up() {
         // The `+` is the panel's; what is left in this row is whatever a
-        // plugin pinned to the right of it, and nothing else.
+        // plugin pinned to the right of it, and nothing else — so on a build
+        // with no such plugin the whole row is gap, and the points below are
+        // read off the row rather than off anything drawn in it.
         let scene = Harness::new(2).frame();
         let panel = panel_box(&scene);
-        let chip = pill_box(&scene);
-        let row = center(chip).y();
+        let header = header_box(&scene);
+        let row = center(header).y();
 
-        // Between the panel and the chip, just left of the chip, and above it.
+        // Just right of the panel, the middle of the row, and its top edge.
         let gaps = [
-            vec2f((panel.max_x() + chip.min_x()) / 2., row),
-            vec2f(chip.min_x() - 8., row),
-            vec2f(center(chip).x(), 2.),
+            vec2f(panel.max_x() + 8., row),
+            vec2f(center(header).x(), row),
+            vec2f(center(header).x(), header.min_y() + 2.),
         ];
 
         for gap in gaps {
@@ -9912,7 +9837,7 @@ mod title_bar_hit_testing {
         // is instead of following the pointer.
         let mut harness = Harness::new(1);
         let scene = harness.frame();
-        let empty = vec2f(pill_box(&scene).min_x() - 30., center(pill_box(&scene)).y());
+        let empty = empty_header_point(&scene);
 
         harness.click_times(empty, 1);
         harness.click_times(empty, 2);
@@ -9929,13 +9854,13 @@ mod title_bar_hit_testing {
 #[test]
 fn a_chord_bound_to_a_plugins_action_reaches_the_plugin() {
     // The end-to-end of a named action, and the thing that was impossible
-    // before there was one: `crook/usage/refresh` is registered by a plugin,
+    // before there was one: `crook/window/new-tab` is registered by a plugin,
     // named in a file the application does not compile, and reached by a chord
-    // this build has no arm for.
+    // this build has no arm for — `shift+cmd+u` is nobody's.
     let mut harness = Harness::new(1);
-    assert!(!harness.usage_is_busy_for_user());
+    assert_eq!(harness.tab_ids().len(), 1);
 
-    harness.bind(r#"[{ "key": "shift+cmd+u", "command": "crook/usage/refresh" }]"#);
+    harness.bind(r#"[{ "key": "shift+cmd+u", "command": "crook/window/new-tab" }]"#);
     harness.press(
         "u",
         Modifiers {
@@ -9946,8 +9871,9 @@ fn a_chord_bound_to_a_plugins_action_reaches_the_plugin() {
         "",
     );
 
-    assert!(
-        harness.usage_is_busy_for_user(),
+    assert_eq!(
+        harness.tab_ids().len(),
+        2,
         "the chord did not reach the plugin's action"
     );
 }
@@ -9972,7 +9898,20 @@ fn a_chord_bound_to_an_action_nothing_answers_to_does_nothing() {
         ),
         None
     );
-    assert!(!harness.usage_is_busy_for_user());
+    harness.press(
+        "u",
+        Modifiers {
+            cmd: true,
+            shift: true,
+            ..Modifiers::default()
+        },
+        "",
+    );
+    assert_eq!(
+        harness.tab_ids().len(),
+        1,
+        "a chord nothing answers to did something anyway"
+    );
 }
 
 #[test]
@@ -9981,16 +9920,16 @@ fn the_shortcuts_page_lists_what_a_plugin_registered_and_the_chord_that_reaches_
     // can bind it. The page cannot have been written with this row in it: the
     // name belongs to a plugin, and so does the chord.
     let mut harness = Harness::new(1);
-    harness.bind(r#"[{ "key": "shift+cmd+u", "command": "crook/usage/refresh" }]"#);
+    harness.bind(r#"[{ "key": "shift+cmd+u", "command": "crook/window/new-tab" }]"#);
     harness.open_settings_page();
     let rail = settings_rail_boxes(&harness.frame());
-    harness.click(center(rail[3]), MouseButton::Left);
+    harness.click(center(rail[2]), MouseButton::Left);
     assert_eq!("Keyboard Shortcuts", harness.settings_section());
 
     let text = frame_text(&harness.frame());
 
     assert!(
-        text.contains("crook/usage/refresh"),
+        text.contains("crook/window/new-tab"),
         "the page does not name the command: {text}"
     );
     assert!(
@@ -10335,32 +10274,32 @@ fn the_settings_rail_lists_the_pages_the_plugins_contributed() {
     let scene = harness.frame();
 
     let rail = settings_rail_boxes(&scene);
-    assert_eq!(rail.len(), 5, "five pages in the rail");
+    assert_eq!(rail.len(), 4, "four pages in the rail");
     // Top to bottom, which is the `order` each plugin asked for.
     assert_eq!(harness.settings_section(), "Appearance");
 
-    harness.click(center(rail[2]), MouseButton::Left);
-    assert_eq!(harness.settings_section(), "Usage");
+    harness.click(center(rail[1]), MouseButton::Left);
+    assert_eq!(harness.settings_section(), "Shell");
     assert!(
-        frame_text(&harness.frame()).contains("Show the usage chip"),
-        "the Usage page did not come up"
+        frame_text(&harness.frame()).contains("Start a login shell"),
+        "the Shell page did not come up"
     );
 }
 
 #[test]
 fn a_settings_page_can_be_reached_by_the_name_on_its_rail_row() {
-    // What `--settings usage` resolves through, and the only name a person
+    // What `--settings shell` resolves through, and the only name a person
     // ever sees: the key is `owner/entry` and nobody types that.
     let harness = Harness::new(1);
 
     let (found, missing) = harness.workspace.read(&harness.app, |workspace, _| {
         (
-            workspace.settings_page_named("usage"),
+            workspace.settings_page_named("shell"),
             workspace.settings_page_named("nonesuch"),
         )
     });
 
-    assert!(found.is_some(), "the Usage page is not reachable by name");
+    assert!(found.is_some(), "the Shell page is not reachable by name");
     assert!(missing.is_none());
 }
 
@@ -10383,10 +10322,9 @@ mod sandboxed {
         // — and the window draws it in the theme in force, in Crook's own
         // fonts, with Crook's own icons.
         //
-        // At order -1 so it wins `header.right`, which is a `Single` slot the
-        // usage chip is already in. That is the whole of what "change
-        // practically everything" has to mean for a store plugin: it can
-        // *replace* something Crook ships.
+        // At order -1, which is the front of `header.right`: the slot is
+        // `Single`, nothing a release binary carries fills it, and a plugin
+        // installed from a file is the whole of what that row shows.
         let scratch = Scratch::new("draws");
         install(
             scratch.path(),
@@ -10400,10 +10338,6 @@ mod sandboxed {
         assert!(text.contains("from a sandbox"), "{text}");
         assert!(text.contains("probed"), "the badge is missing: {text}");
         assert!(text.contains("Poke"), "the button is missing: {text}");
-        assert!(
-            !text.contains("claude"),
-            "the plugin did not win the slot: {text}"
-        );
         // And the icon it named by string is drawn as one of Crook's own.
         assert!(
             icons_of(&harness.frame()).contains(&Lucide::GitBranch),
@@ -10459,6 +10393,53 @@ mod sandboxed {
     }
 
     #[test]
+    fn what_a_plugin_pins_to_the_header_clears_the_right_corner_this_platform_reserves() {
+        // The other end of
+        // `the_header_reserves_the_left_corner_this_platform_puts_its_controls_in_and_no_more`.
+        // Nothing a release binary carries goes in this slot, so the only way
+        // to see the reservation honoured is to put something there — which is
+        // also the honest statement of the rule: the room is kept for whatever
+        // fills the slot, whoever wrote it.
+        let scratch = Scratch::new("corner");
+        install(
+            scratch.path(),
+            "probe",
+            &wasm("eugen/probe", "header.right", 0),
+        );
+        let mut harness = harness(&scratch);
+        let insets = harness.window_insets();
+        let scene = harness.frame();
+        let edge = pinned_right_edge(&scene);
+
+        assert!(
+            WINDOW.x() - edge >= insets.header_right,
+            "what the plugin pinned runs into the {} reserved on the right",
+            insets.header_right
+        );
+        // The reservation and the header's own 10px padding, and nothing else.
+        assert!(
+            WINDOW.x() - edge < insets.header_right + 24.,
+            "what the plugin pinned stops {} short of the right edge",
+            WINDOW.x() - edge
+        );
+    }
+
+    /// The right edge of the last thing a plugin drew in the header row.
+    ///
+    /// The row paints its own ground and its own rule, and both run the whole
+    /// width of it; anything narrower is content, and the right edge of the
+    /// content is what a reservation at that end has to clear.
+    fn pinned_right_edge(scene: &Scene) -> f32 {
+        let header = header_box(scene);
+        visible_rects(scene)
+            .map(|(_, drawn)| drawn)
+            .filter(|drawn| contains(header, *drawn) && drawn.width() < header.width())
+            .map(|drawn| drawn.max_x())
+            .max_by(f32::total_cmp)
+            .expect("the plugin drew something in the header")
+    }
+
+    #[test]
     fn a_contribution_to_a_slot_this_build_does_not_have_is_refused_and_nothing_else() {
         // A plugin written against a Crook with a slot this one does not have
         // should be missing that one contribution, not missing entirely.
@@ -10507,7 +10488,7 @@ mod plugins_page {
         for name in [
             "Window commands",
             "Header",
-            "Usage chip",
+            "Shell settings",
             "Command palette",
             "About",
         ] {
@@ -10526,17 +10507,17 @@ mod plugins_page {
     fn clicking_a_row_shows_that_plugin() {
         let mut harness = harness();
 
-        harness.click_plugin("Usage chip");
+        harness.click_plugin("Command palette");
         let text = frame_text(&harness.frame());
 
-        assert!(text.contains("crook/usage"), "{text}");
+        assert!(text.contains("crook/palette"), "{text}");
         assert!(
-            text.contains("How much of the Claude Code"),
+            text.contains("Everything the window and its plugins can be asked to do"),
             "the card does not describe it: {text}"
         );
         // What it puts on screen, asked of the host rather than of the plugin.
-        assert!(text.contains("header.right"), "{text}");
-        assert!(text.contains("crook/usage/refresh"), "{text}");
+        assert!(text.contains("window.overlay"), "{text}");
+        assert!(text.contains("crook/palette/open"), "{text}");
     }
 
     #[test]
@@ -10599,10 +10580,12 @@ mod plugins_page {
 
     #[test]
     fn the_switch_on_the_card_takes_the_plugin_out_of_the_window() {
+        // The switch is not a preference: throwing it takes the plugin's
+        // registrations back out, so what it contributed stops being in the
+        // window at all rather than being drawn disabled.
         let mut harness = Harness::new(1);
-        assert!(pirate_is_drawn(&harness.frame()));
         harness.show_plugins();
-        harness.click_plugin("Usage chip");
+        harness.click_plugin("Shell settings");
 
         let switches = settings_switch_boxes(&harness.frame());
         assert_eq!(switches.len(), 1, "one switch, on the card");
@@ -10610,23 +10593,20 @@ mod plugins_page {
 
         let text = frame_text(&harness.frame());
         assert!(
-            !pirate_is_drawn(&harness.frame()),
-            "the chip outlived the plugin"
-        );
-        assert!(
             text.contains("switched off"),
             "the card does not say it is off: {text}"
         );
-        // And the Usage page went with it, because that page was the
-        // plugin's too. Asked of the host: the sidebar is showing the plugin
-        // list rather than the settings rail.
+        // And the Shell page went with it, because that page was the plugin's
+        // too. Asked of the host: the sidebar is showing the plugin list
+        // rather than the settings rail.
         assert!(
             harness
                 .workspace
                 .read(&harness.app, |workspace, _| workspace
                     .host()
-                    .settings_page_id("crook/usage/page"))
-                .is_none()
+                    .settings_page_id("crook/shell/page"))
+                .is_none(),
+            "the page outlived the plugin that added it"
         );
     }
 

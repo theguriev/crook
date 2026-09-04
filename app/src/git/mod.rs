@@ -60,8 +60,8 @@ pub fn current_branch(dir: &Path) -> Option<Head> {
 /// Everything about the repository `dir` sits in.
 ///
 /// **Blocking**: this runs `git` for the diff stats. Call it from the
-/// background executor, the way `usage_model` runs its poll — never from a
-/// view. Use [`current_branch`] when only the cheap half is wanted.
+/// background executor, the way [`crate::git_model`] runs its cycle — never
+/// from a view. Use [`current_branch`] when only the cheap half is wanted.
 ///
 /// A bare repository has no working tree to diff, so its `diff` is `None`.
 pub fn gather(dir: &Path) -> GitFacts {
