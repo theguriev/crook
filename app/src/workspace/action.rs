@@ -10,7 +10,7 @@
 //! vertical-tab display options side by side.
 
 use crate::settings::{Density, Granularity, Layout, PrimaryInfo, Subtitle};
-use crate::tab::{PaneId, TabAction};
+use crate::tab::{PaneId, TabAction, TabId};
 
 use super::settings_page::Section;
 
@@ -26,6 +26,8 @@ pub enum WorkspaceAction {
     Settings(SettingsAction),
     /// Something happened in the Themes panel.
     Theme(ThemeAction),
+    /// Something happened in the menu a tab opens, which is about worktrees.
+    Worktree(WorktreeAction),
     /// The pointer entered a row, or left it.
     ///
     /// Carried as an action rather than written directly, because a hover
@@ -66,6 +68,39 @@ pub enum WorkspaceAction {
     Complete(PaneId),
 }
 
+/// What the menu on a tab does.
+///
+/// A worktree is named by **its index in the list the menu is showing** rather
+/// than by its path, and that is not laziness. This enum is `Copy` — a
+/// `WorkspaceAction` is compared by value in a dozen places — and a `PathBuf`
+/// would end that. The index is sound because the list is not live: it is read
+/// once, when the menu opens, and while the menu is up its own modal underlay
+/// is the only thing that can be clicked.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum WorktreeAction {
+    /// Open the menu on this tab. What the active tab's own row dispatches.
+    OpenMenu(TabId),
+    /// Take it down. What a press outside it sends.
+    CloseMenu,
+    /// Show the worktree at this index: bring forward the tab already in it,
+    /// or open one there.
+    Show(usize),
+    /// Begin making one.
+    StartCreating,
+    /// Make it, from what has been typed into the branch field.
+    Create,
+    /// Ask about removing the worktree at this index.
+    AskRemove(usize),
+    /// Remove it. `force` is the second answer, offered only once git has
+    /// refused the first over work that is in there.
+    Remove {
+        /// Whether to delete a checkout with local work in it.
+        force: bool,
+    },
+    /// Back to the list, from the creator or from the confirmation.
+    Cancel,
+}
+
 impl From<TabAction> for WorkspaceAction {
     fn from(action: TabAction) -> Self {
         Self::Tab(action)
@@ -81,6 +116,12 @@ impl From<OptionsAction> for WorkspaceAction {
 impl From<SettingsAction> for WorkspaceAction {
     fn from(action: SettingsAction) -> Self {
         Self::Settings(action)
+    }
+}
+
+impl From<WorktreeAction> for WorkspaceAction {
+    fn from(action: WorktreeAction) -> Self {
+        Self::Worktree(action)
     }
 }
 

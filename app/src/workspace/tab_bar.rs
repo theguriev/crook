@@ -48,7 +48,7 @@ use crate::settings::{Density, Granularity, TabOptions};
 use crate::tab::{AgentStatus, PaneId, TabAction, TabId};
 use crate::theme::theme;
 
-use super::action::WorkspaceAction;
+use super::action::{WorkspaceAction, WorktreeAction};
 use super::row_content::{
     Chips, DetailSection, ROW_PATH_CHARS, RowFacts, RowLine, detail_card, detail_panes,
     metadata_line,
@@ -116,6 +116,21 @@ fn render_row(
     // Resolved once on the workspace rather than here: it is the same answer
     // for every string every row prints, and asking for it is a syscall.
     let home = workspace.home();
+    // The two facts the row's own click needs. A menu opens on the row you are
+    // already in, and only where there is a repository to have worktrees of —
+    // the same promise the branch chip makes, which appears exactly when there
+    // is a branch to name.
+    // The tab's *focused* pane's row, in both conditions. In `Panes`
+    // granularity one tab draws a row per pane, and a menu that answered to
+    // "is this my tab" would be drawn once per row — two popups over each
+    // other, each with its own modal underlay.
+    let is_the_tabs_row = tab_data.panes().focused_id() == pane;
+    let menu_is_open = is_the_tabs_row && workspace.tab_menu().tab == Some(tab);
+    let opens_menu = menu_is_open
+        || (strip.is_active(tab)
+            && is_the_tabs_row
+            && git.is_some_and(|facts| facts.branch.is_some()));
+
     // The one selected row in the whole bar.
     let is_selected = strip.is_active(tab) && tab_data.panes().is_focused(pane);
 
@@ -211,7 +226,16 @@ fn render_row(
         if guard.lock().is_hovered() {
             return;
         }
-        ctx.dispatch_typed_action(WorkspaceAction::Tab(TabAction::FocusPane(pane)));
+        // Clicking the row you are already in opens its menu instead of
+        // focusing what is already focused. That gesture was doing nothing at
+        // all — `FocusPane` on the focused pane resolves to `Unchanged` and
+        // repaints nothing — and it is the one somebody reaches for when they
+        // want to know something *about* what they are working on.
+        ctx.dispatch_typed_action(if opens_menu {
+            WorkspaceAction::Worktree(WorktreeAction::OpenMenu(tab))
+        } else {
+            WorkspaceAction::Tab(TabAction::FocusPane(pane))
+        });
     })
     .on_middle_click(move |_, ctx, _| {
         ctx.dispatch_typed_action(WorkspaceAction::Tab(close_action));
@@ -225,7 +249,21 @@ fn render_row(
     .finish();
 
     let mut stack = Stack::new().with_child(element);
-    if workspace.shows_details_for(pane) {
+    if menu_is_open {
+        // In the card's place rather than beside it. A stack anchors one
+        // overlay: a second added after this one would make the row itself
+        // unclickable, because a row hit-tests against the topmost overlay
+        // that existed when it painted.
+        stack.add_anchored_overlay_child(
+            Dismiss::new(super::tab_menu::render(workspace))
+                .modal()
+                .on_dismiss(|ctx, _| {
+                    ctx.dispatch_typed_action(WorkspaceAction::Worktree(WorktreeAction::CloseMenu));
+                })
+                .finish(),
+            AnchorTo::below(vec2f(0., 4.)),
+        );
+    } else if workspace.shows_details_for(pane) {
         // Added last, and it is the only overlay on this stack: a row
         // hit-tests against the topmost overlay that existed when it painted,
         // so a second one added after this would make the row unclickable.

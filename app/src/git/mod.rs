@@ -24,6 +24,7 @@
 
 pub mod branch;
 pub mod diff;
+pub mod worktree;
 
 #[cfg(test)]
 mod tests;

@@ -197,6 +197,11 @@ struct Overrides {
     themes: bool,
     /// Start with the Themes panel making a theme.
     creating: bool,
+    /// Start with the active tab's worktree menu open, and its creator with
+    /// it when `creating_worktree`.
+    worktrees: bool,
+    /// Start with that menu making a worktree.
+    creating_worktree: bool,
     /// Start in this theme rather than the saved one.
     ///
     /// Applied straight to the palette rather than through
@@ -358,6 +363,11 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
             }
             "--menu" => overrides.menu = true,
             "--themes" => overrides.themes = true,
+            "--worktrees" => overrides.worktrees = true,
+            "--new-worktree" => {
+                overrides.worktrees = true;
+                overrides.creating_worktree = true;
+            }
             "--new-theme" => {
                 overrides.themes = true;
                 overrides.creating = true;
@@ -488,6 +498,8 @@ OPTIONS:
                        `usage`, `keys` or `about`
     --search <TEXT>    Type TEXT into the settings page\'s search box, opening it
     --theme <NAME>     Start in this theme rather than the saved one
+    --worktrees        Start with the active tab's worktree menu open
+    --new-worktree     Start with that menu making a worktree
     --themes           Start with the Themes panel open
     --new-theme        Start with the Themes panel making a theme
     --hover            Start with the first row's detail card up
@@ -678,6 +690,12 @@ fn apply_overrides(
     }
     if overrides.themes {
         workspace.open_theme_panel(overrides.creating, ctx);
+    }
+    if overrides.worktrees {
+        workspace.open_tab_menu_for_snapshot(ctx);
+        if overrides.creating_worktree {
+            workspace.start_creating_worktree(ctx);
+        }
     }
 }
 

@@ -1,4 +1,7 @@
-//! The rail's search field: the first text input in Crook that is not a pane's.
+//! A one-line text field: the text input that is not a pane's.
+//!
+//! Two things use it — the settings rail's search box and the worktree
+//! creator's branch name — and they differ by a placeholder and an icon.
 //!
 //! # Why not [`CommandInput`]
 //!
@@ -20,7 +23,7 @@
 //! same table that gives them to the composer, which is what stops the two
 //! drifting.
 //!
-//! [`CommandInput`]: super::super::input_element::CommandInput
+//! [`CommandInput`]: super::input_element::CommandInput
 //!
 //! # Shaped, not celled
 //!
@@ -48,7 +51,7 @@ use crate::input_keys::{self, Intent, Platform};
 use crate::text_input::TextInput;
 use crate::theme::theme;
 
-use super::super::view::Fonts;
+use super::view::Fonts;
 
 /// The field's height, which is the rail's row height plus its padding.
 pub(super) const HEIGHT: f32 = 26.;
@@ -63,50 +66,66 @@ const ICON_GAP: f32 = 6.;
 /// The inset inside the box, left and right.
 const PADDING: f32 = 7.;
 
-/// What the field says when nothing has been typed. Warp's word, and there is
-/// only one word this box can say.
-const PLACEHOLDER: &str = "Search";
-
 /// The caret's width.
 const CARET_WIDTH: f32 = 1.5;
 
-/// One search box.
-pub(super) struct SearchField {
+/// One field.
+pub(super) struct TextField {
     input: TextInput,
     clipboard: Clipboard,
     fonts: Fonts,
     hover: MouseStateHandle,
+    /// What it says while nothing has been typed.
+    placeholder: &'static str,
+    /// The mark at its left edge, where it has one. A search box says what it
+    /// is with a magnifier; a field whose label is written above it says it
+    /// with the label.
+    icon: Option<Lucide>,
     /// The shaped text, kept from layout for paint and for hit testing.
     line: Option<Line>,
     /// Whether `line` is the placeholder rather than what was typed.
-    placeholder: bool,
+    showing_placeholder: bool,
     size: Option<Vector2F>,
     origin: Option<Point>,
 }
 
-impl SearchField {
+impl TextField {
     /// A field over `input`, which is where everything typed into it lives.
     pub(super) fn new(
         input: TextInput,
         clipboard: Clipboard,
         fonts: Fonts,
         hover: MouseStateHandle,
+        placeholder: &'static str,
     ) -> Self {
         Self {
             input,
             clipboard,
             fonts,
             hover,
+            placeholder,
+            icon: None,
             line: None,
-            placeholder: false,
+            showing_placeholder: false,
             size: None,
             origin: None,
         }
     }
 
+    /// Puts a mark at the field's left edge.
+    pub(super) fn with_icon(mut self, icon: Lucide) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
     /// Where the glyphs begin, relative to the field's own origin.
     fn text_origin(&self, origin: Vector2F) -> Vector2F {
-        origin + vec2f(PADDING + ICON_SIZE + ICON_GAP, 0.)
+        let icon = if self.icon.is_some() {
+            ICON_SIZE + ICON_GAP
+        } else {
+            0.
+        };
+        origin + vec2f(PADDING + icon, 0.)
     }
 
     /// Handles a keystroke, if this field is the one listening.
@@ -183,7 +202,7 @@ fn boundaries(text: &str) -> impl Iterator<Item = usize> + '_ {
         .chain(std::iter::once(text.len()))
 }
 
-impl Element for SearchField {
+impl Element for TextField {
     fn layout(
         &mut self,
         constraint: SizeConstraint,
@@ -191,9 +210,9 @@ impl Element for SearchField {
         _: &AppContext,
     ) -> Vector2F {
         let typed = self.input.editor().text().to_owned();
-        self.placeholder = typed.is_empty();
-        let text = if self.placeholder {
-            PLACEHOLDER.to_owned()
+        self.showing_placeholder = typed.is_empty();
+        let text = if self.showing_placeholder {
+            self.placeholder.to_owned()
         } else {
             typed
         };
@@ -242,18 +261,20 @@ impl Element for SearchField {
             .with_border(Border::all(1.).with_border_color(border))
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)));
 
-        ctx.scene.draw_icon(
-            IconKey::new(Lucide::Search, ICON_SIZE),
-            RectF::new(
-                origin + vec2f(PADDING, (size.y() - ICON_SIZE) / 2.),
-                Vector2F::splat(ICON_SIZE),
-            ),
-            if self.placeholder {
-                theme().text_muted
-            } else {
-                theme().text_primary
-            },
-        );
+        if let Some(icon) = self.icon {
+            ctx.scene.draw_icon(
+                IconKey::new(icon, ICON_SIZE),
+                RectF::new(
+                    origin + vec2f(PADDING, (size.y() - ICON_SIZE) / 2.),
+                    Vector2F::splat(ICON_SIZE),
+                ),
+                if self.showing_placeholder {
+                    theme().text_muted
+                } else {
+                    theme().text_primary
+                },
+            );
+        }
 
         let text_origin = self.text_origin(origin);
         let width = size.x() - (text_origin.x() - origin.x()) - PADDING;
@@ -264,7 +285,7 @@ impl Element for SearchField {
         // order the composer paints in, and the only order in which a caret
         // inside a selection is visible.
         let selection = self.input.editor().selection();
-        if !self.placeholder && !selection.is_empty() {
+        if !self.showing_placeholder && !selection.is_empty() {
             let start = line.x_for_index(selection.start());
             let end = line.x_for_index(selection.end());
             ctx.scene
@@ -275,7 +296,7 @@ impl Element for SearchField {
                 .with_background(theme().selection);
         }
 
-        let ink = if self.placeholder {
+        let ink = if self.showing_placeholder {
             theme().text_muted
         } else {
             theme().text_primary

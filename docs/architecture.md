@@ -704,6 +704,52 @@ that reached the pty — in one function.
 
 **What it does not do yet** is in `docs/blocks.md`. Selecting text across it is below.
 
+### One agent, one worktree
+
+The unit of work is an agent, a tab is that agent's workspace, and a git worktree is the same
+statement made on the filesystem: one branch, one checkout, one place to work that nothing
+else is standing in. Two agents editing one checkout overwrite each other; two agents in two
+worktrees of one repository do not. That is the whole argument for the feature, and it is why
+it is a *menu on a tab* rather than a panel of its own.
+
+Clicking the tab you are already in opens it. That gesture was free — the click dispatched
+`FocusPane` on a pane that was already focused, which resolves to `Unchanged` and repaints
+nothing — and it opens only where the focused pane is inside a repository, which is the same
+promise the branch chip already makes.
+
+The model is [herdr](https://herdr.dev)'s, which is the tool this borrows from rather than
+Warp: there a worktree is not a thing you administer but a workspace with a git checkout
+behind it, and creating one *opens* it. So the menu lists the repository's checkouts and
+opens a tab in whichever one is chosen — or brings forward the tab already there, because two
+agents in one worktree is the thing the feature exists to prevent. Its `--base` is
+deliberately not taken: a worktree made from anything other than the head you are looking at
+is a question a menu cannot ask well.
+
+Three things about it are load-bearing.
+
+**Nothing git-shaped is on the render path.** `git worktree list` is a subprocess, so it runs
+on the background pool when the menu opens and lands through `ctx.spawn` — which is why the
+menu has a state for "reading" at all. The 15-second poll that feeds the branch chip is not
+involved: this is read once, on a gesture, and thrown away when the menu closes.
+
+**Crook records where a shell is; it never drives it.** A new tab's directory is written onto
+its session *before* the shells are synced, because that is the moment a pty's cwd is decided
+and the only moment it can be. Nothing ever issues a `cd` into a running pty, and the session
+directory stops being authoritative the instant the shell reports a different one over OSC 7.
+
+**Removal asks, and asks about the right thing.** `git worktree remove` refuses over modified
+and untracked files — and, measured rather than assumed, *not* over ignored ones, which it
+deletes without a word. So the ignored count is the one most worth showing before the button,
+and it is the one git will never raise on its own. A checkout that is locked, that is the main
+worktree, or that a tab is open in is not offered for removal at all: Crook's own agent
+worktrees are locked by the session holding them, and that lock is what stops one agent tidying
+away another's work.
+
+`app/src/git/worktree.rs` is the whole of the git side — list, add, remove, and a count of what
+is loose in a checkout — with a timeout on every call, two reader threads per call so a
+repository with a fat `target/` cannot deadlock a pipe, and an error type whose variants are
+the things a UI can offer to do about them.
+
 ### The command line is an input field
 
 A pane's next command is composed under its output — an ordinary GUI text input, with a caret
@@ -1273,6 +1319,7 @@ platforms, and treat a build script as the cost it is.
 | Theme chooser | a 240px docked panel with search and virtualisation | a 248px docked panel, no search, every row built |
 | Icons | its own `WarpIcon` and `UiIcon` sets, rendered from SVG | Lucide, vendored as path commands, one distance-field rasterizer (§4) |
 | Settings UI | a pane, 16 pages, search over ~800 widgets | a pane, 4 pages, search over 30 (§4) |
+| Git worktrees | none | a menu on the tab you are in, after herdr's model (§7) |
 
 The through-line: Crook keeps every *architectural* idea from Warp and rejects almost every
 *build-system* one. The architecture is what makes a GPU terminal tractable in Rust. The build

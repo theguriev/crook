@@ -50,8 +50,9 @@ use crate::theme::{Available, theme};
 use crate::usage_model::UsageModel;
 use crate::{Channel, WINDOW_CHROME};
 
-use super::action::{OptionsAction, SettingsAction, ThemeAction, WorkspaceAction};
+use super::action::{OptionsAction, SettingsAction, ThemeAction, WorkspaceAction, WorktreeAction};
 use super::settings_page::{Section, SettingsState};
+use super::tab_menu::{Contents, Mode as WorktreeMode, TabMenuState};
 use super::tabs_panel::geometry::RowGeometry;
 use super::theme_panel::{Mode, ThemePanelState};
 use super::usage_chip::UsageChip;
@@ -343,6 +344,8 @@ pub struct Workspace {
     /// The settings page: whether it is up, which page it is on, and what the
     /// mouse is doing to each of its controls.
     page: SettingsState,
+    /// The menu a tab opens, which is about worktrees.
+    tab_menu: TabMenuState,
     /// The Themes panel, which is the other surface that lists themes.
     panel: ThemePanelState,
     /// Every theme that can be chosen, as of the last time a surface that
@@ -365,6 +368,13 @@ pub struct Workspace {
     /// write a theme into the folder of whoever ran it. `Settings` has the
     /// same seam for the same reason.
     themes_directory: Option<PathBuf>,
+    /// Where a worktree Crook makes is checked out.
+    ///
+    /// Resolved once, at startup, for the reason the themes folder is: it is a
+    /// property of the machine rather than of a frame. `None` on a machine
+    /// with no data directory, where the creator has nowhere to put one and
+    /// says so rather than guessing.
+    worktrees_directory: Option<PathBuf>,
     /// How many settings saves have been asked for.
     ///
     /// Each save task carries the number it was asked at and does nothing if a
@@ -471,10 +481,12 @@ impl Workspace {
             overridden: Overridden::default(),
             menu: MenuState::default(),
             page: SettingsState::default(),
+            tab_menu: TabMenuState::default(),
             panel: ThemePanelState::default(),
             themes: crate::theme::available(),
             theme_before_draft: None,
             themes_directory: crate::theme::user_themes_directory(),
+            worktrees_directory: worktree_store(),
             save_generation: Arc::new(AtomicU64::new(0)),
             panel_scroll: ScrollStateHandle::default(),
             panel_rows: RowGeometry::new(),
@@ -646,6 +658,57 @@ impl Workspace {
         &self.page
     }
 
+    /// How many worktrees the menu has read, or `None` while it is still
+    /// reading or has nothing to read.
+    ///
+    /// For a test, which otherwise has to infer this from pixels — and the
+    /// window behind a popup is still in the scene, so "the menu does not say
+    /// it is reading" is not the same question.
+    pub fn worktrees_listed(&self) -> Option<usize> {
+        match &self.tab_menu.contents {
+            Contents::Ready(worktrees) => Some(worktrees.len()),
+            _ => None,
+        }
+    }
+
+    /// Whether the menu is making a worktree. For a test.
+    pub fn worktree_menu_is_creating(&self) -> bool {
+        self.tab_menu.mode == WorktreeMode::Creating
+    }
+
+    /// The menu a tab opens, which is about worktrees.
+    pub(super) fn tab_menu(&self) -> &TabMenuState {
+        &self.tab_menu
+    }
+
+    /// Every tab, with the directory its focused pane is in.
+    ///
+    /// The focused pane's, because a tab has no directory of its own: a split
+    /// tab has two panes and can have two, and the one being looked at is the
+    /// same answer [`crate::tab::Tab::title`] gives to the same question.
+    pub(super) fn tab_directories(&self) -> Vec<(TabId, PathBuf)> {
+        self.tabs
+            .iter()
+            .filter_map(|tab| {
+                let pane = tab.panes().focused()?;
+                Some((tab.id(), pane.session()?.working_directory.clone()?))
+            })
+            .collect()
+    }
+
+    /// Whether any popup is up.
+    ///
+    /// One question, asked in five places, because the answer is what decides
+    /// whether a pane has the keyboard, whether a hover card may open, whether
+    /// a caret blinks and whether the grid takes a key. Two popups are never
+    /// up at once — opening either closes the other — and the reason is not
+    /// tidiness: a modal underlay covers only the layers painted *before* it,
+    /// so the second one's popup would float above the first one's underlay
+    /// while the first one's underlay swallowed the press meant to dismiss it.
+    pub(super) fn a_popup_is_open(&self) -> bool {
+        self.menu.open || self.tab_menu.is_open()
+    }
+
     /// The Themes panel's state.
     pub(super) fn theme_panel(&self) -> &ThemePanelState {
         &self.panel
@@ -694,6 +757,15 @@ impl Workspace {
     ///
     /// For a test, and for a run that must not read or write the folder of
     /// whoever started it.
+    /// Puts the worktrees Crook makes somewhere else.
+    ///
+    /// A test's, and only a test's: creating one writes a whole checkout to
+    /// disk, and a suite that wrote into the data directory of whoever ran it
+    /// would leave real repositories lying about on their machine.
+    pub fn set_worktrees_directory(&mut self, directory: PathBuf) {
+        self.worktrees_directory = Some(directory);
+    }
+
     pub fn set_themes_directory(&mut self, directory: PathBuf) {
         self.themes_directory = Some(directory);
         self.refresh_themes();
@@ -878,6 +950,344 @@ impl Workspace {
     pub fn type_into_settings_search(&mut self, query: &str, ctx: &mut ViewContext<Self>) {
         self.page.search.edit(|editor| editor.set_text(query));
         ctx.notify();
+    }
+
+    /// Everything the menu on a tab does.
+    ///
+    /// Every arm that asks git anything does it on the background pool and
+    /// lands the answer through `ctx.spawn`. Nothing here blocks the thread
+    /// that draws — the rule the git layer is built on — which is why the menu
+    /// has a state for "reading" at all.
+    fn apply_worktree(&mut self, action: WorktreeAction, ctx: &mut ViewContext<Self>) {
+        match action {
+            WorktreeAction::OpenMenu(tab) => self.open_tab_menu(tab, ctx),
+            WorktreeAction::CloseMenu => self.close_tab_menu(ctx),
+
+            WorktreeAction::Show(index) => {
+                let Some(worktree) = self.tab_menu.worktrees().get(index) else {
+                    return;
+                };
+                let path = worktree.path.clone();
+                let existing = self
+                    .tab_directories()
+                    .into_iter()
+                    .find(|(_, directory)| directory.starts_with(&path))
+                    .map(|(tab, _)| tab);
+
+                self.close_tab_menu(ctx);
+                match existing {
+                    // Already open: bring it forward rather than opening a
+                    // second tab on the same checkout. Two agents in one
+                    // worktree is the thing this whole feature exists to stop.
+                    Some(tab) => {
+                        self.apply(TabAction::Select(tab), ctx);
+                    }
+                    None => {
+                        self.open_tab_in(path, ctx);
+                    }
+                }
+            }
+
+            WorktreeAction::StartCreating => {
+                // Not until the repository has been read. The name offered has
+                // to be one no existing worktree is using, and where the
+                // checkout goes is derived from what the repository is called
+                // — both of which are answers the list carries. Opening the
+                // creator over a list that had not arrived would offer a name
+                // chosen against nothing and then refuse to use it.
+                if !matches!(self.tab_menu.contents, Contents::Ready(_)) {
+                    return;
+                }
+
+                // Pre-filled with a name nothing is using, so the shortest way
+                // through is to press the button. herdr does the same, and the
+                // reason is that a person who has not decided on a name yet
+                // still wants the worktree.
+                let branch = crate::git::worktree::suggested_branch(self.tab_menu.worktrees());
+                self.tab_menu.branch.edit(|editor| {
+                    editor.set_text(&branch);
+                    editor.select_all();
+                });
+                self.tab_menu.problem = None;
+                self.tab_menu.mode = WorktreeMode::Creating;
+                self.tab_menu.forget_hover_state();
+                self.sync_input_keys();
+                ctx.notify();
+            }
+
+            WorktreeAction::Create => self.create_worktree(ctx),
+            WorktreeAction::AskRemove(index) => self.ask_about_removing(index, ctx),
+            WorktreeAction::Remove { force } => self.remove_worktree(force, ctx),
+
+            WorktreeAction::Cancel => {
+                self.tab_menu.mode = WorktreeMode::Listing;
+                self.tab_menu.problem = None;
+                self.tab_menu.forget_hover_state();
+                self.sync_input_keys();
+                ctx.notify();
+            }
+        }
+    }
+
+    /// Opens the menu on a tab, and reads the repository behind it.
+    ///
+    /// Clicking the tab whose menu is already up closes it, which is the
+    /// gear's rule and the one a person expects of anything that opens by
+    /// being clicked.
+    fn open_tab_menu(&mut self, tab: TabId, ctx: &mut ViewContext<Self>) {
+        if self.tab_menu.tab == Some(tab) {
+            self.close_tab_menu(ctx);
+            return;
+        }
+
+        let directory = self
+            .tabs
+            .get(tab)
+            .and_then(|tab| tab.panes().focused())
+            .and_then(|pane| pane.session())
+            .and_then(|session| session.working_directory.clone());
+        let Some(directory) = directory else {
+            return;
+        };
+
+        // Two popups are never up at once. See `a_popup_is_open`.
+        self.close_menu();
+
+        self.tab_menu.tab = Some(tab);
+        self.tab_menu.pane_directory = Some(directory.clone());
+        self.tab_menu.mode = WorktreeMode::Listing;
+        self.tab_menu.contents = Contents::Reading;
+        self.tab_menu.problem = None;
+        self.tab_menu.working = false;
+        self.tab_menu.store = self.worktrees_directory.clone();
+        self.tab_menu.forget_hover_state();
+        self.sync_input_keys();
+        ctx.notify();
+
+        let reading = ctx
+            .background()
+            .spawn(async move { crate::git::worktree::list(&directory) });
+
+        ctx.spawn(reading, move |workspace, listed, ctx| {
+            // The menu may have been taken down, or opened on another tab,
+            // while git was being asked. The answer belongs to the tab it was
+            // asked for and to no other.
+            if workspace.tab_menu.tab != Some(tab) {
+                return;
+            }
+            workspace.tab_menu.contents = match listed {
+                Ok(worktrees) => {
+                    workspace.tab_menu.repository = worktrees
+                        .first()
+                        .and_then(|worktree| worktree.path.file_name())
+                        .map(|name| name.to_string_lossy().into_owned());
+                    Contents::Ready(worktrees)
+                }
+                Err(problem) => Contents::Failed(problem.to_string()),
+            };
+            ctx.notify();
+        })
+        .detach();
+    }
+
+    /// Opens the menu on the active tab and reads the repository *now*, for a
+    /// run that was asked to start with it up.
+    ///
+    /// Blocking, and only here: a snapshot draws one frame and would otherwise
+    /// photograph the menu saying it is still reading. Every other way in goes
+    /// through [`Self::open_tab_menu`] and its background read.
+    pub fn open_tab_menu_for_snapshot(&mut self, ctx: &mut ViewContext<Self>) {
+        let tab = self.tabs.active_id();
+
+        // The demo's directories are invented — they name a checkout of Crook
+        // that is not on this machine — and a menu about a repository that
+        // does not exist is a picture of an error message. The focused pane is
+        // pointed at the directory the process is actually running in, which
+        // is a repository whenever anybody is looking at this flag.
+        if let Some(directory) = std::env::current_dir().ok().filter(|path| path.is_dir())
+            && let Some(pane) = self.tabs.focused_pane_id()
+        {
+            self.update_session(pane, ctx, |session| {
+                session.working_directory = Some(directory);
+            });
+        }
+
+        self.open_tab_menu(tab, ctx);
+        if !self.tab_menu.is_open() {
+            return;
+        }
+
+        let Some(directory) = self.tab_menu.pane_directory.clone() else {
+            return;
+        };
+        self.tab_menu.contents = match crate::git::worktree::list(&directory) {
+            Ok(worktrees) => {
+                self.tab_menu.repository = worktrees
+                    .first()
+                    .and_then(|worktree| worktree.path.file_name())
+                    .map(|name| name.to_string_lossy().into_owned());
+                Contents::Ready(worktrees)
+            }
+            Err(problem) => Contents::Failed(problem.to_string()),
+        };
+        ctx.notify();
+    }
+
+    /// Puts the menu into its creator, for a run that was asked to start there.
+    pub fn start_creating_worktree(&mut self, ctx: &mut ViewContext<Self>) {
+        self.apply_worktree(WorktreeAction::StartCreating, ctx);
+    }
+
+    /// Takes the menu down.
+    fn close_tab_menu(&mut self, ctx: &mut ViewContext<Self>) {
+        if !self.tab_menu.is_open() {
+            return;
+        }
+
+        self.tab_menu.tab = None;
+        self.tab_menu.mode = WorktreeMode::Listing;
+        self.tab_menu.contents = Contents::Reading;
+        self.tab_menu.problem = None;
+        self.tab_menu.working = false;
+        self.tab_menu.forget_hover_state();
+        self.sync_input_keys();
+        ctx.notify();
+    }
+
+    /// Makes the worktree the creator describes, and opens a tab in it.
+    fn create_worktree(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.tab_menu.working {
+            return;
+        }
+
+        let branch = self.tab_menu.branch.editor().text().trim().to_owned();
+        let (Some(repository), Some(path)) = (
+            self.tab_menu.pane_directory.clone(),
+            super::tab_menu::checkout_for(&self.tab_menu),
+        ) else {
+            // The one thing the creator can be missing is a name, and the
+            // field says so more usefully than a sentence would.
+            self.tab_menu.problem = Some("A worktree needs a branch name.".to_owned());
+            ctx.notify();
+            return;
+        };
+
+        self.tab_menu.working = true;
+        self.tab_menu.problem = None;
+        ctx.notify();
+
+        let made = ctx.background().spawn({
+            let path = path.clone();
+            async move { crate::git::worktree::add(&repository, &path, &branch, None) }
+        });
+
+        ctx.spawn(made, move |workspace, made, ctx| {
+            workspace.tab_menu.working = false;
+            match made {
+                // Creating one opens it, which is the whole point: a worktree
+                // nobody is working in is a directory.
+                Ok(()) => {
+                    workspace.close_tab_menu(ctx);
+                    workspace.open_tab_in(path, ctx);
+                }
+                Err(problem) => {
+                    workspace.tab_menu.problem = Some(problem.to_string());
+                    ctx.notify();
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Asks about removing one, and counts what is in it while it asks.
+    fn ask_about_removing(&mut self, index: usize, ctx: &mut ViewContext<Self>) {
+        let Some(worktree) = self.tab_menu.worktrees().get(index) else {
+            return;
+        };
+        let path = worktree.path.clone();
+
+        self.tab_menu.mode = WorktreeMode::Removing {
+            index,
+            local: None,
+            refused: false,
+        };
+        self.tab_menu.problem = None;
+        self.tab_menu.forget_hover_state();
+        ctx.notify();
+
+        let counting = ctx
+            .background()
+            .spawn(async move { crate::git::worktree::local_work(&path) });
+
+        ctx.spawn(counting, move |workspace, counted, ctx| {
+            // Only into the question that asked it. A count that arrived after
+            // the person had gone back to the list would put a line under a
+            // heading that is no longer there.
+            if let WorktreeMode::Removing {
+                index: asking,
+                local,
+                ..
+            } = &mut workspace.tab_menu.mode
+                && *asking == index
+            {
+                *local = counted.ok();
+                ctx.notify();
+            }
+        })
+        .detach();
+    }
+
+    /// Removes the checkout the confirmation is about.
+    fn remove_worktree(&mut self, force: bool, ctx: &mut ViewContext<Self>) {
+        let WorktreeMode::Removing { index, .. } = self.tab_menu.mode else {
+            return;
+        };
+        if self.tab_menu.working {
+            return;
+        }
+        let (Some(worktree), Some(repository)) = (
+            self.tab_menu.worktrees().get(index),
+            self.tab_menu.pane_directory.clone(),
+        ) else {
+            return;
+        };
+        let path = worktree.path.clone();
+
+        self.tab_menu.working = true;
+        self.tab_menu.problem = None;
+        ctx.notify();
+
+        let removed = ctx.background().spawn({
+            let path = path.clone();
+            async move { crate::git::worktree::remove(&repository, &path, force) }
+        });
+
+        ctx.spawn(removed, move |workspace, removed, ctx| {
+            workspace.tab_menu.working = false;
+            match removed {
+                Ok(()) => {
+                    // Back to the list, which has to be read again: the thing
+                    // it was listing is gone.
+                    if let Some(tab) = workspace.tab_menu.tab {
+                        workspace.tab_menu.tab = None;
+                        workspace.open_tab_menu(tab, ctx);
+                    }
+                }
+                // The one refusal that is a question rather than an error:
+                // there is work in there, and the person can still say yes.
+                Err(crate::git::worktree::Error::HoldsLocalWork { .. }) => {
+                    if let WorktreeMode::Removing { refused, .. } = &mut workspace.tab_menu.mode {
+                        *refused = true;
+                    }
+                    ctx.notify();
+                }
+                Err(problem) => {
+                    workspace.tab_menu.problem = Some(problem.to_string());
+                    ctx.notify();
+                }
+            }
+        })
+        .detach();
     }
 
     /// Whether the options menu is up.
@@ -1187,8 +1597,10 @@ impl Workspace {
 
     /// Whether any field on screen is drawing a caret.
     fn shows_a_caret(&self, app: &AppContext) -> bool {
-        if self.menu.open {
-            return false;
+        if self.a_popup_is_open() {
+            // Except the branch field inside the menu that is up, which is the
+            // one caret a popup can carry.
+            return self.tab_menu.branch.has_keys();
         }
         let Some(pane) = self.tabs.focused_pane_id() else {
             return false;
@@ -1640,6 +2052,33 @@ impl Workspace {
         }
 
         let effect = self.tabs.apply(action);
+        self.settle(effect, ctx)
+    }
+
+    /// Opens a tab whose shell starts in `directory`.
+    ///
+    /// The directory is written onto the new session *before* the shells are
+    /// synced, and that ordering is the whole of this function. Syncing is the
+    /// moment a pty's working directory is decided, and it is the only moment
+    /// it can be: Crook records where a shell says it is and never drives it,
+    /// so a directory set afterwards would relabel the row while the shell sat
+    /// in the old place. It is the same order [`crate::session`] restores in.
+    pub fn open_tab_in(&mut self, directory: PathBuf, ctx: &mut ViewContext<Self>) -> TabEffect {
+        let effect = self.tabs.apply(TabAction::New);
+
+        // `New` inserts after the active tab and makes it active, so the
+        // focused pane is the one it just made.
+        if let Some(pane) = self.tabs.focused_pane_id()
+            && let Some(session) = self.tabs.pane_mut(pane).and_then(Pane::session_mut)
+        {
+            session.working_directory = Some(directory);
+        }
+
+        self.settle(effect, ctx)
+    }
+
+    /// Everything that happens after the strip has moved, whatever moved it.
+    fn settle(&mut self, effect: TabEffect, ctx: &mut ViewContext<Self>) -> TabEffect {
         self.sync_interactions();
         self.sync_git(ctx);
         self.sync_terminals(ctx);
@@ -1792,7 +2231,7 @@ impl Workspace {
     /// the card instead.
     pub(super) fn shows_details_for(&self, pane: PaneId) -> bool {
         self.options.show_details_on_hover
-            && !self.menu.open
+            && !self.a_popup_is_open()
             && self.hovered_row == Some(pane)
             // The card says what a row had no room for, and the settings row
             // has nothing behind its one line. `detail_panes` drops the pane
@@ -1924,7 +2363,7 @@ impl Workspace {
     fn sync_input_keys(&self) {
         // The menu is modal and the Themes panel owns the arrow keys, so
         // neither leaves the keyboard with a pane.
-        let listening = (!self.menu.open && !self.panel.open)
+        let listening = (!self.a_popup_is_open() && !self.panel.open)
             .then(|| self.tabs.focused_pane_id())
             .flatten();
         for (id, input) in &self.inputs {
@@ -1941,6 +2380,13 @@ impl Workspace {
         // Note which question this asks. `listening` is the *focused* pane,
         // and the settings page draws no field of its own through `inputs`, so
         // the two never both have the keyboard.
+        // The worktree menu's branch field, which is the other keyboard a
+        // popup can hold and the only one that is not a pane's or the settings
+        // page's.
+        self.tab_menu
+            .branch
+            .set_has_keys(self.tab_menu.mode == WorktreeMode::Creating);
+
         let settings_focused = listening
             .and_then(|id| self.tabs.pane(id))
             .is_some_and(|pane| pane.is_settings());
@@ -2591,6 +3037,23 @@ impl Workspace {
     }
 }
 
+/// Where Crook keeps the checkouts it makes.
+///
+/// Its own store, under the user's data directory, and neither of the two
+/// places a person would put one by hand. *Inside* the repository is a trap
+/// git will not stop you falling into: a checkout under the working tree shows
+/// up in `status`, in every build, and in every recursive search of the
+/// project. *Beside* it means writing into a directory that belongs to whoever
+/// laid the project out, and a tool that scatters siblings around somebody
+/// else's `~/Work` is a tool they stop trusting.
+///
+/// Grouped by repository, so one store serves however many of them a person
+/// works on. herdr's `~/.herdr/worktrees/<repo>/<branch>`, in the place this
+/// platform keeps data rather than in a dotfile of our own.
+fn worktree_store() -> Option<PathBuf> {
+    dirs::data_dir().map(|directory| directory.join("crook").join("worktrees"))
+}
+
 impl TypedActionView for Workspace {
     type Action = WorkspaceAction;
 
@@ -2612,6 +3075,7 @@ impl TypedActionView for Workspace {
             WorkspaceAction::Options(action) => self.apply_option(action, ctx),
             WorkspaceAction::Settings(action) => self.apply_settings(action, ctx),
             WorkspaceAction::Theme(action) => self.apply_theme_action(action, ctx),
+            WorkspaceAction::Worktree(action) => self.apply_worktree(action, ctx),
             WorkspaceAction::HoverRow { pane, entered } => self.hover_row(pane, entered, ctx),
             WorkspaceAction::ReleaseSelection(pane) => self.release_selection(pane, ctx),
             WorkspaceAction::Complete(pane) => self.request_completions(pane, ctx),

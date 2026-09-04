@@ -285,7 +285,7 @@ fn panel(
     let content = if is_settings {
         settings_page::render(workspace, app)
     } else {
-        let keys = match (is_focused, workspace.is_options_menu_open()) {
+        let keys = match (is_focused, workspace.a_popup_is_open()) {
             (false, _) => Keys::None,
             (true, true) => Keys::Signals,
             (true, false) => Keys::All,
