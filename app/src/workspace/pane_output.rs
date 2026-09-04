@@ -14,13 +14,14 @@
 //! emulator's, because that is the only place it stays anchored to its text
 //! while the shell prints underneath it. What this owns is the routing.
 
-use crook_terminal::{CellSide, SelectionKind, ViewportPoint};
+use crook_terminal::{Rows, SelectionKind};
 use crookui_core::event::Event;
 use crookui_core::presenter::EventContext;
 
 use crate::clipboard::Clipboard;
 use crate::input_keys::{self, Platform, Route};
 use crate::pane_selection::PaneSelection;
+use crate::selection::{Anchor, Blocks, Cells, Selection};
 use crate::tab::PaneId;
 use crate::terminal_keys;
 use crate::terminal_model::TerminalHandle;
@@ -58,12 +59,14 @@ pub enum Typed {
     SentToPty,
 }
 
-/// What the output needs to be selectable: which pane this is, the gesture the
-/// workspace keeps for it, and somewhere for a copy to go.
+/// What the output needs to be selectable: which pane this is, the selection
+/// the workspace keeps for it, where its cells are, and somewhere for a copy
+/// to go.
 pub struct Mouse {
     pane: PaneId,
     gesture: PaneSelection,
     clipboard: Clipboard,
+    cells: Cells,
 }
 
 /// The keyboard and the selection of one pane's output.
@@ -121,21 +124,45 @@ impl Output {
         self
     }
 
-    /// Makes the output selectable: `gesture` is the press this pane has open,
-    /// which outlives the frame, `clipboard` is where a copy goes, and `pane`
-    /// is who the release is dispatched for.
+    /// Makes the output selectable: `gesture` is this pane's selection, which
+    /// outlives the frame, `cells` is where its text is read back from,
+    /// `clipboard` is where a copy goes, and `pane` is who the release is
+    /// dispatched for.
     pub fn with_selection(
         mut self,
         pane: PaneId,
         gesture: PaneSelection,
         clipboard: Clipboard,
+        cells: Cells,
     ) -> Self {
         self.mouse = Some(Mouse {
             pane,
             gesture,
             clipboard,
+            cells,
         });
         self
+    }
+
+    /// This pane's selection, when the output is selectable at all.
+    pub fn pane_selection(&self) -> Option<&PaneSelection> {
+        self.mouse.as_ref().map(|mouse| &mouse.gesture)
+    }
+
+    /// Lets go of a selection the frame being laid out cannot honour.
+    ///
+    /// Two things change what an anchor means and neither of them is
+    /// something the anchor can be moved through. A resize that changes the
+    /// column count re-wraps every row, so the cells it named hold other text;
+    /// a change of surface renumbers the rows outright, because a block counts
+    /// its own from zero and a grid counts from the oldest line of the
+    /// scrollback. Both are known here, in layout, and nowhere earlier.
+    pub fn laid_out(&self, columns: usize) {
+        let Some(mouse) = self.mouse.as_ref() else {
+            return;
+        };
+        mouse.gesture.resurfaced(mouse.cells);
+        mouse.gesture.reflowed(columns);
     }
 
     /// The terminal behind the output, when there is one.
@@ -146,11 +173,6 @@ impl Output {
     /// How much of the keyboard this output takes.
     pub fn keys(&self) -> Keys {
         self.keys
-    }
-
-    /// Whether anything can be selected out of this output at all.
-    pub fn is_selectable(&self) -> bool {
-        self.mouse.is_some()
     }
 
     /// The typed keystroke, if this pane is the one that should have it and
@@ -186,12 +208,12 @@ impl Output {
                 .input
                 .as_ref()
                 .is_none_or(|input| input.editor().is_empty()),
-            grid_has_selection: can_copy && handle.has_selection(),
+            grid_has_selection: can_copy && self.has_selection(),
         };
         let route = input_keys::route(keystroke, chars, pane, Platform::current());
 
         if route == Route::CopyOutput {
-            return if self.copy_selection(handle, ctx) {
+            return if self.copy_selection(ctx) {
                 Typed::Handled
             } else {
                 Typed::Ignored
@@ -242,18 +264,79 @@ impl Output {
     /// that is a terminal whose interrupt never works again. A copy that did
     /// not happen costs a highlight and a line in the log; one that disarmed
     /// the interrupt would cost the pane.
-    fn copy_selection(&self, handle: &TerminalHandle, ctx: &mut EventContext) -> bool {
+    fn copy_selection(&self, ctx: &mut EventContext) -> bool {
         let Some(mouse) = self.mouse.as_ref() else {
             return false;
         };
-        if !handle
-            .selection_text()
+        if !self
+            .selected_text()
             .is_some_and(|copied| mouse.clipboard.write(&copied))
         {
             log::warn!("the selection could not be put on the clipboard; letting go of it anyway");
         }
         self.release_selection(ctx);
         true
+    }
+
+    /// Whether anything is selected in this pane's output, on the surface this
+    /// element is drawing.
+    ///
+    /// A field read rather than a walk of the blocks: the selection is only
+    /// ever stored once it covers cells, which is what lets the one keystroke
+    /// that must never be wrong about this — the one that stops a running
+    /// command — be settled by a `bool`. Scoped to the surface for the same
+    /// reason it is a `bool` at all: a selection made on the list while the
+    /// pane has since fallen back to the grid is a highlight that is not on
+    /// screen, and an interrupt spent copying one of those is an interrupt
+    /// nobody asked for.
+    pub fn has_selection(&self) -> bool {
+        self.mouse
+            .as_ref()
+            .is_some_and(|mouse| mouse.gesture.has_selection_in(mouse.cells))
+    }
+
+    /// What a copy would take, or `None` when nothing is selected.
+    ///
+    /// The blocks are asked for at the moment of the copy rather than kept
+    /// from the frame that built this: a command may have finished since, and
+    /// a block that has been harvested holds exactly the rows it did while it
+    /// was open.
+    pub fn selected_text(&self) -> Option<String> {
+        let mouse = self.mouse.as_ref()?;
+        let handle = self.handle.as_ref()?;
+        let selection = mouse.gesture.selection_in(mouse.cells)?;
+        let snapshot = handle.snapshot();
+
+        match mouse.cells {
+            Cells::List => {
+                let blocks = handle.blocks();
+                selection.text(&Blocks::list(&blocks, &snapshot))
+            }
+            // The rows a drag covered may have scrolled out of the viewport,
+            // and a snapshot only ever holds the viewport — so they come back
+            // out of the emulator. A screenful of slack at each end covers the
+            // rows a double or triple click grows onto: a line folded over
+            // more than a whole screen, triple-clicked, copies the screenful
+            // around the click rather than all of it, which is a limit of this
+            // surface and not of the list.
+            Cells::Grid => {
+                let slack = snapshot.rows;
+                let (first, last) = (
+                    selection
+                        .anchor
+                        .row
+                        .min(selection.head.row)
+                        .saturating_sub(slack),
+                    selection.anchor.row.max(selection.head.row) + slack,
+                );
+                let (rows, at) = handle.harvest_rows(first, last);
+                selection.text(&Blocks::one(
+                    selection.anchor.block,
+                    Rows::Stored(&rows),
+                    at,
+                ))
+            }
+        }
     }
 
     /// Puts `text` on the clipboard, reporting whether it got there.
@@ -292,40 +375,58 @@ impl Output {
     /// Alt makes it a block, which is how a column is taken out of aligned
     /// output — `ls -l`, a table, a diff — without the rest of every line
     /// coming with it.
+    ///
+    /// `covers` is whether that already selects cells, which a double or
+    /// triple click does and a single click never does. Only the caller can
+    /// answer it: the blocks are its, not this.
     pub fn press(
         &self,
-        at: ViewportPoint,
-        side: CellSide,
         kind: SelectionKind,
+        at: Anchor,
+        covers: bool,
+        columns: usize,
         ctx: &mut EventContext,
     ) -> bool {
-        let (Some(mouse), Some(handle)) = (self.mouse.as_ref(), self.handle.as_ref()) else {
+        let Some(mouse) = self.mouse.as_ref() else {
             return false;
         };
-        handle.start_selection(kind, at, side);
-        mouse.gesture.begin();
+        mouse.gesture.press(kind, at, covers, columns, mouse.cells);
         ctx.notify();
         true
     }
 
-    /// Drags the open end of the selection to a cell, scrolling the emulator's
-    /// own viewport by `scroll` lines first.
-    pub fn drag(
-        &self,
-        at: ViewportPoint,
-        side: CellSide,
-        scroll: i32,
-        ctx: &mut EventContext,
-    ) -> bool {
-        let (Some(mouse), Some(handle)) = (self.mouse.as_ref(), self.handle.as_ref()) else {
+    /// Drags the open end of the selection to a cell.
+    pub fn drag(&self, at: Anchor, covers: bool, ctx: &mut EventContext) -> bool {
+        let Some(mouse) = self.mouse.as_ref() else {
             return false;
         };
         if !mouse.gesture.is_dragging() {
             return false;
         }
-        handle.drag_selection(at, side, scroll);
-        ctx.notify();
+        if mouse.gesture.drag(at, covers) {
+            ctx.notify();
+        }
         true
+    }
+
+    /// The press this pane has open, and what it is taking at a time.
+    pub fn pressed(&self) -> Option<(SelectionKind, Anchor)> {
+        self.mouse
+            .as_ref()
+            .and_then(|mouse| mouse.gesture.pressed())
+    }
+
+    /// What is selected in this pane's output, in the space this element
+    /// draws.
+    ///
+    /// `None` for a selection taken on the other surface: its rows are
+    /// numbered against a picture this element is not the one drawing, and the
+    /// pane is about to let go of it. See
+    /// [`PaneSelection::resurfaced`](crate::pane_selection::PaneSelection::resurfaced).
+    pub fn selection(&self) -> Option<Selection> {
+        self.mouse
+            .as_ref()
+            .and_then(|mouse| mouse.gesture.selection_in(mouse.cells))
     }
 
     /// Whether a press on this pane's output has not been released yet.
@@ -337,7 +438,9 @@ impl Output {
 
     /// Ends the gesture, reporting whether this pane had one.
     pub fn release(&self) -> bool {
-        self.mouse.as_ref().is_some_and(|mouse| mouse.gesture.end())
+        self.mouse
+            .as_ref()
+            .is_some_and(|mouse| mouse.gesture.release())
     }
 }
 

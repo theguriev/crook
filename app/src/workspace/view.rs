@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crook_terminal::Snapshot;
+use crook_terminal::{Rows, Snapshot};
 use crookui_core::elements::MouseStateHandle;
 use crookui_core::event::Keystroke;
 use crookui_core::fonts::FamilyId;
@@ -21,6 +21,7 @@ use crate::pane_blocks::PaneBlocks;
 use crate::pane_selection::PaneSelection;
 use crate::pane_surface;
 use crate::platform_insets::{LayoutInsets, TabsPlacement, layout_insets};
+use crate::selection::{Blocks, Cells};
 use crate::settings::{Density, GeneralOptions, Granularity, Layout, Settings, TabOptions};
 use crate::tab::{AgentSession, Direction, PaneId, Tab, TabAction, TabEffect, TabId, TabStrip};
 use crate::terminal_font::CellFont;
@@ -1070,8 +1071,41 @@ impl Workspace {
     }
 
     /// What is selected in a pane's output, or `None` when nothing is.
+    ///
+    /// Resolved against the blocks rather than read out of the emulator: a
+    /// selection names a block and a row of it, and all but the newest of
+    /// those left the grid when their commands ended.
+    ///
+    /// Against the space the gesture was made in rather than the surface the
+    /// pane is showing now. The two are the same for as long as a selection
+    /// lives — a pane that changes surface lets go of it — and asking the
+    /// selection is what makes that a fact rather than a hope.
     pub fn terminal_selection(&self, pane: PaneId, app: &AppContext) -> Option<String> {
-        self.terminals.as_ref(app).handle(pane)?.selection_text()
+        let interaction = self.interaction(pane)?;
+        let selection = interaction.selection.selection()?;
+        let model = self.terminals.as_ref(app);
+        let snapshot = model.snapshot(pane)?;
+
+        if interaction.selection.cells() == Cells::Grid {
+            let handle = model.handle(pane)?;
+            let slack = snapshot.rows;
+            let (first, last) = (
+                selection
+                    .anchor
+                    .row
+                    .min(selection.head.row)
+                    .saturating_sub(slack),
+                selection.anchor.row.max(selection.head.row) + slack,
+            );
+            let (rows, at) = handle.harvest_rows(first, last);
+            return selection.text(&Blocks::one(
+                selection.anchor.block,
+                Rows::Stored(&rows),
+                at,
+            ));
+        }
+        let blocks = model.blocks(pane)?;
+        selection.text(&Blocks::list(&blocks, &snapshot))
     }
 
     /// Selects the first occurrence of `text` in a pane's output, reporting
@@ -1082,15 +1116,43 @@ impl Workspace {
     /// to be in, and nobody is holding anything down in a headless run. See
     /// `--select-output`.
     pub fn select_in_output(&self, pane: PaneId, text: &str, ctx: &mut ViewContext<Self>) -> bool {
+        self.select_in_output_through(pane, text, text, ctx)
+    }
+
+    /// Selects from the first occurrence of `from` to the first occurrence of
+    /// `to`, reporting whether the output was showing both.
+    ///
+    /// Two markers because one string cannot name a region that crosses a
+    /// block boundary without spelling out the prompt between them, and a
+    /// prompt is whatever `PS1` was. See `--select-through`.
+    pub fn select_in_output_through(
+        &self,
+        pane: PaneId,
+        from: &str,
+        to: &str,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
         let model = self.terminals.as_ref(ctx);
-        let (Some(handle), Some(snapshot)) = (model.handle(pane), model.snapshot(pane)) else {
+        let (Some(blocks), Some(snapshot)) = (model.blocks(pane), model.snapshot(pane)) else {
             return false;
         };
-        let Some((from, to)) = snapshot.find(text) else {
+        let cells = if Self::grid_surface(&snapshot) {
+            Cells::Grid
+        } else {
+            Cells::List
+        };
+        let addressed = match cells {
+            Cells::Grid => Blocks::grid(&snapshot, snapshot.live_block.id),
+            Cells::List => Blocks::list(&blocks, &snapshot),
+        };
+        let Some(found) = addressed.find_through(from, to) else {
+            return false;
+        };
+        let Some(interaction) = self.interaction(pane) else {
             return false;
         };
 
-        handle.select_cells(from, to);
+        interaction.selection.select(found, snapshot.columns, cells);
         ctx.notify();
         true
     }
@@ -1102,12 +1164,18 @@ impl Workspace {
     /// under it route one keystroke against one answer, and this is what runs
     /// after both of them have had it.
     fn release_selection(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
-        let Some(handle) = self.terminals.as_ref(ctx).handle(pane) else {
+        let Some(interaction) = self.interaction(pane) else {
             return;
         };
-        if handle.clear_selection() {
+        if interaction.selection.clear() {
             ctx.notify();
         }
+    }
+
+    /// Whether a pane showing `snapshot` draws one grid rather than a list of
+    /// blocks, which is the one thing a selection is resolved differently for.
+    fn grid_surface(snapshot: &Snapshot) -> bool {
+        pane_surface::of(snapshot, std::time::Instant::now()).surface == pane_surface::Surface::Grid
     }
 
     /// Starts the git gather chain. Call once, after the window exists.

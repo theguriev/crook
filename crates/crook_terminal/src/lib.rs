@@ -57,16 +57,21 @@
 //! * [`Block`] is one command, its output and how it ended, with its rows owned
 //!   rather than borrowed from the grid. [`Terminal::blocks`] is the history;
 //!   [`Snapshot::live_block`] is the one still open.
+//! * [`Rows`] is one block's rows, out of either store, which is how anything
+//!   that reads a block's text avoids being written twice.
 //! * [`input`] encodes key presses into the bytes a shell expects.
 //! * [`selection`] is the vocabulary a pointer selects text with.
 //!
-//! ## Selection, and what it does not cover yet
+//! ## Selection, and why none of it is here
 //!
-//! Selecting text still belongs to the emulator, which means it works within
-//! the grid — the live block and whatever of the previous one has not scrolled
-//! away. A finished block's rows are no longer in the grid, so a drag cannot
-//! reach across two of them. Copying a whole finished block is exact and needs
-//! no selection at all: [`BlockRows::to_text`].
+//! A pane's output is a list of blocks, and all but the last of them were
+//! harvested out of the grid when their commands ended — so a selection
+//! anchored to a cell of the grid could only ever cover the newest of them.
+//! It is anchored to a block and a row of that block instead, in the list that
+//! draws them, one level above this crate. What this supplies is the two words
+//! both sides use — [`SelectionKind`] and [`CellSide`] — and the one way in to
+//! a block's text whichever store it is in, [`Rows`], which is also what
+//! [`Terminal::harvest_rows`] hands back for a pane drawing one grid.
 
 mod blocks;
 mod emulator;
@@ -74,6 +79,7 @@ mod harvest;
 pub mod input;
 mod marks;
 mod pty;
+mod rows;
 pub mod selection;
 mod snapshot;
 
@@ -90,7 +96,8 @@ pub use crate::harvest::{BlockRows, RowCombining, StyleRun};
 pub use crate::input::{InputModes, Key, Modifiers};
 pub use crate::marks::{PromptKind, ShellMark};
 pub use crate::pty::{ChildExit, Program, Pty, PtyReader, default_shell};
-pub use crate::selection::{CellSide, GridPoint, SelectionKind, SelectionSpan, ViewportPoint};
+pub use crate::rows::Rows;
+pub use crate::selection::{CellSide, SelectionKind};
 pub use crate::snapshot::{
     CellCombining, CellFlags, Cursor, CursorShape, Palette, Rgb, Snapshot, SnapshotCell,
     TerminalSize,
@@ -318,33 +325,16 @@ impl Terminal {
         self.emulator.scroll_to_bottom();
     }
 
-    /// Starts a selection at a cell of the viewport, replacing any there was.
+    /// Copies lines out of the grid into the same store a finished block's
+    /// rows live in, numbered from the oldest line of the scrollback.
     ///
-    /// The kind is what the gesture meant: [`SelectionKind::Simple`] for a
-    /// drag, [`SelectionKind::Semantic`] for a double click, and
-    /// [`SelectionKind::Lines`] for a triple click.
-    pub fn start_selection(&mut self, kind: SelectionKind, at: ViewportPoint, side: CellSide) {
-        self.emulator.start_selection(kind, at, side);
-    }
-
-    /// Drags the open end of the selection to a cell of the viewport.
-    pub fn update_selection(&mut self, at: ViewportPoint, side: CellSide) {
-        self.emulator.update_selection(at, side);
-    }
-
-    /// Drops the selection.
-    pub fn clear_selection(&mut self) {
-        self.emulator.clear_selection();
-    }
-
-    /// Whether there is anything selected to copy.
-    pub fn has_selection(&self) -> bool {
-        self.emulator.has_selection()
-    }
-
-    /// The selected text, or `None` when nothing is selected.
-    pub fn selection_text(&self) -> Option<String> {
-        self.emulator.selection_text()
+    /// What a pane drawing one grid rather than a list of blocks copies a
+    /// selection out of: the rows a drag covered may have scrolled out of the
+    /// viewport since, and the snapshot only ever holds the viewport. Also
+    /// returns the row the answer actually starts at, which is later than
+    /// `first` when the history has already dropped the line it named.
+    pub fn harvest_rows(&self, first: usize, last: usize) -> (BlockRows, usize) {
+        self.emulator.harvest_rows(first, last)
     }
 
     /// The title the child last asked for, which is what a tab should call

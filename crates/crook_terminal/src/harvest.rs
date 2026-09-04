@@ -32,6 +32,8 @@
 //! buffer reused down the whole list. A store that handed back its own row type
 //! would have grown a second copy of that painter.
 
+use std::ops::Range;
+
 use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::Line;
 use alacritty_terminal::term::Term;
@@ -176,16 +178,69 @@ impl BlockRows {
         &self.text[start as usize..end as usize]
     }
 
-    /// Every row, joined by newlines. What "copy this block" hands the
-    /// clipboard.
+    /// How many columns of `row` were printed into.
     ///
-    /// Text for a person rather than a picture of the grid, which is exactly
-    /// what [`crate::Snapshot::text`] hands a live selection and what a block
-    /// copied out of the store has to match: the trailing column of a
-    /// double-width character contributes nothing, because the grid holds a
-    /// space there and copying it puts one inside every CJK word and after
-    /// every emoji, and the zero-width characters stacked on a cell follow the
-    /// character they belong to instead of being dropped.
+    /// Everything past this is blank, which is why the store does not keep it
+    /// and why a copy stops here. See [`Self::text`].
+    pub fn line_length(&self, row: usize) -> usize {
+        self.text(row).chars().count()
+    }
+
+    /// Whether the terminal folded a line too long for the grid here, so the
+    /// row below continues this one rather than starting a new one.
+    ///
+    /// The flag is on the row's last cell, which is where the emulator puts
+    /// it, and the runs always reach that cell however short the text is.
+    pub fn wraps(&self, row: usize) -> bool {
+        self.runs(row)
+            .and_then(<[StyleRun]>::last)
+            .is_some_and(|run| run.flags.contains(CellFlags::WRAPLINE))
+    }
+
+    /// One cell of a row, or `None` when either index is out of range.
+    ///
+    /// For the caller that wants a cell rather than a row — a highlight
+    /// deciding whether it is standing on half of a double-width character.
+    /// Painting a row goes through [`Self::materialise`] instead.
+    pub fn cell(&self, row: usize, column: usize) -> Option<SnapshotCell> {
+        let run = self
+            .runs(row)?
+            .iter()
+            .find(|run| column < usize::from(run.start) + usize::from(run.len))
+            .filter(|run| column >= usize::from(run.start))?;
+        Some(SnapshotCell {
+            c: self.text(row).chars().nth(column).unwrap_or(' '),
+            foreground: run.foreground,
+            background: run.background,
+            flags: run.flags,
+        })
+    }
+
+    /// The zero-width characters stacked on one cell of a row.
+    pub fn zerowidth(&self, row: usize, column: usize) -> &[char] {
+        self.combining(row)
+            .iter()
+            .find(|marks| marks.column == column)
+            .map_or(&[], |marks| &marks.characters)
+    }
+
+    /// Every row, joined by newlines: what the block *looks* like, one line
+    /// per row of the grid.
+    ///
+    /// The same picture [`crate::Snapshot::text`] gives of a live grid, and
+    /// the counterpart of it for a block that has been harvested — which is
+    /// what makes the two comparable. The trailing column of a double-width
+    /// character contributes nothing, because the grid holds a space there and
+    /// copying it puts one inside every CJK word and after every emoji, and
+    /// the zero-width characters stacked on a cell follow the character they
+    /// belong to instead of being dropped.
+    ///
+    /// **Not what a copy of the block hands the clipboard.** A row the
+    /// terminal folded because the line was too long for the pane gets a
+    /// newline here and does not get one there: a copy is the text the shell
+    /// printed, and this is the shape it was printed into. The clipboard is
+    /// served by one region resolved over the block, in `app`'s `selection`,
+    /// so that a drag across a block and its copy control cannot disagree.
     pub fn to_text(&self) -> String {
         let mut text = String::with_capacity(self.text.len() + self.rows());
         for row in 0..self.rows() {
@@ -197,8 +252,9 @@ impl BlockRows {
         text
     }
 
-    /// Appends one row's characters to `out`, as a person would read them.
-    fn write_row(&self, row: usize, out: &mut String) {
+    /// Appends the characters of `columns` on one row to `out`, as a person
+    /// would read them.
+    pub fn write(&self, row: usize, columns: Range<usize>, out: &mut String) {
         let combining = self.combining(row);
         // Runs cover every column of the row where the characters stop at the
         // last one that was printed, so the zip ends with the text and the
@@ -210,7 +266,16 @@ impl BlockRows {
             )
         });
 
-        for (column, (character, spacer)) in self.text(row).chars().zip(spacers).enumerate() {
+        for (column, (character, spacer)) in self
+            .text(row)
+            .chars()
+            .zip(spacers)
+            .enumerate()
+            .skip(columns.start)
+        {
+            if column >= columns.end {
+                break;
+            }
             if spacer {
                 continue;
             }
@@ -219,6 +284,11 @@ impl BlockRows {
                 out.extend(marks.characters.iter());
             }
         }
+    }
+
+    /// Appends one row's characters to `out`, as a person would read them.
+    fn write_row(&self, row: usize, out: &mut String) {
+        self.write(row, 0..self.columns(), out);
     }
 
     /// Roughly how many bytes of heap the block's rows occupy.

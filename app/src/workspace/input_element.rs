@@ -92,6 +92,8 @@ use unicode_width::UnicodeWidthStr;
 use crate::clipboard::Clipboard;
 use crate::input_keys::{self, Platform, Route};
 use crate::pane_blocks::{PaneBlocks, ScrollCause};
+use crate::pane_selection::PaneSelection;
+use crate::selection::Cells;
 use crate::terminal_font::{CellFont, CellMetrics};
 use crate::terminal_model::TerminalHandle;
 use crate::text_input::TextInput;
@@ -168,6 +170,11 @@ pub struct CommandInput {
     /// The shell a submitted line is sent to, when there is one.
     terminal: Option<TerminalHandle>,
 
+    /// What the pane's output has selected, which this element does two things
+    /// with: it never takes the copy chord away from it, and clicking in here
+    /// lets go of it.
+    selection: Option<PaneSelection>,
+
     /// The list above this composer, which a submitted line returns to its own
     /// end.
     blocks: Option<PaneBlocks>,
@@ -208,6 +215,7 @@ impl CommandInput {
             clipboard,
             ink: Ink::default(),
             terminal: None,
+            selection: None,
             blocks: None,
             focused: false,
             alt_screen: false,
@@ -236,6 +244,13 @@ impl CommandInput {
     /// here returns it to its own end.
     pub fn with_blocks(mut self, blocks: PaneBlocks) -> Self {
         self.blocks = Some(blocks);
+        self
+    }
+
+    /// Attaches what the output above has selected, which owns the copy chord
+    /// for as long as it exists.
+    pub fn with_selection(mut self, selection: PaneSelection) -> Self {
+        self.selection = Some(selection);
         self
     }
 
@@ -288,10 +303,13 @@ impl CommandInput {
             // first, and it *does* let go of the selection it copies — but
             // through an action, applied once every element has routed. See
             // `WorkspaceAction::ReleaseSelection`.
+            // The list's space, because that is the only surface a composer
+            // is ever under: the grid never has one. A selection left over
+            // from the grid is one this pane is no longer drawing.
             grid_has_selection: self
-                .terminal
+                .selection
                 .as_ref()
-                .is_some_and(TerminalHandle::has_selection),
+                .is_some_and(|selection| selection.has_selection_in(Cells::List)),
         };
         match input_keys::route(keystroke, chars, pane, Platform::current()) {
             Route::Edit(intent) => {
@@ -353,8 +371,8 @@ impl CommandInput {
         // pointer is anywhere near, is a person's next `cmd-c` copying the
         // wrong one — and the caret they just placed is where they are now
         // looking.
-        if let Some(terminal) = self.terminal.as_ref() {
-            terminal.clear_selection();
+        if let Some(selection) = self.selection.as_ref() {
+            selection.clear();
         }
         self.input
             .press(self.offset_at(position - bounds.origin()), click_count);

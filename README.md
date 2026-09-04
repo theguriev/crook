@@ -41,17 +41,26 @@ Six features, and the page that configures them:
   not a session. **This needs shell integration**, which Crook installs into zsh, bash and
   fish by itself; see below for what a shell without it looks like.
   [`docs/blocks.md`](docs/blocks.md) is the map of the whole surface.
-- **Output you can select and copy.** Drag across a pane's output to select it, double click
-  for a word, triple click for a line, alt-drag for a column; the drag keeps going when the
-  pointer leaves the pane, a drag past the top or bottom edge scrolls the screen under the
-  pointer, and the selection stays on its own text while the shell prints more underneath.
+- **Output you can select and copy, across every command in it.** Drag across a pane's output
+  to select it, double click for a word, triple click for a line, alt-drag for a column; the
+  drag keeps going when the pointer leaves the pane, a drag past the top or bottom edge scrolls
+  the list under the pointer, and the selection stays on its own text while the shell prints
+  more underneath and while the list scrolls over it. **A selection is a block, a row of that
+  block and a column** rather than a cell of the grid, so it spans the commands that have
+  finished as well as the one still running: a drag from one block into the next copies the
+  ends partially and the blocks between them whole, joined with one newline and none of the
+  padding between them. A line the terminal folded comes back as the one line it is, trailing
+  blanks stay behind, and a double-width character copies as one character.
   `cmd-c` — `ctrl-c` or `ctrl-shift-c` off macOS — copies it and lets it go, so the next
   `ctrl-c` interrupts the shell the way it always has. The half-written command line in the
-  field below is left exactly where it was: a copy is not an interrupt. **A selection lives in
-  the block that is still running** — its cells are the only ones still in the emulator, which
-  is what keeps a selection anchored to its own text while output arrives — so a drag cannot
-  cross two finished commands. Copying a *finished* block needs no selection: that is what its
-  hover control is for.
+  field below is left exactly where it was: a copy is not an interrupt. Copying a *whole*
+  finished block still needs no selection at all: that is what its hover control is for, and it
+  takes exactly what dragging across that whole block takes.
+  A pane that is drawing one grid rather than a list — the alternate screen, or a command that
+  has printed past the top of the viewport — is selectable in the same way, over its scrollback
+  as well as its screen. What no selection survives is the picture under it changing: resizing
+  the pane re-wraps the rows, and crossing between the list and the grid renumbers them, so the
+  selection is let go of rather than re-read against text nobody selected.
 - **A command line that behaves like a text field.** Under each pane's output is the line
   being composed — not a box and not a raw terminal line: no border, no fill, no focus ring,
   on the pane's own ground, in the terminal's own font and colours, at the same column zero as
@@ -110,7 +119,7 @@ Six features, and the page that configures them:
 Everything else is out of scope on purpose. There is no keymap system, no persistence, no
 telemetry, and no mouse reporting or IME composition. The shell integration reports command
 boundaries and nothing else, so there is still no completion: Tab does nothing in the field,
-because the shell has never seen the partial line. Blocks are stage one — no cross-block or
+because the shell has never seen the partial line. Blocks are stage one — no
 block-level selection, no keyboard navigation between blocks, no sticky header,
 no jump-to-bottom, and the shell's prompt stays on its own row rather than being lifted into
 the composer; [`docs/blocks.md`](docs/blocks.md) lists those and says what each would touch.

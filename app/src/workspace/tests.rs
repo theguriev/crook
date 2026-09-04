@@ -705,6 +705,19 @@ impl Harness {
         });
     }
 
+    /// Holds the button down with Alt, which is what asks for a rectangle.
+    fn hold_alt(&mut self, position: Vector2F, click_count: u32) {
+        self.dispatch(Event::MouseDown {
+            button: MouseButton::Left,
+            position,
+            modifiers: Modifiers {
+                alt: true,
+                ..Default::default()
+            },
+            click_count,
+        });
+    }
+
     /// Drags to a point with the button still down.
     fn drag_to(&mut self, position: Vector2F) {
         self.dispatch(Event::MouseDragged {
@@ -4654,9 +4667,13 @@ mod shells {
 
         harness.hold(middle, 3);
         harness.let_go(middle);
+        // The line, and not a line break after it. A selection is the cells it
+        // covers, and a newline is not a cell: one only ever appears *between*
+        // two rows. That is also what makes "select this block and copy" and
+        // the block's own copy control hand back the same string.
         assert_eq!(
             harness.terminal_selection(pane).as_deref(),
-            Some("one two three\n"),
+            Some("one two three"),
             "a triple click takes the whole line the pointer is on"
         );
     }
@@ -6296,6 +6313,606 @@ mod shells {
                 5,
                 "a click on the prompt moved a caret that is not in the prompt"
             );
+        }
+
+        /// Selecting text across the list: the commands that have finished as
+        /// well as the one still open.
+        ///
+        /// Every test here aims at the pixels a frame actually painted, and
+        /// that is the point: a finished block's rows left the emulator when
+        /// its command ended, so a test that named cells of the grid would be
+        /// testing the very thing that stopped working.
+        mod selecting {
+            use super::*;
+
+            /// Every row of glyphs a frame painted, top to bottom: the
+            /// baseline it sits on, its characters left to right, and where
+            /// each of them starts.
+            ///
+            /// A blank cell draws no glyph, so a row's text is its non-blank
+            /// characters run together — which is why the markers below are
+            /// single words.
+            fn painted_rows(scene: &Scene) -> Vec<(f32, String, Vec<f32>)> {
+                let mut rows: Vec<(f32, Vec<(f32, char)>)> = Vec::new();
+                for glyph in scene.layers().flat_map(|layer| layer.glyphs.iter()) {
+                    let Some(character) = char::from_u32(glyph.glyph_key.glyph_id) else {
+                        continue;
+                    };
+                    let at = glyph.position;
+                    match rows.iter_mut().find(|(y, _)| (y - at.y()).abs() < 0.5) {
+                        Some((_, cells)) => cells.push((at.x(), character)),
+                        None => rows.push((at.y(), vec![(at.x(), character)])),
+                    }
+                }
+
+                rows.sort_by(|left, right| left.0.total_cmp(&right.0));
+                rows.into_iter()
+                    .map(|(y, mut cells)| {
+                        cells.sort_by(|left, right| left.0.total_cmp(&right.0));
+                        (
+                            y,
+                            cells.iter().map(|(_, c)| *c).collect(),
+                            cells.iter().map(|(x, _)| *x).collect(),
+                        )
+                    })
+                    .collect()
+            }
+
+            /// Where the *last* occurrence of `text` was painted: the pen
+            /// position of its first character and of its last.
+            ///
+            /// The last rather than the first, because the block under test is
+            /// usually the newest one and the command that made it is on
+            /// screen above it.
+            fn painted(scene: &Scene, text: &str) -> Option<(Vector2F, Vector2F)> {
+                painted_rows(scene)
+                    .into_iter()
+                    .rev()
+                    .find_map(|(y, row, xs)| {
+                        let at = row.rfind(text)?;
+                        let first = row[..at].chars().count();
+                        let last = first + text.chars().count() - 1;
+                        Some((vec2f(*xs.get(first)?, y), vec2f(*xs.get(last)?, y)))
+                    })
+            }
+
+            /// The point a press aimed at a painted cell lands on: `across` of
+            /// the way into it, and half way down it.
+            fn aim(pen: Vector2F, across: f32) -> Vector2F {
+                let cell = CellFont::headless(CELL_FONT_SIZE).metrics();
+                vec2f(
+                    pen.x() + across * cell.width,
+                    pen.y() - cell.baseline + cell.height * 0.5,
+                )
+            }
+
+            /// Drags from the start of the last `from` on screen to the end of
+            /// the last `to`, and reports what the pane then has selected.
+            fn drag(harness: &mut Harness, pane: PaneId, from: &str, to: &str) -> Option<String> {
+                let scene = harness.frame();
+                let start = aim(
+                    painted(&scene, from)
+                        .unwrap_or_else(|| panic!("{from:?} is not on screen"))
+                        .0,
+                    0.1,
+                );
+                let end = aim(
+                    painted(&scene, to)
+                        .unwrap_or_else(|| panic!("{to:?} is not on screen"))
+                        .1,
+                    0.9,
+                );
+
+                harness.hold(start, 1);
+                harness.drag_to(end);
+                harness.let_go(end);
+                harness.terminal_selection(pane)
+            }
+
+            /// Puts two files with unmistakable names in a directory of their
+            /// own and moves the shell into it, so that the listing under test
+            /// is short enough to be on screen and says what it is.
+            fn scratch_directory(harness: &mut Harness, pane: PaneId) -> bool {
+                run(harness, pane, "cd \"$(mktemp -d)\" && touch ZULU YANKEE") > 0
+            }
+
+            #[test]
+            fn dragging_across_a_finished_command_s_output_copies_exactly_those_cells() {
+                // **The bug, in the words it was reported in: run `ls -la`,
+                // then go to select what it printed, and find that you
+                // cannot.** The command's rows were harvested out of the
+                // emulator the moment it ended, and the selection was still in
+                // the emulator — so everything a person had already run had
+                // become unselectable, which is the whole reason to look at a
+                // terminal.
+                let mut harness = Harness::panel(1);
+                let Some(pane) = marked_shell(&mut harness) else {
+                    return;
+                };
+                harness.frame();
+                if !scratch_directory(&mut harness, pane) {
+                    return;
+                }
+                run(&mut harness, pane, "ls -la");
+                await_prompt(&mut harness, pane);
+
+                // It really is a finished block: its rows are in the store,
+                // with the command that made them.
+                let last = block_count(&harness, pane) - 1;
+                assert_eq!(
+                    Some("ls -la"),
+                    harness
+                        .workspace
+                        .read(&harness.app, |workspace, app| {
+                            let blocks = workspace.terminal_blocks(pane, app)?;
+                            Some(blocks.get(last)?.command.clone())
+                        })
+                        .flatten()
+                        .as_deref(),
+                    "the newest block is not the listing"
+                );
+                assert!(block_text(&harness, pane, last).contains("ZULU"));
+
+                assert_eq!(
+                    Some("ZULU".to_owned()),
+                    drag(&mut harness, pane, "ZULU", "ZULU"),
+                    "a drag across a finished block's output selected something else"
+                );
+
+                // And the copy chord takes it and lets go of it, which is the
+                // only sign a copy happened at all.
+                harness.press("c", platform_chord(), "c");
+                assert_eq!(None, harness.terminal_selection(pane));
+            }
+
+            #[test]
+            fn with_nothing_selected_ctrl_c_still_interrupts_the_shell() {
+                // **The rule that must survive the whole of this**, on the
+                // surface the whole of this changed. Off macOS the copy chord
+                // is also SIGINT, and the collision is settled by the
+                // selection existing rather than by the key: with something
+                // selected it copies and *lets go*, so the very next press is
+                // the interrupt it has always been.
+                let mut harness = Harness::panel(1);
+                let Some(pane) = marked_shell(&mut harness) else {
+                    return;
+                };
+                harness.frame();
+                if run(&mut harness, pane, "echo MARKER") == 0 {
+                    return;
+                }
+                await_prompt(&mut harness, pane);
+
+                // A command that will not end on its own, so only an interrupt
+                // can let the next one run.
+                harness.type_field(pane, "sleep 30");
+                harness.press("enter", Modifiers::default(), "\r");
+                harness.settle(NO_LEAK_PATIENCE);
+
+                let ctrl = Modifiers {
+                    ctrl: true,
+                    ..Default::default()
+                };
+                assert_eq!(
+                    Some("MARKER".to_owned()),
+                    drag(&mut harness, pane, "MARKER", "MARKER"),
+                    "the finished block above the running command is selectable"
+                );
+                harness.press("c", ctrl, "c");
+                assert_eq!(
+                    None,
+                    harness.terminal_selection(pane),
+                    "the copy did not let go of the selection"
+                );
+
+                // Now nothing is selected, so this one is the interrupt.
+                harness.press("c", ctrl, "c");
+                harness.type_into(pane, "echo AFTER\n");
+                harness.wait_for("the second ctrl-c never reached the shell", |harness| {
+                    harness
+                        .workspace
+                        .read(&harness.app, |workspace, app| {
+                            let blocks = workspace.terminal_blocks(pane, app)?;
+                            Some(
+                                blocks
+                                    .iter()
+                                    .any(|block| block.rows.to_text().contains("AFTER")),
+                            )
+                        })
+                        .unwrap_or_default()
+                });
+            }
+
+            #[test]
+            fn a_selection_spanning_three_blocks_takes_the_ends_partly_and_the_middle_whole() {
+                let mut harness = Harness::panel(1);
+                let Some(pane) = marked_shell(&mut harness) else {
+                    return;
+                };
+                harness.frame();
+                if run(&mut harness, pane, "echo AAAA") == 0 {
+                    return;
+                }
+                run(&mut harness, pane, "echo BBBB");
+                run(&mut harness, pane, "echo CCCC");
+                await_prompt(&mut harness, pane);
+
+                let copied =
+                    drag(&mut harness, pane, "AAAA", "CCCC").expect("three blocks are selected");
+                assert!(
+                    copied.starts_with("AAAA"),
+                    "the first block is not taken from the press onwards: {copied:?}"
+                );
+                assert!(
+                    copied.ends_with("CCCC"),
+                    "the last block is not taken up to the release: {copied:?}"
+                );
+                assert!(
+                    copied.contains("echo BBBB") && copied.contains("\nBBBB"),
+                    "the block between them is not whole: {copied:?}"
+                );
+                assert!(
+                    copied.lines().count() >= 4,
+                    "three blocks in {copied:?} is not enough lines"
+                );
+            }
+
+            #[test]
+            fn a_selection_inside_the_open_block_still_works() {
+                let mut harness = Harness::panel(1);
+                let Some(pane) = marked_shell(&mut harness) else {
+                    return;
+                };
+                harness.frame();
+                if run(&mut harness, pane, "echo LIVE") == 0 {
+                    return;
+                }
+                // A command that keeps its block open, so the rows dragged
+                // across are the grid's rather than a store's.
+                harness.type_field(pane, "printf 'OPE%s\\n' N; sleep 30");
+                harness.press("enter", Modifiers::default(), "\r");
+                harness.wait_for("the command never printed", |harness| {
+                    harness.terminal_text(pane).contains("OPEN")
+                });
+                harness.frame();
+
+                assert_eq!(
+                    Some("OPEN".to_owned()),
+                    drag(&mut harness, pane, "OPEN", "OPEN")
+                );
+                harness.press("c", Modifiers::default(), "\u{3}");
+            }
+
+            #[test]
+            fn a_double_click_takes_a_word_of_a_finished_block_and_a_triple_click_its_line() {
+                let mut harness = Harness::panel(1);
+                let Some(pane) = marked_shell(&mut harness) else {
+                    return;
+                };
+                harness.frame();
+                if run(&mut harness, pane, "echo WORD LINE") == 0 {
+                    return;
+                }
+                await_prompt(&mut harness, pane);
+
+                let scene = harness.frame();
+                let at = aim(
+                    painted(&scene, "WORD").expect("the output is on screen").0,
+                    0.5,
+                );
+                harness.hold(at, 2);
+                harness.let_go(at);
+                assert_eq!(Some("WORD".to_owned()), harness.terminal_selection(pane));
+
+                harness.hold(at, 3);
+                harness.let_go(at);
+                assert_eq!(
+                    Some("WORD LINE".to_owned()),
+                    harness.terminal_selection(pane),
+                    "a triple click takes the whole row of a finished block"
+                );
+            }
+
+            #[test]
+            fn more_output_arriving_does_not_move_a_selection() {
+                // Nothing about a finished block moves when another command
+                // runs after it: it is a different item of the list, not more
+                // rows pushed under the same cells.
+                let mut harness = Harness::panel(1);
+                let Some(pane) = marked_shell(&mut harness) else {
+                    return;
+                };
+                harness.frame();
+                if run(&mut harness, pane, "echo KEEPME") == 0 {
+                    return;
+                }
+                await_prompt(&mut harness, pane);
+                assert_eq!(
+                    Some("KEEPME".to_owned()),
+                    drag(&mut harness, pane, "KEEPME", "KEEPME")
+                );
+
+                // Written straight to the shell rather than typed: typing is
+                // one of the rules that *does* let go of a selection, and what
+                // is under test here is the one thing that must not.
+                harness.type_into(pane, "echo LATER\n");
+                // For the *block* rather than for the text on screen: closing
+                // one harvests its rows and clears the grid above the next, so
+                // a wait that watched the viewport could miss the output
+                // between it arriving and being taken out.
+                harness.wait_for("the shell never ran the second command", |harness| {
+                    harness
+                        .workspace
+                        .read(&harness.app, |workspace, app| {
+                            let blocks = workspace.terminal_blocks(pane, app)?;
+                            Some(
+                                blocks
+                                    .iter()
+                                    .any(|block| block.rows.to_text().contains("LATER")),
+                            )
+                        })
+                        .unwrap_or_default()
+                });
+                harness.frame();
+                assert_eq!(
+                    Some("KEEPME".to_owned()),
+                    harness.terminal_selection(pane),
+                    "output arriving underneath a selection took it away"
+                );
+            }
+
+            #[test]
+            fn scrolling_the_list_does_not_move_a_selection() {
+                // The anchors name a block and a row of it, so the wheel moves
+                // the list under the highlight and neither of them minds.
+                let mut harness = Harness::panel(1);
+                let Some(pane) = marked_shell(&mut harness) else {
+                    return;
+                };
+                harness.frame();
+                if run(&mut harness, pane, "echo SCROLLME") == 0 {
+                    return;
+                }
+                for _ in 0..8 {
+                    run(&mut harness, pane, "echo FILLER");
+                }
+                await_prompt(&mut harness, pane);
+
+                // Back up the list far enough for the marker to be on screen,
+                // then select it and scroll away again.
+                harness.workspace_update(|workspace, ctx| {
+                    workspace.scroll_blocks(pane, -100., ctx);
+                });
+                let Some(copied) = drag(&mut harness, pane, "SCROLLME", "SCROLLME") else {
+                    panic!("the marker never came back into view");
+                };
+                assert_eq!("SCROLLME", copied);
+
+                harness.workspace_update(|workspace, ctx| {
+                    workspace.scroll_blocks(pane, 100., ctx);
+                });
+                harness.frame();
+                assert_eq!(
+                    Some("SCROLLME".to_owned()),
+                    harness.terminal_selection(pane),
+                    "scrolling the list moved the selection off its text"
+                );
+            }
+
+            #[test]
+            fn a_selection_across_a_folded_line_in_a_finished_block_copies_as_one_line() {
+                // The fold is a place the terminal put a line too long for the
+                // pane rather than something the shell printed, and the store
+                // a finished block's rows live in has to remember that.
+                let mut harness = Harness::panel(1);
+                let Some(pane) = marked_shell(&mut harness) else {
+                    return;
+                };
+                harness.frame();
+                let columns = harness.terminal_columns(pane);
+                let digits: String = (100..200).map(|number| number.to_string()).collect();
+                let long = format!("HEAD{digits}TAIL");
+                assert!(
+                    long.len() > columns,
+                    "the line has to be long enough to fold"
+                );
+                if run(
+                    &mut harness,
+                    pane,
+                    "printf 'HEAD'; printf '%s' $(seq 100 199); printf 'TAIL\\n'",
+                ) == 0
+                {
+                    return;
+                }
+                await_prompt(&mut harness, pane);
+
+                let copied =
+                    drag(&mut harness, pane, "HEAD", "TAIL").expect("the folded line is on screen");
+                assert_eq!(long, copied, "the fold came back as a break in the text");
+
+                // And the block's own copy control says the same thing. Two
+                // ways of copying one block that disagree about where its
+                // lines end is a wrapped path pasted as three commands.
+                let Some((clipboard, _system)) = working_clipboard(&harness) else {
+                    return;
+                };
+                let panel = panel_of_the_pane(&mut harness);
+                let scene = hover_block(&mut harness, pane, 0);
+                let controls = copy_controls(&scene, panel);
+                assert_eq!(controls.len(), 1, "one control, on the hovered block");
+                harness.click(center(controls[0]), MouseButton::Left);
+
+                let whole = clipboard.read().unwrap_or_default();
+                assert!(
+                    whole.contains(&long),
+                    "the control broke the folded line the drag ran on: {whole:?}"
+                );
+            }
+
+            #[test]
+            fn a_selection_goes_when_the_pane_falls_back_to_the_grid() {
+                // A command printing past the top of the viewport takes the
+                // pane from the list to the grid, and the two number their
+                // rows differently — a block from its own first row, a grid
+                // from the oldest line of the scrollback. Reading the anchors
+                // against the surface that did not make them copies text
+                // nobody selected; keeping them while the list is not on
+                // screen leaves `ctrl-c` claimed by a highlight nobody can
+                // see. So the pane lets go.
+                let mut harness = Harness::panel(1);
+                let Some(pane) = marked_shell(&mut harness) else {
+                    return;
+                };
+                harness.frame();
+                if run(&mut harness, pane, "echo MARKER") == 0 {
+                    return;
+                }
+                await_prompt(&mut harness, pane);
+                assert_eq!(
+                    Some("MARKER".to_owned()),
+                    drag(&mut harness, pane, "MARKER", "MARKER")
+                );
+
+                // Written straight to the pty: typing into the composer is one
+                // of the rules that lets go of a selection by itself, and what
+                // is under test is the surface changing.
+                harness.type_into(pane, "seq 1 400; sleep 30\n");
+                // Four hundred lines into a pane forty rows tall: the block
+                // this command opened starts a long way above the viewport,
+                // which is what `pane_surface::of` falls back to the grid on.
+                // For a number only the *output* can contain: the command line
+                // itself is echoed on screen, so waiting for "400" would match
+                // the moment the shell drew what was typed at it.
+                harness.wait_for("the command never overflowed the viewport", |harness| {
+                    harness.terminal_text(pane).contains("399")
+                });
+                harness.frame();
+
+                assert_eq!(
+                    None,
+                    harness.terminal_selection(pane),
+                    "a selection the pane is no longer drawing is still being copied"
+                );
+
+                // Which is the whole point: the interrupt is not spent on it.
+                let ctrl = Modifiers {
+                    ctrl: true,
+                    ..Default::default()
+                };
+                harness.press("c", ctrl, "c");
+                harness.type_into(pane, "echo AFTER\n");
+                harness.wait_for("the ctrl-c never reached the shell", |harness| {
+                    harness
+                        .workspace
+                        .read(&harness.app, |workspace, app| {
+                            let blocks = workspace.terminal_blocks(pane, app)?;
+                            Some(
+                                blocks
+                                    .iter()
+                                    .any(|block| block.rows.to_text().contains("AFTER")),
+                            )
+                        })
+                        .unwrap_or_default()
+                });
+            }
+
+            /// The rectangles the highlight put in one pane, as they were
+            /// asked for rather than as the clip left them.
+            ///
+            /// Deliberately unclipped: a highlight that runs past the pane is
+            /// exactly what is under test below, and the clip would hide it.
+            fn highlight(scene: &Scene, panel: RectF) -> Vec<RectF> {
+                scene
+                    .layers()
+                    .flat_map(|layer| layer.rects.iter())
+                    .filter(|rect| rect.background == Fill::Solid(crate::theme::theme().selection))
+                    .map(|rect| rect.bounds)
+                    .filter(|bounds| panel.contains_point(bounds.origin()))
+                    .collect()
+            }
+
+            #[test]
+            fn an_alt_drag_across_two_blocks_bridges_as_the_column_it_is() {
+                // The highlight bridges the padding between two blocks so that
+                // a selection running through it reads as one selection. A
+                // rectangle runs through it as a column — a full-width bar
+                // across the gap would be the one part of an alt-drag that
+                // took whole rows.
+                let mut harness = Harness::panel(1);
+                let Some(pane) = marked_shell(&mut harness) else {
+                    return;
+                };
+                harness.frame();
+                if run(&mut harness, pane, "echo ALPHAALPHA") == 0 {
+                    return;
+                }
+                run(&mut harness, pane, "echo BRAVOBRAVO");
+                await_prompt(&mut harness, pane);
+
+                let scene = harness.frame();
+                let start = aim(
+                    painted(&scene, "ALPHAALPHA")
+                        .expect("the first block is on screen")
+                        .0,
+                    0.1,
+                );
+                let end = aim(
+                    painted(&scene, "BRAVOBRAVO")
+                        .expect("the second block is on screen")
+                        .0,
+                    0.9,
+                );
+                harness.hold_alt(start, 1);
+                harness.drag_to(end);
+                harness.let_go(end);
+
+                let panel = panel_of_the_pane(&mut harness);
+                let cell = CellFont::headless(CELL_FONT_SIZE).metrics().width;
+                let bands = highlight(&harness.frame(), panel);
+                assert!(!bands.is_empty(), "the rectangle painted nothing");
+                for band in bands {
+                    assert!(
+                        band.width() <= cell * 2.,
+                        "a one-column rectangle painted a {}px band across the gap",
+                        band.width()
+                    );
+                }
+            }
+
+            #[test]
+            fn a_highlight_stops_where_the_pane_stops_drawing_the_row() {
+                // A finished block keeps the width it was harvested at, so a
+                // pane narrowed since holds rows it cannot draw. The
+                // highlight is the picture, so it stops with the glyphs; the
+                // copy still takes the whole row, because those cells are the
+                // block's text.
+                let mut harness = Harness::panel(1);
+                let Some(pane) = marked_shell(&mut harness) else {
+                    return;
+                };
+                harness.frame();
+                if run(&mut harness, pane, "printf 'ONEONE\\nTWOTWO\\n'") == 0 {
+                    return;
+                }
+                await_prompt(&mut harness, pane);
+
+                harness.dispatch_action(TabAction::Split(Direction::Right));
+                harness.frame();
+                let panel = panel_of_the_pane(&mut harness);
+                assert_eq!(
+                    Some("ONEONE\nTWOTWO".to_owned()),
+                    drag(&mut harness, pane, "ONEONE", "TWOTWO"),
+                    "the block harvested at the old width is still selectable"
+                );
+
+                for band in highlight(&harness.frame(), panel) {
+                    assert!(
+                        band.max_x() <= panel.max_x() + 0.5,
+                        "the highlight runs {}px past the pane it is in",
+                        band.max_x() - panel.max_x()
+                    );
+                }
+            }
         }
     }
 }

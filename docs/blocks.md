@@ -195,7 +195,81 @@ A list shorter than its box sits on the **bottom** of it. The composer is pinned
 output, and the whole reason it reads as the next line of the terminal is that the open
 block's last row is immediately above it.
 
-## 6. Chrome
+## 6. Selecting across the list
+
+`app/src/selection.rs` is the model, `app/src/pane_selection.rs` holds it per pane, and the
+two elements that draw output supply the arithmetic between a pixel and a cell. There is one
+implementation, and that is the point: two of them is what made a finished command
+unselectable in the first place.
+
+**The address space.** An anchor is `(block id, row of that block, column, side of the cell)`
+— not a cell of the grid. A block id is handed out once and never reused, and a block's rows
+never move within it, so a selection holds still through everything that used to move it: a
+command running below adds an *item* rather than shifting rows, the emulator scrolling changes
+which viewport row the open block's row seven is drawn on but not that it is row seven, and a
+command finishing copies its rows into the store in the order they were already in. Ids
+increase with position in the list, so ordering two anchors is one tuple comparison and the
+open block — always the newest — always sorts last.
+
+**The open block is not a special case.** It is the last item of the same list with its rows
+read out of the `Snapshot` instead of out of a store, and `crook_terminal::Rows` is the one
+type that knows the difference: `count`, `columns`, `cell`, `line_length`, `wraps`, `write`,
+answered twice each and nowhere else.
+
+**The grid is a list of one block.** A pane showing the alternate screen or an overflowing
+block has no finished blocks; it addresses as a single item whose rows are numbered from the
+oldest line the scrollback still holds, so the wheel moves the viewport without renaming
+anything. Copying reads those rows back out of the emulator with `Terminal::harvest_rows`,
+into the very store a finished block uses — which is how a drag through the scrollback copies
+text the snapshot never held. A screenful of slack is harvested at each end for what a double
+or triple click grows onto; a folded line longer than a whole screen is clipped there, and
+only there. A row of it that the wheel has taken off the screen has nothing to grow a word or
+a line against while it is out of sight, and is grown again when it comes back — the copy,
+which does not read the screen, has it whole either way.
+
+**The two numberings do not mix.** A block counts its rows from its own first and a grid counts
+from the oldest line of the history, so the same numbers name different characters on the two
+surfaces: which space an anchor was made in is part of it (`selection::Cells`), and nothing
+resolves it against the other. A pane crosses between the two on its own — a command printing
+past the top of the viewport, a full-screen program starting — and the selection is let go of
+when it does, exactly as a resize lets go of it. An invisible highlight that still owned the
+copy chord would be an interrupt spent on nothing.
+
+**What is knowingly not stable:** a grid selection held while the scrollback is *full*. Rows are
+numbered from the oldest line the history holds, and a full history drops that line for every
+new one, so the selection slides one row up the text per line printed. Counting the dropped
+lines is not something the emulator underneath can answer. It takes a command printing past a
+whole scrollback — ten thousand lines by default — while a selection is being held on the grid.
+
+**A word** is one UAX #29 word-bound segment of the folded line under the pointer, from
+`editor::text::word_range_at` — the same function the composer uses, so double-clicking a path
+in the output and in the line being typed select the same thing. It crosses a fold, because a
+fold is where the terminal put a long line; it never crosses a block, because that is a
+different command.
+
+**Painting** is one rectangle per row, under the glyphs, so selected text keeps its own
+colour. Between two selected blocks the highlight bridges the gap: a selection running out of
+one block and into the next is one run of text with a line break in it, the same thing a
+selection across two paragraphs is, and a highlight with a hole at every boundary would read
+as several selections that happen to touch. The band takes the columns of the row it continues
+so it lines up with the rows either side of it, which also makes an alt-drag bridge as the
+column it is rather than as a bar across the padding. The highlight is cut down to the columns
+the pane is drawing, so a block harvested at a wider width does not paint over the gutter; only
+the picture is short, and the copy still takes the whole row.
+
+**Copying** walks the blocks between the two ends: the ends partially, the ones between them
+whole, joined with one newline — so the padding, the dividers and the copy controls contribute
+nothing and you get the text you saw without the gutter. Inside a block, a row the terminal
+folded runs on into the next without a break, trailing blanks stay behind, and a double-width
+character copies once. A selection ends at cells, so there is no trailing newline. The block's
+own copy control takes the same region — the whole block, with the blank rows at its end
+trimmed off — rather than walking the store its own way, which is how the two came to disagree
+about where a folded line ends.
+
+A resize that changes the column count re-wraps the rows under a selection, so the selection is
+let go of rather than re-anchored onto text nobody selected.
+
+## 7. Chrome
 
 There is no box. A block has no border, no corner radius and no fill in its resting state.
 
@@ -228,7 +302,7 @@ copy.
 * **Thumb** — 4 px wide, 2 px inset, 24 px minimum, in the geometry `Scrollable` paints its
   own with, so the two scrollbars in the application match.
 
-## 7. The composer
+## 8. The composer
 
 `app/src/workspace/input_element.rs`, assembled in `body.rs`. **It is not a box.** No
 background, no corner radius, no side or bottom border, no margin, and no focus ring: the
@@ -258,7 +332,7 @@ all**: two cursors in one pane say nothing about which of them is listening. Onc
 has gone, the shell's own cursor is the only one there is, and it is filled where the pane has
 the keyboard and hollow where it does not.
 
-## 8. Resizing
+## 9. Resizing
 
 `body::PaneSizer` is the only thing that resizes a pty, and it measures the **pane's**
 rectangle, not the output's. The output's box changes whenever the composer appears, hides or
@@ -274,12 +348,6 @@ measured for the grid the last frame had is refreshed rather than painted into t
 
 Stage 1 of the port. These are absent on purpose, not overlooked:
 
-* **Cross-block selection.** Selection is still the emulator's, which means it works inside
-  the **open block and nowhere else**: a finished block's cells have been harvested out of the
-  emulator, so a drag cannot reach across two of them. Copying a whole finished block needs no
-  selection and is exact — that is what the hover control is for. The list-level selection that
-  would fix this is Stage 2, and it must be *one* implementation rather than two that have to
-  agree.
 * **Block selection.** No click-to-select, no shift-click, no accent wash, no per-block border.
 * **Keyboard block navigation.** No Cmd-Up / Cmd-Down, no scroll-to-top-of-block.
 * **The sticky header.** A block taller than the window scrolls like any other content; there

@@ -31,19 +31,32 @@
 //! straight from the [`Snapshot`], from the rows its anchor names and no
 //! others — the rows above those are stale copies of blocks already harvested.
 //!
-//! # What this does not do, and where the rest is
+//! # Selecting across it
 //!
-//! **Selection is still the emulator's**, so it works inside the open block
-//! and nowhere else: a finished block's cells are no longer in the emulator to
-//! drag across. Copying a whole finished block needs no selection and is
-//! exact — that is what the hover control does. Cross-block selection,
-//! multi-block selection, keyboard block navigation, the sticky header and the
-//! jump-to-bottom button are all deliberately absent; see `docs/blocks.md`.
+//! A press anywhere in the list starts a selection and a drag takes it as far
+//! as it goes — through the finished blocks, through the gaps between them and
+//! into the open one, because all of them are items of one address space and
+//! none of them is a special case. The anchors, the region and the copy are
+//! [`crate::selection`]; what is here is the arithmetic between a pixel and a
+//! cell, and the rectangles the highlight is drawn as.
+//!
+//! Two things the list does *not* draw a selection over. A pane showing one
+//! grid rather than a list is [`TerminalElement`](super::TerminalElement)'s,
+//! and a selection made here is let go of when the pane crosses to it, because
+//! the two number their rows differently — see
+//! [`Cells`](crate::selection::Cells). And a block harvested at a wider pane
+//! than the one drawing it holds rows that cannot be drawn: the highlight
+//! stops with the glyphs, while the copy still takes the whole row.
+//!
+//! Click-to-select a block, keyboard block navigation, the sticky header and
+//! the jump-to-bottom button are all deliberately absent; see
+//! `docs/blocks.md`.
 
+use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crook_terminal::{Block, BlockId, CellSide, LiveBlock, Snapshot, SnapshotCell, ViewportPoint};
+use crook_terminal::{Block, BlockId, CellSide, Rows, SelectionKind, Snapshot, SnapshotCell};
 use crookui_core::AppContext;
 use crookui_core::element::{Element, SizeConstraint};
 use crookui_core::event::{DispatchedEvent, Event, MouseButton};
@@ -56,6 +69,7 @@ use crate::clipboard::Clipboard;
 use crate::pane_blocks::{PaneBlocks, ScrollCause};
 use crate::pane_selection::PaneSelection;
 use crate::pane_surface;
+use crate::selection::{Anchor, Blocks, Cells, Item, Region, Selection};
 use crate::tab::PaneId;
 use crate::terminal_font::{CellFont, CellMetrics};
 use crate::terminal_model::{BlockHistory, TerminalHandle};
@@ -165,6 +179,21 @@ pub struct BlockList {
     scratch: Vec<SnapshotCell>,
 }
 
+/// Where one item's rows are painted, and which of them are on screen.
+#[derive(Copy, Clone, Debug)]
+struct RowBox {
+    /// The x the first column starts at.
+    left: f32,
+    /// The y the item's first row starts at.
+    rows_top: f32,
+    /// How many columns the list is drawing.
+    columns: usize,
+    /// The first row of the item that is in view.
+    first_visible: usize,
+    /// One past the last row of it that is.
+    last_visible: usize,
+}
+
 /// One item of the list that layout found in view.
 #[derive(Copy, Clone, Debug)]
 struct Visible {
@@ -214,17 +243,61 @@ impl BlockList {
         self
     }
 
-    /// Makes the open block selectable and the copy control useful: `gesture`
-    /// is the press this pane has open, `clipboard` is where a copy goes, and
-    /// `pane` is who the release is dispatched for.
+    /// Makes the list selectable and the copy control useful: `gesture` is
+    /// this pane's selection, `clipboard` is where a copy goes, and `pane` is
+    /// who the release is dispatched for.
     pub fn with_selection(
         mut self,
         pane: PaneId,
         gesture: PaneSelection,
         clipboard: Clipboard,
     ) -> Self {
-        self.output = self.output.with_selection(pane, gesture, clipboard);
+        self.output = self
+            .output
+            .with_selection(pane, gesture, clipboard, Cells::List);
         self
+    }
+
+    /// The blocks a selection in this pane addresses: the finished commands,
+    /// then the open one.
+    fn addressed(&self) -> Blocks<'_> {
+        Blocks::list(&self.blocks, &self.snapshot)
+    }
+
+    /// The rows of one item of the list, out of whichever store holds them.
+    fn rows_of(&self, index: usize) -> Rows<'_> {
+        match self.block(index) {
+            Some(block) => Rows::Stored(&block.rows),
+            None => match self.live_rows() {
+                Some((top, bottom)) => Rows::Live {
+                    snapshot: &self.snapshot,
+                    top,
+                    count: bottom - top + 1,
+                },
+                // The open block has printed nothing yet, so it holds no rows
+                // rather than one blank one.
+                None => Rows::Live {
+                    snapshot: &self.snapshot,
+                    top: 0,
+                    count: 0,
+                },
+            },
+        }
+    }
+
+    /// How many columns of a row this list actually draws.
+    ///
+    /// The hit test and the paint both go through it, because a column the
+    /// list is too narrow to draw is a column a drag must not be able to
+    /// reach.
+    fn drawn_columns(&self) -> usize {
+        let size = self.size.unwrap_or_default();
+        usize::from(
+            self.font
+                .metrics()
+                .grid_for(size.x() - GUTTER * 2., size.y())
+                .0,
+        )
     }
 
     /// The item index of the open block.
@@ -246,7 +319,7 @@ impl BlockList {
     /// The rows of the snapshot the open block occupies, or `None` when it has
     /// printed nothing yet.
     fn live_rows(&self) -> Option<(usize, usize)> {
-        live_rows(&self.snapshot)
+        self.snapshot.live_rows()
     }
 
     /// What this pane is drawing, as of now.
@@ -281,11 +354,12 @@ impl BlockList {
         let Some(start) = self.inline_start() else {
             return false;
         };
-        let Some((_, last)) = self.live_rows() else {
+        let Some((first, last)) = self.live_rows() else {
             return false;
         };
-        self.cell_at(position)
-            .is_some_and(|(at, _)| at.row == last && at.column >= start)
+        self.anchor_at(position).is_some_and(|at| {
+            at.block == self.snapshot.live_block.id && at.row == last - first && at.column >= start
+        })
     }
 
     /// Brings the height index up to date with this frame's blocks, and walks
@@ -394,41 +468,64 @@ impl BlockList {
         ))
     }
 
-    /// The cell of the *viewport* a window position lands on, and which half of
-    /// it the pointer is on.
+    /// Which cell of the list a window position lands on, and which side of it
+    /// the pointer is on.
     ///
-    /// Only the open block answers: it is the only item whose rows are still
-    /// in the emulator, and the emulator is where a selection has to live to
-    /// stay anchored to its text while the shell prints. A position above the
-    /// open block clamps to its first row and one below it to its last, which
-    /// is what a drag that has left the block means.
-    fn cell_at(&self, position: Vector2F) -> Option<(ViewportPoint, CellSide)> {
+    /// Every item answers, not only the open one: a finished block's rows are
+    /// in a store rather than in the emulator, and the whole point of the
+    /// address space is that this does not matter. Clamped into the list
+    /// rather than refused outside it, because a drag that has left the pane is
+    /// still selecting — past the bottom means the last row of the last item
+    /// on screen, which is the one [`Self::autoscroll`] is about to bring more
+    /// of into view.
+    fn anchor_at(&self, position: Vector2F) -> Option<Anchor> {
         let bounds = self.bounds()?;
-        let live = *self
-            .window
-            .iter()
-            .find(|item| item.index == self.live_index())?;
-        let (first, last) = self.live_rows()?;
-
         let metrics = self.font.metrics();
         let local = position - bounds.origin();
-        let rows_top = live.top + PADDING_TOP * metrics.height;
-        let row = ((local.y() - rows_top) / metrics.height)
-            .floor()
-            .clamp(0., (last - first) as f32) as usize;
 
-        let columns = usize::from(
-            metrics
-                .grid_for(bounds.width() - GUTTER * 2., bounds.height())
-                .0,
-        )
-        .min(self.snapshot.columns);
+        // The item the pointer is inside, or the nearest end of the window.
+        let item = *self
+            .window
+            .iter()
+            .find(|item| local.y() < item.top + item.height)
+            .or_else(|| self.window.last())?;
+
+        let rows = self.rows_of(item.index);
+        let count = rows.count();
+        if count == 0 {
+            return None;
+        }
+        let columns = self.drawn_columns().min(rows.columns());
         if columns == 0 {
             return None;
         }
+
+        let rows_top = item.top + self.padding_top(item.index) * metrics.height;
+        let row = ((local.y() - rows_top) / metrics.height)
+            .floor()
+            .clamp(0., (count - 1) as f32) as usize;
         let (column, side) =
             terminal_element::column_at(local.x() - GUTTER, metrics.width, columns);
-        Some((ViewportPoint::new(first + row, column), side))
+        Some(Anchor::new(self.id(item.index), row, column, side))
+    }
+
+    /// The space above an item's first row, in lines.
+    ///
+    /// One number, asked by the height index, the painter and the hit test, so
+    /// that a click lands on the row it looks like it lands on.
+    fn padding_top(&self, index: usize) -> f32 {
+        padding_top(self.block(index).map(Arc::as_ref))
+    }
+
+    /// Whether the selection this gesture would make covers any cells.
+    ///
+    /// Only the list can answer it — the anchors name blocks, and the blocks
+    /// are here — so it is answered here and handed to the state, which keeps
+    /// a selection only once it is a real one.
+    fn covers(&self, kind: SelectionKind, anchor: Anchor, head: Anchor) -> bool {
+        Selection::new(kind, anchor, head)
+            .region(&self.addressed())
+            .is_some()
     }
 
     /// How far to scroll before a drag lands, when the pointer has left the
@@ -530,26 +627,10 @@ impl BlockList {
             return true;
         }
 
-        let Some(bounds) = self
+        if !self
             .bounds()
-            .filter(|bounds| bounds.contains_point(*position))
-        else {
-            return false;
-        };
-
-        // **A press on a finished block does not start a selection.** Its
-        // cells were harvested out of the emulator when the command ended, and
-        // a selection has to live there to stay anchored to its text while the
-        // shell prints — so there is nothing under the pointer to drag out.
-        // Letting go of whatever *was* selected is still right, for the same
-        // reason a plain click anywhere on the output is.
-        let live_top = self
-            .window
-            .iter()
-            .find(|item| item.index == self.live_index())
-            .map_or(f32::INFINITY, |item| item.top);
-        if position.y() - bounds.origin().y() < live_top {
-            self.output.release_selection(ctx);
+            .is_some_and(|bounds| bounds.contains_point(*position))
+        {
             return false;
         }
 
@@ -561,11 +642,16 @@ impl BlockList {
             return false;
         }
 
-        let Some((at, side)) = self.cell_at(*position) else {
+        let Some(at) = self.anchor_at(*position) else {
             return false;
         };
+        let kind = selection_kind(*click_count, modifiers.alt);
+        // A double or triple click selects on its own; a single one selects
+        // nothing until it is dragged, which is what makes a plain click on
+        // the output let go of the last selection.
+        let covers = self.covers(kind, at, at);
         self.output
-            .press(at, side, selection_kind(*click_count, modifiers.alt), ctx)
+            .press(kind, at, covers, self.snapshot.columns, ctx)
     }
 
     /// Copies a block whose control was pressed and released, or ends a
@@ -588,15 +674,46 @@ impl BlockList {
     /// Exactly that block's text, with no neighbour's and no trailing blank
     /// rows: the rows were harvested when the command ended, so this is what
     /// was on screen and nothing else. This is the thing scrollback cannot do.
+    ///
+    /// **Through the same region a drag over the block makes**, rather than
+    /// through a second walk of the store. Two implementations disagree, and
+    /// these two disagreed about the one thing a terminal must not get wrong
+    /// in a copy: a line too long for the pane, which the control used to hand
+    /// over with the terminal's own fold turned into a newline. Pasting that
+    /// runs a path or a URL as three commands.
     fn copy_block(&self, id: BlockId) -> bool {
-        let Some(block) = self.blocks.iter().find(|block| block.id == id) else {
+        let Some(text) = self.whole_block(id) else {
             return false;
         };
-        self.output.copy(block.rows.to_text().trim_end())
+        self.output.copy(text.trim_end())
+    }
+
+    /// One whole block as a copy of it would read.
+    fn whole_block(&self, id: BlockId) -> Option<String> {
+        let blocks = self.addressed();
+        let item = blocks.item(blocks.index_of(id)?)?;
+        let last = item.rows.count().checked_sub(1)?;
+        Selection::new(
+            SelectionKind::Simple,
+            Anchor::new(id, 0, 0, CellSide::Left),
+            Anchor::new(
+                id,
+                last,
+                item.rows.columns().saturating_sub(1),
+                CellSide::Right,
+            ),
+        )
+        .text(&blocks)
     }
 
     /// Paints one item of the list.
-    fn paint_item(&mut self, origin: Vector2F, item: Visible, ctx: &mut PaintContext) {
+    fn paint_item(
+        &mut self,
+        origin: Vector2F,
+        item: Visible,
+        region: Option<Region>,
+        ctx: &mut PaintContext,
+    ) {
         let metrics = self.font.metrics();
         let size = self.size.unwrap_or_default();
         let top = origin.y() + item.top;
@@ -644,8 +761,10 @@ impl BlockList {
         }
 
         let left = origin.x() + GUTTER;
-        let rows_top = top + PADDING_TOP * metrics.height;
-        let columns = usize::from(metrics.grid_for(size.x() - GUTTER * 2., size.y()).0);
+        let rows_top = top + self.padding_top(item.index) * metrics.height;
+        let columns = self.drawn_columns();
+        let id = self.id(item.index);
+        self.paint_gaps(origin, item, region, rows_top, ctx);
 
         // The rows of *this* item that are on screen. The same arithmetic the
         // list does over its items, applied inside one of them, which is what
@@ -655,8 +774,16 @@ impl BlockList {
 
         match self.block(item.index).cloned() {
             Some(block) => {
+                let item = Item {
+                    id,
+                    rows: Rows::Stored(&block.rows),
+                    first: 0,
+                };
                 let rows = block.rows.rows().min(last_visible);
                 for row in first_visible..rows {
+                    let selected = region
+                        .and_then(|region| region.columns_on(&item, row))
+                        .map(|selected| clamped(selected, columns));
                     let marks = block.rows.materialise(row, &mut self.scratch);
                     let cells = &self.scratch[..self.scratch.len().min(columns)];
                     let top = rows_top + row as f32 * metrics.height;
@@ -675,6 +802,9 @@ impl BlockList {
                     terminal_element::paint_backgrounds(
                         cells, ground, left, top, metrics, ctx.scene,
                     );
+                    if let Some(selected) = selected {
+                        paint_selection(selected, left, top, metrics, ctx.scene);
+                    }
                     terminal_element::paint_rules(cells, left, top, metrics, ctx.scene);
                     terminal_element::paint_glyphs(
                         cells,
@@ -690,7 +820,82 @@ impl BlockList {
                     );
                 }
             }
-            None => self.paint_live(left, rows_top, columns, first_visible, last_visible, ctx),
+            None => self.paint_live(
+                RowBox {
+                    left,
+                    rows_top,
+                    columns,
+                    first_visible,
+                    last_visible,
+                },
+                region,
+                ctx,
+            ),
+        }
+    }
+
+    /// Fills the padding above and below an item's rows when the selection
+    /// runs through the gap into the block on the other side of it.
+    ///
+    /// See [`paint_gap`] for why it bridges at all.
+    fn paint_gaps(
+        &self,
+        origin: Vector2F,
+        item: Visible,
+        region: Option<Region>,
+        rows_top: f32,
+        ctx: &mut PaintContext,
+    ) {
+        let Some(region) = region else {
+            return;
+        };
+        let metrics = self.font.metrics();
+        let block = Item {
+            id: self.id(item.index),
+            rows: self.rows_of(item.index),
+            first: 0,
+        };
+        let count = block.rows.count();
+        if count == 0 {
+            return;
+        }
+        let columns = self.drawn_columns();
+        let left = origin.x() + GUTTER;
+        let top = origin.y() + item.top;
+
+        // The band takes the columns of the row it continues, rather than the
+        // whole width: a run of text leaving the last row of a block leaves it
+        // wherever it started on that row, and an alt-drag crossing the gap is
+        // a column rather than a bar across the padding.
+        let band = |row| {
+            region
+                .columns_on(&block, row)
+                .map(|selected| clamped(selected, columns))
+                .filter(|selected| !selected.is_empty())
+        };
+
+        // Above the first row, when the selection came into this block from
+        // the one before it.
+        if let Some(columns) = band(0).filter(|_| region.start.block < block.id) {
+            paint_gap(
+                RectF::from_points(vec2f(left, top), vec2f(left, rows_top)),
+                columns,
+                left,
+                metrics,
+                ctx.scene,
+            );
+        }
+        // And below the last row, when it goes on into the block after this
+        // one.
+        let bottom = rows_top + count as f32 * metrics.height;
+        if let Some(columns) = band(count - 1).filter(|_| region.end.block > block.id) {
+            paint_gap(
+                RectF::from_points(vec2f(left, bottom), vec2f(left, top + item.height)),
+                columns,
+                left,
+                metrics,
+                ctx.scene,
+            );
         }
     }
 
@@ -699,20 +904,28 @@ impl BlockList {
     /// Only the rows its anchor names: everything above them is a stale copy
     /// of blocks that have already been harvested into the store, and drawing
     /// those would show the same output twice.
-    fn paint_live(
-        &mut self,
-        left: f32,
-        rows_top: f32,
-        columns: usize,
-        first_visible: usize,
-        last_visible: usize,
-        ctx: &mut PaintContext,
-    ) {
+    fn paint_live(&mut self, at: RowBox, region: Option<Region>, ctx: &mut PaintContext) {
+        let RowBox {
+            left,
+            rows_top,
+            columns,
+            first_visible,
+            last_visible,
+        } = at;
         let metrics = self.font.metrics();
         let Some((first, last)) = self.live_rows() else {
             return;
         };
         let ground = self.snapshot.background;
+        let item = Item {
+            id: self.snapshot.live_block.id,
+            rows: Rows::Live {
+                snapshot: &self.snapshot,
+                top: first,
+                count: last - first + 1,
+            },
+            first: 0,
+        };
 
         let count = last - first + 1;
         for row in first_visible..count.min(last_visible) {
@@ -721,15 +934,12 @@ impl BlockList {
             let top = rows_top + row as f32 * metrics.height;
 
             terminal_element::paint_backgrounds(cells, ground, left, top, metrics, ctx.scene);
-            paint_selection(
-                &self.snapshot,
-                source,
-                cells.len(),
-                left,
-                top,
-                metrics,
-                ctx.scene,
-            );
+            if let Some(selected) = region
+                .and_then(|region| region.columns_on(&item, row))
+                .map(|selected| clamped(selected, columns))
+            {
+                paint_selection(selected, left, top, metrics, ctx.scene);
+            }
             terminal_element::paint_rules(cells, left, top, metrics, ctx.scene);
             terminal_element::paint_glyphs(
                 cells,
@@ -908,6 +1118,7 @@ impl Element for BlockList {
                 self.snapshot = handle.snapshot();
             }
         }
+        self.output.laid_out(self.snapshot.columns);
 
         self.measure(size);
         size
@@ -937,8 +1148,15 @@ impl Element for BlockList {
             .draw_rect_without_hit_recording(RectF::new(origin, size))
             .with_background(color(self.snapshot.background));
 
+        // Resolved once for the frame rather than once per row: a double
+        // click asks the text under it where the word ends, and asking that
+        // eighty times a screen would be a walk of the block per row.
+        let region = self
+            .output
+            .selection()
+            .and_then(|selection| selection.region(&self.addressed()));
         for item in std::mem::take(&mut self.window) {
-            self.paint_item(origin, item, ctx);
+            self.paint_item(origin, item, region, ctx);
             self.window.push(item);
         }
         self.paint_control(origin, ctx);
@@ -1029,22 +1247,24 @@ impl BlockList {
     /// Drags the open end of the selection to the pointer, scrolling the list
     /// when the pointer has left it.
     ///
-    /// The *list* scrolls, not the emulator: the emulator's viewport is where
-    /// the open block's rows are, and moving it under a selection anchored to
-    /// them is the one thing that would make a drag select text nobody
-    /// dragged over.
+    /// The *list* scrolls, and nothing else: the anchors name blocks and rows
+    /// of blocks, so what the emulator's own viewport is doing underneath is
+    /// none of a selection's business. That is the whole reason a selection
+    /// made in a block that has since scrolled off the top still copies the
+    /// text it was drawn around.
     fn drag(&self, position: Vector2F, ctx: &mut EventContext) -> bool {
-        if !self.output.is_dragging() {
-            return false;
-        }
-        let lines = self.autoscroll(position);
-        if lines != 0. {
-            self.view.apply(ScrollCause::Wheel(lines));
-        }
-        let Some((at, side)) = self.cell_at(position) else {
+        let Some((kind, anchor)) = self.output.pressed() else {
             return false;
         };
-        self.output.drag(at, side, 0, ctx)
+        let lines = self.autoscroll(position);
+        if lines != 0. && self.view.apply(ScrollCause::Wheel(lines)) {
+            ctx.notify();
+        }
+        let Some(at) = self.anchor_at(position) else {
+            return false;
+        };
+        let covers = self.covers(kind, anchor, at);
+        self.output.drag(at, covers, ctx)
     }
 }
 
@@ -1061,12 +1281,25 @@ fn block_height(block: &Block) -> f32 {
     PADDING_TOP + rows + PADDING_BOTTOM
 }
 
+/// The space above one item's first row, in lines.
+///
+/// `None` is the open block, which always has it. A finished block with no
+/// command has none, which is the other half of [`block_height`]'s rule — and
+/// they have to be the same rule, or the rows are painted somewhere other than
+/// where the height index says the item is and a press lands a row out.
+fn padding_top(block: Option<&Block>) -> f32 {
+    match block {
+        Some(block) if block.command.is_none() => 0.,
+        _ => PADDING_TOP,
+    }
+}
+
 /// How tall the open block is, in lines.
 ///
 /// Zero when it has printed nothing, so a prompt that has not arrived yet
 /// leaves no gap above the composer.
 fn live_height(snapshot: &Snapshot, composer: bool) -> f32 {
-    let Some((first, last)) = live_rows(snapshot) else {
+    let Some((first, last)) = snapshot.live_rows() else {
         return 0.;
     };
     // With a composer under it, no bottom padding at all: what follows the
@@ -1130,32 +1363,11 @@ pub(super) fn inline_start(
         return None;
     }
     let prompt = snapshot.live_block.prompt_end?;
-    let (_, last) = live_rows(snapshot)?;
+    let (_, last) = snapshot.live_rows()?;
     if prompt.row < 0 || prompt.row as usize != last || prompt.column >= snapshot.columns {
         return None;
     }
     Some(prompt.column)
-}
-
-/// The first and last viewport rows the open block occupies, or `None` when it
-/// has printed nothing yet.
-///
-/// The anchor is already resolved against the display offset, so this is
-/// arithmetic on viewport rows. It is clamped into the grid because the anchor
-/// may name a row above the viewport — at which point the pane is drawn as a
-/// grid instead and this list is not on screen at all.
-fn live_rows(snapshot: &Snapshot) -> Option<(usize, usize)> {
-    let LiveBlock {
-        top_row,
-        bottom_row,
-        ..
-    } = snapshot.live_block;
-    if snapshot.rows == 0 || bottom_row < top_row || bottom_row < 0 {
-        return None;
-    }
-    let first = top_row.max(0) as usize;
-    let last = (bottom_row as usize).min(snapshot.rows - 1);
-    (first <= last).then_some((first, last))
 }
 
 /// An extent to lay out at, given a maximum that may be unbounded.
@@ -1163,36 +1375,75 @@ fn bounded(max: f32, min: f32) -> f32 {
     if max.is_finite() { max } else { min }
 }
 
-/// Fills the cells of one open-block row that are inside the selection.
+/// A selected run of columns, cut down to the ones this list is drawing.
+///
+/// A finished block keeps the width it was harvested at, so a pane narrowed
+/// since holds rows wider than it can draw — and a highlight painted at the
+/// stored width would run out past the last glyph, over the gutter and the
+/// scrollbar. The copy still takes the whole row: those cells are the block's
+/// text, and only the picture is short.
+fn clamped(columns: Range<usize>, drawn: usize) -> Range<usize> {
+    columns.start.min(drawn)..columns.end.min(drawn)
+}
+
+/// Fills the cells of one row that are inside the selection.
+///
+/// One rectangle, because the region gives one run of columns per row: a
+/// selected line costs a quad, not eighty. Drawn over the cells' own
+/// backgrounds and under everything else, so the highlight takes the colour
+/// the shell painted the cell and the character is still drawn on top of it in
+/// its own ink — selecting text changes its ground, never its colour.
 fn paint_selection(
-    snapshot: &Snapshot,
-    row: usize,
-    columns: usize,
+    columns: Range<usize>,
     left: f32,
     top: f32,
     metrics: CellMetrics,
     scene: &mut Scene,
 ) {
-    if snapshot.selection.is_none() {
+    if columns.is_empty() {
         return;
     }
-    let mut start = 0;
-    while start < columns {
-        if !snapshot.is_selected(row, start) {
-            start += 1;
-            continue;
-        }
-        let end = (start..columns)
-            .find(|column| !snapshot.is_selected(row, *column))
-            .unwrap_or(columns);
-        scene
-            .draw_rect_without_hit_recording(RectF::new(
-                vec2f(left + start as f32 * metrics.width, top),
-                vec2f((end - start) as f32 * metrics.width, metrics.height),
-            ))
-            .with_background(theme().selection);
-        start = end;
+    scene
+        .draw_rect_without_hit_recording(RectF::new(
+            vec2f(left + columns.start as f32 * metrics.width, top),
+            vec2f(columns.len() as f32 * metrics.width, metrics.height),
+        ))
+        .with_background(theme().selection);
+}
+
+/// Fills the padding above or below an item's rows when the selection runs
+/// through it.
+///
+/// **The highlight bridges the gap between two blocks, deliberately.** A
+/// selection that runs out of one block and into the next is one continuous
+/// run of text with a line break in it — the same thing a selection across two
+/// paragraphs is, where the space between them is highlighted too — and a
+/// highlight with a hole at every boundary would read as several selections
+/// that happen to be touching. The band takes the columns of the row it
+/// continues rather than the pane's width, so it lines up with the rows above
+/// and below it instead of bleeding past them — and an alt-drag, which takes
+/// the same few columns out of every row it crosses, bridges as the column it
+/// is rather than as a bar across the padding.
+///
+/// Nothing in the gap is copied: the padding, the divider and the copy control
+/// are chrome, and [`Region::text`] joins two blocks with the one newline
+/// between the last row of one and the first row of the next.
+fn paint_gap(
+    band: RectF,
+    columns: Range<usize>,
+    left: f32,
+    metrics: CellMetrics,
+    scene: &mut Scene,
+) {
+    if band.height() <= 0. || columns.is_empty() {
+        return;
     }
+    scene
+        .draw_rect_without_hit_recording(RectF::new(
+            vec2f(left + columns.start as f32 * metrics.width, band.min_y()),
+            vec2f(columns.len() as f32 * metrics.width, band.height()),
+        ))
+        .with_background(theme().selection);
 }
 
 #[cfg(test)]
