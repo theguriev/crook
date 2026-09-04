@@ -120,7 +120,7 @@ Seven features, and the page that configures them:
   of the one you are looking at — five candidate colours clustered out of its palette, one
   click to choose the background, and everything else decided so the result is legible. What
   it writes is a file in your themes folder, in the same format as any other.
-- **Git worktrees, one click away.** Click the tab you are already in and, if it is inside a
+- **Git worktrees, one click away.** Right-click a tab and, if it is inside a
   repository, its menu lists that repository's checkouts: the one this tab is in, the ones
   other tabs are in, and the rest. Choosing one opens a tab there — or brings forward the tab
   already in it, because two agents editing one checkout is exactly what a worktree exists to

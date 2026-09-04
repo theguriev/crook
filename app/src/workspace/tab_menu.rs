@@ -2,17 +2,19 @@
 //!
 //! # The gesture
 //!
-//! Clicking the tab you are already in. That gesture was free — the click
-//! dispatches `FocusPane` on a pane that is already focused, which resolves to
-//! `Unchanged` and repaints nothing — and it is the one a person reaches for
-//! when they want to know something *about* what they are working on rather
-//! than to switch to something else.
+//! Right-clicking a tab's row, in the strip or in the panel. This is a context
+//! menu — it is *about* the tab rather than a way to switch to it — and the
+//! secondary button is the one every desktop opens a context menu with. It was
+//! on the left button at first, on the row you were already in, where the
+//! click was otherwise free; that made it something you opened by accident on
+//! the way to the tab you were already in, and something no other tab could
+//! open at all.
 //!
 //! It opens only when that tab's focused pane is inside a git repository.
 //! A menu that opened everywhere and was empty half the time would teach
-//! people not to click; a gesture that does nothing where there is nothing to
-//! say is the same promise the branch chip already makes, which appears on a
-//! row exactly when there is a branch to name.
+//! people not to reach for it; a gesture that does nothing where there is
+//! nothing to say is the same promise the branch chip already makes, which
+//! appears on a row exactly when there is a branch to name.
 //!
 //! # What it is for
 //!

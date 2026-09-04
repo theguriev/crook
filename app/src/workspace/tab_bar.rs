@@ -1,10 +1,10 @@
 //! The horizontal tab strip: one rounded rect per row the strip says to draw.
 //!
 //! A row is a status dot, a text column, a close button and the box around
-//! them, and three gestures: click to focus, middle-click to close, and the
-//! close button. Every handler *emits* an action and none of them touches the
-//! strip, so no id captured while rendering can be stale by the time the frame
-//! is over.
+//! them, and four gestures: click to focus, right-click to open the tab's
+//! worktree menu, middle-click to close, and the close button. Every handler
+//! *emits* an action and none of them touches the strip, so no id captured
+//! while rendering can be stale by the time the frame is over.
 //!
 //! A row stands for a *pane*, in both granularities. Under `Panes` a tab
 //! contributes one row per pane it holds; under `Tabs` it contributes one, for
@@ -116,20 +116,17 @@ fn render_row(
     // Resolved once on the workspace rather than here: it is the same answer
     // for every string every row prints, and asking for it is a syscall.
     let home = workspace.home();
-    // The two facts the row's own click needs. A menu opens on the row you are
-    // already in, and only where there is a repository to have worktrees of —
-    // the same promise the branch chip makes, which appears exactly when there
-    // is a branch to name.
+    // The two facts the row's own right press needs. A menu opens on the row
+    // it landed on, and only where there is a repository to have worktrees of
+    // — the same promise the branch chip makes, which appears exactly when
+    // there is a branch to name.
     // The tab's *focused* pane's row, in both conditions. In `Panes`
     // granularity one tab draws a row per pane, and a menu that answered to
     // "is this my tab" would be drawn once per row — two popups over each
     // other, each with its own modal underlay.
     let is_the_tabs_row = tab_data.panes().focused_id() == pane;
     let menu_is_open = is_the_tabs_row && workspace.tab_menu().tab == Some(tab);
-    let opens_menu = menu_is_open
-        || (strip.is_active(tab)
-            && is_the_tabs_row
-            && git.is_some_and(|facts| facts.branch.is_some()));
+    let opens_menu = is_the_tabs_row && git.is_some_and(|facts| facts.branch.is_some());
 
     // The one selected row in the whole bar.
     let is_selected = strip.is_active(tab) && tab_data.panes().is_focused(pane);
@@ -226,19 +223,22 @@ fn render_row(
         if guard.lock().is_hovered() {
             return;
         }
-        // Clicking the row you are already in opens its menu instead of
-        // focusing what is already focused. That gesture was doing nothing at
-        // all — `FocusPane` on the focused pane resolves to `Unchanged` and
-        // repaints nothing — and it is the one somebody reaches for when they
-        // want to know something *about* what they are working on.
-        ctx.dispatch_typed_action(if opens_menu {
-            WorkspaceAction::Worktree(WorktreeAction::OpenMenu(tab))
-        } else {
-            WorkspaceAction::Tab(TabAction::FocusPane(pane))
-        });
+        ctx.dispatch_typed_action(WorkspaceAction::Tab(TabAction::FocusPane(pane)));
     })
     .on_middle_click(move |_, ctx, _| {
         ctx.dispatch_typed_action(WorkspaceAction::Tab(close_action));
+    })
+    // The secondary button, because this is a context menu and that is the
+    // button a context menu opens on everywhere else. It was on the left one
+    // — on the row you were already in, where the click was otherwise free —
+    // and that made the menu something you could open by accident while
+    // reaching for the tab you are already in, and something you could not
+    // open at all on any other tab.
+    .on_right_click(move |_, ctx, _| {
+        if !opens_menu {
+            return;
+        }
+        ctx.dispatch_typed_action(WorkspaceAction::Worktree(WorktreeAction::OpenMenu(tab)));
     })
     // Warp arms its detail sidecar on the very first hover event, with no
     // timer anywhere in the path, and a port that added the 300ms a tooltip

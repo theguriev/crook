@@ -1089,9 +1089,11 @@ impl Workspace {
 
     /// Opens the menu on a tab, and reads the repository behind it.
     ///
-    /// Clicking the tab whose menu is already up closes it, which is the
-    /// gear's rule and the one a person expects of anything that opens by
-    /// being clicked.
+    /// Pressing again on the tab whose menu is already up closes it, which is
+    /// the gear's rule and the one a person expects of anything that opens by
+    /// being clicked. In practice the modal underlay gets that press first and
+    /// dismisses on it; this is what makes the toggle right anyway, for the
+    /// keyboard and for anything else that dispatches the action.
     fn open_tab_menu(&mut self, tab: TabId, ctx: &mut ViewContext<Self>) {
         if self.tab_menu.tab == Some(tab) {
             self.close_tab_menu(ctx);

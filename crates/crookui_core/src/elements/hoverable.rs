@@ -68,6 +68,7 @@ pub struct Hoverable {
     hover_handler: Option<HoverHandler>,
     click_handler: Option<ClickHandler>,
     middle_click_handler: Option<ClickHandler>,
+    right_click_handler: Option<ClickHandler>,
 }
 
 impl Hoverable {
@@ -89,6 +90,7 @@ impl Hoverable {
             hover_handler: None,
             click_handler: None,
             middle_click_handler: None,
+            right_click_handler: None,
         }
     }
 
@@ -107,6 +109,19 @@ impl Hoverable {
         F: 'static + FnMut(Vector2F, &mut EventContext, &AppContext),
     {
         self.middle_click_handler = Some(Box::new(handler));
+        self
+    }
+
+    /// Runs `handler` on a right press, which conventionally opens a context
+    /// menu.
+    ///
+    /// On the press rather than on the release, the way every desktop opens a
+    /// context menu — and the way [`Self::on_middle_click`] already works.
+    pub fn on_right_click<F>(mut self, handler: F) -> Self
+    where
+        F: 'static + FnMut(Vector2F, &mut EventContext, &AppContext),
+    {
+        self.right_click_handler = Some(Box::new(handler));
         self
     }
 
@@ -222,6 +237,18 @@ impl Element for Hoverable {
                 ..
             } => {
                 if let Some(handler) = self.middle_click_handler.as_mut() {
+                    handler(*position, ctx, app);
+                    ctx.notify();
+                    return true;
+                }
+            }
+
+            Event::MouseDown {
+                button: MouseButton::Right,
+                position,
+                ..
+            } => {
+                if let Some(handler) = self.right_click_handler.as_mut() {
                     handler(*position, ctx, app);
                     ctx.notify();
                     return true;

@@ -2895,10 +2895,12 @@ fn worktree_menu_box(scene: &Scene) -> Option<RectF> {
 }
 
 #[test]
-fn clicking_the_tab_you_are_already_in_opens_its_worktree_menu() {
-    // The gesture, and the whole of why it is this one: clicking the active
-    // row dispatched `FocusPane` on a pane that was already focused, which
-    // resolved to `Unchanged` and repainted nothing. It was free.
+fn right_clicking_a_tab_opens_its_worktree_menu() {
+    // The gesture, and the whole of why it is this one: it is the button a
+    // context menu opens on everywhere else. The left one used to do it — on
+    // the row you were already in, where the click was otherwise free — and
+    // that made the menu something you opened by accident on the way to the
+    // tab you were already in.
     let mut harness = Harness::seeded();
     let scene = harness.frame();
     assert!(
@@ -2907,39 +2909,54 @@ fn clicking_the_tab_you_are_already_in_opens_its_worktree_menu() {
     );
 
     let tab = tab_boxes(&scene)[0];
-    harness.click(center(tab), MouseButton::Left);
+    harness.click(center(tab), MouseButton::Right);
 
     assert!(
         worktree_menu_box(&harness.frame()).is_some(),
-        "the row you are in did not open its menu"
+        "a right press on a row did not open its menu"
     );
 }
 
 #[test]
-fn clicking_it_again_takes_the_menu_down() {
+fn left_clicking_the_tab_you_are_already_in_opens_nothing() {
+    // The other half of moving the gesture: the primary button focuses and
+    // does nothing else, on the active row as much as on any other.
     let mut harness = Harness::seeded();
     let tab = tab_boxes(&harness.frame())[0];
 
     harness.click(center(tab), MouseButton::Left);
-    harness.frame();
-    harness.click(center(tab), MouseButton::Left);
 
     assert!(
         worktree_menu_box(&harness.frame()).is_none(),
-        "a second click on the same row left the menu up"
+        "a left click on the active row opened the worktree menu"
+    );
+}
+
+#[test]
+fn right_clicking_it_again_takes_the_menu_down() {
+    let mut harness = Harness::seeded();
+    let tab = tab_boxes(&harness.frame())[0];
+
+    harness.click(center(tab), MouseButton::Right);
+    harness.frame();
+    harness.click(center(tab), MouseButton::Right);
+
+    assert!(
+        worktree_menu_box(&harness.frame()).is_none(),
+        "a second right press on the same row left the menu up"
     );
 }
 
 #[test]
 fn a_tab_outside_a_repository_opens_no_menu() {
     // "If it is under git, there should be worktree options" — and if it is
-    // not, the click goes on doing what it always did. A menu that opened
-    // everywhere and was empty half the time would teach people not to click.
+    // not, the press does nothing. A menu that opened everywhere and was empty
+    // half the time would teach people not to reach for it.
     let mut harness = Harness::new(1);
     let scene = harness.frame();
     let tab = tab_boxes(&scene)[0];
 
-    harness.click(center(tab), MouseButton::Left);
+    harness.click(center(tab), MouseButton::Right);
 
     assert!(
         worktree_menu_box(&harness.frame()).is_none(),
@@ -2949,8 +2966,8 @@ fn a_tab_outside_a_repository_opens_no_menu() {
 
 #[test]
 fn clicking_a_tab_that_is_not_the_active_one_still_just_selects_it() {
-    // The gesture is only free on the row you are already in. Everywhere else
-    // a click is how a person changes tabs, and it must stay that.
+    // The primary button is how a person changes tabs, and it must stay that
+    // on every row.
     let mut harness = Harness::seeded();
     harness.dispatch_action(TabAction::New);
     let pane = harness.pane_ids()[0];
@@ -2973,6 +2990,32 @@ fn clicking_a_tab_that_is_not_the_active_one_still_just_selects_it() {
 }
 
 #[test]
+fn right_clicking_a_tab_that_is_not_the_active_one_opens_its_menu() {
+    // A context menu is about the row it landed on, not about the row you
+    // happen to be in — the restriction to the active tab was there only
+    // because the gesture shared the primary button with selecting.
+    let mut harness = Harness::seeded();
+    harness.dispatch_action(TabAction::New);
+    let inactive = harness.pane_ids()[0];
+    harness.record_git(inactive, BRANCH, None);
+    let focused = harness.focused_pane_id();
+    let scene = harness.frame();
+
+    let first = tab_boxes(&scene)[0];
+    harness.click(center(first), MouseButton::Right);
+
+    assert!(
+        worktree_menu_box(&harness.frame()).is_some(),
+        "a right press on an inactive tab opened no menu"
+    );
+    assert_eq!(
+        harness.focused_pane_id(),
+        focused,
+        "and it changed tabs, which a context menu does not do"
+    );
+}
+
+#[test]
 fn the_menu_takes_the_keyboard_away_from_the_pane_under_it() {
     // The rule every popup in this window obeys: while one is up the grid
     // keeps only the three signal keys, and no field has the keyboard. A menu
@@ -2980,7 +3023,7 @@ fn the_menu_takes_the_keyboard_away_from_the_pane_under_it() {
     let mut harness = Harness::seeded();
     let tab = tab_boxes(&harness.frame())[0];
 
-    harness.click(center(tab), MouseButton::Left);
+    harness.click(center(tab), MouseButton::Right);
     harness.frame();
 
     assert!(
@@ -3007,7 +3050,7 @@ fn the_menu_reads_the_repository_the_click_landed_on() {
     harness.record_git(pane, "main", None);
 
     let tab = tab_boxes(&harness.frame())[0];
-    harness.click(center(tab), MouseButton::Left);
+    harness.click(center(tab), MouseButton::Right);
     harness.wait_for("the repository to be read", |harness| {
         harness.worktrees_listed().is_some()
     });
@@ -3820,6 +3863,24 @@ fn clicking_a_panel_row_focuses_the_pane_it_stands_for() {
     assert_eq!(harness.active_id(), ids[0]);
     assert_eq!(harness.focused_pane_id(), Some(panes[0]));
     assert_eq!(harness.tab_ids(), ids, "selecting closed something");
+}
+
+#[test]
+fn right_clicking_a_panel_row_opens_the_worktree_menu_too() {
+    // The panel and the strip answer the same gesture, because the rule is
+    // about the tab rather than about how the tab is drawn.
+    let mut harness = Harness::seeded_panel();
+    let row = panel_rows(&harness.frame())[0];
+
+    harness.click(
+        row.origin() + vec2f(40., row.height() / 2.),
+        MouseButton::Right,
+    );
+
+    assert!(
+        worktree_menu_box(&harness.frame()).is_some(),
+        "a right press on a panel row opened no menu"
+    );
 }
 
 #[test]
