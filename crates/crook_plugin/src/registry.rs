@@ -390,7 +390,9 @@ impl<C: 'static> Slots<C> {
 }
 
 struct ActionTable<H> {
-    actions: Vec<(ActionName, PluginId, H)>,
+    /// The handler is an `Option` because [`Actions::with`] takes it out for
+    /// the duration of the call; see there.
+    actions: Vec<(ActionName, PluginId, Option<H>)>,
     complaints: Vec<Complaint>,
 }
 
@@ -440,7 +442,9 @@ impl<H: 'static> Actions<H> {
             return Registration::none();
         }
 
-        table.actions.push((action.clone(), by.clone(), handler));
+        table
+            .actions
+            .push((action.clone(), by.clone(), Some(handler)));
         drop(table);
 
         let weak: Weak<RefCell<ActionTable<H>>> = Rc::downgrade(&self.0);
@@ -456,19 +460,52 @@ impl<H: 'static> Actions<H> {
 
     /// Runs `use_it` against the handler for `action`, if there is one.
     ///
-    /// A visitor rather than a returned handler, because the registry is
-    /// borrowed for the call — which is also what stops an action's handler
-    /// from registering or removing actions while it runs.
+    /// A visitor rather than a returned handler, because `H` is not `Clone`
+    /// and a registry that handed one out could not take it back.
+    ///
+    /// **The registry is not borrowed while the handler runs.** The handler is
+    /// lifted out of the table, the borrow is dropped, and it is put back
+    /// afterwards — which is what makes the obvious thing work: an action whose
+    /// handler disables the plugin that owns it, or registers another action,
+    /// or opens a palette that reads [`names`](Self::names). Holding the borrow
+    /// across the call would have made every one of those a panic in somebody
+    /// else's plugin.
+    ///
+    /// Two consequences, both wanted. The action is *unreachable while it is
+    /// running*, so an action that invokes itself does nothing the second time
+    /// rather than recursing until the stack ends; and if the handler removed
+    /// its own registration, the handler is dropped at the end of the call
+    /// instead of being put back on top of it.
     pub fn with<T>(&self, action: &ActionName, use_it: impl FnOnce(&H) -> T) -> Option<T> {
-        let table = self.0.borrow();
-        table
+        let handler = {
+            let mut table = self.0.borrow_mut();
+            let entry = table
+                .actions
+                .iter_mut()
+                .find(|(name, _, _)| name == action)?;
+            entry.2.take()?
+        };
+
+        let outcome = use_it(&handler);
+
+        if let Some(entry) = self
+            .0
+            .borrow_mut()
             .actions
-            .iter()
+            .iter_mut()
             .find(|(name, _, _)| name == action)
-            .map(|(_, _, handler)| use_it(handler))
+        {
+            entry.2 = Some(handler);
+        }
+
+        Some(outcome)
     }
 
     /// Whether anything answers to this name.
+    ///
+    /// True while the handler is running, because it is still registered: what
+    /// [`with`](Self::with) lifts out is an implementation detail of the call,
+    /// not a change to what exists.
     pub fn contains(&self, action: &ActionName) -> bool {
         self.0
             .borrow()

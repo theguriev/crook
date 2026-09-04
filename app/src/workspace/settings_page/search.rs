@@ -11,35 +11,40 @@
 /// are what it does not: the words somebody would type looking for it, which
 /// are very often not the words the interface chose. "Tab placement" is what
 /// the row is called; "sidebar" is what a person types.
-#[derive(Copy, Clone, Debug)]
+/// Owned rather than `&'static str`, and that is not an accident of
+/// convenience. A row's label used to be a literal in this crate because every
+/// row was; a plugin's named action is a string that does not exist until the
+/// plugin has built, and a page that could only describe rows written down at
+/// compile time is a page no plugin can appear on.
+#[derive(Clone, Debug)]
 pub(super) struct Words {
     /// What the row is called.
-    pub(super) label: &'static str,
+    pub(super) label: String,
     /// The line under the label, where there is one.
-    pub(super) description: Option<&'static str>,
+    pub(super) description: Option<String>,
     /// Words that find the row but are not written on it.
-    pub(super) keywords: &'static [&'static str],
+    pub(super) keywords: Vec<String>,
 }
 
 impl Words {
     /// A row found only by what it says.
-    pub(super) const fn new(label: &'static str) -> Self {
+    pub(super) fn new(label: impl Into<String>) -> Self {
         Self {
-            label,
+            label: label.into(),
             description: None,
-            keywords: &[],
+            keywords: Vec::new(),
         }
     }
 
     /// The same, with the line under it.
-    pub(super) const fn with_description(mut self, description: &'static str) -> Self {
-        self.description = Some(description);
+    pub(super) fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
         self
     }
 
     /// The same, with words that are not written on the row.
-    pub(super) const fn with_keywords(mut self, keywords: &'static [&'static str]) -> Self {
-        self.keywords = keywords;
+    pub(super) fn with_keywords(mut self, keywords: &[&str]) -> Self {
+        self.keywords = keywords.iter().map(|word| (*word).to_owned()).collect();
         self
     }
 }
@@ -93,8 +98,11 @@ impl Query {
         // every query with a row is worse than one that answers some with
         // none: the answer stops meaning anything.
         self.terms.iter().all(|term| {
-            contains(words.label, term)
-                || words.description.is_some_and(|line| contains(line, term))
+            contains(&words.label, term)
+                || words
+                    .description
+                    .as_deref()
+                    .is_some_and(|line| contains(line, term))
                 || words.keywords.iter().any(|word| contains(word, term))
                 || context.iter().any(|word| contains(word, term))
         })

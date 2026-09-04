@@ -238,7 +238,7 @@ pub(super) fn row(words: Words, enabled: bool, control: Box<dyn Element>, ui: Fa
             Flex::row()
                 .with_main_axis_size(MainAxisSize::Max)
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                .with_child(label_text(words.label, enabled, ui))
+                .with_child(label_text(words.label.clone(), enabled, ui))
                 // The control is pushed against the right edge by a spacer
                 // rather than placed at a column position, so that rows with
                 // labels of wildly different lengths still line their controls
@@ -252,7 +252,7 @@ pub(super) fn row(words: Words, enabled: bool, control: Box<dyn Element>, ui: Fa
     // of the row's column rather than of the label's: a description confined
     // to the label's share of the line would be cut off at the width of
     // whatever control happens to sit beside it.
-    if let Some(description) = words.description {
+    if let Some(description) = words.description.clone() {
         column.add_child(description_text(description, ui));
     }
 
@@ -266,7 +266,7 @@ pub(super) fn row(words: Words, enabled: bool, control: Box<dyn Element>, ui: Fa
 }
 
 /// A row's label, greyed when the row is inert.
-fn label_text(label: &'static str, enabled: bool, ui: FamilyId) -> Box<dyn Element> {
+fn label_text(label: String, enabled: bool, ui: FamilyId) -> Box<dyn Element> {
     Text::new(label, ui, LABEL_SIZE)
         .with_color(if enabled {
             theme().text_primary
@@ -277,7 +277,7 @@ fn label_text(label: &'static str, enabled: bool, ui: FamilyId) -> Box<dyn Eleme
 }
 
 /// The second line under a label.
-fn description_text(description: &'static str, ui: FamilyId) -> Box<dyn Element> {
+fn description_text(description: String, ui: FamilyId) -> Box<dyn Element> {
     Container::new(
         Text::new(description, ui, DESCRIPTION_SIZE)
             .with_color(theme().text_muted)
@@ -306,9 +306,9 @@ pub(super) fn choice_group(
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_child(label_text(words.label, enabled, ui));
+        .with_child(label_text(words.label.clone(), enabled, ui));
 
-    if let Some(description) = words.description {
+    if let Some(description) = words.description.clone() {
         column.add_child(description_text(description, ui));
     }
 
@@ -687,7 +687,7 @@ pub(super) fn fact(
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_child(
-                Text::new(words.label, fonts.ui, LABEL_SIZE)
+                Text::new(words.label.clone(), fonts.ui, LABEL_SIZE)
                     .with_color(theme().text_muted)
                     .finish(),
             )

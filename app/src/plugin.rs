@@ -50,6 +50,20 @@ pub type UiContribution = Box<dyn Fn(&Workspace, &AppContext) -> Box<dyn Element
 /// thing an enum variant was, addressable by people who cannot add a variant.
 pub type ActionHandler = Box<dyn Fn(&mut Workspace, &mut ViewContext<Workspace>)>;
 
+/// A registered action, as something `Copy`.
+///
+/// [`WorkspaceAction`](crate::workspace::WorkspaceAction) is compared by value
+/// in a dozen places and has to stay `Copy`; an [`ActionName`] is a `String`.
+/// So a chord and a menu entry carry this instead — an index into the order
+/// actions were registered in, which [`Host`] keeps.
+///
+/// The **name** is still the identity. Two ids that resolve to one name run one
+/// handler, and an id whose plugin has been disabled resolves to a name nothing
+/// answers to, which is a chord that does nothing rather than a dangling
+/// pointer into a table.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ActionId(usize);
+
 /// Everything a plugin may register, and the record of who registered what.
 ///
 /// A plugin never keeps its own guards: [`Host`] holds them, filed under the
@@ -67,6 +81,14 @@ pub struct Host {
     fonts: Fonts,
     slots: Slots<UiContribution>,
     actions: Actions<ActionHandler>,
+    /// Every action name that has ever been registered here, in order.
+    ///
+    /// Appended to and never removed from, because an [`ActionId`] is an index
+    /// into it and an index that moved would be a chord that started meaning
+    /// something else. Disabling a plugin takes its handler out of the
+    /// registry, not its name out of here — which is what makes the id safe to
+    /// hold on to.
+    action_names: Vec<ActionName>,
     /// Whose registrations are being made right now. Set around each plugin's
     /// `build` so a plugin cannot register in another's name by accident.
     building: Option<PluginId>,
@@ -84,6 +106,7 @@ impl Host {
             fonts,
             slots: Slots::new(),
             actions: Actions::new(),
+            action_names: Vec::new(),
             building: None,
             kept: Vec::new(),
             loaded: Vec::new(),
@@ -131,16 +154,49 @@ impl Host {
     }
 
     /// Registers something the application can be asked to do by name.
+    ///
+    /// The id it hands back is what a chord or a menu entry carries; it is also
+    /// obtainable later from the name, so a plugin that only wants the action
+    /// to exist may throw it away.
     pub fn register_action(
         &mut self,
         action: ActionName,
         handler: impl Fn(&mut Workspace, &mut ViewContext<Workspace>) + 'static,
-    ) {
+    ) -> ActionId {
         let who = self.who();
-        let registration = self
-            .actions
-            .register(&who, action, Box::new(handler) as ActionHandler);
+        let registration =
+            self.actions
+                .register(&who, action.clone(), Box::new(handler) as ActionHandler);
         self.kept.push((who, registration));
+
+        match self.action_names.iter().position(|known| *known == action) {
+            Some(index) => ActionId(index),
+            None => {
+                self.action_names.push(action);
+                ActionId(self.action_names.len() - 1)
+            }
+        }
+    }
+
+    /// The id for a name, if anything answers to it right now.
+    ///
+    /// `None` for a name nothing is registered under — a chord bound to a
+    /// plugin that is not installed, or one spelled wrong — which is the case
+    /// the keymap is built around: it does nothing, and it does not stop the
+    /// chords around it working.
+    pub fn action(&self, name: &ActionName) -> Option<ActionId> {
+        if !self.actions.contains(name) {
+            return None;
+        }
+        self.action_names
+            .iter()
+            .position(|known| known == name)
+            .map(ActionId)
+    }
+
+    /// What an id is called.
+    pub fn action_name(&self, id: ActionId) -> Option<&ActionName> {
+        self.action_names.get(id.0)
     }
 
     /// The font families, for a plugin building something that draws text

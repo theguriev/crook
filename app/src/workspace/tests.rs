@@ -577,6 +577,24 @@ impl Harness {
             .read(&self.app, |workspace, app| workspace.shell_login(app))
     }
 
+    /// Whether somebody clicked the chip and is still waiting.
+    fn usage_is_busy_for_user(&self) -> bool {
+        self.workspace.read(&self.app, |workspace, ctx| {
+            workspace.usage().as_ref(ctx).is_busy_for_user()
+        })
+    }
+
+    /// Reads a keymap out of `text` and puts it in force.
+    fn bind(&mut self, text: &str) {
+        let directory = Scratch::new();
+        let path = directory.path().join("keymap.json");
+        fs::write(&path, text).expect("a scratch keymap");
+        let keymap = crate::keymap::Keymap::load(&path);
+        assert!(!keymap.is_empty(), "nothing in {text:?} was a binding");
+
+        self.workspace_update(|workspace, _| workspace.set_keymap(keymap));
+    }
+
     /// Whether the usage poll chain is meant to be running.
     fn usage_is_wanted(&self) -> bool {
         self.workspace.read(&self.app, |workspace, ctx| {
@@ -8877,4 +8895,77 @@ mod title_bar_hit_testing {
             }
         }
     }
+}
+
+#[test]
+fn a_chord_bound_to_a_plugins_action_reaches_the_plugin() {
+    // The end-to-end of a named action, and the thing that was impossible
+    // before there was one: `crook/usage/refresh` is registered by a plugin,
+    // named in a file the application does not compile, and reached by a chord
+    // this build has no arm for.
+    let mut harness = Harness::new(1);
+    assert!(!harness.usage_is_busy_for_user());
+
+    harness.bind(r#"{"cmd-shift-u": "crook/usage/refresh"}"#);
+    harness.press(
+        "u",
+        Modifiers {
+            cmd: true,
+            shift: true,
+            ..Modifiers::default()
+        },
+        "",
+    );
+
+    assert!(
+        harness.usage_is_busy_for_user(),
+        "the chord did not reach the plugin's action"
+    );
+}
+
+#[test]
+fn a_chord_bound_to_an_action_nothing_answers_to_does_nothing() {
+    // A keymap written for a plugin that is not installed, which is the
+    // ordinary state of any keymap somebody copied from a friend. It costs
+    // that one chord and nothing else.
+    let mut harness = Harness::new(1);
+
+    harness.bind(r#"{"cmd-shift-u": "eugen/not-installed/go"}"#);
+
+    assert_eq!(
+        harness.action_for(
+            "u",
+            Modifiers {
+                cmd: true,
+                shift: true,
+                ..Modifiers::default()
+            }
+        ),
+        None
+    );
+    assert!(!harness.usage_is_busy_for_user());
+}
+
+#[test]
+fn the_keys_page_lists_what_a_plugin_registered_and_the_chord_that_reaches_it() {
+    // Where somebody finds out an action's name, which is the only way they
+    // can bind it. The page cannot have been written with this row in it: the
+    // name belongs to a plugin.
+    let mut harness = Harness::new(1);
+    harness.bind(r#"{"cmd-shift-u": "crook/usage/refresh"}"#);
+    harness.open_settings_page();
+    let rail = settings_rail_boxes(&harness.frame());
+    harness.click(center(rail[3]), MouseButton::Left);
+    assert_eq!(Section::Keys, harness.settings_section());
+
+    let text = frame_text(&harness.frame());
+
+    assert!(
+        text.contains("crook/usage/refresh"),
+        "the Keys page does not name the action: {text}"
+    );
+    assert!(
+        text.contains("cmd-shift-u"),
+        "the Keys page does not say what reaches it: {text}"
+    );
 }

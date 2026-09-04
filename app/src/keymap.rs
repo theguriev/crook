@@ -33,6 +33,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crook_plugin::ActionName;
 use crookui_core::event::{Keystroke, Modifiers};
 use serde_json::{Map, Value};
 
@@ -50,11 +51,28 @@ const KEYMAP_FILE: &str = "keymap.json";
 /// shell or their editor wants.
 const UNBOUND: &str = "none";
 
+/// What a chord was bound to.
+///
+/// Two kinds, and the difference is *when the name is resolved*. One of Crook's
+/// own is settled while the file is read, because the set is compiled in. A
+/// plugin's is not: this file is read before the plugins are built, and a
+/// plugin can be disabled while the window is open — so the name is kept as
+/// written and looked up every time the chord is pressed. A name nothing
+/// answers to is a chord that does nothing, which is the same outcome as a
+/// plugin the person has not installed, and correct for both.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Bound {
+    /// One of the window's own bindings.
+    Builtin(Binding),
+    /// A named action, which is what every plugin's is.
+    Named(ActionName),
+}
+
 /// The bindings a person wrote down.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Keymap {
     /// What each chord was bound to, or `None` where it was unbound.
-    bindings: HashMap<Keystroke, Option<Binding>>,
+    bindings: HashMap<Keystroke, Option<Bound>>,
 }
 
 impl Keymap {
@@ -73,8 +91,8 @@ impl Keymap {
     /// The two `None`s are different and the nesting says which is which: the
     /// outer one is "this keymap says nothing about that chord", and the inner
     /// one is "this keymap says that chord does nothing".
-    pub fn binding(&self, keystroke: &Keystroke) -> Option<Option<Binding>> {
-        self.bindings.get(keystroke).copied()
+    pub fn binding(&self, keystroke: &Keystroke) -> Option<Option<Bound>> {
+        self.bindings.get(keystroke).cloned()
     }
 
     /// Reads the per-user keymap, defaulting past anything unusable.
@@ -176,10 +194,60 @@ pub fn parse_chord(chord: &str) -> Option<Keystroke> {
     (!key.is_empty()).then(|| Keystroke::new(key, modifiers))
 }
 
+/// Writes a chord the way [`parse_chord`] reads one.
+///
+/// The inverse, and tested as one: the settings page prints what a person
+/// wrote in their own file, and printing it in a different notation from the
+/// one the file uses would be the page teaching a syntax that does not parse.
+/// The modifier order is the order this file lists them in, so two chords with
+/// the same modifiers always read the same however they were typed.
+pub fn format_chord(keystroke: &Keystroke) -> String {
+    let mut chord = String::new();
+    for (present, name) in [
+        (keystroke.modifiers.cmd, "cmd"),
+        (keystroke.modifiers.ctrl, "ctrl"),
+        (keystroke.modifiers.alt, "alt"),
+        (keystroke.modifiers.shift, "shift"),
+    ] {
+        if present {
+            chord.push_str(name);
+            chord.push('-');
+        }
+    }
+    chord.push_str(&keystroke.key);
+    chord
+}
+
+/// Every chord the person bound, in no particular order.
+///
+/// For the settings page, which prints what a named action is reachable by.
+pub fn bindings(keymap: &Keymap) -> Vec<(Keystroke, Option<Bound>)> {
+    keymap
+        .bindings
+        .iter()
+        .map(|(keystroke, bound)| (keystroke.clone(), bound.clone()))
+        .collect()
+}
+
 /// The action a name stands for: `Some(None)` unbinds, `None` is a name this
 /// build does not know.
-pub fn parse_action(name: &str) -> Option<Option<Binding>> {
-    let binding = match name.trim().to_ascii_lowercase().as_str() {
+///
+/// A name with a `/` in it is a plugin's — `owner/name/action` — and is *not*
+/// checked against anything here. Whether a plugin answering to it is installed
+/// is a question with a different answer at every moment of the window's life,
+/// and asking it while reading a file would freeze one of those answers into
+/// the table. What is checked is the shape, so that a typo is a warned-about
+/// line rather than a binding that silently never fires.
+pub fn parse_action(name: &str) -> Option<Option<Bound>> {
+    let name = name.trim();
+    if name.contains('/') {
+        return match ActionName::parse(name) {
+            Ok(action) => Some(Some(Bound::Named(action))),
+            Err(_) => None,
+        };
+    }
+
+    let binding = match name.to_ascii_lowercase().as_str() {
         UNBOUND => return Some(None),
         "new_tab" => Binding::NewTab,
         "close_pane" => Binding::ClosePane,
@@ -196,14 +264,15 @@ pub fn parse_action(name: &str) -> Option<Option<Binding>> {
         "zoom_reset" => Binding::ZoomReset,
         _ => return None,
     };
-    Some(Some(binding))
+    Some(Some(Bound::Builtin(binding)))
 }
 
-/// Every action a keymap may name, for the settings page to list.
+/// Every *built-in* action a keymap may name, for the settings page to list.
 ///
 /// In the order the settings page's Keys section already lists the bindings,
 /// so a person reading one and writing the other is reading the same order
-/// twice.
+/// twice. What a plugin registers is not here and could not be: it is known
+/// only once the plugins have built, and the page reads it from the host.
 pub const ACTION_NAMES: [&str; 14] = [
     "new_tab",
     "close_pane",
