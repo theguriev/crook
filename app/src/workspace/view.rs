@@ -18,7 +18,6 @@ use crate::git::GitFacts;
 use crate::git_model::GitModel;
 use crate::input_keys::{self, Binding, Platform};
 use crate::pane_blocks::PaneBlocks;
-use crate::pane_input::{CARET_PHASE, PaneInput};
 use crate::pane_selection::PaneSelection;
 use crate::pane_surface;
 use crate::platform_insets::{LayoutInsets, TabsPlacement, layout_insets};
@@ -26,6 +25,7 @@ use crate::settings::{Density, GeneralOptions, Granularity, Layout, Settings, Ta
 use crate::tab::{AgentSession, Direction, PaneId, Tab, TabAction, TabEffect, TabId, TabStrip};
 use crate::terminal_font::CellFont;
 use crate::terminal_model::{BlockHistory, TerminalHandle, TerminalModel, TerminalUpdate};
+use crate::text_input::{CARET_PHASE, TextInput};
 use crate::theme::creator::Draft;
 use crate::theme::{Available, theme};
 use crate::usage_model::UsageModel;
@@ -255,7 +255,7 @@ pub struct Workspace {
     /// One per pane and never one per tab: a split gives the new pane a field
     /// of its own, with its own undo stack and its own history, which is what
     /// makes two panes of the same tab two places to work rather than one.
-    inputs: HashMap<PaneId, PaneInput>,
+    inputs: HashMap<PaneId, TextInput>,
     /// The system clipboard every field copies to and pastes from. One for the
     /// window: see [`Clipboard`].
     clipboard: Clipboard,
@@ -632,6 +632,22 @@ impl Workspace {
         }
     }
 
+    /// What is in the settings page's search box, for a test to read back.
+    pub fn settings_search_text(&self) -> String {
+        self.page.search.editor().text().to_owned()
+    }
+
+    /// Types `query` into the settings page's search box, for a run that was
+    /// asked to start with something searched for.
+    ///
+    /// Straight into the editor rather than through a keystroke each: what the
+    /// box does with a keystroke is insert a character, and a snapshot wants
+    /// the state that leaves rather than the path to it.
+    pub fn type_into_settings_search(&mut self, query: &str, ctx: &mut ViewContext<Self>) {
+        self.page.search.edit(|editor| editor.set_text(query));
+        ctx.notify();
+    }
+
     /// Whether the options menu is up.
     pub fn is_options_menu_open(&self) -> bool {
         self.menu.open
@@ -945,13 +961,19 @@ impl Workspace {
         let Some(pane) = self.tabs.focused_pane_id() else {
             return false;
         };
+        // The settings page's search box is the other field that blinks, and
+        // it is the one field that is not a pane's — so it is asked about
+        // separately, in the one state it can have the keyboard in.
+        if self.page.search.has_keys() {
+            return true;
+        }
         self.terminal(pane, app).is_some_and(|(_, snapshot)| {
             pane_surface::of(&snapshot, std::time::Instant::now()).composer
         })
     }
 
     /// The command line being composed in a pane.
-    pub(super) fn input(&self, pane: PaneId) -> Option<&PaneInput> {
+    pub(super) fn input(&self, pane: PaneId) -> Option<&TextInput> {
         self.inputs.get(&pane)
     }
 
@@ -1414,6 +1436,16 @@ impl Workspace {
         });
         self.sync_input_keys();
 
+        // The query lives exactly as long as the page it filters. The page's
+        // *section* deliberately outlives its pane — closing the tab and
+        // opening it again comes back to where you were — but a filter must
+        // not: a settings page that came back showing four rows out of thirty
+        // would read as broken rather than as filtered, and the box that
+        // explains why is at the top of a rail somebody has to look at.
+        if self.tabs.settings_pane().is_none() {
+            self.page.search.edit(crate::editor::Editor::clear);
+        }
+
         // A row that has gone cannot receive the hover-out that would clear
         // this, and a card anchored to a row that no longer paints would hang
         // in the frame with nothing under it.
@@ -1440,6 +1472,21 @@ impl Workspace {
         for (id, input) in &self.inputs {
             input.set_has_keys(Some(*id) == listening);
         }
+
+        // The settings page's search box, which is the one field that is not a
+        // pane's. It has the keyboard whenever the focused pane is the page it
+        // is part of, which is Warp's rule — there the search field is what
+        // the settings pane focuses when it opens — and it is the only rule
+        // available: there is nothing else on that page that takes a key, so
+        // "focus is somewhere else on the page" is not a state that exists.
+        //
+        // Note which question this asks. `listening` is the *focused* pane,
+        // and the settings page draws no field of its own through `inputs`, so
+        // the two never both have the keyboard.
+        let settings_focused = listening
+            .and_then(|id| self.tabs.pane(id))
+            .is_some_and(|pane| pane.is_settings());
+        self.page.search.set_has_keys(settings_focused);
     }
 
     /// Tells the git model which directories the strip is showing.

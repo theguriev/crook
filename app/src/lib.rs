@@ -48,7 +48,6 @@ pub mod git;
 pub mod git_model;
 pub mod input_keys;
 pub mod pane_blocks;
-pub mod pane_input;
 pub mod pane_selection;
 pub mod pane_surface;
 pub mod platform_insets;
@@ -59,6 +58,7 @@ pub mod tab;
 pub mod terminal_font;
 pub mod terminal_keys;
 pub mod terminal_model;
+pub mod text_input;
 pub mod theme;
 pub mod usage_model;
 pub mod workspace;
@@ -208,6 +208,13 @@ struct Overrides {
     /// extra tab in the strip, which is the point — a snapshot of the
     /// settings page is a snapshot of a window with the settings open in it.
     settings: Option<Section>,
+    /// Type this into the settings page's search box at startup.
+    ///
+    /// Implies `--settings`: a query with no page to filter is nothing to
+    /// look at. Like `--type` for a pane's field, it leaves the text in the
+    /// box rather than doing anything with it, because leaving it there *is*
+    /// what the box does — the page is filtered on every keystroke.
+    search: Option<String>,
     /// Start in this layout rather than the saved one.
     layout: Option<Layout>,
     /// Start with rows standing for this rather than for the saved one.
@@ -345,6 +352,15 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 let name = args.next().context("`--theme` needs a name")?;
                 overrides.theme = Some(name);
             }
+            "--search" => {
+                let query = args
+                    .next()
+                    .context("`--search` needs something to search for")?;
+                overrides.search = Some(query);
+                if overrides.settings.is_none() {
+                    overrides.settings = Some(Section::default());
+                }
+            }
             "--settings" => {
                 // The section is optional, and a bare `--settings` opens the
                 // page where a click on the menu entry opens it. Peeking
@@ -449,6 +465,7 @@ OPTIONS:
     --menu             Start with the tab options menu open
     --settings [PAGE]  Start with a settings tab open, on `appearance`,
                        `usage`, `keys` or `about`
+    --search <TEXT>    Type TEXT into the settings page\'s search box, opening it
     --theme <NAME>     Start in this theme rather than the saved one
     --themes           Start with the Themes panel open
     --new-theme        Start with the Themes panel making a theme
@@ -606,6 +623,9 @@ fn apply_overrides(
     }
     if let Some(section) = overrides.settings {
         workspace.open_settings_page(section, ctx);
+    }
+    if let Some(query) = &overrides.search {
+        workspace.type_into_settings_search(query, ctx);
     }
     if overrides.themes {
         workspace.open_theme_panel(overrides.creating, ctx);

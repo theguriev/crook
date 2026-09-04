@@ -411,6 +411,27 @@ impl Harness {
             .read(&self.app, |workspace, _| workspace.settings_section())
     }
 
+    /// Types `text` into whatever has the keyboard, a key at a time.
+    ///
+    /// Through `press`, so the bindings get first refusal exactly as they do
+    /// in a window — which is the half of "the search box takes typing" worth
+    /// asserting.
+    fn type_text(&mut self, text: &str) {
+        for character in text.chars() {
+            self.press(
+                &character.to_lowercase().to_string(),
+                Modifiers::default(),
+                &character.to_string(),
+            );
+        }
+    }
+
+    /// What is in the settings page's search box.
+    fn search_text(&self) -> String {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.settings_search_text())
+    }
+
     /// Shows a different page, the way a click on the rail does.
     fn select_settings_section(&mut self, section: Section) {
         self.dispatch_workspace_action(WorkspaceAction::Settings(SettingsAction::Select(section)));
@@ -3489,6 +3510,9 @@ fn settings_rail_boxes(scene: &Scene) -> Vec<RectF> {
     let pane = settings_pane_box(scene);
     let mut rows: Vec<RectF> = visible_rects(scene)
         .filter(|(rect, _)| rect.corner_radius.get_top_left() == Radius::Pixels(6.))
+        // The search box above them is the same shape, and is outlined where a
+        // page button never is.
+        .filter(|(rect, _)| rect.border == Border::default())
         .map(|(_, bounds)| bounds)
         .filter(|bounds| {
             pane.contains_point(center(*bounds))
@@ -4014,6 +4038,156 @@ fn the_settings_row_leads_with_a_gear_and_says_nothing_a_session_would() {
         .filter(|bounds| settings_row.contains_point(center(*bounds)))
         .collect();
     assert!(dots.is_empty(), "the settings row drew a status dot");
+}
+
+#[test]
+fn typing_in_the_rail_filters_the_page_and_the_rail_together() {
+    // The whole feature, through the real keyboard: keys the bindings decline
+    // reach the box, and one query narrows both halves of the page at once.
+    // Filtering the rail is not decoration — a rail still listing four pages
+    // beside a page holding three rows would say the opposite of what the box
+    // is for.
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.frame();
+
+    harness.type_text("chip");
+    assert_eq!(harness.search_text(), "chip");
+
+    let scene = harness.frame();
+    let text = frame_text(&scene);
+    assert!(
+        text.contains("Show the PR link chip") && text.contains("Show the diff stats chip"),
+        "the rows that say `chip` are not on the page: {text:?}"
+    );
+    assert!(
+        !text.contains("Tab placement"),
+        "a row that says nothing about chips survived the filter"
+    );
+    assert!(
+        text.contains("Appearance (3)"),
+        "the rail does not count what it found: {text:?}"
+    );
+    assert!(
+        !text.contains("About"),
+        "a page with nothing in it is still listed"
+    );
+}
+
+#[test]
+fn a_row_is_found_by_a_word_that_is_not_written_on_it() {
+    // The keywords, which are the difference between a search that works and
+    // one that only finds what somebody already knew to call it. Nothing on
+    // the "Tab placement" row says "sidebar".
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.frame();
+    harness.type_text("sidebar");
+
+    assert!(
+        frame_text(&harness.frame()).contains("Tab placement"),
+        "the row nobody calls by its name was not found"
+    );
+}
+
+#[test]
+fn a_query_that_empties_the_page_shows_the_first_page_that_has_something() {
+    // The rail's selection does not move — clearing the box has to put you
+    // back where you were — so which page is *shown* is worked out from the
+    // query instead.
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.frame();
+    harness.type_text("clipboard");
+
+    let text = frame_text(&harness.frame());
+    assert!(
+        text.contains("Copy what is selected"),
+        "the page with the answers is not the one on screen: {text:?}"
+    );
+    assert_eq!(
+        harness.settings_section(),
+        Section::Appearance,
+        "the rail moved its own selection"
+    );
+}
+
+#[test]
+fn a_query_that_finds_nothing_says_so() {
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.frame();
+    harness.type_text("zzz");
+
+    let text = frame_text(&harness.frame());
+    assert!(
+        text.contains("No settings match your search."),
+        "an empty page with no explanation on it: {text:?}"
+    );
+    assert!(
+        settings_rail_boxes(&harness.frame()).len() <= 1,
+        "a rail with no pages in it should hold nothing but the box"
+    );
+}
+
+#[test]
+fn escape_empties_the_box_and_puts_the_page_back() {
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.frame();
+    harness.type_text("chip");
+    harness.frame();
+
+    harness.press("escape", Modifiers::default(), "");
+    assert_eq!(harness.search_text(), "");
+    assert!(
+        frame_text(&harness.frame()).contains("Tab placement"),
+        "the page did not come back"
+    );
+}
+
+#[test]
+fn the_query_goes_when_the_page_does() {
+    // The page's *section* outlives the pane on purpose — closing the tab and
+    // opening it again comes back to where you were. A filter must not: a page
+    // that came back showing three rows out of thirty would read as broken
+    // rather than as filtered, and the box that explains it is in a rail
+    // somebody has to look at to find.
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.frame();
+    harness.type_text("chip");
+
+    harness.dispatch_action(TabAction::Close(harness.active_id()));
+    harness.frame();
+    harness.open_settings_page();
+
+    assert_eq!(harness.search_text(), "");
+    assert!(frame_text(&harness.frame()).contains("Tab placement"));
+}
+
+#[test]
+fn the_box_takes_no_keys_while_a_session_is_the_focused_pane() {
+    // The one rule that keeps the box from eating a shell's typing: it has the
+    // keyboard when the focused pane is the page it is part of, and never
+    // otherwise. A settings tab open in the strip while somebody works in
+    // another tab must not be collecting their keystrokes.
+    let mut harness = Harness::new(2);
+    harness.open_settings_page();
+    harness.frame();
+    harness.type_text("ab");
+    assert_eq!(harness.search_text(), "ab");
+
+    let session = harness.tab_ids()[0];
+    harness.dispatch_action(TabAction::Select(session));
+    harness.frame();
+    harness.type_text("cd");
+
+    assert_eq!(
+        harness.search_text(),
+        "ab",
+        "the search box collected what was typed into a session"
+    );
 }
 
 #[test]

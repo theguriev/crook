@@ -420,6 +420,45 @@ the machine happened to have, which is a flat gear on one machine and a colour e
 next. Everything a font would not draw was built out of `Container`s: the two density marks
 in the gear menu were seven rectangles, and the git branch beside a tab title was three.
 
+### The second text field
+
+For most of Crook's life there was exactly one place to type: the composer
+under a pane. That element draws in the terminal's cell grid so it lines up
+with the output above it, draws its first row on the shell's own prompt row,
+takes its colours from the pty's palette, sends its line to a shell, and routes
+its keys through a policy whose first three rules are about a selection, an
+alternate screen and a signal. Two files said, in as many words, that a second
+field was a refactor of the input layer rather than a feature: the Themes panel
+has no search box, and the settings page had none either.
+
+The settings page's rail now has one, and the refactor turned out to be three
+seams rather than a rewrite.
+
+- **The state was never a pane's.** `app/src/text_input.rs` — called
+  `pane_input.rs` while a pane was the only thing that could hold one — is an
+  editor, a caret blink, a drag, and one `has_keys` flag, behind an `Rc` so it
+  survives the element tree that draws it. Two of its lines assume a shell:
+  the one that hands back a line to send, and the one that throws a line away.
+  A field with nowhere to send a line simply never asks for those.
+- **The keymap was never a pane's either.** `input_keys::route` is the keyboard
+  policy of a *pane*; `input_keys::intent` under it is the platform's text
+  editing — word movement, the line ends, the clipboard chords, undo, and the
+  emacs bindings macOS puts in every text field — with no pane in it. Making it
+  `pub` is the whole of what the search box needed to get all of that from the
+  same table the composer gets it from, which is what stops the two drifting.
+- **The painting is not shared, and should not be.** The composer is drawn in
+  cells because it has to line up with a grid. A search box in a sidebar is
+  drawn through the shaper, like every label beside it, and gets its caret
+  position from the shaped line rather than from a column times a cell width.
+  Those are two different elements, and each is short.
+
+What is still missing is a *focus* concept: which field has the keyboard is one
+boolean per field, written by `Workspace::sync_input_keys` whenever focus could
+have moved. The rule for the new one is Warp's — the box has the keyboard
+whenever the focused pane is the settings page — and it holds because there is
+nothing else on that page that takes a key. A third field, or a second one on
+the same surface, is where that stops being enough.
+
 ### One trap worth knowing now
 
 `cosmic-text`'s `ShapeLine::new` panics on multi-paragraph text. A tab title derived from
@@ -1062,7 +1101,7 @@ platforms, and treat a build script as the cost it is.
 | Themes | 21 built in, gradients, images, a creator, OS sync, hot reload | 13 built in, the same file format, a creator without the image, no OS sync |
 | Theme chooser | a 240px docked panel with search and virtualisation | a 248px docked panel, no search, every row built |
 | Icons | its own `WarpIcon` and `UiIcon` sets, rendered from SVG | Lucide, vendored as path commands, one distance-field rasterizer (§4) |
-| Settings UI | a pane, 16 pages, search over ~800 widgets | a pane, 4 pages, no search |
+| Settings UI | a pane, 16 pages, search over ~800 widgets | a pane, 4 pages, search over 30 (§4) |
 
 The through-line: Crook keeps every *architectural* idea from Warp and rejects almost every
 *build-system* one. The architecture is what makes a GPU terminal tractable in Rust. The build

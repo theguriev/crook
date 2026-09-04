@@ -18,7 +18,9 @@ use crookui_core::prelude::*;
 use super::super::action::{OptionsAction, SettingsAction, ThemeAction};
 use super::super::theme_preview;
 use super::super::view::Workspace;
+use super::search::Words;
 use super::widgets::{self, Segment};
+use super::widgets::{Category, Entry};
 use super::{Control, Section};
 use crate::input_keys::Platform;
 use crate::settings::{
@@ -43,12 +45,14 @@ fn chord(mac: &str, other: &str) -> String {
     .to_owned()
 }
 
-/// One page.
-pub(super) fn render(
-    workspace: &Workspace,
-    section: Section,
-    app: &AppContext,
-) -> Box<dyn Element> {
+/// One page, as the categories it is made of.
+///
+/// Built rather than drawn, because the search filters it and because the rail
+/// counts it: what a page holds has to be a value the moment anything but the
+/// page itself needs to ask a question about it. Every page is built on every
+/// keystroke while a query is in force — four pages of about thirty rows, once
+/// per frame, which is a rounding error beside the frame it is part of.
+pub(super) fn of(workspace: &Workspace, section: Section, app: &AppContext) -> Vec<Category> {
     match section {
         Section::Appearance => appearance(workspace),
         Section::Usage => usage(workspace, app),
@@ -57,24 +61,23 @@ pub(super) fn render(
     }
 }
 
-/// A column of categories, which is what every page is.
-fn page(children: Vec<Box<dyn Element>>) -> Box<dyn Element> {
-    Flex::column()
-        .with_main_axis_size(MainAxisSize::Min)
-        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_children(children)
-        .finish()
-}
-
 /// Where the tabs are and what a row of them looks like.
-fn appearance(workspace: &Workspace) -> Box<dyn Element> {
+fn appearance(workspace: &Workspace) -> Vec<Category> {
     let options = workspace.options();
     let ui = workspace.fonts().ui;
     let state = workspace.settings_page();
 
     let placement = widgets::row(
-        "Tab placement",
-        Some("Where the list of what you are working on lives."),
+        Words::new("Tab placement")
+            .with_description("Where the list of what you are working on lives.")
+            .with_keywords(&[
+                "sidebar",
+                "strip",
+                "header",
+                "vertical",
+                "horizontal",
+                "left",
+            ]),
         true,
         widgets::segmented(
             vec![
@@ -97,8 +100,9 @@ fn appearance(workspace: &Workspace) -> Box<dyn Element> {
     );
 
     let granularity = widgets::row(
-        "View as",
-        Some("Whether one row stands for a single pane or for a whole tab."),
+        Words::new("View as")
+            .with_description("Whether one row stands for a single pane or for a whole tab.")
+            .with_keywords(&["granularity", "split", "group", "one"]),
         true,
         widgets::segmented(
             vec![
@@ -121,8 +125,9 @@ fn appearance(workspace: &Workspace) -> Box<dyn Element> {
     );
 
     let density = widgets::row(
-        "Density",
-        Some("How much of a row is text. Only an expanded row carries chips."),
+        Words::new("Density")
+            .with_description("How much of a row is text. Only an expanded row carries chips.")
+            .with_keywords(&["compact", "expanded", "spacing", "height", "size", "small"]),
         true,
         widgets::segmented(
             vec![
@@ -144,11 +149,11 @@ fn appearance(workspace: &Workspace) -> Box<dyn Element> {
         ui,
     );
 
-    page(vec![
-        widgets::category("Theme", true, theme_category(workspace), ui),
-        widgets::category("Tabs", false, vec![placement, granularity, density], ui),
-        widgets::category("Rows", false, rows_category(workspace), ui),
-    ])
+    vec![
+        widgets::category("Theme", theme_category(workspace)),
+        widgets::category("Tabs", vec![placement, granularity, density]),
+        widgets::category("Rows", rows_category(workspace)),
+    ]
 }
 
 /// The "Theme" category: which theme is in force, and the way to another.
@@ -159,13 +164,24 @@ fn appearance(workspace: &Workspace) -> Box<dyn Element> {
 /// settings page is a list you look at instead of your work, and the panel
 /// exists so that a theme is judged against a running shell rather than
 /// against a card.
-fn theme_category(workspace: &Workspace) -> Vec<Box<dyn Element>> {
+fn theme_category(workspace: &Workspace) -> Vec<Entry> {
     let ui = workspace.fonts().ui;
     let fonts = workspace.fonts();
     let state = workspace.settings_page();
 
     vec![
         widgets::current_theme_row(
+            Words::new("Current theme")
+                .with_description("Choose another, or make one")
+                .with_keywords(&[
+                    "colour",
+                    "color",
+                    "palette",
+                    "dark",
+                    "light",
+                    "scheme",
+                    "appearance",
+                ]),
             theme_preview::card(
                 crate::theme::theme(),
                 theme_preview::ROW_CARD,
@@ -185,7 +201,15 @@ fn theme_category(workspace: &Workspace) -> Vec<Box<dyn Element>> {
             ui,
         ),
         widgets::fact(
-            "Themes folder",
+            Words::new("Themes folder").with_keywords(&[
+                "yaml",
+                "warp",
+                "import",
+                "custom",
+                "directory",
+                "path",
+                "file",
+            ]),
             crate::theme::user_themes_directory()
                 .map(|path| path.display().to_string())
                 .unwrap_or_else(|| {
@@ -199,7 +223,7 @@ fn theme_category(workspace: &Workspace) -> Vec<Box<dyn Element>> {
 
 /// The "Rows" category: which fact goes on which line, and which chips a row
 /// carries.
-fn rows_category(workspace: &Workspace) -> Vec<Box<dyn Element>> {
+fn rows_category(workspace: &Workspace) -> Vec<Entry> {
     let options = workspace.options();
     let ui = workspace.fonts().ui;
     let state = workspace.settings_page();
@@ -210,8 +234,9 @@ fn rows_category(workspace: &Workspace) -> Vec<Box<dyn Element>> {
     let expanded = options.density == Density::Expanded;
 
     let mut rows = vec![widgets::choice_group(
-        "Pane title as",
-        Some("Which fact a row leads with. The others fill the lines below it."),
+        Words::new("Pane title as")
+            .with_description("Which fact a row leads with. The others fill the lines below it.")
+            .with_keywords(&["title", "name", "command", "directory", "branch", "leading"]),
         true,
         [
             PrimaryInfo::Command,
@@ -237,8 +262,11 @@ fn rows_category(workspace: &Workspace) -> Vec<Box<dyn Element>> {
     // for the same reason.
     let chosen = resolve_subtitle(options.primary_info, options.subtitle);
     rows.push(widgets::choice_group(
-        "Additional metadata",
-        Some("What a compact row's second line says. An expanded row chooses for itself."),
+        Words::new("Additional metadata")
+            .with_description(
+                "What a compact row's second line says. An expanded row chooses for itself.",
+            )
+            .with_keywords(&["subtitle", "second", "line", "under", "branch", "directory"]),
         !expanded,
         subtitle_options_for(options.primary_info)
             .into_iter()
@@ -256,8 +284,11 @@ fn rows_category(workspace: &Workspace) -> Vec<Box<dyn Element>> {
     ));
 
     rows.push(widgets::row(
-        "Show the PR link chip",
-        Some("Crook has no forge integration yet, so no session has a link to show."),
+        Words::new("Show the PR link chip")
+            .with_description(
+                "Crook has no forge integration yet, so no session has a link to show.",
+            )
+            .with_keywords(&["pull", "request", "github", "forge", "link", "chip"]),
         expanded,
         widgets::switch(
             options.show_pr_link,
@@ -268,8 +299,11 @@ fn rows_category(workspace: &Workspace) -> Vec<Box<dyn Element>> {
     ));
 
     rows.push(widgets::row(
-        "Show the diff stats chip",
-        Some("Added and removed lines in the row's repository. Expanded rows only."),
+        Words::new("Show the diff stats chip")
+            .with_description(
+                "Added and removed lines in the row's repository. Expanded rows only.",
+            )
+            .with_keywords(&["diff", "stats", "added", "removed", "lines", "git", "chip"]),
         expanded,
         widgets::switch(
             options.show_diff_stats,
@@ -280,8 +314,9 @@ fn rows_category(workspace: &Workspace) -> Vec<Box<dyn Element>> {
     ));
 
     rows.push(widgets::row(
-        "Show details on hover",
-        Some("Opens a card beside a row with everything the row had no space for."),
+        Words::new("Show details on hover")
+            .with_description("Opens a card beside a row with everything the row had no space for.")
+            .with_keywords(&["hover", "card", "detail", "tooltip", "popup", "preview"]),
         true,
         widgets::switch(
             options.show_details_on_hover,
@@ -296,8 +331,9 @@ fn rows_category(workspace: &Workspace) -> Vec<Box<dyn Element>> {
     // indication that anything on it has been changed from the default.
     let changed = options != TabOptions::default();
     rows.push(widgets::row(
-        "Tab options",
-        Some("Every option on this page, back to what a fresh install opens with."),
+        Words::new("Tab options")
+            .with_description("Every option on this page, back to what a fresh install opens with.")
+            .with_keywords(&["reset", "default", "restore", "undo", "revert"]),
         changed,
         widgets::text_button(
             "Reset to defaults",
@@ -312,14 +348,19 @@ fn rows_category(workspace: &Workspace) -> Vec<Box<dyn Element>> {
 }
 
 /// The usage chip, and what turning it off actually stops.
-fn usage(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
+fn usage(workspace: &Workspace, app: &AppContext) -> Vec<Category> {
     let ui = workspace.fonts().ui;
     let state = workspace.settings_page();
     let general = workspace.general();
 
     let chip = widgets::row(
-        "Show the usage chip",
-        Some("The pill in the header, showing how much of the session budget is spent."),
+        Words::new("Show the usage chip")
+            .with_description(
+                "The pill in the header, showing how much of the session budget is spent.",
+            )
+            .with_keywords(&[
+                "usage", "token", "budget", "claude", "limit", "quota", "network", "poll", "pill",
+            ]),
         true,
         widgets::switch(
             general.show_usage_chip,
@@ -340,11 +381,10 @@ fn usage(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
         (None, None) => "not being read".to_owned(),
     };
 
-    page(vec![
-        widgets::category("Claude Code", true, vec![chip], ui),
+    vec![
+        widgets::category("Claude Code", vec![chip]),
         widgets::category(
             "Session",
-            false,
             vec![
                 widgets::note(
                     "Crook reads the session Claude Code already stores on this machine and asks \
@@ -352,35 +392,54 @@ fn usage(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
                      does not poll.",
                     ui,
                 ),
-                widgets::fact("Last reading", current, false, workspace.fonts()),
+                widgets::fact(
+                    Words::new("Last reading")
+                        .with_keywords(&["usage", "percent", "spent", "session", "poll"]),
+                    current,
+                    false,
+                    workspace.fonts(),
+                ),
             ],
-            ui,
         ),
-    ])
+    ]
 }
 
 /// The bindings, which are fixed.
-fn keys(workspace: &Workspace) -> Box<dyn Element> {
+fn keys(workspace: &Workspace) -> Vec<Category> {
     let ui = workspace.fonts().ui;
     let fonts = workspace.fonts();
 
-    let binding = |label: &'static str, chord: String| widgets::fact(label, chord, true, fonts);
+    // The chord is the value, which is what makes it searchable: somebody who
+    // remembers the key and not the name of what it does types the key.
+    let binding = |words: Words, chord: String| widgets::fact(words, chord, true, fonts);
+    let key = Words::new;
 
-    page(vec![
+    vec![
         widgets::category(
             "Tabs and panes",
-            true,
             vec![
-                binding("New agent tab", chord("cmd-t", "ctrl-shift-t")),
-                binding("Close the focused pane", chord("cmd-w", "ctrl-shift-w")),
-                binding("Split to the right", chord("cmd-d", "ctrl-shift-d")),
-                binding("Split downwards", chord("cmd-shift-d", "ctrl-shift-e")),
                 binding(
-                    "Previous / next tab",
+                    key("New agent tab").with_keywords(&["open", "create", "another"]),
+                    chord("cmd-t", "ctrl-shift-t"),
+                ),
+                binding(
+                    key("Close the focused pane").with_keywords(&["quit", "exit", "kill"]),
+                    chord("cmd-w", "ctrl-shift-w"),
+                ),
+                binding(
+                    key("Split to the right").with_keywords(&["vertical", "side", "beside"]),
+                    chord("cmd-d", "ctrl-shift-d"),
+                ),
+                binding(
+                    key("Split downwards").with_keywords(&["horizontal", "below", "under"]),
+                    chord("cmd-shift-d", "ctrl-shift-e"),
+                ),
+                binding(
+                    key("Previous / next tab").with_keywords(&["switch", "cycle", "between"]),
                     chord("cmd-alt-left / right", "ctrl-pageup / pagedown"),
                 ),
                 binding(
-                    "Move the active tab",
+                    key("Move the active tab").with_keywords(&["reorder", "position"]),
                     chord("cmd-ctrl-left / right", "ctrl-shift-pageup / pagedown"),
                 ),
                 widgets::note(
@@ -391,17 +450,22 @@ fn keys(workspace: &Workspace) -> Box<dyn Element> {
                     ui,
                 ),
             ],
-            ui,
         ),
         widgets::category(
             "Command blocks",
-            false,
             vec![
                 binding(
-                    "Copy a whole command and its output",
+                    key("Copy a whole command and its output").with_keywords(&[
+                        "clipboard",
+                        "block",
+                        "yank",
+                    ]),
                     "hover it, then click".to_owned(),
                 ),
-                binding("Move through the commands", "wheel".to_owned()),
+                binding(
+                    key("Move through the commands").with_keywords(&["scroll", "block", "wheel"]),
+                    "wheel".to_owned(),
+                ),
                 widgets::note(
                     "A pane's output is a list of commands, and that needs the shell to say \
                      where each one starts and ends. Crook installs the marks that do it into \
@@ -419,20 +483,30 @@ fn keys(workspace: &Workspace) -> Box<dyn Element> {
                     ui,
                 ),
             ],
-            ui,
         ),
         widgets::category(
             "Selecting the output",
-            false,
             vec![
-                binding("Select a run of text", "drag".to_owned()),
                 binding(
-                    "Select a word / a whole line",
+                    key("Select a run of text").with_keywords(&["mouse", "drag", "highlight"]),
+                    "drag".to_owned(),
+                ),
+                binding(
+                    key("Select a word / a whole line")
+                        .with_keywords(&["mouse", "double", "triple", "click"]),
                     "double / triple click".to_owned(),
                 ),
-                binding("Select a column of it", "alt-drag".to_owned()),
                 binding(
-                    "Copy what is selected",
+                    key("Select a column of it").with_keywords(&[
+                        "block",
+                        "rectangular",
+                        "alt",
+                        "option",
+                    ]),
+                    "alt-drag".to_owned(),
+                ),
+                binding(
+                    key("Copy what is selected").with_keywords(&["clipboard", "yank"]),
                     chord("cmd-c", "ctrl-c or ctrl-shift-c"),
                 ),
                 widgets::note(
@@ -461,15 +535,27 @@ fn keys(workspace: &Workspace) -> Box<dyn Element> {
                     ui,
                 ),
             ],
-            ui,
         ),
         widgets::category(
             "The command field",
-            false,
             vec![
-                binding("Send the line to the shell", "enter".to_owned()),
-                binding("Lengthen it by a line", "shift-enter".to_owned()),
-                binding("Walk this pane's history", "up / down".to_owned()),
+                binding(
+                    key("Send the line to the shell")
+                        .with_keywords(&["run", "execute", "submit", "return"]),
+                    "enter".to_owned(),
+                ),
+                binding(
+                    key("Lengthen it by a line").with_keywords(&[
+                        "multiline",
+                        "newline",
+                        "continue",
+                    ]),
+                    "shift-enter".to_owned(),
+                ),
+                binding(
+                    key("Walk this pane's history").with_keywords(&["previous", "recall", "arrow"]),
+                    "up / down".to_owned(),
+                ),
                 widgets::note(
                     "Everything else in the field is the text editing this platform already \
                      does. ctrl-c interrupts the shell and throws the half-written line away \
@@ -485,14 +571,23 @@ fn keys(workspace: &Workspace) -> Box<dyn Element> {
                     ui,
                 ),
             ],
-            ui,
         ),
         widgets::category(
             "Window",
-            false,
             vec![
-                binding("Move the tabs panel", chord("cmd-b", "ctrl-shift-b")),
-                binding("Open these settings", chord("cmd-,", "ctrl-,")),
+                binding(
+                    key("Move the tabs panel").with_keywords(&[
+                        "sidebar",
+                        "strip",
+                        "placement",
+                        "layout",
+                    ]),
+                    chord("cmd-b", "ctrl-shift-b"),
+                ),
+                binding(
+                    key("Open these settings").with_keywords(&["preferences", "options", "config"]),
+                    chord("cmd-,", "ctrl-,"),
+                ),
                 widgets::note(
                     "These settings are a pane, like a session is, so they close the way every \
                      pane does and have no key of their own for it. Pressing the binding again \
@@ -507,13 +602,12 @@ fn keys(workspace: &Workspace) -> Box<dyn Element> {
                     ui,
                 ),
             ],
-            ui,
         ),
-    ])
+    ]
 }
 
 /// What this build is, where it keeps its file, and who owns what in it.
-fn about(workspace: &Workspace) -> Box<dyn Element> {
+fn about(workspace: &Workspace) -> Vec<Category> {
     let ui = workspace.fonts().ui;
     let fonts = workspace.fonts();
 
@@ -526,25 +620,39 @@ fn about(workspace: &Workspace) -> Box<dyn Element> {
         None => "nowhere — this run keeps its options in memory".to_owned(),
     };
 
-    page(vec![
+    vec![
         widgets::category(
             "Build",
-            true,
             vec![
                 widgets::fact(
-                    "Version",
+                    Words::new("Version").with_keywords(&["build", "release", "crook"]),
                     env!("CARGO_PKG_VERSION").to_owned(),
                     false,
                     fonts,
                 ),
-                widgets::fact("Channel", workspace.channel().to_owned(), false, fonts),
-                widgets::fact("Settings file", file, true, fonts),
+                widgets::fact(
+                    Words::new("Channel").with_keywords(&["dev", "stable", "build"]),
+                    workspace.channel().to_owned(),
+                    false,
+                    fonts,
+                ),
+                widgets::fact(
+                    Words::new("Settings file").with_keywords(&[
+                        "json",
+                        "config",
+                        "path",
+                        "where",
+                        "folder",
+                        "directory",
+                    ]),
+                    file,
+                    true,
+                    fonts,
+                ),
             ],
-            ui,
         ),
         widgets::category(
             "Licence",
-            false,
             vec![
                 widgets::note(
                     "Crook is open source under the MIT licence, in full and with no exceptions.",
@@ -567,7 +675,6 @@ fn about(workspace: &Workspace) -> Box<dyn Element> {
                     ui,
                 ),
             ],
-            ui,
         ),
-    ])
+    ]
 }

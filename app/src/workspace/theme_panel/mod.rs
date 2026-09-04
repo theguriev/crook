@@ -11,15 +11,18 @@
 //! beside it, a one-line hint, a search field, and a scrolling list of preview
 //! cards with names under them.
 //!
-//! All of that is here except the search field, and the reason is not
-//! principle: Crook's text input is [`CommandInput`], which exists to send a
-//! line to a shell — it is keyed by `PaneId`, its Enter is wired to `send()`,
-//! and the arbitration that decides which one has the keyboard runs over the
-//! panes. Reusing it outside a pane is a refactor of the input layer rather
-//! than a panel feature. Warp needs a search box because it lists twenty-one
-//! built-in themes plus everything a person has collected; Crook lists three
-//! plus a folder, and the day that folder holds fifty this is the first thing
-//! to build.
+//! All of that is here except the search field, and it is now a choice rather
+//! than a cost. It was the second: Crook's only text input was
+//! [`CommandInput`], which exists to send a line to a shell, and reusing it
+//! outside a pane was a refactor of the input layer rather than a panel
+//! feature. The settings page's rail did that refactor —
+//! [`SearchField`](super::settings_page) is a text field with no pane under it
+//! — so a panel that wanted one would now be assembling parts that exist.
+//!
+//! What is left is the reason Warp has one and Crook does not need one: Warp
+//! lists twenty-one built-in themes plus everything a person has collected;
+//! Crook lists thirteen plus a folder, and they fit on two screens. The day
+//! that folder holds fifty, this is a small job.
 //!
 //! [`CommandInput`]: super::input_element::CommandInput
 //!
