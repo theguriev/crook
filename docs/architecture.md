@@ -865,10 +865,35 @@ short pane — is the other half of the same decision.
 
 ### What the emulator does not do
 
-Mouse reporting, IME composition, the kitty keyboard protocol, the numeric keypad, and OSC 52
-clipboard writes — the *field* reaches the system clipboard, the grid does not, and an OSC 52
-is logged rather than silently dropped. Ctrl+Enter and Ctrl+Tab are indistinguishable from the
-unmodified key in every legacy encoding, which is the stated reason the kitty protocol exists.
+IME composition, the kitty keyboard protocol and the numeric keypad. Ctrl+Enter and Ctrl+Tab
+are indistinguishable from the unmodified key in every legacy encoding, which is the stated
+reason the kitty protocol exists.
+
+**Mouse reporting is in**, in `crook_terminal::mouse`. A program asks for it with `?1000`,
+`?1002` or `?1003` and gets presses, drags or every move; `?1006` switches the encoding to the
+SGR form, which is the one with no 223-column limit and the only one that can say which button
+came up. `?1007` is separate and on by default, as it is in xterm: it is what turns the wheel
+into arrow keys for a pager that never asked for the mouse, which is why `less` and `man`
+scroll out of the box. **Shift suspends all of it** — that is the only way to select text out
+of a program that has taken the pointer, and copying what `htop` is showing is a thing people
+do constantly.
+
+The gesture is classified once, when the button goes down, and remembered in `PaneSelection`
+as `Selecting` or `Reporting`. Asking the terminal again on each move would be asking a
+question whose answer can change mid-drag, and a program that turned reporting off while a
+button was held would leave the release unreported and half a selection dragged out of a
+screen nobody selected in.
+
+What it reaches is **the grid, not the block list**. That is where a program which reads the
+mouse actually draws: every one of them takes the alternate screen, which is the first rule in
+`pane_surface::of`. A program that reads the mouse and stays on the primary screen — `fzf`
+with a fixed height is the only common one — gets no reports, and the block list goes on
+selecting under it.
+
+OSC 52 clipboard writes are in too: the write reaches the window's one clipboard through
+`TerminalUpdate::ClipboardStore`, an empty payload is dropped rather than destroying what
+somebody had copied, and the *read* direction stays refused in the emulator, where answering
+it would hand any program that can print to a pty the contents of the clipboard.
 
 One residue is worth writing down rather than discovering. End-of-file on the pty master is
 the only signal this design has that a session is over, and something other than the child

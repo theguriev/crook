@@ -55,7 +55,7 @@ use crookui_core::scene::{ClipBounds, CornerRadius, Radius, Scene};
 use crate::clipboard::Clipboard;
 use crate::pane_blocks::{PaneBlocks, ScrollCause};
 use crate::pane_input::PaneInput;
-use crate::pane_selection::PaneSelection;
+use crate::pane_selection::{Gesture, PaneSelection};
 use crate::pane_surface;
 use crate::tab::PaneId;
 use crate::terminal_font::{CellFont, CellMetrics};
@@ -580,7 +580,10 @@ impl BlockList {
             }
             return true;
         }
-        self.output.release()
+        // The list never gives a press to a program — a block is Crook's own
+        // surface, and the grid is where a program that reads the mouse draws
+        // — so any gesture open here is a selection.
+        self.output.release() != Gesture::None
     }
 
     /// Puts one finished block's command and output on the clipboard.

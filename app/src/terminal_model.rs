@@ -81,8 +81,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crook_terminal::{
-    Block, CellSide, Key, Modifiers, Palette, Rgb, SelectionKind, Snapshot, Terminal,
-    TerminalEvent, TerminalOptions, TerminalSize, ViewportPoint,
+    Block, CellSide, Key, Modifiers, MouseButton, MouseEventKind, MouseModes, Palette, Rgb,
+    SelectionKind, Snapshot, Terminal, TerminalEvent, TerminalOptions, TerminalSize, ViewportPoint,
 };
 use crookui_core::geometry::Color;
 use crookui_core::prelude::*;
@@ -782,6 +782,56 @@ impl TerminalHandle {
                     log::debug!("could not send a key to a shell: {error}");
                     false
                 }
+            }
+        })
+    }
+
+    /// Which mouse reports the program in this pane has asked for.
+    ///
+    /// The one question a pointer gesture asks before it does anything: with
+    /// nothing asked for it is a selection, and with something asked for it
+    /// belongs to the program.
+    pub fn mouse_modes(&self) -> MouseModes {
+        self.drive(|terminal| terminal.emulator().mouse_modes())
+    }
+
+    /// Sends a pointer gesture, returning whether the program took it.
+    ///
+    /// Deliberately **not** scrolled to the bottom first, unlike a key press.
+    /// A program reading the mouse owns the screen, so there is no scrollback
+    /// above it to be pulled away from — and a caller only ever reaches this
+    /// with a cell of the viewport it just hit-tested, which a scroll would
+    /// invalidate between the two.
+    pub fn send_mouse(
+        &self,
+        kind: MouseEventKind,
+        button: Option<MouseButton>,
+        at: ViewportPoint,
+        modifiers: Modifiers,
+    ) -> bool {
+        self.drive(
+            |terminal| match terminal.send_mouse(kind, button, at, modifiers) {
+                Ok(sent) => sent,
+                Err(error) => {
+                    log::debug!("could not send a pointer gesture to a shell: {error}");
+                    false
+                }
+            },
+        )
+    }
+
+    /// Sends the wheel as arrow keys to a full-screen program that asked for
+    /// `?1007`, returning whether anything was sent.
+    ///
+    /// What makes the wheel scroll `less` and `man`, neither of which reports
+    /// the mouse. Nothing happens on the primary screen, where the wheel
+    /// belongs to the scrollback.
+    pub fn send_alternate_scroll(&self, lines: i32) -> bool {
+        self.drive(|terminal| match terminal.send_alternate_scroll(lines) {
+            Ok(sent) => sent,
+            Err(error) => {
+                log::debug!("could not send the wheel to a shell: {error}");
+                false
             }
         })
     }

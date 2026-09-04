@@ -1,4 +1,4 @@
-//! The selection gesture in one pane's output, as the view holds it between
+//! The pointer gesture in one pane's output, as the view holds it between
 //! frames.
 //!
 //! The selection itself is not here. It lives in the emulator, in `Term`'s own
@@ -17,16 +17,43 @@
 //! [`PaneInput`](crate::pane_input::PaneInput) and every mouse state — and a
 //! pane that closes takes its gesture with it, along with the selection in the
 //! terminal it closed.
+//!
+//! # Why the gesture has a kind
+//!
+//! A press on a pane means one of two entirely different things depending on
+//! what is running in it. With no program reading the mouse it starts a
+//! selection; with `vim`, `htop` or `tmux` in the pane it is a click that
+//! belongs to the program, and the moves that follow are reports rather than a
+//! selection being dragged out.
+//!
+//! Which of the two it was is decided **once, when the button goes down**, and
+//! remembered here. Asking the terminal again on every move would be asking a
+//! question whose answer can change mid-drag: a program that turns mouse
+//! reporting off while a button is held would leave the release unreported and
+//! a selection half-dragged out of a screen nobody selected in.
 
 use std::cell::Cell;
 use std::rc::Rc;
 
-/// Whether a selection is being dragged out of one pane's output.
+/// What the button that went down on a pane's output is doing.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum Gesture {
+    /// Nothing is held.
+    #[default]
+    None,
+    /// A selection is being dragged out of the output.
+    Selecting,
+    /// The gesture belongs to a program that asked for the mouse. Every move
+    /// and the release are reported to it, and nothing is selected.
+    Reporting,
+}
+
+/// The pointer gesture one pane's output has open.
 ///
 /// Cheap to clone — it is an [`Rc`] — because the element that draws the grid
 /// takes one every frame.
 #[derive(Clone, Default)]
-pub struct PaneSelection(Rc<Cell<bool>>);
+pub struct PaneSelection(Rc<Cell<Gesture>>);
 
 impl PaneSelection {
     /// A pane with no gesture in progress.
@@ -34,23 +61,44 @@ impl PaneSelection {
         Self::default()
     }
 
-    /// Says a press landed on this pane's output, so the moves that follow are
-    /// this pane's to act on.
+    /// Says a press landed on this pane's output and started a selection, so
+    /// the moves that follow are this pane's to act on.
     pub fn begin(&self) {
-        self.0.set(true);
+        self.0.set(Gesture::Selecting);
     }
 
-    /// Whether a press on this pane's output has not been released yet.
-    pub fn is_dragging(&self) -> bool {
+    /// Says a press landed and was given to a program that reads the mouse.
+    pub fn begin_reporting(&self) {
+        self.0.set(Gesture::Reporting);
+    }
+
+    /// What the open gesture is, if there is one.
+    pub fn gesture(&self) -> Gesture {
         self.0.get()
     }
 
-    /// Ends the gesture, reporting whether there was one to end.
+    /// Whether a selection is being dragged out of this pane.
+    pub fn is_dragging(&self) -> bool {
+        self.0.get() == Gesture::Selecting
+    }
+
+    /// Whether the open gesture belongs to a program reading the mouse.
+    pub fn is_reporting(&self) -> bool {
+        self.0.get() == Gesture::Reporting
+    }
+
+    /// Whether any button that went down here is still down.
+    pub fn is_open(&self) -> bool {
+        self.0.get() != Gesture::None
+    }
+
+    /// Ends the gesture, reporting what it was.
     ///
     /// The answer is what makes a release meaningful: only the pane that took
-    /// the press has anything to do with the button coming up again.
-    pub fn end(&self) -> bool {
-        self.0.replace(false)
+    /// the press has anything to do with the button coming up again, and only
+    /// it knows whether that release is a program's or a selection's.
+    pub fn end(&self) -> Gesture {
+        self.0.replace(Gesture::None)
     }
 }
 
@@ -72,13 +120,15 @@ mod tests {
             "a press on one pane started a drag in another"
         );
 
-        assert!(
+        assert_eq!(
             pressed.end(),
+            Gesture::Selecting,
             "the release belongs to the pane that was pressed"
         );
         assert!(!pressed.is_dragging());
-        assert!(
-            !untouched.end(),
+        assert_eq!(
+            untouched.end(),
+            Gesture::None,
             "a pane with no gesture has no release to claim"
         );
     }
@@ -92,5 +142,22 @@ mod tests {
 
         handed_to_the_element.begin();
         assert!(kept.is_dragging());
+    }
+
+    #[test]
+    fn a_press_a_program_took_is_never_mistaken_for_a_selection() {
+        // The distinction the whole type exists to keep: a drag inside `vim`
+        // must not leave a highlight behind it, and the release must reach the
+        // program rather than ending a selection nobody made.
+        let gesture = PaneSelection::new();
+        gesture.begin_reporting();
+
+        assert!(gesture.is_reporting());
+        assert!(gesture.is_open());
+        assert!(
+            !gesture.is_dragging(),
+            "a click a program took is not a selection being dragged"
+        );
+        assert_eq!(gesture.end(), Gesture::Reporting);
     }
 }

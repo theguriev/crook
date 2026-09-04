@@ -14,14 +14,16 @@
 //! emulator's, because that is the only place it stays anchored to its text
 //! while the shell prints underneath it. What this owns is the routing.
 
-use crook_terminal::{CellSide, SelectionKind, ViewportPoint};
+use crook_terminal::{
+    CellSide, Modifiers, MouseButton, MouseEventKind, MouseModes, SelectionKind, ViewportPoint,
+};
 use crookui_core::event::Event;
 use crookui_core::presenter::EventContext;
 
 use crate::clipboard::Clipboard;
 use crate::input_keys::{self, Platform, Route};
 use crate::pane_input::PaneInput;
-use crate::pane_selection::PaneSelection;
+use crate::pane_selection::{Gesture, PaneSelection};
 use crate::tab::PaneId;
 use crate::terminal_keys;
 use crate::terminal_model::TerminalHandle;
@@ -328,16 +330,77 @@ impl Output {
         true
     }
 
-    /// Whether a press on this pane's output has not been released yet.
+    /// Whether a selection is being dragged out of this pane's output.
     pub fn is_dragging(&self) -> bool {
         self.mouse
             .as_ref()
             .is_some_and(|mouse| mouse.gesture.is_dragging())
     }
 
-    /// Ends the gesture, reporting whether this pane had one.
-    pub fn release(&self) -> bool {
-        self.mouse.as_ref().is_some_and(|mouse| mouse.gesture.end())
+    /// Whether any button that went down on this output is still down.
+    pub fn is_open(&self) -> bool {
+        self.mouse
+            .as_ref()
+            .is_some_and(|mouse| mouse.gesture.is_open())
+    }
+
+    /// Whether the open gesture belongs to a program that reads the mouse.
+    pub fn is_reporting(&self) -> bool {
+        self.mouse
+            .as_ref()
+            .is_some_and(|mouse| mouse.gesture.is_reporting())
+    }
+
+    /// Ends the gesture, reporting what it was.
+    pub fn release(&self) -> Gesture {
+        self.mouse
+            .as_ref()
+            .map_or(Gesture::None, |mouse| mouse.gesture.end())
+    }
+
+    /// Which mouse reports the program in this pane has asked for.
+    ///
+    /// [`MouseModes::NONE`] whenever there is no terminal, which is what makes
+    /// a detached output — a test, a pane whose shell has gone — behave as one
+    /// nobody is reading the pointer in.
+    pub fn mouse_modes(&self) -> MouseModes {
+        self.handle
+            .as_ref()
+            .map_or(MouseModes::NONE, TerminalHandle::mouse_modes)
+    }
+
+    /// Hands a pointer gesture to the program, reporting whether it took it.
+    ///
+    /// `false` for every gesture the modes in force do not cover, which is what
+    /// leaves a press to start a selection instead. A gesture reported to a
+    /// program repaints nothing by itself: what the program does about it
+    /// arrives as output, and that is what draws the next frame.
+    pub fn report_mouse(
+        &self,
+        kind: MouseEventKind,
+        button: Option<MouseButton>,
+        at: ViewportPoint,
+        modifiers: Modifiers,
+    ) -> bool {
+        self.handle
+            .as_ref()
+            .is_some_and(|handle| handle.send_mouse(kind, button, at, modifiers))
+    }
+
+    /// Says a press was given to a program, so the moves that follow are
+    /// reports rather than a selection being dragged out.
+    pub fn begin_reporting(&self) {
+        if let Some(mouse) = self.mouse.as_ref() {
+            mouse.gesture.begin_reporting();
+        }
+    }
+
+    /// Sends the wheel to a full-screen program as arrow keys, for one that
+    /// asked for `?1007` and never asked for the mouse.
+    pub fn alternate_scroll(&self, lines: i32) -> bool {
+        self.handle
+            .as_ref()
+            .is_some_and(|handle| handle.send_alternate_scroll(lines))
     }
 }
 

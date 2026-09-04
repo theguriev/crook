@@ -73,6 +73,7 @@ mod emulator;
 mod harvest;
 pub mod input;
 mod marks;
+pub mod mouse;
 mod pty;
 pub mod selection;
 mod snapshot;
@@ -89,6 +90,7 @@ pub use crate::emulator::{Emulator, TerminalEvent};
 pub use crate::harvest::{BlockRows, RowCombining, StyleRun};
 pub use crate::input::{InputModes, Key, Modifiers};
 pub use crate::marks::{PromptKind, ShellMark};
+pub use crate::mouse::{MouseButton, MouseEventKind, MouseModes};
 pub use crate::pty::{ChildExit, Program, Pty, PtyReader, default_shell};
 pub use crate::selection::{CellSide, GridPoint, SelectionKind, SelectionSpan, ViewportPoint};
 pub use crate::snapshot::{
@@ -249,6 +251,59 @@ impl Terminal {
             return Ok(false);
         };
         self.write(&bytes)?;
+        Ok(true)
+    }
+
+    /// Sends a pointer gesture, if the child has asked to hear about it.
+    ///
+    /// Returns whether any bytes were sent, which is also the answer to "did
+    /// the program take this gesture?" — a caller uses it to decide whether the
+    /// same press should instead start a selection. Nothing is sent, and
+    /// `false` comes back, whenever no mouse mode is in force.
+    ///
+    /// `at` is a cell of the viewport. Converting a pixel to one is the
+    /// renderer's job: only it knows the cell size and where the grid was
+    /// drawn.
+    pub fn send_mouse(
+        &mut self,
+        kind: MouseEventKind,
+        button: Option<MouseButton>,
+        at: ViewportPoint,
+        modifiers: Modifiers,
+    ) -> io::Result<bool> {
+        let modes = self.emulator.mouse_modes();
+        let Some(bytes) = mouse::encode(kind, button, at, modifiers, modes) else {
+            return Ok(false);
+        };
+        self.write(&bytes)?;
+        Ok(true)
+    }
+
+    /// Sends the wheel as arrow keys, for a full-screen program that never
+    /// asked for the mouse.
+    ///
+    /// This is what makes the wheel scroll `less`, `man` and `git log`. None of
+    /// them reports the mouse; all of them read arrow keys, and `?1007` is how
+    /// they say so. `lines` is positive for a turn away from the user, matching
+    /// [`Self::scroll_lines`].
+    ///
+    /// Returns whether anything was sent. Nothing is on the primary screen: the
+    /// wheel belongs to the scrollback there, which is real history a person
+    /// can go back to.
+    pub fn send_alternate_scroll(&mut self, lines: i32) -> io::Result<bool> {
+        let modes = self.emulator.mouse_modes();
+        if !modes.wants_alternate_scroll(self.emulator.is_alt_screen()) || lines == 0 {
+            return Ok(false);
+        }
+
+        let key = if lines > 0 { Key::Up } else { Key::Down };
+        let count = lines.unsigned_abs();
+        // One key press per line, because that is what a wheel notch is to a
+        // program reading arrow keys, and a pager has no way to be told "three
+        // lines" in one.
+        for _ in 0..count {
+            self.send_key(key, Modifiers::NONE)?;
+        }
         Ok(true)
     }
 

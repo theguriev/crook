@@ -67,9 +67,15 @@
 use std::sync::Arc;
 
 use crook_terminal::{
-    CellFlags, CellSide, Cursor, CursorShape, Rgb, RowCombining, Snapshot, SnapshotCell,
-    ViewportPoint,
+    CellFlags, CellSide, Cursor, CursorShape, MouseEventKind, Rgb, RowCombining, Snapshot,
+    SnapshotCell, ViewportPoint,
 };
+// Both crates have a `MouseButton` and they are different types: one is what a
+// window reported, the other is what a terminal protocol names. Keeping the
+// unqualified name for the window's own is what makes every event pattern in
+// this file read the way it did before mouse reporting existed.
+use crook_terminal::Modifiers as ReportedModifiers;
+use crook_terminal::MouseButton as ReportedButton;
 use crookui_core::AppContext;
 use crookui_core::element::{Element, SizeConstraint};
 use crookui_core::event::{DispatchedEvent, Event, Modifiers, MouseButton};
@@ -79,7 +85,7 @@ use crookui_core::scene::Scene;
 
 use crate::clipboard::Clipboard;
 use crate::pane_input::PaneInput;
-use crate::pane_selection::PaneSelection;
+use crate::pane_selection::{Gesture, PaneSelection};
 use crate::pane_surface;
 use crate::tab::PaneId;
 use crate::terminal_font::{CellFont, CellMetrics};
@@ -104,6 +110,30 @@ const STRIKEOUT_HEIGHT_RATIO: f32 = 0.28;
 
 /// How wide the beam cursor and the hollow block's outline are drawn.
 const CURSOR_STROKE: f32 = 2.;
+
+/// The most wheel notches one scroll event is reported as.
+///
+/// A trackpad fling arrives as a single event carrying a large pixel delta, and
+/// the mouse protocol counts notches: without a bound, one flick of two fingers
+/// would be hundreds of six-byte writes down a pty for a screen that can only
+/// scroll as far as it has lines.
+const MAX_WHEEL_NOTCHES: u32 = 16;
+
+/// The terminal's name for a button the window reported, or `None` for one the
+/// mouse protocol has no number for.
+///
+/// The two side buttons of a five-button mouse are the `None` case. The
+/// protocol does have codes for them, and nothing that reads the mouse in a
+/// terminal has ever expected one, so sending them would be inventing traffic
+/// rather than reporting a gesture.
+fn reported(button: MouseButton) -> Option<ReportedButton> {
+    match button {
+        MouseButton::Left => Some(ReportedButton::Left),
+        MouseButton::Middle => Some(ReportedButton::Middle),
+        MouseButton::Right => Some(ReportedButton::Right),
+        MouseButton::Back | MouseButton::Forward => None,
+    }
+}
 
 /// One pane's terminal grid.
 pub struct TerminalElement {
@@ -166,9 +196,11 @@ impl TerminalElement {
         self.output.type_key(event, self.snapshot.alt_screen, ctx) != Typed::Ignored
     }
 
-    /// Starts a selection where a press landed.
+    /// Starts a selection where a press landed, or hands the press to a
+    /// program that is reading the mouse.
     fn press(
         &self,
+        button: MouseButton,
         position: Vector2F,
         click_count: u32,
         modifiers: Modifiers,
@@ -177,13 +209,73 @@ impl TerminalElement {
         let Some((at, side)) = self.cell_at(position) else {
             return false;
         };
+
+        if self.report(MouseEventKind::Press, reported(button), at, modifiers) {
+            self.output.begin_reporting();
+            return true;
+        }
+
+        // Only the primary button selects. A right or middle click a program
+        // did not want has nothing to do with a selection, and taking one
+        // would throw away the highlight somebody was about to copy.
+        if button != MouseButton::Left {
+            return false;
+        }
         self.output
             .press(at, side, selection_kind(click_count, modifiers.alt), ctx)
     }
 
+    /// Hands a gesture to the program in this pane, if it asked for the mouse.
+    ///
+    /// **Shift is the way out.** Every terminal makes holding it suspend mouse
+    /// reporting, because otherwise there is no way at all to select text out
+    /// of a program that has taken the pointer — and copying what `htop` is
+    /// showing is a thing people do constantly. Holding it therefore reports
+    /// nothing, and the gesture falls through to the selection below.
+    fn report(
+        &self,
+        kind: MouseEventKind,
+        button: Option<ReportedButton>,
+        at: ViewportPoint,
+        modifiers: Modifiers,
+    ) -> bool {
+        if modifiers.shift {
+            return false;
+        }
+        self.output.report_mouse(
+            kind,
+            button,
+            at,
+            ReportedModifiers {
+                shift: false,
+                control: modifiers.ctrl,
+                alt: modifiers.alt,
+                logo: modifiers.cmd,
+            },
+        )
+    }
+
     /// Drags the open end of the selection to the pointer, scrolling the
     /// viewport when the pointer has left the grid.
-    fn drag(&self, position: Vector2F, ctx: &mut EventContext) -> bool {
+    fn drag(
+        &self,
+        button: MouseButton,
+        position: Vector2F,
+        modifiers: Modifiers,
+        ctx: &mut EventContext,
+    ) -> bool {
+        // A drag a program took goes on being reported to it, wherever the
+        // pointer has got to. It is clamped into the grid rather than dropped
+        // outside it for the same reason a selection is: a drag that left the
+        // window is still a drag, and `vim` resizing a split needs to hear
+        // about the row the pointer is level with.
+        if self.output.is_reporting() {
+            let Some((at, _)) = self.cell_at(position) else {
+                return false;
+            };
+            return self.report(MouseEventKind::Motion, reported(button), at, modifiers);
+        }
+
         // Deliberately not hit-tested: dragging *past* the pane is how a
         // selection is taken to the end of a line, and how it is taken past
         // the end of the screen. What keeps this pane's grid out of a drag
@@ -198,9 +290,41 @@ impl TerminalElement {
         self.output.drag(at, side, self.autoscroll(position), ctx)
     }
 
+    /// Reports a pointer move that no button is behind, for a program that
+    /// asked for `?1003`.
+    ///
+    /// Hit-tested, unlike a drag: with no button down there is no gesture that
+    /// began here, so a pointer crossing a neighbouring pane is not this one's
+    /// to report.
+    fn moved(&self, position: Vector2F, modifiers: Modifiers) -> bool {
+        if self.output.is_open() || !self.output.mouse_modes().motion {
+            return false;
+        }
+        if !self
+            .bounds()
+            .is_some_and(|bounds| bounds.contains_point(position))
+        {
+            return false;
+        }
+        let Some((at, _)) = self.cell_at(position) else {
+            return false;
+        };
+        self.report(MouseEventKind::Motion, None, at, modifiers)
+    }
+
     /// Ends the gesture, reporting whether this pane had one.
-    fn release(&self) -> bool {
-        self.output.release()
+    fn release(&self, button: MouseButton, position: Vector2F, modifiers: Modifiers) -> bool {
+        match self.output.release() {
+            Gesture::None => false,
+            Gesture::Selecting => true,
+            Gesture::Reporting => {
+                let Some((at, _)) = self.cell_at(position) else {
+                    return true;
+                };
+                self.report(MouseEventKind::Release, reported(button), at, modifiers);
+                true
+            }
+        }
     }
 
     /// The cell of the viewport a window position lands on, and which half of
@@ -272,9 +396,23 @@ impl TerminalElement {
 
     /// Moves the viewport through the scrollback, if the wheel turned over this
     /// pane.
+    /// Moves the viewport through the scrollback, if the wheel turned over this
+    /// pane — or gives the wheel to whatever is running instead.
+    ///
+    /// Three destinations, in the order every terminal tries them:
+    ///
+    /// 1. **A program reading the mouse** gets the notch as button 64 or 65,
+    ///    which is how `tmux` scrolls its own pane and `vim` its own buffer.
+    /// 2. **A full-screen program that asked for `?1007`** gets arrow keys.
+    ///    That is what makes the wheel work in `less`, `man` and `git log`,
+    ///    none of which reports the mouse.
+    /// 3. **Everything else** scrolls the emulator's history, which is the
+    ///    only one of the three that is Crook's own scrollback.
     fn scroll(&self, event: &Event) -> bool {
         let Event::ScrollWheel {
-            position, delta, ..
+            position,
+            delta,
+            modifiers,
         } = event
         else {
             return false;
@@ -290,14 +428,51 @@ impl TerminalElement {
             return false;
         };
         let height = self.font.metrics().height;
+        // Positive is up the screen and back into history, which is the sense
+        // both the wheel and the emulator use.
         let lines = (delta.to_pixels(height).y() / height).round() as i32;
         if lines == 0 {
             return false;
         }
-        // Positive is up the screen and back into history, which is the sense
-        // both the wheel and the emulator use.
+
+        // Shift takes the wheel back from whatever is running, the same way it
+        // takes a press back: it is the one gesture that always means Crook's
+        // own scrollback. On the alternate screen there is no history to move
+        // through, so it lands on nothing — which is the honest answer, and
+        // better than a program scrolling when somebody asked it not to.
+        if !modifiers.shift {
+            if let Some(at) = self.cell_at(*position).map(|(at, _)| at)
+                && self.report_wheel(lines, at, *modifiers)
+            {
+                return true;
+            }
+            if self.output.alternate_scroll(lines) {
+                return true;
+            }
+        }
+
         handle.scroll_lines(lines);
         true
+    }
+
+    /// Sends `lines` notches of the wheel to a program reading the mouse.
+    ///
+    /// One report per line, because a notch is what the protocol counts and
+    /// there is no way to say "three" in one. Bounded, so that a trackpad
+    /// fling cannot turn into hundreds of writes down a pty.
+    fn report_wheel(&self, lines: i32, at: ViewportPoint, modifiers: Modifiers) -> bool {
+        let button = if lines > 0 {
+            ReportedButton::WheelUp
+        } else {
+            ReportedButton::WheelDown
+        };
+
+        let notches = lines.unsigned_abs().min(MAX_WHEEL_NOTCHES);
+        let mut sent = false;
+        for _ in 0..notches {
+            sent |= self.report(MouseEventKind::Press, Some(button), at, modifiers);
+        }
+        sent
     }
 }
 
@@ -378,14 +553,15 @@ impl Element for TerminalElement {
         // out is [`PaneSelection`]: only the pane the press landed on has one.
         match event.raw_event() {
             Event::MouseDragged {
-                button: MouseButton::Left,
+                button,
                 position,
-                ..
-            } => return self.drag(*position, ctx),
+                modifiers,
+            } => return self.drag(*button, *position, *modifiers, ctx),
             Event::MouseUp {
-                button: MouseButton::Left,
-                ..
-            } => return self.release(),
+                button,
+                position,
+                modifiers,
+            } => return self.release(*button, *position, *modifiers),
             _ => {}
         }
 
@@ -405,7 +581,7 @@ impl Element for TerminalElement {
 
         match event {
             Event::MouseDown {
-                button: MouseButton::Left,
+                button,
                 position,
                 click_count,
                 modifiers,
@@ -413,8 +589,17 @@ impl Element for TerminalElement {
                 .bounds()
                 .is_some_and(|bounds| bounds.contains_point(*position)) =>
             {
-                self.press(*position, *click_count, *modifiers, ctx)
+                self.press(*button, *position, *click_count, *modifiers, ctx)
             }
+            // A bare move, for a program that asked to hear about every one.
+            // It is last because it is the only mouse event that is *usually*
+            // nothing to do with this element, and `moved` answers `false`
+            // without touching the terminal unless `?1003` is in force.
+            Event::MouseMoved {
+                position,
+                modifiers,
+                is_synthetic: false,
+            } => self.moved(*position, *modifiers),
             _ => false,
         }
     }

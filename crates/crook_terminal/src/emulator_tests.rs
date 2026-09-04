@@ -210,6 +210,50 @@ fn test_the_bell_is_reported() {
 }
 
 #[test]
+fn test_the_mouse_modes_are_the_ones_the_child_asked_for() {
+    let mut emulator = emulator();
+    assert!(
+        !emulator.mouse_modes().is_reporting(),
+        "a fresh terminal reports nothing, which is what leaves the pointer to \
+         the person"
+    );
+    assert!(
+        emulator.mouse_modes().alternate_scroll,
+        "alternate scroll is on from the start, as it is in xterm — which is \
+         what makes the wheel scroll a pager that was never configured"
+    );
+
+    // What every full-screen program written this century sends: click
+    // reporting, drag reporting, and the SGR encoding.
+    emulator.advance(b"\x1b[?1000h\x1b[?1002h\x1b[?1006h");
+    let modes = emulator.mouse_modes();
+    assert!(modes.drag);
+    assert!(modes.sgr);
+    assert!(modes.is_reporting());
+
+    // And on the way out it puts every one of them back, which is what makes
+    // a selection work again in the shell the program returns to.
+    emulator.advance(b"\x1b[?1000l\x1b[?1002l\x1b[?1006l");
+    assert!(!emulator.mouse_modes().is_reporting());
+    assert!(!emulator.mouse_modes().sgr);
+}
+
+#[test]
+fn test_alternate_scroll_is_reported_separately_from_the_mouse() {
+    // A pager relies on this and never asks for the mouse. The two have to
+    // stay apart: a drag across `less` must still select, and the wheel must
+    // still reach it as arrow keys.
+    let mut emulator = emulator();
+    assert!(emulator.mouse_modes().wants_alternate_scroll(true));
+
+    // A program that turns it off wants the wheel to do nothing at all, which
+    // is what `?1007l` has always meant.
+    emulator.advance(b"\x1b[?1007l");
+    assert!(!emulator.mouse_modes().alternate_scroll);
+    assert!(!emulator.mouse_modes().wants_alternate_scroll(true));
+}
+
+#[test]
 fn test_an_osc_52_write_is_reported_and_a_read_is_not_answered() {
     let mut emulator = emulator();
     // `c` is the clipboard selection; the payload is base64, which alacritty

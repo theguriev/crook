@@ -41,6 +41,7 @@ use parking_lot::Mutex;
 use crate::blocks::{Block, BlockId, BlockTracker, IgnoreReason, LiveBlock};
 use crate::input::InputModes;
 use crate::marks::ShellMark;
+use crate::mouse::MouseModes;
 use crate::pty::ChildExit;
 use crate::selection::{CellSide, GridPoint, SelectionKind, SelectionSpan, ViewportPoint};
 use crate::snapshot::{self, Palette, Snapshot, TerminalSize};
@@ -583,6 +584,22 @@ impl Emulator {
         InputModes {
             application_cursor: self.term.mode().contains(TermMode::APP_CURSOR),
             application_keypad: self.term.mode().contains(TermMode::APP_KEYPAD),
+        }
+    }
+
+    /// Which mouse reports the child has asked for.
+    ///
+    /// All false — [`MouseModes::NONE`] — is the state a shell sits in, and is
+    /// what tells a caller that the pointer belongs to the person rather than
+    /// to the program.
+    pub fn mouse_modes(&self) -> MouseModes {
+        let mode = self.term.mode();
+        MouseModes {
+            click: mode.contains(TermMode::MOUSE_REPORT_CLICK),
+            drag: mode.contains(TermMode::MOUSE_DRAG),
+            motion: mode.contains(TermMode::MOUSE_MOTION),
+            sgr: mode.contains(TermMode::SGR_MOUSE),
+            alternate_scroll: mode.contains(TermMode::ALTERNATE_SCROLL),
         }
     }
 
