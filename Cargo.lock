@@ -551,6 +551,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arboard",
+ "crook_plugin",
  "crook_terminal",
  "crook_usage",
  "crookui",
@@ -564,6 +565,10 @@ dependencies = [
  "unicode-segmentation",
  "unicode-width",
 ]
+
+[[package]]
+name = "crook_plugin"
+version = "0.1.0"
 
 [[package]]
 name = "crook_terminal"

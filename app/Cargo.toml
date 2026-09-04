@@ -30,6 +30,7 @@ default = []
 release_bundle = []
 
 [dependencies]
+crook_plugin.workspace = true
 crook_terminal.workspace = true
 crook_usage.workspace = true
 crookui.workspace = true

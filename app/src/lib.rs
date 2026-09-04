@@ -56,6 +56,8 @@ pub mod pane_selection;
 pub mod pane_split;
 pub mod pane_surface;
 pub mod platform_insets;
+pub mod plugin;
+pub mod plugins;
 pub mod process;
 pub mod selection;
 pub mod session;

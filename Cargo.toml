@@ -10,6 +10,7 @@ publish = false
 
 [workspace.dependencies]
 # Local crates.
+crook_plugin = { path = "crates/crook_plugin" }
 crook_terminal = { path = "crates/crook_terminal" }
 crook_usage = { path = "crates/crook_usage" }
 crookui = { path = "crates/crookui" }
