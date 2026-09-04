@@ -53,11 +53,13 @@ use crate::window_controls::{WindowHandle, WindowState};
 use crate::{Channel, WINDOW_CHROME};
 
 use super::action::{
-    OptionsAction, SettingsAction, ThemeAction, WindowAction, WorkspaceAction, WorktreeAction,
+    OptionsAction, SearchAction, SettingsAction, ThemeAction, WindowAction, WorkspaceAction,
+    WorktreeAction,
 };
 use super::settings_page::SettingsState;
 use super::tab_menu::{Contents, Mode as WorktreeMode, TabMenuState};
 use super::tabs_panel::geometry::RowGeometry;
+use super::tabs_panel::search::SearchState;
 use super::theme_panel::{Mode, ThemePanelState};
 use super::{body, header_toolbar, tabs_panel};
 
@@ -528,6 +530,14 @@ pub struct Workspace {
     /// selection made with the keyboard can be scrolled to. See
     /// [`RowGeometry`](super::tabs_panel::geometry::RowGeometry).
     panel_rows: RowGeometry,
+    /// The box above the list: what has been typed into it, and whether the
+    /// keyboard is its.
+    ///
+    /// Beside the panel's scroll offset and its row geometry rather than
+    /// inside the panel module, for the reason both of those are: the element
+    /// tree is rebuilt on every render, so anything a keystroke changes has to
+    /// outlive the element that saw it.
+    panel_search: SearchState,
     /// The row the pointer is on, if the detail card is armed.
     hovered_row: Option<PaneId>,
     /// The home directory, resolved once.
@@ -652,6 +662,7 @@ impl Workspace {
             saves: Arc::default(),
             panel_scroll: ScrollStateHandle::default(),
             panel_rows: RowGeometry::new(),
+            panel_search: SearchState::default(),
             hovered_row: None,
             home: std::env::home_dir(),
             new_tab: MouseStateHandle::default(),
@@ -1145,6 +1156,42 @@ impl Workspace {
         self.panel_rows.clone()
     }
 
+    /// The search box above the tab list.
+    pub(crate) fn panel_search(&self) -> &SearchState {
+        &self.panel_search
+    }
+
+    /// Whether that box is on screen at all.
+    ///
+    /// It belongs to the tabs, so it is drawn when the tabs are — and the
+    /// Themes panel takes the sidebar's body while it is up, tab list and box
+    /// together. Asked in two places and answered in one: the panel draws the
+    /// box by it, and [`Self::search_takes_keys`] refuses the keyboard to a box
+    /// nobody can see.
+    pub(super) fn panel_search_is_showing(&self) -> bool {
+        self.section.is_none() && !self.panel.open
+    }
+
+    /// Whether the keyboard is the search box's rather than the pane's.
+    ///
+    /// The wish is [`SearchState::is_focused`]; this is the wish granted. Every
+    /// other clause is a thing that has taken the keyboard away from the pane
+    /// as well, so this is the one place where "the box is being typed into"
+    /// and "the pane is being typed into" are settled against each other — and
+    /// they are settled by asking one question, which is why they cannot both
+    /// be true.
+    ///
+    /// A menu or a panel opening over the box suspends the wish rather than
+    /// ending it, so closing one a person opened by accident gives them back
+    /// the box they were typing in. Leaving the section is the one thing that
+    /// ends it, in [`Self::show_section`]: the box is gone, not covered.
+    pub(super) fn search_takes_keys(&self) -> bool {
+        self.panel_search.is_focused()
+            && self.panel_search_is_showing()
+            && !self.a_popup_is_open()
+            && !self.host.a_surface_is_up()
+    }
+
     /// A text field belonging to one section, made the first time it is drawn.
     ///
     /// The index it hands back is what an action carries, because
@@ -1299,6 +1346,14 @@ impl Workspace {
         // go on holding the keyboard.
         self.forget_section_state();
         self.clear_fields();
+        // The panel's box goes with them, and for the same reason: it filters
+        // a list that is about to be replaced, and coming back to the tabs to
+        // find four of forty is a sidebar that reads as broken rather than as
+        // filtered. The keyboard goes back with it, because a person who
+        // clicked their way out of the box was finished with it — anything
+        // that merely covers it is handled by `search_takes_keys` instead.
+        self.panel_search.clear();
+        self.panel_search.set_focused(false);
         self.sync_input_keys();
         ctx.notify();
     }
@@ -1334,6 +1389,11 @@ impl Workspace {
             .to_owned()
     }
 
+    /// What is in the panel's search box, for a test to read back.
+    pub fn panel_search_text(&self) -> String {
+        self.panel_search.input().editor().text().to_owned()
+    }
+
     /// Types `query` into the settings page's search box, for a run that was
     /// asked to start with something searched for.
     ///
@@ -1344,6 +1404,23 @@ impl Workspace {
         self.field(SETTINGS_SECTION, "search")
             .1
             .edit(|editor| editor.set_text(query));
+        ctx.notify();
+    }
+
+    /// Types `query` into the panel's search box, for a run that was told to.
+    ///
+    /// With the keyboard in it, unlike the settings page's: that box has the
+    /// keyboard by virtue of its section being on screen, and this one only
+    /// ever has it because somebody put it there — a snapshot of a filtered
+    /// list with an unfocused box would be a picture of a state that cannot
+    /// happen.
+    pub fn type_into_panel_search(&mut self, query: &str, ctx: &mut ViewContext<Self>) {
+        self.show_section(None, ctx);
+        self.panel_search
+            .input()
+            .edit(|editor| editor.set_text(query));
+        self.panel_search.set_focused(true);
+        self.sync_input_keys();
         ctx.notify();
     }
 
@@ -2611,6 +2688,18 @@ impl Workspace {
             return Some(WorkspaceAction::Run(action));
         }
 
+        // **The search box owns its two ways out while it is being typed
+        // into**, and it owns them here rather than in the field because the
+        // field has nowhere to hand the keyboard back to: see
+        // [`tabs_panel::search`]. Before the bindings, like the panel above —
+        // and after them nothing would be left, since Escape and Enter are
+        // nobody's chord and would fall through to the pane's shell.
+        if self.search_takes_keys()
+            && let Some(action) = self.search_action_for(keystroke)
+        {
+            return Some(action);
+        }
+
         // The person's own table first, and only where it has something to
         // say: a chord it does not mention keeps Crook's binding, and one it
         // binds to nothing has none at all — which is how a chord is given
@@ -2663,6 +2752,11 @@ impl Workspace {
             Binding::NextTab => TabAction::Select(self.neighbour(1)?),
             Binding::MoveTabLeft => TabAction::MoveLeft,
             Binding::MoveTabRight => TabAction::MoveRight,
+            // Telegram's chord for Telegram's box, and it works from anywhere
+            // in the window — including from a section that is not the tabs,
+            // which is what makes it one gesture rather than two. See
+            // `apply_search`.
+            Binding::SearchTabs => return Some(SearchAction::Focus.into()),
             // The sidebar chord every editor uses for the same gesture: move
             // the list of things you are working on out of the way, or back.
             // The binding every application on all three platforms uses for
@@ -2693,6 +2787,25 @@ impl Workspace {
         };
 
         Some(WorkspaceAction::Tab(tab))
+    }
+
+    /// What a keystroke means to the search box, if it means anything.
+    ///
+    /// Two keys, both unmodified, and neither of them is a chord: every other
+    /// key typed while the box has the keyboard is the box's own and is left
+    /// to it. Escape and Enter are taken away from it because both end with
+    /// the keyboard somewhere else, which is a thing an element cannot do.
+    fn search_action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
+        if !keystroke.modifiers.is_empty() {
+            return None;
+        }
+
+        let action = match keystroke.key.as_str() {
+            "escape" => SearchAction::Dismiss,
+            "enter" => SearchAction::Accept,
+            _ => return None,
+        };
+        Some(action.into())
     }
 
     /// What a keystroke means to the Themes panel, if it means anything.
@@ -2899,10 +3012,17 @@ impl Workspace {
         // neither leaves the keyboard with a pane.
         // A plugin's surface counts exactly as an open menu does: while a
         // palette is up nothing under it is typing into a shell.
-        let listening =
-            (!self.a_popup_is_open() && !self.panel.open && !self.host.a_surface_is_up())
-                .then(|| self.tabs.focused_pane_id())
-                .flatten();
+        // The search box counts exactly as an open menu does, and for the same
+        // reason: while a person is typing into it they are not typing into a
+        // shell. It is the only one of these that is on screen *beside* a pane
+        // rather than over it, which is why it is a wish that has to be
+        // granted rather than a surface that is simply up.
+        let listening = (!self.a_popup_is_open()
+            && !self.panel.open
+            && !self.host.a_surface_is_up()
+            && !self.search_takes_keys())
+        .then(|| self.tabs.focused_pane_id())
+        .flatten();
         for (id, input) in &self.inputs {
             input.set_has_keys(Some(*id) == listening);
         }
@@ -2923,6 +3043,12 @@ impl Workspace {
         self.tab_menu
             .branch
             .set_has_keys(self.tab_menu.mode == WorktreeMode::Creating);
+
+        // The panel's own box, which is not one of the section fields below:
+        // see `search_takes_keys` for why it is asked a different question.
+        self.panel_search
+            .input()
+            .set_has_keys(self.search_takes_keys());
 
         // A section's fields take the keyboard while that section is showing,
         // which is also when no pane is: the sidebar's sections replace the
@@ -3027,6 +3153,62 @@ impl Workspace {
         // preferences panel — change the title field, turn two chips off, and
         // only then click away.
         self.set_options(options, ctx);
+    }
+
+    /// Empties the panel's search box and gives the keyboard back.
+    ///
+    /// What [`SearchAction::Dismiss`] does, reached from the other direction:
+    /// there, a person said they were finished; here, they did something that
+    /// says it. Silent when there was no search on, so the ordinary business
+    /// of the strip costs nothing and asks for no frame of its own — the
+    /// action that called this is about to ask for one.
+    fn stop_searching(&mut self) {
+        if !self.panel_search.is_focused() && self.panel_search.is_empty() {
+            return;
+        }
+        self.panel_search.clear();
+        self.panel_search.set_focused(false);
+        self.sync_input_keys();
+    }
+
+    /// Moves the keyboard into the panel's search box, or out of it.
+    ///
+    /// Both ways out empty the box, and that is the rule the whole feature
+    /// hangs on: the query lives for exactly as long as a person is looking
+    /// for something. Nothing in here touches the strip's own state — the
+    /// active tab, the focused pane — except the one `Select` that is the
+    /// point of `Accept`.
+    fn apply_search(&mut self, action: SearchAction, ctx: &mut ViewContext<Self>) {
+        match action {
+            SearchAction::Focus => {
+                // The chord can arrive from another section, and the box is
+                // not drawn there. Showing the tabs first is what makes one
+                // press enough; from a click it is already true and
+                // `show_section` returns having done nothing.
+                self.show_section(None, ctx);
+                self.panel_search.set_focused(true);
+            }
+            SearchAction::Dismiss => {
+                self.panel_search.clear();
+                self.panel_search.set_focused(false);
+            }
+            SearchAction::Accept => {
+                // Read before the box is emptied, because emptying it is what
+                // decides there is no match at all.
+                let chosen = tabs_panel::search::first_match(self, ctx);
+                self.panel_search.clear();
+                self.panel_search.set_focused(false);
+                if let Some(tab) = chosen {
+                    // Through the ordinary path, so Enter on a match is the
+                    // click on that row it is meant to stand in for — the same
+                    // scroll, the same focus, the same save.
+                    self.apply(TabAction::Select(tab), ctx);
+                }
+            }
+        }
+
+        self.sync_input_keys();
+        ctx.notify();
     }
 
     /// Switches the page the rail has selected, or does one of the two things
@@ -3625,6 +3807,15 @@ impl TypedActionView for Workspace {
     fn handle_action(&mut self, action: &WorkspaceAction, ctx: &mut ViewContext<Self>) {
         match *action {
             WorkspaceAction::Tab(action) => {
+                // Anything asked of the strip ends the search, and this is the
+                // only place that can say so for *every* way of asking: a click
+                // on a row, the `+`, a close button, a split, a chord. The
+                // person found what they were looking for — or stopped looking
+                // — and both mean the same two things. The keyboard is the
+                // half that has to happen: a box that kept it after a row was
+                // clicked would collect the first command typed into the tab it
+                // opened, which is the trap this whole box is arranged around.
+                self.stop_searching();
                 if self.apply(action, ctx) == TabEffect::CloseWindow {
                     (self.quit)();
                 }
@@ -3645,6 +3836,7 @@ impl TypedActionView for Workspace {
             }
             WorkspaceAction::Options(action) => self.apply_option(action, ctx),
             WorkspaceAction::Settings(action) => self.apply_settings(action, ctx),
+            WorkspaceAction::Search(action) => self.apply_search(action, ctx),
             WorkspaceAction::Theme(action) => self.apply_theme_action(action, ctx),
             WorkspaceAction::Window(action) => self.apply_window_action(action),
             WorkspaceAction::Worktree(action) => self.apply_worktree(action, ctx),

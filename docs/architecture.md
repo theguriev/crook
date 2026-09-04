@@ -522,10 +522,24 @@ seams rather than a rewrite.
 
 What is still missing is a *focus* concept: which field has the keyboard is one
 boolean per field, written by `Workspace::sync_input_keys` whenever focus could
-have moved. The rule for the new one is Warp's — the box has the keyboard
-whenever the focused pane is the settings page — and it holds because there is
-nothing else on that page that takes a key. A third field, or a second one on
-the same surface, is where that stops being enough.
+have moved. For a field a sidebar section brought with it the rule is Warp's —
+the box has the keyboard whenever its section is showing — and it holds because
+a section replaces the panes rather than sitting beside them, so there is
+nothing else on that screen that takes a key.
+
+The tabs panel's own search box is where that rule ran out, exactly as this
+paragraph said a second field on the same surface would. It is drawn *beside* a
+running shell: the list it filters and the pane the keyboard would otherwise
+belong to are on screen together, so "my surface is showing" cannot decide who
+gets a keystroke. The answer is one function — `Workspace::search_takes_keys` —
+and it is deliberately the only place the two are settled against each other:
+the box has the keyboard when somebody put it there (a press, or `cmd-k` /
+`ctrl-shift-k`) *and* it is on screen *and* nothing modal is over it, and
+`sync_input_keys` reads that one answer to decide both what the box gets and
+what the pane loses. The two ways back out — Escape, and Enter on a match — are
+claimed by `Workspace::action_for` rather than by the field, because a field
+cannot hand the keyboard to something that is not a field. A focus *system*
+would be this rule generalised; one function is what two fields cost.
 
 ### One trap worth knowing now
 

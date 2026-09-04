@@ -49,7 +49,8 @@ use crookui_core::icons::Lucide;
 use crate::theme::theme;
 
 pub use action::{
-    OptionsAction, SettingsAction, ThemeAction, WindowAction, WorkspaceAction, WorktreeAction,
+    OptionsAction, SearchAction, SettingsAction, ThemeAction, WindowAction, WorkspaceAction,
+    WorktreeAction,
 };
 pub use block_list::BlockList;
 pub use input_element::CommandInput;

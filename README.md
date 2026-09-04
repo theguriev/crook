@@ -19,7 +19,11 @@ Seven features, and the page that configures them:
 
 - **Tabs.** Open, close, switch, reorder. One agent session per tab, with a derived title.
   They live in a panel down the left edge or in a strip across the header, and the gear menu
-  says what a row of them shows.
+  says what a row of them shows. Above the list is a **search box**, Telegram's way round: it
+  filters the rows by what a tab is running, where it is working and the branch it is on, and
+  filters nothing else — the active tab stays active and a filtered-out tab goes on printing.
+  `cmd-k` (`ctrl-shift-k` off macOS) puts the keyboard in it from anywhere in the window,
+  Enter opens the top match, and Escape gives the keyboard back to the shell.
 - **The window's own title bar.** There is no strip of system chrome above Crook. The window is
   opened with the application's frame, so the header *is* the title bar and the window's
   controls sit on Crook's own surface: dragging the header's empty space moves the window and a

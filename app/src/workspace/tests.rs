@@ -539,6 +539,31 @@ impl Harness {
             .read(&self.app, |workspace, _| workspace.settings_search_text())
     }
 
+    /// What is in the panel's search box.
+    fn panel_search_text(&self) -> String {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.panel_search_text())
+    }
+
+    /// Whether that box, rather than the pane, is what typing reaches.
+    fn panel_search_takes_keys(&self) -> bool {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.search_takes_keys())
+    }
+
+    /// Puts the keyboard in it with the chord, from wherever it is.
+    fn press_search_chord(&mut self) {
+        self.press("k", platform_chord(), "k");
+        self.frame();
+    }
+
+    /// Presses the box, which is the other way in.
+    fn click_panel_search(&mut self) {
+        let box_ = panel_search_box(&self.frame());
+        self.click(center(box_), MouseButton::Left);
+        self.frame();
+    }
+
     /// Whether the menu is asking about removing a checkout.
     fn worktree_menu_is_confirming(&self) -> bool {
         self.workspace.read(&self.app, |workspace, _| {
@@ -3489,6 +3514,23 @@ fn panel_box(scene: &Scene) -> RectF {
     boxes[0]
 }
 
+/// The panel's search box, by the one thing only a field is: its own rounded
+/// ground, exactly [`text_field::HEIGHT`] tall, inside the panel.
+fn panel_search_box(scene: &Scene) -> RectF {
+    let panel = panel_box(scene);
+    let boxes: Vec<RectF> = visible_rects(scene)
+        .filter(|(rect, bounds)| {
+            rect.background == Fill::Solid(theme().overlay_1)
+                && (bounds.height() - crate::workspace::text_field::HEIGHT).abs() < 0.5
+                && bounds.max_x() <= panel.max_x()
+        })
+        .map(|(_, bounds)| bounds)
+        .collect();
+
+    assert_eq!(boxes.len(), 1, "expected one search box, got {boxes:?}");
+    boxes[0]
+}
+
 /// Every row the panel painted, as (what it drew, what the clip left).
 ///
 /// A row is the only 4px-rounded box inside the panel wider than a button: the
@@ -3568,6 +3610,299 @@ fn a_fresh_workspace_opens_with_the_tabs_in_a_panel() {
         "the panel is not at the edge"
     );
     assert_eq!(panel_rows(&scene).len(), 2, "one row per tab");
+}
+
+#[test]
+fn the_panel_carries_a_search_box_between_the_control_bar_and_the_list() {
+    // Telegram's arrangement, which is what the box is drawn in: the title row
+    // with its buttons, then the field across the whole column, then the list.
+    // Asserted as an order rather than as coordinates — what matters is that
+    // the box is under the `+` and above the first row, not what any of the
+    // three happen to measure.
+    let mut harness = Harness::panel(2);
+    let scene = harness.frame();
+
+    let field = panel_search_box(&scene);
+    let rows = panel_rows(&scene);
+
+    assert!(
+        field.min_y() > plus_box(&scene).min_y(),
+        "the box is above the control bar it belongs under"
+    );
+    assert!(
+        field.max_y() <= rows[0].min_y(),
+        "the box overlaps the first row of the list"
+    );
+    assert!(
+        field.width() > tabs_panel::PANEL_WIDTH - 20.,
+        "the box does not take the width of the column: {field:?}"
+    );
+}
+
+#[test]
+fn the_box_takes_no_keys_until_it_is_asked_for() {
+    // The rule that makes a search box possible in a window whose whole point
+    // is a shell: the tabs and a pane are on screen together, so the box has to
+    // stay out of the way of typing until somebody puts the keyboard in it.
+    let mut harness = Harness::panel(2);
+
+    harness.type_text("ab");
+    assert_eq!(
+        harness.panel_search_text(),
+        "",
+        "the box collected what was typed into a session"
+    );
+    assert!(
+        harness.pane_takes_keys(),
+        "the pane lost the keyboard to it"
+    );
+
+    harness.press_search_chord();
+    assert!(harness.panel_search_takes_keys(), "the chord found nothing");
+    assert!(
+        !harness.pane_takes_keys(),
+        "the pane and the box both have the keyboard"
+    );
+
+    harness.type_text("cd");
+    assert_eq!(harness.panel_search_text(), "cd");
+}
+
+#[test]
+fn typing_in_the_box_filters_the_list_and_leaves_the_strip_alone() {
+    // The whole feature, and the one line of it that is easy to get wrong: a
+    // filter is a thing the *list* does. The tab that is active stays active
+    // and every tab is still open — a person looking for one tab has not asked
+    // to close the others.
+    let mut harness = Harness::panel(3);
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.derived_title = Some("kettle".to_owned());
+    });
+
+    harness.click_panel_search();
+    harness.type_text("kettle");
+
+    let scene = harness.frame();
+    assert_eq!(
+        panel_rows(&scene).len(),
+        1,
+        "the filter kept the wrong rows"
+    );
+    let text = panel_text(&scene);
+    assert!(
+        text.contains("kettle") && !text.contains("agent 2"),
+        "the list is not the one row that matches: {text:?}"
+    );
+
+    assert_eq!(harness.tab_ids().len(), 3, "the search closed a tab");
+    assert_eq!(
+        harness.active_id(),
+        harness.tab_ids()[2],
+        "the search moved the active tab"
+    );
+}
+
+#[test]
+fn a_row_is_found_by_the_directory_it_prints() {
+    // A row says two things — what is running and where — and both of them are
+    // what somebody types. The path is matched as the row abbreviates it and
+    // not as the row *cuts* it: a directory that could not be found because
+    // the column was too narrow to print its middle is a search nobody trusts
+    // twice.
+    let mut harness = Harness::panel(2);
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(PathBuf::from("/tmp/zebra"));
+    });
+
+    harness.click_panel_search();
+    harness.type_text("zebra");
+
+    assert_eq!(
+        panel_rows(&harness.frame()).len(),
+        1,
+        "the row standing in /tmp/zebra was not the one kept"
+    );
+}
+
+#[test]
+fn a_tab_is_found_by_a_pane_its_row_does_not_name() {
+    // `Tabs` granularity draws one row per tab and that row names the focused
+    // pane, silently dropping the rest. A filter that searched only what the
+    // row prints would hide the tab that is running what somebody is looking
+    // for, which is the one thing a search must not do.
+    let mut harness = Harness::panel(2);
+    let hidden = harness.active_pane_ids()[0];
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    harness.update_session(hidden, |session| {
+        session.derived_title = Some("kettle".to_owned());
+    });
+    harness.set_granularity(Granularity::Tabs);
+
+    harness.click_panel_search();
+    harness.type_text("kettle");
+
+    let scene = harness.frame();
+    assert_eq!(
+        panel_rows(&scene).len(),
+        1,
+        "the tab running it was filtered out"
+    );
+    // The row that survived names the tab's *focused* pane, which is the one
+    // the split made and not the one the query found — so the match came from
+    // a pane the list never printed. ("kettle" is in the panel either way: the
+    // box prints what was typed into it.)
+    let text = panel_text(&scene);
+    assert!(
+        text.contains("agent 3") && !text.contains("agent 1"),
+        "the tab kept is not the one running it: {text:?}"
+    );
+}
+
+#[test]
+fn enter_selects_the_top_match_and_gives_the_keyboard_back() {
+    // Telegram's Enter, and the reason the box is worth a chord: three
+    // letters, one key, and you are in that tab with the keyboard back in the
+    // shell. The query goes with it — what it was for has happened.
+    let mut harness = Harness::panel(3);
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.derived_title = Some("kettle".to_owned());
+    });
+    harness.press_search_chord();
+    harness.type_text("kettle");
+
+    harness.press("enter", Modifiers::default(), "");
+
+    assert_eq!(
+        harness.active_id(),
+        harness.tab_ids()[0],
+        "Enter did not open the tab that matched"
+    );
+    assert_eq!(
+        harness.panel_search_text(),
+        "",
+        "the query outlived its use"
+    );
+    assert!(
+        !harness.panel_search_takes_keys() && harness.pane_takes_keys(),
+        "the box kept the keyboard after it was finished with"
+    );
+    assert_eq!(
+        panel_rows(&harness.frame()).len(),
+        3,
+        "the list is still cut"
+    );
+}
+
+#[test]
+fn clicking_a_row_that_was_searched_for_ends_the_search() {
+    // The other half of Enter, and the one that is easy to leave out: a person
+    // who found their tab with the mouse is just as finished as one who found
+    // it with a key, and a box that kept the keyboard would collect the first
+    // command they typed into the tab they had just opened.
+    let mut harness = Harness::panel(3);
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.derived_title = Some("kettle".to_owned());
+    });
+    harness.press_search_chord();
+    harness.type_text("kettle");
+
+    let row = panel_rows(&harness.frame())[0];
+    harness.click(center(row), MouseButton::Left);
+    harness.frame();
+
+    assert_eq!(
+        harness.active_id(),
+        harness.tab_ids()[0],
+        "the row is inert"
+    );
+    assert_eq!(harness.panel_search_text(), "");
+    assert!(
+        !harness.panel_search_takes_keys() && harness.pane_takes_keys(),
+        "the box kept the keyboard after the row was clicked"
+    );
+    assert_eq!(panel_rows(&harness.frame()).len(), 3);
+}
+
+#[test]
+fn escape_empties_the_box_and_gives_the_keyboard_back() {
+    // One press, not two. In the settings rail Escape only empties the box,
+    // because there is nowhere else on that screen for the keyboard to go;
+    // here there is a shell behind it, and a box that held on would eat the
+    // next command typed.
+    let mut harness = Harness::panel(2);
+    harness.press_search_chord();
+    harness.type_text("kettle");
+    assert_eq!(harness.panel_search_text(), "kettle");
+
+    harness.press("escape", Modifiers::default(), "");
+
+    assert_eq!(harness.panel_search_text(), "");
+    assert!(harness.pane_takes_keys(), "the pane never got the keyboard");
+    assert_eq!(
+        panel_rows(&harness.frame()).len(),
+        2,
+        "the list is still cut"
+    );
+}
+
+#[test]
+fn a_query_that_empties_the_panel_says_so() {
+    // The one state in which the panel is genuinely empty — the strip refuses
+    // to empty itself and closes the window instead — so it says what the
+    // filter did rather than what a window with no tabs would say.
+    let mut harness = Harness::panel(2);
+    harness.click_panel_search();
+    harness.type_text("zzzz");
+
+    let scene = harness.frame();
+    assert!(panel_rows(&scene).is_empty());
+    assert!(
+        panel_text(&scene).contains("No tabs match your search."),
+        "an empty panel with no explanation in it: {:?}",
+        panel_text(&scene)
+    );
+}
+
+#[test]
+fn the_query_goes_when_the_sidebar_shows_something_else() {
+    // The same rule the settings rail's box follows, for the same reason: a
+    // filter that survived a trip through the settings would bring a person
+    // back to a sidebar showing four tabs out of forty, which reads as broken
+    // rather than as filtered. The keyboard goes with it — clicking a section
+    // button is being finished with the box.
+    let mut harness = Harness::panel(3);
+    harness.click_panel_search();
+    harness.type_text("kettle");
+
+    harness.show_plugins();
+    harness.show_tabs();
+
+    assert_eq!(harness.panel_search_text(), "");
+    assert!(!harness.panel_search_takes_keys());
+    assert_eq!(panel_rows(&harness.frame()).len(), 3);
+}
+
+#[test]
+fn the_chord_comes_back_to_the_tabs_from_another_section() {
+    // One gesture rather than two. The box is drawn over the tabs and nowhere
+    // else, so a chord pressed on the settings has to bring the tabs back
+    // before it can put the keyboard anywhere.
+    let mut harness = Harness::panel(2);
+    harness.open_settings_page();
+
+    harness.press_search_chord();
+
+    assert!(
+        !harness.is_settings_page_open(),
+        "the sidebar is still showing the settings"
+    );
+    assert!(harness.panel_search_takes_keys());
+    harness.type_text("kettle");
+    assert_eq!(harness.panel_search_text(), "kettle");
 }
 
 #[test]
@@ -3699,6 +4034,10 @@ fn lifted_tab_box(scene: &Scene) -> RectF {
             rect.background == Fill::Solid(theme().overlay_1)
                 && rect.bounds.width() > 100.
                 && rect.bounds.max_x() <= panel.max_x()
+                // The search box is painted on the same ground and takes the
+                // same width. Nothing else in the panel is exactly a field
+                // tall, which is also how `panel_search_box` finds it.
+                && (rect.bounds.height() - crate::workspace::text_field::HEIGHT).abs() >= 0.5
         })
         .map(|(_, bounds)| bounds)
         .collect();

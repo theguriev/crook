@@ -161,6 +161,17 @@ fn keys(workspace: &Workspace) -> Vec<Category> {
                     key("Move the active tab").with_keywords(&["reorder", "position"]),
                     chord("cmd-ctrl-left / right", "ctrl-shift-pageup / pagedown"),
                 ),
+                binding(
+                    key("Search the tabs").with_keywords(&["find", "filter", "panel", "sidebar"]),
+                    chord("cmd-k", "ctrl-shift-k"),
+                ),
+                widgets::note(
+                    "The box above the list filters it while something is typed in it, and \
+                     nothing else: the tab that is active stays active and a filtered-out tab \
+                     goes on printing. Escape empties it and gives the keyboard back to the \
+                     pane; Enter selects the top match and does the same.",
+                    ui,
+                ),
                 widgets::note(
                     "Every chord here stays off the ones the field needs. On macOS that is why \
                      the tabs are on cmd-alt-arrow rather than cmd-shift-arrow, which selects to \

@@ -180,6 +180,8 @@ pub enum Binding {
     MoveTabLeft,
     /// Move the active tab one place towards the end.
     MoveTabRight,
+    /// Put the keyboard in the search box above the tabs.
+    SearchTabs,
     /// Open the settings page.
     OpenSettings,
     /// Make the terminal's text bigger.
@@ -283,6 +285,10 @@ pub fn binding(keystroke: &Keystroke, platform: Platform) -> Option<Binding> {
                 ("w", false, false, false) => Some(Binding::ClosePane),
                 ("d", false, false, false) => Some(Binding::SplitRight),
                 ("d", true, false, false) => Some(Binding::SplitDown),
+                // Telegram's chord, which is what the box's placeholder says.
+                // Free on macOS: the field's own emacs bindings are ctrl-keys,
+                // and cmd-k is nobody's here.
+                ("k", false, false, false) => Some(Binding::SearchTabs),
                 (",", false, false, false) => Some(Binding::OpenSettings),
                 // Not Cmd-Shift-arrow, which every macOS text field spends on
                 // selecting to the end of a line — the field needs it more
@@ -313,6 +319,11 @@ pub fn binding(keystroke: &Keystroke, platform: Platform) -> Option<Binding> {
                 // Not Ctrl-Shift-D with a Shift already spent: the split pair
                 // takes the two keys next to each other instead.
                 ("e", true) => Some(Binding::SplitDown),
+                // With the Shift every one of Crook's own chords takes off
+                // macOS, and here it is load-bearing twice over: bare ctrl-k
+                // is the field's "delete to the end of the line", which a
+                // window binding would take away from every pane.
+                ("k", true) => Some(Binding::SearchTabs),
                 // Ctrl-comma without a Shift: the settings chord is the same
                 // on every platform, and unlike the tab bindings above it has
                 // no field gesture to stay out of the way of.
