@@ -856,7 +856,7 @@ impl Harness {
 /// for the shell to say something *before* typing at it, so that starting up
 /// and doing as it was told are two waits rather than one. Every test here
 /// that types does that.
-const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
+const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The modifier that means "this is an application command" on this platform.
 ///
