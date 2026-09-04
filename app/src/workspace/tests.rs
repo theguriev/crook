@@ -299,11 +299,12 @@ impl Harness {
             .read(&self.app, |workspace, _| workspace.window_insets())
     }
 
-    /// Draws another platform's window controls, the way `--controls` does.
+    /// Lays the header out for another platform's window controls, the way
+    /// `--controls` does.
     ///
-    /// The only way to look at two thirds of this: the caption buttons are
-    /// Crook's own drawing on Windows and Linux, so a machine running neither
-    /// can still lay them out and measure them.
+    /// The only way to look at the macOS reservation from anywhere else: the
+    /// traffic lights are the one thing still painted over Crook's header, and
+    /// a machine that is not a Mac can still lay the room out for them.
     fn override_controls(&mut self, layout: ControlLayout) {
         let workspace = &self.workspace;
         self.app.update(|ctx| {
@@ -1542,119 +1543,13 @@ fn fullscreen_gives_back_the_room_the_traffic_lights_were_using() {
         "the panel does not reserve the corner the traffic lights are in"
     );
 
-    harness.set_window_state(WindowState {
-        fullscreen: true,
-        ..WindowState::default()
-    });
+    harness.set_window_state(WindowState { fullscreen: true });
 
     assert_eq!(
         harness.window_insets().panel_left,
         0.,
         "fullscreen did not give back what the traffic lights had"
     );
-}
-
-/// The caption buttons Crook draws for a window with no frame, by their boxes.
-///
-/// Found by size rather than by fill: a button that is not being pointed at
-/// draws no fill at all on Windows, and the point of the geometry is that the
-/// three of them are the width that was reserved whether or not anyone is
-/// pointing at one.
-fn caption_boxes(scene: &Scene, size: Vector2F) -> Vec<RectF> {
-    let mut boxes: Vec<RectF> = visible_rects(scene)
-        .map(|(_, bounds)| bounds)
-        .filter(|bounds| {
-            (bounds.width() - size.x()).abs() < 0.5 && (bounds.height() - size.y()).abs() < 0.5
-        })
-        .collect();
-    boxes.sort_by(|left, right| left.min_x().total_cmp(&right.min_x()));
-    boxes
-}
-
-#[test]
-fn the_caption_buttons_fill_exactly_the_end_of_the_header_that_was_reserved() {
-    // Neither platform this draws for can be run here, so what is checked is
-    // the arithmetic that is wrong on both when it is wrong: three buttons
-    // that reach the corner of the window and start where the reservation
-    // starts. A cluster narrower than its reservation is a hole in the header;
-    // a wider one sits on the usage chip.
-    for (layout, button) in [
-        (ControlLayout::Windows, vec2f(45., 30.)),
-        (ControlLayout::Freedesktop, vec2f(30., 30.)),
-    ] {
-        let mut harness = Harness::new(1);
-        harness.override_controls(layout);
-        let reserved = layout.insets(WindowChrome::Client, false).right;
-        let scene = harness.frame();
-        let buttons = caption_boxes(&scene, button);
-
-        assert_eq!(
-            buttons.len(),
-            3,
-            "{layout:?} drew {} controls",
-            buttons.len()
-        );
-        assert!(
-            buttons[0].min_x() >= WINDOW.x() - reserved,
-            "{layout:?} started its controls {} left of the {reserved} it reserved",
-            WINDOW.x() - reserved - buttons[0].min_x()
-        );
-        assert!(
-            WINDOW.x() - buttons[2].max_x() <= 8.,
-            "{layout:?} left {} between the close button and the window's edge",
-            WINDOW.x() - buttons[2].max_x()
-        );
-        // Nothing the header drew of its own may reach into that end.
-        assert!(
-            pill_box(&scene).max_x() <= WINDOW.x() - reserved,
-            "{layout:?} drew the usage chip under its own close button"
-        );
-    }
-}
-
-#[test]
-fn a_caption_button_lights_up_under_the_pointer_and_asks_the_window_when_it_is_clicked() {
-    let mut harness = Harness::new(1);
-    harness.override_controls(ControlLayout::Windows);
-    let scene = harness.frame();
-    let buttons = caption_boxes(&scene, vec2f(45., 30.));
-
-    harness.move_to(center(buttons[0]));
-    let hovered = harness.frame();
-    assert_eq!(
-        fills_of(&hovered, theme().overlay_2)
-            .into_iter()
-            .filter(|bounds| (bounds.width() - 45.).abs() < 0.5)
-            .count(),
-        1,
-        "the button under the pointer did not light up"
-    );
-
-    // In order, left to right, the way every desktop that has these draws
-    // them: minimise, then maximise, then close.
-    harness.click(center(buttons[0]), MouseButton::Left);
-    assert_eq!(harness.window_requests(), vec![Request::Minimize]);
-    harness.click(center(buttons[1]), MouseButton::Left);
-    assert_eq!(
-        harness.window_requests(),
-        vec![Request::Minimize, Request::ToggleMaximized]
-    );
-
-    harness.click(center(buttons[2]), MouseButton::Left);
-    assert_eq!(harness.quit_requests.get(), 1, "close did not close");
-    assert_eq!(
-        harness.window_requests().len(),
-        2,
-        "closing the window is a quit, not a fourth thing to ask a window"
-    );
-}
-
-/// Everything painted in one colour, by its box.
-fn fills_of(scene: &Scene, color: Color) -> Vec<RectF> {
-    visible_rects(scene)
-        .filter(|(rect, _)| rect.background == Fill::Solid(color))
-        .map(|(_, bounds)| bounds)
-        .collect()
 }
 
 #[test]
@@ -8423,14 +8318,6 @@ mod the_bell {
 mod title_bar_hit_testing {
     use super::*;
 
-    /// The header's own box: the full-width surface rect at the top.
-    fn header_box(scene: &Scene) -> RectF {
-        fills_of(scene, theme().surface)
-            .into_iter()
-            .find(|bounds| bounds.min_y() == 0. && bounds.width() > 512.)
-            .expect("the header paints its own surface")
-    }
-
     fn press(harness: &mut Harness, position: Vector2F, count: u32) {
         harness.dispatch(Event::MouseDown {
             button: MouseButton::Left,
@@ -8507,7 +8394,7 @@ mod title_bar_hit_testing {
     #[test]
     fn every_gap_between_the_header_controls_still_picks_the_window_up() {
         // The `+` and the gear are the panel's; what is left in this row is
-        // whatever a plugin pinned to the right of it and the caption cluster.
+        // whatever a plugin pinned to the right of it, and nothing else.
         let scene = Harness::new(2).frame();
         let panel = panel_box(&scene);
         let chip = pill_box(&scene);
@@ -8528,6 +8415,32 @@ mod title_bar_hit_testing {
                 harness.window_requests(),
                 vec![Request::Drag],
                 "the gap at {gap:?} did not pick the window up"
+            );
+        }
+    }
+
+    #[test]
+    fn the_top_right_corner_of_the_window_picks_it_up_on_every_platform() {
+        // The corner three caption buttons used to be in. Crook draws none on
+        // any platform now, so the header runs into it and it is title bar
+        // like the rest of the row — a press there moves the window rather
+        // than closing it. Checked for all three layouts because a cluster
+        // coming back anywhere would be a corner that stops dragging.
+        for layout in [
+            ControlLayout::MacOs,
+            ControlLayout::Windows,
+            ControlLayout::Freedesktop,
+        ] {
+            let mut harness = Harness::new(1);
+            harness.override_controls(layout);
+            harness.frame();
+
+            press(&mut harness, vec2f(WINDOW.x() - 2., 2.), 1);
+
+            assert_eq!(
+                harness.window_requests(),
+                vec![Request::Drag],
+                "{layout:?} did not pick the window up by its top-right corner"
             );
         }
     }
@@ -8554,88 +8467,6 @@ mod title_bar_hit_testing {
             vec![Request::Drag, Request::ToggleMaximized, Request::Drag],
             "the press after a double click was not a drag"
         );
-    }
-
-    #[test]
-    fn the_caption_cluster_starts_at_the_top_of_the_window() {
-        // The buttons belong to the window, not to the row they are drawn in:
-        // every desktop that draws them puts them hard against the top of the
-        // window, and the top-right corner is where a person throws the
-        // pointer to close one. Hung from the header's bottom edge instead —
-        // which is what the row's own `CrossAxisAlignment::End` does to them —
-        // they leave a strip of inert header above the close button.
-        for (layout, button) in [
-            (ControlLayout::Windows, vec2f(45., 30.)),
-            (ControlLayout::Freedesktop, vec2f(30., 30.)),
-        ] {
-            let mut harness = Harness::new(1);
-            harness.override_controls(layout);
-            let scene = harness.frame();
-            let header = header_box(&scene);
-            let buttons = caption_boxes(&scene, button);
-
-            assert_eq!(
-                buttons[0].min_y(),
-                0.,
-                "{layout:?} starts its caption buttons {} below the top of the window, \
-                 inside a header {} tall",
-                buttons[0].min_y(),
-                header.height()
-            );
-        }
-    }
-
-    #[test]
-    fn the_top_right_corner_of_the_window_closes_it_rather_than_dragging_it() {
-        // The one above as a gesture: two pixels in from the top-right corner
-        // is the close button on Windows, and nothing there may pick the
-        // window up instead.
-        let mut harness = Harness::new(1);
-        harness.override_controls(ControlLayout::Windows);
-        harness.frame();
-
-        press(&mut harness, vec2f(WINDOW.x() - 2., 2.), 1);
-
-        assert!(
-            harness.window_requests().is_empty(),
-            "the top-right corner of the window asked for {:?}",
-            harness.window_requests()
-        );
-    }
-
-    #[test]
-    fn the_resize_border_keeps_out_of_every_caption_button() {
-        // The corner the border is told to leave alone has to be the cluster
-        // itself. `App::handle_resize_border` runs *before* the element tree
-        // sees a press, so any part of a button outside that corner is a
-        // button that resizes the window instead of doing what it says — on
-        // Windows the last five columns of the close button and the top five
-        // rows of all three, which is exactly where a corner-aimed pointer
-        // lands. The other half of this — that nothing inside the corner is an
-        // edge — is `chrome.rs`'s own test.
-        for (layout, button) in [
-            (ControlLayout::Windows, vec2f(45., 30.)),
-            (ControlLayout::Freedesktop, vec2f(30., 30.)),
-        ] {
-            let mut harness = Harness::new(1);
-            harness.override_controls(layout);
-            let scene = harness.frame();
-            let area = super::super::caption_area(layout, WindowChrome::Client)
-                .expect("{layout:?} draws its own controls");
-            let kept = RectF::new(vec2f(WINDOW.x() - area.x(), 0.), area);
-
-            for bounds in caption_boxes(&scene, button) {
-                let inside = bounds.min_x() >= kept.min_x()
-                    && bounds.max_x() <= kept.max_x()
-                    && bounds.min_y() >= kept.min_y()
-                    && bounds.max_y() <= kept.max_y();
-                assert!(
-                    inside,
-                    "{layout:?} draws a caption button at {bounds:?}, outside the {kept:?} \
-                     the resize border was told to keep out of"
-                );
-            }
-        }
     }
 }
 

@@ -49,7 +49,7 @@ use crate::text_input::{CARET_PHASE, TextInput};
 use crate::theme::creator::Draft;
 use crate::theme::{Available, theme};
 use crate::usage_model::UsageModel;
-use crate::window_controls::{WindowHandle, WindowState};
+use crate::window_controls::WindowHandle;
 use crate::{Channel, WINDOW_CHROME};
 
 use super::action::{
@@ -120,24 +120,6 @@ pub(super) struct TabInteraction {
     pub(super) container: MouseStateHandle,
     /// The tab's name above them, which only a split tab draws.
     pub(super) header: MouseStateHandle,
-}
-
-/// What the mouse is doing to the three controls Crook draws for a window the
-/// window manager has left frameless.
-///
-/// One handle each, like every other control: they are three buttons that
-/// happen to sit together, and a shared handle would light all three up at
-/// once. Always present, even on macOS, where nothing reads them — three
-/// `Arc`s cost less than a field that only exists on two platforms and a
-/// `cfg` on everything that touches it.
-#[derive(Default)]
-pub(super) struct CaptionState {
-    /// The button that sends the window to the taskbar.
-    pub(super) minimize: MouseStateHandle,
-    /// The one that fills the work area, or puts the window back.
-    pub(super) maximize: MouseStateHandle,
-    /// The one that ends the process.
-    pub(super) close: MouseStateHandle,
 }
 
 /// The options menu: whether it is up, and what the mouse is doing to each of
@@ -538,17 +520,16 @@ pub struct Workspace {
     /// render path. It does not change while the process runs.
     home: Option<PathBuf>,
     new_tab: MouseStateHandle,
-    caption: CaptionState,
     quit: QuitRequest,
     /// The window this is drawn in, for the header to move and maximise.
     window: WindowHandle,
     /// Where this build's platform puts a window's controls.
     ///
     /// A field rather than [`ControlLayout::host`] read at the point of use,
-    /// so `--controls` can render another platform's title bar on this one.
-    /// The other two thirds of this module's window chrome are invisible on
-    /// whichever machine it is being written on, and a picture of them is the
-    /// only way to look at them without three computers.
+    /// so `--controls` can lay this window out as another platform's. What is
+    /// left of that difference is macOS's reservation for its traffic lights,
+    /// which is invisible on the other two platforms and can only be looked at
+    /// by asking for it.
     control_layout: ControlLayout,
 }
 
@@ -655,7 +636,6 @@ impl Workspace {
             hovered_row: None,
             home: std::env::home_dir(),
             new_tab: MouseStateHandle::default(),
-            caption: CaptionState::default(),
             quit,
             window,
             control_layout: ControlLayout::host(),
@@ -1898,7 +1878,8 @@ impl Workspace {
     /// The one call a renderer makes about window chrome. It answers "how
     /// much" and "which element owes it" together, so no view can get the
     /// second half right on the platform it was written on and wrong on the
-    /// other two.
+    /// other two. Crook draws no controls of its own, so what this reserves is
+    /// only ever room for the platform's — the traffic lights on macOS.
     ///
     /// Fullscreen is asked of the window itself on every frame, because macOS
     /// takes the traffic lights away there and the room reserved for them has
@@ -1918,22 +1899,8 @@ impl Workspace {
         WINDOW_CHROME
     }
 
-    /// Where this window's controls are, and what shape they are.
-    pub(super) fn control_layout(&self) -> ControlLayout {
-        self.control_layout
-    }
-
-    /// What the window is doing, as of this frame.
-    pub(super) fn window_state(&self) -> WindowState {
-        self.window.state()
-    }
-
-    /// What the mouse is doing to the caption buttons.
-    pub(super) fn caption(&self) -> &CaptionState {
-        &self.caption
-    }
-
-    /// Draws another platform's window controls, the way `--controls` asks.
+    /// Lays the header out for another platform's window controls, the way
+    /// `--controls` asks.
     ///
     /// A way to look at a frame, like `--theme` and `--layout`: it changes
     /// what this build draws, never what it is. Nothing else moves — the
@@ -1949,8 +1916,8 @@ impl Workspace {
     ///
     /// Nothing here notifies, and that is not an oversight: none of these
     /// changes anything Crook draws. What they change is the *window*, and the
-    /// frame that has to follow — a maximise control that becomes a restore
-    /// control — comes back through `Shell`, which watches the window's own
+    /// frame that has to follow — the room macOS's traffic lights give back in
+    /// fullscreen — comes back through `Shell`, which watches the window's own
     /// state between frames. Repainting here would draw the state that was
     /// asked for a moment before the window manager decided whether to give
     /// it.

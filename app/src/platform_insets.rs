@@ -5,20 +5,19 @@
 //! above it is the whole question here, and it has one answer per window, not
 //! one per platform: a window the window manager decorates keeps its controls
 //! in its own bar and costs the header nothing, while an undecorated window
-//! that draws its own title bar has to leave room for them.
+//! that draws its own title bar has to leave room for whatever the system
+//! still paints over it.
 //!
-//! This is worth its own module and its own tests because two thirds of it is
-//! invisible on whichever machine you develop on: reserve when there is
-//! nothing to reserve for and the header ends in a 136px hole on Windows that
-//! no one on macOS will ever see; fail to reserve and the first tab sits under
-//! the close button on a platform you are not looking at.
+//! Crook draws no controls of its own, so there is exactly one thing left to
+//! reserve for: macOS's traffic lights, which AppKit paints over Crook's
+//! surface on a client-decorated window. Windows and Linux hand the whole
+//! header back — their undecorated windows have nothing over them at all.
 //!
-//! Crook opens a client-decorated window, so every number here is live. What
-//! is reserved is not always the same thing, either: on macOS the room is for
-//! the *system's* traffic lights, painted over Crook's surface by AppKit,
-//! while on Windows and Linux it is the room Crook's own caption buttons are
-//! drawn in — see `workspace::title_bar`, which measures its cluster against
-//! this table so the two can never disagree.
+//! This is worth its own module and its own tests because the platform that
+//! needs the reservation is not necessarily the one you are looking at:
+//! reserve where nothing is painted and the header ends in a hole nobody on
+//! macOS will ever see; fail to reserve on macOS and the first tab sits under
+//! the green light.
 //!
 //! # Which element the reservation belongs to
 //!
@@ -147,18 +146,12 @@ impl ControlLayout {
                 left: TRAFFIC_LIGHTS,
                 right: 0.,
             },
-            // Three 45px caption buttons plus a pixel of separation. Windows
-            // keeps them in fullscreen, so there is no fullscreen case.
-            Self::Windows => WindowControlInsets {
-                left: 0.,
-                right: 136.,
-            },
-            // GNOME and KDE draw narrower buttons than Windows does; 116px is
-            // what Warp measured across the common desktop environments.
-            Self::Freedesktop => WindowControlInsets {
-                left: 0.,
-                right: 116.,
-            },
+            // Nothing at all: an undecorated window on Windows or Linux has no
+            // controls over Crook's surface, and Crook draws none there
+            // itself. The header runs to the corner of the window, and the
+            // desktop's own shortcuts are what minimise, maximise and close
+            // it — see `workspace::title_bar`.
+            Self::Windows | Self::Freedesktop => WindowControlInsets::NONE,
         }
     }
 }
@@ -242,22 +235,19 @@ mod tests {
     }
 
     #[test]
-    fn windows_and_freedesktop_reserve_the_right_edge_in_every_state() {
-        for fullscreen in [false, true] {
-            assert_eq!(
-                ControlLayout::Windows.insets(WindowChrome::Client, fullscreen),
-                WindowControlInsets {
-                    left: 0.,
-                    right: 136.
-                }
-            );
-            assert_eq!(
-                ControlLayout::Freedesktop.insets(WindowChrome::Client, fullscreen),
-                WindowControlInsets {
-                    left: 0.,
-                    right: 116.
-                }
-            );
+    fn windows_and_freedesktop_reserve_nothing_in_any_state() {
+        // A frameless window with no controls of Crook's own over it: every
+        // pixel of the header is the header's, maximised, fullscreen or
+        // neither. A reservation here is a hole in the top-right corner on the
+        // two platforms this project has no machine for.
+        for layout in [ControlLayout::Windows, ControlLayout::Freedesktop] {
+            for fullscreen in [false, true] {
+                assert_eq!(
+                    layout.insets(WindowChrome::Client, fullscreen),
+                    WindowControlInsets::NONE,
+                    "{layout:?} reserved room for controls nothing draws"
+                );
+            }
         }
     }
 
@@ -294,24 +284,23 @@ mod tests {
 
     #[test]
     fn a_right_hand_reservation_stays_on_the_header() {
-        // Windows and Linux put their controls in the top-right corner, which
-        // belongs to the header. A `split` that swapped both ends would still
-        // pass the macOS test above and would leave whatever is pinned to the
-        // header under the close button on the other two platforms.
-        for (layout, right) in [
-            (ControlLayout::Windows, 136.),
-            (ControlLayout::Freedesktop, 116.),
-        ] {
-            assert_eq!(
-                layout.insets(WindowChrome::Client, false).split(),
-                LayoutInsets {
-                    panel_left: 0.,
-                    header_left: 0.,
-                    header_right: right
-                },
-                "{layout:?} moved its right-hand reservation"
-            );
-        }
+        // No platform reserves a right end today, so this is the rule rather
+        // than a number: whatever the right inset is, it is the header's and
+        // never the panel's. A `split` that swapped both ends would still pass
+        // the macOS test above and would put a future reservation under the
+        // panel, on the opposite side of the window from the controls.
+        let insets = WindowControlInsets {
+            left: 0.,
+            right: 120.,
+        };
+        assert_eq!(
+            insets.split(),
+            LayoutInsets {
+                panel_left: 0.,
+                header_left: 0.,
+                header_right: 120.
+            }
+        );
     }
 
     #[test]

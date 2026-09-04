@@ -106,9 +106,9 @@ pub(super) fn with_chrome(attributes: WindowAttributes, chrome: WindowChrome) ->
 ///
 /// Wider than the hairline it looks like, because the border is invisible and
 /// what a person aims at is the window's outline, and narrow enough that what
-/// it costs is normally a strip of somebody's padding rather than a control.
-/// The one place it *would* have taken a control is the corner the caption
-/// buttons are in, which is why [`edge_at`] is told to keep out of it.
+/// it costs is a strip of somebody's padding rather than a control. Nothing an
+/// application draws is allowed in it, which is why the header's own controls
+/// are inset from the edges of the window.
 pub(super) const RESIZE_GRAB: f32 = 5.;
 
 /// Which edge or corner of a frameless window a drag is resizing.
@@ -172,28 +172,13 @@ impl ResizeEdge {
 /// two `grab`-wide strips overlap there, and a person aiming at the corner of
 /// a window means the corner.
 ///
-/// `caption` is the box the application draws the window's own controls in,
-/// anchored to the top-right corner, or `None` where it draws none. No part of
-/// it is an edge: those buttons are the window's frame as much as the border
-/// is, and the top-right corner is precisely where a person throws the pointer
-/// to close a window. Without this the last five columns of the close button —
-/// and, once the cluster is flush with the top of the window, its top five
-/// rows — would start a resize instead.
-pub(super) fn edge_at(
-    position: Vector2F,
-    size: Vector2F,
-    grab: f32,
-    caption: Option<Vector2F>,
-) -> Option<ResizeEdge> {
+/// Every zone belongs to the window and nothing else: this runs before the
+/// element tree sees a press, so an application that draws a control against
+/// the edge of a frameless window loses its outermost pixels to a resize.
+pub(super) fn edge_at(position: Vector2F, size: Vector2F, grab: f32) -> Option<ResizeEdge> {
     let inside =
         (0. ..=size.x()).contains(&position.x()) && (0. ..=size.y()).contains(&position.y());
     if !inside {
-        return None;
-    }
-
-    if caption.is_some_and(|caption| {
-        position.x() >= size.x() - caption.x() && position.y() <= caption.y()
-    }) {
         return None;
     }
 
@@ -368,7 +353,7 @@ mod tests {
 
         for (position, expected) in cases {
             assert_eq!(
-                edge_at(position, SIZE, GRAB, None),
+                edge_at(position, SIZE, GRAB),
                 Some(expected),
                 "{position:?} is not the {expected:?} zone"
             );
@@ -377,15 +362,14 @@ mod tests {
 
     #[test]
     fn the_middle_of_the_window_is_not_an_edge() {
-        assert_eq!(edge_at(vec2f(400., 300.), SIZE, GRAB, None), None);
+        assert_eq!(edge_at(vec2f(400., 300.), SIZE, GRAB), None);
         // One pixel inside the grab strip on every side.
-        assert_eq!(edge_at(vec2f(GRAB + 1., GRAB + 1.), SIZE, GRAB, None), None);
+        assert_eq!(edge_at(vec2f(GRAB + 1., GRAB + 1.), SIZE, GRAB), None);
         assert_eq!(
             edge_at(
                 vec2f(SIZE.x() - GRAB - 1., SIZE.y() - GRAB - 1.),
                 SIZE,
-                GRAB,
-                None
+                GRAB
             ),
             None
         );
@@ -402,58 +386,25 @@ mod tests {
             vec2f(SIZE.x() + 40., 300.),
             vec2f(300., SIZE.y() + 40.),
         ] {
-            assert_eq!(edge_at(position, SIZE, GRAB, None), None, "{position:?}");
-        }
-    }
-
-    /// What Crook's own caption cluster measures on Windows: three 45-wide
-    /// buttons and a pixel of separation, flush with the top-right corner.
-    const CAPTION: Vector2F = vec2f(136., 30.);
-
-    #[test]
-    fn the_corner_the_application_draws_its_own_controls_in_is_not_an_edge() {
-        // The whole of the close button, including the five columns the east
-        // strip would otherwise take and the five rows the north strip would:
-        // `handle_resize_border` runs before the delegate, so an edge here is
-        // a press the button never sees, and the corner is the one place a
-        // person aims for without looking.
-        for position in [
-            vec2f(SIZE.x() - 1., 1.),
-            vec2f(SIZE.x() - 1., CAPTION.y() - 1.),
-            vec2f(SIZE.x() - CAPTION.x(), 0.),
-            vec2f(SIZE.x() - 2., 2.),
-        ] {
-            assert_eq!(
-                edge_at(position, SIZE, GRAB, Some(CAPTION)),
-                None,
-                "{position:?} is inside the application's own controls"
-            );
-            assert!(
-                edge_at(position, SIZE, GRAB, None).is_some(),
-                "{position:?} is an edge for a window that draws no controls of its own"
-            );
+            assert_eq!(edge_at(position, SIZE, GRAB), None, "{position:?}");
         }
     }
 
     #[test]
-    fn every_other_edge_survives_the_corner_the_controls_are_in() {
-        // The exclusion is one corner, not an amnesty: a window whose top-right
-        // is the close button is still resized by its other seven zones, and by
-        // the east edge below the buttons.
-        let cases = [
-            (vec2f(400., 1.), ResizeEdge::North),
-            (vec2f(1., 1.), ResizeEdge::NorthWest),
-            (vec2f(SIZE.x() - 1., CAPTION.y() + 1.), ResizeEdge::East),
-            (vec2f(SIZE.x() - 1., SIZE.y() - 1.), ResizeEdge::SouthEast),
-        ];
-
-        for (position, expected) in cases {
-            assert_eq!(
-                edge_at(position, SIZE, GRAB, Some(CAPTION)),
-                Some(expected),
-                "{position:?} stopped being the {expected:?} zone"
-            );
-        }
+    fn the_top_right_corner_is_an_edge_like_any_other() {
+        // It was not always: the application used to draw three caption
+        // buttons there and the border was told to keep out of the box they
+        // were in. Nothing is drawn in that corner now, so a window that gave
+        // it up would be a window that cannot be resized from the corner every
+        // other application resizes from.
+        assert_eq!(
+            edge_at(vec2f(SIZE.x() - 1., 1.), SIZE, GRAB),
+            Some(ResizeEdge::NorthEast)
+        );
+        assert_eq!(
+            edge_at(vec2f(SIZE.x() - 1., 30.), SIZE, GRAB),
+            Some(ResizeEdge::East)
+        );
     }
 
     #[test]

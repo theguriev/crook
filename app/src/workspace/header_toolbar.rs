@@ -1,6 +1,5 @@
 //! The header row: whatever is pinned to the right of it — and, since the
-//! window has no title bar of its own, the window's controls and the place to
-//! pick it up by.
+//! window has no title bar of its own, the place to pick the window up by.
 //!
 //! What is pinned to the right is whatever a plugin put in
 //! [`HEADER_RIGHT`](crate::plugins::header::HEADER_RIGHT), and this row does
@@ -26,14 +25,12 @@
 //! that belongs to this element, which is what keeps the two halves of one
 //! answer from being written in two places.
 //!
-//! # The reservation is spent once
+//! # The reservation is a hole and nothing else
 //!
-//! Both ends of it are room for the window's controls, but only one of them is
-//! ever *empty*. On macOS the left end is a hole for the traffic lights AppKit
-//! paints over this row; on Windows and Linux the right end is not a hole at
-//! all — it is where [`title_bar::caption_buttons`] draws the controls Crook
-//! owes the window. So the left end is padding and the right end is either
-//! padding or the cluster itself, never both.
+//! Both ends of it are room for controls this row does not draw: Crook draws
+//! none anywhere, so what is reserved is the corner macOS's traffic lights are
+//! painted into and nothing more. On Windows and Linux the window has no
+//! controls over this surface at all and the reservation is zero at both ends.
 
 use crookui_core::elements::Padding;
 use crookui_core::prelude::*;
@@ -53,11 +50,9 @@ const PADDING: Padding = Padding {
 
 pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
     // Crook's window is the application's to decorate, so this row is the
-    // title bar and something is over it: the traffic lights on macOS, the
-    // controls below on Windows and Linux. Which end, and how much, is one
-    // answer, given once rather than per platform.
+    // title bar and the traffic lights are painted over it on macOS. Which
+    // end, and how much, is one answer, given once rather than per platform.
     let insets = workspace.window_insets();
-    let controls = title_bar::caption_buttons(workspace);
 
     let items = Container::new(
         Flex::row()
@@ -85,36 +80,16 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
     )
     .with_padding(Padding {
         left: insets.header_left + PADDING.left,
-        // Room for controls this row does not draw. Where it draws them, the
-        // cluster beside this is the reservation and adding it here as well
-        // would spend it twice.
-        right: PADDING.right
-            + if controls.is_some() {
-                0.
-            } else {
-                insets.header_right
-            },
+        // Room for controls this row does not draw, on the platform where
+        // something is painted over this end of it.
+        right: PADDING.right + insets.header_right,
         ..PADDING
     })
     .finish();
 
-    // Aligned to the *top*, unlike the row inside it: the tabs hang from the
-    // header's bottom edge, but the caption buttons belong to the window and
-    // every desktop that draws them puts them hard against its top-right
-    // corner. Bottom-aligning them left a strip of inert header above the
-    // close button — exactly where a person throws the pointer to close a
-    // maximised window without aiming.
-    let mut row = Flex::row()
-        .with_main_axis_size(MainAxisSize::Max)
-        .with_cross_axis_alignment(CrossAxisAlignment::Start)
-        .with_child(Expanded::new(1., items).finish());
-    // Outside the padding, so the close button reaches the corner of the
-    // window the way a caption button is expected to.
-    row.add_children(controls);
-
     title_bar::draggable(
         workspace,
-        Container::new(row.finish())
+        Container::new(items)
             .with_background_color(theme().surface)
             // The seam between the header and the body, and the only line
             // across the top of the window: what used to be above this row was

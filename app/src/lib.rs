@@ -245,11 +245,11 @@ struct Overrides {
     /// Draw another platform's window controls rather than this one's.
     ///
     /// The only override here that changes nothing a person can set. It exists
-    /// because two thirds of the window's chrome is invisible on whichever
-    /// machine Crook is being written on: the traffic lights are macOS's own,
-    /// and the caption buttons Crook draws for Windows and Linux are drawn by
-    /// this process, which means a picture of them needs no Windows and no
-    /// Linux — only a way to ask for them.
+    /// because the window's chrome is invisible on whichever machine Crook is
+    /// being written on: macOS reserves the corner its traffic lights are
+    /// painted into and the other two platforms reserve nothing, and laying
+    /// the header out either way needs no second machine — only a way to ask
+    /// for it.
     controls: Option<ControlLayout>,
     /// Start with rows standing for this rather than for the saved one.
     granularity: Option<Granularity>,
@@ -852,10 +852,6 @@ fn open_window(channel: Channel, frames: Option<u32>, overrides: Overrides) -> R
             .window_size()
             .map_or(WINDOW_SIZE, |[width, height]| vec2f(width, height)),
         chrome: WINDOW_CHROME,
-        // What the resize border has to keep out of. Answered by the module
-        // that draws the buttons, so the corner the border avoids is the
-        // cluster itself rather than a second opinion about where it is.
-        caption_buttons: workspace::caption_area(ControlLayout::host(), WINDOW_CHROME),
         ..Default::default()
     };
 
@@ -1362,10 +1358,10 @@ struct Shell {
     ///
     /// The window's state changes for reasons no application hears about — the
     /// macOS green button, a tiling compositor, a shortcut belonging to the
-    /// desktop — and two things Crook draws depend on it: the maximise control
-    /// becomes a restore control, and macOS takes the traffic lights away in
-    /// fullscreen, so the room reserved for them has to go too. Comparing it
-    /// each frame is what turns a change nobody reported into a repaint.
+    /// desktop — and one thing Crook lays out depends on it: macOS takes the
+    /// traffic lights away in fullscreen, so the room reserved for them has to
+    /// go too. Comparing it each frame is what turns a change nobody reported
+    /// into a repaint.
     window_state: WindowState,
 }
 
@@ -1373,15 +1369,14 @@ struct Shell {
 ///
 /// The whole of the seam: four verbs forwarded to the windowing layer, which
 /// is the only crate in the workspace that knows what a window is. Everything
-/// above it — the header, the panel's control bar, the caption buttons — is
-/// written against [`window_controls::WindowControls`] and runs unchanged with
-/// nothing behind it.
+/// above it — the header, the panel's control bar, the window plugin's
+/// commands — is written against [`window_controls::WindowControls`] and runs
+/// unchanged with nothing behind it.
 struct RealWindow(PlatformWindow);
 
 impl window_controls::WindowControls for RealWindow {
     fn state(&self) -> WindowState {
         WindowState {
-            maximized: self.0.is_maximized(),
             fullscreen: self.0.is_fullscreen(),
         }
     }
