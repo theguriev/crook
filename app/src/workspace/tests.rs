@@ -4677,19 +4677,119 @@ fn insertion_lines(scene: &Scene) -> Vec<RectF> {
 impl Harness {
     /// Picks a point up and puts it down at another, the way a hand does:
     /// press, travel, release.
+    ///
+    /// A frame after every event, because the window draws one after every
+    /// event — and a drag *changes what the next event will be answered
+    /// against*, since the line it draws moves the rows under it. A gesture
+    /// tested against the frame it started on is a gesture no hand ever makes.
     fn drag(&mut self, from: Vector2F, to: Vector2F) {
+        // The pointer arrives before it presses. That is not decoration: a
+        // hovered row puts its detail card up, which makes the row a `Stack`,
+        // which changes the layer it paints into — and a press hit-tested
+        // against the wrong layer is a press the panel refuses. See
+        // [`drag::Handle::takes`].
+        self.move_to(from);
+        self.frame();
         self.hold(from, 1);
+        self.frame();
         // Two moves, because the first is what turns the press into a drag and
         // a gesture that arrived in one jump is not one a person can make.
         self.drag_to(from + (to - from) * 0.5);
+        self.frame();
         self.drag_to(to);
+        self.frame();
         self.let_go(to);
+        self.frame();
     }
 }
 
 /// A point inside a row, clear of its close button.
 fn inside(row: RectF) -> Vector2F {
     row.origin() + vec2f(40., row.height() / 2.)
+}
+
+#[test]
+fn a_row_can_be_picked_up_with_its_hover_card_up() {
+    // Every row a person drags is a row they have just hovered, so this is
+    // not an edge: it is the only way the gesture is ever made.
+    let (mut harness, group) = Harness::grouped_panel(3);
+    let loose = *harness.tab_ids().last().expect("three tabs and a worktree");
+    let rows = panel_rows(&harness.frame());
+    assert!(
+        harness.options().show_details_on_hover,
+        "the card is on by default, which is what makes this the ordinary case"
+    );
+
+    let onto = rows[0].origin() + vec2f(40., rows[0].height() * 0.75);
+    harness.drag(inside(rows[3]), onto);
+
+    assert_eq!(harness.group_of(loose), Some(group));
+}
+
+#[test]
+fn a_drop_at_the_end_of_a_group_draws_its_line_inside_the_group() {
+    // The gap under a group's last member is also the gap above the block
+    // beneath it, and the row the pointer is nearest belongs to that block.
+    // Named as that row, the drop is one the panel has no line for: it joins a
+    // group in front of something the group does not contain. It has to be
+    // said as the group's end, which is the same slot and is drawable.
+    let (mut harness, group) = Harness::grouped_panel(2);
+    let members = harness.members_of(group);
+    let rows = panel_rows(&harness.frame());
+    let loose = *rows.last().expect("three rows");
+
+    harness.hold(inside(loose), 1);
+    // The bottom of the group's last member, which is above the loose row.
+    let last_member = rows[1];
+    harness.drag_to(last_member.origin() + vec2f(40., last_member.height() - 1.));
+
+    let scene = harness.frame();
+    let lines = insertion_lines(&scene);
+    assert_eq!(lines.len(), 1, "no line for a drop at the end of a group");
+    assert!(
+        lines[0].min_x() > loose.min_x(),
+        "the line is not indented into the group it joins: {lines:?}"
+    );
+
+    harness.let_go(last_member.origin() + vec2f(40., last_member.height() - 1.));
+    assert_eq!(
+        harness.members_of(group).len(),
+        members.len() + 1,
+        "the drop the line promised did not happen"
+    );
+}
+
+#[test]
+fn a_pointer_held_still_leaves_the_line_where_it_is() {
+    // The line takes room, and the room pushes the rows under it down. Answer
+    // the pointer against the rows that were painted and the answer undoes
+    // itself: the line appears, the row moves out from under the pointer, the
+    // gap it named is no longer the one the pointer is in, the line goes. A
+    // person aiming at a boundary holds the pointer exactly where that runs at
+    // the frame rate.
+    let (mut harness, _) = Harness::grouped_panel(3);
+    let rows = panel_rows(&harness.frame());
+    let from = inside(rows[3]);
+    harness.move_to(from);
+    harness.frame();
+    harness.hold(from, 1);
+    harness.frame();
+
+    // Every boundary in the list, and every position within the room the line
+    // would take on either side of one.
+    for step in 0..120 {
+        let at = vec2f(from.x(), rows[0].min_y() + step as f32);
+        harness.drag_to(at);
+        let first = insertion_lines(&harness.frame());
+        harness.drag_to(at);
+        let again = insertion_lines(&harness.frame());
+        assert_eq!(
+            first,
+            again,
+            "the list moved under a pointer that did not, at y {}",
+            at.y()
+        );
+    }
 }
 
 #[test]

@@ -413,7 +413,7 @@ fn list(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
         if let Some(first) = block.tabs.first().map(|(tab, _)| *tab)
             && drag::line_above_block(pending, first)
         {
-            column.add_child(insertion_line(false));
+            column.add_child(insertion_line(workspace, false));
         }
 
         match block.group {
@@ -436,7 +436,7 @@ fn list(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
     }
 
     if drag::line_at_end(pending) {
-        column.add_child(insertion_line(false));
+        column.add_child(insertion_line(workspace, false));
     }
 
     match granularity {
@@ -578,12 +578,12 @@ fn group_block(
 
         for (tab, panes) in members {
             if drag::line_above_member(pending, group, *tab) {
-                rows.add_child(insertion_line(true));
+                rows.add_child(insertion_line(workspace, true));
             }
             rows.add_child(tab_block(workspace, *tab, panes, Some(group), false, app));
         }
         if drag::line_ends_group(pending, group) {
-            rows.add_child(insertion_line(true));
+            rows.add_child(insertion_line(workspace, true));
         }
 
         column.add_child(
@@ -746,29 +746,33 @@ fn heading(
 /// indentation of whatever it is joining — so a drop *into* a group reads
 /// differently from a drop between blocks, which is the one thing the line has
 /// to be able to say. Warp draws exactly this, at exactly this inset.
-fn insertion_line(in_group: bool) -> Box<dyn Element> {
-    ConstrainedBox::new(
-        Container::new(
-            Container::new(Empty::new().finish())
-                .with_background_color(theme().accent)
-                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
-                    INSERTION_LINE_HEIGHT / 2.,
-                )))
-                .finish(),
+fn insertion_line(workspace: &Workspace, in_group: bool) -> Box<dyn Element> {
+    drag::Parting::new(
+        workspace.panel_drag(),
+        ConstrainedBox::new(
+            Container::new(
+                Container::new(Empty::new().finish())
+                    .with_background_color(theme().accent)
+                    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+                        INSERTION_LINE_HEIGHT / 2.,
+                    )))
+                    .finish(),
+            )
+            .with_padding(Padding {
+                top: (INSERTION_SLOT_HEIGHT - INSERTION_LINE_HEIGHT) / 2.,
+                left: if in_group {
+                    0.
+                } else {
+                    GROUP_HORIZONTAL_PADDING
+                },
+                bottom: (INSERTION_SLOT_HEIGHT - INSERTION_LINE_HEIGHT) / 2.,
+                right: GROUP_HORIZONTAL_PADDING,
+            })
+            .finish(),
         )
-        .with_padding(Padding {
-            top: (INSERTION_SLOT_HEIGHT - INSERTION_LINE_HEIGHT) / 2.,
-            left: if in_group {
-                0.
-            } else {
-                GROUP_HORIZONTAL_PADDING
-            },
-            bottom: (INSERTION_SLOT_HEIGHT - INSERTION_LINE_HEIGHT) / 2.,
-            right: GROUP_HORIZONTAL_PADDING,
-        })
+        .with_height(INSERTION_SLOT_HEIGHT)
         .finish(),
     )
-    .with_height(INSERTION_SLOT_HEIGHT)
     .finish()
 }
 
