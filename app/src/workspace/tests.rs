@@ -6255,9 +6255,18 @@ mod shells {
             !harness.terminal_text(pane).trim().is_empty()
         });
 
+        // **The command does not return to a prompt**, and that is the whole
+        // of why `read` is on the end of it. A great many people's shells set
+        // the terminal's title from a `precmd`: the printf sets it, the prompt
+        // that follows sets it straight back, and what this test then sees
+        // depends on whether the machine was fast enough to look in between.
+        // It passed on an idle laptop and failed under a full suite, which is
+        // the worst way for a test to be wrong. A shell waiting on a line it
+        // will never get draws no second prompt, so the title it was told to
+        // set is the title it has.
         harness.type_into(
             pane,
-            "printf '\\033]0;deploy the release\\007\\033]7;file:///tmp\\007'\n",
+            "printf '\\033]0;deploy the release\\007\\033]7;file:///tmp\\007'; read\n",
         );
         harness.wait_for("the shell's title never reached the strip", |harness| {
             harness.pane_title(pane) == "deploy the release"
@@ -9215,5 +9224,79 @@ mod plugins_page {
             text.contains("It is what draws the page"),
             "the card does not say why its switch is inert: {text}"
         );
+    }
+}
+
+/// The Themes panel's place in the window, which is the sidebar's.
+mod theme_panel_placement {
+    use super::*;
+
+    #[test]
+    fn the_panel_is_the_sidebar_whatever_section_is_showing() {
+        // The bug this test exists for: the panel was composed inside the
+        // tabs' own branch of the render, so opening the chooser from the
+        // Appearance page set the flag and drew nothing at all. It is one
+        // place now, and every section goes through it.
+        for section in [None, Some("Settings"), Some("Plugins")] {
+            let mut harness = Harness::new(1);
+            match section {
+                Some("Settings") => harness.open_settings_page(),
+                Some("Plugins") => harness.show_plugins(),
+                _ => {}
+            }
+
+            harness.open_theme_panel();
+            let scene = harness.frame();
+
+            assert!(
+                !theme_cards(&scene).is_empty(),
+                "the panel drew no theme cards with {section:?} showing"
+            );
+            let panel = panel_box(&scene);
+            for card in theme_cards(&scene) {
+                assert!(
+                    card.max_x() <= panel.max_x() + 0.5,
+                    "a theme card at {card:?} is outside the sidebar, which \
+                     ends at {}",
+                    panel.max_x()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_panel_stands_in_for_the_section_rather_than_beside_it() {
+        // A column of its own would have squeezed whatever was beside it: in
+        // the 1024-wide window Crook opens, a sidebar and a panel and a
+        // settings page left the page too narrow to print its own values.
+        let mut harness = Harness::new(1);
+        harness.open_settings_page();
+        let before = frame_text(&harness.frame());
+        assert!(before.contains("Appearance"));
+
+        harness.open_theme_panel();
+        let text = frame_text(&harness.frame());
+
+        assert!(text.contains("Themes"), "the panel is not up: {text}");
+        assert!(
+            !text.contains("Shell"),
+            "the settings rail is still in the sidebar beside the panel: {text}"
+        );
+        // And the page it was opened from is untouched, at its own width.
+        assert!(text.contains("Follow the desktop"), "{text}");
+    }
+
+    #[test]
+    fn closing_the_panel_gives_the_section_its_sidebar_back() {
+        let mut harness = Harness::new(1);
+        harness.open_settings_page();
+        harness.open_theme_panel();
+        assert!(!frame_text(&harness.frame()).contains("Shell"));
+
+        harness.dispatch_workspace_action(WorkspaceAction::Theme(ThemeAction::ClosePanel));
+
+        let text = frame_text(&harness.frame());
+        assert!(text.contains("Shell"), "the rail did not come back: {text}");
+        assert!(!text.contains("Change your current theme."), "{text}");
     }
 }

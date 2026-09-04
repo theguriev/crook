@@ -35,13 +35,23 @@
 //! flow, in the panel rather than in a modal, because a modal over a panel is
 //! a second floating surface for a five-swatch choice.
 //!
-//! # Why a panel at all, when the settings page already lists themes
+//! # Where it is, and why it moved
 //!
-//! Because the settings page is a *pane*, and a pane replaces the thing you
-//! are theming. The panel's whole advantage is that a shell stays on screen
-//! beside it: a theme is judged against real output, not against a preview
-//! card. The two surfaces share one list and one write path — the settings
-//! page's row opens this panel rather than listing themes a second time.
+//! It is the **sidebar's body** while it is up: the tab list, or the settings
+//! rail, or the plugin list steps aside for it and comes back when the × is
+//! pressed. It was a column of its own between the sidebar and the work, which
+//! is where Warp docks its chooser — and that stopped being right the day the
+//! sidebar grew sections. Three columns in a 1024-wide window left the
+//! settings page too narrow to print its own values, and the panel was drawn
+//! only in the section that happened to compose it, so opening the chooser
+//! from the Appearance page set a flag and drew nothing at all.
+//!
+//! What was worth keeping is kept: the work stays on screen beside it, so a
+//! theme is still judged against real output rather than against a preview
+//! card. It is now *not even pushed aside*.
+//!
+//! The settings page's "Current theme" row opens this rather than listing
+//! themes a second time: one list, one write path.
 
 mod creator;
 mod list;
@@ -60,12 +70,16 @@ use crate::theme::theme;
 use super::action::{ThemeAction, WorkspaceAction};
 use super::view::Workspace;
 
-/// The panel's width.
+/// The width a row of this panel has to lay itself out against.
 ///
-/// Warp's is 240 and the tabs panel beside it is 248; two docked panels of
-/// almost the same width read as a mistake, so this is the one Crook already
-/// has.
-pub(super) const PANEL_WIDTH: f32 = 248.;
+/// The sidebar's, because this *is* the sidebar while it is up. It was this
+/// panel's own when it was a column of its own beside the work — Warp's is
+/// 240, and two docked columns of almost the same width read as a mistake, so
+/// it was already the sidebar's number then.
+///
+/// Read rather than measured because a card's size is decided while the
+/// element tree is being built, which is before anything has been laid out.
+const PANEL_WIDTH: f32 = super::tabs_panel::PANEL_WIDTH;
 
 /// The strip at the top that carries the close button, matching the tabs
 /// panel's control bar so the two line up.
@@ -181,28 +195,26 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
         Mode::Creating => creator::render(workspace),
     };
 
-    ConstrainedBox::new(
-        Container::new(
-            Flex::column()
-                .with_main_axis_size(MainAxisSize::Max)
-                .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-                .with_child(header(workspace))
-                .with_child(title_row(workspace, ui))
-                .with_child(hint(state.mode, ui))
-                .with_child(Expanded::new(1., body).finish())
-                .finish(),
-        )
-        .with_background_color(theme().surface)
-        .with_border(Border::right(1.).with_border_color(theme().border))
-        .with_padding(Padding {
-            top: 0.,
-            bottom: PANEL_PADDING,
-            left: PANEL_PADDING,
-            right: PANEL_PADDING,
-        })
-        .finish(),
+    // No width, no ground and no border of its own: this *is* the sidebar's
+    // body while it is up, and the panel around it has all three. It had them
+    // when it was a column of its own beside the work — see this module's own
+    // doc for why it stopped being one.
+    Container::new(
+        Flex::column()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_child(header(workspace))
+            .with_child(title_row(workspace, ui))
+            .with_child(hint(state.mode, ui))
+            .with_child(Expanded::new(1., body).finish())
+            .finish(),
     )
-    .with_width(PANEL_WIDTH)
+    .with_padding(Padding {
+        top: 0.,
+        bottom: PANEL_PADDING,
+        left: PANEL_PADDING,
+        right: PANEL_PADDING,
+    })
     .finish()
 }
 
