@@ -2785,6 +2785,17 @@ impl Workspace {
             return Some(WorkspaceAction::Run(action));
         }
 
+        // **The menu a tab opens owns the same two keys while it is up**, and
+        // for the reason the search box's are claimed here rather than left to
+        // the field: [`TextField`](super::text_field::TextField) answers
+        // Escape by emptying itself and Enter by doing nothing, so a popup
+        // whose branch field has the keyboard has no way out that is not a
+        // pointer. Before the bindings, because a modal popup's Escape is not
+        // a chord anything else in the window may take.
+        if let Some(action) = self.tab_menu_action_for(keystroke) {
+            return Some(action);
+        }
+
         // **The search box owns its two ways out while it is being typed
         // into**, and it owns them here rather than in the field because the
         // field has nowhere to hand the keyboard back to: see
@@ -2928,6 +2939,33 @@ impl Workspace {
         let action = match keystroke.key.as_str() {
             "escape" => SearchAction::Dismiss,
             "enter" => SearchAction::Accept,
+            _ => return None,
+        };
+        Some(action.into())
+    }
+
+    /// What a keystroke means to the menu a tab opens, if it means anything.
+    ///
+    /// The two keys its buttons are: Escape is Cancel — back to the list from
+    /// either face that left it, and out of the menu from the list itself, so
+    /// one key always undoes one step — and Enter is the creator's Create, so
+    /// the whole of making a worktree is a name and a press. Unmodified only,
+    /// like the panel's, because a chord is a window command wherever the
+    /// pointer is.
+    ///
+    /// Enter does **nothing** in the confirmation, on purpose. Removing a
+    /// checkout is the one destructive thing in this menu, and a button that
+    /// answered to the key next to the one people dismiss dialogs with is how
+    /// somebody deletes work they meant to keep. That one stays a click.
+    fn tab_menu_action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
+        if !self.tab_menu.is_open() || !keystroke.modifiers.is_empty() {
+            return None;
+        }
+
+        let action = match (keystroke.key.as_str(), self.tab_menu.mode) {
+            ("escape", WorktreeMode::Listing) => WorktreeAction::CloseMenu,
+            ("escape", _) => WorktreeAction::Cancel,
+            ("enter", WorktreeMode::Creating) => WorktreeAction::Create,
             _ => return None,
         };
         Some(action.into())
