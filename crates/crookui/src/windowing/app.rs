@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use crookui_core::event::Event;
+use crookui_core::event::{Event, MouseButton};
 use crookui_core::executor::{Foreground, Runnable};
 use crookui_core::geometry::{Vector2F, vec2f};
 use crookui_core::platform::FontDb;
@@ -35,6 +35,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 
 use crate::rendering::init_wgpu_instance;
 
+use super::chrome::{RESIZE_GRAB, WindowChrome, WindowControls, edge_at};
 use super::event::InputState;
 use super::window::Window;
 
@@ -46,8 +47,16 @@ pub struct WindowOptions {
     pub size: Vector2F,
     /// The smallest inner size the user may drag it to, in logical pixels.
     pub min_size: Vector2F,
-    /// Whether the window manager draws a title bar and frame.
-    pub decorations: bool,
+    /// Who draws the title bar the window's controls sit in.
+    pub chrome: WindowChrome,
+    /// The box the application draws the window's own controls in, anchored to
+    /// the top-right corner, in logical pixels — `None` where it draws none.
+    ///
+    /// Not something the window is opened with, but a fact about the
+    /// application that only the frame needs: the resize border stops at this
+    /// corner. It belongs beside [`WindowOptions::chrome`] because it is
+    /// decided by the same answer and never changes afterwards.
+    pub caption_buttons: Option<Vector2F>,
     /// Whether the window may be see-through where the scene is.
     pub transparent: bool,
 }
@@ -58,7 +67,8 @@ impl Default for WindowOptions {
             title: "Crook".to_owned(),
             size: vec2f(1024., 640.),
             min_size: vec2f(480., 192.),
-            decorations: true,
+            chrome: WindowChrome::default(),
+            caption_buttons: None,
             transparent: true,
         }
     }
@@ -147,6 +157,12 @@ pub struct Platform {
     pub foreground: Rc<Foreground>,
     /// A handle for waking the main thread from a background task.
     pub proxy: Proxy,
+    /// The window, for an application that draws its own title bar and so has
+    /// to move, maximise and minimise it itself.
+    ///
+    /// Handed over before the window exists, because the application is built
+    /// before it: every method does nothing until [`run`] has opened one.
+    pub window: WindowControls,
 }
 
 /// Everything that reaches the main thread from somewhere else.
@@ -194,9 +210,11 @@ pub fn run(
     init_wgpu_instance(Box::new(event_loop.owned_display_handle()));
 
     let proxy = Proxy(Arc::new(Mutex::new(event_loop.create_proxy())));
+    let controls = WindowControls::default();
     let platform = Platform {
         foreground: proxy.foreground(),
         proxy: proxy.clone(),
+        window: controls.clone(),
     };
     let delegate = build_delegate(&platform);
 
@@ -205,6 +223,7 @@ pub fn run(
         font_db,
         delegate,
         window: None,
+        controls,
         input: InputState::default(),
         replay_requested_redraw: false,
         frame_retry: None,
@@ -220,6 +239,7 @@ struct App {
     font_db: Box<dyn FontDb>,
     delegate: Box<dyn WindowDelegate>,
     window: Option<Window>,
+    controls: WindowControls,
     input: InputState,
 
     /// Whether the redraw now pending is the one the hover replay itself asked
@@ -280,6 +300,12 @@ impl ApplicationHandler<CrookEvent> for App {
                 // desktop that will not say is taken as dark, which is what a
                 // terminal has always been.
                 let theme = window.system_theme();
+
+                // Before the delegate hears anything: the controls handle is
+                // what a header's drag, zoom or close reaches the real window
+                // through, and the first event can arrive as soon as the
+                // delegate is called below.
+                self.controls.attach(window.handle());
                 self.window = Some(window);
                 if self.delegate.handle_event(Event::SystemTheme(theme)) {
                     self.with_window(Window::request_redraw);
@@ -351,7 +377,24 @@ impl ApplicationHandler<CrookEvent> for App {
             return;
         };
 
-        if self.delegate.handle_event(event) {
+        // Before the delegate, because the resize border is *outside* the
+        // application: a press five pixels into a frameless window belongs to
+        // the window manager however interesting the element under it is —
+        // except in the corner the application draws the window's own controls
+        // in, which `handle_resize_border` leaves alone.
+        let grabbed = self.handle_resize_border(&event);
+        let redraw = !grabbed && self.delegate.handle_event(event);
+
+        // After both of them, which is the whole point. The border starts a
+        // gesture above, but a window *move* is started by the header, inside
+        // the delegate's own dispatch: asking before that ran read the flag one
+        // event late, and one event is long enough for the first pointer move
+        // after the drag to be converted as a drag with no button behind it.
+        if self.controls.take_gesture_started() {
+            self.input.release_buttons();
+        }
+
+        if redraw {
             self.with_window(Window::request_redraw);
         }
     }
@@ -366,6 +409,52 @@ impl App {
                 .as_mut()
                 .expect("the window was matched by id a moment ago"),
         )
+    }
+
+    /// Resizes the window from its own edges, on a window that has none of the
+    /// window manager's.
+    ///
+    /// Returns whether the event was the border's rather than the
+    /// application's. Nothing happens at all under native chrome, and nothing
+    /// happens on macOS, where a client-decorated window still has a frame and
+    /// the system is still resizing it.
+    fn handle_resize_border(&mut self, event: &Event) -> bool {
+        if !self.options.chrome.is_frameless() {
+            return false;
+        }
+
+        // A maximised window has no outside to drag towards, and a fullscreen
+        // one is not a window with edges at all.
+        let resizable = !self.controls.is_maximized() && !self.controls.is_fullscreen();
+        let size = self.with_window(|window| window.logical_size());
+        let caption = self.options.caption_buttons;
+        let edge = |position| {
+            resizable
+                .then(|| edge_at(position, size, RESIZE_GRAB, caption))
+                .flatten()
+        };
+
+        match event {
+            // Set on every move, including the one that leaves the border: a
+            // pointer that kept the resize arrow over the middle of a terminal
+            // would be worse than one that never showed it at all.
+            Event::MouseMoved { position, .. } => {
+                self.controls.set_resize_cursor(edge(*position));
+                false
+            }
+            Event::MouseDown {
+                button: MouseButton::Left,
+                position,
+                ..
+            } => match edge(*position) {
+                Some(edge) => {
+                    self.controls.start_resize(edge);
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        }
     }
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {

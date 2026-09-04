@@ -28,6 +28,7 @@ use crate::rendering::{Error, Renderer, WindowResources, reset_wgpu_instance};
 use super::event::system_theme;
 
 use super::WindowOptions;
+use super::chrome::with_chrome;
 
 /// The wgpu half of a window, which can be thrown away and rebuilt.
 struct RenderingResources {
@@ -56,7 +57,7 @@ pub(super) struct Window {
 impl Window {
     /// Creates the winit window and everything needed to draw into it.
     pub(super) fn new(event_loop: &ActiveEventLoop, options: &WindowOptions) -> Result<Self> {
-        let attributes = winit::window::Window::default_attributes()
+        let attributes = with_chrome(winit::window::Window::default_attributes(), options.chrome)
             .with_title(options.title.clone())
             .with_inner_size(winit::dpi::LogicalSize::new(
                 options.size.x() as f64,
@@ -66,7 +67,6 @@ impl Window {
                 options.min_size.x() as f64,
                 options.min_size.y() as f64,
             ))
-            .with_decorations(options.decorations)
             .with_transparent(options.transparent);
 
         let window = Arc::new(
@@ -102,6 +102,11 @@ impl Window {
             surface_size,
             surface_requires_reconfiguration: false,
         })
+    }
+
+    /// The window itself, for the controls the application drives it with.
+    pub(super) fn handle(&self) -> Arc<winit::window::Window> {
+        self.window.clone()
     }
 
     /// The winit id this window's events arrive under.

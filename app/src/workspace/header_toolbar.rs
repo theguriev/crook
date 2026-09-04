@@ -1,5 +1,6 @@
 //! The header row: the tab strip when there is one, then whatever is pinned to
-//! the right.
+//! the right — and, since the window has no title bar of its own, the window's
+//! controls and the place to pick it up by.
 //!
 //! There is one right-hand item and its slot is hard-coded. Warp's header
 //! items are a persisted, user-reorderable, cloud-synced setting, which means
@@ -20,6 +21,15 @@
 //! decided here — [`Workspace::window_insets`](super::view::Workspace) hands
 //! back the share that belongs to this element, which is what keeps the two
 //! halves of one answer from being written in two places.
+//!
+//! # The reservation is spent once
+//!
+//! Both ends of it are room for the window's controls, but only one of them is
+//! ever *empty*. On macOS the left end is a hole for the traffic lights AppKit
+//! paints over this row; on Windows and Linux the right end is not a hole at
+//! all — it is where [`title_bar::caption_buttons`] draws the controls Crook
+//! owes the window. So the left end is padding and the right end is either
+//! padding or the cluster itself, never both.
 
 use crookui_core::elements::Padding;
 use crookui_core::prelude::*;
@@ -28,6 +38,7 @@ use crate::settings::Layout;
 use crate::theme::theme;
 
 use super::tab_bar;
+use super::title_bar;
 use super::view::Workspace;
 
 /// Space between the tab strip and the chip, so a wide title never runs into
@@ -38,13 +49,21 @@ const CHIP_GUTTER: f32 = 12.;
 /// against.
 const CHIP_LIFT: f32 = 5.;
 
+/// The header's own padding, before anything the window asked for.
+const PADDING: Padding = Padding {
+    top: 6.,
+    left: 8.,
+    bottom: 0.,
+    right: 10.,
+};
+
 pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
-    // Crook's window is decorated by the window manager, so the controls are
-    // in a bar of their own above this row and nothing here has to move out of
-    // their way — on every platform, in both layouts. The call is kept rather
-    // than the answer hard-coded: the day the window goes borderless, this is
-    // one of the two lines that already has the right answer.
+    // Crook's window is the application's to decorate, so this row is the
+    // title bar and something is over it: the traffic lights on macOS, the
+    // controls below on Windows and Linux. Which end, and how much, is one
+    // answer given per layout rather than per platform.
     let insets = workspace.window_insets();
+    let controls = title_bar::caption_buttons(workspace);
 
     let leading = match workspace.options().layout {
         Layout::Horizontal => tab_bar::render(workspace, app),
@@ -55,7 +74,7 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
         Layout::Vertical => Empty::new().finish(),
     };
 
-    Container::new(
+    let items = Container::new(
         Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::End)
@@ -74,13 +93,44 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
             })
             .finish(),
     )
-    .with_background_color(theme().surface)
-    .with_border(Border::bottom(1.).with_border_color(theme().border))
     .with_padding(Padding {
-        top: 6.,
-        left: insets.header_left + 8.,
-        bottom: 0.,
-        right: insets.header_right + 10.,
+        left: insets.header_left + PADDING.left,
+        // Room for controls this row does not draw. Where it draws them, the
+        // cluster beside this is the reservation and adding it here as well
+        // would spend it twice.
+        right: PADDING.right
+            + if controls.is_some() {
+                0.
+            } else {
+                insets.header_right
+            },
+        ..PADDING
     })
-    .finish()
+    .finish();
+
+    // Aligned to the *top*, unlike the row inside it: the tabs hang from the
+    // header's bottom edge, but the caption buttons belong to the window and
+    // every desktop that draws them puts them hard against its top-right
+    // corner. Bottom-aligning them left a strip of inert header above the
+    // close button — exactly where a person throws the pointer to close a
+    // maximised window without aiming.
+    let mut row = Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Start)
+        .with_child(Expanded::new(1., items).finish());
+    // Outside the padding, so the close button reaches the corner of the
+    // window the way a caption button is expected to.
+    row.add_children(controls);
+
+    title_bar::draggable(
+        workspace,
+        Container::new(row.finish())
+            .with_background_color(theme().surface)
+            // The seam between the header and the body, and the only line
+            // across the top of the window: what used to be above this row was
+            // the window manager's title bar, and there is no longer one to
+            // divide anything from.
+            .with_border(Border::bottom(1.).with_border_color(theme().border))
+            .finish(),
+    )
 }

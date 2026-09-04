@@ -159,6 +159,16 @@ impl InputState {
         }
     }
 
+    /// Forgets every button it believes is held.
+    ///
+    /// For the one case where a release genuinely never arrives: a window move
+    /// or resize runs inside the window manager's own event loop, which
+    /// swallows the release that ends it. Without this the next pointer move
+    /// is reported as a drag, and goes on being one until the next click.
+    pub(super) fn release_buttons(&mut self) {
+        self.buttons_down.clear();
+    }
+
     /// Replays the last pointer position as a synthetic move.
     ///
     /// A frame that changed layout leaves hover state stale — close a tab and

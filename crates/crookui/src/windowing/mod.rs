@@ -17,9 +17,19 @@
 //! required the application to be built first.
 //!
 //! [`run`] returns when the window closes.
+//!
+//! # A window the application decorates itself
+//!
+//! [`WindowChrome::Client`] moves the window's controls onto the application's
+//! own first row, and [`chrome`] is where the consequences live: what to ask
+//! the platform for, what a frameless window has to do about its own resize
+//! edges, and [`WindowControls`], the four verbs and two questions the
+//! application needs to move a window it is drawing the title bar of.
 
 mod app;
+mod chrome;
 mod event;
 mod window;
 
 pub use app::{Platform, Proxy, WindowDelegate, WindowOptions, run};
+pub use chrome::{ResizeEdge, WindowChrome, WindowControls};

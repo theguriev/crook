@@ -68,6 +68,7 @@ pub mod terminal_model;
 pub mod text_input;
 pub mod theme;
 pub mod usage_model;
+pub mod window_controls;
 pub mod workspace;
 
 use std::fs::File;
@@ -78,7 +79,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
-use crookui::{CosmicFontDb, Platform, Proxy, WindowDelegate, WindowOptions, render_scene_to_rgba};
+use crookui::{
+    CosmicFontDb, Platform, Proxy, WindowControls as PlatformWindow, WindowDelegate, WindowOptions,
+    render_scene_to_rgba,
+};
 use crookui_core::event::{Event, Keystroke, Modifiers};
 use crookui_core::executor::{Background, LocalQueue};
 use crookui_core::geometry::{Vector2F, vec2f};
@@ -87,11 +91,12 @@ use crookui_core::prelude::*;
 use crookui_core::scene::Scene;
 use crookui_core::{AddSingletonModel as _, App, Presenter, WindowId};
 
-use crate::platform_insets::WindowChrome;
+use crate::platform_insets::{ControlLayout, WindowChrome};
 use crate::settings::{Density, Granularity, Layout, Settings};
 use crate::tab::{AgentStatus, Direction, PaneId, Tab, TabAction};
 use crate::terminal_font::{CELL_FONT_SIZE, CellFont};
 use crate::usage_model::UsageModel;
+use crate::window_controls::{Detached, WindowHandle, WindowState};
 use crate::workspace::{Fonts, QuitRequest, Section, Workspace};
 
 /// The window Crook opens, in logical pixels.
@@ -99,11 +104,16 @@ const WINDOW_SIZE: Vector2F = vec2f(1024., 640.);
 
 /// Who draws Crook's window controls.
 ///
-/// The window manager does: Crook opens a decorated window, so the controls
-/// live in a title bar above the client area and the header underneath owes
-/// them no room. The header asks for its insets with this, so the two facts
-/// cannot drift apart — [`open_window`] derives `decorations` from it.
-pub const WINDOW_CHROME: WindowChrome = WindowChrome::Native;
+/// Crook does. The window is opened with the application's own chrome, so the
+/// header *is* the title bar and the window's controls are painted over it:
+/// AppKit's traffic lights on macOS, Crook's own three buttons everywhere
+/// else. [`WindowChrome`](crookui::WindowChrome) is where the difference
+/// between those two lives.
+///
+/// One constant because it is one decision. [`open_window`] opens the window
+/// with it and the header reserves room by it, so what the header leaves free
+/// and what the window actually draws cannot drift apart.
+pub const WINDOW_CHROME: WindowChrome = WindowChrome::Client;
 
 /// The scale factor the headless snapshot renders at. Two, because that is
 /// where subpixel glyph positioning and the atlas are actually exercised.
@@ -229,6 +239,15 @@ struct Overrides {
     search: Option<String>,
     /// Start in this layout rather than the saved one.
     layout: Option<Layout>,
+    /// Draw another platform's window controls rather than this one's.
+    ///
+    /// The only override here that changes nothing a person can set. It exists
+    /// because two thirds of the window's chrome is invisible on whichever
+    /// machine Crook is being written on: the traffic lights are macOS's own,
+    /// and the caption buttons Crook draws for Windows and Linux are drawn by
+    /// this process, which means a picture of them needs no Windows and no
+    /// Linux — only a way to ask for them.
+    controls: Option<ControlLayout>,
     /// Start with rows standing for this rather than for the saved one.
     granularity: Option<Granularity>,
     /// Start in this density rather than the saved one.
@@ -452,6 +471,15 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                     other => bail!("`--granularity` takes panes or tabs, not {other}"),
                 });
             }
+            "--controls" => {
+                let platform = args.next().context("`--controls` needs a platform")?;
+                overrides.controls = Some(match platform.as_str() {
+                    "macos" => ControlLayout::MacOs,
+                    "windows" => ControlLayout::Windows,
+                    "linux" => ControlLayout::Freedesktop,
+                    other => bail!("`--controls` takes macos, windows or linux, not {other}"),
+                });
+            }
             "--layout" => {
                 let mode = args.next().context("`--layout` needs a mode")?;
                 overrides.layout = Some(match mode.as_str() {
@@ -506,6 +534,9 @@ OPTIONS:
     --layout <MODE>    Start with the tabs `vertical` or `horizontal` rather than as saved
     --granularity <M>  Start with rows standing for `panes` or `tabs` rather than as saved
     --density <MODE>   Start in `compact` or `expanded` density rather than the saved one
+    --controls <OS>    Draw `macos`, `windows` or `linux` window controls in the
+                       header rather than this platform's, for a picture of the
+                       title bar the other two get
     -h, --help         Print this message
     -V, --version      Print the version and channel
 
@@ -691,6 +722,9 @@ fn apply_overrides(
     if overrides.themes {
         workspace.open_theme_panel(overrides.creating, ctx);
     }
+    if let Some(layout) = overrides.controls {
+        workspace.override_control_layout(layout, ctx);
+    }
     if overrides.worktrees {
         workspace.open_tab_menu_for_snapshot(ctx);
         if overrides.creating_worktree {
@@ -740,7 +774,11 @@ fn open_window(channel: Channel, frames: Option<u32>, overrides: Overrides) -> R
         size: session
             .window_size()
             .map_or(WINDOW_SIZE, |[width, height]| vec2f(width, height)),
-        decorations: WINDOW_CHROME == WindowChrome::Native,
+        chrome: WINDOW_CHROME,
+        // What the resize border has to keep out of. Answered by the module
+        // that draws the buttons, so the corner the border avoids is the
+        // cluster itself rather than a second opinion about where it is.
+        caption_buttons: workspace::caption_area(ControlLayout::host(), WINDOW_CHROME),
         ..Default::default()
     };
 
@@ -807,8 +845,17 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
     // channel reaches is the About page's label, and a PNG that said "stable"
     // on a machine that built it from a working tree would be wrong in the one
     // way a snapshot exists to catch.
-    let (window_id, workspace) =
-        app.add_window(|ctx| Workspace::new(fonts, cell_font, settings, Channel::Dev, quit, ctx));
+    let (window_id, workspace) = app.add_window(|ctx| {
+        Workspace::new(
+            fonts,
+            cell_font,
+            settings,
+            Channel::Dev,
+            quit,
+            Rc::new(Detached),
+            ctx,
+        )
+    });
     app.update(|ctx| {
         workspace.update(ctx, |workspace, ctx| {
             // A run with a shell to show wants one pane filling the body, not
@@ -1229,6 +1276,47 @@ struct Shell {
     /// it: the session file, which is what makes the next window open the size
     /// this one was.
     window_size: Rc<std::cell::Cell<Vector2F>>,
+    /// The window, for the header that is its title bar.
+    window: WindowHandle,
+    /// What the window was doing when the last frame was built.
+    ///
+    /// The window's state changes for reasons no application hears about — the
+    /// macOS green button, a tiling compositor, a shortcut belonging to the
+    /// desktop — and two things Crook draws depend on it: the maximise control
+    /// becomes a restore control, and macOS takes the traffic lights away in
+    /// fullscreen, so the room reserved for them has to go too. Comparing it
+    /// each frame is what turns a change nobody reported into a repaint.
+    window_state: WindowState,
+}
+
+/// The real window, behind the handle the workspace holds.
+///
+/// The whole of the seam: four verbs forwarded to the windowing layer, which
+/// is the only crate in the workspace that knows what a window is. Everything
+/// above it — the header, the panel's control bar, the caption buttons — is
+/// written against [`window_controls::WindowControls`] and runs unchanged with
+/// nothing behind it.
+struct RealWindow(PlatformWindow);
+
+impl window_controls::WindowControls for RealWindow {
+    fn state(&self) -> WindowState {
+        WindowState {
+            maximized: self.0.is_maximized(),
+            fullscreen: self.0.is_fullscreen(),
+        }
+    }
+
+    fn start_drag(&self) {
+        self.0.start_drag();
+    }
+
+    fn toggle_maximized(&self) {
+        self.0.toggle_maximized();
+    }
+
+    fn minimize(&self) {
+        self.0.minimize();
+    }
 }
 
 /// The state of a `--run` in a windowed session.
@@ -1275,6 +1363,7 @@ impl Shell {
         app.update(|ctx| ctx.add_singleton_model(UsageModel::new));
 
         let proxy = platform.proxy.clone();
+        let window: WindowHandle = Rc::new(RealWindow(platform.window.clone()));
         let quit: QuitRequest = {
             let proxy = proxy.clone();
             // Closing the last tab closes the window, which is what keeps the
@@ -1283,7 +1372,15 @@ impl Shell {
         };
 
         let (window_id, workspace) = app.add_window(|ctx| {
-            Workspace::new(fonts, cell_font, settings, launch.channel, quit, ctx)
+            Workspace::new(
+                fonts,
+                cell_font,
+                settings,
+                launch.channel,
+                quit,
+                window.clone(),
+                ctx,
+            )
         });
         let window_size = workspace.read(&app, |workspace, _| workspace.window_size_cell());
         app.update(|ctx| {
@@ -1342,7 +1439,31 @@ impl Shell {
             run,
             ime_area: None,
             window_size,
+            window,
+            window_state: WindowState::default(),
         }
+    }
+
+    /// Repaints when the window's own state has changed under the frame.
+    ///
+    /// Asked rather than listened for, because there is nothing to listen to:
+    /// entering fullscreen arrives as a resize like any other, and being
+    /// maximised by the desktop arrives as nothing at all. Cheap enough to ask
+    /// once a frame — two calls into the window system — and a frame is
+    /// exactly when the answer is needed.
+    fn sync_window_state(&mut self) {
+        let state = self.window.state();
+        if state == self.window_state {
+            return;
+        }
+
+        self.window_state = state;
+        // Its own update, before the one that builds the frame: an effect
+        // drains when the outermost update unwinds, so a notify raised inside
+        // the build would be taken by the frame after this one.
+        let workspace = &self.workspace;
+        self.app
+            .update(|ctx| workspace.update(ctx, |_, ctx| ctx.notify()));
     }
 
     /// Types the `--run` command, once there has been a frame to size the pane
@@ -1468,6 +1589,7 @@ impl WindowDelegate for Shell {
         // Written down rather than dispatched: it costs nothing, it invalidates
         // nothing, and it is the only place the window's size is known.
         self.window_size.set(size);
+        self.sync_window_state();
 
         let window_id = self.window_id;
         let presenter = &mut self.presenter;

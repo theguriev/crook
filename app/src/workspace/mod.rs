@@ -42,6 +42,7 @@ mod terminal_element;
 mod text_field;
 mod theme_panel;
 mod theme_preview;
+mod title_bar;
 mod usage_chip;
 mod view;
 
@@ -52,12 +53,15 @@ use crookui_core::icons::Lucide;
 
 use crate::theme::theme;
 
-pub use action::{OptionsAction, SettingsAction, ThemeAction, WorkspaceAction, WorktreeAction};
+pub use action::{
+    OptionsAction, SettingsAction, ThemeAction, WindowAction, WorkspaceAction, WorktreeAction,
+};
 pub use block_list::BlockList;
 pub use input_element::CommandInput;
 pub use pane_output::{Keys, Output};
 pub use settings_page::Section;
 pub use terminal_element::TerminalElement;
+pub(crate) use title_bar::caption_area;
 pub use usage_chip::{UsageChip, UsageChipAction};
 pub use view::{Fonts, QuitRequest, Workspace};
 

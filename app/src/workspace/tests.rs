@@ -25,6 +25,7 @@ use crookui_core::{AddSingletonModel as _, App, Presenter, WindowId};
 
 use crate::Channel;
 use crate::git::{DiffStats, GitFacts, Head};
+use crate::platform_insets::{ControlLayout, WindowChrome};
 use crate::settings::{
     Density, GeneralOptions, Granularity, Layout, PrimaryInfo, Settings, Subtitle, TabOptions,
 };
@@ -32,6 +33,7 @@ use crate::tab::{AgentSession, AgentStatus, Direction, Pane, PaneId, Tab, TabAct
 use crate::terminal_font::{CELL_FONT_SIZE, CellFont};
 use crate::theme::theme;
 use crate::usage_model::UsageModel;
+use crate::window_controls::{Recorder, Request, WindowState};
 
 use super::{
     Fonts, OptionsAction, QuitRequest, Section, SettingsAction, ThemeAction, Workspace,
@@ -112,6 +114,10 @@ struct Harness {
     window_id: WindowId,
     workspace: ViewHandle<Workspace>,
     quit_requests: Rc<Cell<usize>>,
+    /// The window the header is the title bar of, which only remembers what it
+    /// was asked. A drag leaves no mark on a frame, so this is the only thing
+    /// that can be looked at afterwards.
+    window: Rc<Recorder>,
 }
 
 impl Harness {
@@ -160,6 +166,7 @@ impl Harness {
             Rc::new(move || requests.set(requests.get() + 1))
         };
 
+        let window = Rc::new(Recorder::default());
         let fonts = Fonts {
             ui: FamilyId(0),
             monospace: FamilyId(0),
@@ -168,8 +175,17 @@ impl Harness {
         // text out with none: a cell is half the font size, and a character is
         // its own glyph id.
         let cell_font = CellFont::headless(CELL_FONT_SIZE);
-        let (window_id, workspace) = app
-            .add_window(|ctx| Workspace::new(fonts, cell_font, settings, Channel::Dev, quit, ctx));
+        let (window_id, workspace) = app.add_window(|ctx| {
+            Workspace::new(
+                fonts,
+                cell_font,
+                settings,
+                Channel::Dev,
+                quit,
+                window.clone(),
+                ctx,
+            )
+        });
 
         let mut harness = Self {
             queue,
@@ -178,6 +194,7 @@ impl Harness {
             window_id,
             workspace,
             quit_requests,
+            window,
         };
 
         for _ in 1..tabs {
@@ -298,6 +315,51 @@ impl Harness {
     fn window_insets(&self) -> crate::platform_insets::LayoutInsets {
         self.workspace
             .read(&self.app, |workspace, _| workspace.window_insets())
+    }
+
+    /// Draws another platform's window controls, the way `--controls` does.
+    ///
+    /// The only way to look at two thirds of this: the caption buttons are
+    /// Crook's own drawing on Windows and Linux, so a machine running neither
+    /// can still lay them out and measure them.
+    fn override_controls(&mut self, layout: ControlLayout) {
+        let workspace = &self.workspace;
+        self.app.update(|ctx| {
+            workspace.update(ctx, |workspace, ctx| {
+                workspace.override_control_layout(layout, ctx)
+            });
+        });
+    }
+
+    /// Puts the window into a state it can only be put into from outside —
+    /// the macOS green button, a compositor, a desktop shortcut — and asks for
+    /// the frame that follows.
+    fn set_window_state(&mut self, state: WindowState) {
+        self.window.state.set(state);
+        let workspace = &self.workspace;
+        self.app
+            .update(|ctx| workspace.update(ctx, |_, ctx| ctx.notify()));
+    }
+
+    /// What the header has asked of the window.
+    fn window_requests(&self) -> Vec<Request> {
+        self.window.requests()
+    }
+
+    /// One press and release at `position`, as the `count`-th click of a
+    /// series.
+    fn click_times(&mut self, position: Vector2F, count: u32) {
+        self.dispatch(Event::MouseDown {
+            button: MouseButton::Left,
+            position,
+            modifiers: Modifiers::default(),
+            click_count: count,
+        });
+        self.dispatch(Event::MouseUp {
+            button: MouseButton::Left,
+            position,
+            modifiers: Modifiers::default(),
+        });
     }
 
     /// Starts in a density the command line asked for, the way `--density`
@@ -1293,27 +1355,292 @@ fn the_first_tab_clears_the_window_controls_this_platform_draws() {
 }
 
 #[test]
-fn a_natively_decorated_window_leaves_no_gap_for_controls_it_does_not_draw() {
-    // The window manager draws Crook's controls in a bar of its own, above the
-    // client area. Reserving for them anyway costs 136px of header on Windows
-    // and 116 on Linux — a hole nobody developing on macOS would ever see, and
-    // a first tab pushed 64px in for macOS itself.
+fn the_header_reserves_the_corner_this_platform_puts_its_controls_in_and_no_other() {
+    // Crook's header *is* the title bar, so something is over it — and only at
+    // one end. Reserving at both would leave a hole at whichever end this
+    // platform's controls are not, which is the failure nobody sees because it
+    // is always the end they are not looking at.
     let mut harness = Harness::new(1);
+    let insets = harness.window_insets();
     let scene = harness.frame();
     let first = tab_boxes(&scene)[0];
     let chip = pill_box(&scene);
 
-    // The header's own padding, and nothing else.
     assert!(
-        first.min_x() < 24.,
-        "the first tab starts at {}, which is a window-control reservation",
-        first.min_x()
+        first.min_x() >= insets.header_left,
+        "the first tab starts at {} inside a {} reservation",
+        first.min_x(),
+        insets.header_left
+    );
+    // The reservation and the header's own 8px padding, and nothing else.
+    assert!(
+        first.min_x() < insets.header_left + 24.,
+        "the first tab starts at {}, further in than the reservation of {}",
+        first.min_x(),
+        insets.header_left
     );
     assert!(
-        WINDOW.x() - chip.max_x() < 24.,
+        WINDOW.x() - chip.max_x() >= insets.header_right,
+        "the chip runs into the {} reserved on the right",
+        insets.header_right
+    );
+    assert!(
+        WINDOW.x() - chip.max_x() < insets.header_right + 24.,
         "the chip stops {} short of the right edge",
         WINDOW.x() - chip.max_x()
     );
+}
+
+#[test]
+fn fullscreen_gives_back_the_room_the_traffic_lights_were_using() {
+    // macOS moves its traffic lights into the menu-bar overlay in fullscreen.
+    // The room reserved for them has to go with them or the header ends in a
+    // 64px hole — and nothing tells the application it happened, which is why
+    // the state is read on the render path rather than remembered.
+    let mut harness = Harness::new(1);
+    harness.override_controls(ControlLayout::MacOs);
+    let windowed = tab_boxes(&harness.frame())[0];
+
+    harness.set_window_state(WindowState {
+        fullscreen: true,
+        ..WindowState::default()
+    });
+    let full = tab_boxes(&harness.frame())[0];
+
+    assert_eq!(
+        windowed.min_x() - full.min_x(),
+        ControlLayout::MacOs
+            .insets(WindowChrome::Client, false)
+            .left,
+        "fullscreen did not give back exactly what the traffic lights had"
+    );
+    assert!(full.min_x() < 24., "the header still starts past a hole");
+}
+
+/// The caption buttons Crook draws for a window with no frame, by their boxes.
+///
+/// Found by size rather than by fill: a button that is not being pointed at
+/// draws no fill at all on Windows, and the point of the geometry is that the
+/// three of them are the width that was reserved whether or not anyone is
+/// pointing at one.
+fn caption_boxes(scene: &Scene, size: Vector2F) -> Vec<RectF> {
+    let mut boxes: Vec<RectF> = visible_rects(scene)
+        .map(|(_, bounds)| bounds)
+        .filter(|bounds| {
+            (bounds.width() - size.x()).abs() < 0.5 && (bounds.height() - size.y()).abs() < 0.5
+        })
+        .collect();
+    boxes.sort_by(|left, right| left.min_x().total_cmp(&right.min_x()));
+    boxes
+}
+
+#[test]
+fn the_caption_buttons_fill_exactly_the_end_of_the_header_that_was_reserved() {
+    // Neither platform this draws for can be run here, so what is checked is
+    // the arithmetic that is wrong on both when it is wrong: three buttons
+    // that reach the corner of the window and start where the reservation
+    // starts. A cluster narrower than its reservation is a hole in the header;
+    // a wider one sits on the usage chip.
+    for (layout, button) in [
+        (ControlLayout::Windows, vec2f(45., 30.)),
+        (ControlLayout::Freedesktop, vec2f(30., 30.)),
+    ] {
+        let mut harness = Harness::new(1);
+        harness.override_controls(layout);
+        let reserved = layout.insets(WindowChrome::Client, false).right;
+        let scene = harness.frame();
+        let buttons = caption_boxes(&scene, button);
+
+        assert_eq!(
+            buttons.len(),
+            3,
+            "{layout:?} drew {} controls",
+            buttons.len()
+        );
+        assert!(
+            buttons[0].min_x() >= WINDOW.x() - reserved,
+            "{layout:?} started its controls {} left of the {reserved} it reserved",
+            WINDOW.x() - reserved - buttons[0].min_x()
+        );
+        assert!(
+            WINDOW.x() - buttons[2].max_x() <= 8.,
+            "{layout:?} left {} between the close button and the window's edge",
+            WINDOW.x() - buttons[2].max_x()
+        );
+        // Nothing the header drew of its own may reach into that end.
+        assert!(
+            pill_box(&scene).max_x() <= WINDOW.x() - reserved,
+            "{layout:?} drew the usage chip under its own close button"
+        );
+    }
+}
+
+#[test]
+fn a_caption_button_lights_up_under_the_pointer_and_asks_the_window_when_it_is_clicked() {
+    let mut harness = Harness::new(1);
+    harness.override_controls(ControlLayout::Windows);
+    let scene = harness.frame();
+    let buttons = caption_boxes(&scene, vec2f(45., 30.));
+
+    harness.move_to(center(buttons[0]));
+    let hovered = harness.frame();
+    assert_eq!(
+        fills_of(&hovered, theme().overlay_2)
+            .into_iter()
+            .filter(|bounds| (bounds.width() - 45.).abs() < 0.5)
+            .count(),
+        1,
+        "the button under the pointer did not light up"
+    );
+
+    // In order, left to right, the way every desktop that has these draws
+    // them: minimise, then maximise, then close.
+    harness.click(center(buttons[0]), MouseButton::Left);
+    assert_eq!(harness.window_requests(), vec![Request::Minimize]);
+    harness.click(center(buttons[1]), MouseButton::Left);
+    assert_eq!(
+        harness.window_requests(),
+        vec![Request::Minimize, Request::ToggleMaximized]
+    );
+
+    harness.click(center(buttons[2]), MouseButton::Left);
+    assert_eq!(harness.quit_requests.get(), 1, "close did not close");
+    assert_eq!(
+        harness.window_requests().len(),
+        2,
+        "closing the window is a quit, not a fourth thing to ask a window"
+    );
+}
+
+/// Everything painted in one colour, by its box.
+fn fills_of(scene: &Scene, color: Color) -> Vec<RectF> {
+    visible_rects(scene)
+        .filter(|(rect, _)| rect.background == Fill::Solid(color))
+        .map(|(_, bounds)| bounds)
+        .collect()
+}
+
+#[test]
+fn pressing_the_header_where_nothing_is_picks_the_window_up() {
+    // The gesture that makes this row a title bar. It is a *press*, not a
+    // click: the window manager takes over the pointer from the press onward,
+    // so waiting for the release would mean waiting for one that never comes.
+    let mut harness = Harness::new(1);
+    let scene = harness.frame();
+    let empty = vec2f(
+        pill_box(&scene).min_x() - 30.,
+        center(tab_boxes(&scene)[0]).y(),
+    );
+
+    harness.dispatch(Event::MouseDown {
+        button: MouseButton::Left,
+        position: empty,
+        modifiers: Modifiers::default(),
+        click_count: 1,
+    });
+
+    assert_eq!(harness.window_requests(), vec![Request::Drag]);
+}
+
+#[test]
+fn pressing_something_in_the_header_does_not_pick_the_window_up() {
+    // "Empty" is whatever the row's children did not claim, and this is the
+    // half of that which fails silently: a header that dragged the window from
+    // its own controls would make every tab unclickable, and the tab would
+    // still be highlighted while the window moved.
+    let mut harness = Harness::new(2);
+    let scene = harness.frame();
+    let tab = center(tab_boxes(&scene)[0]);
+    let chip = center(pill_box(&scene));
+
+    harness.click(tab, MouseButton::Left);
+    harness.click(chip, MouseButton::Left);
+
+    assert!(
+        harness.window_requests().is_empty(),
+        "a press on a control dragged the window: {:?}",
+        harness.window_requests()
+    );
+}
+
+#[test]
+fn a_press_that_dismisses_the_options_menu_does_not_pick_the_window_up() {
+    // The menu's underlay is modal and it is *inside* the header, so a press
+    // outside the menu reaches the drag region on its way to nowhere. Taking
+    // it as empty space would move the window every time the menu was
+    // dismissed, which is the one gesture that has to leave the window alone.
+    let mut harness = Harness::new(1);
+    harness.dispatch_option(OptionsAction::TogglePopup);
+    let scene = harness.frame();
+    let empty = vec2f(
+        pill_box(&scene).min_x() - 30.,
+        center(tab_boxes(&scene)[0]).y(),
+    );
+
+    harness.click_times(empty, 1);
+
+    assert!(
+        !harness.is_menu_open(),
+        "the press did not dismiss the menu"
+    );
+    assert!(
+        harness.window_requests().is_empty(),
+        "dismissing the menu dragged the window"
+    );
+}
+
+#[test]
+fn double_clicking_the_header_maximises_the_window() {
+    let mut harness = Harness::new(1);
+    let scene = harness.frame();
+    let empty = vec2f(
+        pill_box(&scene).min_x() - 30.,
+        center(tab_boxes(&scene)[0]).y(),
+    );
+
+    harness.click_times(empty, 1);
+    harness.click_times(empty, 2);
+
+    // The first press is still a drag: the window manager decides what a drag
+    // of zero pixels was, and every desktop that has this gesture starts one
+    // the same way.
+    assert_eq!(
+        harness.window_requests(),
+        vec![Request::Drag, Request::ToggleMaximized]
+    );
+}
+
+#[test]
+fn the_panel_owns_the_top_left_corner_of_the_window_in_the_vertical_layout() {
+    // The layout Crook opens in. The panel's control bar is the window's
+    // top-left corner, so it is what the traffic lights are painted over and
+    // what that end of the window is dragged by — and the header, which is no
+    // longer in that corner, owes neither.
+    let mut harness = Harness::panel(1);
+    harness.override_controls(ControlLayout::MacOs);
+    let insets = harness.window_insets();
+    assert_eq!(insets.header_left, 0., "the header kept a corner it lost");
+    assert!(insets.panel_left > 0., "the panel took no reservation");
+
+    let scene = harness.frame();
+    let gear = gear_box(&scene);
+    assert!(
+        gear.min_x() >= insets.panel_left,
+        "the panel's gear is at {} under a {} reservation",
+        gear.min_x(),
+        insets.panel_left
+    );
+
+    // The empty half of the control bar: left of the gear, right of the room
+    // the traffic lights are painted in.
+    harness.dispatch(Event::MouseDown {
+        button: MouseButton::Left,
+        position: vec2f((insets.panel_left + gear.min_x()) / 2., center(gear).y()),
+        modifiers: Modifiers::default(),
+        click_count: 1,
+    });
+
+    assert_eq!(harness.window_requests(), vec![Request::Drag]);
 }
 
 /// The usage chip's pill, by its fully-rounded box.
@@ -7970,14 +8297,13 @@ mod text_size {
     }
 
     /// The chord, sent the way the window delegate sends a bound keystroke.
+    ///
+    /// Through [`platform_chord`] rather than a bare Control: zoom is Command
+    /// on macOS, so hard-coding Control made these four tests unable to pass
+    /// on a Mac at all. Shift is don't-care for the zoom bindings off macOS,
+    /// which is why the chord every other test uses fits this one too.
     fn zoom(harness: &mut Harness, key: &str) -> bool {
-        harness.press_key(
-            key,
-            Modifiers {
-                ctrl: true,
-                ..Modifiers::default()
-            },
-        )
+        harness.press_key(key, platform_chord())
     }
 
     #[test]
@@ -8134,5 +8460,244 @@ mod the_bell {
         harness.dispatch_action(TabAction::FocusPane(failed));
 
         assert_eq!(status_of(&harness, failed), Some(AgentStatus::Failed));
+    }
+}
+
+// ---------------------------------------------------------------- ADVERSARIAL
+/// The title bar's two halves, checked against each other: every control in
+/// the header still answers a click, and every gap between them still picks
+/// the window up.
+#[cfg(test)]
+mod title_bar_hit_testing {
+    use super::*;
+
+    /// The `+` button's box, by the only 5px-rounded rect in the frame.
+    fn plus_box(scene: &Scene) -> RectF {
+        let boxes: Vec<RectF> = visible_rects(scene)
+            .filter(|(rect, _)| rect.corner_radius.get_top_left() == Radius::Pixels(5.))
+            .map(|(_, bounds)| bounds)
+            .collect();
+        assert_eq!(boxes.len(), 1, "expected one + button, got {boxes:?}");
+        boxes[0]
+    }
+
+    /// The header's own box: the full-width surface rect at the top.
+    fn header_box(scene: &Scene) -> RectF {
+        fills_of(scene, theme().surface)
+            .into_iter()
+            .find(|bounds| bounds.min_y() == 0. && bounds.width() > 512.)
+            .expect("the header paints its own surface")
+    }
+
+    fn press(harness: &mut Harness, position: Vector2F, count: u32) {
+        harness.dispatch(Event::MouseDown {
+            button: MouseButton::Left,
+            position,
+            modifiers: Modifiers::default(),
+            click_count: count,
+        });
+    }
+
+    #[test]
+    fn every_control_in_the_header_still_answers_a_click() {
+        let mut harness = Harness::new(2);
+
+        // The gear opens its menu.
+        let scene = harness.frame();
+        harness.click(center(gear_box(&scene)), MouseButton::Left);
+        assert!(harness.is_menu_open(), "the gear stopped opening the menu");
+        harness.dispatch_option(OptionsAction::TogglePopup);
+
+        // The `+` opens a tab.
+        let scene = harness.frame();
+        let before = tab_boxes(&scene).len();
+        harness.click(center(plus_box(&scene)), MouseButton::Left);
+        let scene = harness.frame();
+        assert_eq!(
+            tab_boxes(&scene).len(),
+            before + 1,
+            "the + stopped opening tabs"
+        );
+
+        // A tab focuses its pane.
+        let tabs = tab_boxes(&scene);
+        harness.click(center(tabs[0]), MouseButton::Left);
+        let scene = harness.frame();
+        assert_eq!(
+            tab_boxes(&scene)
+                .iter()
+                .position(|bounds| *bounds == tabs[0]),
+            Some(0),
+            "the first tab moved when it was clicked"
+        );
+
+        // And none of the four dragged the window.
+        assert!(
+            harness.window_requests().is_empty(),
+            "a control in the header dragged the window: {:?}",
+            harness.window_requests()
+        );
+    }
+
+    #[test]
+    fn the_chip_and_the_tabs_swallow_a_double_click_rather_than_maximising() {
+        for target in ["tab", "chip", "gear", "plus"] {
+            let mut harness = Harness::new(2);
+            let scene = harness.frame();
+            let at = match target {
+                "tab" => center(tab_boxes(&scene)[0]),
+                "chip" => center(pill_box(&scene)),
+                "gear" => center(gear_box(&scene)),
+                _ => center(plus_box(&scene)),
+            };
+
+            harness.click_times(at, 1);
+            harness.click_times(at, 2);
+
+            assert!(
+                harness.window_requests().is_empty(),
+                "double clicking the {target} asked the window for {:?}",
+                harness.window_requests()
+            );
+        }
+    }
+
+    #[test]
+    fn every_gap_between_the_header_controls_still_picks_the_window_up() {
+        let scene = Harness::new(2).frame();
+        let tabs = tab_boxes(&scene);
+        let plus = plus_box(&scene);
+        let gear = gear_box(&scene);
+        let chip = pill_box(&scene);
+        let row = center(tabs[0]).y();
+
+        // Between the last tab and the `+`, between the `+` and the gear,
+        // between the gear and the chip, and above the chip.
+        let gaps = [
+            vec2f((tabs[1].max_x() + plus.min_x()) / 2., row),
+            vec2f((plus.max_x() + gear.min_x()) / 2., row),
+            vec2f((gear.max_x() + chip.min_x()) / 2., row),
+            vec2f(center(chip).x(), 2.),
+        ];
+
+        for gap in gaps {
+            let mut harness = Harness::new(2);
+            harness.frame();
+            press(&mut harness, gap, 1);
+            assert_eq!(
+                harness.window_requests(),
+                vec![Request::Drag],
+                "the gap at {gap:?} did not pick the window up"
+            );
+        }
+    }
+
+    #[test]
+    fn the_third_press_in_a_row_still_picks_the_window_up() {
+        // The second press of a series maximises and no other one does.
+        // `InputState::count_click` goes on counting — 1, 2, 3, 4 for as long
+        // as the presses stay inside half a second and four pixels of each
+        // other — so a `click_count >= 2` rule made every press after a double
+        // click another maximise: reach straight for the title bar to move the
+        // window you have just maximised, and it restores and stays where it
+        // is instead of following the pointer.
+        let mut harness = Harness::new(1);
+        let scene = harness.frame();
+        let empty = vec2f(
+            pill_box(&scene).min_x() - 30.,
+            center(tab_boxes(&scene)[0]).y(),
+        );
+
+        harness.click_times(empty, 1);
+        harness.click_times(empty, 2);
+        harness.click_times(empty, 3);
+
+        assert_eq!(
+            harness.window_requests(),
+            vec![Request::Drag, Request::ToggleMaximized, Request::Drag],
+            "the press after a double click was not a drag"
+        );
+    }
+
+    #[test]
+    fn the_caption_cluster_starts_at_the_top_of_the_window() {
+        // The buttons belong to the window, not to the row they are drawn in:
+        // every desktop that draws them puts them hard against the top of the
+        // window, and the top-right corner is where a person throws the
+        // pointer to close one. Hung from the header's bottom edge instead —
+        // which is what the row's own `CrossAxisAlignment::End` does to them —
+        // they leave a strip of inert header above the close button.
+        for (layout, button) in [
+            (ControlLayout::Windows, vec2f(45., 30.)),
+            (ControlLayout::Freedesktop, vec2f(30., 30.)),
+        ] {
+            let mut harness = Harness::new(1);
+            harness.override_controls(layout);
+            let scene = harness.frame();
+            let header = header_box(&scene);
+            let buttons = caption_boxes(&scene, button);
+
+            assert_eq!(
+                buttons[0].min_y(),
+                0.,
+                "{layout:?} starts its caption buttons {} below the top of the window, \
+                 inside a header {} tall",
+                buttons[0].min_y(),
+                header.height()
+            );
+        }
+    }
+
+    #[test]
+    fn the_top_right_corner_of_the_window_closes_it_rather_than_dragging_it() {
+        // The one above as a gesture: two pixels in from the top-right corner
+        // is the close button on Windows, and nothing there may pick the
+        // window up instead.
+        let mut harness = Harness::new(1);
+        harness.override_controls(ControlLayout::Windows);
+        harness.frame();
+
+        press(&mut harness, vec2f(WINDOW.x() - 2., 2.), 1);
+
+        assert!(
+            harness.window_requests().is_empty(),
+            "the top-right corner of the window asked for {:?}",
+            harness.window_requests()
+        );
+    }
+
+    #[test]
+    fn the_resize_border_keeps_out_of_every_caption_button() {
+        // The corner the border is told to leave alone has to be the cluster
+        // itself. `App::handle_resize_border` runs *before* the element tree
+        // sees a press, so any part of a button outside that corner is a
+        // button that resizes the window instead of doing what it says — on
+        // Windows the last five columns of the close button and the top five
+        // rows of all three, which is exactly where a corner-aimed pointer
+        // lands. The other half of this — that nothing inside the corner is an
+        // edge — is `chrome.rs`'s own test.
+        for (layout, button) in [
+            (ControlLayout::Windows, vec2f(45., 30.)),
+            (ControlLayout::Freedesktop, vec2f(30., 30.)),
+        ] {
+            let mut harness = Harness::new(1);
+            harness.override_controls(layout);
+            let scene = harness.frame();
+            let area = super::super::caption_area(layout, WindowChrome::Client)
+                .expect("{layout:?} draws its own controls");
+            let kept = RectF::new(vec2f(WINDOW.x() - area.x(), 0.), area);
+
+            for bounds in caption_boxes(&scene, button) {
+                let inside = bounds.min_x() >= kept.min_x()
+                    && bounds.max_x() <= kept.max_x()
+                    && bounds.min_y() >= kept.min_y()
+                    && bounds.max_y() <= kept.max_y();
+                assert!(
+                    inside,
+                    "{layout:?} draws a caption button at {bounds:?}, outside the {kept:?} \
+                     the resize border was told to keep out of"
+                );
+            }
+        }
     }
 }

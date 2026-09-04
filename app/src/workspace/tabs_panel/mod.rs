@@ -69,6 +69,7 @@ use crate::theme::theme;
 
 use super::action::WorkspaceAction;
 use super::controls;
+use super::title_bar;
 use super::view::Workspace;
 
 pub(super) mod geometry;
@@ -156,6 +157,12 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
 /// search field that cannot be typed into would be worse than a gap. What the
 /// slot does earn today is the layout — the gear and the `+` sit against the
 /// panel's right edge, where they will still be when something fills it.
+///
+/// In this layout the bar is also half of the window's title bar: it is the
+/// top-left corner, so it is what the traffic lights sit on and what a person
+/// picks that end of the window up by. Both follow from the corner rather than
+/// from the panel, which is why the inset and the drag come from the same two
+/// places the header's do.
 fn control_bar(workspace: &Workspace) -> Box<dyn Element> {
     // The one place in the panel that can be under the window's own controls:
     // on a client-decorated macOS window the traffic lights are in this
@@ -164,37 +171,40 @@ fn control_bar(workspace: &Workspace) -> Box<dyn Element> {
     // and `layout_insets` is what makes that one decision.
     let inset = workspace.window_insets().panel_left;
 
-    Container::new(
-        Flex::row()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_spacing(CONTROL_BAR_SPACING)
-            .with_child(Expanded::new(1., Empty::new().finish()).finish())
-            .with_child(controls::gear_button(
-                workspace,
-                AnchorTo {
-                    // Right edges aligned, unlike the strip's. The gear sits
-                    // near the right edge of a 248px column and the menu is
-                    // 200 wide: hung from its left edge it would open across
-                    // the body, and `keep_on_screen` would not pull it back
-                    // because the window has plenty of room to its right.
-                    parent: Corner::BottomRight,
-                    child: Corner::TopRight,
-                    offset: vec2f(0., 4.),
-                    keep_on_screen: true,
-                    keep_clear_of_parent: false,
-                },
-            ))
-            .with_child(controls::new_tab_button(workspace))
-            .finish(),
+    title_bar::draggable(
+        workspace,
+        Container::new(
+            Flex::row()
+                .with_main_axis_size(MainAxisSize::Max)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_spacing(CONTROL_BAR_SPACING)
+                .with_child(Expanded::new(1., Empty::new().finish()).finish())
+                .with_child(controls::gear_button(
+                    workspace,
+                    AnchorTo {
+                        // Right edges aligned, unlike the strip's. The gear sits
+                        // near the right edge of a 248px column and the menu is
+                        // 200 wide: hung from its left edge it would open across
+                        // the body, and `keep_on_screen` would not pull it back
+                        // because the window has plenty of room to its right.
+                        parent: Corner::BottomRight,
+                        child: Corner::TopRight,
+                        offset: vec2f(0., 4.),
+                        keep_on_screen: true,
+                        keep_clear_of_parent: false,
+                    },
+                ))
+                .with_child(controls::new_tab_button(workspace))
+                .finish(),
+        )
+        .with_padding(Padding {
+            top: CONTROL_BAR_VERTICAL_PADDING,
+            left: CONTROL_BAR_HORIZONTAL_PADDING + inset,
+            bottom: CONTROL_BAR_VERTICAL_PADDING,
+            right: CONTROL_BAR_HORIZONTAL_PADDING,
+        })
+        .finish(),
     )
-    .with_padding(Padding {
-        top: CONTROL_BAR_VERTICAL_PADDING,
-        left: CONTROL_BAR_HORIZONTAL_PADDING + inset,
-        bottom: CONTROL_BAR_VERTICAL_PADDING,
-        right: CONTROL_BAR_HORIZONTAL_PADDING,
-    })
-    .finish()
 }
 
 /// The tabs, wrapped in whichever chrome the granularity asks for.

@@ -280,9 +280,77 @@ tab strip and a chip, none of that is worth a second backend — but if Crook ev
 macOS menu bar, that is the moment to revisit this, and the `platform::current` facade
 (below) is where the second arm would go.
 
+### The window's frame is Crook's
+
+Crook opens a client-decorated window. `WINDOW_CHROME` in `app/src/lib.rs` is `Client`, the
+header *is* the window's title bar, and the window's own controls sit on Crook's surface rather
+than in a strip of system chrome above it. It is the one decision in the application that means
+something genuinely different on each of the three platforms, which is why it is written down
+here rather than left in the code.
+
+**macOS keeps its frame.** Turning decorations off there takes the traffic lights away with
+them, and no Mac application draws its own. The arrangement AppKit actually offers is a
+transparent title bar over a full-size content view — `with_titlebar_transparent`,
+`with_title_hidden` and `with_fullsize_content_view`, with `with_decorations(true)` still in
+place. The window keeps its buttons, its shadow, its resize edges and its own drag behaviour;
+what goes is the *bar*, so Crook's header paints to the top of the window and the lights are
+painted over it. Moving, resizing and closing the window are therefore not Crook's problem
+there. The room is: `platform_insets` reserves the 70 logical pixels the three buttons occupy —
+measured off a screenshot of the running window, where they span x = 9.0 to 68.5 — at whichever
+element owns the window's top-left corner, and gives it back in fullscreen, where macOS moves
+them into the menu-bar overlay.
+
+**Windows and Linux have no frame at all.** `with_decorations(false)` is the whole of it, and
+everything the frame was doing becomes the application's:
+
+- **The controls.** `workspace/title_bar.rs` draws minimise, maximise-or-restore and close, in
+  the shape the platform draws them: 45×30 squares flush with the top-right corner on Windows,
+  30px circles inset by 8 on GNOME and KDE. The cluster is constrained to exactly the width
+  `platform_insets` reserved, and a test asserts that those two numbers are one number.
+- **Moving it.** `Window::drag_window`, from a press on the header's *empty space* — which is
+  not a list of rectangles but whatever the row's own children did not claim, so adding a
+  control to the header stops it being draggable there on the same frame.
+- **Resizing it.** An invisible five-pixel border, eight zones with the corners winning over the
+  edges, `Window::drag_resize_window` on a press and the matching cursor on a move. It runs
+  *before* the element tree, because a press five pixels into a frameless window belongs to the
+  window manager however interesting the element under it is — with one exception, below.
+- **The shadow**, on Windows only: DWM hides it for an undecorated window, so the attributes ask
+  for it back with `with_undecorated_shadow(true)`. Without it there is no edge of any kind
+  between Crook and a dark window behind it.
+
+**Two seams exist only because of this.** The resize border and the caption buttons want the
+same pixels: the border consumes a press before any element sees it, and the close button is in
+the corner a person throws the pointer at without aiming. So the windowing layer is told the box
+the application's own controls are in — `caption_area`, computed from the same metrics the
+buttons are drawn from — and `edge_at` answers "no edge" inside it. The cost is resizing from
+the top-right corner, which is what every client-decorated Windows application gives up. The
+second seam is a release that never arrives: a move or a resize runs inside the window manager's
+own loop, which swallows the button-up that ends it, so the windowing layer forgets every held
+button when a gesture starts — *after* dispatching to the application, because a window move is
+started by the header, inside that dispatch.
+
+**What has never been run.** There is no Windows or Linux machine in this project's loop, so two
+thirds of the above has never opened a window: the borderless window itself, the resize edges,
+the shadow, and the caption buttons acting on a frame that is not macOS's. What was done instead
+is worth stating precisely, so it is not mistaken for more. `--controls macos|windows|linux`
+draws another platform's title bar on this one — the real element tree, real hit-testing, the
+real action path — so all three clusters were laid out, measured, hovered and clicked here;
+`cargo clippy --target x86_64-pc-windows-msvc` and `--target x86_64-unknown-linux-gnu` check
+that both compile and warn nowhere; and the geometry that needs no window — the eight resize
+zones, the corner the border keeps out of, the per-platform reservation — is unit-tested. The
+window those buttons acted on was still a macOS one.
+
+**Two macOS behaviours worth knowing**, both found rather than written. AppKit keeps a drag band
+roughly 28 points tall at the top of a window with a transparent title bar: a *drag* there moves
+the window whatever Crook draws underneath, though clicks pass through normally, and a double
+click there is macOS's own zoom rather than Crook's. It also keeps the outermost 8–10 points of
+each corner for resizing, so the literal corner pixel is never the application's on macOS.
+Neither can be turned off through winit, and neither applies where Crook draws the controls
+itself.
+
 ### Where the `cfg`s live
 
-Even with one backend, platform differences exist: the window-control inset is 64px on the
+Even with one backend, platform differences exist: the window-control inset is 70px on the
 left on macOS and 136px on the right on Windows; the Claude Code credential lookup consults
 the Keychain on macOS and a plain file elsewhere. Warp's discipline is to put every one of
 these behind a single facade:
