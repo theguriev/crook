@@ -22,6 +22,11 @@
 //! Window coordinates, not content ones. A drop is answered against where the
 //! pointer *is*, and the pointer is in the window.
 //!
+//! The boxes are read back as the list would have drawn them with no line in
+//! it, which is not a detail: a line that takes room moves the rows under it,
+//! and a drop decided against rows the drop itself moved un-decides itself
+//! every other frame. See [`Inner::unparted`].
+//!
 //! # Why the drop is decided by a pure function
 //!
 //! [`drop_action`] is the whole gesture's judgement — which gap, whose group,
@@ -31,11 +36,20 @@
 //! the top half of a heading), are tested here in microseconds with no window
 //! and no pointer.
 //!
-//! What it cannot get wrong is the invariant: it names a group and a
-//! neighbour, and [`TabStrip::apply`](crate::tab::TabStrip::apply) clamps the
-//! two against each other. A target computed from a coarse gesture can be
-//! wrong about *where* and still cannot produce a strip the panel is unable to
-//! draw.
+//! What it cannot get wrong is the invariant:
+//! [`TabStrip::apply`](crate::tab::TabStrip::apply) clamps the group and the
+//! neighbour it names against each other, so a target computed from a coarse
+//! gesture can be wrong about *where* and still cannot produce a strip the
+//! panel is unable to draw.
+//!
+//! It has one job that clamp cannot do for it, though, and getting it wrong is
+//! invisible rather than wrong: the target has to be a target the *panel* can
+//! draw. The panel draws a line above a member of the group being joined, or
+//! at that group's end, or above a whole block — so a drop that joins a group
+//! must name one of that group's own rows, and a block that lands somewhere
+//! must name the row a block begins with. Both are said here rather than left
+//! to the clamp, because a drop the strip performs correctly and the panel
+//! could not promise is a drop nobody asked for.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -44,7 +58,7 @@ use crookui_core::AppContext;
 use crookui_core::element::{Element, SizeConstraint};
 use crookui_core::elements::MouseStateHandle;
 use crookui_core::event::{DispatchedEvent, Event, MouseButton};
-use crookui_core::geometry::{Point, Vector2F};
+use crookui_core::geometry::{Point, Vector2F, ZIndex};
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 
 use crate::tab::{GroupId, TabAction, TabId};
@@ -145,7 +159,48 @@ struct Inner {
     slots: Vec<Slot>,
     /// How wide the list was, so that a drop outside the panel can be refused.
     width: std::ops::Range<f32>,
+    /// Where the last frame parted to make room for the line, and by how
+    /// much. See [`Self::unparted`].
+    parting: Option<(f32, f32)>,
     gesture: Option<Gesture>,
+}
+
+impl Inner {
+    /// The slots as the list would have drawn them with no line in it.
+    ///
+    /// The line is drawn *between* two rows, and the room it takes pushes
+    /// every row under it down. Answering the pointer against the boxes that
+    /// were actually painted therefore feeds the answer back into itself: the
+    /// line appears, the row under the pointer moves out from under it, the
+    /// gap it named stops being the one the pointer is in, the line goes away,
+    /// the row comes back — a list that strobes at the frame rate anywhere
+    /// within the parting's height of a boundary, which is where a person
+    /// aiming at that boundary holds the pointer.
+    ///
+    /// So the question is asked of the list that has no line in it. Every box
+    /// under the parting comes back up by its height, which is exactly the
+    /// layout of the frame before the drag began, and the answer becomes a
+    /// function of the pointer alone. It is the same reason a scrollbar is
+    /// sized from the content rather than from itself.
+    fn unparted(&self) -> Vec<Slot> {
+        let Some((top, height)) = self.parting else {
+            return self.slots.clone();
+        };
+        self.slots
+            .iter()
+            .map(|slot| {
+                if slot.top >= top {
+                    Slot {
+                        top: slot.top - height,
+                        bottom: slot.bottom - height,
+                        ..*slot
+                    }
+                } else {
+                    *slot
+                }
+            })
+            .collect()
+    }
 }
 
 impl PanelDrag {
@@ -163,12 +218,19 @@ impl PanelDrag {
     fn begin(&self, width: std::ops::Range<f32>) {
         let mut inner = self.0.borrow_mut();
         inner.slots.clear();
+        inner.parting = None;
         inner.width = width;
     }
 
     /// Records one box, in paint order.
     fn record(&self, grip: Grip, top: f32, bottom: f32) {
         self.0.borrow_mut().slots.push(Slot { grip, top, bottom });
+    }
+
+    /// Records the room the line took, so the rows under it can be put back
+    /// where they would have been. See [`Inner::unparted`].
+    fn record_parting(&self, top: f32, height: f32) {
+        self.0.borrow_mut().parting = Some((top, height));
     }
 
     /// Takes note of a press, which is not yet a drag.
@@ -229,7 +291,7 @@ impl PanelDrag {
         if !inner.width.contains(&gesture.at.x()) {
             return None;
         }
-        drop_action(&inner.slots, gesture.grip.carries(), gesture.at.y())
+        drop_action(&inner.unparted(), gesture.grip.carries(), gesture.at.y())
     }
 
     /// Ends the gesture, answering with whether it was a drag at all and with
@@ -312,6 +374,20 @@ fn tab_drop(slots: &[Slot], tab: TabId, index: usize, after: bool) -> Option<Tab
         }
     };
 
+    // A drop into a group can only name one of that group's own rows. The gap
+    // under a group's last member is also the gap above whatever follows it,
+    // so the row below it — which is what the pointer names — belongs to the
+    // next block, and `before` then points outside the group being joined.
+    // The strip clamps that back into the group's run, so the tab does land
+    // where it was aimed; what nothing can do with it is *draw* it, because
+    // there is no member row to draw a line above. The one gap it can only
+    // ever mean is the group's end, so it is named as the group's end here —
+    // the same slot, said in the terms the panel has a line for.
+    let before = match (group, before) {
+        (Some(joining), Some(named)) if !is_member(slots, named, joining) => None,
+        _ => before,
+    };
+
     // Dropping a tab back where it already is: the row above the gap is the
     // tab itself, or the row below it is.
     if before == Some(tab) {
@@ -347,6 +423,12 @@ fn group_drop(slots: &[Slot], group: GroupId, index: usize, after: bool) -> Opti
             Grip::Heading { .. } => next_tab(slots, index),
         }
     };
+    // Said as the block it lands in front of rather than as the row: the row
+    // the pointer named can be the middle of a group, and a block does not go
+    // between two of another block's members. The strip snaps it to the same
+    // place; saying it here is what gives the panel a line to draw, which is
+    // drawn above a *block*.
+    let before = before.map(|before| block_start(slots, before));
 
     // The two gaps its own block already occupies: above its first member,
     // and under its last one. Neither is a move, and a line drawn in either
@@ -362,6 +444,37 @@ fn group_drop(slots: &[Slot], group: GroupId, index: usize, after: bool) -> Opti
     }
 
     Some(TabAction::MoveGroup { group, before })
+}
+
+/// Whether a row of the list is one of `group`'s members.
+fn is_member(slots: &[Slot], tab: TabId, group: GroupId) -> bool {
+    slots.iter().any(|held| {
+        matches!(held.grip, Grip::Tab { tab: held, group: Some(joined) } if held == tab && joined == group)
+    })
+}
+
+/// The row the block holding `tab` begins with: its group's first member, or
+/// `tab` itself when it is in no group.
+fn block_start(slots: &[Slot], tab: TabId) -> TabId {
+    let group = slots.iter().find_map(|held| match held.grip {
+        Grip::Tab { tab: held, group } if held == tab => Some(group),
+        _ => None,
+    });
+    match group.flatten() {
+        Some(group) => first_member(slots, group).unwrap_or(tab),
+        None => tab,
+    }
+}
+
+/// A group's first member, as the list drew it.
+fn first_member(slots: &[Slot], group: GroupId) -> Option<TabId> {
+    slots.iter().find_map(|held| match held.grip {
+        Grip::Tab {
+            tab,
+            group: Some(joined),
+        } if joined == group => Some(tab),
+        _ => None,
+    })
 }
 
 /// The group the last row of the list is in, if it is in one.
@@ -485,6 +598,67 @@ impl Element for Frame {
     }
 }
 
+/// Wraps the line the list parts to make room for: records the room it took,
+/// so that the rows under it can be answered where they would have been.
+///
+/// See [`Inner::unparted`] for why a drop must not be decided against a layout
+/// the drop itself moved.
+pub(crate) struct Parting {
+    drag: PanelDrag,
+    child: Box<dyn Element>,
+    size: Option<Vector2F>,
+    origin: Option<Point>,
+}
+
+impl Parting {
+    /// Makes `child` the room a frame gave the line.
+    pub(crate) fn new(drag: PanelDrag, child: Box<dyn Element>) -> Self {
+        Self {
+            drag,
+            child,
+            size: None,
+            origin: None,
+        }
+    }
+}
+
+impl Element for Parting {
+    fn layout(
+        &mut self,
+        constraint: SizeConstraint,
+        ctx: &mut LayoutContext,
+        app: &AppContext,
+    ) -> Vector2F {
+        let size = self.child.layout(constraint, ctx, app);
+        self.size = Some(size);
+        size
+    }
+
+    fn paint(&mut self, origin: Vector2F, ctx: &mut PaintContext, app: &AppContext) {
+        self.origin = Some(Point::from_vec2f(origin, ctx.scene.z_index()));
+        let height = self.size.map_or(0., |size| size.y());
+        self.drag.record_parting(origin.y(), height);
+        self.child.paint(origin, ctx, app);
+    }
+
+    fn dispatch_event(
+        &mut self,
+        event: &DispatchedEvent,
+        ctx: &mut EventContext,
+        app: &AppContext,
+    ) -> bool {
+        self.child.dispatch_event(event, ctx, app)
+    }
+
+    fn size(&self) -> Option<Vector2F> {
+        self.size
+    }
+
+    fn origin(&self) -> Option<Point> {
+        self.origin
+    }
+}
+
 /// Wraps one row or one heading: records where it was drawn, and turns a press
 /// that travels into a drag.
 ///
@@ -503,6 +677,11 @@ pub(crate) struct Handle {
     child: Box<dyn Element>,
     size: Option<Vector2F>,
     origin: Option<Point>,
+    /// The topmost layer the child reached, which is what a press is
+    /// hit-tested against. [`Hoverable`](crookui_core::elements::Hoverable)
+    /// and [`Scrollable`](crookui_core::elements::Scrollable) keep the same
+    /// number for the same reason. See [`Self::takes`].
+    child_max_z_index: Option<ZIndex>,
 }
 
 impl Handle {
@@ -527,18 +706,32 @@ impl Handle {
             child,
             size: None,
             origin: None,
+            child_max_z_index: None,
         }
     }
 
     /// Whether a press at `position` landed on this box and nothing is over
     /// it.
+    ///
+    /// Against the topmost layer the child reached rather than the one this
+    /// element painted into, which is
+    /// [`Hoverable`](crookui_core::elements::Hoverable)'s rule and has to be:
+    /// a row that draws itself above this element is still the row, not
+    /// something covering it. A row does exactly that whenever it is a
+    /// [`Stack`](crookui_core::elements::Stack) — which is every row with its
+    /// hover card up, and therefore every row a pointer has arrived at. Asking
+    /// about the layer *this* painted into found the row's own paint on top of
+    /// the press and refused it, so with the card switched on — its default —
+    /// no row in the panel could be picked up at all.
     fn takes(&self, position: Vector2F, ctx: &EventContext) -> bool {
-        let (Some(origin), Some(size)) = (self.origin, self.size) else {
+        let (Some(origin), Some(size), Some(top)) =
+            (self.origin, self.size, self.child_max_z_index)
+        else {
             return false;
         };
         ctx.visible_rect(origin, size)
             .is_some_and(|visible| visible.contains_point(position))
-            && !ctx.is_covered(Point::from_vec2f(position, origin.z_index()))
+            && !ctx.is_covered(Point::from_vec2f(position, top))
     }
 }
 
@@ -559,6 +752,7 @@ impl Element for Handle {
         let height = self.size.map_or(0., |size| size.y());
         self.drag.record(self.grip, origin.y(), origin.y() + height);
         self.child.paint(origin, ctx, app);
+        self.child_max_z_index = Some(ctx.scene.max_active_z_index());
     }
 
     fn dispatch_event(
@@ -731,6 +925,66 @@ mod tests {
                 before: None
             }),
             "under the last member is still inside the group it is over"
+        );
+    }
+
+    /// The panel of [`panel`], with a loose row under the group as well: the
+    /// arrangement where the gap below the group's last member is also the gap
+    /// above something else.
+    fn panel_with_a_row_under_the_group() -> (Vec<Slot>, Vec<TabId>, GroupId) {
+        let (mut slots, mut tabs, group) = panel();
+        let under = TabId::next();
+        tabs.push(under);
+        slots.push(Slot {
+            grip: Grip::Tab {
+                tab: under,
+                group: None,
+            },
+            top: 80.,
+            bottom: 100.,
+        });
+        (slots, tabs, group)
+    }
+
+    #[test]
+    fn a_drop_under_a_group_s_last_member_is_the_group_s_end() {
+        // The row below that gap belongs to the next block, and a drop that
+        // named it would be asking to join a group in front of a tab the group
+        // does not contain: the strip clamps it back into the group, and the
+        // panel has no line to draw for it in the meantime. The gap has one
+        // meaning, so it is given the name of that meaning.
+        let (slots, tabs, group) = panel_with_a_row_under_the_group();
+
+        assert_eq!(
+            drop_action(&slots, Carried::Tab(tabs[0]), 75.),
+            Some(TabAction::MoveTab {
+                tab: tabs[0],
+                group: Some(group),
+                before: None
+            })
+        );
+    }
+
+    #[test]
+    fn a_group_dropped_inside_another_block_lands_above_that_block() {
+        // A block goes between blocks, never between two of another block's
+        // members — so the gap under a group's first member names the group,
+        // not the member under it.
+        let (slots, tabs, group) = panel_with_a_row_under_the_group();
+        let moving = GroupId::next();
+
+        assert_eq!(
+            drop_action(&slots, Carried::Group(moving), 55.),
+            Some(TabAction::MoveGroup {
+                group: moving,
+                before: Some(tabs[1])
+            }),
+            "the block starts at its first member, whichever member was named"
+        );
+        assert_eq!(
+            drop_action(&slots, Carried::Group(group), 55.),
+            None,
+            "and its own block is where it already is"
         );
     }
 
