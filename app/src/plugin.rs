@@ -511,6 +511,20 @@ impl Host {
         self.fonts
     }
 
+    /// The slot of that name, if one has been declared.
+    ///
+    /// For a plugin that names a slot with a *string* — which every plugin
+    /// outside the binary does. A native plugin names a [`SlotId`] and cannot
+    /// name one that does not exist; the answer to a name nothing declares is
+    /// "no", and the contribution is refused rather than filed under a slot
+    /// invented on the spot.
+    pub fn slot_named(&self, name: &str) -> Option<SlotId> {
+        self.slots
+            .declared()
+            .into_iter()
+            .find(|slot| slot.as_str() == name)
+    }
+
     /// The slots, for the renderers that draw them.
     pub fn slots(&self) -> &Slots<UiContribution> {
         &self.slots

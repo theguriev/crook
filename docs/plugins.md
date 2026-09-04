@@ -57,8 +57,24 @@ description of something that was never built.
     which dispatches in a loop and cannot grow the stack whatever it is compiled at. The
     cost is some interpreter speed, for a plugin whose whole job is to format a percentage.
 
-  Still to do: capabilities actually granted and enforced, the host side that turns a `Node`
-  into elements, and a plugin in the box re-implemented as wasm to dogfood the ABI.
+  The application half is in: `plugins::wasm` reads `plugin.wasm` out of each directory under
+  the platform's data directory, turns what a guest registered into real registrations —
+  resolving every string it was handed, refusing a slot nothing declares and prefixing every
+  action with the plugin's own id — and draws what it describes through one `Node` → element
+  translator. A sandboxed plugin is on the Plugins page, in the command palette and in the
+  header beside the ones in the box, and it can *replace* one of them: `header.right` is a
+  `Single` slot, and a store plugin asking for a lower order wins it.
+
+  A render that fails draws nothing and says so once; a plugin that fails three times in a
+  row stops being asked, because a plugin that traps on frame one will trap on frame two.
+
+  **What it costs in the binary**, measured on this machine: 20,602,664 bytes before and
+  23,486,232 after — 2.8MB, or 2.1MB stripped. That is the *host*, and it is the whole of the
+  increase: an uninstalled plugin is still not in the binary, and a disabled one is still not
+  built. The store's plugins are files in a directory, which is what the tier was for.
+
+  Still to do: capabilities actually granted and enforced, and a plugin in the box
+  re-implemented as wasm to dogfood the ABI from the other side.
 
 ## 0. What was asked for, and what it means
 

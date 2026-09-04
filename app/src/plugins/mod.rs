@@ -30,6 +30,7 @@ mod plugins_page;
 mod settings;
 mod shell;
 mod usage;
+pub mod wasm;
 pub mod window;
 
 use crate::plugin::Plugin;

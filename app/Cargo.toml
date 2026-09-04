@@ -31,7 +31,9 @@ release_bundle = []
 
 [dependencies]
 crook_plugin.workspace = true
+crook_plugin_api.workspace = true
 crook_terminal.workspace = true
+crook_wasm.workspace = true
 crook_usage.workspace = true
 crookui.workspace = true
 crookui_core.workspace = true
@@ -48,3 +50,8 @@ unicode-width.workspace = true
 png.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+
+[dev-dependencies]
+# Test plugins are written in wasm's text format and assembled in the test, so
+# a wasm toolchain is not needed to run `cargo test`.
+wat.workspace = true

@@ -85,6 +85,20 @@ impl Lucide {
         self.row().1
     }
 
+    /// The icon of that name, if this build has one.
+    ///
+    /// The inverse of [`name`](Self::name), for anything that has a string
+    /// rather than a variant — a sandboxed plugin naming an icon, a theme
+    /// file, a line of configuration. `None` for a name this build has never
+    /// heard of, which is a caller that draws nothing rather than one that
+    /// fails.
+    pub fn named(name: &str) -> Option<Self> {
+        data::TABLE
+            .iter()
+            .find(|(_, known, _)| *known == name)
+            .map(|(icon, _, _)| *icon)
+    }
+
     /// Its row of the generated table.
     ///
     /// By search rather than by index, so the table's order is free to change

@@ -99,7 +99,7 @@ use crate::tab::{AgentStatus, Direction, PaneId, Tab, TabAction};
 use crate::terminal_font::{CELL_FONT_SIZE, CellFont};
 use crate::usage_model::UsageModel;
 use crate::window_controls::{Detached, WindowHandle, WindowState};
-use crate::workspace::{Fonts, QuitRequest, Workspace};
+use crate::workspace::{Fonts, Opening, QuitRequest, Workspace};
 
 /// The window Crook opens, in logical pixels.
 const WINDOW_SIZE: Vector2F = vec2f(1024., 640.);
@@ -922,8 +922,11 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
         Workspace::new(
             fonts,
             cell_font,
-            settings,
-            Channel::Dev,
+            Opening {
+                settings,
+                channel: Channel::Dev,
+                plugins: crate::plugins::defaults(),
+            },
             quit,
             Rc::new(Detached),
             ctx,
@@ -1422,6 +1425,21 @@ struct Launch {
     overrides: Overrides,
 }
 
+/// Every plugin this window carries: the ones in the box, then the ones a
+/// person installed.
+///
+/// In that order, and it is load order: a slot's entries are settled by
+/// `order` first and by load order second, so an installed plugin that asks
+/// for the same place as one of Crook's own is drawn after it rather than
+/// instead of it. A store plugin that wanted to come first has to say so.
+fn everything_installed() -> Vec<Box<dyn crate::plugin::Plugin>> {
+    let mut plugins = crate::plugins::defaults();
+    if let Some(directory) = crate::plugins::wasm::directory() {
+        plugins.extend(crate::plugins::wasm::installed(&directory));
+    }
+    plugins
+}
+
 impl Shell {
     fn new(
         platform: &Platform,
@@ -1448,8 +1466,11 @@ impl Shell {
             Workspace::new(
                 fonts,
                 cell_font,
-                settings,
-                launch.channel,
+                Opening {
+                    settings,
+                    channel: launch.channel,
+                    plugins: everything_installed(),
+                },
                 quit,
                 window.clone(),
                 ctx,
