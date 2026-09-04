@@ -1,20 +1,28 @@
 //! The card: everything worth knowing about one plugin.
 //!
-//! What a row cannot say. The name, what it is, where it came from, whether it
-//! is running, what it puts on screen and what it can be asked to do — and,
-//! when it did not load, why.
+//! What a row cannot say. What it is, where it came from, whether it is
+//! running, what it puts on screen and what it can be asked to do — and, when
+//! it did not load, why.
+//!
+//! The frame is [`section::content`](crate::workspace::section::content)'s,
+//! which is the same frame a settings page is drawn in, so what is here is
+//! only the body: the plugin's *name* is the page title and is drawn by the
+//! frame. What follows it is the facts, the description and the switch, which
+//! belong to no heading — and then one [`widgets::category_element`] per
+//! headed block, so a heading here has the same weight, the same rule above it
+//! and the same gap under it as a category of settings.
 //!
 //! # There is room here for a picture
 //!
 //! Deliberately: a plugin from a store will want one, and the shape of this
-//! card is the one that has room for it above the heading without anything
-//! else moving. Nothing carries an image yet — a native plugin's manifest is a
-//! `&'static str` per field and a sandboxed one's has no picture in it — so
-//! there is nothing to draw and this says so rather than reserving a grey
-//! rectangle for a future release.
+//! card is the one that has room for it at the top of the body, under the name
+//! and above the facts, without anything else moving. Nothing carries an image
+//! yet — a native plugin's manifest is a `&'static str` per field and a
+//! sandboxed one's has no picture in it — so there is nothing to draw and this
+//! says so rather than reserving a grey rectangle for a future release.
 
 use crookui_core::elements::{Padding, Paragraph};
-use crookui_core::fonts::{FamilyId, Properties, Weight};
+use crookui_core::fonts::FamilyId;
 use crookui_core::prelude::*;
 
 use crook_plugin::{EntryId, Manifest, PluginId};
@@ -25,36 +33,15 @@ use crate::workspace::{Workspace, WorkspaceAction};
 
 use super::{HOLDS_THE_PAGE, action, tier_words};
 
-/// The inset around the card.
-const PADDING: f32 = 20.;
-
-/// The widest the card's text is allowed to get.
-///
-/// The same measure the settings rows are held to, and for the same reason: a
-/// description stretched across a metre of screen is a description whose next
-/// line the eye cannot find.
-const MAX_WIDTH: f32 = 560.;
-
-/// The whole card, or a line saying there is nothing to show.
-pub(super) fn render(workspace: &Workspace, showing: Option<&PluginId>) -> Box<dyn Element> {
+/// The body of the card: everything under the plugin's name.
+pub(super) fn render(workspace: &Workspace, manifest: &'static Manifest) -> Box<dyn Element> {
     let ui = workspace.fonts().ui;
     let host = workspace.host();
-
-    let Some(manifest) = showing.and_then(|id| {
-        host.available()
-            .iter()
-            .find(|manifest| manifest.id == *id)
-            .copied()
-    }) else {
-        // Unreachable while any plugin is loaded, and this page is one.
-        return Empty::new().finish();
-    };
 
     let on = host.is_loaded(&manifest.id);
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_child(heading(manifest, ui))
         .with_child(facts(manifest, on, ui))
         .with_child(description(manifest, ui))
         .with_child(switch(workspace, manifest, on, ui));
@@ -118,33 +105,7 @@ pub(super) fn render(workspace: &Workspace, showing: Option<&PluginId>) -> Box<d
         column.add_child(section("What it can be asked to do", rows, ui));
     }
 
-    Scrollable::new(
-        workspace.settings_page().scroll_named("plugins.card"),
-        ConstrainedBox::new(
-            Container::new(column.finish())
-                .with_uniform_padding(PADDING)
-                .finish(),
-        )
-        .with_max_width(MAX_WIDTH + PADDING * 2.)
-        .finish(),
-    )
-    .with_scrollbar(theme().overlay_3)
-    .finish()
-}
-
-/// The plugin's name, at the size a heading is.
-fn heading(manifest: &Manifest, ui: FamilyId) -> Box<dyn Element> {
-    Container::new(
-        Text::new(manifest.name, ui, 15.)
-            .with_color(theme().text_primary)
-            .with_style(Properties {
-                weight: Weight::Semibold,
-                ..Properties::default()
-            })
-            .finish(),
-    )
-    .with_margin_bottom(4.)
-    .finish()
+    column.finish()
 }
 
 /// The line under it: who owns it, which version, where it came from.
@@ -231,28 +192,19 @@ fn switch(workspace: &Workspace, manifest: &Manifest, on: bool, ui: FamilyId) ->
 }
 
 /// A heading with lines under it.
+///
+/// A settings page's category, drawn by the same function, so that a heading
+/// on this page and a heading on a settings page are the same heading with the
+/// same rule above it. Never `first`: the facts, the description and the switch
+/// are always above it, so there is always something for the rule to separate
+/// this from.
 fn section(title: &str, rows: Vec<widgets::Entry>, ui: FamilyId) -> Box<dyn Element> {
-    let mut column = Flex::column()
-        .with_main_axis_size(MainAxisSize::Min)
-        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_child(
-            Container::new(
-                Text::new(title.to_owned(), ui, widgets::CATEGORY_SIZE)
-                    .with_color(theme().text_muted)
-                    .with_style(Properties {
-                        weight: Weight::Semibold,
-                        ..Properties::default()
-                    })
-                    .finish(),
-            )
-            .with_margin_top(20.)
-            .with_margin_bottom(8.)
-            .finish(),
-        );
-    for row in rows {
-        column.add_child(row.element);
-    }
-    column.finish()
+    widgets::category_element(
+        title,
+        false,
+        rows.into_iter().map(|row| row.element).collect(),
+        ui,
+    )
 }
 
 /// Everything the audit has to say about this plugin.

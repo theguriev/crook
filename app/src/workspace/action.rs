@@ -246,21 +246,19 @@ pub enum ThemeAction {
 /// The split is deliberate and it is the page's whole design: every control
 /// that changes a tab option dispatches the [`OptionsAction`] the gear menu
 /// already dispatches, so the two surfaces cannot drift apart. What is left is
-/// this — three actions, none of which is "open" or "close": the page is a
-/// pane, so opening it is [`TabAction::OpenSettings`] and closing it is
-/// closing a pane, through the same close button, middle click and close
-/// chord — `cmd-w`, `ctrl-shift-w` off macOS — as every other pane in the
-/// window.
+/// this — and none of it is "open" or "close": the settings are a section of
+/// the sidebar, so showing them is [`WorkspaceAction::ShowSection`] and
+/// leaving them is showing another one.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum SettingsAction {
-    /// Show a different page of the settings in the pane already holding
+    /// Show a different page of the settings in the section already holding
     /// them.
     Select(PageId),
     /// Move the keyboard to one of the fields on the page, or back to the
     /// rail's search box.
     ///
     /// By index rather than by name, because this enum is `Copy`; see
-    /// [`SettingsState::field`](crate::workspace::settings_page::SettingsState::field).
+    /// [`Workspace::field`](crate::workspace::Workspace::field).
     FocusField(Option<usize>),
     /// "Show the usage chip", which is also what starts and stops the poll.
     ToggleUsageChip,

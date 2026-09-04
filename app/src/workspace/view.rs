@@ -3459,14 +3459,15 @@ impl Workspace {
         ctx.notify();
     }
 
-    /// Switches the page the rail has selected, or does one of the two things
+    /// Switches the page the rail has selected, or does one of the few things
     /// only the settings page can do.
     ///
-    /// Opening and closing are not here: those are [`TabAction::OpenSettings`]
-    /// and the ordinary close of a pane, because the page is a pane. Every
-    /// other control on it dispatches an [`OptionsAction`] and lands in
-    /// [`Self::apply_option`] beside the gear menu's clicks, which is why this
-    /// handles three actions rather than fifteen.
+    /// Showing and leaving are not here: those are
+    /// [`WorkspaceAction::ShowSection`], because the settings are a section of
+    /// the sidebar. Every other control on the page dispatches an
+    /// [`OptionsAction`] and lands in [`Self::apply_option`] beside the gear
+    /// menu's clicks, which is why this handles a handful of actions rather
+    /// than all fifteen.
     fn apply_settings(&mut self, action: SettingsAction, ctx: &mut ViewContext<Self>) {
         match action {
             SettingsAction::Select(page) => {
