@@ -39,7 +39,7 @@ use alacritty_terminal::vte::{Parser, Perform};
 use parking_lot::Mutex;
 
 use crate::blocks::{Block, BlockId, BlockTracker, IgnoreReason, LiveBlock};
-use crate::input::InputModes;
+use crate::input::{InputModes, KeyboardModes};
 use crate::marks::ShellMark;
 use crate::mouse::MouseModes;
 use crate::pty::ChildExit;
@@ -233,6 +233,11 @@ impl Emulator {
         let proxy = EventProxy::default();
         let config = Config {
             scrolling_history: scrollback_lines,
+            // Off in alacritty's default config, which means `Term` would
+            // refuse the mode-setting escapes and never answer the query a
+            // program uses to find out whether the protocol is available. The
+            // encoder in `crate::input` reads the flags this maintains.
+            kitty_keyboard: true,
             ..Config::default()
         };
         let mut term = Term::new(config, &size, proxy.clone());
@@ -581,9 +586,17 @@ impl Emulator {
 
     /// Which encoding the child currently expects for cursor and keypad keys.
     pub fn input_modes(&self) -> InputModes {
+        let mode = self.term.mode();
         InputModes {
-            application_cursor: self.term.mode().contains(TermMode::APP_CURSOR),
-            application_keypad: self.term.mode().contains(TermMode::APP_KEYPAD),
+            application_cursor: mode.contains(TermMode::APP_CURSOR),
+            application_keypad: mode.contains(TermMode::APP_KEYPAD),
+            keyboard: KeyboardModes {
+                disambiguate: mode.contains(TermMode::DISAMBIGUATE_ESC_CODES),
+                report_events: mode.contains(TermMode::REPORT_EVENT_TYPES),
+                report_alternates: mode.contains(TermMode::REPORT_ALTERNATE_KEYS),
+                report_all: mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC),
+                report_text: mode.contains(TermMode::REPORT_ASSOCIATED_TEXT),
+            },
         }
     }
 

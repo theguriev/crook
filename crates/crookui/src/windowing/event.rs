@@ -124,7 +124,7 @@ impl InputState {
                 is_synthetic: false,
                 ..
             } => {
-                let keystroke = Keystroke::new(key_name(&event.logical_key)?, self.modifiers);
+                let keystroke = Keystroke::new(event_key_name(event)?, self.modifiers);
                 match event.state {
                     ElementState::Pressed => Some(Event::KeyDown {
                         keystroke,
@@ -195,6 +195,73 @@ fn to_mouse_button(button: winit::event::MouseButton) -> Option<MouseButton> {
         // A twelve-button gaming mouse has nothing to say to a terminal.
         winit::event::MouseButton::Other(_) => None,
     }
+}
+
+/// The name a key press is known by, keypad included.
+///
+/// The keypad is the one place the *physical* key matters. Its digits report
+/// the same logical key as the ones above the letters, and a terminal has to
+/// tell them apart: in application keypad mode — which every full-screen editor
+/// turns on — `5` on the keypad sends `SS3 u` and `5` on the number row sends a
+/// `5`.
+///
+/// It is read only when the logical key agrees that a digit was typed. With
+/// NumLock off, the keypad's `1` reports `End`, and that is what it means: the
+/// key is navigating, not typing, and naming it `numpad1` would send a digit
+/// where every terminal sends a cursor movement.
+fn event_key_name(event: &winit::event::KeyEvent) -> Option<String> {
+    if let Some(name) = keypad_name(event) {
+        return Some(name.to_owned());
+    }
+    key_name(&event.logical_key)
+}
+
+/// The `numpad*` name for a keypad key that is typing rather than navigating,
+/// or `None` for every other key.
+fn keypad_name(event: &winit::event::KeyEvent) -> Option<&'static str> {
+    use winit::keyboard::{KeyCode, PhysicalKey};
+
+    let PhysicalKey::Code(code) = event.physical_key else {
+        return None;
+    };
+
+    // The operators and Enter carry no NumLock question: they type the same
+    // character whichever way it is set.
+    let unconditional = match code {
+        KeyCode::NumpadAdd => "numpadadd",
+        KeyCode::NumpadSubtract => "numpadsubtract",
+        KeyCode::NumpadMultiply => "numpadmultiply",
+        KeyCode::NumpadDivide => "numpaddivide",
+        KeyCode::NumpadEqual => "numpadequal",
+        KeyCode::NumpadEnter => "numpadenter",
+        _ => "",
+    };
+    if !unconditional.is_empty() {
+        return Some(unconditional);
+    }
+
+    // The digits and the separator only count as keypad keys while NumLock has
+    // them typing. Otherwise the logical key is Home, End, an arrow or Delete,
+    // and that is the key that was pressed.
+    let typed = match &event.logical_key {
+        Key::Character(text) => text.as_str(),
+        _ => return None,
+    };
+    let name = match (code, typed) {
+        (KeyCode::Numpad0, "0") => "numpad0",
+        (KeyCode::Numpad1, "1") => "numpad1",
+        (KeyCode::Numpad2, "2") => "numpad2",
+        (KeyCode::Numpad3, "3") => "numpad3",
+        (KeyCode::Numpad4, "4") => "numpad4",
+        (KeyCode::Numpad5, "5") => "numpad5",
+        (KeyCode::Numpad6, "6") => "numpad6",
+        (KeyCode::Numpad7, "7") => "numpad7",
+        (KeyCode::Numpad8, "8") => "numpad8",
+        (KeyCode::Numpad9, "9") => "numpad9",
+        (KeyCode::NumpadDecimal, "." | ",") => "numpaddecimal",
+        _ => return None,
+    };
+    Some(name)
 }
 
 /// The lowercase name a keymap would spell this key with.

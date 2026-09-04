@@ -142,7 +142,7 @@ fn test_home_and_end_follow_the_cursor_mode_too() {
 fn test_a_modified_arrow_drops_the_application_form() {
     let application = InputModes {
         application_cursor: true,
-        application_keypad: false,
+        ..InputModes::default()
     };
 
     // Control is modifier 5; the sequence has to become the CSI form to carry
@@ -256,4 +256,233 @@ fn test_control_over_a_key_with_no_c0_code_sends_the_character() {
     );
     assert_eq!(vec![0x01], held(Key::Char('a'), Modifiers::CONTROL));
     assert_eq!(vec![0x1e], held(Key::Char('6'), Modifiers::CONTROL));
+}
+
+/// The kitty keyboard protocol: the keys whose legacy bytes collide, told
+/// apart.
+mod kitty_keyboard {
+    use super::*;
+
+    /// What a program asks for with `CSI > 1 u`, which is the flag that
+    /// carries the protocol and the one every program that uses it sets.
+    fn disambiguating() -> InputModes {
+        InputModes {
+            keyboard: KeyboardModes {
+                disambiguate: true,
+                ..KeyboardModes::NONE
+            },
+            ..InputModes::default()
+        }
+    }
+
+    fn sent(key: Key, modifiers: Modifiers, modes: InputModes) -> String {
+        let bytes = encode(key, modifiers, modes).expect("this key should encode");
+        String::from_utf8(bytes).expect("every encoding here is ASCII")
+    }
+
+    #[test]
+    fn test_the_collisions_the_protocol_exists_for_are_told_apart() {
+        let modes = disambiguating();
+
+        // Plain, these four keep the numbers of the control codes they used to
+        // send, which is what makes them recognisable to a program that has
+        // only just turned the protocol on.
+        assert_eq!(sent(Key::Escape, Modifiers::NONE, modes), "\x1b[27u");
+        assert_eq!(sent(Key::Enter, Modifiers::NONE, modes), "\x1b[13u");
+        assert_eq!(sent(Key::Tab, Modifiers::NONE, modes), "\x1b[9u");
+        assert_eq!(sent(Key::Backspace, Modifiers::NONE, modes), "\x1b[127u");
+
+        // And the whole point: these four were indistinguishable from the
+        // unmodified key in every legacy encoding. Control is modifier 5.
+        assert_eq!(sent(Key::Enter, Modifiers::CONTROL, modes), "\x1b[13;5u");
+        assert_eq!(sent(Key::Tab, Modifiers::CONTROL, modes), "\x1b[9;5u");
+        assert_eq!(sent(Key::Enter, Modifiers::SHIFT, modes), "\x1b[13;2u");
+        assert_eq!(
+            sent(Key::Char('i'), Modifiers::CONTROL, modes),
+            "\x1b[105;5u",
+            "ctrl-i and Tab both fold to 0x09 in the legacy encoding"
+        );
+    }
+
+    #[test]
+    fn test_a_control_combination_reports_the_unshifted_key() {
+        // `ctrl-A` and `ctrl-a` are one key with a modifier, not two keys. 97
+        // is a lowercase `a`, and the shift is in the parameter.
+        let modes = disambiguating();
+        let shifted = Modifiers {
+            shift: true,
+            control: true,
+            ..Modifiers::NONE
+        };
+
+        assert_eq!(sent(Key::Char('A'), shifted, modes), "\x1b[97;6u");
+        assert_eq!(
+            sent(Key::Char('a'), Modifiers::CONTROL, modes),
+            "\x1b[97;5u"
+        );
+    }
+
+    #[test]
+    fn test_the_keys_with_unambiguous_legacy_forms_are_left_alone() {
+        // Arrows, function keys and the `CSI n ~` family already carry a
+        // modifier parameter, so the protocol keeps them exactly as they were.
+        // Replacing them would break every program that reads terminfo.
+        let modes = disambiguating();
+
+        assert_eq!(sent(Key::Up, Modifiers::NONE, modes), "\x1b[A");
+        assert_eq!(sent(Key::Up, Modifiers::CONTROL, modes), "\x1b[1;5A");
+        assert_eq!(sent(Key::Function(5), Modifiers::NONE, modes), "\x1b[15~");
+        assert_eq!(sent(Key::PageUp, Modifiers::NONE, modes), "\x1b[5~");
+
+        // A plain character still types, which is what keeps a shell usable in
+        // a program that turned the protocol on around it.
+        assert_eq!(sent(Key::Char('a'), Modifiers::NONE, modes), "a");
+    }
+
+    #[test]
+    fn test_report_all_escapes_even_the_keys_that_would_have_typed() {
+        let modes = InputModes {
+            keyboard: KeyboardModes {
+                disambiguate: true,
+                report_all: true,
+                ..KeyboardModes::NONE
+            },
+            ..InputModes::default()
+        };
+
+        // Bare, because nothing was held: `CSI 97u` rather than `CSI 97;1u`,
+        // which is what kitty itself sends and what its own parser expects.
+        assert_eq!(sent(Key::Char('a'), Modifiers::NONE, modes), "\x1b[97u");
+        // The key is the unshifted one and the shift is the parameter, so a
+        // capital `Z` is key 122 with modifier 2.
+        assert_eq!(sent(Key::Char('Z'), Modifiers::SHIFT, modes), "\x1b[122;2u");
+    }
+
+    #[test]
+    fn test_report_text_appends_what_the_key_produced() {
+        // A program that asked for every key still has to know what was typed,
+        // and this is how it finds out without a layout table of its own.
+        let modes = InputModes {
+            keyboard: KeyboardModes {
+                disambiguate: true,
+                report_all: true,
+                report_text: true,
+                ..KeyboardModes::NONE
+            },
+            ..InputModes::default()
+        };
+
+        // 97 is the key, 1 is "nothing held", and the second 97 is the `a`
+        // that was typed.
+        assert_eq!(
+            sent(Key::Char('a'), Modifiers::NONE, modes),
+            "\x1b[97;1;97u"
+        );
+        // The shifted character is what was produced, and the unshifted one is
+        // still the key.
+        assert_eq!(
+            sent(Key::Char('A'), Modifiers::SHIFT, modes),
+            "\x1b[97;2;65u"
+        );
+        // Escape produces no text, so nothing is appended for it.
+        assert_eq!(sent(Key::Escape, Modifiers::NONE, modes), "\x1b[27u");
+    }
+
+    #[test]
+    fn test_nothing_changes_until_a_program_asks() {
+        // The legacy encodings, unchanged, which is what a shell sits in.
+        let modes = InputModes::default();
+
+        assert_eq!(sent(Key::Escape, Modifiers::NONE, modes), "\x1b");
+        assert_eq!(sent(Key::Enter, Modifiers::CONTROL, modes), "\r");
+        assert_eq!(sent(Key::Char('c'), Modifiers::CONTROL, modes), "\u{3}");
+    }
+}
+
+/// The keypad, whose whole point is that it sends something different from the
+/// number row once a program has asked it to.
+mod keypad {
+    use super::*;
+
+    /// The mode `DECPAM` puts the keypad in, which every full-screen editor
+    /// sets on the way in and clears on the way out.
+    fn application() -> InputModes {
+        InputModes {
+            application_keypad: true,
+            ..InputModes::default()
+        }
+    }
+
+    fn in_application(key: KeypadKey) -> Vec<u8> {
+        encode(Key::Keypad(key), Modifiers::NONE, application()).expect("a keypad key encodes")
+    }
+
+    #[test]
+    fn test_the_keypad_types_its_own_characters_in_the_mode_a_shell_is_in() {
+        assert_eq!(b"5".to_vec(), plain(Key::Keypad(KeypadKey::Digit(5))));
+        assert_eq!(b"0".to_vec(), plain(Key::Keypad(KeypadKey::Digit(0))));
+        assert_eq!(b".".to_vec(), plain(Key::Keypad(KeypadKey::Decimal)));
+        assert_eq!(b"+".to_vec(), plain(Key::Keypad(KeypadKey::Add)));
+        assert_eq!(b"/".to_vec(), plain(Key::Keypad(KeypadKey::Divide)));
+
+        // Enter is Enter. A shell that got anything else from it would not run
+        // the line.
+        assert_eq!(b"\r".to_vec(), plain(Key::Keypad(KeypadKey::Enter)));
+    }
+
+    #[test]
+    fn test_application_mode_sends_the_ss3_forms_the_vt100_gave_them() {
+        // The digits run `p` to `y` in order, which is what terminfo describes
+        // and what every curses program parses.
+        assert_eq!(b"\x1bOp".to_vec(), in_application(KeypadKey::Digit(0)));
+        assert_eq!(b"\x1bOu".to_vec(), in_application(KeypadKey::Digit(5)));
+        assert_eq!(b"\x1bOy".to_vec(), in_application(KeypadKey::Digit(9)));
+
+        assert_eq!(b"\x1bOn".to_vec(), in_application(KeypadKey::Decimal));
+        assert_eq!(b"\x1bOk".to_vec(), in_application(KeypadKey::Add));
+        assert_eq!(b"\x1bOm".to_vec(), in_application(KeypadKey::Subtract));
+        assert_eq!(b"\x1bOj".to_vec(), in_application(KeypadKey::Multiply));
+        assert_eq!(b"\x1bOo".to_vec(), in_application(KeypadKey::Divide));
+        assert_eq!(b"\x1bOX".to_vec(), in_application(KeypadKey::Equal));
+        assert_eq!(b"\x1bOM".to_vec(), in_application(KeypadKey::Enter));
+    }
+
+    #[test]
+    fn test_a_modifier_drops_the_application_form() {
+        // `SS3` has nowhere to put a parameter, and unlike the arrows there is
+        // no agreed `CSI 1 ; m` spelling for a keypad key. What is left is the
+        // character with the modifier applied, which is what was meant.
+        assert_eq!(
+            vec![0x1b, b'5'],
+            encode(
+                Key::Keypad(KeypadKey::Digit(5)),
+                Modifiers::ALT,
+                application()
+            )
+            .expect("a modified keypad key still encodes")
+        );
+        assert_eq!(
+            b"\r".to_vec(),
+            encode(
+                Key::Keypad(KeypadKey::Enter),
+                Modifiers::SHIFT,
+                application()
+            )
+            .expect("shift-enter on the keypad is still enter")
+        );
+    }
+
+    #[test]
+    fn test_a_digit_outside_the_keypad_sends_nothing() {
+        // Unreachable from the windowing layer, which only ever names `0` to
+        // `9`. Silence beats a byte nobody can predict.
+        assert_eq!(
+            encode(
+                Key::Keypad(KeypadKey::Digit(10)),
+                Modifiers::NONE,
+                application()
+            ),
+            None
+        );
+    }
 }

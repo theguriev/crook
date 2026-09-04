@@ -88,7 +88,7 @@ use anyhow::Result;
 pub use crate::blocks::{Block, BlockId, BlockState, IgnoreReason, LiveBlock, PromptEnd};
 pub use crate::emulator::{Emulator, TerminalEvent};
 pub use crate::harvest::{BlockRows, RowCombining, StyleRun};
-pub use crate::input::{InputModes, Key, Modifiers};
+pub use crate::input::{InputModes, Key, KeyboardModes, KeypadKey, Modifiers};
 pub use crate::marks::{PromptKind, ShellMark};
 pub use crate::mouse::{MouseButton, MouseEventKind, MouseModes};
 pub use crate::pty::{ChildExit, Program, Pty, PtyReader, default_shell};

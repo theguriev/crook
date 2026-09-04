@@ -865,9 +865,24 @@ short pane — is the other half of the same decision.
 
 ### What the emulator does not do
 
-IME composition, the kitty keyboard protocol and the numeric keypad. Ctrl+Enter and Ctrl+Tab
-are indistinguishable from the unmodified key in every legacy encoding, which is the stated
-reason the kitty protocol exists.
+IME composition, and key *releases* — which is the one kitty flag that is carried and not
+acted on, because a release never reaches `crook_terminal`.
+
+**The kitty keyboard protocol is in**, in `crook_terminal::input`. Alacritty's `Term` already
+maintained the mode stack behind a config flag that was off; turning it on and reading the
+five `TermMode` bits is the whole of the plumbing. What the encoder does with them is narrow
+on purpose: arrows, function keys and the `CSI n ~` family already carry a modifier parameter,
+so the protocol leaves them exactly as they are, and what it replaces is the handful of keys
+whose legacy bytes genuinely collide — Escape, Enter, Tab, Backspace, and every Ctrl
+combination that folds to a C0 code. That collision is the entire reason the protocol exists:
+Ctrl+Enter, Ctrl+Tab and Ctrl+I used to be indistinguishable from Enter, Tab and Tab.
+
+**The numeric keypad is in** too, and it is the one place a *physical* key matters. The
+keypad's `5` reports the same logical key as the `5` above the letters, and in application
+keypad mode — `DECPAM`, which every full-screen editor sets — they send different bytes. So
+`crookui`'s event translation names the keypad apart, `numpad5`, and only when the logical key
+agrees a digit was typed: with NumLock off that key *is* End, and naming it otherwise would
+send a digit where every terminal sends a cursor movement.
 
 **Mouse reporting is in**, in `crook_terminal::mouse`. A program asks for it with `?1000`,
 `?1002` or `?1003` and gets presses, drags or every move; `?1006` switches the encoding to the
