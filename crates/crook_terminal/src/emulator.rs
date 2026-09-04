@@ -40,8 +40,9 @@ use parking_lot::Mutex;
 
 use crate::blocks::{Block, BlockId, BlockTracker, IgnoreReason, LiveBlock};
 use crate::harvest::{self, BlockRows};
-use crate::input::InputModes;
+use crate::input::{InputModes, KeyboardModes};
 use crate::marks::ShellMark;
+use crate::mouse::MouseModes;
 use crate::pty::ChildExit;
 use crate::snapshot::{self, Palette, Snapshot, TerminalSize};
 
@@ -67,6 +68,20 @@ pub enum TerminalEvent {
     ChildExited(ChildExit),
     /// The child asked for text to be put on the system clipboard with OSC 52.
     ClipboardStore(String),
+    /// The shell has answered a completion request, and the answer is waiting
+    /// where the asker put the question.
+    ///
+    /// The number is the request's, echoed back: a person who pressed Tab
+    /// twice quickly has two requests outstanding, and only the answer to the
+    /// second one is about the line they are looking at.
+    ///
+    /// Nothing here reads the answer. It is a file, in a directory this crate
+    /// has never heard of — the scratch the shell integration owns — which is
+    /// exactly why the payload is a serial rather than the candidates: an
+    /// escape sequence carrying filenames would need an encoding, and a shell
+    /// that has to base64 its own output needs a `base64` this machine may not
+    /// have.
+    Completions(u64),
 }
 
 /// Collects `Term`'s events so they can be handled after parsing, rather than
@@ -113,6 +128,7 @@ impl EventListener for EventProxy {
 struct OscWatcher {
     working_directory: Option<PathBuf>,
     mark: Option<ShellMark>,
+    completions: Option<u64>,
 }
 
 impl Perform for OscWatcher {
@@ -124,6 +140,15 @@ impl Perform for OscWatcher {
                 }
             }
             Some(&b"133") => self.mark = ShellMark::parse(params),
+            // Crook's own, and the number is deliberately far from anything
+            // standardised: nothing but a shell Crook itself set up emits it,
+            // and a stream that happens to contain one costs a caller a look
+            // at a file it wrote.
+            Some(&COMPLETIONS_OSC) if params.len() >= 2 => {
+                self.completions = str::from_utf8(params[1])
+                    .ok()
+                    .and_then(|serial| serial.parse().ok());
+            }
             _ => {}
         }
     }
@@ -135,6 +160,13 @@ impl Perform for OscWatcher {
         self.mark.is_some()
     }
 }
+
+/// The OSC number a shell answers a completion request on.
+///
+/// Crook's own. VS Code took 633 for the same job and its own protocol; this
+/// is far enough away from every number anything standardised uses that a
+/// stream carrying one came from a shell Crook set up.
+const COMPLETIONS_OSC: &[u8] = b"6339";
 
 /// Reads the payload of OSC 7, which is a `file://` URL or a bare path.
 ///
@@ -225,6 +257,11 @@ impl Emulator {
         let proxy = EventProxy::default();
         let config = Config {
             scrolling_history: scrollback_lines,
+            // Off in alacritty's default config, which means `Term` would
+            // refuse the mode-setting escapes and never answer the query a
+            // program uses to find out whether the protocol is available. The
+            // encoder in `crate::input` reads the flags this maintains.
+            kitty_keyboard: true,
             ..Config::default()
         };
         let mut term = Term::new(config, &size, proxy.clone());
@@ -501,9 +538,33 @@ impl Emulator {
 
     /// Which encoding the child currently expects for cursor and keypad keys.
     pub fn input_modes(&self) -> InputModes {
+        let mode = self.term.mode();
         InputModes {
-            application_cursor: self.term.mode().contains(TermMode::APP_CURSOR),
-            application_keypad: self.term.mode().contains(TermMode::APP_KEYPAD),
+            application_cursor: mode.contains(TermMode::APP_CURSOR),
+            application_keypad: mode.contains(TermMode::APP_KEYPAD),
+            keyboard: KeyboardModes {
+                disambiguate: mode.contains(TermMode::DISAMBIGUATE_ESC_CODES),
+                report_events: mode.contains(TermMode::REPORT_EVENT_TYPES),
+                report_alternates: mode.contains(TermMode::REPORT_ALTERNATE_KEYS),
+                report_all: mode.contains(TermMode::REPORT_ALL_KEYS_AS_ESC),
+                report_text: mode.contains(TermMode::REPORT_ASSOCIATED_TEXT),
+            },
+        }
+    }
+
+    /// Which mouse reports the child has asked for.
+    ///
+    /// All false — [`MouseModes::NONE`] — is the state a shell sits in, and is
+    /// what tells a caller that the pointer belongs to the person rather than
+    /// to the program.
+    pub fn mouse_modes(&self) -> MouseModes {
+        let mode = self.term.mode();
+        MouseModes {
+            click: mode.contains(TermMode::MOUSE_REPORT_CLICK),
+            drag: mode.contains(TermMode::MOUSE_DRAG),
+            motion: mode.contains(TermMode::MOUSE_MOTION),
+            sgr: mode.contains(TermMode::SGR_MOUSE),
+            alternate_scroll: mode.contains(TermMode::ALTERNATE_SCROLL),
         }
     }
 
@@ -598,6 +659,10 @@ impl Emulator {
                 | Event::MouseCursorDirty
                 | Event::Wakeup => {}
             }
+        }
+
+        if let Some(serial) = self.osc_watcher.completions.take() {
+            self.events.push(TerminalEvent::Completions(serial));
         }
 
         if let Some(directory) = self.osc_watcher.working_directory.take()

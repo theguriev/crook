@@ -637,3 +637,171 @@ fn closing_the_settings_pane_of_a_split_tab_leaves_the_session_behind() {
         "the tab should have kept the session it was split with"
     );
 }
+
+/// Dragging the boundary between two panes, which is arithmetic on weights and
+/// needs no window to check.
+mod resizing {
+    use super::*;
+
+    /// The weights of the active tab's panes, in render order.
+    fn flexes(strip: &TabStrip) -> Vec<f32> {
+        strip
+            .active()
+            .expect("there is an active tab")
+            .panes()
+            .iter()
+            .map(Pane::flex)
+            .collect()
+    }
+
+    /// A strip whose one tab holds `count` panes, and their ids in order.
+    fn split(count: usize) -> (TabStrip, Vec<PaneId>) {
+        let mut strip = TabStrip::new();
+        for _ in 1..count {
+            strip.apply(TabAction::Split(Direction::Right));
+        }
+        let tab = strip.active_id();
+        let panes = panes_of(&strip, tab);
+        (strip, panes)
+    }
+
+    #[test]
+    fn a_fresh_split_divides_evenly() {
+        let (strip, _) = split(3);
+        assert_eq!(flexes(&strip), vec![1., 1., 1.]);
+    }
+
+    #[test]
+    fn a_drag_moves_weight_between_the_pair_and_nobody_else() {
+        // The property that makes a three-way split behave: dragging the first
+        // divider must not move the third pane at all.
+        let (mut strip, panes) = split(3);
+
+        assert_eq!(
+            TabEffect::Changed,
+            strip.apply(TabAction::ResizePanes {
+                before: panes[0],
+                after: panes[1],
+                leading: 0.75,
+            })
+        );
+
+        let flexes = flexes(&strip);
+        assert!((flexes[0] - 1.5).abs() < 1e-5, "three quarters of the pair");
+        assert!((flexes[1] - 0.5).abs() < 1e-5);
+        assert_eq!(flexes[2], 1., "the pane beyond the divider never moved");
+        assert!(
+            (flexes[0] + flexes[1] - 2.).abs() < 1e-5,
+            "the pair keeps the share it had between them"
+        );
+    }
+
+    #[test]
+    fn a_pane_cannot_be_dragged_away_to_nothing() {
+        // A divider that could take a pane to zero would put itself on top of
+        // its neighbour, and the pane behind it would have no edge left to
+        // grab it back by.
+        let (mut strip, panes) = split(2);
+
+        strip.apply(TabAction::ResizePanes {
+            before: panes[0],
+            after: panes[1],
+            leading: 0.,
+        });
+        let squeezed = flexes(&strip);
+        assert!(squeezed[0] > 0., "the pane is still on screen");
+        assert!(squeezed[1] < 2.);
+
+        strip.apply(TabAction::ResizePanes {
+            before: panes[0],
+            after: panes[1],
+            leading: 1.,
+        });
+        assert!(flexes(&strip)[1] > 0.);
+    }
+
+    #[test]
+    fn a_pair_that_is_not_adjacent_is_refused() {
+        // An action is a value and can arrive after the panes it names have
+        // moved or closed. A divider knows its neighbours; the group checks.
+        let (mut strip, panes) = split(3);
+
+        assert_eq!(
+            TabEffect::Unchanged,
+            strip.apply(TabAction::ResizePanes {
+                before: panes[0],
+                after: panes[2],
+                leading: 0.5,
+            }),
+            "there is no divider between the first pane and the third"
+        );
+        assert_eq!(
+            TabEffect::Unchanged,
+            strip.apply(TabAction::ResizePanes {
+                before: panes[1],
+                after: panes[0],
+                leading: 0.5,
+            }),
+            "the pair is ordered, and this one is back to front"
+        );
+        assert_eq!(flexes(&strip), vec![1., 1., 1.]);
+    }
+
+    #[test]
+    fn a_drag_that_changes_nothing_repaints_nothing() {
+        // A pointer held still produces a move per frame, and every one of
+        // them asks for the ratio it already has.
+        let (mut strip, panes) = split(2);
+        let resize = TabAction::ResizePanes {
+            before: panes[0],
+            after: panes[1],
+            leading: 0.5,
+        };
+
+        assert_eq!(
+            TabEffect::Unchanged,
+            strip.apply(resize),
+            "an even split asked to stay even"
+        );
+    }
+
+    #[test]
+    fn evening_out_is_the_way_back() {
+        let (mut strip, panes) = split(3);
+        strip.apply(TabAction::ResizePanes {
+            before: panes[0],
+            after: panes[1],
+            leading: 0.9,
+        });
+        assert_ne!(flexes(&strip), vec![1., 1., 1.]);
+
+        assert_eq!(TabEffect::Changed, strip.apply(TabAction::EvenPanes));
+        assert_eq!(flexes(&strip), vec![1., 1., 1.]);
+
+        assert_eq!(
+            TabEffect::Unchanged,
+            strip.apply(TabAction::EvenPanes),
+            "a split that is already even has not changed"
+        );
+    }
+
+    #[test]
+    fn a_closed_pane_leaves_the_survivors_their_weights() {
+        // Three equal panes that lose one leave two weights of 1, and the
+        // layout divides what is left between them. A fraction would have had
+        // to be renormalised here; a weight does not.
+        let (mut strip, panes) = split(3);
+        strip.apply(TabAction::ResizePanes {
+            before: panes[0],
+            after: panes[1],
+            leading: 0.75,
+        });
+
+        strip.apply(TabAction::ClosePane(panes[2]));
+
+        let flexes = flexes(&strip);
+        assert_eq!(flexes.len(), 2);
+        assert!((flexes[0] - 1.5).abs() < 1e-5);
+        assert!((flexes[1] - 0.5).abs() < 1e-5);
+    }
+}

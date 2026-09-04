@@ -26,7 +26,10 @@ use std::cell::{Cell, Ref, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use crookui_core::geometry::RectF;
+
 use crate::clipboard::Clipboard;
+use crate::completion::Completions;
 use crate::editor::{Editor, Selection};
 use crate::input_keys::Intent;
 
@@ -60,6 +63,76 @@ struct Inner {
     /// which is what stops a keystroke arriving in that gap from landing in a
     /// field nothing can draw or read back.
     has_keys: Cell<bool>,
+
+    /// What an input method is composing, and where its own caret sits inside
+    /// it.
+    ///
+    /// **Not in the editor**, and that is the whole design. A preedit is not
+    /// text: it is replaced wholesale by the next one, it can be abandoned
+    /// without leaving anything behind, and it must never reach the undo
+    /// history or a submitted line. Keeping it beside the editor means every
+    /// existing operation — a copy, a submit, `is_empty` — goes on answering
+    /// about what was actually typed, and only the drawing has to know.
+    preedit: RefCell<Preedit>,
+
+    /// The completion request this field is waiting for an answer to, and what
+    /// the last answer said.
+    ///
+    /// The serial is what makes a stale answer discardable: pressing Tab twice
+    /// quickly leaves two requests outstanding, the shell answers both, and
+    /// only the second is about the line on screen. It counts up and never
+    /// resets, so no answer can be mistaken for a later one.
+    completion: RefCell<CompletionState>,
+
+    /// Where the caret was last painted, in window coordinates.
+    ///
+    /// Written by the element that draws the field and read by the window,
+    /// which puts the input method's candidate list beside it. It has to come
+    /// from the paint path: the caret's position is the result of wrapping the
+    /// line at the width the field was given, and nothing else in the
+    /// application knows either.
+    caret_rect: Cell<Option<RectF>>,
+}
+
+/// What this field has asked the shell, and what it last heard back.
+#[derive(Debug, Default)]
+struct CompletionState {
+    /// The number of the last request sent. Zero before any.
+    asked: u64,
+    /// The candidates the last *matching* answer carried, and the word they
+    /// were for.
+    ///
+    /// Kept so the list can be drawn under the field, and dropped the moment
+    /// the line changes: a list of what `car` could become is nonsense under a
+    /// line that now says `cargo b`.
+    showing: Option<(String, Completions)>,
+}
+
+/// The text an input method is composing, before it becomes text.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Preedit {
+    /// The string being composed. Empty means there is no composition.
+    text: String,
+    /// Where the input method's own caret sits within [`Self::text`], as a
+    /// byte offset. Always on a character boundary.
+    caret: usize,
+}
+
+impl Preedit {
+    /// Whether nothing is being composed.
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    /// The string being composed.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// How far into the composition the input method's caret is, in bytes.
+    pub fn caret(&self) -> usize {
+        self.caret
+    }
 }
 
 /// A selection being dragged out: where it started, and in what units.
@@ -99,7 +172,143 @@ impl TextInput {
             drag: Cell::new(None),
             active_since: Cell::new(Instant::now()),
             has_keys: Cell::new(false),
+            preedit: RefCell::new(Preedit::default()),
+            completion: RefCell::new(CompletionState::default()),
+            caret_rect: Cell::new(None),
         }))
+    }
+
+    /// What an input method is composing in this field, if anything.
+    pub fn preedit(&self) -> Ref<'_, Preedit> {
+        self.0.preedit.borrow()
+    }
+
+    /// The line as far as the caret, which is the question a completion
+    /// answers.
+    ///
+    /// The prefix rather than the whole line and an offset, because that is
+    /// what every shell's completion takes — `complete -C` in fish and
+    /// `compgen` in bash both complete the end of what they are given.
+    pub fn line_to_caret(&self) -> String {
+        let editor = self.0.editor.borrow();
+        editor.text()[..editor.caret()].to_owned()
+    }
+
+    /// Records that a completion has been asked for, and returns its number.
+    ///
+    /// Counts up and never resets, so an answer to a request two keystrokes
+    /// ago cannot be mistaken for the answer to this one.
+    pub fn ask_for_completions(&self) -> u64 {
+        let mut completion = self.0.completion.borrow_mut();
+        completion.asked += 1;
+        completion.showing = None;
+        completion.asked
+    }
+
+    /// Applies an answer, reporting whether anything on screen changed.
+    ///
+    /// Three outcomes, and they are the three every shell's Tab has. One
+    /// candidate is inserted whole. Several insert as much as they agree on.
+    /// An answer that adds nothing to what is typed is *shown* instead, which
+    /// is the only useful thing left to do with it.
+    ///
+    /// An answer whose number is not the one this field is waiting for is
+    /// dropped: it is about a line that has since been typed past.
+    pub fn take_completions(&self, serial: u64, answer: Completions) -> bool {
+        {
+            let completion = self.0.completion.borrow();
+            if completion.asked != serial {
+                return false;
+            }
+        }
+
+        let word = crate::completion::word_at_end(&self.line_to_caret()).to_owned();
+        if let Some(whole) = answer.insertion(&word) {
+            let addition = whole[word.len()..].to_owned();
+            self.0.completion.borrow_mut().showing = None;
+            self.edit(|editor| editor.insert(&addition));
+            return true;
+        }
+
+        let showing = (answer.candidates.len() > 1).then_some((word, answer));
+        let mut completion = self.0.completion.borrow_mut();
+        if completion.showing == showing {
+            return false;
+        }
+        completion.showing = showing;
+        true
+    }
+
+    /// The candidates to draw under the field, if any are still relevant.
+    ///
+    /// Dropped the moment the word under the caret is no longer the one they
+    /// were for: a list of what `car` could become is nonsense under a line
+    /// that now says `cargo b`.
+    pub fn showing_completions(&self) -> Option<Completions> {
+        let completion = self.0.completion.borrow();
+        let (word, answer) = completion.showing.as_ref()?;
+        (crate::completion::word_at_end(&self.line_to_caret()) == word).then(|| answer.clone())
+    }
+
+    /// Whether an input method is mid-composition here.
+    ///
+    /// The one question the rest of the field asks: while this is true a click
+    /// does not move the caret, because the offsets the pointer resolves
+    /// against are offsets into a string that includes a preedit the editor
+    /// has never heard of.
+    pub fn is_composing(&self) -> bool {
+        !self.0.preedit.borrow().is_empty()
+    }
+
+    /// Replaces what the input method is composing.
+    ///
+    /// `caret` is clamped onto a character boundary of `text`, because an
+    /// input method reporting a range this build does not understand must not
+    /// be able to panic the field. Reports whether anything changed, which is
+    /// what decides if the frame is worth redrawing.
+    pub fn set_preedit(&self, text: &str, caret: usize) -> bool {
+        let mut caret = caret.min(text.len());
+        while caret > 0 && !text.is_char_boundary(caret) {
+            caret -= 1;
+        }
+
+        let mut preedit = self.0.preedit.borrow_mut();
+        let replacement = Preedit {
+            text: text.to_owned(),
+            caret,
+        };
+        if *preedit == replacement {
+            return false;
+        }
+        *preedit = replacement;
+        drop(preedit);
+        // The caret is solid while somebody is composing, for the same reason
+        // it is solid while somebody is typing: it is being looked at.
+        self.0.active_since.set(Instant::now());
+        true
+    }
+
+    /// Abandons any composition, reporting whether there was one.
+    ///
+    /// What an input method that gave up produces, and what a commit does
+    /// before it inserts: in both cases what was on screen belongs to nothing.
+    pub fn clear_preedit(&self) -> bool {
+        let had = !self.0.preedit.borrow().is_empty();
+        if had {
+            *self.0.preedit.borrow_mut() = Preedit::default();
+        }
+        had
+    }
+
+    /// Where the caret was last painted, in window coordinates.
+    pub fn caret_rect(&self) -> Option<RectF> {
+        self.0.caret_rect.get()
+    }
+
+    /// Records where the caret has just been painted, so the window can put an
+    /// input method's candidate list beside it.
+    pub fn set_caret_rect(&self, rect: Option<RectF>) {
+        self.0.caret_rect.set(rect);
     }
 
     /// Whether the keyboard belongs to this field.
@@ -221,6 +430,11 @@ fn apply(intent: Intent, clipboard: &Clipboard, editor: &mut Editor) -> Option<S
 
     match intent {
         Insert(text) => editor.insert(&text),
+        // Not an edit, and deliberately nothing here. The line goes to the
+        // shell and the answer comes back frames later on a channel of its
+        // own; the element that saw the keystroke is what sends the question,
+        // because it is the only thing holding the terminal to ask.
+        Complete => {}
         Newline => editor.insert_newline(),
         Submit => return Some(editor.submit()),
         Backspace => editor.backspace(),

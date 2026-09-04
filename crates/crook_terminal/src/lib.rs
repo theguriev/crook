@@ -78,10 +78,12 @@ mod emulator;
 mod harvest;
 pub mod input;
 mod marks;
+pub mod mouse;
 mod pty;
 mod rows;
 pub mod selection;
 mod snapshot;
+pub mod url;
 
 use std::fmt;
 use std::io::{self, Write};
@@ -93,8 +95,9 @@ use anyhow::Result;
 pub use crate::blocks::{Block, BlockId, BlockState, IgnoreReason, LiveBlock, PromptEnd};
 pub use crate::emulator::{Emulator, TerminalEvent};
 pub use crate::harvest::{BlockRows, RowCombining, StyleRun};
-pub use crate::input::{InputModes, Key, Modifiers};
+pub use crate::input::{InputModes, Key, KeyboardModes, KeypadKey, Modifiers};
 pub use crate::marks::{PromptKind, ShellMark};
+pub use crate::mouse::{MouseButton, MouseEventKind, MouseModes};
 pub use crate::pty::{ChildExit, Program, Pty, PtyReader, default_shell};
 pub use crate::rows::Rows;
 pub use crate::selection::{CellSide, SelectionKind};
@@ -105,6 +108,14 @@ pub use crate::snapshot::{
 
 /// How much output a terminal remembers above the viewport.
 const DEFAULT_SCROLLBACK_LINES: usize = 10_000;
+
+/// The key press that asks an integrated shell for completions.
+///
+/// A `CSI n ~` with a number nothing has ever assigned, which is what makes it
+/// bindable: every shell's line editor can be told what `\e[6339~` means, and
+/// none of them already thinks it means something. See
+/// [`Terminal::request_completions`].
+pub const COMPLETION_REQUEST: &[u8] = b"\x1b[6339~";
 
 /// Everything a new terminal needs to know.
 #[derive(Clone, Debug, Default)]
@@ -257,6 +268,85 @@ impl Terminal {
         };
         self.write(&bytes)?;
         Ok(true)
+    }
+
+    /// Sends a pointer gesture, if the child has asked to hear about it.
+    ///
+    /// Returns whether any bytes were sent, which is also the answer to "did
+    /// the program take this gesture?" — a caller uses it to decide whether the
+    /// same press should instead start a selection. Nothing is sent, and
+    /// `false` comes back, whenever no mouse mode is in force.
+    ///
+    /// `at` is a cell of the viewport. Converting a pixel to one is the
+    /// renderer's job: only it knows the cell size and where the grid was
+    /// drawn.
+    pub fn send_mouse(
+        &mut self,
+        kind: MouseEventKind,
+        button: Option<MouseButton>,
+        row: usize,
+        column: usize,
+        modifiers: Modifiers,
+    ) -> io::Result<bool> {
+        let modes = self.emulator.mouse_modes();
+        let Some(bytes) = mouse::encode(kind, button, row, column, modifiers, modes) else {
+            return Ok(false);
+        };
+        self.write(&bytes)?;
+        Ok(true)
+    }
+
+    /// Sends the wheel as arrow keys, for a full-screen program that never
+    /// asked for the mouse.
+    ///
+    /// This is what makes the wheel scroll `less`, `man` and `git log`. None of
+    /// them reports the mouse; all of them read arrow keys, and `?1007` is how
+    /// they say so. `lines` is positive for a turn away from the user, matching
+    /// [`Self::scroll_lines`].
+    ///
+    /// Returns whether anything was sent. Nothing is on the primary screen: the
+    /// wheel belongs to the scrollback there, which is real history a person
+    /// can go back to.
+    pub fn send_alternate_scroll(&mut self, lines: i32) -> io::Result<bool> {
+        let modes = self.emulator.mouse_modes();
+        if !modes.wants_alternate_scroll(self.emulator.is_alt_screen()) || lines == 0 {
+            return Ok(false);
+        }
+
+        let key = if lines > 0 { Key::Up } else { Key::Down };
+        let count = lines.unsigned_abs();
+        // One key press per line, because that is what a wheel notch is to a
+        // program reading arrow keys, and a pager has no way to be told "three
+        // lines" in one.
+        for _ in 0..count {
+            self.send_key(key, Modifiers::NONE)?;
+        }
+        Ok(true)
+    }
+
+    /// Asks the shell for completions of a line it cannot see.
+    ///
+    /// **The one thing OSC 133 is not.** Command marks are an announcement:
+    /// the shell says where a prompt began and how a command ended, and never
+    /// answers a question. Completion is a question — "what could this line
+    /// become?" — and the answer belongs to the shell, which owns the
+    /// `PATH` hashing, the `complete` definitions and the glob rules that make
+    /// one right.
+    ///
+    /// The line does not travel in this sequence, and that is deliberate. What
+    /// travels is a *key*, one the integration snippet has bound to a function
+    /// of its own; the line itself is a file the caller wrote and the snippet
+    /// reads. An escape sequence carrying a command line would have to escape
+    /// every character a shell can hold — a semicolon, a quote, a newline, a
+    /// byte that is not UTF-8 at all — and the answer coming back would have
+    /// the same problem twice over, in a shell that may have no `base64` to
+    /// solve it with.
+    ///
+    /// A shell with no integration binds nothing, so this types an unknown
+    /// escape sequence at a prompt: the line editor discards it and beeps at
+    /// worst. Nothing is echoed and no line is submitted.
+    pub fn request_completions(&mut self) -> io::Result<()> {
+        self.write(COMPLETION_REQUEST)
     }
 
     /// Sends pasted text.

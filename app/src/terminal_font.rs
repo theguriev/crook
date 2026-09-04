@@ -109,8 +109,14 @@ impl CellMetrics {
 pub struct CellFont(Rc<Inner>);
 
 struct Inner {
-    /// The font backend, or `None` for a grid measured without one.
-    glyphs: Option<CosmicGlyphs>,
+    /// The font backend and the family it was resolved from, or `None` for a
+    /// grid measured without one.
+    ///
+    /// The family is kept so that [`CellFont::resized`] can re-measure the
+    /// same faces at a new size. Re-resolving it from a name would let a font
+    /// uninstalled mid-session turn one press of the zoom chord into a change
+    /// of typeface.
+    source: Option<(CosmicGlyphs, FamilyId)>,
     /// Regular, bold, italic, bold italic — see [`CellFont::face`].
     faces: [FontId; FACE_COUNT],
     metrics: CellMetrics,
@@ -130,6 +136,35 @@ impl CellFont {
     /// Fails when the family was never registered, or when its `m` has no
     /// advance — either way there is no monospace cell to be had from it.
     pub fn new(glyphs: CosmicGlyphs, family: FamilyId, font_size: f32) -> Result<Self> {
+        Self::build(Some((glyphs, family)), font_size)
+    }
+
+    /// The same faces, measured at a different size.
+    ///
+    /// What zooming is. The family is remembered rather than re-resolved,
+    /// which matters for more than tidiness: a name resolves to whatever is
+    /// installed *now*, and a font uninstalled mid-session would otherwise
+    /// make one press of the zoom chord silently change the typeface.
+    ///
+    /// A headless font resizes too, and is the only case that cannot fail.
+    pub fn resized(&self, font_size: f32) -> Result<Self> {
+        match self.0.source.clone() {
+            Some((glyphs, family)) => Self::build(Some((glyphs, family)), font_size),
+            None => Ok(Self::headless(font_size)),
+        }
+    }
+
+    /// The size this font is set at.
+    pub fn font_size(&self) -> f32 {
+        self.0.metrics.font_size
+    }
+
+    /// Resolves the faces and measures the cell, for a real family or for
+    /// nothing at all.
+    fn build(source: Option<(CosmicGlyphs, FamilyId)>, font_size: f32) -> Result<Self> {
+        let Some((glyphs, family)) = source else {
+            return Ok(Self::headless(font_size));
+        };
         let width = glyphs
             .em_width(family, font_size)
             .with_context(|| format!("{family:?} cannot measure a monospace cell"))?;
@@ -153,7 +188,7 @@ impl CellFont {
         );
 
         Ok(Self::assemble(
-            Some(glyphs),
+            Some((glyphs, family)),
             faces,
             font_size,
             width,
@@ -224,7 +259,7 @@ impl CellFont {
             return *glyph;
         }
 
-        let glyph = match self.0.glyphs.as_ref() {
+        let glyph = match self.0.source.as_ref().map(|(glyphs, _)| glyphs) {
             Some(glyphs) => glyphs
                 .glyph_for_char(face, character)
                 .map(|glyph| (face, glyph))
@@ -238,7 +273,7 @@ impl CellFont {
     }
 
     fn assemble(
-        glyphs: Option<CosmicGlyphs>,
+        source: Option<(CosmicGlyphs, FamilyId)>,
         faces: [FontId; FACE_COUNT],
         font_size: f32,
         width: f32,
@@ -261,7 +296,7 @@ impl CellFont {
             default_compute_baseline_position(font_size, height / font_size, ascent, descent);
 
         Self(Rc::new(Inner {
-            glyphs,
+            source,
             faces,
             metrics: CellMetrics {
                 width,

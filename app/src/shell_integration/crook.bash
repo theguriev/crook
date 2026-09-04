@@ -25,6 +25,73 @@ CROOK_SHELL_INTEGRATION=1
 
 __crook_mark() { builtin printf '\e]133;%s\a' "$1"; }
 
+# Completion, which is the one thing the marks cannot do: they are an
+# announcement, and this is a question with an answer.
+#
+# The line does not arrive in the key sequence. It is in a file Crook wrote — a
+# command line can hold a semicolon, a newline and bytes that are not UTF-8, and
+# escaping all of them past a shell and past an OSC parser twice over is a
+# protocol nobody should have to debug. The answer goes back the same way, and
+# the escape sequence carries only the request's number.
+__crook_complete() {
+	[ -n "${CROOK_SCRATCH-}" ] || return 0
+	local request="$CROOK_SCRATCH/complete.in"
+	local answer="$CROOK_SCRATCH/complete.out"
+	[ -f "$request" ] || return 0
+
+	local serial line
+	{
+		IFS= read -r serial
+		# The rest of the file is the line up to the caret. `read -d ''` takes
+		# it whole, newlines included, and reports failure at end of file even
+		# though it read everything — which is why its status is ignored.
+		IFS= read -r -d '' line || true
+	} <"$request"
+
+	local -a candidates=()
+	__crook_candidates "$line"
+	builtin printf '%s\n' ${candidates[@]+"${candidates[@]}"} >"$answer"
+	builtin printf '\e]6339;%s\a' "$serial"
+}
+
+# What `line` could become, into the `candidates` array of the caller.
+#
+# The word being completed is everything after the last unquoted space, which is
+# an approximation and a deliberate one: bash's own splitting is
+# `COMP_WORDBREAKS` and a parser nobody wants twice. It is right for every line
+# that does not quote a space, which is nearly all of them, and wrong in a way
+# that offers too *few* completions rather than the wrong ones.
+__crook_candidates() {
+	local line=$1
+	local word=${line##* }
+	local prefix=${line%"$word"}
+
+	# The first word of the line is a command; everything after it is an
+	# argument. `compgen -c` reads the same hash and PATH the shell completes
+	# from, so this is the shell's answer rather than an imitation of it.
+	if [ -z "${prefix//[[:space:]]/}" ]; then
+		mapfile -t candidates < <(builtin compgen -c -- "$word" 2>/dev/null)
+		return 0
+	fi
+
+	case $word in
+		# A variable, which `compgen -v` knows and no glob does.
+		\$*) mapfile -t candidates < <(builtin compgen -P '$' -v -- "${word#\$}" 2>/dev/null) ;;
+		# `-o default` is what makes a directory come back with its slash and a
+		# name with a space come back quoted, both of which the caller inserts
+		# verbatim.
+		*) mapfile -t candidates < <(builtin compgen -o default -- "$word" 2>/dev/null) ;;
+	esac
+}
+
+# `bind -x` runs the function and then redraws the prompt, which is exactly
+# right: nothing is printed but an OSC, and the line the person is typing is
+# Crook's rather than readline's, so there is nothing on screen to disturb.
+#
+# Guarded because a bash built without readline — or one whose stdin is not a
+# terminal by the time this runs — has no `bind` at all.
+builtin bind -x '"\e[6339~": __crook_complete' 2>/dev/null || true
+
 # \[ ... \] is how readline is told a stretch of prompt prints nothing. Without
 # it bash miscounts the prompt width and every long line the user types wraps in
 # the wrong place — which reads as a terminal bug, not a shell one.

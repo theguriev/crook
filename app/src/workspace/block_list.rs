@@ -56,17 +56,20 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crook_terminal::url;
 use crook_terminal::{Block, BlockId, CellSide, Rows, SelectionKind, Snapshot, SnapshotCell};
 use crookui_core::AppContext;
 use crookui_core::element::{Element, SizeConstraint};
-use crookui_core::event::{DispatchedEvent, Event, MouseButton};
+use crookui_core::event::{DispatchedEvent, Event, Modifiers, MouseButton};
 use crookui_core::geometry::{Point, RectF, Vector2F, vec2f};
 use crookui_core::icons::{IconKey, Lucide};
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 use crookui_core::scene::{ClipBounds, CornerRadius, Radius, Scene};
 
+use crate::browser;
 use crate::clipboard::Clipboard;
 use crate::pane_blocks::{PaneBlocks, ScrollCause};
+use crate::pane_link::{LinkRow, LinkSpan, PaneLink};
 use crate::pane_selection::PaneSelection;
 use crate::pane_surface;
 use crate::selection::{Anchor, Blocks, Cells, Item, Region, Selection};
@@ -177,6 +180,10 @@ pub struct BlockList {
     window: Vec<Visible>,
     /// One row's cells, reused down the whole list.
     scratch: Vec<SnapshotCell>,
+    /// The link under the pointer, which the workspace keeps per pane because
+    /// the move that finds one and the frame that underlines it are different
+    /// frames. `None` for a list nothing can be clicked in.
+    links: Option<PaneLink>,
 }
 
 /// Where one item's rows are painted, and which of them are on screen.
@@ -222,6 +229,7 @@ impl BlockList {
             font,
             view,
             output: Output::detached(),
+            links: None,
             size: None,
             origin: None,
             window: Vec::new(),
@@ -528,6 +536,125 @@ impl BlockList {
             .is_some()
     }
 
+    /// Makes the URLs in this pane's output clickable, through the link state
+    /// the workspace keeps for it.
+    pub fn with_links(mut self, links: PaneLink) -> Self {
+        self.links = Some(links);
+        self
+    }
+
+    /// The link under the pointer, or `None`.
+    ///
+    /// Works on every item of the list rather than only the open one, which is
+    /// the difference between this and [`Self::cell_at`]: a selection has to
+    /// live in the emulator and so can only cover the open block, but a link
+    /// is read straight off the text and a URL printed by a command that
+    /// finished an hour ago is still a URL.
+    fn link_at(&self, position: Vector2F, modifiers: Modifiers) -> Option<LinkSpan> {
+        if !terminal_element::opens_links(modifiers) {
+            return None;
+        }
+        let bounds = self.bounds().filter(|b| b.contains_point(position))?;
+
+        let metrics = self.font.metrics();
+        let local = position - bounds.origin();
+        let item = *self
+            .window
+            .iter()
+            .find(|item| local.y() >= item.top && local.y() < item.top + item.height)?;
+
+        let rows_top = item.top + PADDING_TOP * metrics.height;
+        let row = ((local.y() - rows_top) / metrics.height).floor();
+        if row < 0. {
+            // The padding above a block's first row, which belongs to no row.
+            return None;
+        }
+        let row = row as usize;
+
+        let columns = usize::from(
+            metrics
+                .grid_for(bounds.width() - GUTTER * 2., bounds.height())
+                .0,
+        );
+        if columns == 0 {
+            return None;
+        }
+        let (column, _) = terminal_element::column_at(local.x() - GUTTER, metrics.width, columns);
+
+        let (link_row, text) = match self.block(item.index) {
+            Some(block) => {
+                let text = block.rows.text(row).to_owned();
+                (
+                    LinkRow::Block {
+                        index: item.index,
+                        row,
+                    },
+                    text,
+                )
+            }
+            None => {
+                // The open block, whose rows are still the snapshot's.
+                let (first, last) = self.live_rows()?;
+                let source = first + row;
+                if source > last || source >= self.snapshot.rows {
+                    return None;
+                }
+                let text = self
+                    .snapshot
+                    .row(source)
+                    .iter()
+                    .map(|cell| cell.c)
+                    .collect();
+                (
+                    LinkRow::Block {
+                        index: item.index,
+                        row,
+                    },
+                    text,
+                )
+            }
+        };
+
+        let url = url::at(&text, column)?;
+        Some(LinkSpan {
+            row: link_row,
+            start: url.start,
+            len: url.len,
+            uri: url.uri,
+        })
+    }
+
+    /// Finds the link under the pointer, reporting whether the frame changed.
+    fn track_link(&self, position: Vector2F, modifiers: Modifiers) -> bool {
+        let Some(links) = self.links.as_ref() else {
+            return false;
+        };
+        links.set(self.link_at(position, modifiers))
+    }
+
+    /// Opens the link under the pointer, reporting whether there was one.
+    fn open_link(&self, position: Vector2F, modifiers: Modifiers) -> bool {
+        let Some(link) = self.link_at(position, modifiers) else {
+            return false;
+        };
+        browser::open(&link.uri)
+    }
+
+    /// Underlines the link under the pointer, when it is on this row.
+    fn paint_link(&self, row: LinkRow, left: f32, top: f32, ctx: &mut PaintContext) {
+        let Some(link) = self.links.as_ref().and_then(|links| links.on(row)) else {
+            return;
+        };
+        terminal_element::paint_link_rule(
+            vec2f(left, top),
+            link.start,
+            link.len,
+            self.font.metrics(),
+            color(self.snapshot.foreground),
+            ctx.scene,
+        );
+    }
+
     /// How far to scroll before a drag lands, when the pointer has left the
     /// top or the bottom of the list, in lines.
     fn autoscroll(&self, position: Vector2F) -> f32 {
@@ -666,6 +793,9 @@ impl BlockList {
             }
             return true;
         }
+        // The list never gives a press to a program — a block is Crook's own
+        // surface, and the grid is where a program that reads the mouse draws
+        // — so any gesture open here is a selection.
         self.output.release()
     }
 
@@ -772,6 +902,11 @@ impl BlockList {
         let first_visible = ((origin.y() - rows_top) / metrics.height).floor().max(0.) as usize;
         let last_visible = ((origin.y() + size.y() - rows_top) / metrics.height).ceil() as usize;
 
+        // Taken before the shadow below: `item` becomes the selection's view
+        // of this block, and a link is addressed by the block's position in
+        // the list rather than by its identity.
+        let listed = item.index;
+
         match self.block(item.index).cloned() {
             Some(block) => {
                 let item = Item {
@@ -818,6 +953,7 @@ impl BlockList {
                         },
                         ctx.scene,
                     );
+                    self.paint_link(LinkRow::Block { index: listed, row }, left, top, ctx);
                 }
             }
             None => self.paint_live(
@@ -955,6 +1091,15 @@ impl BlockList {
                     inverted: None,
                 },
                 ctx.scene,
+            );
+            self.paint_link(
+                LinkRow::Block {
+                    index: self.live_index(),
+                    row,
+                },
+                left,
+                top,
+                ctx,
             );
         }
 
@@ -1228,7 +1373,41 @@ impl Element for BlockList {
             return true;
         }
         match event {
-            Event::MouseMoved { position, .. } => self.hover(*position, ctx),
+            Event::MouseMoved {
+                position,
+                modifiers,
+                ..
+            } => {
+                let mut changed = self.track_link(*position, *modifiers);
+                if changed {
+                    ctx.notify();
+                }
+                changed |= self.hover(*position, ctx);
+                changed
+            }
+            // Letting go of the chord key puts the pointer back to selecting,
+            // and the underline goes with it — under a pointer that never
+            // moved, which is why the move above cannot be the only place this
+            // is asked.
+            Event::ModifiersChanged {
+                position,
+                modifiers,
+            } => {
+                let changed = self.track_link(*position, *modifiers);
+                if changed {
+                    ctx.notify();
+                }
+                changed
+            }
+            // Before the press below, and instead of it: a chord-click on a
+            // link is not a selection gesture, and starting one would leave a
+            // highlight behind the browser that just opened.
+            Event::MouseDown {
+                button: MouseButton::Left,
+                position,
+                modifiers,
+                ..
+            } if self.open_link(*position, *modifiers) => true,
             Event::MouseDown { .. } => self.press(event, ctx),
             _ => false,
         }

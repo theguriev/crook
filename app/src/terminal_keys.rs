@@ -13,7 +13,7 @@
 //! modifiers come along so that the emulator can apply the terminal's own
 //! encodings to them.
 
-use crook_terminal::{Key, Modifiers};
+use crook_terminal::{Key, KeypadKey, Modifiers};
 use crookui_core::event::Keystroke;
 
 /// The highest function key [`Key::Function`] encodes.
@@ -71,9 +71,30 @@ fn named(key: &str) -> Option<Key> {
         // A named key that nonetheless types: the platform reports the space
         // bar by name, and every shell expects a plain `0x20` from it.
         "space" => Key::Char(' '),
-        _ => return function(key),
+        _ => return keypad(key).or_else(|| function(key)),
     };
     Some(named)
+}
+
+/// A key of the numeric keypad, which the windowing layer names apart from the
+/// number row precisely so this can tell them apart.
+///
+/// A press that is *navigating* — the keypad with NumLock off — never reaches
+/// here: it arrives under the name of the key it is acting as, `end` or `up`,
+/// and is matched above.
+fn keypad(key: &str) -> Option<Key> {
+    let rest = key.strip_prefix("numpad")?;
+    let keypad = match rest {
+        "decimal" => KeypadKey::Decimal,
+        "add" => KeypadKey::Add,
+        "subtract" => KeypadKey::Subtract,
+        "multiply" => KeypadKey::Multiply,
+        "divide" => KeypadKey::Divide,
+        "equal" => KeypadKey::Equal,
+        "enter" => KeypadKey::Enter,
+        digit => KeypadKey::Digit(digit.parse::<u8>().ok().filter(|digit| *digit <= 9)?),
+    };
+    Some(Key::Keypad(keypad))
 }
 
 /// `f1` through `f20`. The letter `f` on its own falls through to [`typed`],
@@ -183,6 +204,36 @@ mod tests {
                 "{name} did not reach the shell"
             );
         }
+    }
+
+    #[test]
+    fn the_keypad_is_named_apart_from_the_number_row() {
+        // The whole reason the windowing layer reads the physical key: `5` on
+        // the keypad and `5` above the letters are different keys to a
+        // terminal, and only one of them changes with `DECPAM`.
+        for (name, key) in [
+            ("numpad0", KeypadKey::Digit(0)),
+            ("numpad9", KeypadKey::Digit(9)),
+            ("numpaddecimal", KeypadKey::Decimal),
+            ("numpadadd", KeypadKey::Add),
+            ("numpadsubtract", KeypadKey::Subtract),
+            ("numpadmultiply", KeypadKey::Multiply),
+            ("numpaddivide", KeypadKey::Divide),
+            ("numpadequal", KeypadKey::Equal),
+            ("numpadenter", KeypadKey::Enter),
+        ] {
+            assert_eq!(
+                key_for(&keystroke(name, UiModifiers::default()), ""),
+                Some((Key::Keypad(key), Modifiers::NONE)),
+                "{name} did not reach the shell as a keypad key"
+            );
+        }
+
+        // And the number row is untouched by any of it.
+        assert_eq!(
+            key_for(&keystroke("5", UiModifiers::default()), "5"),
+            Some((Key::Char('5'), Modifiers::NONE))
+        );
     }
 
     #[test]

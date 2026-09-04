@@ -953,10 +953,82 @@ short pane — is the other half of the same decision.
 
 ### What the emulator does not do
 
-Mouse reporting, IME composition, the kitty keyboard protocol, the numeric keypad, and OSC 52
-clipboard writes — the *field* reaches the system clipboard, the grid does not, and an OSC 52
-is logged rather than silently dropped. Ctrl+Enter and Ctrl+Tab are indistinguishable from the
-unmodified key in every legacy encoding, which is the stated reason the kitty protocol exists.
+Key *releases*, which is the one kitty flag that is carried and not acted on, because a
+release never reaches `crook_terminal`.
+
+**IME composition is in**, and it lives in the composer rather than in the emulator, which is
+where it belongs: the field is what a line is typed into. `winit` is told
+`set_ime_allowed(true)` — without which the platform never starts a composition and the keys
+that would have begun one arrive as themselves — and its four `Ime` events become one
+`Event::Ime`. The preedit is kept *beside* the editor, in `PaneInput`, never in it: a preedit
+is not text, it is replaced wholesale by the next one, and putting it in the editor would put
+it in the undo history, in a copy and in a submitted line. Only the drawing composes the two,
+and `CommandInput` underlines the result so a half-converted word does not read as a committed
+one. A click cannot move the caret while a composition is open, because the offsets a pointer
+resolves against are offsets into a line the editor has never seen. The caret's painted
+rectangle travels back out to the window through `Proxy::set_ime_area`, so the candidate list
+stands beside the text being composed; it has to come from the paint path, because where the
+caret is is the result of wrapping the line at the width the field was given.
+
+**The kitty keyboard protocol is in**, in `crook_terminal::input`. Alacritty's `Term` already
+maintained the mode stack behind a config flag that was off; turning it on and reading the
+five `TermMode` bits is the whole of the plumbing. What the encoder does with them is narrow
+on purpose: arrows, function keys and the `CSI n ~` family already carry a modifier parameter,
+so the protocol leaves them exactly as they are, and what it replaces is the handful of keys
+whose legacy bytes genuinely collide — Escape, Enter, Tab, Backspace, and every Ctrl
+combination that folds to a C0 code. That collision is the entire reason the protocol exists:
+Ctrl+Enter, Ctrl+Tab and Ctrl+I used to be indistinguishable from Enter, Tab and Tab.
+
+**The numeric keypad is in** too, and it is the one place a *physical* key matters. The
+keypad's `5` reports the same logical key as the `5` above the letters, and in application
+keypad mode — `DECPAM`, which every full-screen editor sets — they send different bytes. So
+`crookui`'s event translation names the keypad apart, `numpad5`, and only when the logical key
+agrees a digit was typed: with NumLock off that key *is* End, and naming it otherwise would
+send a digit where every terminal sends a cursor movement.
+
+**Mouse reporting is in**, in `crook_terminal::mouse`. A program asks for it with `?1000`,
+`?1002` or `?1003` and gets presses, drags or every move; `?1006` switches the encoding to the
+SGR form, which is the one with no 223-column limit and the only one that can say which button
+came up. `?1007` is separate and on by default, as it is in xterm: it is what turns the wheel
+into arrow keys for a pager that never asked for the mouse, which is why `less` and `man`
+scroll out of the box. **Shift suspends all of it** — that is the only way to select text out
+of a program that has taken the pointer, and copying what `htop` is showing is a thing people
+do constantly.
+
+The gesture is classified once, when the button goes down, and remembered in `PaneSelection`
+as `Selecting` or `Reporting`. Asking the terminal again on each move would be asking a
+question whose answer can change mid-drag, and a program that turned reporting off while a
+button was held would leave the release unreported and half a selection dragged out of a
+screen nobody selected in.
+
+What it reaches is **the grid, not the block list**. That is where a program which reads the
+mouse actually draws: every one of them takes the alternate screen, which is the first rule in
+`pane_surface::of`. A program that reads the mouse and stays on the primary screen — `fzf`
+with a fixed height is the only common one — gets no reports, and the block list goes on
+selecting under it.
+
+**URLs are clickable**, on both surfaces. `crook_terminal::url` finds the link under one cell
+of one row, on demand: walking the whole grid every frame to build a table nobody reads would
+be work proportional to the screen for an answer about a single cell. Holding the platform's
+own chord key — Command on macOS, Control elsewhere — underlines it and makes a click open it;
+without the key the pointer goes on selecting, because a terminal where clicking a URL opened a
+browser is a terminal you cannot copy a URL out of. `app::browser` hands it to `open`,
+`xdg-open` or `cmd /c start`, and checks the scheme against a list first: a program's output is
+not trustworthy, and nothing printed into a pane should be able to ask the platform to open a
+scheme some application has registered a handler for.
+
+**OSC 8 is not read**, and that is a decision rather than an omission. Carrying a per-cell
+hyperlink to the renderer means either putting it on `SnapshotCell` — twelve bytes and `Copy`
+precisely so a full screen is one flat allocation — or threading a side table through the
+harvest path too, so a link keeps working after its command ends. Doing it on the live grid
+alone would be worse than not doing it: a link that dies when the command finishes is a link
+nobody can trust. Most OSC 8 links a terminal sees have the URL as their own text, and those
+work through the scan above.
+
+OSC 52 clipboard writes are in too: the write reaches the window's one clipboard through
+`TerminalUpdate::ClipboardStore`, an empty payload is dropped rather than destroying what
+somebody had copied, and the *read* direction stays refused in the emulator, where answering
+it would hand any program that can print to a pty the contents of the clipboard.
 
 One residue is worth writing down rather than discovering. End-of-file on the pty master is
 the only signal this design has that a session is over, and something other than the child
@@ -1011,12 +1083,35 @@ bash and fish it starts (`app/src/shell_integration`, and "Blocks" in §7), whic
 that says where a command starts and ends. Warp's channel does more than that, and the two
 things still missing are worth naming rather than discovering:
 
-- **No completion.** Tab does nothing in the field, because the shell has never seen the
-  partial line and has nothing to complete. There is no way to fake it: completion is the
-  shell's, and reaching it means either sending the line for the shell to edit — which is the
-  design the field replaced — or a request/response channel to the shell, which OSC 133 is
-  not. VS Code's private `OSC 633` is that channel; adding one means a snippet that answers as
-  well as announces, and a protocol between the two.
+- **Completion is in**, and it took the second channel this paragraph used to ask for. OSC 133
+  is an announcement — the shell says where a prompt began and how a command ended — and
+  completion is a *question*, so there is a second protocol beside it, in `app/src/completion.rs`
+  and the three snippets.
+
+  The question is a **file**: Crook writes the line up to the caret into the session's own
+  scratch and sends `ESC [ 6339 ~`, a key the snippet has bound. The answer is a file too, and
+  the `ESC ] 6339 ; n BEL` that says it is ready carries nothing but the request's number. A
+  command line can hold a semicolon, a newline and bytes that are not UTF-8, and escaping every
+  one of them past a shell *and* past an OSC parser — twice, on the way back — is a protocol
+  nobody should have to debug, in a shell that may have no `base64` to do it with. The number is
+  what makes a stale answer discardable: pressing Tab twice quickly leaves two outstanding, and
+  only the second is about the line on screen.
+
+  What each shell can answer differs, and the difference is the shells'. **fish** answers with
+  `complete -C`, which is the real question and every `complete` definition it has. **bash**
+  answers with `compgen`: its own command, file and variable completion, but *not* the `_git`
+  and `_docker` functions `bash-completion` installs — driving one means setting `COMP_WORDS`,
+  `COMP_CWORD`, `COMP_LINE` and `COMP_POINT` by hand and calling a function whose name has to be
+  dug out of `complete -p`, and getting any of it wrong runs somebody's completion script
+  against a line it was never given. **zsh** is the weakest: its completion system runs inside a
+  ZLE widget and reports through `compstate` rather than returning anything, so there is nothing
+  to ask from outside one, and what the snippet offers is commands, files and variables out of
+  zsh's own hashes and globs.
+
+  What Crook does with an answer is what every shell's Tab does: one candidate is inserted
+  whole, several insert as much as they agree on, and an answer that adds nothing is listed
+  under the field instead. A list rather than a menu — a menu with a selection in it would want
+  the arrow keys, which the field spends on its history.
 - **A password prompt is composed in the clear — in one remaining case.** `sudo`, `ssh` and
   `read -s` turn echo off and read a line on the *normal* screen. With marks this is now
   handled by the rule that hides the composer: the prompt happens while a command is running,
@@ -1073,12 +1168,24 @@ configs; and a filesystem watcher that hot-reloads the themes directory. Crook r
 file format and ignores every one of those fields rather than refusing a file that carries
 them, which is the property that matters: a theme written for Warp loads here.
 
-The one omission worth naming is **OS sync**. Warp resolves the active theme as a pure function
-of (a `use_system_theme` flag, an explicit `{light, dark}` pair of theme names, the OS mode) —
-a design worth copying exactly when it arrives, because it needs no per-theme pairing metadata.
-What it needs first is the OS mode, and that means plumbing `winit`'s system-theme query and
-its `ThemeChanged` event through `crookui`, which is a change to the windowing layer rather
-than to the theme one.
+**OS sync is in**, and it is Warp's design copied exactly: the active theme is a pure function
+of a `use_system_theme` flag, an explicit `{light, dark}` pair of theme names, and the OS mode.
+That is `Settings::theme_for`, which needs no per-theme pairing metadata — nothing has to
+declare itself light or dark, and either theme can be either half of the pair — and which is
+therefore testable with no window and no desktop. The OS mode reaches it as an ordinary
+`Event::SystemTheme`: `winit`'s `ThemeChanged`, plus one query when the window opens, because
+winit only ever reports a *change* and an application that waited for one would open in the
+wrong half. A desktop that will not answer is taken as dark, which is what a terminal has
+always been. Choosing a theme while following writes only the half in force, so the other half
+stays whatever somebody chose for it.
+
+**Hot reload is in, as a poll rather than a watcher, and only while the Themes panel is open.**
+A filesystem watcher is a dependency, a thread and a per-platform API for a folder that changes
+when a person is editing a theme — which is exactly when that panel is open. Closed, it costs
+nothing at all: the chain ends at the first tick that finds the panel gone. The re-read happens
+on the background pool, and the theme in force is looked up again *by name*, because the
+palette in force is the old one and a lookup by palette would find the row it used to be and
+conclude nothing had happened.
 
 **Themes, and what a theme is allowed to be.** `app/src/theme.rs` used to be one `const`
 struct of twenty colours with a comment saying this type is the shape themes would load into
@@ -1114,10 +1221,25 @@ user-remappable keymap. Crook reads input directly. The half worth keeping is al
 keyboard and mouse produce the *same* action values, so a keymap layer can be inserted later
 without touching a single handler.
 
-**Persistence.** No session or window restore. When it arrives, the shape to copy is Warp's:
-snapshot types entirely separate from live types, containing only serializable fields and none
-of the mouse, drag or handle state — a `Vec<TabSnapshot>` plus an active index, `serde_json`
-to a file next to the config.
+**Persistence is in**, in `app/src/session.rs`, and it is exactly the shape this paragraph used
+to prescribe: snapshot types entirely separate from the live ones, holding a title, a directory
+and a share of a split and nothing else — a `Vec<TabSnapshot>` plus an active index and a
+window size, `serde_json` to a file beside the settings.
+
+Three decisions in it are worth naming. It is written **on every change rather than on the way
+out**, because there is no reliable way out: a window closed by the window manager, a process
+killed, a machine that lost power — none of them runs a shutdown path, and a file written only
+at exit is missing exactly when somebody wanted it. Every id in a restored strip is **minted
+fresh**, so a restored window is indistinguishable from one somebody opened by hand and nothing
+keyed by pane id can collide with a previous process's. And a file this build did not write is
+**bounded rather than validated**: sixty-four tabs and sixteen panes, because there is no
+correct number and a truncated or hand-edited file must not be able to open ten thousand ptys
+before the first frame.
+
+What is *not* remembered is the point: no scrollback, no output, no process. A window that
+redrew yesterday's output over a shell that had never run any of it would be lying about the
+state of the machine. The settings pane is left out too — it is something somebody opened to
+change a setting, not work in progress.
 
 **Telemetry, crash reporting, autoupdate.** All absent. Worth noting that adding Sentry on
 macOS is not a `Cargo.toml` line: Warp's build script downloads an `xcframework` and its

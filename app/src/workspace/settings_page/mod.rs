@@ -181,6 +181,14 @@ pub(super) enum Control {
     ShowDetailsOnHover,
     /// "Show the usage chip".
     ShowUsageChip,
+    /// "Follow the desktop".
+    FollowSystemTheme,
+    /// "Bring the tabs back".
+    RestoreSession,
+    /// The minus of "Text size".
+    FontSmaller,
+    /// The plus of it.
+    FontBigger,
     /// "Reset to defaults".
     ResetTabOptions,
     /// The preview in the "Current theme" row.

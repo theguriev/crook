@@ -647,3 +647,163 @@ fn a_field_scrolled_past_its_first_row_continues_nothing() {
         "every row at the gutter"
     );
 }
+
+/// Composing with an input method: the half-typed word is in the field, and
+/// only what the method commits is text.
+mod composition {
+    use super::*;
+    use crookui_core::event::Ime;
+
+    /// Paints a field whose rows were wrapped from the line *as drawn*, which
+    /// is what `paint_input` measures itself against.
+    fn painted_composing(input: &TextInput, columns: usize) -> Scene {
+        let editor = input.editor();
+        let preedit = input.preedit();
+        let (text, caret, _) = composed(&editor, &preedit);
+        let rows = rows_of(&text, caret, columns);
+        drop(text);
+        drop(preedit);
+        drop(editor);
+        painted_rows(input, &rows, true, Ink::default())
+    }
+
+    #[test]
+    fn a_preedit_is_drawn_in_the_line_and_is_not_in_it() {
+        let input = holding("echo ");
+        // Seven bytes: two three-byte kana and the `n` that has not become one
+        // yet, which is exactly the state an input method sits in mid-word.
+        input.set_preedit("にほn", 7);
+
+        // The line as drawn carries the composition at the caret.
+        let editor = input.editor();
+        let preedit = input.preedit();
+        let (text, caret, range) = composed(&editor, &preedit);
+        assert_eq!(text.as_ref(), "echo にほn");
+        assert_eq!(range, Some(5..12));
+        assert_eq!(caret, 12, "the caret sits after what has been composed");
+        drop(text);
+        drop(preedit);
+        drop(editor);
+
+        // The editor has never heard of it. This is what keeps a preedit out
+        // of the undo history, out of a copy, and out of a submitted line.
+        assert_eq!(input.editor().text(), "echo ");
+        assert_eq!(input.editor().caret(), 5);
+    }
+
+    #[test]
+    fn the_composition_is_underlined_so_it_does_not_read_as_text() {
+        let bare = holding("ab");
+        let composing = holding("ab");
+        composing.set_preedit("cd", 2);
+
+        let plain_rects = rects(&painted_composing(&bare, 20)).len();
+        let ruled = rects(&painted_composing(&composing, 20));
+
+        assert_eq!(
+            ruled.len(),
+            plain_rects + 1,
+            "a composition adds exactly one rule to the frame"
+        );
+
+        // Under the two cells it occupies, and no wider.
+        let metrics = font().metrics();
+        let rule = ruled
+            .iter()
+            .find(|rect| rect.bounds.height() < metrics.height / 2.)
+            .expect("the rule is the short rectangle");
+        assert!((rule.bounds.min_x() - 2. * metrics.width).abs() < 0.5);
+        assert!((rule.bounds.width() - 2. * metrics.width).abs() < 0.5);
+    }
+
+    #[test]
+    fn a_commit_is_an_insertion_and_nothing_more() {
+        // The whole of what makes typing Japanese work: the keys never arrive
+        // as key presses, so the commit is the only thing that can put text in
+        // the field.
+        let input = holding("echo ");
+        input.set_preedit("にほn", 7);
+        assert!(input.is_composing());
+
+        // What the element does with `Ime::Commit`, which is deliberately the
+        // same call typed text makes.
+        input.clear_preedit();
+        input.edit(|editor| editor.insert("日本"));
+
+        assert!(!input.is_composing());
+        assert_eq!(input.editor().text(), "echo 日本");
+        assert_eq!(input.editor().caret(), "echo 日本".len());
+    }
+
+    #[test]
+    fn a_composition_that_was_abandoned_leaves_nothing_behind() {
+        let input = holding("ls");
+        input.set_preedit("ni", 2);
+
+        assert!(input.clear_preedit(), "there was a composition to drop");
+        assert!(!input.clear_preedit(), "and only one");
+        assert_eq!(input.editor().text(), "ls");
+
+        let editor = input.editor();
+        let preedit = input.preedit();
+        let (text, _, range) = composed(&editor, &preedit);
+        assert_eq!(text.as_ref(), "ls");
+        assert_eq!(range, None);
+    }
+
+    #[test]
+    fn a_caret_offset_an_input_method_cannot_have_meant_is_clamped() {
+        // An input method reporting a range this build does not understand
+        // must not be able to panic a field. Both a byte past the end and one
+        // inside a character are pulled back to a boundary.
+        let input = TextInput::new();
+
+        input.set_preedit("にほ", 999);
+        assert_eq!(input.preedit().caret(), "にほ".len());
+
+        input.set_preedit("にほ", 1);
+        assert_eq!(
+            input.preedit().caret(),
+            0,
+            "a byte inside a character is not a caret position"
+        );
+    }
+
+    #[test]
+    fn the_caret_rectangle_is_recorded_wherever_the_caret_lands() {
+        // What the window puts the candidate list beside. It has to come from
+        // the paint path: where the caret is depends on how the line wrapped.
+        let input = holding("hello");
+        assert_eq!(input.caret_rect(), None, "nothing has been painted yet");
+
+        painted_composing(&input, 20);
+
+        let metrics = font().metrics();
+        let rect = input.caret_rect().expect("the caret was painted");
+        assert!((rect.min_x() - 5. * metrics.width).abs() < 0.5);
+        assert!((rect.height() - metrics.height).abs() < 0.5);
+    }
+
+    #[test]
+    fn the_events_map_onto_the_three_things_a_field_can_do() {
+        // A guard on the enum rather than on a field: a variant added later
+        // has to be given an answer here before this compiles.
+        for ime in [
+            Ime::Enabled,
+            Ime::Preedit {
+                text: "a".to_owned(),
+                cursor: Some((1, 1)),
+            },
+            Ime::Commit("a".to_owned()),
+            Ime::Disabled,
+        ] {
+            match ime {
+                Ime::Enabled | Ime::Disabled => {}
+                Ime::Preedit { text, cursor } => {
+                    assert_eq!(cursor.map(|(start, _)| start), Some(text.len()));
+                }
+                Ime::Commit(text) => assert!(!text.is_empty()),
+            }
+        }
+    }
+}

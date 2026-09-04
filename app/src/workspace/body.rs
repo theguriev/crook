@@ -81,16 +81,18 @@ use std::time::Instant;
 use crook_terminal::{Snapshot, TerminalSize};
 use crookui_core::element::SizeConstraint;
 use crookui_core::elements::Padding;
-use crookui_core::event::DispatchedEvent;
-use crookui_core::fonts::{Properties, Weight};
+use crookui_core::event::{DispatchedEvent, Event, MouseButton};
+use crookui_core::fonts::{FamilyId, Properties, Weight};
 use crookui_core::geometry::{Point, Vector2F, vec2f};
 use crookui_core::prelude::*;
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 
+use crate::completion::Completions;
 use crate::pane_blocks::PaneBlocks;
+use crate::pane_split::{DividerDrag, Drag, PaneExtent};
 use crate::pane_surface::{self, Surface};
 use crate::tab::{Pane, PaneId, SplitAxis, TabAction};
-use crate::terminal_font::CellFont;
+use crate::terminal_font::{CellFont, CellMetrics};
 use crate::terminal_model::TerminalHandle;
 use crate::theme::theme;
 
@@ -121,10 +123,17 @@ pub(super) const GRID_VERTICAL_PADDING: f32 = 2.;
 /// The line between two panes, and the whole of what separates them.
 ///
 /// Warp's `get_divider_thickness`: one pixel under its minimalist UI flag and
-/// two without it. One, because Crook has no drag to make a thicker line
-/// easier to grab — Warp pads its divider by four on each side for exactly
-/// that and only when the thin one is in use.
+/// two without it. One, and the drag is made easy to hit by [`DIVIDER_GRAB`]
+/// rather than by a thicker line — Warp pads its own divider on each side for
+/// exactly the same reason.
 const DIVIDER_THICKNESS: f32 = 1.;
+
+/// How wide a divider is to grab, as opposed to how wide it is drawn.
+///
+/// A one-pixel target is not a target. Every window manager and every editor
+/// gives a split handle a band around it, and because this is only a hit area
+/// the panes on each side are still drawn right up to the line.
+const DIVIDER_GRAB: f32 = 9.;
 
 /// The rule between two blocks, and above the composer.
 ///
@@ -162,18 +171,40 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
     }
     .with_main_axis_size(MainAxisSize::Max);
 
-    for (index, pane) in panes.iter().enumerate() {
-        if index > 0 {
-            layout.add_child(divider(panes.axis()));
+    let mut previous: Option<PaneId> = None;
+    for pane in panes.iter() {
+        if let Some(before) = previous {
+            // The divider between this pane and the one before it, which is
+            // the pair a drag on it moves the boundary of.
+            layout.add_child(
+                SplitDivider::new(
+                    panes.axis(),
+                    before,
+                    pane.id(),
+                    (
+                        workspace.pane_extent(before),
+                        workspace.pane_extent(pane.id()),
+                    ),
+                    workspace.divider_drag().clone(),
+                )
+                .finish(),
+            );
         }
-        // Equal flex, tight: every pane gets the same share of the tab. Warp
-        // gives each node a `PaneFlex(1.0)` too and only moves away from it
-        // when a divider is dragged, which is the one part of a split this
-        // does not do.
+        // The pane's own weight, which is one until a divider is dragged
+        // between it and a neighbour. Warp gives each node a `PaneFlex(1.0)`
+        // and moves away from it on exactly the same gesture.
         let state = PaneState {
             is_focused: panes.is_focused(pane.id()),
         };
-        layout.add_child(Expanded::new(1., panel(workspace, pane, state, app)).finish());
+        // Measured on the way past, because the divider beside it has no other
+        // way to learn how many pixels a weight became.
+        let measured = Measured::new(
+            panes.axis(),
+            workspace.pane_extent(pane.id()),
+            panel(workspace, pane, state, app),
+        );
+        layout.add_child(Expanded::new(pane.flex(), measured.finish()).finish());
+        previous = Some(pane.id());
     }
 
     layout.finish()
@@ -433,11 +464,13 @@ fn blocks(
     // follows it are separated by however many frames the pointer takes to
     // move, and every one of them throws this tree away.
     if let Some(interaction) = workspace.interaction(pane) {
-        list = list.with_selection(
-            pane,
-            interaction.selection.clone(),
-            workspace.clipboard().clone(),
-        );
+        list = list
+            .with_selection(
+                pane,
+                interaction.selection.clone(),
+                workspace.clipboard().clone(),
+            )
+            .with_links(interaction.links.clone());
     }
     list.finish()
 }
@@ -457,11 +490,13 @@ fn grid(
         grid = grid.with_input(input.clone());
     }
     if let Some(interaction) = workspace.interaction(pane) {
-        grid = grid.with_selection(
-            pane,
-            interaction.selection.clone(),
-            workspace.clipboard().clone(),
-        );
+        grid = grid
+            .with_selection(
+                pane,
+                interaction.selection.clone(),
+                workspace.clipboard().clone(),
+            )
+            .with_links(interaction.links.clone());
     }
     // The grid's own gutter, rather than the pane's: the pane has none, so
     // that the composer's rule can run edge to edge.
@@ -508,10 +543,12 @@ fn composer(
     };
 
     let cell = font.metrics().height;
-    let mut composing = CommandInput::new(input.clone(), font, workspace.clipboard().clone())
-        .with_terminal(handle, state.focused, state.alt_screen)
-        .with_inline(state.inline)
-        .with_ink(state.ink);
+    let mut composing =
+        CommandInput::new(input.clone(), font.clone(), workspace.clipboard().clone())
+            .for_pane(pane)
+            .with_terminal(handle, state.focused, state.alt_screen)
+            .with_inline(state.inline)
+            .with_ink(state.ink);
     // So that Enter brings the list back to the block the command is about to
     // make, however far up somebody had scrolled to read.
     if let Some(view) = workspace.pane_blocks(pane) {
@@ -522,7 +559,24 @@ fn composer(
     if let Some(interaction) = workspace.interaction(pane) {
         composing = composing.with_selection(interaction.selection.clone());
     }
-    let composing = composing.finish();
+
+    // The candidates go *under* the field, which is where every shell puts
+    // them: the line being typed stays where it was and the list appears below
+    // it, so nothing a person is reading moves.
+    let composing: Box<dyn Element> = match input.showing_completions() {
+        Some(answer) => Flex::column()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_child(composing.finish())
+            .with_child(candidates(
+                &answer,
+                workspace.fonts().monospace,
+                font.metrics(),
+                state.ink,
+            ))
+            .finish(),
+        None => composing.finish(),
+    };
 
     let rule = if state.cut_off { RULE } else { 0. };
     Container::new(composing)
@@ -547,6 +601,47 @@ fn composer(
         })
         .finish()
 }
+
+/// What a line could become, listed under the field.
+///
+/// **A list rather than a menu**, which is what bash, zsh and fish all print
+/// when Tab is ambiguous: the candidates appear, the line stays where it was,
+/// and the next keystroke narrows them. A menu with a selection in it would
+/// need the arrow keys, which this field spends on its history, and a state
+/// machine for a gesture nobody asked for yet.
+///
+/// It is drawn in the terminal's own font and ink, because it is about the
+/// line above it and that line is set in the terminal's type.
+fn candidates(
+    answer: &Completions,
+    family: FamilyId,
+    metrics: CellMetrics,
+    ink: Ink,
+) -> Box<dyn Element> {
+    let mut text = answer.candidates.join("  ");
+    if answer.truncated {
+        // A `compgen -c` on a full PATH is thousands of entries. Saying so is
+        // more use than printing the first two hundred and stopping.
+        text.push_str("  …");
+    }
+
+    Container::new(
+        Text::new(text, family, metrics.font_size)
+            .with_color(ink.text.with_alpha(CANDIDATE_ALPHA))
+            .finish(),
+    )
+    .with_margin_top(metrics.height * CANDIDATE_GAP)
+    .finish()
+}
+
+/// How much of the terminal's foreground the candidate list is drawn in.
+///
+/// De-emphasised, because it is not part of the line: a person is reading what
+/// they typed, and the list is a hint under it.
+const CANDIDATE_ALPHA: u8 = 160;
+
+/// The gap between the line and the list, in rows.
+const CANDIDATE_GAP: f32 = 0.4;
 
 /// Resizes a pane's pty from the pane's own rectangle, and draws its child
 /// inside it.
@@ -686,5 +781,282 @@ fn divider(axis: SplitAxis) -> Box<dyn Element> {
     match axis {
         SplitAxis::Horizontal => line.with_width(DIVIDER_THICKNESS).finish(),
         SplitAxis::Vertical => line.with_height(DIVIDER_THICKNESS).finish(),
+    }
+}
+
+/// Records how many pixels its child was given along one axis.
+///
+/// The one thing a divider cannot work out for itself. The group holds
+/// weights; a `Flex` turns them into pixels and then forgets; and a drag of
+/// twenty pixels has to become a share before the group can act on it. So the
+/// pane writes down what it measured and the divider beside it reads it.
+///
+/// It is not a `PaneSizer` because a settings pane has no pty to size and is
+/// still a pane a divider can be dragged against.
+struct Measured {
+    axis: SplitAxis,
+    extent: PaneExtent,
+    child: Box<dyn Element>,
+    size: Option<Vector2F>,
+    origin: Option<Point>,
+}
+
+impl Measured {
+    fn new(axis: SplitAxis, extent: PaneExtent, child: Box<dyn Element>) -> Self {
+        Self {
+            axis,
+            extent,
+            child,
+            size: None,
+            origin: None,
+        }
+    }
+}
+
+impl Element for Measured {
+    fn layout(
+        &mut self,
+        constraint: SizeConstraint,
+        ctx: &mut LayoutContext,
+        app: &AppContext,
+    ) -> Vector2F {
+        let size = self.child.layout(constraint, ctx, app);
+        self.extent.set(match self.axis {
+            SplitAxis::Horizontal => size.x(),
+            SplitAxis::Vertical => size.y(),
+        });
+        self.size = Some(size);
+        size
+    }
+
+    fn paint(&mut self, origin: Vector2F, ctx: &mut PaintContext, app: &AppContext) {
+        self.origin = Some(Point::from_vec2f(origin, ctx.scene.z_index()));
+        self.child.paint(origin, ctx, app);
+    }
+
+    fn dispatch_event(
+        &mut self,
+        event: &DispatchedEvent,
+        ctx: &mut EventContext,
+        app: &AppContext,
+    ) -> bool {
+        self.child.dispatch_event(event, ctx, app)
+    }
+
+    fn size(&self) -> Option<Vector2F> {
+        self.size
+    }
+
+    fn origin(&self) -> Option<Point> {
+        self.origin
+    }
+}
+
+/// A divider that can be dragged, moving the boundary between the two panes it
+/// separates.
+///
+/// # Why it takes the pixels and reports a ratio
+///
+/// Nothing outside the layout knows how wide a pane is: the group holds
+/// weights, and what those become in pixels is decided by a `Flex` that has
+/// already finished by the time a pointer arrives. So the two panes measure
+/// themselves — [`PaneSizer`] already computes exactly that in order to size
+/// the pty — and leave the number where this can read it. A drag then has
+/// everything it needs: the pair covers `before + after` pixels, moving the
+/// divider `d` of them makes it `before + d` and `after - d`, and the *share*
+/// that falls to the first is what the group can act on however many other
+/// panes are beside them.
+///
+/// # Why it is wider than the line it draws
+///
+/// A one-pixel target is not a target. The hit area is
+/// [`DIVIDER_GRAB`] across, centred on the line, which is what every window
+/// manager and every editor does with a split handle — and because it is only
+/// a hit area, the pane on each side is drawn right up to the line.
+struct SplitDivider {
+    axis: SplitAxis,
+    before: PaneId,
+    after: PaneId,
+    /// The two panes' measured extents, which they write during layout.
+    extents: (PaneExtent, PaneExtent),
+    /// The drag in progress, shared with every other divider so that only one
+    /// can be dragged at a time.
+    drag: DividerDrag,
+    child: Box<dyn Element>,
+    size: Option<Vector2F>,
+    origin: Option<Point>,
+}
+
+impl SplitDivider {
+    fn new(
+        axis: SplitAxis,
+        before: PaneId,
+        after: PaneId,
+        extents: (PaneExtent, PaneExtent),
+        drag: DividerDrag,
+    ) -> Self {
+        Self {
+            axis,
+            before,
+            after,
+            extents,
+            drag,
+            child: divider(axis),
+            size: None,
+            origin: None,
+        }
+    }
+
+    /// How far along the dragged axis a window position is.
+    fn along(&self, position: Vector2F) -> f32 {
+        match self.axis {
+            SplitAxis::Horizontal => position.x(),
+            SplitAxis::Vertical => position.y(),
+        }
+    }
+
+    /// The rectangle a press has to land in, which is wider than the line.
+    fn grab_area(&self) -> Option<RectF> {
+        let bounds = self.bounds()?;
+        let grow = (DIVIDER_GRAB - DIVIDER_THICKNESS).max(0.) / 2.;
+        Some(match self.axis {
+            SplitAxis::Horizontal => RectF::new(
+                bounds.origin() - vec2f(grow, 0.),
+                bounds.size() + vec2f(grow * 2., 0.),
+            ),
+            SplitAxis::Vertical => RectF::new(
+                bounds.origin() - vec2f(0., grow),
+                bounds.size() + vec2f(0., grow * 2.),
+            ),
+        })
+    }
+
+    /// Takes the press, if it landed on this divider.
+    fn press(&self, position: Vector2F, click_count: u32, ctx: &mut EventContext) -> bool {
+        if !self
+            .grab_area()
+            .is_some_and(|area| area.contains_point(position))
+        {
+            return false;
+        }
+
+        // A double click evens the split out again, which is the only way back
+        // once a divider has been dragged and is what every editor does.
+        if click_count >= 2 {
+            ctx.dispatch_typed_action(TabAction::EvenPanes);
+            return true;
+        }
+
+        let (before, after) = (self.extents.0.get(), self.extents.1.get());
+        // A pane that has never been laid out has no extent to divide, which
+        // is the frame before the first one. There is nothing to drag yet.
+        if before + after <= 0. {
+            return false;
+        }
+        self.drag.begin(Drag {
+            before: self.before,
+            after: self.after,
+            anchor: self.along(position),
+            before_extent: before,
+            after_extent: after,
+        });
+        true
+    }
+
+    /// Moves the boundary to wherever the pointer has got to.
+    ///
+    /// Not hit-tested: a divider drag routinely leaves the few pixels it
+    /// started in, and the pointer is free to travel the whole window. What
+    /// keeps another divider out of it is that the drag names the pair it
+    /// began between.
+    fn drag_to(&self, position: Vector2F, ctx: &mut EventContext) -> bool {
+        let Some(drag) = self.drag.get().filter(|drag| drag.before == self.before) else {
+            return false;
+        };
+
+        let total = drag.before_extent + drag.after_extent;
+        if total <= 0. {
+            return false;
+        }
+        let moved = self.along(position) - drag.anchor;
+        let leading = ((drag.before_extent + moved) / total).clamp(0., 1.);
+
+        ctx.dispatch_typed_action(TabAction::ResizePanes {
+            before: drag.before,
+            after: drag.after,
+            leading,
+        });
+        true
+    }
+}
+
+impl Element for SplitDivider {
+    fn layout(
+        &mut self,
+        constraint: SizeConstraint,
+        ctx: &mut LayoutContext,
+        app: &AppContext,
+    ) -> Vector2F {
+        let size = self.child.layout(constraint, ctx, app);
+        self.size = Some(size);
+        size
+    }
+
+    fn paint(&mut self, origin: Vector2F, ctx: &mut PaintContext, app: &AppContext) {
+        self.origin = Some(Point::from_vec2f(origin, ctx.scene.z_index()));
+        self.child.paint(origin, ctx, app);
+    }
+
+    fn dispatch_event(
+        &mut self,
+        event: &DispatchedEvent,
+        ctx: &mut EventContext,
+        app: &AppContext,
+    ) -> bool {
+        // The rest of a drag this divider owns is not hit-tested, for the
+        // reason a selection's is not: the pointer has left the line by the
+        // first pixel of the gesture.
+        match event.raw_event() {
+            Event::MouseDragged {
+                button: MouseButton::Left,
+                position,
+                ..
+            } => return self.drag_to(*position, ctx),
+            Event::MouseUp {
+                button: MouseButton::Left,
+                ..
+            } => {
+                return self
+                    .drag
+                    .get()
+                    .is_some_and(|drag| drag.before == self.before)
+                    && self.drag.end();
+            }
+            _ => {}
+        }
+
+        let Some(z_index) = self.z_index() else {
+            return self.child.dispatch_event(event, ctx, app);
+        };
+        if let Some(Event::MouseDown {
+            button: MouseButton::Left,
+            position,
+            click_count,
+            ..
+        }) = event.at_z_index(z_index, ctx)
+            && self.press(*position, *click_count, ctx)
+        {
+            return true;
+        }
+
+        self.child.dispatch_event(event, ctx, app)
+    }
+
+    fn size(&self) -> Option<Vector2F> {
+        self.size
+    }
+
+    fn origin(&self) -> Option<Point> {
+        self.origin
     }
 }

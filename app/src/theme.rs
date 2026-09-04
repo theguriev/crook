@@ -450,6 +450,15 @@ pub fn named(name: &str) -> Option<Theme> {
 /// The name of the theme a fresh install opens in.
 pub const DEFAULT_NAME: &str = BUILTIN[0].name;
 
+/// The name of the theme a fresh install follows the desktop *into the light*
+/// with.
+///
+/// The dark half of that pair is [`DEFAULT_NAME`]. Two built-ins that are the
+/// same design at two ends of the scale, so a person who turns system
+/// following on and never touches it again gets a matched pair rather than two
+/// unrelated palettes.
+pub const DEFAULT_LIGHT_NAME: &str = BUILTIN[1].name;
+
 thread_local! {
     /// The palette this thread draws in.
     static CURRENT: Cell<Theme> = const { Cell::new(DARK) };

@@ -42,17 +42,23 @@
 //! which is the state a person is in the instant before they press copy and one
 //! nobody can hold a button down for in a headless run.
 
+pub mod browser;
 pub mod clipboard;
+pub mod completion;
 pub mod editor;
 pub mod git;
 pub mod git_model;
 pub mod input_keys;
+pub mod keymap;
 pub mod pane_blocks;
+pub mod pane_link;
 pub mod pane_selection;
+pub mod pane_split;
 pub mod pane_surface;
 pub mod platform_insets;
 pub mod process;
 pub mod selection;
+pub mod session;
 pub mod settings;
 pub mod shell_integration;
 pub mod tab;
@@ -499,6 +505,8 @@ KEYS (macOS):
     cmd-w                      Close the focused pane, and its tab with the last one
     cmd-alt-left/right         Select the previous/next tab
     cmd-ctrl-left/right        Move the active tab
+    cmd-plus / cmd-minus       Make the terminal's text bigger / smaller
+    cmd-0                      Put the text back to its default size
 
 KEYS (Linux and Windows):
     ctrl-shift-t               New agent tab
@@ -508,6 +516,8 @@ KEYS (Linux and Windows):
     ctrl-shift-w               Close the focused pane, and its tab with the last one
     ctrl-pageup/pagedown       Select the previous/next tab
     ctrl-shift-pageup/pagedown Move the active tab
+    ctrl-plus / ctrl-minus     Make the terminal's text bigger / smaller
+    ctrl-0                     Put the text back to its default size
 
     Control-Shift, because a bare ctrl-letter belongs to the program in the
     pane: ctrl-c interrupts it, ctrl-d ends its input and ctrl-w takes back a
@@ -573,13 +583,19 @@ THE INPUT FIELD:
 
 /// How many workers are parked on a timer at any moment.
 ///
-/// Three: the usage poll between readings, the git gather between cycles, and
-/// the caret blink between halves of its phase. Each is one background task for
-/// the whole cycle — the wait *and* the work — so each holds its worker across
-/// the wait rather than yielding it, and none is ever counted as idle. Raise
-/// this when a fourth such chain appears, and see the test at the bottom of
-/// this file for what happens if it is not raised.
-const PARKED_WORKERS: usize = 3;
+/// Four: the usage poll between readings, the git gather between cycles, the
+/// caret blink between halves of its phase, and the one that asks the shells
+/// whether they are still alive. Each is one background task for the whole
+/// cycle — the wait *and* the work — so each holds its worker across the wait
+/// rather than yielding it, and none is ever counted as idle. Raise this when a
+/// fifth such chain appears, and see the test at the bottom of this file for
+/// what happens if it is not raised.
+///
+/// The number is a count of *chains*, never of panes. That is why the child
+/// check is one task for the whole terminal model rather than one per session:
+/// a chain per pane would park a worker per pane, and a window with more panes
+/// than the machine has cores would have nothing left to run a save on.
+const PARKED_WORKERS: usize = 4;
 
 /// A pool with a worker left over once both poll chains are asleep.
 ///
@@ -593,14 +609,32 @@ fn background_pool() -> Arc<Background> {
     Arc::new(Background::new(cores.max(PARKED_WORKERS + 1)))
 }
 
-fn resolve_fonts(font_db: &CosmicFontDb) -> Result<Fonts> {
+/// The two families the window draws in.
+///
+/// `monospace` is the settings file's if it names one this machine answers to,
+/// and the platform's default otherwise. A name that resolves to nothing is a
+/// warning and the default rather than a window that fails to open: a font can
+/// be uninstalled between two launches, and that is not a reason to refuse to
+/// start — it is exactly the same rule the theme name is read under.
+fn resolve_fonts(font_db: &CosmicFontDb, monospace: Option<&str>) -> Result<Fonts> {
+    let chosen = monospace.and_then(|name| match font_db.load_family_from_system(name) {
+        Ok(family) => Some(family),
+        Err(error) => {
+            log::warn!("no font family called {name:?} on this machine: {error:#}");
+            None
+        }
+    });
+
     Ok(Fonts {
         ui: font_db
             .default_ui_family()
             .context("no usable interface font")?,
-        monospace: font_db
-            .default_monospace_family()
-            .context("no usable monospace font")?,
+        monospace: match chosen {
+            Some(family) => family,
+            None => font_db
+                .default_monospace_family()
+                .context("no usable monospace font")?,
+        },
     })
 }
 
@@ -657,21 +691,37 @@ fn open_window(channel: Channel, frames: Option<u32>, overrides: Overrides) -> R
     // Everything fallible happens before the event loop takes over, because
     // the delegate is built inside a closure that cannot report an error.
     let font_db = CosmicFontDb::new().context("no usable system fonts")?;
-    let fonts = resolve_fonts(&font_db)?;
+    // Blocking, and deliberately: one small file, read once, before there is a
+    // window to stall. Before the fonts, because it names one of them.
+    let settings = Settings::for_user();
+    let fonts = resolve_fonts(&font_db, settings.font_family())?;
     // Resolved here, from the database, because this is the last moment
     // anything can hold it: it is moved into the event loop on the next line
     // but one, and a grid needs to ask it for a glyph on every frame after
     // that. See `CosmicGlyphs`.
-    let cell_font = CellFont::new(font_db.glyphs(), fonts.monospace, CELL_FONT_SIZE)?;
+    let cell_font = CellFont::new(
+        font_db.glyphs(),
+        fonts.monospace,
+        settings.general().font_size(),
+    )?;
     let text_layout: Arc<dyn TextLayoutSystem> = Arc::new(font_db.text_layout());
-    // Blocking, and deliberately: one small file, read once, before there is a
-    // window to stall.
-    let settings = Settings::for_user();
     apply_startup_theme(&settings, &launch.overrides);
+
+    // Read here, before the window exists, because the window opens at the
+    // size it names. An empty one — a first run, an unreadable file, or the
+    // setting turned off — is the default window and one tab, which is exactly
+    // what every launch did before this file existed.
+    let session = if settings.general().restore_session {
+        crate::session::Session::for_user()
+    } else {
+        crate::session::Session::default()
+    };
 
     let options = WindowOptions {
         title: channel.window_title(),
-        size: WINDOW_SIZE,
+        size: session
+            .window_size()
+            .map_or(WINDOW_SIZE, |[width, height]| vec2f(width, height)),
         decorations: WINDOW_CHROME == WindowChrome::Native,
         ..Default::default()
     };
@@ -684,6 +734,7 @@ fn open_window(channel: Channel, frames: Option<u32>, overrides: Overrides) -> R
             settings.clone(),
             text_layout.clone(),
             &launch,
+            session.clone(),
         ))
     })
 }
@@ -713,7 +764,11 @@ fn apply_startup_theme(settings: &Settings, overrides: &Overrides) {
 /// changing, and the frame that is written is the one with the output in it.
 fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
     let font_db = CosmicFontDb::new().context("no usable system fonts")?;
-    let fonts = resolve_fonts(&font_db)?;
+    // The platform's default family at the default size, and never the
+    // settings file's: a snapshot is a picture of the *application*, and one
+    // that came out in whatever font and size the person running it happens to
+    // have chosen would be a different picture on every machine.
+    let fonts = resolve_fonts(&font_db, None)?;
     let cell_font = CellFont::new(font_db.glyphs(), fonts.monospace, CELL_FONT_SIZE)?;
     let text_layout: Arc<dyn TextLayoutSystem> = Arc::new(font_db.text_layout());
 
@@ -1146,6 +1201,16 @@ struct Shell {
     /// What the command line asked to leave on screen, until the first frame
     /// has been drawn. See [`Composed`].
     composed: Composed,
+    /// The rectangle the input method was last told the caret occupies, so a
+    /// frame that did not move it sends no message.
+    ime_area: Option<crookui_core::geometry::RectF>,
+    /// Where the workspace reads the window's size from.
+    ///
+    /// The size is an argument to `build_scene` and reaches nothing in the
+    /// view tree, so the delegate writes it down for the one thing that wants
+    /// it: the session file, which is what makes the next window open the size
+    /// this one was.
+    window_size: Rc<std::cell::Cell<Vector2F>>,
 }
 
 /// The state of a `--run` in a windowed session.
@@ -1186,6 +1251,7 @@ impl Shell {
         settings: Settings,
         text_layout: Arc<dyn TextLayoutSystem>,
         launch: &Launch,
+        session: crate::session::Session,
     ) -> Self {
         let mut app = App::new(platform.foreground.clone(), background_pool());
         app.update(|ctx| ctx.add_singleton_model(UsageModel::new));
@@ -1201,8 +1267,20 @@ impl Shell {
         let (window_id, workspace) = app.add_window(|ctx| {
             Workspace::new(fonts, cell_font, settings, launch.channel, quit, ctx)
         });
+        let window_size = workspace.read(&app, |workspace, _| workspace.window_size_cell());
         app.update(|ctx| {
             workspace.update(ctx, |workspace, ctx| {
+                // First of all, because everything below it works on whatever
+                // strip is there: the overrides open a settings page in it,
+                // the git poll reads its directories, and `start_terminals`
+                // opens a shell in every pane it holds.
+                //
+                // A session that describes nothing leaves the strip a fresh
+                // window's, which is what every launch had before there was a
+                // file to read.
+                if let Some(strip) = session.restore() {
+                    workspace.restore(strip, ctx);
+                }
                 // Before the polls, not after: `start_git_poll` decides
                 // whether to pay for `git diff` from the density it finds, and
                 // a density the command line asked for has to be in place by
@@ -1244,6 +1322,8 @@ impl Shell {
             frames_drawn: 0,
             frame_budget: launch.frames,
             run,
+            ime_area: None,
+            window_size,
         }
     }
 
@@ -1317,6 +1397,32 @@ impl Shell {
         log::info!("the shell printed:\n{}", printed.trim_end());
     }
 
+    /// Moves the rectangle an input method puts its candidate list beside, so
+    /// that a half-composed word and the list of things it could become are in
+    /// the same place on screen.
+    ///
+    /// After the frame rather than during it: the caret's position is a result
+    /// of laying the line out at the width the field was given, so it is not
+    /// known until the field has been painted. Sent only when it moved,
+    /// because every window system takes this as a message.
+    fn follow_caret_with_the_input_method(&mut self) {
+        let caret = self
+            .workspace
+            .read(&self.app, |workspace, _| workspace.caret_rect());
+        if caret == self.ime_area {
+            return;
+        }
+        self.ime_area = caret;
+
+        // A field that has no caret keeps the last rectangle rather than
+        // being given a meaningless one: there is no composition to place, and
+        // moving the box to the origin would drag a candidate list somebody is
+        // looking at into the corner.
+        if let Some(caret) = caret {
+            self.proxy.set_ime_area(caret.origin(), caret.size());
+        }
+    }
+
     /// Handles a keystroke, if it is bound to something.
     fn handle_keystroke(&mut self, event: &Event) -> bool {
         let Event::KeyDown { keystroke, .. } = event else {
@@ -1341,6 +1447,10 @@ impl Shell {
 
 impl WindowDelegate for Shell {
     fn build_scene(&mut self, size: Vector2F, scale_factor: f32) -> Rc<Scene> {
+        // Written down rather than dispatched: it costs nothing, it invalidates
+        // nothing, and it is the only place the window's size is known.
+        self.window_size.set(size);
+
         let window_id = self.window_id;
         let presenter = &mut self.presenter;
 
@@ -1352,6 +1462,21 @@ impl WindowDelegate for Shell {
     }
 
     fn handle_event(&mut self, event: Event) -> bool {
+        // Not hit-tested and not dispatched into the tree: the desktop's
+        // setting is about the window rather than about anything in it, and
+        // the workspace is the one thing that knows whether it is being
+        // followed.
+        if let Event::SystemTheme(theme) = event {
+            let workspace = &self.workspace;
+            let dark = theme.is_dark();
+            self.app.update(|ctx| {
+                workspace.update(ctx, |workspace, ctx| workspace.set_system_dark(dark, ctx));
+            });
+            return self
+                .app
+                .read(|ctx| ctx.has_window_invalidations(self.window_id));
+        }
+
         if self.handle_keystroke(&event) {
             return true;
         }
@@ -1368,6 +1493,7 @@ impl WindowDelegate for Shell {
     }
 
     fn frame_drawn(&mut self) {
+        self.follow_caret_with_the_input_method();
         self.type_pending_run();
         self.compose_pending_pane();
 

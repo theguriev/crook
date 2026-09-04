@@ -44,6 +44,23 @@ static NEXT_SESSION: AtomicU64 = AtomicU64::new(0);
 /// The sweep runs once per process, not once per pane.
 static SWEPT: Once = Once::new();
 
+/// The variable that tells the snippet where its scratch directory is.
+///
+/// The only channel that reaches it: the directory's name is minted per
+/// session, so nothing in the snippet can know it without being told.
+const COMPLETION_DIRECTORY_VAR: &str = "CROOK_SCRATCH";
+
+/// The file a completion request is written to, inside that directory.
+///
+/// Two lines: the cursor's byte offset into the line, then the line itself.
+/// A file rather than an escape sequence because a command line can hold a
+/// semicolon, a newline and bytes that are not UTF-8, and every one of them
+/// would have to be escaped past a shell *and* past an OSC parser.
+const COMPLETION_REQUEST_FILE: &str = "complete.in";
+
+/// The file the shell writes its answer to: one candidate per line.
+const COMPLETION_ANSWER_FILE: &str = "complete.out";
+
 /// A shell launch with its scratch files on disk.
 ///
 /// Holding one is what keeps the directory alive: dropping it removes the
@@ -144,11 +161,33 @@ impl Session {
         Self::from_launch(shell, plain(program), None)
     }
 
+    /// Where the shell reads a completion request from and writes its answer.
+    ///
+    /// Inside the session's own scratch, so it is removed with everything else
+    /// when the pane closes, and it is per-pane: two shells asked at the same
+    /// moment answer into two different files.
+    pub fn completion_request(&self) -> Option<PathBuf> {
+        Some(self.scratch.as_ref()?.join(COMPLETION_REQUEST_FILE))
+    }
+
+    /// Where the answer lands. See [`Self::completion_request`].
+    pub fn completion_answer(&self) -> Option<PathBuf> {
+        Some(self.scratch.as_ref()?.join(COMPLETION_ANSWER_FILE))
+    }
+
     fn from_launch(shell: Shell, launch: Launch, scratch: Option<PathBuf>) -> Self {
+        let mut environment = launch.environment;
+        // The snippet has to be told where to look, and an environment
+        // variable is the only channel that reaches it: the file it reads is
+        // in a directory whose name is minted per session.
+        if let Some(scratch) = scratch.as_ref().and_then(|path| path.to_str()) {
+            environment.push((COMPLETION_DIRECTORY_VAR.to_owned(), scratch.to_owned()));
+        }
+
         Self {
             shell,
             program: launch.program,
-            environment: launch.environment,
+            environment,
             scratch,
         }
     }

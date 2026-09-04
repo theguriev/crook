@@ -65,9 +65,13 @@
 //! started it. Nothing can make that read return: the slave is open in another
 //! process and the reader's own descriptor is a duplicate of the master, so the
 //! thread parks until the orphan exits, holding a descriptor and nothing else.
-//! For the same reason a shell that exits *behind* such a process leaves its
-//! pane open, because end-of-file on the master is the only signal this design
-//! has that a session is over.
+//!
+//! What that used to cost as well was the *pane*: end-of-file on the master was
+//! the only signal this design had that a session was over, so a shell that
+//! exited behind such a process left its pane sitting there showing a dead
+//! prompt. [`TerminalModel::watch_children`] asks the children directly instead,
+//! once a second and in one task for the whole model, so the pane closes when
+//! the shell does whatever the pty is doing.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -81,12 +85,13 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crook_terminal::{
-    Block, BlockId, BlockRows, Key, Modifiers, Palette, Rgb, Snapshot, Terminal, TerminalEvent,
-    TerminalOptions, TerminalSize,
+    Block, BlockId, BlockRows, Key, Modifiers, MouseButton, MouseEventKind, MouseModes, Palette,
+    Rgb, Snapshot, Terminal, TerminalEvent, TerminalOptions, TerminalSize,
 };
 use crookui_core::geometry::Color;
 use crookui_core::prelude::*;
 
+use crate::completion::{self, Completions};
 use crate::pane_surface;
 use crate::shell_integration;
 use crate::tab::PaneId;
@@ -114,6 +119,13 @@ const READ_CHUNK: usize = 16 * 1024;
 /// are a scheduling decision apart, and the exit status is worth a short wait.
 const REAP_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// How often the shells are asked whether they are still alive.
+///
+/// A second: fast enough that a pane whose pty is held open by a background
+/// process closes while somebody is still looking at it, and one `waitpid` per
+/// pane per second is nothing. See [`TerminalModel::watch_children`].
+const CHILD_POLL: Duration = Duration::from_secs(1);
+
 /// How long the reader sleeps between attempts to reap.
 const REAP_INTERVAL: Duration = Duration::from_millis(5);
 
@@ -126,9 +138,10 @@ const INITIAL_GRID: TerminalSize = TerminalSize::new(80, 24);
 
 /// Something one pane's shell did that the rest of the application cares about.
 ///
-/// Everything else a terminal reports — a bell, a clipboard write, a repaint —
-/// is either handled here or is not the workspace's business. These three are:
-/// two of them rename or relocate a session, and the third closes a pane.
+/// Everything else a terminal reports — a repaint, a query already answered —
+/// is either handled here or is not the workspace's business. These five are:
+/// two of them rename or relocate a session, one closes a pane, and the last
+/// two are the child asking for something only the window can give it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TerminalUpdate {
     /// The shell set a window title, or reset it. This is what makes a tab of
@@ -141,6 +154,25 @@ pub enum TerminalUpdate {
     /// The shell is gone. The pane should close, and with it its tab and the
     /// window if they were the last ones.
     Closed(PaneId),
+    /// The child asked for text to be put on the system clipboard with OSC 52.
+    ///
+    /// Only the window has a clipboard, so the terminal cannot answer this
+    /// itself. The reverse direction — a child *reading* the clipboard — is
+    /// refused in the emulator and never reaches here: answering it would hand
+    /// any program that can print to a pty the contents of the clipboard.
+    ClipboardStore(PaneId, String),
+    /// The bell rang.
+    ///
+    /// What to do with it is the workspace's to decide, because the answer is
+    /// about the tab strip rather than about the grid: a bell in a pane nobody
+    /// is looking at is the only interesting kind.
+    Bell(PaneId),
+    /// The shell answered a completion request, and this is what it said.
+    ///
+    /// The serial is the request's, echoed back through the shell: pressing
+    /// Tab twice quickly leaves two outstanding, and only the answer to the
+    /// second is about the line on screen.
+    Completions(PaneId, u64, Completions),
 }
 
 /// The finished blocks of one pane, as the surface holds them.
@@ -225,6 +257,14 @@ pub struct TerminalModel {
     /// The colours every terminal resolves its cells against.
     palette: Palette,
 
+    /// Whether the chain that asks the shells whether they are still alive is
+    /// already running.
+    ///
+    /// One for the whole model rather than one per pane, and this is the flag
+    /// that keeps it that way: every session that opens asks for the chain, and
+    /// only the first one starts it. See [`Self::watch_children`].
+    watching_children: bool,
+
     /// Whether a pane installs command marks into the shell it opens.
     ///
     /// On, and the seam a setting hangs on when there is one. Off is not a
@@ -279,6 +319,7 @@ impl TerminalModel {
             failures: HashMap::new(),
             live: false,
             palette: crook_palette(),
+            watching_children: false,
             shell_marks: true,
             flusher: Arc::new(Flusher::default()),
             flushing: false,
@@ -374,6 +415,37 @@ impl TerminalModel {
     ///
     /// The pty buffers it, so this works before the shell has finished starting:
     /// what is written now is read when it gets there.
+    /// Asks a pane's shell what a half-typed line could become.
+    ///
+    /// Writes the question into the session's own scratch and sends the key
+    /// press the integration snippet bound to it — see [`crate::completion`]
+    /// for why the line travels in a file rather than in the escape sequence.
+    ///
+    /// Reports whether the question was asked at all. `false` is a pane with
+    /// no shell, or one running a shell Crook could not install its
+    /// integration into: there is nothing bound to the key and nothing would
+    /// ever answer, so the caller must not sit waiting for one.
+    pub fn request_completions(&self, pane: PaneId, serial: u64, line_to_caret: &str) -> bool {
+        let Some(session) = self.sessions.get(&pane) else {
+            return false;
+        };
+        let Some(request) = session._integration.completion_request() else {
+            return false;
+        };
+
+        // Written before the key is sent, and that ordering is the whole of the
+        // handshake: the snippet reads the file the moment the key arrives.
+        if let Err(error) = std::fs::write(
+            &request,
+            completion::request_text(serial, line_to_caret).as_bytes(),
+        ) {
+            log::debug!("could not write a completion request: {error}");
+            return false;
+        }
+
+        session.shared.request_completions()
+    }
+
     pub fn type_into(&self, pane: PaneId, text: &str) {
         let Some(session) = self.sessions.get(&pane) else {
             log::warn!("nothing to type into: pane {pane:?} has no terminal");
@@ -499,7 +571,80 @@ impl TerminalModel {
             },
         );
         self.watch(pane, ctx);
+        self.watch_children(ctx);
         ctx.notify();
+    }
+
+    /// Notices that a shell has exited even though its pty has not.
+    ///
+    /// **The one thing end-of-file cannot tell us.** The reader thread learns a
+    /// session is over by the pty master going quiet, and something other than
+    /// the shell can hold the far end open: a `sleep 60 &`, a dev server
+    /// started with an `&`, an `ssh -f`. The shell exits, the descriptor stays
+    /// open, and the reader parks on it for as long as that process lives —
+    /// leaving a pane sitting there showing a dead shell.
+    ///
+    /// So the child is asked directly. It is a poll, at a second, and that is
+    /// a deliberate trade: the alternative is moving the child onto a thread of
+    /// its own to block in `wait`, and the moment the child is reaped anywhere
+    /// but under this lock, a `kill` racing it can signal whatever process id
+    /// the system has since handed out. A `waitpid` with `WNOHANG` once a
+    /// second costs nothing and cannot do that.
+    ///
+    /// **One chain for the whole model**, not one per pane, and that is not a
+    /// tidiness point. A task that sleeps holds its worker for the whole cycle
+    /// — see `PARKED_WORKERS` in `crate` — so a chain per pane would park a
+    /// worker per pane, and a window with more panes than the machine has
+    /// cores would have no worker left to run anything else on.
+    ///
+    /// The chain ends when the last session does, which is what stops a closed
+    /// window from going on asking about shells that are gone.
+    fn watch_children(&mut self, ctx: &mut ModelContext<Self>) {
+        if self.sessions.is_empty() || self.watching_children {
+            return;
+        }
+        self.watching_children = true;
+
+        let shared: Vec<_> = self
+            .sessions
+            .iter()
+            .map(|(pane, session)| (*pane, session.shared.clone()))
+            .collect();
+
+        let asking = ctx.background().spawn(async move {
+            thread::sleep(CHILD_POLL);
+            shared
+                .into_iter()
+                .filter(|(_, session)| {
+                    // Under the terminal's own lock, like every other
+                    // `try_wait` — the exit is cached there, and that cache is
+                    // what stops a later kill from signalling a stranger.
+                    match session.lock().try_wait() {
+                        Ok(exit) => exit.is_some(),
+                        Err(error) => {
+                            log::debug!("could not check on a shell: {error:#}");
+                            false
+                        }
+                    }
+                })
+                .map(|(pane, _)| pane)
+                .collect::<Vec<_>>()
+        });
+
+        ctx.spawn(asking, move |model, exited, ctx| {
+            model.watching_children = false;
+            for pane in exited {
+                if model.sessions.contains_key(&pane) {
+                    // The same close every other path takes: the workspace is
+                    // what knows a tab's last pane takes the tab, and the last
+                    // tab the window. Nothing here removes the session — the
+                    // close comes back round through `sync`.
+                    ctx.emit(TerminalUpdate::Closed(pane));
+                }
+            }
+            model.watch_children(ctx);
+        })
+        .detach();
     }
 
     /// Starts the shared repaint thread, once.
@@ -594,11 +739,28 @@ impl TerminalModel {
                 // The child asked the terminal to close. It is about to stop
                 // being readable anyway, so this is only ever early notice.
                 TerminalEvent::Exit => log::debug!("the shell in pane {pane:?} asked to close"),
-                TerminalEvent::Bell => log::trace!("bell in pane {pane:?}"),
-                // Nothing in Crook can reach a system clipboard yet, and
-                // silently dropping an OSC 52 is better than pretending.
-                TerminalEvent::ClipboardStore(_) => {
-                    log::debug!("pane {pane:?} asked to write the clipboard, which Crook cannot");
+                TerminalEvent::Bell => updates.push(TerminalUpdate::Bell(pane)),
+                // The escape sequence says only that an answer is ready; the
+                // answer itself is a file, in a directory this session owns.
+                TerminalEvent::Completions(serial) => {
+                    if let Some(answer) = session
+                        ._integration
+                        .completion_answer()
+                        .as_deref()
+                        .and_then(completion::read_answer)
+                    {
+                        updates.push(TerminalUpdate::Completions(pane, serial, answer));
+                    }
+                }
+                // The clipboard belongs to the window, so this is carried up
+                // rather than answered here. An empty write is dropped: it is
+                // what a program clearing its own selection sends, and putting
+                // an empty string on the clipboard would silently destroy
+                // whatever the person had copied.
+                TerminalEvent::ClipboardStore(text) => {
+                    if !text.is_empty() {
+                        updates.push(TerminalUpdate::ClipboardStore(pane, text));
+                    }
                 }
                 // The enum is `#[non_exhaustive]`. A shell asking for something
                 // a later version of the emulator learned to report is not an
@@ -778,6 +940,57 @@ impl TerminalHandle {
                     log::debug!("could not send a key to a shell: {error}");
                     false
                 }
+            }
+        })
+    }
+
+    /// Which mouse reports the program in this pane has asked for.
+    ///
+    /// The one question a pointer gesture asks before it does anything: with
+    /// nothing asked for it is a selection, and with something asked for it
+    /// belongs to the program.
+    pub fn mouse_modes(&self) -> MouseModes {
+        self.drive(|terminal| terminal.emulator().mouse_modes())
+    }
+
+    /// Sends a pointer gesture, returning whether the program took it.
+    ///
+    /// Deliberately **not** scrolled to the bottom first, unlike a key press.
+    /// A program reading the mouse owns the screen, so there is no scrollback
+    /// above it to be pulled away from — and a caller only ever reaches this
+    /// with a cell of the viewport it just hit-tested, which a scroll would
+    /// invalidate between the two.
+    pub fn send_mouse(
+        &self,
+        kind: MouseEventKind,
+        button: Option<MouseButton>,
+        row: usize,
+        column: usize,
+        modifiers: Modifiers,
+    ) -> bool {
+        self.drive(
+            |terminal| match terminal.send_mouse(kind, button, row, column, modifiers) {
+                Ok(sent) => sent,
+                Err(error) => {
+                    log::debug!("could not send a pointer gesture to a shell: {error}");
+                    false
+                }
+            },
+        )
+    }
+
+    /// Sends the wheel as arrow keys to a full-screen program that asked for
+    /// `?1007`, returning whether anything was sent.
+    ///
+    /// What makes the wheel scroll `less` and `man`, neither of which reports
+    /// the mouse. Nothing happens on the primary screen, where the wheel
+    /// belongs to the scrollback.
+    pub fn send_alternate_scroll(&self, lines: i32) -> bool {
+        self.drive(|terminal| match terminal.send_alternate_scroll(lines) {
+            Ok(sent) => sent,
+            Err(error) => {
+                log::debug!("could not send the wheel to a shell: {error}");
+                false
             }
         })
     }
@@ -1030,6 +1243,17 @@ impl Shared {
 
     fn publish_state(&self) -> MutexGuard<'_, PublishState> {
         self.publish.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Sends the key press that asks an integrated shell for completions.
+    fn request_completions(&self) -> bool {
+        match self.lock().request_completions() {
+            Ok(()) => true,
+            Err(error) => {
+                log::debug!("could not ask a shell for completions: {error}");
+                false
+            }
+        }
     }
 
     fn snapshot(&self) -> Arc<Snapshot> {

@@ -5,11 +5,21 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+/// How often the themes folder is re-read while the Themes panel is open.
+///
+/// Fast enough that saving a theme file and looking at the window feels
+/// immediate, slow enough that a folder of fifty themes is a directory walk
+/// somebody would have to go looking for in a profiler. It costs nothing at
+/// all while the panel is closed — see [`Workspace::watch_themes`].
+pub(super) const THEMES_POLL: Duration = Duration::from_millis(750);
 
 use crook_terminal::{Rows, Snapshot};
 use crookui_core::elements::MouseStateHandle;
 use crookui_core::event::Keystroke;
 use crookui_core::fonts::FamilyId;
+use crookui_core::geometry::RectF;
 use crookui_core::prelude::*;
 
 use crate::clipboard::Clipboard;
@@ -17,13 +27,21 @@ use crate::editor::Selection;
 use crate::git::GitFacts;
 use crate::git_model::GitModel;
 use crate::input_keys::{self, Binding, Platform};
+use crate::keymap::Keymap;
 use crate::pane_blocks::PaneBlocks;
+use crate::pane_link::PaneLink;
 use crate::pane_selection::PaneSelection;
+use crate::pane_split::{DividerDrag, PaneExtent};
 use crate::pane_surface;
 use crate::platform_insets::{LayoutInsets, TabsPlacement, layout_insets};
 use crate::selection::{Blocks, Cells};
-use crate::settings::{Density, GeneralOptions, Granularity, Layout, Settings, TabOptions};
-use crate::tab::{AgentSession, Direction, PaneId, Tab, TabAction, TabEffect, TabId, TabStrip};
+use crate::settings::{
+    DEFAULT_FONT_SIZE, Density, FONT_SIZE_STEP, GeneralOptions, Granularity, Layout, Settings,
+    TabOptions,
+};
+use crate::tab::{
+    AgentSession, AgentStatus, Direction, Pane, PaneId, Tab, TabAction, TabEffect, TabId, TabStrip,
+};
 use crate::terminal_font::CellFont;
 use crate::terminal_model::{BlockHistory, TerminalHandle, TerminalModel, TerminalUpdate};
 use crate::text_input::{CARET_PHASE, TextInput};
@@ -34,6 +52,7 @@ use crate::{Channel, WINDOW_CHROME};
 
 use super::action::{OptionsAction, SettingsAction, ThemeAction, WorkspaceAction};
 use super::settings_page::{Section, SettingsState};
+use super::tabs_panel::geometry::RowGeometry;
 use super::theme_panel::{Mode, ThemePanelState};
 use super::usage_chip::UsageChip;
 use super::{body, header_toolbar, tabs_panel};
@@ -76,6 +95,11 @@ pub(super) struct PaneInteraction {
     pub(super) body: MouseStateHandle,
     /// The selection gesture in the pane's output. See [`PaneSelection`].
     pub(super) selection: PaneSelection,
+    /// The link under the pointer in the pane's output. See [`PaneLink`].
+    pub(super) links: PaneLink,
+    /// How many pixels the pane last measured along the split's axis. See
+    /// [`PaneExtent`].
+    pub(super) extent: PaneExtent,
     /// Where the pane's block list is scrolled to and what the pointer is
     /// over. See [`PaneBlocks`].
     pub(super) blocks: PaneBlocks,
@@ -260,6 +284,41 @@ pub struct Workspace {
     /// The system clipboard every field copies to and pastes from. One for the
     /// window: see [`Clipboard`].
     clipboard: Clipboard,
+
+    /// The divider drag in progress, shared by every divider in the window so
+    /// that only one can be dragged at a time. See
+    /// [`DividerDrag`](crate::pane_split::DividerDrag).
+    divider_drag: DividerDrag,
+
+    /// Makes the last session save the one that lands. See
+    /// [`Self::save_session`].
+    session_generation: Arc<AtomicU64>,
+
+    /// How big the window was when it was last laid out, in logical pixels.
+    ///
+    /// Written by the delegate, which is the only thing told: the size is an
+    /// argument to `build_scene` and nothing in the view tree ever sees it. A
+    /// cell rather than a field so that recording it costs no `update` and
+    /// therefore no frame.
+    window_size: Rc<std::cell::Cell<Vector2F>>,
+
+    /// The bindings a person wrote down, consulted before Crook's own.
+    ///
+    /// Read once, at startup, like the theme and the font family: a keymap
+    /// re-read mid-session would change what a key does between the press and
+    /// the release. See [`crate::keymap`].
+    keymap: Keymap,
+
+    /// Whether the desktop is set to dark, as of the last thing the window
+    /// said about it.
+    ///
+    /// Dark until told otherwise, which is what a terminal has always been and
+    /// what a desktop that will not answer is taken as. It is one bit rather
+    /// than a theme because the *resolution* is
+    /// [`Settings::theme_for`](crate::settings::Settings::theme_for), and
+    /// keeping a resolved theme here as well would be a second copy of an
+    /// answer that already has one.
+    system_is_dark: bool,
     interactions: HashMap<PaneId, PaneInteraction>,
     /// What the mouse is doing to each tab's chrome in the panel.
     ///
@@ -323,6 +382,10 @@ pub struct Workspace {
     /// a scroll offset that lived in it would snap back to the top on the
     /// frame the scroll itself caused.
     panel_scroll: ScrollStateHandle,
+    /// Where the panel drew each of its rows on the last frame, so that a
+    /// selection made with the keyboard can be scrolled to. See
+    /// [`RowGeometry`](super::tabs_panel::geometry::RowGeometry).
+    panel_rows: RowGeometry,
     /// The row the pointer is on, if the detail card is armed.
     hovered_row: Option<PaneId>,
     /// The home directory, resolved once.
@@ -375,6 +438,7 @@ impl Workspace {
         });
 
         let options = settings.tab_options();
+        let settings_path = settings.path().map(Path::to_owned);
         let mut workspace = Self {
             tabs: TabStrip::new(),
             fonts,
@@ -385,6 +449,20 @@ impl Workspace {
             terminals,
             inputs: HashMap::new(),
             clipboard: Clipboard::new(),
+            divider_drag: DividerDrag::new(),
+            session_generation: Arc::new(AtomicU64::new(0)),
+            // Blocking, and deliberately: one small file, read once, on the
+            // same startup path the settings are read on. A run with no
+            // settings file to write is an ephemeral one — a test, the
+            // headless snapshot — and must not read the keymap of whoever is
+            // running it either.
+            keymap: if settings_path.is_some() {
+                Keymap::for_user()
+            } else {
+                Keymap::new()
+            },
+            window_size: Rc::new(std::cell::Cell::new(Vector2F::zero())),
+            system_is_dark: true,
             interactions: HashMap::new(),
             tab_chrome: HashMap::new(),
             settings,
@@ -399,6 +477,7 @@ impl Workspace {
             themes_directory: crate::theme::user_themes_directory(),
             save_generation: Arc::new(AtomicU64::new(0)),
             panel_scroll: ScrollStateHandle::default(),
+            panel_rows: RowGeometry::new(),
             hovered_row: None,
             home: std::env::home_dir(),
             new_tab: MouseStateHandle::default(),
@@ -489,9 +568,60 @@ impl Workspace {
 
         crate::theme::set_theme(palette);
         self.settings.set_theme(name);
+        // And into whichever half of the desktop pair is in force, so that a
+        // theme chosen while following the system is the one it comes back to
+        // the next time the desktop is in this state. Writing both halves
+        // would be worse than writing neither: it would silently replace the
+        // theme somebody had chosen for the *other* half.
+        self.settings.set_system_theme(self.system_is_dark, name);
         self.save_settings(ctx);
         self.sync_palette(ctx);
         ctx.notify();
+    }
+
+    /// Records what the desktop is set to, and follows it if it is being
+    /// followed.
+    ///
+    /// Called once when the window opens and again whenever the setting moves.
+    /// The resolution itself is [`Settings::theme_for`] — a pure function of
+    /// the flag, the pair of names and this one bit — so nothing here decides
+    /// anything a test would need a desktop to reproduce.
+    pub fn set_system_dark(&mut self, dark: bool, ctx: &mut ViewContext<Self>) {
+        self.system_is_dark = dark;
+        if !self.general().use_system_theme {
+            return;
+        }
+
+        let wanted = self.settings.theme_for(dark).to_owned();
+        if wanted == self.settings.theme() {
+            return;
+        }
+        self.set_theme(&wanted, ctx);
+    }
+
+    /// Whether the desktop is set to dark, as of the last thing the window
+    /// said.
+    pub fn system_is_dark(&self) -> bool {
+        self.system_is_dark
+    }
+
+    /// Turns following the desktop on or off.
+    ///
+    /// Turning it on applies whichever half the desktop is currently in, which
+    /// is the only way the switch can be honest: a toggle that changed nothing
+    /// until the next sunset would look broken.
+    pub fn set_follow_system_theme(&mut self, follow: bool, ctx: &mut ViewContext<Self>) {
+        let mut general = self.general();
+        if general.use_system_theme == follow {
+            return;
+        }
+        general.use_system_theme = follow;
+        self.set_general(general, ctx);
+
+        if follow {
+            let wanted = self.settings.theme_for(self.system_is_dark).to_owned();
+            self.set_theme(&wanted, ctx);
+        }
     }
 
     /// Hands the terminals the palette the theme in force resolves to.
@@ -579,6 +709,69 @@ impl Workspace {
         self.select_theme_in_force();
     }
 
+    /// Re-reads the themes folder while the panel is open, so a file edited in
+    /// an editor takes effect in the window beside it.
+    ///
+    /// **A poll, and only while somebody is looking.** Warp watches its themes
+    /// directory with a filesystem watcher; that is a dependency, a thread and
+    /// a per-platform API for a folder that changes when a person is editing a
+    /// theme — which is exactly when the panel is open. Closed, this costs
+    /// nothing at all: the chain ends at the first tick that finds the panel
+    /// gone, and an application that is idle by design stays idle.
+    ///
+    /// The read happens on the background pool, because it is a directory walk
+    /// and a parse per file, and neither belongs on the thread that draws.
+    fn watch_themes(&self, ctx: &mut ViewContext<Self>) {
+        if !self.panel.open {
+            return;
+        }
+
+        let directory = self.themes_directory.clone();
+        let reading = ctx.background().spawn(async move {
+            std::thread::sleep(THEMES_POLL);
+            match directory.as_deref() {
+                Some(directory) => crate::theme::available_in(directory),
+                None => crate::theme::available(),
+            }
+        });
+
+        ctx.spawn(reading, |workspace, themes, ctx| {
+            workspace.adopt_themes(themes, ctx);
+            workspace.watch_themes(ctx);
+        })
+        .detach();
+    }
+
+    /// Takes a freshly read themes folder, re-applying the theme in force if
+    /// its own file is what changed.
+    ///
+    /// By *name*, which is the only way an edit can be noticed: the palette in
+    /// force is the old one, so looking the theme up by palette would find the
+    /// row it used to be and conclude nothing had happened.
+    fn adopt_themes(&mut self, themes: Vec<crate::theme::Available>, ctx: &mut ViewContext<Self>) {
+        // The creator paints a draft on the window. Re-applying anything under
+        // it would replace a palette somebody is in the middle of choosing.
+        if !self.panel.open || self.panel.mode == Mode::Creating || self.themes == themes {
+            return;
+        }
+
+        self.themes = themes;
+        let name = self.settings.theme().to_owned();
+        if let Some(edited) = self
+            .themes
+            .iter()
+            .find(|available| available.name == name)
+            .map(|available| available.theme)
+            && edited != theme()
+        {
+            crate::theme::set_theme(edited);
+            self.sync_palette(ctx);
+        }
+
+        self.select_theme_in_force();
+        ctx.notify();
+    }
+
     /// Puts the keyboard's row on the theme that is on screen.
     ///
     /// By palette rather than by name, for the reason [`Self::theme_name`]
@@ -607,6 +800,44 @@ impl Workspace {
     /// How far the tabs panel's list has been scrolled.
     pub(super) fn panel_scroll(&self) -> ScrollStateHandle {
         self.panel_scroll.clone()
+    }
+
+    /// Where the panel's rows were drawn on the last frame.
+    pub(super) fn panel_rows(&self) -> RowGeometry {
+        self.panel_rows.clone()
+    }
+
+    /// Brings the focused pane's row into view in the tabs panel.
+    ///
+    /// The gap that used to be written down in `tabs_panel`'s module docs:
+    /// selecting a tab from the keyboard moved the selection whether or not
+    /// its row was on screen. What it needed was a scrollable that can be told
+    /// to make a particular child visible, and what that needs is somewhere
+    /// for the children to say where they ended up — which is
+    /// [`RowGeometry`](super::tabs_panel::geometry::RowGeometry).
+    ///
+    /// Against the row boxes the *last* frame recorded, which is right: the
+    /// rows do not move when the selection does, so a frame that has not been
+    /// drawn yet would report the same offsets. A row that was never drawn —
+    /// the first selection of a session, before any frame — scrolls nowhere,
+    /// and the next selection finds it.
+    fn scroll_row_into_view(&self) {
+        if self.options.layout != Layout::Vertical {
+            return;
+        }
+        let Some(pane) = self.tabs.focused_pane_id() else {
+            return;
+        };
+        let Some(row) = self.panel_rows.get(pane) else {
+            return;
+        };
+
+        let mut scroll = self.panel_scroll.lock();
+        if let Some(offset) =
+            tabs_panel::geometry::scroll_for(row, scroll.offset(), scroll.viewport())
+        {
+            scroll.scroll_to(offset);
+        }
     }
 
     /// Whether the settings page is open — which is to say, whether a pane is
@@ -973,6 +1204,38 @@ impl Workspace {
         })
     }
 
+    /// How many pixels a pane last measured along the axis its split divides.
+    ///
+    /// Written by the element that lays it out and read by the divider beside
+    /// it, which is the only way a drag in pixels can become the share the
+    /// pane group keeps. A pane with no entry yet reports zero, which is the
+    /// state a divider reads as "nothing to drag against".
+    pub(super) fn pane_extent(&self, pane: PaneId) -> PaneExtent {
+        self.interactions
+            .get(&pane)
+            .map_or_else(PaneExtent::new, |interaction| interaction.extent.clone())
+    }
+
+    /// The divider drag in progress anywhere in the window.
+    ///
+    /// One for the window rather than one per divider, which is what makes
+    /// "only one divider can be dragged at a time" a fact rather than a rule.
+    pub(super) fn divider_drag(&self) -> &DividerDrag {
+        &self.divider_drag
+    }
+
+    /// Where the caret of the field with the keyboard was last painted.
+    ///
+    /// What the window puts an input method's candidate list beside. `None`
+    /// when no field has the keyboard — a full-screen program is up, or the
+    /// settings page is the focused pane — and when the caret has been
+    /// scrolled out of a field taller than its box.
+    pub fn caret_rect(&self) -> Option<RectF> {
+        let pane = self.tabs.focused_pane_id()?;
+        let input = self.inputs.get(&pane)?;
+        input.has_keys().then(|| input.caret_rect()).flatten()
+    }
+
     /// The command line being composed in a pane.
     pub(super) fn input(&self, pane: PaneId) -> Option<&TextInput> {
         self.inputs.get(&pane)
@@ -1230,6 +1493,74 @@ impl Workspace {
         true
     }
 
+    /// Records that a pane's shell rang the bell.
+    ///
+    /// A bell is a program saying "look at me", so it becomes the one status
+    /// that means exactly that — and only in a pane nobody is looking at. The
+    /// pane with the keyboard is already being looked at, and a shell that
+    /// rings on every ambiguous Tab completion would otherwise paint its own
+    /// row amber while somebody typed in it.
+    ///
+    /// It is cleared by looking: [`Self::attend`] runs on every focus change.
+    fn ring(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) -> bool {
+        if self.tabs.focused_pane_id() == Some(pane) {
+            // Not "nothing to write into" — the pane is there and the bell was
+            // heard. Reporting `true` is what keeps this out of the log line
+            // that means a pane has gone.
+            return true;
+        }
+        self.update_session(pane, ctx, |session| {
+            session.status = AgentStatus::NeedsInput;
+        })
+    }
+
+    /// Clears the attention a bell asked for, now that the pane has it.
+    ///
+    /// Only [`AgentStatus::NeedsInput`] is cleared, and only ever back to
+    /// [`AgentStatus::Idle`]: a pane that failed stays failed until something
+    /// says otherwise, and looking at a running command does not stop it.
+    fn attend(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some(pane) = self.tabs.focused_pane_id() else {
+            return;
+        };
+        let rang = self
+            .tabs
+            .pane(pane)
+            .and_then(Pane::session)
+            .is_some_and(|session| session.status == AgentStatus::NeedsInput);
+        if !rang {
+            return;
+        }
+        self.update_session(pane, ctx, |session| session.status = AgentStatus::Idle);
+    }
+
+    /// Asks a pane's shell what the word before its caret could become.
+    ///
+    /// The workspace rather than the field, because the question needs the
+    /// terminal *model*: the line goes into a file in the session's own
+    /// scratch, and only the model knows where that is.
+    fn request_completions(&self, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        let Some(input) = self.inputs.get(&pane) else {
+            return;
+        };
+
+        let serial = input.ask_for_completions();
+        let line = input.line_to_caret();
+        let asked = self.terminals.update(ctx, |model, _| {
+            model.request_completions(pane, serial, &line)
+        });
+
+        if !asked {
+            // A shell with no integration binds nothing, so nothing will ever
+            // answer. Saying so once beats a field that looks as though it is
+            // thinking.
+            log::debug!("pane {pane:?} has no shell that can answer a completion");
+        }
+        // The list that was showing has gone either way — `ask_for_completions`
+        // dropped it — so the frame is worth drawing.
+        ctx.notify();
+    }
+
     /// Applies what a pane's shell did.
     ///
     /// A title and a working directory go into the session, which is what makes
@@ -1241,7 +1572,11 @@ impl Workspace {
     /// which is the same path `cmd-w` takes: the pane goes, its tab goes with
     /// it if it was the last pane, and the window goes if that was the last
     /// tab. There is deliberately no second way to close anything.
-    fn apply_terminal_update(&mut self, update: &TerminalUpdate, ctx: &mut ViewContext<Self>) {
+    pub(super) fn apply_terminal_update(
+        &mut self,
+        update: &TerminalUpdate,
+        ctx: &mut ViewContext<Self>,
+    ) {
         let reported = match update {
             TerminalUpdate::Title(pane, title) => {
                 let title = title.clone();
@@ -1256,6 +1591,25 @@ impl Workspace {
             TerminalUpdate::Closed(pane) => {
                 if self.apply(TabAction::ClosePane(*pane), ctx) == TabEffect::CloseWindow {
                     (self.quit)();
+                }
+                true
+            }
+            // Straight onto the window's one clipboard, which is the same one
+            // `cmd-c` writes: a program that asked for its text to be copied
+            // means the clipboard a person will paste from, not a second one.
+            TerminalUpdate::ClipboardStore(_, text) => {
+                if !self.clipboard.write(text) {
+                    log::debug!("a shell asked to write the clipboard, and there is none");
+                }
+                true
+            }
+            TerminalUpdate::Bell(pane) => self.ring(*pane, ctx),
+            TerminalUpdate::Completions(pane, serial, answer) => {
+                let Some(input) = self.inputs.get(pane) else {
+                    return;
+                };
+                if input.take_completions(*serial, answer.clone()) {
+                    ctx.notify();
                 }
                 true
             }
@@ -1289,11 +1643,19 @@ impl Workspace {
         self.sync_interactions();
         self.sync_git(ctx);
         self.sync_terminals(ctx);
+        // After the strip has moved, so "which pane is being looked at" is the
+        // answer for the state the frame is about to draw. Every action comes
+        // through here, which is what makes looking at a pane the one and only
+        // thing that quiets its bell — and what brings the row it selected
+        // into view whichever gesture selected it.
+        self.attend(ctx);
+        self.scroll_row_into_view();
 
         // An action that changed nothing repaints nothing: holding down
         // cmd-alt-left on the leftmost tab must not put the window on a
-        // key-repeat render loop.
+        // key-repeat render loop — and writes no session file either.
         if effect == TabEffect::Changed {
+            self.save_session(ctx);
             ctx.notify();
         }
         effect
@@ -1320,7 +1682,17 @@ impl Workspace {
             return Some(action);
         }
 
-        let tab = match input_keys::binding(keystroke, Platform::current())? {
+        // The person's own table first, and only where it has something to
+        // say: a chord it does not mention keeps Crook's binding, and one it
+        // binds to nothing has none at all — which is how a chord is given
+        // back to a shell or an editor that wants it. Nothing here reaches
+        // what a *pane* does with a key; see `crate::keymap`.
+        let bound = match self.keymap.binding(keystroke) {
+            Some(binding) => binding?,
+            None => input_keys::binding(keystroke, Platform::current())?,
+        };
+
+        let tab = match bound {
             Binding::NewTab => TabAction::New,
             // Warp's `pane_group:close_current_session`: the pane goes, and
             // the tab only goes with it when it was the tab's last one.
@@ -1343,6 +1715,22 @@ impl Workspace {
             // than toggle it away, which is what `OpenSettings` does and a
             // toggle could not.
             Binding::OpenSettings => TabAction::OpenSettings,
+            // The zoom chords are not tab actions: they change the font the
+            // whole window is drawn in, and the size lives in the settings
+            // beside the theme.
+            Binding::ZoomIn => {
+                return Some(
+                    SettingsAction::SetFontSize(self.general().zoomed(FONT_SIZE_STEP)).into(),
+                );
+            }
+            Binding::ZoomOut => {
+                return Some(
+                    SettingsAction::SetFontSize(self.general().zoomed(-FONT_SIZE_STEP)).into(),
+                );
+            }
+            Binding::ZoomReset => {
+                return Some(SettingsAction::SetFontSize(DEFAULT_FONT_SIZE).into());
+            }
         };
 
         Some(WorkspaceAction::Tab(tab))
@@ -1482,6 +1870,8 @@ impl Workspace {
                     close: MouseStateHandle::default(),
                     body: MouseStateHandle::default(),
                     selection: PaneSelection::new(),
+                    links: PaneLink::new(),
+                    extent: PaneExtent::new(),
                     blocks: PaneBlocks::new(),
                 });
             self.inputs.entry(*id).or_default();
@@ -1702,7 +2092,54 @@ impl Workspace {
                 // control by hand would.
                 self.set_options(TabOptions::default(), ctx);
             }
+            SettingsAction::SetFontSize(size) => self.set_font_size(size, ctx),
+            SettingsAction::ToggleFollowSystemTheme => {
+                let follow = !self.general().use_system_theme;
+                self.set_follow_system_theme(follow, ctx);
+            }
+            SettingsAction::ToggleRestoreSession => {
+                let mut general = self.general();
+                general.restore_session = !general.restore_session;
+                self.set_general(general, ctx);
+                // Turning it on writes the file now rather than at the next
+                // tab action, so a person who switches it on and closes the
+                // window gets what they asked for.
+                self.save_session(ctx);
+            }
         }
+    }
+
+    /// Sets the terminal's type size and re-measures every grid in the window.
+    ///
+    /// The size is a fact about the *font*, not about a pane, so the whole
+    /// window changes at once — which is also why the ptys follow without
+    /// anything here telling them: a pane's columns and rows are its box
+    /// divided by a cell, so the next layout measures a different grid and
+    /// `PaneSizer` reports it.
+    ///
+    /// A font that will not re-measure at the new size leaves the old one in
+    /// place. That is a family whose metrics have gone — a font uninstalled
+    /// mid-session — and the honest answer to it is the size that was working
+    /// a moment ago rather than a window that stops drawing.
+    pub fn set_font_size(&mut self, size: f32, ctx: &mut ViewContext<Self>) {
+        let mut general = self.general();
+        general.font_size = size;
+        let size = general.font_size();
+        if (self.cell_font.font_size() - size).abs() < f32::EPSILON {
+            return;
+        }
+
+        match self.cell_font.resized(size) {
+            Ok(font) => self.cell_font = font,
+            Err(error) => {
+                log::warn!("could not set the terminal font to {size}: {error:#}");
+                return;
+            }
+        }
+        // After the font, because the save is what makes the size outlive the
+        // process and there is no point remembering one that could not be
+        // applied.
+        self.set_general(general, ctx);
     }
 
     /// Everything the Themes panel does.
@@ -1734,6 +2171,7 @@ impl Workspace {
                 self.scroll_selection_into_view();
                 self.panel.forget_hover_state();
                 self.sync_input_keys();
+                self.watch_themes(ctx);
                 ctx.notify();
             }
             ThemeAction::ClosePanel => {
@@ -2001,6 +2439,78 @@ impl Workspace {
             })
             .detach();
     }
+
+    /// Writes what the window is showing, so the next one can come back to it.
+    ///
+    /// **On a change rather than on the way out**, because there is no reliable
+    /// way out: a window closed by the window manager, a process killed, a
+    /// machine that lost power — none of them runs a shutdown path, and a
+    /// session file written only at exit is one that is missing exactly when
+    /// somebody wanted it. Every mutation of the strip goes through
+    /// [`Self::apply`], which is where this is called from, and those are rare
+    /// enough — a tab opened, a pane closed, a split — that a small file per
+    /// gesture is not worth debouncing.
+    ///
+    /// The same generation trick as the settings save, for the same reason: two
+    /// gestures a millisecond apart must not race each other to the file with
+    /// the earlier one winning.
+    fn save_session(&self, ctx: &mut ViewContext<Self>) {
+        if !self.general().restore_session {
+            return;
+        }
+        let Some(path) = crate::session::user_session_path() else {
+            return;
+        };
+        // An ephemeral run — a test, the headless snapshot — has nowhere to
+        // write its *settings*, and must not write a session file into the
+        // real one's place either.
+        if self.settings.path().is_none() {
+            return;
+        }
+
+        let generation = self.session_generation.fetch_add(1, Ordering::Relaxed) + 1;
+        let latest = self.session_generation.clone();
+        let session = crate::session::Session::of(&self.tabs, self.window_size());
+
+        ctx.background()
+            .spawn(async move {
+                if latest.load(Ordering::Relaxed) != generation {
+                    return;
+                }
+                if let Err(error) = session.save_blocking(&path) {
+                    log::warn!("could not save the session: {error:#}");
+                }
+            })
+            .detach();
+    }
+
+    /// How big the window was when it was last laid out, if it has been.
+    fn window_size(&self) -> Option<[f32; 2]> {
+        let size = self.window_size.get();
+        (size.x() >= 1. && size.y() >= 1.).then(|| [size.x(), size.y()])
+    }
+
+    /// Records the window's size, from the frame that is being built.
+    ///
+    /// Set by the delegate rather than reached for, because the size is an
+    /// argument to `build_scene` and nothing in the view tree is told it.
+    pub fn window_size_cell(&self) -> Rc<std::cell::Cell<Vector2F>> {
+        self.window_size.clone()
+    }
+
+    /// Replaces the strip with the one a previous session described.
+    ///
+    /// Everything the workspace keeps *beside* the strip — mouse states, drag
+    /// gestures, scroll offsets, input fields — is keyed by pane id and is
+    /// brought back into step by `sync_interactions`, exactly as it is after
+    /// any other mutation. Nothing here has to know what that state is.
+    pub fn restore(&mut self, strip: TabStrip, ctx: &mut ViewContext<Self>) {
+        self.tabs = strip;
+        self.sync_interactions();
+        self.sync_git(ctx);
+        self.sync_input_keys();
+        ctx.notify();
+    }
 }
 
 /// Whether anything on screen would print a diff stat.
@@ -2104,6 +2614,7 @@ impl TypedActionView for Workspace {
             WorkspaceAction::Theme(action) => self.apply_theme_action(action, ctx),
             WorkspaceAction::HoverRow { pane, entered } => self.hover_row(pane, entered, ctx),
             WorkspaceAction::ReleaseSelection(pane) => self.release_selection(pane, ctx),
+            WorkspaceAction::Complete(pane) => self.request_completions(pane, ctx),
         }
     }
 }

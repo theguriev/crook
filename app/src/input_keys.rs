@@ -122,6 +122,12 @@ pub enum Intent {
     Undo,
     /// Step forward one undone edit.
     Redo,
+    /// Ask the shell what the word before the caret could become.
+    ///
+    /// Not an edit: nothing changes until the shell answers, and the answer
+    /// arrives frames later on a channel of its own. See
+    /// [`crate::completion`].
+    Complete,
 }
 
 /// Where a keystroke goes.
@@ -178,6 +184,12 @@ pub enum Binding {
     ToggleLayout,
     /// Open the settings page.
     OpenSettings,
+    /// Make the terminal's text bigger.
+    ZoomIn,
+    /// Make it smaller.
+    ZoomOut,
+    /// Put it back to the size a fresh install opens at.
+    ZoomReset,
 }
 
 /// **The whole keyboard policy of a pane, in one function.**
@@ -283,6 +295,13 @@ pub fn binding(keystroke: &Keystroke, platform: Platform) -> Option<Binding> {
                 ("right", false, true, false) => Some(Binding::NextTab),
                 ("left", false, false, true) => Some(Binding::MoveTabLeft),
                 ("right", false, false, true) => Some(Binding::MoveTabRight),
+                // The zoom chords every application has. `=` is the unshifted
+                // key `+` is printed on, and both are accepted because which
+                // one the platform reports depends on the layout and on
+                // whether Shift was held.
+                ("=" | "+", _, false, false) => Some(Binding::ZoomIn),
+                ("-" | "_", _, false, false) => Some(Binding::ZoomOut),
+                ("0", false, false, false) => Some(Binding::ZoomReset),
                 _ => None,
             }
         }
@@ -309,6 +328,13 @@ pub fn binding(keystroke: &Keystroke, platform: Platform) -> Option<Binding> {
                 ("pagedown", false) => Some(Binding::NextTab),
                 ("pageup", true) => Some(Binding::MoveTabLeft),
                 ("pagedown", true) => Some(Binding::MoveTabRight),
+                // The zoom chords, with and without the Shift that reaches the
+                // `+` and `_` printed on the same two keys. Ctrl-minus does
+                // not collide with anything a shell wants: the C0 range has no
+                // code for it, so it was already sending a bare `-`.
+                ("=" | "+", _) => Some(Binding::ZoomIn),
+                ("-" | "_", _) => Some(Binding::ZoomOut),
+                ("0", false) => Some(Binding::ZoomReset),
                 _ => None,
             }
         }
@@ -402,6 +428,13 @@ fn named_intent(key: &str, modifiers: Modifiers, platform: Platform) -> Option<I
         // it is the one that must not be sent.
         "enter" if modifiers.shift => Some(Intent::Newline),
         "enter" if plain(modifiers) => Some(Intent::Submit),
+
+        // Tab used to do nothing at all, because the shell had never seen the
+        // partial line and had nothing to complete. It has now: the line goes
+        // to the shell through a channel of its own and the answer comes back
+        // the same way. A tab *character* is still not typed — no terminal has
+        // ever let one into a command line, and the field measures in cells.
+        "tab" if plain(modifiers) => Some(Intent::Complete),
 
         "backspace" => Some(match () {
             _ if line_chord(modifiers, platform) => Intent::DeleteToLineStart,
@@ -951,11 +984,13 @@ mod tests {
 
     #[test]
     fn a_key_that_produces_only_a_control_character_types_nothing() {
-        // Tab and Escape both produce text, and neither has a cell to sit in.
+        // Escape produces text and has no cell to sit in. Neither has Tab,
+        // which is why it asks the shell a question instead of typing one.
         for platform in [Platform::Mac, Platform::Other] {
             assert_eq!(
                 route(&keystroke("tab", none()), "\t", composing(), platform),
-                Route::Ignored
+                Route::Edit(Intent::Complete),
+                "a tab character has never been typeable into a command line"
             );
             assert_eq!(
                 route(
@@ -1242,6 +1277,46 @@ mod tests {
                 binding(&keystroke(key, ctrl()), Platform::Other),
                 None,
                 "ctrl-{key} is Crook's, and the tty cannot have it"
+            );
+        }
+    }
+
+    #[test]
+    fn the_zoom_chords_are_bound_on_both_platforms() {
+        // Both keys of each pair, because which one the platform reports for
+        // the same physical key depends on the layout and on whether Shift
+        // was held.
+        for (key, expected) in [
+            ("=", Binding::ZoomIn),
+            ("+", Binding::ZoomIn),
+            ("-", Binding::ZoomOut),
+            ("_", Binding::ZoomOut),
+            ("0", Binding::ZoomReset),
+        ] {
+            assert_eq!(
+                binding(&keystroke(key, cmd()), Platform::Mac),
+                Some(expected),
+                "cmd-{key}"
+            );
+            assert_eq!(
+                binding(&keystroke(key, ctrl()), Platform::Other),
+                Some(expected),
+                "ctrl-{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bare_minus_is_not_a_zoom() {
+        // The chord is the modifier. Typing a `-` into a command line must not
+        // resize every pane in the window.
+        for key in ["-", "=", "0", "+"] {
+            assert_eq!(binding(&keystroke(key, none()), Platform::Other), None);
+            assert_eq!(binding(&keystroke(key, none()), Platform::Mac), None);
+            assert_eq!(
+                binding(&keystroke(key, shift()), Platform::Other),
+                None,
+                "shift-{key} types a character"
             );
         }
     }

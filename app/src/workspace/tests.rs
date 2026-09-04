@@ -141,7 +141,17 @@ impl Harness {
     /// anything at all when there is none.
     fn with_settings(tabs: usize, settings: Settings) -> Self {
         let queue = LocalQueue::new();
-        let mut app = App::new(queue.foreground(), Arc::new(Background::new(1)));
+        // Two, not one, and for the reason `crate::PARKED_WORKERS` exists: a
+        // task that waits on a timer holds its worker for the whole cycle, so
+        // a pool of one has nothing left to run anything else on. A harness
+        // with a single worker passed for as long as no test started such a
+        // chain — and then failed, twenty seconds at a time and in a test
+        // about a shell title, the day the terminal model grew one.
+        //
+        // Two rather than the application's `PARKED_WORKERS + 1`: a test
+        // starts at most the model's own chain, and a pool of five per harness
+        // is five OS threads per test for workers nothing ever schedules onto.
+        let mut app = App::new(queue.foreground(), Arc::new(Background::new(2)));
         app.update(|ctx| ctx.add_singleton_model(UsageModel::new));
 
         let quit_requests = Rc::new(Cell::new(0));
@@ -397,6 +407,25 @@ impl Harness {
         };
         self.workspace
             .read(&self.app, |workspace, _| workspace.pane_takes_keys(pane))
+    }
+
+    /// Pumps the queue until `settled` is true or `patience` runs out.
+    ///
+    /// For the background chains that have no completion to wait on: a poll
+    /// that will re-arm itself for as long as the window is open.
+    fn settle_for(
+        &mut self,
+        patience: std::time::Duration,
+        mut settled: impl FnMut(&mut Self) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + patience;
+        loop {
+            self.queue.run_until_parked();
+            if settled(self) || std::time::Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
     }
 
     /// The name of the theme in force.
@@ -817,6 +846,16 @@ impl Harness {
 }
 
 /// How long a test waits for a shell to do as it was told.
+///
+/// It bounds a *failure*, never a pass: a test that is going to succeed does so
+/// in a second. What makes it generous is that the thing being waited for is a
+/// real shell starting and sourcing somebody's rc files, on a machine running
+/// as many of these tests at once as it has cores.
+///
+/// The way to make a shell test reliable is not to raise this: it is to wait
+/// for the shell to say something *before* typing at it, so that starting up
+/// and doing as it was told are two waits rather than one. Every test here
+/// that types does that.
 const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// The modifier that means "this is an application command" on this platform.
@@ -3899,6 +3938,66 @@ fn a_theme_dropped_into_the_folder_is_in_the_panel_the_next_time_it_opens() {
     assert!(names.contains(&"My Own".to_owned()));
 }
 
+#[test]
+fn a_theme_file_edited_while_the_panel_is_open_is_re_read_and_re_applied() {
+    // The half of a filesystem watcher that matters: somebody is editing a
+    // theme in one window and looking at Crook in the other. The panel being
+    // open is what the poll is gated on, because that is when it is happening.
+    let themes = Scratch::new();
+    let mut harness = Harness::new(1);
+    let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+    harness.set_themes_directory(themes.path().to_owned());
+
+    let path = themes.path().join("my_own.yaml");
+    fs::write(&path, theme_file_text()).expect("writable");
+    harness.open_theme_panel();
+    harness.workspace_update(|workspace, ctx| workspace.set_theme("My Own", ctx));
+
+    let before = crate::theme::theme().terminal.background;
+    assert_eq!(harness.theme_name(), "My Own");
+
+    // The same theme, one colour different, saved under the same name.
+    fs::write(&path, theme_file_text().replace("#2e3440", "#101010")).expect("writable");
+    harness.settle_for(std::time::Duration::from_secs(5), |harness| {
+        let _ = harness;
+        crate::theme::theme().terminal.background != before
+    });
+
+    assert_ne!(
+        crate::theme::theme().terminal.background,
+        before,
+        "the edit never reached the window"
+    );
+    assert_eq!(
+        harness.theme_name(),
+        "My Own",
+        "it is still the same theme, re-read"
+    );
+}
+
+#[test]
+fn the_themes_folder_is_not_polled_while_the_panel_is_closed() {
+    // An application that is idle by design stays idle: the chain ends at the
+    // first tick that finds the panel gone.
+    let themes = Scratch::new();
+    let mut harness = Harness::new(1);
+    let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+    harness.set_themes_directory(themes.path().to_owned());
+
+    let before = harness.theme_names().len();
+    fs::write(themes.path().join("my_own.yaml"), theme_file_text()).expect("writable");
+
+    // Two poll intervals, which is one more than it takes for a poll that was
+    // running to have noticed. Longer would only make the suite slower.
+    harness.settle_for(super::view::THEMES_POLL * 2, |_| false);
+
+    assert_eq!(
+        harness.theme_names().len(),
+        before,
+        "the list moved with nobody looking at it"
+    );
+}
+
 /// A theme file in Warp's format, for the tests that drop one in.
 fn theme_file_text() -> String {
     let mut text = String::from(
@@ -4262,14 +4361,13 @@ fn a_switch_on_the_page_writes_the_option_the_gear_menu_writes() {
     let scene = harness.frame();
 
     let switches = settings_switch_boxes(&scene);
-    assert_eq!(
-        switches.len(),
-        3,
-        "PR link, diff stats and the detail card, in that order"
-    );
+    // The detail card's is the last switch on the page, whichever others have
+    // scrolled into view above it — the page has grown a switch twice now, and
+    // a fixed index would have to be corrected each time.
+    let detail_card = *switches.last().expect("the page has switches on it");
 
     assert!(harness.options().show_details_on_hover);
-    harness.click(center(switches[2]), MouseButton::Left);
+    harness.click(center(detail_card), MouseButton::Left);
     assert!(
         !harness.options().show_details_on_hover,
         "the switch did not write the option"
@@ -4292,12 +4390,20 @@ fn a_switch_the_density_has_made_inert_is_drawn_and_does_nothing() {
 
     let switches = settings_switch_boxes(&harness.frame());
     let before = harness.options();
-    harness.click(center(switches[0]), MouseButton::Left);
+
+    // The two chip switches are the third and second from the end: the detail
+    // card's is last, and whatever else the page has grown is above them.
+    // Counted from the end rather than the start for the reason the test above
+    // is: a fixed index has to be corrected every time a switch is added.
+    let inert = [switches.len() - 3, switches.len() - 2];
+    for index in inert {
+        harness.click(center(switches[index]), MouseButton::Left);
+    }
 
     assert_eq!(
         before,
         harness.options(),
-        "a compact row has no chips, so its chip switch must not be clickable"
+        "a compact row has no chips, so its chip switches must not be clickable"
     );
 }
 
@@ -5134,6 +5240,69 @@ mod shells {
     }
 
     #[test]
+    fn tab_completes_a_path_the_shell_can_see_and_crook_cannot() {
+        // **The whole feature, end to end, and the point of doing it this
+        // way.** The completion is the shell's: it is computed by the shell in
+        // the pane, against the directory that shell is in, by the shell's own
+        // machinery. Crook writes the question, sends a key, and splices the
+        // answer back into a line the shell has never seen.
+        let directory = Scratch::new();
+        fs::write(directory.path().join("distinctive-name.txt"), "").expect("writable");
+
+        let mut harness = Harness::panel(1);
+        let Some(pane) = marked_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+        await_prompt(&mut harness, pane);
+
+        // Into the directory the file is in, so the answer can only have come
+        // from the shell: nothing in Crook knows where that shell is.
+        type_line(&mut harness, &format!("cd {}", directory.path().display()));
+        harness.press("enter", Modifiers::default(), "");
+        await_prompt(&mut harness, pane);
+
+        type_line(&mut harness, "cat disti");
+        harness.press("tab", Modifiers::default(), "\t");
+
+        harness.wait_for("the shell never completed the path", |harness| {
+            harness.field_text(pane).contains("distinctive-name.txt")
+        });
+    }
+
+    #[test]
+    fn a_pane_whose_pty_is_held_open_by_a_background_process_still_closes() {
+        // End-of-file on the pty master is what the reader learns a session is
+        // over by, and something other than the shell can hold the far end
+        // open. Before the child was asked directly, this pane sat there
+        // showing a dead shell until somebody closed it by hand.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+        harness.wait_for("the shell never printed anything", |harness| {
+            !harness.terminal_text(pane).trim().is_empty()
+        });
+
+        // A process that outlives the shell and keeps the slave descriptor.
+        type_line(&mut harness, "sleep 30 &");
+        harness.press("enter", Modifiers::default(), "");
+        harness.wait_for("the background job never started", |harness| {
+            harness.terminal_text(pane).contains(char::is_numeric)
+        });
+
+        type_line(&mut harness, "exit");
+        harness.press("enter", Modifiers::default(), "");
+
+        // The shell is gone; the pty is not. The window closes because the
+        // *child* was asked, not because anything reached end of file.
+        harness.wait_for("the pane never noticed its shell had exited", |harness| {
+            harness.quit_requests() > 0
+        });
+    }
+
+    #[test]
     fn a_command_typed_into_the_field_reaches_the_shell_when_it_is_sent() {
         // **The whole feature, end to end.** Keys the bindings declined go into
         // the field and nowhere else; the pty hears nothing at all until Enter;
@@ -5386,6 +5555,15 @@ mod shells {
         };
         assert_eq!(harness.pane_title(pane), "agent 1");
 
+        // Wait for the shell to *be there* before typing at it. Starting up and
+        // doing as it was told are then two waits of their own rather than one
+        // that has to cover both — which is the difference between a test that
+        // is reliable on a loaded machine and one that is not.
+        harness.frame();
+        harness.wait_for("the shell never printed anything", |harness| {
+            !harness.terminal_text(pane).trim().is_empty()
+        });
+
         harness.type_into(
             pane,
             "printf '\\033]0;deploy the release\\007\\033]7;file:///tmp\\007'\n",
@@ -5525,6 +5703,15 @@ mod shells {
         };
         harness.frame();
         assert_eq!(harness.field_text(pane), "");
+
+        // Wait for the shell to reach its own prompt before sending the end of
+        // input. A `^D` written into a pty the shell has not started reading
+        // yet is read during its startup, where it is not an end of file at
+        // all — which is the difference between this test passing and hanging
+        // for its whole budget.
+        harness.wait_for("the shell never printed anything", |harness| {
+            !harness.terminal_text(pane).trim().is_empty()
+        });
 
         harness.press("d", ctrl(), "d");
         harness.wait_for("the shell never read an end of file", |harness| {
@@ -7090,4 +7277,452 @@ fn the_row_height_the_panel_scrolls_by_is_the_height_it_draws() {
         "rows are drawn {drawn} apart and scrolled by {}",
         crate::workspace::theme_panel::ROW_HEIGHT
     );
+}
+
+/// The tabs panel scrolling to the row a selection landed on.
+mod panel_autoscroll {
+    use super::*;
+
+    /// How far the panel's list is scrolled.
+    fn offset(harness: &Harness) -> f32 {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.panel_scroll().lock().offset()
+        })
+    }
+
+    /// A panel with enough tabs that the list is longer than the window.
+    fn crowded() -> Harness {
+        let mut harness = Harness::panel(1);
+        for _ in 0..30 {
+            harness.dispatch_action(TabAction::New);
+        }
+        harness.frame();
+        harness
+    }
+
+    #[test]
+    fn selecting_a_tab_off_the_bottom_brings_its_row_into_view() {
+        // Without this, the keyboard moves the selection to a row nobody can
+        // see and the panel looks as though the chord did nothing.
+        let mut harness = crowded();
+        let first = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tabs().iter().next().expect("a first tab").id()
+        });
+
+        harness.dispatch_action(TabAction::Select(first));
+        harness.frame();
+        assert_eq!(offset(&harness), 0., "the first row is at the top");
+
+        let last = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tabs().iter().last().expect("a last tab").id()
+        });
+        harness.dispatch_action(TabAction::Select(last));
+        harness.frame();
+
+        assert!(
+            offset(&harness) > 0.,
+            "the last row was selected and the list never moved"
+        );
+    }
+
+    #[test]
+    fn a_row_already_in_view_does_not_move_the_list() {
+        // A selection that scrolled every time would fight the wheel: reading
+        // down the list and clicking what you find would jump it.
+        let mut harness = crowded();
+        let last = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tabs().iter().last().expect("a last tab").id()
+        });
+        harness.dispatch_action(TabAction::Select(last));
+        harness.frame();
+        let settled = offset(&harness);
+
+        // The same tab again, and then a frame: nothing has moved.
+        harness.dispatch_action(TabAction::Select(last));
+        harness.frame();
+
+        assert_eq!(offset(&harness), settled);
+    }
+
+    #[test]
+    fn the_header_strip_layout_scrolls_nothing() {
+        // There is no panel in that layout, and the scroll state behind it is
+        // not something a tab selection should be writing into.
+        let mut harness = Harness::new(1);
+        for _ in 0..30 {
+            harness.dispatch_action(TabAction::New);
+        }
+        harness.frame();
+
+        assert_eq!(offset(&harness), 0.);
+    }
+}
+
+/// Restoring a window: the strip comes back, and everything the workspace
+/// keeps beside it comes back into step.
+mod restoring {
+    use super::*;
+    use crate::session::Session;
+
+    #[test]
+    fn a_restored_strip_brings_the_per_pane_state_with_it() {
+        // The whole risk of replacing the strip wholesale: mouse states, drag
+        // gestures, scroll offsets and input fields are all keyed by pane id,
+        // and every id in a restored strip is new. Nothing in `restore` knows
+        // what that state is — `sync_interactions` does — so this is what
+        // proves the seam holds.
+        let mut source = Harness::new(1);
+        source.dispatch_action(TabAction::Split(Direction::Right));
+        source.dispatch_action(TabAction::New);
+        let session = source.workspace.read(&source.app, |workspace, _| {
+            Session::of(workspace.tabs(), None)
+        });
+
+        let mut harness = Harness::new(1);
+        let strip = session.restore().expect("there was something to restore");
+        harness.workspace_update(|workspace, ctx| workspace.restore(strip, ctx));
+
+        let panes = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .panes()
+                .map(|(_, pane)| pane.id())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(panes.len(), 3, "two tabs, the first split in two");
+
+        for pane in panes {
+            assert!(
+                harness
+                    .workspace
+                    .read(&harness.app, |workspace, _| workspace
+                        .interaction(pane)
+                        .is_some()),
+                "{pane:?} came back with no mouse state"
+            );
+        }
+
+        // And the frame draws, which is the other half of the same claim.
+        harness.frame();
+    }
+
+    #[test]
+    fn the_pane_that_had_the_keyboard_has_it_again() {
+        let mut source = Harness::new(1);
+        source.dispatch_action(TabAction::Split(Direction::Right));
+        let first = source.workspace.read(&source.app, |workspace, _| {
+            workspace
+                .tabs()
+                .panes()
+                .map(|(_, pane)| pane.id())
+                .next()
+                .expect("a first pane")
+        });
+        source.dispatch_action(TabAction::FocusPane(first));
+
+        let session = source.workspace.read(&source.app, |workspace, _| {
+            Session::of(workspace.tabs(), None)
+        });
+
+        let mut harness = Harness::new(1);
+        let strip = session.restore().expect("restored");
+        harness.workspace_update(|workspace, ctx| workspace.restore(strip, ctx));
+        harness.frame();
+
+        let focused = harness.focused_pane_id().expect("a focused pane");
+        let panes = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .panes()
+                .map(|(_, pane)| pane.id())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(Some(focused), panes.first().copied());
+        assert!(
+            harness.pane_takes_keys(),
+            "the restored pane's field was never told it has the keyboard"
+        );
+    }
+}
+
+/// Following the desktop's light or dark setting.
+mod system_theme {
+    use super::*;
+
+    /// A harness on settings that know where they would be written, so the
+    /// pair is really read back rather than kept in memory.
+    fn harness(themes: &Scratch, settings: &Scratch) -> Harness {
+        let mut harness = Harness::with_settings(1, settings.settings());
+        harness.set_themes_directory(themes.path().to_owned());
+        harness
+    }
+
+    /// Chooses a theme by name, the way a row of the panel does.
+    fn choose(harness: &mut Harness, name: &str) {
+        let name = name.to_owned();
+        harness.workspace_update(|workspace, ctx| workspace.set_theme(&name, ctx));
+    }
+
+    fn follow(harness: &mut Harness, on: bool) {
+        harness.workspace_update(|workspace, ctx| workspace.set_follow_system_theme(on, ctx));
+    }
+
+    fn desktop_is_dark(harness: &mut Harness, dark: bool) {
+        harness.workspace_update(|workspace, ctx| workspace.set_system_dark(dark, ctx));
+    }
+
+    #[test]
+    fn the_desktop_is_ignored_until_it_is_being_followed() {
+        // A terminal whose chosen theme changed colour at sunset without being
+        // asked would be a surprise, which is why the flag is off by default.
+        let themes = Scratch::new();
+        let files = Scratch::new();
+        let mut harness = harness(&themes, &files);
+        let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+
+        choose(&mut harness, "Midnight");
+        desktop_is_dark(&mut harness, false);
+
+        assert_eq!(harness.theme_name(), "Midnight");
+    }
+
+    #[test]
+    fn turning_it_on_applies_the_half_the_desktop_is_in() {
+        // A switch that changed nothing until the next sunset would look
+        // broken.
+        let themes = Scratch::new();
+        let files = Scratch::new();
+        let mut harness = harness(&themes, &files);
+        let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+
+        desktop_is_dark(&mut harness, false);
+        follow(&mut harness, true);
+
+        assert_eq!(harness.theme_name(), crate::theme::DEFAULT_LIGHT_NAME);
+    }
+
+    #[test]
+    fn the_desktop_moving_moves_the_theme_with_it() {
+        let themes = Scratch::new();
+        let files = Scratch::new();
+        let mut harness = harness(&themes, &files);
+        let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+
+        follow(&mut harness, true);
+        desktop_is_dark(&mut harness, false);
+        assert_eq!(harness.theme_name(), crate::theme::DEFAULT_LIGHT_NAME);
+
+        desktop_is_dark(&mut harness, true);
+        assert_eq!(harness.theme_name(), crate::theme::DEFAULT_NAME);
+    }
+
+    #[test]
+    fn choosing_a_theme_while_following_sets_only_the_half_in_force() {
+        // The other half is somebody's choice for the other half, and
+        // replacing it would silently throw it away.
+        let themes = Scratch::new();
+        let files = Scratch::new();
+        let mut harness = harness(&themes, &files);
+        let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+
+        follow(&mut harness, true);
+        desktop_is_dark(&mut harness, true);
+        choose(&mut harness, "Midnight");
+
+        let (light, dark) = harness.workspace.read(&harness.app, |workspace, _| {
+            (
+                workspace.settings().light_theme().to_owned(),
+                workspace.settings().dark_theme().to_owned(),
+            )
+        });
+        assert_eq!(dark, "Midnight");
+        assert_eq!(
+            light,
+            crate::theme::DEFAULT_LIGHT_NAME,
+            "the light half was left as it was"
+        );
+
+        // And going light comes back to it rather than to Midnight.
+        desktop_is_dark(&mut harness, false);
+        assert_eq!(harness.theme_name(), crate::theme::DEFAULT_LIGHT_NAME);
+    }
+}
+
+/// Zooming: one number that every measurement in the window comes from.
+mod text_size {
+    use super::*;
+    use crate::settings::{DEFAULT_FONT_SIZE, FONT_SIZE_STEP, MAX_FONT_SIZE};
+
+    fn size(harness: &Harness) -> f32 {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.cell_font().font_size()
+        })
+    }
+
+    /// The chord, sent the way the window delegate sends a bound keystroke.
+    fn zoom(harness: &mut Harness, key: &str) -> bool {
+        harness.press_key(
+            key,
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+        )
+    }
+
+    #[test]
+    fn the_chords_change_the_font_every_grid_is_measured_with() {
+        let mut harness = Harness::new(1);
+        assert_eq!(size(&harness), DEFAULT_FONT_SIZE);
+
+        assert!(zoom(&mut harness, "="));
+        assert_eq!(size(&harness), DEFAULT_FONT_SIZE + FONT_SIZE_STEP);
+
+        assert!(zoom(&mut harness, "-"));
+        assert_eq!(size(&harness), DEFAULT_FONT_SIZE);
+    }
+
+    #[test]
+    fn a_bigger_cell_is_a_wider_cell() {
+        // The point of the whole feature: the cell is what a pane's columns
+        // and rows are its box divided by, so a pty resizes because the font
+        // did and nothing has to tell it.
+        let mut harness = Harness::new(1);
+        let before = harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.cell_font().metrics());
+
+        assert!(zoom(&mut harness, "="));
+        let after = harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.cell_font().metrics());
+
+        assert!(after.width > before.width, "{after:?} vs {before:?}");
+        assert!(after.height >= before.height);
+    }
+
+    #[test]
+    fn the_reset_chord_goes_back_to_the_size_a_fresh_install_opens_at() {
+        let mut harness = Harness::new(1);
+        for _ in 0..4 {
+            zoom(&mut harness, "=");
+        }
+        assert_ne!(size(&harness), DEFAULT_FONT_SIZE);
+
+        assert!(zoom(&mut harness, "0"));
+        assert_eq!(size(&harness), DEFAULT_FONT_SIZE);
+    }
+
+    #[test]
+    fn holding_the_chord_down_stops_at_the_end_of_the_range() {
+        // Key repeat reaches the end of the range in a second, so the end has
+        // to be an answer rather than an accident — and the frame that changed
+        // nothing must not repaint.
+        let mut harness = Harness::new(1);
+        for _ in 0..200 {
+            zoom(&mut harness, "=");
+        }
+
+        assert_eq!(size(&harness), MAX_FONT_SIZE);
+        harness.frame();
+    }
+}
+
+/// The bell: what a shell asks for that only the tab strip can answer.
+///
+/// Driven through `apply_terminal_update`, which is the exact call the
+/// subscription in `Workspace::new` makes when a session's own thread reports
+/// something.
+mod the_bell {
+    use super::*;
+    use crate::terminal_model::TerminalUpdate;
+
+    /// Applies one update the way the model's subscription does.
+    fn report(harness: &mut Harness, update: TerminalUpdate) {
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(&update, ctx);
+        });
+    }
+
+    fn status_of(harness: &Harness, pane: PaneId) -> Option<AgentStatus> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tabs().pane(pane).and_then(Pane::status)
+        })
+    }
+
+    /// The pane of the tab that is *not* active.
+    fn background_of(harness: &Harness) -> PaneId {
+        let active = harness.focused_pane_id().expect("the window has a pane");
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| {
+                workspace
+                    .tabs()
+                    .panes()
+                    .map(|(_, pane)| pane.id())
+                    .find(|id| *id != active)
+            })
+            .expect("two tabs have two panes")
+    }
+
+    #[test]
+    fn a_bell_in_a_pane_nobody_is_looking_at_asks_for_attention() {
+        let mut harness = Harness::new(2);
+        let ringing = background_of(&harness);
+
+        assert_eq!(status_of(&harness, ringing), Some(AgentStatus::Idle));
+        report(&mut harness, TerminalUpdate::Bell(ringing));
+
+        assert_eq!(
+            status_of(&harness, ringing),
+            Some(AgentStatus::NeedsInput),
+            "a bell in a background pane is the one thing that says look here"
+        );
+    }
+
+    #[test]
+    fn a_bell_in_the_pane_with_the_keyboard_is_not_an_interruption() {
+        // Bash rings this on an ambiguous Tab completion. Painting somebody's
+        // own row amber while they type in it would be worse than silence.
+        let mut harness = Harness::new(1);
+        let focused = harness.focused_pane_id().expect("the window has a pane");
+
+        report(&mut harness, TerminalUpdate::Bell(focused));
+
+        assert_eq!(status_of(&harness, focused), Some(AgentStatus::Idle));
+    }
+
+    #[test]
+    fn looking_at_a_pane_is_what_quiets_it() {
+        let mut harness = Harness::new(2);
+        let ringing = background_of(&harness);
+
+        report(&mut harness, TerminalUpdate::Bell(ringing));
+        assert_eq!(status_of(&harness, ringing), Some(AgentStatus::NeedsInput));
+
+        harness.dispatch_action(TabAction::FocusPane(ringing));
+
+        assert_eq!(
+            status_of(&harness, ringing),
+            Some(AgentStatus::Idle),
+            "the bell was answered by looking at the pane that rang"
+        );
+    }
+
+    #[test]
+    fn a_failed_pane_is_not_quieted_by_being_looked_at() {
+        // Only the status a bell sets is cleared by attention. Failure is a
+        // fact about the work, and looking at it does not undo it.
+        let mut harness = Harness::new(2);
+        let failed = background_of(&harness);
+        harness.workspace_update(|workspace, ctx| {
+            workspace.update_session(failed, ctx, |session| {
+                session.status = AgentStatus::Failed;
+            });
+        });
+
+        harness.dispatch_action(TabAction::FocusPane(failed));
+
+        assert_eq!(status_of(&harness, failed), Some(AgentStatus::Failed));
+    }
 }

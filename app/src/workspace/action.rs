@@ -15,7 +15,7 @@ use crate::tab::{PaneId, TabAction};
 use super::settings_page::Section;
 
 /// Everything the header dispatches.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum WorkspaceAction {
     /// Something happened to the strip. Applied by `TabStrip::apply`.
     Tab(TabAction),
@@ -57,6 +57,13 @@ pub enum WorkspaceAction {
     /// of them. **Nothing may change what is selected in the output while a
     /// keystroke is being dispatched.**
     ReleaseSelection(PaneId),
+    /// Ask this pane's shell what the word before the caret could become.
+    ///
+    /// An action rather than a call, for the reason `ReleaseSelection` is one:
+    /// the element that saw Tab holds the field but not the terminal *model*,
+    /// and it is the model that knows where this session's scratch directory
+    /// is. See [`crate::completion`].
+    Complete(PaneId),
 }
 
 impl From<TabAction> for WorkspaceAction {
@@ -125,7 +132,7 @@ pub enum ThemeAction {
 /// closing a pane, through the same close button, middle click and close
 /// chord — `cmd-w`, `ctrl-shift-w` off macOS — as every other pane in the
 /// window.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum SettingsAction {
     /// Show a different page of the settings in the pane already holding
     /// them.
@@ -134,6 +141,19 @@ pub enum SettingsAction {
     ToggleUsageChip,
     /// Put every tab option back to the value a fresh install opens with.
     ResetTabOptions,
+    /// Set the terminal's type size, in logical pixels.
+    ///
+    /// A size rather than a step, so that the zoom chords, the settings page's
+    /// buttons and its reset all send the same action. Whoever sends it has
+    /// already asked [`GeneralOptions`](crate::settings::GeneralOptions) what
+    /// the next size is, which is the one place the bounds are applied.
+    SetFontSize(f32),
+    /// "Follow the desktop": whether the theme tracks the system's light or
+    /// dark setting.
+    ToggleFollowSystemTheme,
+    /// "Bring the tabs back": whether a window opens holding the tabs the last
+    /// one had.
+    ToggleRestoreSession,
 }
 
 /// What the options menu writes.

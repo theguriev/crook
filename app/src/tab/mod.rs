@@ -279,7 +279,7 @@ impl Tab {
 /// The whole vocabulary, addressed by identity. `MoveLeft` and `MoveRight`
 /// need no argument because there is only one tab a person can mean by them:
 /// the one they are looking at.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum TabAction {
     /// Open a tab after the active one and select it.
     New,
@@ -301,6 +301,22 @@ pub enum TabAction {
     /// Focus a pane, activating its tab. Warp's
     /// `WorkspaceAction::FocusPane(PaneViewLocator)`.
     FocusPane(PaneId),
+    /// Move the divider between two adjacent panes of the active tab.
+    ///
+    /// `leading` is the share of the pair that goes to the first of them, from
+    /// zero to one. A ratio rather than pixels, because only the element that
+    /// drew the two panes knows how wide they were — and only the group knows
+    /// what a share means once other panes are beside them.
+    ResizePanes {
+        /// The pane on the left, or above.
+        before: PaneId,
+        /// The pane on the right, or below.
+        after: PaneId,
+        /// The share of the two of them that `before` takes.
+        leading: f32,
+    },
+    /// Give every pane of the active tab an equal share again.
+    EvenPanes,
     /// Show the settings page: focus the pane already holding it, or open a
     /// tab for it.
     ///
@@ -374,6 +390,48 @@ impl TabStrip {
             active: id,
             mru: vec![id],
             opened: 1,
+        }
+    }
+
+    /// An empty strip, for a caller that is about to fill it.
+    ///
+    /// **The one shape this type otherwise refuses to be in**, and it exists
+    /// for exactly one caller: [`crate::session`], which builds a strip out of
+    /// a file and cannot start from a strip that already has a tab nobody
+    /// asked for. It is `pub(crate)` and paired with [`Self::adopt`]; a strip
+    /// left empty draws no rows and answers `None` to everything, which is why
+    /// the restoring path throws one away rather than opening a window with
+    /// it.
+    pub(crate) fn empty() -> Self {
+        Self {
+            tabs: Vec::new(),
+            active: TabId::next(),
+            mru: Vec::new(),
+            opened: 0,
+        }
+    }
+
+    /// Appends a tab built elsewhere, making it the active one.
+    ///
+    /// The counter moves with it, so the first tab a person opens after a
+    /// restore is named after the ones that came back rather than repeating
+    /// one of their names.
+    pub(crate) fn adopt(&mut self, tab: Tab) {
+        let id = tab.id();
+        self.tabs.push(tab);
+        self.opened += 1;
+        self.repair(Some(id));
+    }
+
+    /// Selects a tab by its position in the bar.
+    ///
+    /// Out of range selects nothing, which leaves whatever `adopt` last made
+    /// active. Positions are the session file's vocabulary and nothing else's:
+    /// every other caller names a tab by identity, for the reason the module
+    /// docs give at length.
+    pub(crate) fn select_index(&mut self, index: usize) {
+        if let Some(id) = self.tabs.get(index).map(Tab::id) {
+            self.repair(Some(id));
         }
     }
 
@@ -615,6 +673,22 @@ impl TabStrip {
                     TabEffect::Unchanged
                 }
             }
+
+            // Both of these are about the *active* tab's split, because a
+            // divider is a thing on screen and only the active tab has any.
+            TabAction::ResizePanes {
+                before,
+                after,
+                leading,
+            } => match self.get_mut(self.active) {
+                Some(tab) => pane_effect(tab.panes_mut().resize(before, after, leading)),
+                None => TabEffect::Unchanged,
+            },
+
+            TabAction::EvenPanes => match self.get_mut(self.active) {
+                Some(tab) => pane_effect(tab.panes_mut().even_out()),
+                None => TabEffect::Unchanged,
+            },
         }
     }
 
@@ -697,5 +771,18 @@ impl TabStrip {
         self.active = chosen;
         self.mru.retain(|id| *id != chosen);
         self.mru.insert(0, chosen);
+    }
+}
+
+/// What a change inside one tab's panes means to the strip.
+///
+/// Only for the changes that cannot empty a group. `GroupEmptied` is the
+/// closing path's, where it means "and then the tab goes", and it is handled
+/// there rather than mapped here — a resize that reported it would be a bug,
+/// and reading it as `Unchanged` is the answer that changes nothing.
+fn pane_effect(effect: PaneEffect) -> TabEffect {
+    match effect {
+        PaneEffect::Changed => TabEffect::Changed,
+        PaneEffect::Unchanged | PaneEffect::GroupEmptied => TabEffect::Unchanged,
     }
 }

@@ -76,13 +76,14 @@
 //! Not the keymap either — see [`crate::input_keys`], which is also where the
 //! decision to hand a keystroke to the shell instead is made.
 
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::ops::Range;
 
 use crook_terminal::Snapshot;
 use crookui_core::AppContext;
 use crookui_core::element::{Element, SizeConstraint};
-use crookui_core::event::{DispatchedEvent, Event, Keystroke, MouseButton};
+use crookui_core::event::{DispatchedEvent, Event, Ime, Keystroke, MouseButton};
 use crookui_core::geometry::{Color, Point, RectF, Vector2F, vec2f};
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 use crookui_core::scene::{ClipBounds, CornerRadius, Radius, Scene};
@@ -90,19 +91,26 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
 use crate::clipboard::Clipboard;
-use crate::input_keys::{self, Platform, Route};
+use crate::editor::Editor;
+use crate::input_keys::{self, Intent, Platform, Route};
 use crate::pane_blocks::{PaneBlocks, ScrollCause};
 use crate::pane_selection::PaneSelection;
 use crate::selection::Cells;
+use crate::tab::PaneId;
 use crate::terminal_font::{CellFont, CellMetrics};
 use crate::terminal_model::TerminalHandle;
+use crate::text_input::Preedit;
 use crate::text_input::TextInput;
 use crate::theme::theme;
 
+use super::action::WorkspaceAction;
 use super::terminal_element::color;
 
 /// The tallest the composer ever grows, in rows.
 const MAX_ROWS: usize = 8;
+
+/// How thick the rule under a composition is, as a fraction of the cell.
+const PREEDIT_RULE_RATIO: f32 = 0.06;
 
 /// How wide the caret is drawn.
 ///
@@ -170,6 +178,9 @@ pub struct CommandInput {
     /// The shell a submitted line is sent to, when there is one.
     terminal: Option<TerminalHandle>,
 
+    /// Which pane this field belongs to, for the actions that name one.
+    pane: Option<PaneId>,
+
     /// What the pane's output has selected, which this element does two things
     /// with: it never takes the copy chord away from it, and clicking in here
     /// lets go of it.
@@ -215,6 +226,7 @@ impl CommandInput {
             clipboard,
             ink: Ink::default(),
             terminal: None,
+            pane: None,
             selection: None,
             blocks: None,
             focused: false,
@@ -244,6 +256,16 @@ impl CommandInput {
     /// here returns it to its own end.
     pub fn with_blocks(mut self, blocks: PaneBlocks) -> Self {
         self.blocks = Some(blocks);
+        self
+    }
+
+    /// Says which pane this field belongs to, for the actions that name one.
+    ///
+    /// A completion is the only one today: the question needs the terminal
+    /// model rather than the handle this element holds, so it is dispatched
+    /// rather than called, and an action has to say which pane it is about.
+    pub fn for_pane(mut self, pane: PaneId) -> Self {
+        self.pane = Some(pane);
         self
     }
 
@@ -312,6 +334,17 @@ impl CommandInput {
                 .is_some_and(|selection| selection.has_selection_in(Cells::List)),
         };
         match input_keys::route(keystroke, chars, pane, Platform::current()) {
+            // Not an edit: the line goes to the shell and the answer comes
+            // back frames later. Dispatched rather than called, because the
+            // question needs the terminal *model* — only it knows where this
+            // session's scratch directory is — and this element holds a
+            // handle to the terminal and nothing else.
+            Route::Edit(Intent::Complete) => {
+                if let Some(id) = self.pane {
+                    ctx.dispatch_typed_action(WorkspaceAction::Complete(id));
+                }
+                true
+            }
             Route::Edit(intent) => {
                 if let Some(line) = self.input.apply(intent, &self.clipboard) {
                     self.send(&line);
@@ -364,6 +397,16 @@ impl CommandInput {
         };
         if !self.takes_press(position - bounds.origin(), bounds.width()) {
             return false;
+        }
+
+        // **A click cannot move the caret while an input method is composing.**
+        // The offsets the pointer resolves against are offsets into the line
+        // as drawn, which carries a preedit the editor has never heard of, so
+        // one taken from past the composition would be past the end of the
+        // editor's own text. The press is still taken, so that it does not
+        // fall through to the output above and clear a selection there.
+        if self.input.is_composing() {
+            return true;
         }
 
         // Clicking into the field lets go of whatever was selected in the
@@ -429,6 +472,11 @@ impl CommandInput {
     /// Wrapped again rather than read off the last layout: a keystroke and a
     /// click can arrive between two frames, and rows measured against text
     /// that has since changed would point into the middle of it.
+    ///
+    /// Always against the editor's *own* text, never the composed line: this
+    /// answer becomes a caret offset, and an offset into a string carrying a
+    /// preedit the editor has never heard of would point past the end of it.
+    /// While a composition is open nothing calls this — see [`Self::press`].
     fn offset_at(&self, local: Vector2F) -> usize {
         let metrics = self.font.metrics();
         let width = self.size.map_or(0., Vector2F::x);
@@ -443,6 +491,68 @@ impl CommandInput {
         );
         rows.at_point(editor.text(), local, metrics)
     }
+
+    /// Applies what an input method said, reporting whether the frame changed.
+    ///
+    /// A commit is an insertion and nothing more: it goes through the editor
+    /// exactly as typed text does, so it lands in the undo history, replaces
+    /// the selection and reaches a submitted line the same way. Everything
+    /// else only moves the preedit, which is not text and never touches the
+    /// editor at all.
+    fn compose(&self, ime: &Ime, ctx: &mut EventContext) -> bool {
+        if !self.input.has_keys() {
+            return false;
+        }
+
+        let changed = match ime {
+            // A composition starting means anything left over from the last
+            // one is stale, whatever ended it.
+            Ime::Enabled | Ime::Disabled => self.input.clear_preedit(),
+            Ime::Preedit { text, cursor } => {
+                let caret = cursor.map_or(text.len(), |(start, _)| start);
+                self.input.set_preedit(text, caret)
+            }
+            Ime::Commit(text) => {
+                self.input.clear_preedit();
+                self.input.edit(|editor| editor.insert(text));
+                true
+            }
+        };
+
+        if changed {
+            ctx.notify();
+        }
+        changed
+    }
+}
+
+/// The line as it is drawn, and where the caret goes in it.
+///
+/// With nothing being composed this is the editor's own text, borrowed. With a
+/// composition open it is that text with the preedit spliced in at the caret,
+/// and the caret moved to wherever the input method put its own — which is how
+/// a half-typed Japanese word appears in the field rather than in a floating
+/// box somewhere near it.
+///
+/// The third value is the preedit's range in the returned string, which is
+/// what gets the underline that says "this is not text yet".
+fn composed<'a>(
+    editor: &'a Editor,
+    preedit: &Preedit,
+) -> (Cow<'a, str>, usize, Option<Range<usize>>) {
+    if preedit.is_empty() {
+        return (Cow::Borrowed(editor.text()), editor.caret(), None);
+    }
+
+    let at = editor.caret();
+    let text = editor.text();
+    let mut composed = String::with_capacity(text.len() + preedit.text().len());
+    composed.push_str(&text[..at]);
+    composed.push_str(preedit.text());
+    composed.push_str(&text[at..]);
+
+    let range = at..at + preedit.text().len();
+    (Cow::Owned(composed), at + preedit.caret(), Some(range))
 }
 
 impl Element for CommandInput {
@@ -464,20 +574,21 @@ impl Element for CommandInput {
         let metrics = self.font.metrics();
         let budget = row_budget(constraint.max.y(), metrics, self.pane_rows());
         let editor = self.input.editor();
-        let rows = Rows::of(
-            editor.text(),
-            editor.caret(),
-            width,
-            metrics,
-            budget,
-            self.inline,
-        );
+        let preedit = self.input.preedit();
+        // Laid out against the *composed* line, so that a field whose preedit
+        // has pushed it onto a second row is given that row's height. Measuring
+        // the editor's text and painting the composition would draw the last
+        // row outside the box.
+        let (text, caret, _) = composed(&editor, &preedit);
+        let rows = Rows::of(&text, caret, width, metrics, budget, self.inline);
         // Short by the row shared with the prompt, which the list above has
         // already been given the space for. A one-line field that continues a
         // prompt therefore measures zero and the whole column is a row
         // shorter, which is the point: the line being typed is *on* the
         // prompt's row rather than under it.
         let height = rows.height(metrics);
+        drop(text);
+        drop(preedit);
         drop(editor);
 
         let size = vec2f(
@@ -540,6 +651,7 @@ impl Element for CommandInput {
 
         match event {
             Event::KeyDown { keystroke, chars } => self.type_key(keystroke, chars, ctx),
+            Event::Ime(ime) => self.compose(ime, ctx),
             Event::MouseDown {
                 button: MouseButton::Left,
                 position,
@@ -949,11 +1061,21 @@ fn paint_input(
 ) {
     let metrics = font.metrics();
     let editor = input.editor();
-    let text = editor.text();
+    let preedit = input.preedit();
+    let (text, caret_offset, composing) = composed(&editor, &preedit);
+    let text = text.as_ref();
 
-    let selection = editor.selection().range();
+    // No selection is drawn while a composition is open. An input method
+    // replaces the selection when it commits, so a highlight standing beside
+    // the preedit would be pointing at text that is about to go — and its
+    // offsets are the editor's, which the composed line has already moved.
+    let selection = if composing.is_some() {
+        0..0
+    } else {
+        editor.selection().range()
+    };
     let caret = (focused && input.caret_is_visible())
-        .then(|| rows.place(text, editor.caret()))
+        .then(|| rows.place(text, caret_offset))
         .flatten();
 
     for (row, range) in rows.iter().enumerate() {
@@ -976,10 +1098,34 @@ fn paint_input(
         }
     }
 
+    // The rule under a composition, drawn before the caret so the caret sits
+    // over it. It is what says the text above it is not text yet: an input
+    // method's own candidate list is somewhere else on screen entirely, and
+    // without this there is nothing to tell a half-converted word from a
+    // committed one.
+    if let Some(range) = composing {
+        paint_preedit_rule(text, &range, rows, origin, metrics, ink.caret, scene);
+    }
+
     // Last, so that it is drawn over the selection it may be sitting in. In
     // the *terminal's* cursor colour, which is the one the grid paints the
     // shell's own cursor in: a caret in the accent would be a form field's,
     // and would disagree with the block above it.
+    //
+    // Where it lands is also recorded, because it is the one thing the window
+    // needs in order to put an input method's candidate list beside the text
+    // being composed rather than in a corner. It is recorded whether or not
+    // the caret was *drawn*: a blink that happened to be in its dark half
+    // must not move the candidate list.
+    let placed = rows.place(text, caret_offset);
+    input.set_caret_rect(placed.map(|(row, column)| {
+        let at = origin + rows.offset(row, metrics);
+        RectF::new(
+            vec2f(at.x() + column as f32 * metrics.width, at.y()),
+            vec2f(metrics.width, metrics.height),
+        )
+    }));
+
     if let Some((row, column)) = caret {
         let height = metrics.height * CARET_HEIGHT;
         let at = origin + rows.offset(row, metrics);
@@ -993,6 +1139,40 @@ fn paint_input(
             ))
             .with_background(ink.caret)
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CARET_WIDTH / 2.)));
+    }
+}
+
+/// Underlines the cells a composition occupies, one rule per drawn row.
+///
+/// The range is in bytes of the composed line, and a preedit long enough to
+/// wrap covers part of several rows — so this intersects it with each row
+/// rather than assuming one.
+fn paint_preedit_rule(
+    text: &str,
+    range: &Range<usize>,
+    rows: &Rows,
+    origin: Vector2F,
+    metrics: CellMetrics,
+    color: Color,
+    scene: &mut Scene,
+) {
+    let thickness = (metrics.height * PREEDIT_RULE_RATIO).max(1.);
+    for (row, span) in rows.iter().enumerate() {
+        let start = range.start.max(span.start);
+        let end = range.end.min(span.end);
+        if start >= end {
+            continue;
+        }
+
+        let at = origin + rows.offset(row, metrics);
+        let from = cells(&text[span.start..start]) as f32 * metrics.width;
+        let width = cells(&text[start..end]) as f32 * metrics.width;
+        scene
+            .draw_rect_without_hit_recording(RectF::new(
+                vec2f(at.x() + from, at.y() + metrics.height - thickness),
+                vec2f(width, thickness),
+            ))
+            .with_background(color);
     }
 }
 

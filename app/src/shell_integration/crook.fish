@@ -48,6 +48,45 @@ and begin
         __crook_mark D
     end
 
+    # Completion, which is the one thing the marks above cannot do: they are an
+    # announcement, and this is a question with an answer.
+    #
+    # The line does not arrive in the key sequence. It is in a file Crook wrote
+    # — a command line can hold a semicolon, a newline and bytes that are not
+    # UTF-8, and escaping all of them past a shell and past an OSC parser twice
+    # over is a protocol nobody should have to debug. The answer goes back the
+    # same way, and the escape sequence carries only the request's number.
+    #
+    # fish is the shell this is easy in: `complete -C` is exactly this
+    # question, and its answer is the real one — every `complete` definition
+    # fish has, not an approximation built out of globs.
+    function __crook_complete
+        test -n "$CROOK_SCRATCH"; or return
+        set --local request "$CROOK_SCRATCH/complete.in"
+        set --local answer "$CROOK_SCRATCH/complete.out"
+        test -f "$request"; or return
+
+        # The first line is the request's number; everything after it is the
+        # line up to the caret. It is the *prefix* rather than the whole line
+        # and a cursor offset, because that is the question every shell's
+        # completion actually answers.
+        set --local content (cat "$request")
+        set --local serial $content[1]
+        set --local line (string join \n $content[2..-1])
+
+        # `complete --do-complete` answers with `completion<TAB>description`,
+        # and each completion is the whole word rather than the part that is
+        # missing — which is what Crook wants, because it is replacing a word.
+        complete --do-complete="$line" 2>/dev/null \
+            | string replace --regex '\t.*$' '' >"$answer"
+        printf '\e]6339;%s\a' $serial
+    end
+
+    bind \e\[6339~ __crook_complete
+    # fish keeps insert and default mode bindings apart, and a person in vi
+    # mode types in insert mode.
+    bind --mode insert \e\[6339~ __crook_complete 2>/dev/null
+
     function __crook_has_mode_prompt --description 'Whether fish_mode_prompt prints anything'
         functions --query fish_mode_prompt
         and functions fish_mode_prompt | string match --regex --invert --quiet '^ *(#|function |end$|$)'

@@ -24,7 +24,8 @@ use super::widgets::{Category, Entry};
 use super::{Control, Section};
 use crate::input_keys::Platform;
 use crate::settings::{
-    Density, Granularity, Layout, PrimaryInfo, TabOptions, resolve_subtitle, subtitle_options_for,
+    Density, FONT_SIZE_STEP, Granularity, Layout, PrimaryInfo, TabOptions, resolve_subtitle,
+    subtitle_options_for,
 };
 
 /// A binding as this platform spells it.
@@ -149,10 +150,90 @@ fn appearance(workspace: &Workspace) -> Vec<Category> {
         ui,
     );
 
+    let restore = widgets::row(
+        Words::new("Bring the tabs back")
+            .with_description(
+                "Open with the tabs and splits the last window had, in their own directories.",
+            )
+            .with_keywords(&["session", "restore", "reopen", "startup", "remember"]),
+        true,
+        widgets::switch(
+            workspace.general().restore_session,
+            Some(SettingsAction::ToggleRestoreSession.into()),
+            state.control(Control::RestoreSession),
+        ),
+        ui,
+    );
+
     vec![
         widgets::category("Theme", theme_category(workspace)),
-        widgets::category("Tabs", vec![placement, granularity, density]),
+        widgets::category("Text", text_category(workspace)),
+        widgets::category("Tabs", vec![placement, granularity, density, restore]),
         widgets::category("Rows", rows_category(workspace)),
+    ]
+}
+
+/// The "Text" category: how big the terminal's own type is, and which family
+/// it is set in.
+///
+/// The size is a control; the family is a fact. Changing a family means
+/// re-selecting four faces, re-measuring the cell and resizing every pty in
+/// the window against a list of what is installed — and there is no element to
+/// choose from such a list with, because `crookui_core` has no text field and
+/// no combo box. So the family is set in the settings file, under
+/// `font_family`, and this row says which one answered.
+fn text_category(workspace: &Workspace) -> Vec<Entry> {
+    let ui = workspace.fonts().ui;
+    let state = workspace.settings_page();
+    let general = workspace.general();
+    let size = general.font_size();
+
+    // `None` at each end of the range, which draws the button de-emphasised
+    // and inert — the same "there is nothing to do here" the reset button has.
+    let step = |by: f32| {
+        let next = general.zoomed(by);
+        (next != size).then(|| SettingsAction::SetFontSize(next).into())
+    };
+
+    let size_row = widgets::row(
+        Words::new("Text size")
+            .with_description("How big the terminal's own text is. Every pane resizes with it.")
+            .with_keywords(&["font", "zoom", "bigger", "smaller", "scale", "type"]),
+        true,
+        widgets::stepper(
+            format!("{size}"),
+            step(-FONT_SIZE_STEP),
+            state.control(Control::FontSmaller),
+            step(FONT_SIZE_STEP),
+            state.control(Control::FontBigger),
+            ui,
+        ),
+        ui,
+    );
+
+    // What the settings file asked for, which is not quite the same as what
+    // answered: a family is resolved once, at startup, and a name nothing on
+    // this machine answers to falls back with a line in the log. The note
+    // under the row says so rather than this row pretending to know.
+    let chosen = workspace
+        .settings()
+        .font_family()
+        .map_or_else(|| "System default".to_owned(), str::to_owned);
+
+    vec![
+        size_row,
+        widgets::fact(
+            Words::new("Font").with_keywords(&["family", "typeface", "monospace", "font_family"]),
+            chosen,
+            false,
+            workspace.fonts(),
+        ),
+        widgets::note(
+            "The font is whichever monospace family this machine calls its default, unless the \
+             settings file names another under \"font_family\". It is read once, when Crook \
+             starts, and a name nothing answers to is a line in the log and the default.",
+            ui,
+        ),
     ]
 }
 
@@ -193,6 +274,36 @@ fn theme_category(workspace: &Workspace) -> Vec<Entry> {
             workspace.theme_name().to_owned(),
             ThemeAction::OpenPanel.into(),
             state.control(Control::ThemeRowButton),
+            ui,
+        ),
+        widgets::row(
+            Words::new("Follow the desktop")
+                .with_description(
+                    "Use one theme while the desktop is light and another while it is dark.",
+                )
+                .with_keywords(&["system", "light", "dark", "auto", "appearance", "os"]),
+            true,
+            widgets::switch(
+                workspace.general().use_system_theme,
+                Some(SettingsAction::ToggleFollowSystemTheme.into()),
+                state.control(Control::FollowSystemTheme),
+            ),
+            ui,
+        ),
+        widgets::fact(
+            Words::new("Light / dark").with_keywords(&["pair", "system", "theme"]),
+            format!(
+                "{} / {}",
+                workspace.settings().light_theme(),
+                workspace.settings().dark_theme()
+            ),
+            false,
+            fonts,
+        ),
+        widgets::note(
+            "While the desktop is being followed, choosing a theme sets the half it is currently \
+             in, so the other one is left as it was. The pair is remembered whether or not the \
+             switch is on.",
             ui,
         ),
         widgets::note(
@@ -588,10 +699,43 @@ fn keys(workspace: &Workspace) -> Vec<Category> {
                     key("Open these settings").with_keywords(&["preferences", "options", "config"]),
                     chord("cmd-,", "ctrl-,"),
                 ),
+                binding(
+                    key("Make the text bigger / smaller")
+                        .with_keywords(&["zoom", "font", "size", "scale"]),
+                    chord("cmd-+ / cmd--", "ctrl-+ / ctrl--"),
+                ),
+                binding(
+                    key("Put the text back to its size").with_keywords(&["zoom", "reset", "font"]),
+                    chord("cmd-0", "ctrl-0"),
+                ),
                 widgets::note(
                     "These settings are a pane, like a session is, so they close the way every \
                      pane does and have no key of their own for it. Pressing the binding again \
                      brings this tab forward rather than closing it.",
+                    ui,
+                ),
+                widgets::fact(
+                    Words::new("Keymap file").with_keywords(&[
+                        "bindings",
+                        "shortcuts",
+                        "chords",
+                        "rebind",
+                        "keymap",
+                    ]),
+                    crate::keymap::user_keymap_path()
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| {
+                            "nowhere — this machine has no configuration directory".to_owned()
+                        }),
+                    true,
+                    fonts,
+                ),
+                widgets::note(
+                    "A chord in that file wins over the one above it, and \"none\" takes a chord \
+                     away — which is how one is given back to a shell or an editor that wants \
+                     it. It is read when Crook starts. What a pane does with a key is not in it: \
+                     ctrl-c interrupts and ctrl-d ends an input, and a keymap that could take \
+                     one of those away would be one that breaks a terminal.",
                     ui,
                 ),
                 widgets::note(

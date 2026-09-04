@@ -75,10 +75,17 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+use crook_terminal::url::{self, Url};
 use crook_terminal::{
-    BlockId, CellFlags, CellSide, Cursor, CursorShape, Rgb, RowCombining, Rows, SelectionKind,
-    Snapshot, SnapshotCell,
+    BlockId, CellFlags, CellSide, Cursor, CursorShape, MouseEventKind, Rgb, RowCombining, Rows,
+    SelectionKind, Snapshot, SnapshotCell,
 };
+// Both crates have a `MouseButton` and they are different types: one is what a
+// window reported, the other is what a terminal protocol names. Keeping the
+// unqualified name for the window's own is what makes every event pattern in
+// this file read the way it did before mouse reporting existed.
+use crook_terminal::Modifiers as ReportedModifiers;
+use crook_terminal::MouseButton as ReportedButton;
 use crookui_core::AppContext;
 use crookui_core::element::{Element, SizeConstraint};
 use crookui_core::event::{DispatchedEvent, Event, Modifiers, MouseButton};
@@ -86,7 +93,10 @@ use crookui_core::geometry::{Color, Point, RectF, Vector2F, vec2f};
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 use crookui_core::scene::Scene;
 
+use crate::browser;
 use crate::clipboard::Clipboard;
+use crate::input_keys::Platform;
+use crate::pane_link::{LinkRow, LinkSpan, PaneLink};
 use crate::pane_selection::PaneSelection;
 use crate::pane_surface;
 use crate::selection::{Anchor, Blocks, Cells, Item, Region, Selection, grid_first_row};
@@ -115,6 +125,72 @@ const STRIKEOUT_HEIGHT_RATIO: f32 = 0.28;
 /// How wide the beam cursor and the hollow block's outline are drawn.
 const CURSOR_STROKE: f32 = 2.;
 
+/// The most wheel notches one scroll event is reported as.
+///
+/// A trackpad fling arrives as a single event carrying a large pixel delta, and
+/// the mouse protocol counts notches: without a bound, one flick of two fingers
+/// would be hundreds of six-byte writes down a pty for a screen that can only
+/// scroll as far as it has lines.
+const MAX_WHEEL_NOTCHES: u32 = 16;
+
+/// Whether these modifiers mean "the pointer is following links right now".
+///
+/// The platform's own chord key, which is the one every terminal uses for
+/// this: Command on macOS, Control everywhere else. It has to be a modifier
+/// rather than a plain click, because the pointer is already spoken for — a
+/// terminal where clicking a URL opened a browser is a terminal you cannot
+/// select a URL in.
+pub(super) fn opens_links(modifiers: Modifiers) -> bool {
+    match Platform::current() {
+        Platform::Mac => modifiers.cmd && !modifiers.ctrl,
+        // Not with Shift, which suspends mouse reporting and is how a drag is
+        // taken out of a program that has the pointer. Two meanings for one
+        // combination is one too many.
+        Platform::Other => modifiers.ctrl && !modifiers.cmd && !modifiers.shift,
+    }
+}
+
+/// Underlines the cells a link occupies.
+///
+/// Its own function because both surfaces draw it: a URL printed by a running
+/// command is on the grid, and the same URL a moment later is a row of a
+/// finished block.
+pub(super) fn paint_link_rule(
+    row_origin: Vector2F,
+    start: usize,
+    len: usize,
+    metrics: CellMetrics,
+    color: Color,
+    scene: &mut Scene,
+) {
+    let thickness = (metrics.height * RULE_THICKNESS_RATIO).max(1.);
+    scene
+        .draw_rect_without_hit_recording(RectF::new(
+            vec2f(
+                row_origin.x() + start as f32 * metrics.width,
+                row_origin.y() + metrics.height - thickness,
+            ),
+            vec2f(len as f32 * metrics.width, thickness),
+        ))
+        .with_background(color);
+}
+
+/// The terminal's name for a button the window reported, or `None` for one the
+/// mouse protocol has no number for.
+///
+/// The two side buttons of a five-button mouse are the `None` case. The
+/// protocol does have codes for them, and nothing that reads the mouse in a
+/// terminal has ever expected one, so sending them would be inventing traffic
+/// rather than reporting a gesture.
+fn reported(button: MouseButton) -> Option<ReportedButton> {
+    match button {
+        MouseButton::Left => Some(ReportedButton::Left),
+        MouseButton::Middle => Some(ReportedButton::Middle),
+        MouseButton::Right => Some(ReportedButton::Right),
+        MouseButton::Back | MouseButton::Forward => None,
+    }
+}
+
 /// One pane's terminal grid.
 pub struct TerminalElement {
     /// The grid to paint. Replaced during layout when the pane resized the pty
@@ -127,6 +203,11 @@ pub struct TerminalElement {
     /// same way. See [`Output`].
     output: Output,
 
+    /// The link under the pointer, which the workspace keeps per pane because
+    /// the move that finds one and the frame that underlines it are different
+    /// frames. `None` for a grid nothing can be clicked in.
+    links: Option<PaneLink>,
+
     size: Option<Vector2F>,
     origin: Option<Point>,
 }
@@ -138,6 +219,7 @@ impl TerminalElement {
             snapshot,
             font,
             output: Output::detached(),
+            links: None,
             size: None,
             origin: None,
         }
@@ -172,6 +254,71 @@ impl TerminalElement {
         self
     }
 
+    /// Makes the URLs the shell printed clickable, through the link state the
+    /// workspace keeps for this pane.
+    pub fn with_links(mut self, links: PaneLink) -> Self {
+        self.links = Some(links);
+        self
+    }
+
+    /// Finds the link under the pointer, or lets go of the one that was there.
+    ///
+    /// Only while the platform's own chord key is held: the pointer is already
+    /// spoken for by the selection, and a click that opened a browser instead
+    /// of placing a selection would be a terminal you cannot copy a URL out
+    /// of. Reports whether the frame changed.
+    fn track_link(&self, position: Vector2F, modifiers: Modifiers) -> bool {
+        let Some(links) = self.links.as_ref() else {
+            return false;
+        };
+
+        let found = self
+            .link_at(position, modifiers)
+            .map(|(row, url)| LinkSpan {
+                row: LinkRow::Viewport(row),
+                start: url.start,
+                len: url.len,
+                uri: url.uri,
+            });
+        links.set(found)
+    }
+
+    /// The URL under a window position, and the viewport row it is on.
+    ///
+    /// `None` unless the link modifier is held, which is what keeps this scan
+    /// off every ordinary pointer move.
+    fn link_at(&self, position: Vector2F, modifiers: Modifiers) -> Option<(usize, Url)> {
+        if !opens_links(modifiers) {
+            return None;
+        }
+        if !self
+            .bounds()
+            .is_some_and(|bounds| bounds.contains_point(position))
+        {
+            return None;
+        }
+
+        // The *viewport's* row, because that is what the snapshot is indexed
+        // by. A selection's anchor names a row of the text instead, which is a
+        // different number the moment anything has scrolled.
+        let (row, column) = self.viewport_cell_at(position)?;
+        if row >= self.snapshot.rows {
+            return None;
+        }
+        // One `char` per cell, which is what `url::at` counts in.
+        let text: String = self.snapshot.row(row).iter().map(|cell| cell.c).collect();
+        let url = url::at(&text, column)?;
+        Some((row, url))
+    }
+
+    /// Opens the link under the pointer, reporting whether there was one.
+    fn open_link(&self, position: Vector2F, modifiers: Modifiers) -> bool {
+        let Some((_, url)) = self.link_at(position, modifiers) else {
+            return false;
+        };
+        browser::open(&url.uri)
+    }
+
     /// The grid as the one block a selection addresses.
     ///
     /// Under the name the anchors already carry rather than the one the open
@@ -201,9 +348,11 @@ impl TerminalElement {
         self.output.type_key(event, self.snapshot.alt_screen, ctx) != Typed::Ignored
     }
 
-    /// Starts a selection where a press landed.
+    /// Starts a selection where a press landed, or hands the press to a
+    /// program that is reading the mouse.
     fn press(
         &self,
+        button: MouseButton,
         position: Vector2F,
         click_count: u32,
         modifiers: Modifiers,
@@ -212,15 +361,81 @@ impl TerminalElement {
         let Some(at) = self.anchor_at(position) else {
             return false;
         };
+
+        if self.report(MouseEventKind::Press, reported(button), position, modifiers) {
+            self.output.begin_reporting();
+            return true;
+        }
+
+        // Only the primary button selects. A right or middle click a program
+        // did not want has nothing to do with a selection, and taking one
+        // would throw away the highlight somebody was about to copy.
+        if button != MouseButton::Left {
+            return false;
+        }
         let kind = selection_kind(click_count, modifiers.alt);
         let covers = self.covers(kind, at, at);
         self.output
             .press(kind, at, covers, self.snapshot.columns, ctx)
     }
 
+    /// Hands a gesture to the program in this pane, if it asked for the mouse.
+    ///
+    /// **Shift is the way out.** Every terminal makes holding it suspend mouse
+    /// reporting, because otherwise there is no way at all to select text out
+    /// of a program that has taken the pointer — and copying what `htop` is
+    /// showing is a thing people do constantly. Holding it therefore reports
+    /// nothing, and the gesture falls through to the selection below.
+    fn report(
+        &self,
+        kind: MouseEventKind,
+        button: Option<ReportedButton>,
+        position: Vector2F,
+        modifiers: Modifiers,
+    ) -> bool {
+        if modifiers.shift {
+            return false;
+        }
+        let Some((row, column)) = self.viewport_cell_at(position) else {
+            return false;
+        };
+        self.output.report_mouse(
+            kind,
+            button,
+            row,
+            column,
+            ReportedModifiers {
+                shift: false,
+                control: modifiers.ctrl,
+                alt: modifiers.alt,
+                logo: modifiers.cmd,
+            },
+        )
+    }
+
     /// Drags the open end of the selection to the pointer, scrolling the
     /// viewport when the pointer has left the grid.
-    fn drag(&self, position: Vector2F, ctx: &mut EventContext) -> bool {
+    fn drag(
+        &self,
+        button: MouseButton,
+        position: Vector2F,
+        modifiers: Modifiers,
+        ctx: &mut EventContext,
+    ) -> bool {
+        // A drag a program took goes on being reported to it, wherever the
+        // pointer has got to. It is clamped into the grid rather than dropped
+        // outside it for the same reason a selection is: a drag that left the
+        // window is still a drag, and `vim` resizing a split needs to hear
+        // about the row the pointer is level with.
+        if self.output.is_reporting() {
+            return self.report(
+                MouseEventKind::Motion,
+                reported(button),
+                position,
+                modifiers,
+            );
+        }
+
         // Deliberately not hit-tested: dragging *past* the pane is how a
         // selection is taken to the end of a line, and how it is taken past
         // the end of the screen. What keeps this pane's grid out of a drag
@@ -243,8 +458,43 @@ impl TerminalElement {
         self.output.drag(at, covers, ctx)
     }
 
+    /// Reports a pointer move that no button is behind, for a program that
+    /// asked for `?1003`.
+    ///
+    /// Hit-tested, unlike a drag: with no button down there is no gesture that
+    /// began here, so a pointer crossing a neighbouring pane is not this one's
+    /// to report.
+    fn moved(&self, position: Vector2F, modifiers: Modifiers) -> bool {
+        if self.output.is_dragging()
+            || self.output.is_reporting()
+            || !self.output.mouse_modes().motion
+        {
+            return false;
+        }
+        if !self
+            .bounds()
+            .is_some_and(|bounds| bounds.contains_point(position))
+        {
+            return false;
+        }
+        self.report(MouseEventKind::Motion, None, position, modifiers)
+    }
+
     /// Ends the gesture, reporting whether this pane had one.
-    fn release(&self) -> bool {
+    ///
+    /// A press a program took and a press that was dragging a selection are
+    /// two different gestures with one button, and the release belongs to
+    /// whichever of them was open.
+    fn release(&self, button: MouseButton, position: Vector2F, modifiers: Modifiers) -> bool {
+        if self.output.end_reporting() {
+            self.report(
+                MouseEventKind::Release,
+                reported(button),
+                position,
+                modifiers,
+            );
+            return true;
+        }
         self.output.release()
     }
 
@@ -261,6 +511,36 @@ impl TerminalElement {
     /// the oldest line the scrollback holds, which is what keeps a selection on
     /// the text it was dragged across while the viewport moves over it — and
     /// it is the same numbering [`Self::addressed`] hands the region.
+    /// The cell of the *viewport* a window position lands on.
+    ///
+    /// Not an [`Anchor`], and the difference is the whole reason both exist. An
+    /// anchor names a row of the *text*, numbered so that it stays on its own
+    /// characters while the viewport scrolls under it; the mouse protocol names
+    /// a row of the *screen*, because that is what the program drawing on it is
+    /// addressing. A drag through the scrollback needs the first; `htop` needs
+    /// the second.
+    ///
+    /// Clamped into the grid rather than refused outside it, for the reason a
+    /// drag is: a pointer that has left the pane is still pointing at the row
+    /// it is level with.
+    fn viewport_cell_at(&self, position: Vector2F) -> Option<(usize, usize)> {
+        let bounds = self.bounds()?;
+        let metrics = self.font.metrics();
+        let (fitting_columns, fitting_rows) = metrics.grid_for(bounds.width(), bounds.height());
+        let columns = usize::from(fitting_columns).min(self.snapshot.columns);
+        let rows = usize::from(fitting_rows).min(self.snapshot.rows);
+        if columns == 0 || rows == 0 {
+            return None;
+        }
+
+        let local = position - bounds.origin();
+        let (column, _) = column_at(local.x(), metrics.width, columns);
+        let row = (local.y() / metrics.height)
+            .floor()
+            .clamp(0., (rows - 1) as f32) as usize;
+        Some((row, column))
+    }
+
     fn anchor_at(&self, position: Vector2F) -> Option<Anchor> {
         let bounds = self.bounds()?;
         let metrics = self.font.metrics();
@@ -326,9 +606,23 @@ impl TerminalElement {
 
     /// Moves the viewport through the scrollback, if the wheel turned over this
     /// pane.
+    /// Moves the viewport through the scrollback, if the wheel turned over this
+    /// pane — or gives the wheel to whatever is running instead.
+    ///
+    /// Three destinations, in the order every terminal tries them:
+    ///
+    /// 1. **A program reading the mouse** gets the notch as button 64 or 65,
+    ///    which is how `tmux` scrolls its own pane and `vim` its own buffer.
+    /// 2. **A full-screen program that asked for `?1007`** gets arrow keys.
+    ///    That is what makes the wheel work in `less`, `man` and `git log`,
+    ///    none of which reports the mouse.
+    /// 3. **Everything else** scrolls the emulator's history, which is the
+    ///    only one of the three that is Crook's own scrollback.
     fn scroll(&self, event: &Event) -> bool {
         let Event::ScrollWheel {
-            position, delta, ..
+            position,
+            delta,
+            modifiers,
         } = event
         else {
             return false;
@@ -344,14 +638,49 @@ impl TerminalElement {
             return false;
         };
         let height = self.font.metrics().height;
+        // Positive is up the screen and back into history, which is the sense
+        // both the wheel and the emulator use.
         let lines = (delta.to_pixels(height).y() / height).round() as i32;
         if lines == 0 {
             return false;
         }
-        // Positive is up the screen and back into history, which is the sense
-        // both the wheel and the emulator use.
+
+        // Shift takes the wheel back from whatever is running, the same way it
+        // takes a press back: it is the one gesture that always means Crook's
+        // own scrollback. On the alternate screen there is no history to move
+        // through, so it lands on nothing — which is the honest answer, and
+        // better than a program scrolling when somebody asked it not to.
+        if !modifiers.shift {
+            if self.report_wheel(lines, *position, *modifiers) {
+                return true;
+            }
+            if self.output.alternate_scroll(lines) {
+                return true;
+            }
+        }
+
         handle.scroll_lines(lines);
         true
+    }
+
+    /// Sends `lines` notches of the wheel to a program reading the mouse.
+    ///
+    /// One report per line, because a notch is what the protocol counts and
+    /// there is no way to say "three" in one. Bounded, so that a trackpad
+    /// fling cannot turn into hundreds of writes down a pty.
+    fn report_wheel(&self, lines: i32, position: Vector2F, modifiers: Modifiers) -> bool {
+        let button = if lines > 0 {
+            ReportedButton::WheelUp
+        } else {
+            ReportedButton::WheelDown
+        };
+
+        let notches = lines.unsigned_abs().min(MAX_WHEEL_NOTCHES);
+        let mut sent = false;
+        for _ in 0..notches {
+            sent |= self.report(MouseEventKind::Press, Some(button), position, modifiers);
+        }
+        sent
     }
 }
 
@@ -417,6 +746,27 @@ impl Element for TerminalElement {
             selected,
             ctx.scene,
         );
+
+        // Over the grid, because it is an affordance rather than something the
+        // shell printed: it appears when the chord key goes down and goes away
+        // when it comes up, and the cells under it are unchanged.
+        if let Some(link) = self
+            .links
+            .as_ref()
+            .and_then(|links| links.on_viewport_rows(self.snapshot.rows))
+        {
+            let LinkRow::Viewport(row) = link.row else {
+                return;
+            };
+            paint_link_rule(
+                origin + vec2f(0., row as f32 * self.font.metrics().height),
+                link.start,
+                link.len,
+                self.font.metrics(),
+                color(self.snapshot.foreground),
+                ctx.scene,
+            );
+        }
     }
 
     fn dispatch_event(
@@ -440,14 +790,15 @@ impl Element for TerminalElement {
         // out is [`PaneSelection`]: only the pane the press landed on has one.
         match event.raw_event() {
             Event::MouseDragged {
-                button: MouseButton::Left,
+                button,
                 position,
-                ..
-            } => return self.drag(*position, ctx),
+                modifiers,
+            } => return self.drag(*button, *position, *modifiers, ctx),
             Event::MouseUp {
-                button: MouseButton::Left,
-                ..
-            } => return self.release(),
+                button,
+                position,
+                modifiers,
+            } => return self.release(*button, *position, *modifiers),
             _ => {}
         }
 
@@ -469,13 +820,60 @@ impl Element for TerminalElement {
             Event::MouseDown {
                 button: MouseButton::Left,
                 position,
+                modifiers,
+                ..
+            } if self.open_link(*position, *modifiers) => {
+                // Before the press below, and instead of it. A chord-click on a
+                // link is not a selection gesture, and starting one would leave
+                // a highlight behind the browser that just opened.
+                true
+            }
+            Event::MouseDown {
+                button,
+                position,
                 click_count,
                 modifiers,
             } if self
                 .bounds()
                 .is_some_and(|bounds| bounds.contains_point(*position)) =>
             {
-                self.press(*position, *click_count, *modifiers, ctx)
+                self.press(*button, *position, *click_count, *modifiers, ctx)
+            }
+            // A bare move: it lights up a link under the pointer, and it is
+            // reported to a program that asked to hear about every one. Last,
+            // because it is the only mouse event that is *usually* nothing to
+            // do with this element, and both halves answer `false` cheaply.
+            //
+            // A synthetic move is included, and deliberately: it is replayed
+            // after a frame that changed layout, and a link is exactly the
+            // kind of thing whose position moved out from under a pointer that
+            // did not.
+            Event::MouseMoved {
+                position,
+                modifiers,
+                is_synthetic,
+            } => {
+                let mut changed = self.track_link(*position, *modifiers);
+                if changed {
+                    ctx.notify();
+                }
+                if !is_synthetic {
+                    changed |= self.moved(*position, *modifiers);
+                }
+                changed
+            }
+            // Letting go of the chord key puts the pointer back to selecting,
+            // and the underline has to go with it — under a pointer that never
+            // moved, which is why this is not handled by the move above.
+            Event::ModifiersChanged {
+                position,
+                modifiers,
+            } => {
+                let changed = self.track_link(*position, *modifiers);
+                if changed {
+                    ctx.notify();
+                }
+                changed
             }
             _ => false,
         }

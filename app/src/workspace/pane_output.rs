@@ -14,7 +14,7 @@
 //! emulator's, because that is the only place it stays anchored to its text
 //! while the shell prints underneath it. What this owns is the routing.
 
-use crook_terminal::{Rows, SelectionKind};
+use crook_terminal::{Modifiers, MouseButton, MouseEventKind, MouseModes, Rows, SelectionKind};
 use crookui_core::event::Event;
 use crookui_core::presenter::EventContext;
 
@@ -441,6 +441,66 @@ impl Output {
         self.mouse
             .as_ref()
             .is_some_and(|mouse| mouse.gesture.release())
+    }
+
+    /// Which mouse reports the program in this pane has asked for.
+    ///
+    /// [`MouseModes::NONE`] whenever there is no terminal, which is what makes
+    /// a detached output — a test, a pane whose shell has gone — behave as one
+    /// nobody is reading the pointer in.
+    pub fn mouse_modes(&self) -> MouseModes {
+        self.handle
+            .as_ref()
+            .map_or(MouseModes::NONE, TerminalHandle::mouse_modes)
+    }
+
+    /// Hands a pointer gesture to the program, reporting whether it took it.
+    ///
+    /// `false` for every gesture the modes in force do not cover, which is what
+    /// leaves a press to start a selection instead. A gesture reported to a
+    /// program repaints nothing by itself: what the program does about it
+    /// arrives as output, and that is what draws the next frame.
+    pub fn report_mouse(
+        &self,
+        kind: MouseEventKind,
+        button: Option<MouseButton>,
+        row: usize,
+        column: usize,
+        modifiers: Modifiers,
+    ) -> bool {
+        self.handle
+            .as_ref()
+            .is_some_and(|handle| handle.send_mouse(kind, button, row, column, modifiers))
+    }
+
+    /// Says a press was given to a program, so the moves that follow are
+    /// reports rather than a selection being dragged out.
+    pub fn begin_reporting(&self) -> bool {
+        self.mouse
+            .as_ref()
+            .is_some_and(|mouse| mouse.gesture.begin_reporting())
+    }
+
+    /// Whether the button that is down belongs to a program reading the mouse.
+    pub fn is_reporting(&self) -> bool {
+        self.mouse
+            .as_ref()
+            .is_some_and(|mouse| mouse.gesture.is_reporting())
+    }
+
+    /// Ends a reported press, reporting whether there was one.
+    pub fn end_reporting(&self) -> bool {
+        self.mouse
+            .as_ref()
+            .is_some_and(|mouse| mouse.gesture.end_reporting())
+    }
+
+    /// Sends the wheel to a full-screen program as arrow keys, for one that
+    /// asked for `?1007` and never asked for the mouse.
+    pub fn alternate_scroll(&self, lines: i32) -> bool {
+        self.handle
+            .as_ref()
+            .is_some_and(|handle| handle.send_alternate_scroll(lines))
     }
 }
 

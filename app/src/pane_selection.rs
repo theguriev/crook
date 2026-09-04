@@ -67,6 +67,23 @@ struct State {
     /// reason a resize does: the picture it was drawn on is gone. See
     /// [`crate::selection::Cells`].
     cells: Cells,
+    /// Whether the button that is down was given to a program reading the
+    /// mouse rather than to a selection.
+    ///
+    /// **A third state beside the two above, not a flag on the press.** A
+    /// press on a pane means one of two entirely different things depending on
+    /// what is running in it: with nothing reading the mouse it starts a
+    /// selection, and with `vim`, `htop` or `tmux` in the pane it is a click
+    /// the program takes, whose moves and release are reports rather than a
+    /// drag.
+    ///
+    /// Which it was is decided **once, when the button goes down**, and
+    /// remembered. Asking the terminal again on every move would be asking a
+    /// question whose answer can change mid-drag: a program that turned mouse
+    /// reporting off while a button was held would leave the release
+    /// unreported and half a selection dragged out of a screen nobody selected
+    /// in.
+    reporting: bool,
 }
 
 impl PaneSelection {
@@ -140,6 +157,31 @@ impl PaneSelection {
     /// landed on has anything to do with the button coming up again.
     pub fn release(&self) -> bool {
         self.0.borrow_mut().pressed.take().is_some()
+    }
+
+    /// Says the press that just landed was given to a program reading the
+    /// mouse, so nothing that follows it is a selection.
+    ///
+    /// Whatever was selected is let go of, exactly as an ordinary press lets
+    /// go of it: the pointer now belongs to the program, and a highlight left
+    /// behind under it would be one nobody could extend or clear.
+    pub fn begin_reporting(&self) -> bool {
+        let mut state = self.0.borrow_mut();
+        let was = state.selected;
+        state.pressed = None;
+        state.selected = None;
+        state.reporting = true;
+        was.is_some()
+    }
+
+    /// Whether the button that is down belongs to a program reading the mouse.
+    pub fn is_reporting(&self) -> bool {
+        self.0.borrow().reporting
+    }
+
+    /// Ends a reported press, reporting whether there was one to end.
+    pub fn end_reporting(&self) -> bool {
+        std::mem::take(&mut self.0.borrow_mut().reporting)
     }
 
     /// What is selected, or `None` when nothing is.
