@@ -62,6 +62,9 @@ thiserror = "2.0"
 # with no `cc` anywhere in its graph — fourteen crates and not one build script
 # that shells out to a compiler.
 wasmi = { version = "2.0", features = ["portable-dispatch"] }
+# Assembling wasm from its text format, which is how the tests build a plugin
+# without a wasm toolchain being installed.
+wat = "1"
 unicode-segmentation = "1.13"
 # The same East Asian width table the terminal emulator lays its grid out with,
 # so the input field gives a CJK filename the two columns the shell will echo it

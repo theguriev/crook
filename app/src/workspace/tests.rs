@@ -36,8 +36,8 @@ use crate::usage_model::UsageModel;
 use crate::window_controls::{Recorder, Request, WindowState};
 
 use super::{
-    Fonts, OptionsAction, QuitRequest, SettingsAction, ThemeAction, Workspace, WorkspaceAction,
-    WorktreeAction, controls, settings_page, tab_options_menu, tabs_panel,
+    Fonts, Opening, OptionsAction, QuitRequest, SettingsAction, ThemeAction, Workspace,
+    WorkspaceAction, WorktreeAction, controls, settings_page, tab_options_menu, tabs_panel,
 };
 
 /// Big enough that two tabs both reach their maximum width, so the geometry
@@ -146,6 +146,16 @@ impl Harness {
     /// carries the path, and `Workspace::save_settings` returns before doing
     /// anything at all when there is none.
     fn with_settings(tabs: usize, settings: Settings) -> Self {
+        Self::with_plugins(tabs, settings, crate::plugins::defaults())
+    }
+
+    /// The same, with a different set of plugins — which is how a test gives
+    /// the window one that is not in the box.
+    fn with_plugins(
+        tabs: usize,
+        settings: Settings,
+        plugins: Vec<Box<dyn crate::plugin::Plugin>>,
+    ) -> Self {
         let queue = LocalQueue::new();
         // Two, not one, and for the reason `crate::PARKED_WORKERS` exists: a
         // task that waits on a timer holds its worker for the whole cycle, so
@@ -179,8 +189,11 @@ impl Harness {
             Workspace::new(
                 fonts,
                 cell_font,
-                settings,
-                Channel::Dev,
+                Opening {
+                    settings,
+                    channel: Channel::Dev,
+                    plugins,
+                },
                 quit,
                 window.clone(),
                 ctx,
@@ -9324,4 +9337,121 @@ fn the_switch_that_would_take_the_switch_away_is_inert() {
         text.contains("This is what draws the page you are on."),
         "the page does not say which switches are inert: {text}"
     );
+}
+
+/// A window carrying one plugin that is not in the binary.
+mod sandboxed {
+    use super::*;
+    use crate::plugins::wasm::tests::{Scratch, install, wasm};
+
+    /// A harness whose plugins are the ones in the box plus whatever is in a
+    /// scratch directory.
+    fn harness(scratch: &Scratch) -> Harness {
+        let mut plugins = crate::plugins::defaults();
+        plugins.extend(crate::plugins::wasm::installed(scratch.path()));
+        Harness::with_plugins(1, Settings::ephemeral(), plugins)
+    }
+
+    #[test]
+    fn what_a_sandboxed_plugin_describes_is_what_the_window_draws() {
+        // The whole of the second tier, end to end: a `.wasm` file in a
+        // directory, run in an interpreter, describing a row it never painted
+        // — and the window draws it in the theme in force, in Crook's own
+        // fonts, with Crook's own icons.
+        //
+        // At order -1 so it wins `header.right`, which is a `Single` slot the
+        // usage chip is already in. That is the whole of what "change
+        // practically everything" has to mean for a store plugin: it can
+        // *replace* something Crook ships.
+        let scratch = Scratch::new("draws");
+        install(
+            scratch.path(),
+            "probe",
+            &wasm("eugen/probe", "header.right", -1),
+        );
+        let mut harness = harness(&scratch);
+
+        let text = frame_text(&harness.frame());
+
+        assert!(text.contains("from a sandbox"), "{text}");
+        assert!(text.contains("probed"), "the badge is missing: {text}");
+        assert!(text.contains("Poke"), "the button is missing: {text}");
+        assert!(
+            !text.contains("claude"),
+            "the plugin did not win the slot: {text}"
+        );
+        // And the icon it named by string is drawn as one of Crook's own.
+        assert!(
+            icons_of(&harness.frame()).contains(&Lucide::GitBranch),
+            "the icon it asked for was not drawn"
+        );
+    }
+
+    #[test]
+    fn a_sandboxed_plugin_is_on_the_plugins_page_beside_the_ones_in_the_box() {
+        let scratch = Scratch::new("listed");
+        install(
+            scratch.path(),
+            "probe",
+            &wasm("eugen/probe", "header.right", 10),
+        );
+        let mut harness = harness(&scratch);
+
+        harness.open_settings_page();
+        harness.select_settings_section("Plugins");
+        let text = frame_text(&harness.frame());
+
+        assert!(text.contains("Probe"), "{text}");
+        assert!(
+            text.contains("A plugin that exists to be looked at."),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn a_sandboxed_plugins_action_is_reachable_by_name_like_any_other() {
+        // Prefixed by the host with the plugin's own id, so a guest cannot
+        // claim an action belonging to anybody else however it spells its own.
+        let scratch = Scratch::new("action");
+        install(
+            scratch.path(),
+            "probe",
+            &wasm("eugen/probe", "header.right", 10),
+        );
+        let mut harness = harness(&scratch);
+
+        harness.press("p", palette_chord(), "");
+        harness.frame();
+        harness.type_text("poke");
+        let text = frame_text(&harness.frame());
+
+        assert!(text.contains("Poke the probe"), "{text}");
+        assert!(text.contains("eugen/probe/poke"), "{text}");
+    }
+
+    #[test]
+    fn a_contribution_to_a_slot_this_build_does_not_have_is_refused_and_nothing_else() {
+        // A plugin written against a Crook with a slot this one does not have
+        // should be missing that one contribution, not missing entirely.
+        let scratch = Scratch::new("unknown-slot");
+        install(
+            scratch.path(),
+            "probe",
+            &wasm("eugen/probe", "somewhere.else", 0),
+        );
+        let mut harness = harness(&scratch);
+
+        let text = frame_text(&harness.frame());
+
+        assert!(!text.contains("probed"), "it drew somewhere: {text}");
+        // Still loaded, still listed, still offering its action.
+        assert!(
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.host().is_loaded(
+                    &crate::plugin::PluginId::parse("eugen/probe").expect("a literal")
+                )),
+            "the plugin was thrown away over one contribution"
+        );
+    }
 }

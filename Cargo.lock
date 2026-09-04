@@ -561,8 +561,10 @@ dependencies = [
  "anyhow",
  "arboard",
  "crook_plugin",
+ "crook_plugin_api",
  "crook_terminal",
  "crook_usage",
+ "crook_wasm",
  "crookui",
  "crookui_core",
  "dirs",
@@ -573,6 +575,7 @@ dependencies = [
  "serde_json",
  "unicode-segmentation",
  "unicode-width",
+ "wat",
 ]
 
 [[package]]

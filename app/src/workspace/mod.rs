@@ -62,7 +62,7 @@ pub(crate) use settings_page::widgets::Category;
 pub use terminal_element::TerminalElement;
 pub use text_field::TextField;
 pub(crate) use title_bar::caption_area;
-pub use view::{Fonts, QuitRequest, Workspace};
+pub use view::{Fonts, Opening, QuitRequest, Workspace};
 
 /// The tallest a tab is allowed to get, however few of them there are.
 ///

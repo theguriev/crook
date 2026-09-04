@@ -331,6 +331,22 @@ impl<C: 'static> Slots<C> {
             .any(|entry| entry.slot == slot)
     }
 
+    /// Every slot that has been declared, in the order they were.
+    ///
+    /// For a host that has to resolve a *string* against the slots that exist
+    /// — which is what a sandboxed plugin hands it. A native plugin names a
+    /// [`SlotId`] and cannot name one that does not exist; a plugin outside
+    /// the binary can name anything, and the answer to a name nothing
+    /// declares is "no", not a new slot.
+    pub fn declared(&self) -> Vec<SlotId> {
+        self.0
+            .borrow()
+            .declared
+            .iter()
+            .map(|(slot, _, _)| *slot)
+            .collect()
+    }
+
     /// Which plugin contributed each entry to a slot, in drawing order.
     ///
     /// For the plugins page, which has to be able to say who put a thing on

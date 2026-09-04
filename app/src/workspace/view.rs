@@ -356,6 +356,29 @@ impl SaveOrder {
     }
 }
 
+/// What one window is opened with, as one argument.
+///
+/// Three values that arrive together, are read once each, and travel from
+/// whoever built them to [`Workspace::new`] with nothing in between looking at
+/// them. Passing them separately put that function one argument over clippy's
+/// limit, and grouping them says something true: they are the opening, not
+/// three unrelated parameters. `Launch` in `crate::lib` is the same answer to
+/// the same question one layer up.
+pub struct Opening {
+    /// The options this window starts with.
+    pub settings: Settings,
+    /// Which build is running, for the About page.
+    pub channel: Channel,
+    /// Every plugin this window carries: the ones in the box, then the ones a
+    /// person installed.
+    ///
+    /// A list rather than something read here, because what is in it is not
+    /// one thing — a list in the source and a directory somebody has to have
+    /// gone and looked in — and a window that read a directory would be a
+    /// window no test could give a plugin to.
+    pub plugins: Vec<Box<dyn crate::plugin::Plugin>>,
+}
+
 /// The window's root view.
 pub struct Workspace {
     tabs: TabStrip,
@@ -521,12 +544,16 @@ impl Workspace {
     pub fn new(
         fonts: Fonts,
         cell_font: CellFont,
-        settings: Settings,
-        channel: Channel,
+        opening: Opening,
         quit: QuitRequest,
         window: WindowHandle,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
+        let Opening {
+            settings,
+            channel,
+            plugins,
+        } = opening;
         let usage = UsageModel::handle(ctx);
 
         let git = ctx.add_model(GitModel::new);
@@ -552,16 +579,17 @@ impl Workspace {
         terminals.update(ctx, |model, _| model.set_shell_login(login_shell));
 
         // Last, and before anything is placed on the workspace: every plugin
-        // in the box builds here, and a plugin that owns a model or a view
-        // makes it with this context. Nothing it registers can reach the
-        // workspace yet — the contributions are closures, and they are not
-        // called until there is a frame to draw.
-        let host = crate::plugin::load(
-            crate::plugins::defaults(),
-            settings.disabled_plugins(),
-            fonts,
-            ctx,
-        );
+        // builds here, and one that owns a model or a view makes it with this
+        // context. Nothing it registers can reach the workspace yet — the
+        // contributions are closures, and they are not called until there is a
+        // frame to draw.
+        //
+        // The list arrives rather than being read here, because what is in it
+        // is not one thing: the plugins in the box are a list in the source,
+        // and the ones a person installed are a directory somebody has to have
+        // gone and looked in. A window that read a directory would be a window
+        // no test could give a plugin to.
+        let host = crate::plugin::load(plugins, settings.disabled_plugins(), fonts, ctx);
 
         let options = settings.tab_options();
         let settings_path = settings.path().map(Path::to_owned);

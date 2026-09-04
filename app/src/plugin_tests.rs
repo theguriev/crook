@@ -14,7 +14,7 @@ use crate::settings::Settings;
 use crate::terminal_font::{CELL_FONT_SIZE, CellFont};
 use crate::usage_model::UsageModel;
 use crate::window_controls::Recorder;
-use crate::workspace::{Fonts, Workspace};
+use crate::workspace::{Fonts, Opening, Workspace};
 
 use super::*;
 
@@ -60,8 +60,11 @@ fn with_context(disabled: &[String], test: impl FnOnce(&mut Host, &mut ViewConte
         Workspace::new(
             fonts,
             CellFont::headless(CELL_FONT_SIZE),
-            Settings::ephemeral(),
-            Channel::Dev,
+            Opening {
+                settings: Settings::ephemeral(),
+                channel: Channel::Dev,
+                plugins: plugins::defaults(),
+            },
             quit,
             Rc::new(Recorder::default()),
             ctx,
