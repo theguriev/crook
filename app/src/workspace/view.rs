@@ -166,8 +166,6 @@ pub(super) struct GroupInteraction {
 pub(super) struct MenuState {
     /// Whether the popup is up.
     pub(super) open: bool,
-    /// The gear that opens it.
-    pub(super) gear: MouseStateHandle,
     /// "View as: Panes".
     pub(super) panes: MouseStateHandle,
     /// "View as: Tabs".
@@ -201,8 +199,8 @@ pub(super) struct MenuState {
 impl MenuState {
     /// Drops every hover and press the popup was holding.
     ///
-    /// Called when something other than a click on the gear takes the menu
-    /// down — today, the settings page opening over it. Every row is about to
+    /// Called when something other than a press on the list's own ground takes
+    /// the menu down — today, the settings page opening over it. Every row is about to
     /// stop existing without seeing a hover-out, and the next time the menu
     /// opens the row the pointer happened to be on would come back lit.
     ///
@@ -212,7 +210,6 @@ impl MenuState {
     /// not to be.
     fn forget_hover_state(&self) {
         for state in [
-            &self.gear,
             &self.panes,
             &self.tabs,
             &self.compact,
@@ -582,6 +579,13 @@ pub struct Workspace {
     /// render path. It does not change while the process runs.
     home: Option<PathBuf>,
     new_tab: MouseStateHandle,
+    /// The room the tab list leaves under itself, whose secondary press opens
+    /// the options menu.
+    ///
+    /// A handle of its own rather than the `+`'s, for the reason
+    /// [`MenuState`] is written out one field at a time: two controls sharing
+    /// one state is how a press on either of them starts being dropped.
+    panel_ground: MouseStateHandle,
     quit: QuitRequest,
     /// The window this is drawn in, for the header to move and maximise.
     window: WindowHandle,
@@ -709,6 +713,7 @@ impl Workspace {
             hovered_row: None,
             home: std::env::home_dir(),
             new_tab: MouseStateHandle::default(),
+            panel_ground: MouseStateHandle::default(),
             quit,
             window,
             control_layout: ControlLayout::host(),
@@ -1431,6 +1436,11 @@ impl Workspace {
             return;
         }
         self.section = key;
+        // The menu is a popup about the tab list and it is drawn *inside* the
+        // tab list, so a section covering the list takes it off screen. Left
+        // open it would be a menu nobody can see and nobody can dismiss —
+        // which is what `--menu --section` used to leave behind.
+        self.close_menu();
         // The sidebar and the window are both about to be replaced, so every
         // control the pointer was on is about to stop existing without ever
         // seeing a hover-out — and a field on the section being left must not
@@ -1622,8 +1632,8 @@ impl Workspace {
     /// Opens the menu on a tab, and reads the repository behind it.
     ///
     /// Pressing again on the tab whose menu is already up closes it, which is
-    /// the gear's rule and the one a person expects of anything that opens by
-    /// being clicked. In practice the modal underlay gets that press first and
+    /// the options menu's rule and the one a person expects of anything that
+    /// opens by being pressed. In practice the modal underlay gets that press first and
     /// dismisses on it; this is what makes the toggle right anyway, for the
     /// keyboard and for anything else that dispatches the action.
     fn open_tab_menu(&mut self, tab: TabId, ctx: &mut ViewContext<Self>) {
@@ -3092,6 +3102,10 @@ impl Workspace {
         self.new_tab.clone()
     }
 
+    pub(super) fn panel_ground_state(&self) -> MouseStateHandle {
+        self.panel_ground.clone()
+    }
+
     pub(super) fn interaction(&self, id: PaneId) -> Option<&PaneInteraction> {
         self.interactions.get(&id)
     }
@@ -3115,11 +3129,13 @@ impl Workspace {
     ///
     /// Never while the options menu is up. Warp tears its sidecar down when
     /// the row's tab opens a menu, and here it also keeps an invariant the
-    /// overlay layers depend on: the menu is anchored inside the control bar,
-    /// which paints *before* the list, so a card opened from a row afterwards
-    /// would land in a later overlay layer and cover the menu's own modal
-    /// underlay — the press that should dismiss the menu would be swallowed by
-    /// the card instead.
+    /// overlay layers depend on: the menu and a row's card are both anchored
+    /// overlays, so whichever is added last covers the other. The menu is
+    /// added to the ground *under* the list, after the list itself, so it
+    /// wins — but only for a card the same frame builds. Leaving a card armed
+    /// and letting it come back on some later frame would put it over the
+    /// menu's own modal underlay, and the press that should dismiss the menu
+    /// would be swallowed by the card instead.
     pub(super) fn shows_details_for(&self, pane: PaneId) -> bool {
         self.options.show_details_on_hover
             && !self.a_popup_is_open()
@@ -3508,7 +3524,7 @@ impl Workspace {
     /// Showing and leaving are not here: those are
     /// [`WorkspaceAction::ShowSection`], because the settings are a section of
     /// the sidebar. Every other control on the page dispatches an
-    /// [`OptionsAction`] and lands in [`Self::apply_option`] beside the gear
+    /// [`OptionsAction`] and lands in [`Self::apply_option`] beside the options
     /// menu's clicks, which is why this handles a handful of actions rather
     /// than all fifteen.
     fn apply_settings(&mut self, action: SettingsAction, ctx: &mut ViewContext<Self>) {
@@ -3812,9 +3828,9 @@ impl Workspace {
     /// Takes the options menu down, and forgets what the mouse was doing to
     /// it.
     ///
-    /// Called when something other than the gear closes it — today, its own
-    /// "Settings…" entry, which navigates away from the strip the menu is
-    /// about. Every row is about to stop existing without seeing a hover-out,
+    /// Called when something other than a press on the list's own ground closes
+    /// it — today, its own "Settings…" entry, which navigates away from the
+    /// list the menu is about. Every row is about to stop existing without seeing a hover-out,
     /// and the next time the menu opens the row the pointer happened to be on
     /// would come back lit.
     fn close_menu(&mut self) {
@@ -3983,10 +3999,10 @@ impl View for Workspace {
 
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
         // The panel is the full height of the window and the header starts
-        // beside it, not above it. That is what puts the panel's control bar
-        // in the window's top-left corner — where a client-decorated macOS
-        // window draws its traffic lights — and it is why `window_insets` has
-        // a `panel_left` at all.
+        // beside it, not above it. That is what puts the panel's first row in
+        // the window's top-left corner — where a client-decorated macOS window
+        // draws its traffic lights — and it is why `window_insets` has a
+        // `panel_left` at all.
         //
         // What the sidebar holds and what the window holds are one answer,
         // asked once: a section builds both halves together, because its list
@@ -4116,9 +4132,6 @@ impl TypedActionView for Workspace {
                 }
             }
             WorkspaceAction::ShowSection(section) => {
-                // The menu is a popup about the tab list, and its job is done
-                // the moment its own entry puts something else in the sidebar.
-                self.close_menu();
                 if section
                     .is_some_and(|id| self.host.sidebar_section_key(id) == Some(SETTINGS_SECTION))
                 {

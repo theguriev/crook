@@ -74,9 +74,9 @@ pub(crate) const CLOSE_ICON_SIZE: f32 = 12.;
 /// The mark a settings row leads with, where a session's row carries its
 /// status.
 ///
-/// One constant for the panel's row and its gear button, because they are the
-/// same symbol standing for the same thing and two copies of it is how they
-/// end up different.
+/// One constant for the panel's settings row and the button that chooses that
+/// section, because they are the same symbol standing for the same thing and
+/// two copies of it is how they end up different.
 pub(crate) const GEAR_ICON: Lucide = Lucide::Settings;
 
 /// Breaks `text` into lines of at most `max_chars` characters each.

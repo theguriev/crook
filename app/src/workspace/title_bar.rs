@@ -10,9 +10,9 @@
 //!
 //! "Empty" is not a list of rectangles kept in step with the header's layout.
 //! It is whatever the row's own children did not claim: the children see every
-//! event first, and a press that a tab, the gear or the `+` handled never
-//! reaches the drag. Add a control to the header and it stops being draggable
-//! there on the same frame, with nothing to remember.
+//! event first, and a press that a tab or the usage chip handled never reaches
+//! the drag. Add a control to the header and it stops being draggable there on
+//! the same frame, with nothing to remember.
 //!
 //! # There are no caption buttons
 //!

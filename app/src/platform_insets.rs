@@ -23,12 +23,20 @@
 //!
 //! "How much" is only half the answer. The other half is *who pays*: the
 //! controls sit at the two top corners of the window, and Crook's tabs are a
-//! panel down the left edge — so the panel's control bar owns the top-left
-//! corner and the header owns only the top-right. Reserving the left end on
-//! the header instead puts macOS's traffic lights straight through the panel's
-//! gear button, and it is invisible on Windows and Linux, where the controls
-//! are on the other side. [`WindowControlInsets::split`] is what makes that one
+//! panel down the left edge — so the panel owns the top-left corner and the
+//! header owns only the top-right. Reserving the left end on the header
+//! instead puts macOS's traffic lights straight through the panel's search
+//! box, and it is invisible on Windows and Linux, where the controls are on
+//! the other side. [`WindowControlInsets::split`] is what makes that one
 //! decision instead of two guesses, and it is tested for every platform.
+//!
+//! The panel spends its end on a strip of nothing above its first row, rather
+//! than on padding beside one — see `tabs_panel::title_strip`. A 70px indent
+//! on a 248px column leaves no room to type a path into the search box, and
+//! the reservation is a fact about the corner rather than about whatever
+//! happens to be drawn in it. Which is also why `panel_left` decides whether
+//! that strip is drawn at all: nonzero on a client-decorated macOS window and
+//! nowhere else, so nowhere else has a bar.
 
 /// Who draws the window's controls, and therefore whether they overlap the
 /// header.
@@ -76,10 +84,10 @@ impl WindowControlInsets {
     /// Which element owes which end of this reservation.
     ///
     /// The left end follows the top-left corner of the window, which the tabs
-    /// panel's control bar owns; the right end follows the top-right, which is
-    /// the header's. There was once a second arrangement to choose between —
-    /// a strip across the header, owing both ends — and this was a `split_for`
-    /// that took it as a parameter.
+    /// panel owns; the right end follows the top-right, which is the header's.
+    /// There was once a second arrangement to choose between — a strip across
+    /// the header, owing both ends — and this was a `split_for` that took it as
+    /// a parameter.
     pub const fn split(self) -> LayoutInsets {
         LayoutInsets {
             panel_left: self.left,
@@ -268,8 +276,8 @@ mod tests {
     fn the_panel_takes_the_left_reservation_and_the_header_takes_none_of_it() {
         // macOS is the platform where this is visible at all: its lights are
         // top-left, which is the corner the panel owns. Getting it wrong there
-        // puts them through the panel's gear, and nobody on Windows or Linux
-        // would ever see it.
+        // puts them through the panel's search box, and nobody on Windows or
+        // Linux would ever see it.
         assert_eq!(
             ControlLayout::MacOs
                 .insets(WindowChrome::Client, false)

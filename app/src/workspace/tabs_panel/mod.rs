@@ -7,10 +7,19 @@
 //! Warp's early return at `view.rs:20916` does. There is no state in which
 //! both a strip and a panel show tabs.
 //!
-//! Top to bottom: a control bar, the search box, the list, and the row of
-//! buttons that says what the list is. Warp keeps its search field *in* that
-//! bar; this one is a row of its own, which is Telegram's arrangement and is
-//! what the bar being the window's title bar forces — see [`search`].
+//! Top to bottom: the search box, the list, the `+` in the space the list
+//! leaves, and the row of buttons that says what the list is. Warp keeps its
+//! search field in a control bar over the top of all that, with a gear and a
+//! `+` at the right of it; Crook has no such bar. The gear is gone — the menu
+//! it opened is about the list, so the list's own secondary press opens it —
+//! and the `+` is at the foot of the list, which is where Warp's *browser*
+//! puts it. What was left of the bar was an empty strip, and an empty strip
+//! is chrome that says nothing. See [`controls`](super::controls).
+//!
+//! The one thing that could not go with it is the corner: on a
+//! client-decorated macOS window the window's own controls are painted over
+//! the top-left of the panel. [`title_strip`] is that reservation and nothing
+//! else, and it is drawn only where something is painted over it.
 //!
 //! # Granularity is two changes, not one
 //!
@@ -42,7 +51,8 @@
 //! default combination and six at the other extreme, with every tab past that
 //! drawn, clipped away, and unclickable. (Eight and six rather than the nine
 //! and seven they were before the row of section buttons took a strip off the
-//! bottom of the list.)
+//! bottom of the list; the `+` under it and the control bar that went from
+//! over it have since cancelled each other out to within a row.)
 //!
 //! [`Scrollable`] keeps the half of [`Clipped`] that mattered — a row that
 //! overflows is neither painted over the body nor hit-tested there — and adds
@@ -87,14 +97,13 @@ pub(crate) mod search;
 /// this becomes the initial value and nothing else moves.
 pub(super) const PANEL_WIDTH: f32 = 248.;
 
-/// Warp's `CONTROL_BAR_VERTICAL_PADDING`.
-const CONTROL_BAR_VERTICAL_PADDING: f32 = 4.;
-
-/// The control bar's left and right padding.
-const CONTROL_BAR_HORIZONTAL_PADDING: f32 = 8.;
-
-/// Warp's `CONTROL_BAR_SPACING`, between the controls in that bar.
-const CONTROL_BAR_SPACING: f32 = 4.;
+/// How much of the top of the panel the window's own controls have taken.
+///
+/// See [`title_strip`]. The number is the control bar's own: it is the room
+/// macOS's traffic lights have been drawn in for as long as the panel has had
+/// a bar, and a smaller one would move them against a window that has not
+/// changed.
+pub(super) const TITLE_STRIP_HEIGHT: f32 = 32.;
 
 /// Warp's `GROUP_HORIZONTAL_PADDING`, inset either side of a `Panes` tab.
 const GROUP_HORIZONTAL_PADDING: f32 = 8.;
@@ -164,8 +173,9 @@ const SECTION_ICON_SIZE: f32 = 18.;
 /// See [`SECTION_ICON_SIZE`].
 const SECTION_LABEL_SIZE: f32 = 10.;
 
-/// The whole panel: the control bar, whatever the chosen section puts in it,
-/// and the row of buttons that chooses.
+/// The whole panel: whatever the chosen section puts in it, the row of buttons
+/// that chooses, and — only where the window's own controls are painted over
+/// this corner — the strip that reserves them room.
 ///
 /// `body` is the section's own — the tab list when the tabs are showing, and
 /// the section's sidebar otherwise. It is handed in rather than built here
@@ -174,8 +184,11 @@ const SECTION_LABEL_SIZE: f32 = 10.;
 pub(super) fn render(workspace: &Workspace, body: Box<dyn Element>) -> Box<dyn Element> {
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Max)
-        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_child(control_bar(workspace));
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+
+    if let Some(strip) = title_strip(workspace) {
+        column.add_child(strip);
+    }
 
     // Only over the tabs, because it filters the tabs. Every other section
     // brings its own search where it needs one — the settings rail has one at
@@ -198,9 +211,26 @@ pub(super) fn render(workspace: &Workspace, body: Box<dyn Element>) -> Box<dyn E
     .finish()
 }
 
-/// The tab list, scrolling inside whatever the bars left it.
+/// The tab list, scrolling inside whatever the search box left it, and the
+/// space under it, which is a button.
+///
+/// The word that does the work is [`Shrinkable`]. The list is a loose flex
+/// child, so it may use up to its share and is free to be smaller: a list of
+/// three tabs measures three tabs tall, and the `+` lands directly under the
+/// last of them with the room below left as room. Tight, the scroll area would
+/// always be the full height of the panel and the `+` would be pinned to its
+/// foot — a button at the bottom of a column rather than the end of a list.
+///
+/// The `+` is a height of its own rather than the remainder, and it has to be:
+/// nothing inside a [`Scrollable`] can take "the remainder", because the
+/// content is laid out against an infinite axis — which is what stops a
+/// two-row list from measuring a viewport tall and scrolling — and a flexible
+/// child of an infinite axis is a debug assertion. Out here the axis is real,
+/// but the room under the band is not the band's either: see
+/// [`controls`](super::controls) for why the button is a band and not the
+/// column.
 pub(super) fn tab_list(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
-    Scrollable::new(
+    let scroller = Scrollable::new(
         workspace.panel_scroll(),
         // Inside the scrollable and outside every row, which is what makes a
         // row's offset measurable from the content rather than from the
@@ -214,7 +244,17 @@ pub(super) fn tab_list(workspace: &Workspace, app: &AppContext) -> Box<dyn Eleme
         .finish(),
     )
     .with_scrollbar(theme().overlay_3)
-    .finish()
+    .finish();
+
+    controls::options_ground(
+        workspace,
+        Flex::column()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_child(Shrinkable::new(1., scroller).finish())
+            .with_child(controls::new_tab_area(workspace))
+            .finish(),
+    )
 }
 
 /// The row of buttons at the foot of the panel.
@@ -324,47 +364,34 @@ fn button(
     .finish()
 }
 
-/// The bar across the top of the panel: the gear and the `+`, at its right
-/// edge.
+/// The room the window's own controls have already taken at the top of the
+/// panel, and the surface that corner of the window is picked up by.
 ///
-/// The flexible [`Empty`] in front of them is what puts them there, and it is
-/// now the whole of the bar's left half: the search box that Warp keeps *in*
-/// this bar is a row of its own underneath, because this one is also the
-/// window's title bar and a field wide enough to type a path into would leave
-/// nothing to pick the window up by. See [`search`].
+/// This is all that is left of the control bar. The bar was thirty-two pixels
+/// of chrome holding a gear and a `+`; the gear is gone and the `+` is at the
+/// foot of the list, and the one thing that could not go with them is the
+/// corner itself — on a client-decorated macOS window AppKit paints the
+/// traffic lights over these pixels, so the panel's first row has to start
+/// below them, and something has to be left to pick that end of the window up
+/// by.
 ///
-/// In this layout the bar is also half of the window's title bar: it is the
-/// top-left corner, so it is what the traffic lights sit on and what a person
-/// picks that end of the window up by. Both follow from the corner rather than
-/// from the panel, which is why the inset and the drag come from the same two
-/// places the header's do.
-fn control_bar(workspace: &Workspace) -> Box<dyn Element> {
-    // The one place in the panel that can be under the window's own controls:
-    // on a client-decorated macOS window the traffic lights are in this
-    // corner, which is a fact about where the tabs are rather than about the
-    // platform. `WindowControlInsets::split` is what makes that one decision.
-    let inset = workspace.window_insets().panel_left;
+/// [`LayoutInsets::panel_left`](crate::platform_insets::LayoutInsets) is
+/// nonzero in exactly that case and in no other, which is why it decides
+/// whether this row exists at all rather than merely how wide it is. On
+/// Windows and Linux, and on macOS in fullscreen where the lights are moved
+/// away, there is nothing here and the panel starts with its search box —
+/// which is what taking the bar out means everywhere it can be taken out.
+fn title_strip(workspace: &Workspace) -> Option<Box<dyn Element>> {
+    if workspace.window_insets().panel_left == 0. {
+        return None;
+    }
 
-    title_bar::draggable(
+    Some(title_bar::draggable(
         workspace,
-        Container::new(
-            Flex::row()
-                .with_main_axis_size(MainAxisSize::Max)
-                .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                .with_spacing(CONTROL_BAR_SPACING)
-                .with_child(Expanded::new(1., Empty::new().finish()).finish())
-                .with_child(controls::gear_button(workspace))
-                .with_child(controls::new_tab_button(workspace))
-                .finish(),
-        )
-        .with_padding(Padding {
-            top: CONTROL_BAR_VERTICAL_PADDING,
-            left: CONTROL_BAR_HORIZONTAL_PADDING + inset,
-            bottom: CONTROL_BAR_VERTICAL_PADDING,
-            right: CONTROL_BAR_HORIZONTAL_PADDING,
-        })
-        .finish(),
-    )
+        ConstrainedBox::new(Empty::new().finish())
+            .with_height(TITLE_STRIP_HEIGHT)
+            .finish(),
+    ))
 }
 
 /// The tabs the search left, gathered into blocks and wrapped in whichever

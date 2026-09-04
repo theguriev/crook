@@ -245,7 +245,7 @@ pub const ICONS: usize = 13;
 /// an icon cannot be named without being drawable.
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Lucide {
-    /// The mark on a chosen row of the gear menu and of the settings page.
+    /// The mark on a chosen row of the tab options menu and of the settings page.
     ///
     /// Lucide's [`check`](https://lucide.dev/icons/check).
     Check,
@@ -269,7 +269,7 @@ pub enum Lucide {
     ///
     /// Lucide's [`info`](https://lucide.dev/icons/info).
     Info,
-    /// The Expanded density, in the gear menu's segmented control.
+    /// The Expanded density, in the tab options menu's segmented control.
     ///
     /// Lucide's [`layout-grid`](https://lucide.dev/icons/layout-grid).
     LayoutGrid,
@@ -289,7 +289,7 @@ pub enum Lucide {
     ///
     /// Lucide's [`search`](https://lucide.dev/icons/search).
     Search,
-    /// The gear that opens the options menu.
+    /// The mark on a settings row, and on the button that shows one.
     ///
     /// Lucide's [`settings`](https://lucide.dev/icons/settings).
     Settings,

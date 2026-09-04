@@ -86,10 +86,10 @@ const SCROLLBAR_GUTTER: f32 = 12.;
 ///
 /// Wider than the tab list's eight, and deliberately: the tab list's rows are
 /// cards with their own fill, and these are labels.
-const PANEL_PADDING: f32 = 12.;
+pub(super) const PANEL_PADDING: f32 = 12.;
 
 /// The gap under the field at the top of a list.
-const FIELD_GAP: f32 = 10.;
+pub(super) const FIELD_GAP: f32 = 10.;
 
 /// One row of that list: its inset, the radius of its fill, and the gap under
 /// it.

@@ -84,8 +84,11 @@ use super::view::Workspace;
 /// Crook already has.
 const PANEL_WIDTH: f32 = super::tabs_panel::PANEL_WIDTH;
 
-/// The strip at the top that carries the close button, matching the tabs
-/// panel's control bar so the two line up.
+/// The strip at the top that carries the close button.
+///
+/// It used to match the tabs panel's control bar so the two lined up; that bar
+/// is gone and this row is now on its own terms — the close button is a 20px
+/// square with six pixels either side of it, which is what thirty-two is.
 const HEADER_HEIGHT: f32 = 32.;
 
 /// The panel's own inset.

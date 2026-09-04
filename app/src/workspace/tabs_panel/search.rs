@@ -1,13 +1,14 @@
 //! The box above the tabs, and what it hides.
 //!
 //! Telegram's shape and Telegram's rules, which is what was asked for. The
-//! field is **its own full-width row under the control bar** rather than a
-//! control inside it: that bar is also the window's title bar — it is the
-//! top-left corner, it carries the traffic lights on macOS and it is what a
-//! person picks the window up by — and a field wide enough to type a path into
-//! would leave the gear, the `+` and the drag surface fighting over 248
-//! pixels. Telegram makes the same call for the same reason: title row, then
-//! search, then the list.
+//! field is **its own full-width row** rather than a control in a bar with
+//! other things: Warp keeps a search field, a gear and a `+` in one 248px
+//! row, and a field wide enough to type a path into leaves the other two
+//! nowhere to be. Crook has neither of the other two any more, and the field
+//! keeps the whole row — it is the panel's first row now, and on the one
+//! platform that paints its window controls over that corner it is
+//! [`title_strip`](super::title_strip) rather than this that gives them room.
+//! Telegram makes the same call: search, then the list.
 //!
 //! # What it does to the list
 //!
@@ -63,11 +64,25 @@ use super::super::settings_page::search::{Query, Words};
 use super::super::text_field::TextField;
 use super::super::view::Workspace;
 
-/// The inset around the field: the control bar's own, and a gap under it.
-const PADDING: f32 = 8.;
+/// The inset around the field, and the gap under it.
+///
+/// Shared with [`section`](super::super::section) rather than matched to it.
+/// Every other sidebar a section can put in this column opens with the same
+/// field in the same place, and the buttons at the foot of the panel switch
+/// between them — so a box that moved by four pixels on the way would be the
+/// kind of difference nobody can name and everybody can see. Two constants
+/// that happened to agree would drift the first time one of them was tuned;
+/// these are the same two.
+///
+/// It leaves the field narrower than the rows under it, which the rows'
+/// [`PANEL_PADDING`](super::super::section::PANEL_PADDING) already explains:
+/// a tab row is a card with its own fill and a section's row is a label, so
+/// the two are inset differently on purpose. The field belongs to the column,
+/// not to the list.
+const PADDING: f32 = super::super::section::PANEL_PADDING;
 
-/// The gap between the box and the first row of the list.
-const BOTTOM_GAP: f32 = 6.;
+/// See [`PADDING`].
+const BOTTOM_GAP: f32 = super::super::section::FIELD_GAP;
 
 /// What the box says while nothing has been typed.
 ///
@@ -146,7 +161,7 @@ impl SearchState {
     }
 }
 
-/// The box itself, between the control bar and the list.
+/// The box itself: the panel's first row, over the list.
 pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
     let state = workspace.panel_search();
 
@@ -166,7 +181,7 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
         .finish(),
     )
     .with_padding(Padding {
-        top: 0.,
+        top: PADDING,
         left: PADDING,
         bottom: BOTTOM_GAP,
         right: PADDING,

@@ -18,8 +18,10 @@ dropped, and why.
 Eight features, and the page that configures them:
 
 - **Tabs.** Open, close, switch, reorder. One agent session per tab, with a derived title.
-  They live in a panel down the left edge or in a strip across the header, and the gear menu
-  says what a row of them shows. Above the list is a **search box**, Telegram's way round: it
+  They live in a panel down the left edge, and a **View options** menu — the panel's own
+  secondary click, on the empty space the list leaves — says what a row of them shows. Under
+  that space is a `+`, which is where Warp's browser puts the one that opens another tab.
+  Above the list is a **search box**, Telegram's way round: it
   filters the rows by what a tab is running, where it is working and the branch it is on, and
   filters nothing else — the active tab stays active and a filtered-out tab goes on printing.
   `cmd-k` (`ctrl-shift-k` off macOS) puts the keyboard in it from anywhere in the window,
@@ -166,13 +168,13 @@ Eight features, and the page that configures them:
   neither inside the repository, where git will happily let you put one and every build and
   every search then trips over it, nor beside it in a directory somebody else laid out.
 
-- **A settings page**, which opens the way a shell does: `cmd/ctrl-,` — or the gear menu's
-  last entry — puts it in a **tab of its own**, listed in the strip beside the work it
+- **A settings page**, which opens the way a shell does: `cmd/ctrl-,` — or the View options
+  menu's last entry — puts it in a **tab of its own**, listed beside the work it
   configures, splittable next to that work, and closed by the same × and the same close chord
   (`cmd-w`, `ctrl-shift-w` off macOS) as any other pane. Five pages: Appearance, Shell, Usage,
   Keyboard Shortcuts and About. Every option on it is one the application actually reads;
   there is nothing there that does not do something. Changes apply on the click and are
-  written to `<config>/crook/settings.json`, which is the same eight keys the gear menu writes plus the
+  written to `<config>/crook/settings.json`, which is the same eight keys that menu writes plus the
   theme, the light and dark pair it follows the desktop between, the terminal's type size,
   whether the tabs come back, and — set in the file rather than on the page — its font family.
   The type size is also on `cmd/ctrl-plus`, `-minus` and `-0`, and every pane resizes with it:

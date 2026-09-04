@@ -216,7 +216,7 @@ pub(super) fn render(
     if menu_is_open {
         // Below the row and inside the panel. Beside it — where the card goes
         // — would put a 260px menu over the body, which is the same argument
-        // that right-aligns the gear's menu in this column.
+        // that right-aligns the list's own options menu in this column.
         let mut stack = Stack::new().with_child(element);
         stack.add_anchored_overlay_child(
             Dismiss::new(super::super::tab_menu::render(workspace))

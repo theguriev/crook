@@ -41,7 +41,7 @@ use crate::window_controls::{Recorder, Request, WindowState};
 
 use super::{
     Fonts, Opening, OptionsAction, QuitRequest, SettingsAction, ThemeAction, Workspace,
-    WorkspaceAction, WorktreeAction, controls, tab_options_menu, tabs_panel,
+    WorkspaceAction, WorktreeAction, tab_options_menu, tabs_panel,
 };
 
 /// Big enough that two tabs both reach their maximum width, so the geometry
@@ -1158,9 +1158,9 @@ fn tab_boxes(scene: &Scene) -> Vec<RectF> {
 
 /// The close buttons that are currently drawn, by their rounded boxes.
 ///
-/// Bounded by size as well as by radius: the options gear, its menu's info
-/// note and the hover detail card are all 4px-rounded too, and only a close
-/// button is a 16px square. A clipped one is narrower, never wider.
+/// Bounded by size as well as by radius: a row, the options menu's info note
+/// and the hover detail card are all 4px-rounded too, and only a close button
+/// is a 16px square. A clipped one is narrower, never wider.
 fn close_boxes(scene: &Scene) -> Vec<RectF> {
     rects_rounded_by(scene, Radius::Pixels(4.))
         .into_iter()
@@ -1369,10 +1369,9 @@ fn info_dot_box(scene: &Scene) -> RectF {
 /// The note the info dot opens.
 ///
 /// Every `surface_raised` panel with a 4px radius, which while the menu is up
-/// is the note and nothing else: the popup itself is 6px-rounded, the gear's
-/// tooltip is suppressed while its menu is open, and opening the menu takes
-/// down any hover card. Deliberately not filtered by width — the width is what
-/// the test is about.
+/// is the note and nothing else: the popup itself is 6px-rounded, and opening
+/// the menu takes down any hover card. Deliberately not filtered by width —
+/// the width is what the test is about.
 fn info_notes(scene: &Scene) -> Vec<RectF> {
     detail_cards(scene)
 }
@@ -1445,19 +1444,27 @@ fn row_label_x(scene: &Scene, row: RectF) -> f32 {
         .fold(f32::INFINITY, f32::min)
 }
 
-/// The gear that opens the popup, by its 16x16 icon slot's box.
-fn gear_box(scene: &Scene) -> RectF {
-    let boxes: Vec<RectF> = visible_rects(scene)
-        .filter(|(rect, _)| {
-            rect.corner_radius.get_top_left() == Radius::Pixels(4.)
-                && (rect.bounds.width() - 20.).abs() < 0.5
-                && (rect.bounds.height() - 20.).abs() < 0.5
-        })
-        .map(|(_, bounds)| bounds)
-        .collect();
+/// A point in the room the list leaves under the `+`, which is what the
+/// options menu's secondary press is aimed at.
+///
+/// Below the band rather than on it. The band answers the same press, but it
+/// paints a box of its own and so covers the ground exactly there — pressing
+/// it would prove the band's handler works and say nothing about the room.
+/// Ninety pixels off the foot of the panel clears the row of section buttons,
+/// and it is far enough down to be outside the menu this opens: that menu
+/// hangs from the *top* of the list area, so a point just under a short list
+/// would be under the popup as well and the second press of a toggle would
+/// land on the popup instead of on the ground.
+fn empty_list_space(scene: &Scene) -> Vector2F {
+    let panel = panel_box(scene);
+    let plus = plus_box(scene);
+    let point = vec2f(center(panel).x(), panel.max_y() - 90.);
 
-    assert_eq!(boxes.len(), 1, "exactly one options gear per frame");
-    boxes[0]
+    assert!(
+        point.y() > plus.max_y(),
+        "the list leaves no room under the {plus:?} to press"
+    );
+    point
 }
 
 /// The chips a row draws, by their pill boxes.
@@ -1727,10 +1734,12 @@ fn double_clicking_the_header_maximises_the_window() {
 
 #[test]
 fn the_panel_owns_the_top_left_corner_of_the_window_in_the_vertical_layout() {
-    // The layout Crook opens in. The panel's control bar is the window's
-    // top-left corner, so it is what the traffic lights are painted over and
-    // what that end of the window is dragged by — and the header, which is no
-    // longer in that corner, owes neither.
+    // The layout Crook opens in. The panel's top row is the window's top-left
+    // corner, so it is what the traffic lights are painted over and what that
+    // end of the window is dragged by — and the header, which is no longer in
+    // that corner, owes neither. The control bar that used to be that row is
+    // gone; what is left is the reservation itself, which exists only where
+    // something is painted over it.
     let mut harness = Harness::panel(1);
     harness.override_controls(ControlLayout::MacOs);
     let insets = harness.window_insets();
@@ -1738,24 +1747,41 @@ fn the_panel_owns_the_top_left_corner_of_the_window_in_the_vertical_layout() {
     assert!(insets.panel_left > 0., "the panel took no reservation");
 
     let scene = harness.frame();
-    let gear = gear_box(&scene);
+    let field = panel_search_box(&scene);
     assert!(
-        gear.min_x() >= insets.panel_left,
-        "the panel's gear is at {} under a {} reservation",
-        gear.min_x(),
-        insets.panel_left
+        field.min_y() >= tabs_panel::TITLE_STRIP_HEIGHT,
+        "the search box starts at {} and the traffic lights reach {}",
+        field.min_y(),
+        tabs_panel::TITLE_STRIP_HEIGHT
     );
 
-    // The empty half of the control bar: left of the gear, right of the room
-    // the traffic lights are painted in.
+    // The strip itself: above the search box, inside the room the lights are
+    // painted in.
     harness.dispatch(Event::MouseDown {
         button: MouseButton::Left,
-        position: vec2f((insets.panel_left + gear.min_x()) / 2., center(gear).y()),
+        position: vec2f(insets.panel_left / 2., tabs_panel::TITLE_STRIP_HEIGHT / 2.),
         modifiers: Modifiers::default(),
         click_count: 1,
     });
 
     assert_eq!(harness.window_requests(), vec![Request::Drag]);
+}
+
+#[test]
+fn a_platform_that_paints_nothing_over_the_panel_gets_no_strip_at_all() {
+    // The other half, and the one the person asking for the control bar to go
+    // was looking at: with nothing over the corner there is nothing to reserve,
+    // so the panel starts with its search box and the row is not drawn at all.
+    let mut harness = Harness::panel(1);
+    harness.override_controls(ControlLayout::Freedesktop);
+    assert_eq!(harness.window_insets().panel_left, 0.);
+
+    let field = panel_search_box(&harness.frame());
+    assert!(
+        field.min_y() < tabs_panel::TITLE_STRIP_HEIGHT,
+        "the search box starts at {}, which is a strip's worth down a panel        that reserved nothing",
+        field.min_y()
+    );
 }
 
 /// The usage chip's pill, by its fully-rounded box.
@@ -1795,16 +1821,15 @@ fn clicking_a_crowded_tab_selects_it_and_closes_nothing() {
 
 #[test]
 fn the_new_tab_button_opens_a_tab_without_closing_the_active_one() {
+    // Crowded on purpose: the `+` sits under a list long enough to scroll, and
+    // it is outside the scroll area for exactly that reason — a `+` that went
+    // with the content would be unreachable at the tab count a person most
+    // wants another tab at.
     let mut harness = Harness::new(CROWDED);
     let ids = harness.tab_ids();
     let button = new_tab_box(&harness.frame());
 
-    // Its left edge: the first place the active tab's close button reaches
-    // once the strip is crowded enough for it to escape.
-    harness.click(
-        button.origin() + vec2f(2., button.height() / 2.),
-        MouseButton::Left,
-    );
+    harness.click(center(button), MouseButton::Left);
 
     let after = harness.tab_ids();
     assert_eq!(after.len(), ids.len() + 1, "the new tab replaced one");
@@ -2147,13 +2172,16 @@ impl Harness {
 }
 
 #[test]
-fn the_gear_opens_the_menu_and_a_click_outside_closes_it() {
-    let mut harness = Harness::seeded();
+fn the_empty_space_under_the_list_opens_the_menu_and_a_click_outside_closes_it() {
+    let mut harness = Harness::seeded_panel();
     assert!(!harness.is_menu_open());
 
-    let gear = gear_box(&harness.frame());
-    harness.click(center(gear), MouseButton::Left);
-    assert!(harness.is_menu_open(), "the gear did not open the menu");
+    let ground = empty_list_space(&harness.frame());
+    harness.click(ground, MouseButton::Right);
+    assert!(
+        harness.is_menu_open(),
+        "a secondary press on the empty space under the list opened nothing"
+    );
 
     let popup = menu_box(&harness.frame());
     // Well clear of the popup, and over the body — which must not react.
@@ -2165,22 +2193,23 @@ fn the_gear_opens_the_menu_and_a_click_outside_closes_it() {
 }
 
 #[test]
-fn re_clicking_the_gear_closes_the_menu_once_rather_than_twice() {
-    // The gear is under the modal underlay while the menu is up, so its own
-    // handler never fires and the press goes through the dismiss path. Letting
-    // both run would toggle twice in one click and leave the menu looking
-    // frozen open.
-    let mut harness = Harness::seeded();
-    let gear = gear_box(&harness.frame());
+fn pressing_the_empty_space_again_closes_the_menu_once_rather_than_twice() {
+    // The ground is under the modal underlay while the menu is up, so its own
+    // handler never fires and the press goes through the dismiss path — which
+    // takes the secondary button as well as the primary one, for exactly this
+    // gesture. Letting both run would toggle twice in one press and leave the
+    // menu looking frozen open.
+    let mut harness = Harness::seeded_panel();
+    let ground = empty_list_space(&harness.frame());
 
-    harness.click(center(gear), MouseButton::Left);
+    harness.click(ground, MouseButton::Right);
     assert!(harness.is_menu_open());
     harness.frame();
 
-    harness.click(center(gear), MouseButton::Left);
+    harness.click(ground, MouseButton::Right);
     assert!(
         !harness.is_menu_open(),
-        "re-clicking the gear toggled twice"
+        "pressing the empty space again toggled twice"
     );
 }
 
@@ -2561,33 +2590,6 @@ fn clicking_a_density_segment_changes_how_much_of_a_row_there_is() {
 }
 
 #[test]
-fn the_gear_says_what_it_does_while_the_pointer_is_on_it_and_the_menu_is_down() {
-    let mut harness = Harness::seeded();
-    let gear = gear_box(&harness.frame());
-    assert!(!frame_text(&harness.frame()).contains(controls::GEAR_TOOLTIP));
-
-    harness.move_to(center(gear));
-    let hovered = harness.frame();
-    assert!(
-        frame_text(&hovered).contains(controls::GEAR_TOOLTIP),
-        "hovering the gear named nothing; the only way to find out what it \
-         does is to click it"
-    );
-    // The tooltip is an anchored overlay, which contributes nothing to the
-    // size of the stack it hangs off — a button that grew or moved when it was
-    // named would slide out from under the pointer that named it.
-    assert_eq!(gear, gear_box(&hovered), "the tooltip moved the gear");
-
-    // Suppressed while the menu is up: the popup hangs off this button, and a
-    // tooltip left there would sit between the gear and its own menu.
-    harness.dispatch_option(OptionsAction::TogglePopup);
-    assert!(
-        !frame_text(&harness.frame()).contains(controls::GEAR_TOOLTIP),
-        "the tooltip stayed up under the menu it opened"
-    );
-}
-
-#[test]
 fn the_info_note_fits_inside_the_menu_it_belongs_to() {
     // `Text` never wraps and `Stack` lays an anchored child out against the
     // whole window, so the unbroken sentence measured about twice the popup's
@@ -2900,7 +2902,7 @@ fn every_mark_in_the_chrome_is_an_icon_rather_than_a_codepoint() {
     // character it hopes the machine has a font for. The codepoints below are
     // the ones that used to be drawn here, and a `Text` carrying any of them
     // is a mark that will be a different shape on somebody else's machine —
-    // or, for the gear, a colour emoji.
+    // or, for the settings mark, a colour emoji.
     let mut harness = Harness::seeded();
 
     // The tab list first: the branch mark is a row's, and rows are only drawn
@@ -2918,7 +2920,7 @@ fn every_mark_in_the_chrome_is_an_icon_rather_than_a_codepoint() {
     let drawn = icons_of(&scene);
     assert!(
         drawn.contains(&Lucide::Settings),
-        "the settings draw no gear, only {drawn:?}"
+        "the settings draw no settings mark, only {drawn:?}"
     );
 
     let text = frame_text(&scene);
@@ -3001,7 +3003,7 @@ fn worktree_remove_cross(scene: &Scene) -> RectF {
 /// The worktree menu the active tab opens, by its popup box.
 ///
 /// Found the way the options menu is: the one surface-raised, 6px-rounded box
-/// that is wide enough to be it. The gear's menu is 200 wide and this is 260,
+/// that is wide enough to be it. The options menu is 200 wide and this is 260,
 /// which is what tells the two apart in a frame that could hold either.
 fn worktree_menu_box(scene: &Scene) -> Option<RectF> {
     visible_rects(scene)
@@ -3863,9 +3865,9 @@ fn panel_search_box(scene: &Scene) -> RectF {
 
 /// Every row the panel painted, as (what it drew, what the clip left).
 ///
-/// A row is the only 4px-rounded box inside the panel wider than a button: the
-/// gear is 20 across, a close button 16, and the hover card hangs outside the
-/// panel entirely.
+/// A row is the only 4px-rounded box inside the panel wider than a button: a
+/// close button is 16 across, the `+` is rounded by five, and the hover card
+/// hangs outside the panel entirely.
 fn panel_row_rects(scene: &Scene) -> Vec<(RectF, RectF)> {
     let panel = panel_box(scene);
     let mut rows: Vec<(RectF, RectF)> = visible_rects(scene)
@@ -3943,12 +3945,12 @@ fn a_fresh_workspace_opens_with_the_tabs_in_a_panel() {
 }
 
 #[test]
-fn the_panel_carries_a_search_box_between_the_control_bar_and_the_list() {
-    // Telegram's arrangement, which is what the box is drawn in: the title row
-    // with its buttons, then the field across the whole column, then the list.
-    // Asserted as an order rather than as coordinates — what matters is that
-    // the box is under the `+` and above the first row, not what any of the
-    // three happen to measure.
+fn the_panel_carries_a_search_box_above_the_list_and_the_plus_below_it() {
+    // Telegram's arrangement with Warp's browser at the other end of it: the
+    // field across the whole column, then the list, then the `+` in the space
+    // the list leaves. Asserted as an order rather than as coordinates — what
+    // matters is that the field is over every row and the `+` under every row,
+    // not what any of the three happen to measure.
     let mut harness = Harness::panel(2);
     let scene = harness.frame();
 
@@ -3956,15 +3958,19 @@ fn the_panel_carries_a_search_box_between_the_control_bar_and_the_list() {
     let rows = panel_rows(&scene);
 
     assert!(
-        field.min_y() > plus_box(&scene).min_y(),
-        "the box is above the control bar it belongs under"
+        field.max_y() <= plus_box(&scene).min_y(),
+        "the box is under the `+` it belongs above"
+    );
+    assert!(
+        plus_box(&scene).min_y() >= rows[rows.len() - 1].max_y(),
+        "the `+` is not under the last row of the list"
     );
     assert!(
         field.max_y() <= rows[0].min_y(),
         "the box overlaps the first row of the list"
     );
     assert!(
-        field.width() > tabs_panel::PANEL_WIDTH - 20.,
+        field.width() > tabs_panel::PANEL_WIDTH - 26.,
         "the box does not take the width of the column: {field:?}"
     );
 }
@@ -5238,18 +5244,15 @@ fn a_panel_rows_close_button_closes_the_pane_it_names() {
 
 #[test]
 fn the_options_menu_opens_from_the_panel_and_stays_inside_it() {
-    // The whole of why the anchor is a parameter: the strip's gear hangs its
-    // menu from the left edge, and the same rule in a 248px column would open
-    // a 200px menu across the body.
+    // The whole of why the anchor names a corner: right edges aligned, because
+    // a 200px menu hung leftwards off a 248px column opens across the body,
+    // and `keep_on_screen` would not pull it back — the window has plenty of
+    // room to its right.
     let mut harness = Harness::seeded_panel();
     let panel = panel_box(&harness.frame());
 
-    let gear = gear_box(&harness.frame());
-    assert!(
-        panel.contains_point(center(gear)),
-        "the gear is not in the panel"
-    );
-    harness.click(center(gear), MouseButton::Left);
+    let ground = empty_list_space(&harness.frame());
+    harness.click(ground, MouseButton::Right);
     assert!(harness.is_menu_open());
 
     let menu = menu_box(&harness.frame());
@@ -5262,8 +5265,111 @@ fn the_options_menu_opens_from_the_panel_and_stays_inside_it() {
         panel.max_x()
     );
     assert!(
-        menu.min_y() >= gear.max_y(),
-        "the menu opened over its own gear"
+        panel.contains_point(center(menu)),
+        "the menu at {menu:?} is not inside the panel at {panel:?}"
+    );
+}
+
+#[test]
+fn the_band_under_the_list_lights_up_whole_rather_than_around_its_mark() {
+    // The `+` is the end of the list, so it is as wide as a row and it lights
+    // like one. A highlight the size of the glyph would be a smaller target
+    // than the one in the bar this replaced, and it would read as a mark
+    // somebody left there rather than as somewhere to press.
+    let mut harness = Harness::seeded_panel();
+    let scene = harness.frame();
+    let plus = plus_box(&scene);
+    let last = *panel_rows(&scene).last().expect("a row");
+
+    assert!(
+        (plus.width() - last.width()).abs() < 0.5,
+        "the `+` is {plus:?} and a row is {last:?}; the two do not line up"
+    );
+
+    // Its left edge, as far from the glyph in the middle as the band allows.
+    harness.move_to(vec2f(plus.min_x() + 4., center(plus).y()));
+    let scene = harness.frame();
+
+    let lit: Vec<RectF> = visible_rects(&scene)
+        .filter(|(rect, _)| {
+            rect.corner_radius.get_top_left() == Radius::Pixels(5.)
+                && rect.background == Fill::Solid(theme().overlay_1)
+        })
+        .map(|(_, bounds)| bounds)
+        .collect();
+
+    assert_eq!(
+        lit,
+        vec![plus],
+        "hovering the edge of the band lit {lit:?} rather than the whole of it"
+    );
+}
+
+#[test]
+fn the_panel_and_the_settings_rail_put_their_search_box_in_the_same_place() {
+    // Two sidebars in one column, so one box. Copied rather than chosen: a
+    // field a few pixels wider or higher in one section than in the other is
+    // the kind of difference nobody can name and everybody can see when the
+    // buttons at the foot of the panel switch between them.
+    let mut harness = Harness::seeded_panel();
+    let tabs = panel_search_box(&harness.frame());
+
+    harness.open_settings_page();
+    let rail = panel_search_box(&harness.frame());
+
+    assert_eq!(
+        tabs, rail,
+        "the tab list puts its search box at {tabs:?} and the settings rail       puts the same box at {rail:?}"
+    );
+}
+
+#[test]
+fn a_sidebar_section_gets_neither_the_plus_nor_the_menu_the_list_carries() {
+    // Both belong to the tab list, and the tab list is one section of the
+    // sidebar. `tabs_panel::render` draws the chrome for every section, so a
+    // `+` added there rather than to the list itself would offer a new agent
+    // tab from the middle of the settings rail.
+    let mut harness = Harness::seeded_panel();
+    harness.open_settings_page();
+    let scene = harness.frame();
+
+    assert!(
+        rects_rounded_by(&scene, Radius::Pixels(5.)).is_empty(),
+        "the settings rail is showing and the tab list's `+` is still drawn"
+    );
+
+    let panel = panel_box(&scene);
+    harness.click(
+        vec2f(center(panel).x(), panel.max_y() - 90.),
+        MouseButton::Right,
+    );
+    assert!(
+        !harness.is_menu_open(),
+        "a press on the settings rail opened the tab list's options menu"
+    );
+}
+
+#[test]
+fn a_secondary_press_on_a_row_opens_that_row_s_menu_and_not_the_list_s() {
+    // Both menus answer the same button, one layer apart. The row wins because
+    // the ground is a sibling *under* the list rather than a wrapper around it:
+    // a stack asks its topmost child first and stops at the one that claims the
+    // press, and the ground is covered by every rect a row painted.
+    let mut harness = Harness::seeded_panel();
+    let row = panel_rows(&harness.frame())[0];
+
+    harness.click(
+        row.origin() + vec2f(40., row.height() / 2.),
+        MouseButton::Right,
+    );
+
+    assert!(
+        worktree_menu_box(&harness.frame()).is_some(),
+        "the row's own menu did not open"
+    );
+    assert!(
+        !harness.is_menu_open(),
+        "a press on a row opened the list's options menu as well"
     );
 }
 
@@ -5304,49 +5410,6 @@ fn card_dividers(scene: &Scene, card: RectF) -> Vec<RectF> {
         })
         .map(|(_, bounds)| bounds)
         .collect()
-}
-
-#[test]
-fn the_gear_tooltip_is_a_label_beside_the_gear_and_not_a_bar_down_the_window() {
-    // An anchored overlay child is laid out against the whole window, and
-    // `Align` returns `constraint.max` on every finite axis — so an `Align`
-    // inside the tooltip measured 88 by the window's *height*: an 88px bar
-    // from the top of the window to the bottom, straight down the tab list,
-    // with the label stranded in the middle of it and every element under it
-    // reporting itself covered.
-    let mut harness = Harness::seeded_panel();
-    let scene = harness.frame();
-    let gear = gear_box(&scene);
-    let plus = new_tab_box(&scene);
-    let row = panel_rows(&scene)[0];
-
-    harness.move_to(center(gear));
-    let scene = harness.frame();
-    let tooltips = detail_cards(&scene);
-    assert_eq!(tooltips.len(), 1, "hovering the gear named nothing");
-    let tooltip = tooltips[0];
-
-    assert!(
-        tooltip.height() < 2. * gear.height(),
-        "the tooltip is {tooltip:?}, which is a bar rather than a label"
-    );
-    assert!(
-        tooltip.min_y() >= gear.max_y(),
-        "the tooltip at {tooltip:?} is not below the gear at {gear:?}"
-    );
-    // It floats over the top of the list while it is up, which is what a
-    // tooltip does. What it must not do is run past it: the bar reached the
-    // bottom of the window and covered every row on the way.
-    assert!(
-        tooltip.max_y() < row.max_y(),
-        "the tooltip at {tooltip:?} outlasts the row at {row:?} it is drawn          over"
-    );
-    assert!(
-        tooltip
-            .intersection(plus)
-            .is_none_or(|overlap| overlap.is_empty()),
-        "the tooltip at {tooltip:?} covers the new-tab button at {plus:?}"
-    );
 }
 
 #[test]
@@ -5470,10 +5533,12 @@ fn clicking_a_split_tabs_heading_selects_it_without_moving_the_focus_inside_it()
 
 #[test]
 fn a_row_armed_before_the_menu_opened_puts_no_card_over_the_menus_underlay() {
-    // The gear moved into the control bar, which paints *before* the list, so
-    // a card opened from a row afterwards lands in a later overlay layer than
-    // the menu — and covers the modal underlay whose whole job is to catch the
-    // press that dismisses. `--menu --hover` applies the two in that order.
+    // A card and the menu are both anchored overlays, and the later of the two
+    // covers the earlier. The menu is added last on the ground under the list,
+    // so it wins for any card the same frame builds — but a card armed before
+    // and left armed would come back on a later frame, land in a later overlay
+    // layer, and cover the modal underlay whose whole job is to catch the press
+    // that dismisses. `--menu --hover` applies the two in that order.
     let mut harness = Harness::seeded_panel();
     let row = panel_rows(&harness.frame())[0];
 
@@ -5587,8 +5652,9 @@ fn overlaps(left: RectF, right: RectF) -> bool {
 
 /// The `+` button's box, by the only 5px-rounded rect in the frame.
 ///
-/// It lives in the panel's control bar, which is the window's top-left corner
-/// — so it is also what moves when the traffic lights come and go.
+/// Five is what keeps it out of every other helper here: a row, a card and a
+/// close button are all rounded by four, and the `+` has been the one thing in
+/// the frame rounded by five since it was in the control bar.
 fn plus_box(scene: &Scene) -> RectF {
     let boxes: Vec<RectF> = visible_rects(scene)
         .filter(|(rect, _)| rect.corner_radius.get_top_left() == Radius::Pixels(5.))
@@ -5691,8 +5757,13 @@ fn creator_buttons(scene: &Scene) -> Vec<RectF> {
 }
 
 /// The five swatches the creator offers, left to right.
+///
+/// Filled as well as 40 tall. A swatch *is* a colour, so it always has a fill,
+/// and height on its own caught an unpainted container in the tabs panel
+/// behind this the day that container changed height.
 fn creator_swatches(scene: &Scene) -> Vec<RectF> {
     let mut swatches: Vec<RectF> = visible_rects(scene)
+        .filter(|(rect, _)| rect.background != Fill::None)
         .map(|(_, bounds)| bounds)
         .filter(|bounds| (bounds.height() - 40.).abs() < 0.5)
         .collect();
@@ -6099,7 +6170,7 @@ fn the_settings_chord_shows_the_settings_section_and_a_second_press_keeps_it() {
 }
 
 #[test]
-fn opening_the_settings_page_from_the_gear_menu_takes_the_menu_down() {
+fn opening_the_settings_page_from_the_options_menu_takes_the_menu_down() {
     // The popup is a menu about the strip. It stays up through every option
     // click on purpose, but this entry navigates away from what it is about.
     let mut harness = Harness::seeded();
@@ -6302,7 +6373,7 @@ fn the_page_and_the_scroll_position_outlive_leaving_the_section() {
 }
 
 #[test]
-fn a_switch_on_the_page_writes_the_option_the_gear_menu_writes() {
+fn a_switch_on_the_page_writes_the_option_the_options_menu_writes() {
     let mut harness = Harness::new(1);
     harness.open_settings_page();
 
@@ -6333,7 +6404,7 @@ fn a_switch_on_the_page_writes_the_option_the_gear_menu_writes() {
 #[test]
 fn a_switch_the_density_has_made_inert_is_drawn_and_does_nothing() {
     // Warp's third way with an irrelevant setting, and the one the page takes:
-    // the row stays, greyed, with no handler. The gear menu takes the other —
+    // the row stays, greyed, with no handler. The options menu takes the other —
     // it drops the two rows entirely — and both are right for their surface.
     let mut harness = Harness::new(1);
     assert_eq!(Density::Compact, harness.options().density);
@@ -9714,10 +9785,13 @@ mod title_bar_hit_testing {
     fn every_control_in_the_header_still_answers_a_click() {
         let mut harness = Harness::new(2);
 
-        // The gear opens its menu.
+        // The empty space under the list opens the options menu.
         let scene = harness.frame();
-        harness.click(center(gear_box(&scene)), MouseButton::Left);
-        assert!(harness.is_menu_open(), "the gear stopped opening the menu");
+        harness.click(empty_list_space(&scene), MouseButton::Right);
+        assert!(
+            harness.is_menu_open(),
+            "the empty space stopped opening the menu"
+        );
         harness.dispatch_option(OptionsAction::TogglePopup);
 
         // The `+` opens a tab.
@@ -9743,23 +9817,22 @@ mod title_bar_hit_testing {
             "the first tab moved when it was clicked"
         );
 
-        // And none of the four dragged the window.
+        // And none of the three dragged the window.
         assert!(
             harness.window_requests().is_empty(),
-            "a control in the header dragged the window: {:?}",
+            "a control in the panel dragged the window: {:?}",
             harness.window_requests()
         );
     }
 
     #[test]
     fn the_chip_and_the_tabs_swallow_a_double_click_rather_than_maximising() {
-        for target in ["tab", "chip", "gear", "plus"] {
+        for target in ["tab", "chip", "plus"] {
             let mut harness = Harness::new(2);
             let scene = harness.frame();
             let at = match target {
                 "tab" => center(tab_boxes(&scene)[0]),
                 "chip" => center(pill_box(&scene)),
-                "gear" => center(gear_box(&scene)),
                 _ => center(plus_box(&scene)),
             };
 
@@ -9776,8 +9849,8 @@ mod title_bar_hit_testing {
 
     #[test]
     fn every_gap_between_the_header_controls_still_picks_the_window_up() {
-        // The `+` and the gear are the panel's; what is left in this row is
-        // whatever a plugin pinned to the right of it, and nothing else.
+        // The `+` is the panel's; what is left in this row is whatever a
+        // plugin pinned to the right of it, and nothing else.
         let scene = Harness::new(2).frame();
         let panel = panel_box(&scene);
         let chip = pill_box(&scene);
