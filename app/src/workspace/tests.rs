@@ -7887,14 +7887,13 @@ mod text_size {
     }
 
     /// The chord, sent the way the window delegate sends a bound keystroke.
+    ///
+    /// Through [`platform_chord`] rather than a bare Control: zoom is Command
+    /// on macOS, so hard-coding Control made these four tests unable to pass
+    /// on a Mac at all. Shift is don't-care for the zoom bindings off macOS,
+    /// which is why the chord every other test uses fits this one too.
     fn zoom(harness: &mut Harness, key: &str) -> bool {
-        harness.press_key(
-            key,
-            Modifiers {
-                ctrl: true,
-                ..Modifiers::default()
-            },
-        )
+        harness.press_key(key, platform_chord())
     }
 
     #[test]
