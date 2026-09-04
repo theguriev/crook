@@ -28,6 +28,8 @@ use crookui_core::prelude::*;
 use crook_plugin::{EntryId, Manifest, PluginId, SlotId, Slots};
 
 use crate::theme::theme;
+use crate::workspace::settings_page::search::Words;
+use crate::workspace::settings_page::widgets::Command;
 use crate::workspace::settings_page::{named, widgets};
 use crate::workspace::{Workspace, WorkspaceAction};
 
@@ -111,9 +113,32 @@ pub(super) fn render(workspace: &Workspace, manifest: &'static Manifest) -> Box<
 
     let (commands, unoffered) = offers(workspace, &manifest.id);
     if !commands.is_empty() || unoffered > 0 {
+        // A row with a button rather than a line of text. What this section
+        // used to be was nine action names a person could read and not reach:
+        // the only way to run one was the command palette, which the card
+        // never mentions. A command that is listed where it cannot be run is a
+        // command most people will never find.
         let mut rows: Vec<widgets::Entry> = commands
             .into_iter()
-            .map(|line| widgets::note(&line, ui))
+            .map(|offered| {
+                let live = offered.command.is_some();
+                let control = widgets::text_button(
+                    "Run",
+                    offered.command,
+                    workspace
+                        .settings_page()
+                        .control(named(&format!("plugins.run.{}", offered.name))),
+                    ui,
+                );
+                widgets::row(
+                    Words::new(offered.title)
+                        .with_description(&offered.name)
+                        .with_keywords(&[&offered.name]),
+                    live,
+                    control,
+                    ui,
+                )
+            })
             .collect();
         if unoffered > 0 {
             // Counted rather than listed. A plugin's own arrow keys are
@@ -431,7 +456,7 @@ fn drawn_in<C: 'static>(slots: &Slots<C>, plugin: &PluginId) -> Vec<String> {
 /// a command is one a person should be able to find. The card lists the
 /// commands and counts the rest — a plugin whose internal wiring is its
 /// longest section is a card nobody reads.
-fn offers(workspace: &Workspace, plugin: &PluginId) -> (Vec<String>, usize) {
+fn offers(workspace: &Workspace, plugin: &PluginId) -> (Vec<Offered>, usize) {
     let host = workspace.host();
     let mine: Vec<crate::plugin::ActionName> = host
         .actions()
@@ -441,13 +466,35 @@ fn offers(workspace: &Workspace, plugin: &PluginId) -> (Vec<String>, usize) {
         .map(|(name, _)| name)
         .collect();
 
-    let offered: Vec<String> = mine
+    let offered: Vec<Offered> = mine
         .iter()
         .filter_map(|name| {
-            host.title_of(name)
-                .map(|title| format!("{name} \u{2014} {title}"))
+            let title = host.title_of(name)?;
+            Some(Offered {
+                // The title is the label and the name goes under it. What a
+                // person is looking for is what the command *does*; the name
+                // is what they need only once they want to bind it, and
+                // putting it first left every row starting with three words
+                // of punctuation.
+                title: title.to_owned(),
+                name: name.to_string(),
+                command: host.action(name).map(WorkspaceAction::Run),
+            })
         })
         .collect();
     let rest = mine.len() - offered.len();
     (offered, rest)
+}
+
+/// One command a plugin offers, and how to run it.
+struct Offered {
+    /// What a palette would call it, which is the row's label.
+    title: String,
+    /// `owner/plugin/action`, under the label and in the row's keywords: it is
+    /// what somebody binding a chord to this needs, and what somebody reading
+    /// the card does not.
+    name: String,
+    /// What pressing it does, or `None` for a command that has gone — a plugin
+    /// switched off between the list being read and the frame being drawn.
+    command: Command,
 }
