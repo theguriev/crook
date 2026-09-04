@@ -131,9 +131,17 @@ const REAP_INTERVAL: Duration = Duration::from_millis(5);
 
 /// The grid a terminal starts at, before any pane has been laid out.
 ///
-/// The size every terminal has ever defaulted to. The first layout replaces it
-/// with what the pane actually measured, usually before the shell has printed
-/// its prompt.
+/// The size every terminal has ever defaulted to, and a placeholder: a pane has
+/// no rectangle until the first layout measures one, and the shell is started
+/// before that because the element that measures a pane is built around a
+/// running terminal. The first layout replaces it.
+///
+/// It is a real gap and not only a formality. A shell can print its whole
+/// startup — a `~/.zprofile` banner, a greeting sized with `tput cols` — inside
+/// that window, and what it printed is copied out of the grid into a block the
+/// moment the first prompt mark arrives, so a later resize cannot reflow it.
+/// Closing it means measuring a pane that has no terminal in it yet, which is a
+/// change to how panes are laid out rather than to how shells are started.
 const INITIAL_GRID: TerminalSize = TerminalSize::new(80, 24);
 
 /// Something one pane's shell did that the rest of the application cares about.
@@ -275,6 +283,14 @@ pub struct TerminalModel {
     /// continuous stream.
     shell_marks: bool,
 
+    /// Whether a pane's shell is started as a login shell.
+    ///
+    /// On, and set from
+    /// [`GeneralOptions::login_shell`](crate::settings::GeneralOptions::login_shell).
+    /// It is what makes the shell read `~/.zprofile`, `~/.bash_profile` and the
+    /// rest — the files a person's `PATH` is built in.
+    shell_login: bool,
+
     /// The one thread that comes back for batches parsed too soon to draw.
     ///
     /// Shared by every pane and started with the first of them, so a model that
@@ -321,6 +337,7 @@ impl TerminalModel {
             palette: crook_palette(),
             watching_children: false,
             shell_marks: true,
+            shell_login: shell_integration::login_by_default(),
             flusher: Arc::new(Flusher::default()),
             flushing: false,
         }
@@ -350,6 +367,20 @@ impl TerminalModel {
     /// shell starts and cannot be taken out of one that is already running.
     pub fn set_shell_marks(&mut self, enabled: bool) {
         self.shell_marks = enabled;
+    }
+
+    /// Says whether shells opened from now on are login shells.
+    ///
+    /// Only shells opened *after* this, and for the same reason: a shell reads
+    /// its startup files once, before it draws its first prompt, and no message
+    /// sent afterwards can make it read them again.
+    pub fn set_shell_login(&mut self, login: bool) {
+        self.shell_login = login;
+    }
+
+    /// Whether the next shell opened will be a login shell.
+    pub fn shell_login(&self) -> bool {
+        self.shell_login
     }
 
     /// Opens a shell for every pane that has none, and closes the ones whose
@@ -484,6 +515,7 @@ impl TerminalModel {
         // session below rather than left to fall out of scope here.
         let integration = shell_integration::Session::open(&shell_integration::Options {
             enabled: self.shell_marks,
+            login: self.shell_login,
             ..Default::default()
         });
         let mut options = TerminalOptions {

@@ -83,6 +83,15 @@ Seven features, and the page that configures them:
   longer than a blink: the field goes away and its space goes to the block. `ctrl-c`, `ctrl-z`
   and an end-of-input `ctrl-d` always reach the shell. That line is drawn in one function,
   `app/src/input_keys.rs`, and the architecture doc's §7 says why it is drawn there.
+- **The shell your other terminal gives you.** A pane starts a *login* shell, which is what
+  Terminal.app, iTerm2 and WezTerm start and what `login(1)` itself starts. That is the
+  difference between the environment you configured and a subset of it: only a login shell
+  reads `/etc/zprofile`, `~/.zprofile` and `~/.zlogin` on zsh, `/etc/profile` and
+  `~/.bash_profile` on bash, and only a login shell makes macOS run `path_helper` — the thing
+  that builds `PATH` out of `/etc/paths` and `/etc/paths.d` at all. So the ASCII art in your
+  `~/.zprofile` appears, `which` answers the way it does next door, and you get the same
+  version of every tool. See "Which files your shell reads" below for the details, including
+  the switch that turns it off.
 - **Shell integration, installed by itself.** A pane running zsh, bash or fish emits the four
   OSC 133 marks that say where a prompt starts, where a command starts and how it ended. There
   is nothing to install and nothing to configure: Crook writes a scratch `ZDOTDIR`, `--rcfile`
@@ -90,8 +99,8 @@ Seven features, and the page that configures them:
   `~/.zshrc`, and removes the stub when the pane closes. Set `CROOK_NO_SHELL_INTEGRATION` to
   anything but `0` to turn it off. It reaches only shells Crook itself starts — not the far
   side of an `ssh`, not a container, and not a shell it has no snippet for (`pwsh`, `nu`,
-  `ksh`, `tcsh`) — and on those machines the same text can be pasted at the end of the rc file
-  by hand: it is `app/src/shell_integration/crook.zsh` and its two siblings.
+  `ksh`, `tcsh`) — and on those machines `crook --shell-integration zsh` prints the same text
+  to paste at the end of the rc file by hand.
 
   It also **answers**, which is what makes Tab work. Command marks are an announcement and
   completion is a question, so there is a second channel beside them: Crook writes the line
@@ -162,6 +171,66 @@ the composer; [`docs/blocks.md`](docs/blocks.md) lists those and says what each 
 The terminal grid still reaches no clipboard of its own: the input field copies and pastes, an
 OSC 52 from the shell does not. The list of what is absent — and what adding each item would
 touch — is the last section of the architecture doc.
+
+## Which files your shell reads
+
+If your `PATH` inside Crook is not the `PATH` you get in your other terminal, or the banner
+your `~/.zprofile` prints is missing, this is the section.
+
+**Crook starts a login shell**, the same as Terminal.app, iTerm2 and WezTerm, and the same as
+`login(1)` itself. A shell reads a different set of your files depending on how it was
+started, and the login set is the one that holds the facts about your whole session:
+
+| shell | a login shell reads | a non-login interactive shell reads |
+|---|---|---|
+| zsh | `/etc/zshenv`, `~/.zshenv`, `/etc/zprofile`, `~/.zprofile`, `/etc/zshrc`, `~/.zshrc`, `/etc/zlogin`, `~/.zlogin` | `/etc/zshenv`, `~/.zshenv`, `/etc/zshrc`, `~/.zshrc` |
+| bash | `/etc/profile`, then the **first** of `~/.bash_profile`, `~/.bash_login`, `~/.profile` — and not `~/.bashrc`, which the profile usually sources itself | `~/.bashrc` |
+| fish | `config.fish`, with `status is-login` true, which is what makes fish run `path_helper` | `config.fish` |
+
+On macOS the missing half is the expensive one: `/etc/zprofile` is where `path_helper` builds
+`PATH` out of `/etc/paths` and `/etc/paths.d`, and **nothing else runs it**. A non-login shell
+on a Mac therefore has a `PATH` nobody assembled — different tools, different versions, in a
+different order than every other terminal on the same desktop.
+
+**Two things follow for your dotfiles.** Your `~/.zprofile` and `~/.bash_profile` now run
+*once per pane* rather than once per login, so anything slow or noisy in them is slow and
+noisy in every pane and every split — that is what the switch below is for. And a shell Crook
+starts is otherwise exactly your shell: it reads your own files, in your shell's own order,
+each exactly once. Crook never writes to a file you own; it points the shell at a scratch
+directory of stubs that source yours, and deletes it when the pane closes.
+
+**The default is per platform**, because the question is "what does the terminal beside it
+do":
+
+- **macOS and Windows: on.** Every macOS terminal starts a login shell, and `path_helper`
+  lives where only a login shell will find it.
+- **Linux: off.** GNOME Terminal, Konsole and xfce4-terminal all start a non-login shell, and
+  Linux configurations are written to match — `PATH` and the prompt go in `~/.bashrc` or
+  `~/.zshrc`, and a `~/.bash_profile` that does not source `~/.bashrc` is an ordinary thing to
+  have. Turning it on there would read the profile, skip `~/.bashrc` — that is bash's rule,
+  not Crook's — and leave you with no aliases and no prompt.
+
+**The switch** is Settings → Shell → *Start a login shell* (`cmd/ctrl-,`, or
+`crook --settings shell`), stored as `login_shell` in the settings file. It applies to the
+next shell opened, not to the ones already running, because a shell reads its startup files
+once and nothing can make it read them again.
+
+**Two shells are special.**
+
+- **bash** cannot be given `--rcfile` and `-l` at the same time: a login bash reads no rc
+  file at all, so `bash --rcfile <file> -l` silently never opens the file, and the command
+  marks are in that file. Crook's rc file therefore runs bash's own login sequence itself, in
+  bash's own order, and its logout sequence — `~/.bash_logout` and the `logout` builtin — as
+  well. What it cannot reproduce is `shopt -q login_shell`, which stays off, and `$0`, which
+  is the shell's path rather than `-bash`.
+- **A shell Crook has no `-l` for** — tcsh, ksh, dash, nushell, a wrapper script — is started
+  the way `login(1)` starts one instead, with `argv[0]` set to the shell's name with a leading
+  hyphen. That needs no option parsing, so it works on a shell nobody anticipated; `-l` would
+  not, since tcsh answers ``Unknown option: `-l'``.
+
+**Windows** has no login shell to start. `PATH` is in the registry and every process already
+has all of it, and `$PROFILE` is read by every interactive PowerShell. There is no convention
+to imitate, so nothing is imitated.
 
 ## Prerequisites
 

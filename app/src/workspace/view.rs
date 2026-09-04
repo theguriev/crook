@@ -479,6 +479,11 @@ impl Workspace {
         ctx.subscribe_to_model(&terminals, |workspace, _, update, ctx| {
             workspace.apply_terminal_update(update, ctx);
         });
+        // Before any shell can be opened, because a shell reads its startup
+        // files once and the model's own default would otherwise decide the
+        // first pane of every session for a person who turned this off.
+        let login_shell = settings.general().login_shell;
+        terminals.update(ctx, |model, _| model.set_shell_login(login_shell));
 
         let options = settings.tab_options();
         let settings_path = settings.path().map(Path::to_owned);
@@ -1466,11 +1471,11 @@ impl Workspace {
     /// starts or stops whatever they gate.
     ///
     /// The mirror of [`Self::set_options`] for the other group, and it has one
-    /// job that one does not: the usage chip's switch is also the poll's, so
-    /// the model is told before the file is written. A person who turns the
-    /// chip off has said they do not want Crook talking to the network, and
-    /// waiting for a background save to land before acting on that would be
-    /// the wrong order to do two things in.
+    /// job that one does not: two of these switches are also models', so the
+    /// models are told before the file is written. A person who turns the chip
+    /// off has said they do not want Crook talking to the network, and waiting
+    /// for a background save to land before acting on that would be the wrong
+    /// order to do two things in.
     fn set_general(&mut self, general: GeneralOptions, ctx: &mut ViewContext<Self>) {
         if general == self.settings.general() {
             return;
@@ -1480,6 +1485,11 @@ impl Workspace {
         self.usage.update(ctx, |model, ctx| {
             model.set_wanted(general.show_usage_chip, ctx);
         });
+        // The shells already running keep the startup they were given; there is
+        // no way to read a file into a shell that has drawn its prompt. This
+        // decides the next one opened.
+        self.terminals
+            .update(ctx, |model, _| model.set_shell_login(general.login_shell));
         self.save_settings(ctx);
         ctx.notify();
     }
@@ -1719,6 +1729,23 @@ impl Workspace {
     pub fn set_shell_marks(&self, enabled: bool, ctx: &mut ViewContext<Self>) {
         self.terminals
             .update(ctx, |model, _| model.set_shell_marks(enabled));
+    }
+
+    /// Says whether shells opened from now on are login shells.
+    ///
+    /// Normally the setting decides, and it is applied when the window is
+    /// built. This is the seam a test uses to stand a shell up in a world it
+    /// controls: a login shell reads the startup files of whoever is running
+    /// the suite, and a test whose result depends on what a developer's
+    /// `~/.zprofile` prints is not a test.
+    pub fn set_shell_login(&self, login: bool, ctx: &mut ViewContext<Self>) {
+        self.terminals
+            .update(ctx, |model, _| model.set_shell_login(login));
+    }
+
+    /// Whether the next shell opened will be a login shell.
+    pub fn shell_login(&self, app: &AppContext) -> bool {
+        self.terminals.as_ref(app).shell_login()
     }
 
     /// Writes to a pane's shell directly, going round the input field.
@@ -2732,6 +2759,11 @@ impl Workspace {
             SettingsAction::ToggleFollowSystemTheme => {
                 let follow = !self.general().use_system_theme;
                 self.set_follow_system_theme(follow, ctx);
+            }
+            SettingsAction::ToggleLoginShell => {
+                let mut general = self.general();
+                general.login_shell = !general.login_shell;
+                self.set_general(general, ctx);
             }
             SettingsAction::ToggleRestoreSession => {
                 let mut general = self.general();

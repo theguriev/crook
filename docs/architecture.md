@@ -654,6 +654,86 @@ fit in a twelve-byte `Copy` cell, and dropping them turns `José` into `Jose` on
 that hands out decomposed names. They ride beside the grid in a small side table that is
 empty for essentially every screen.
 
+### Which shell, and how it is started
+
+Two decisions live in `crates/crook_terminal/src/pty.rs`, and both of them are the difference
+between "my terminal" and "a terminal".
+
+**Which shell.** `$SHELL` when it names something this user may execute, otherwise the shell
+in the password database — `pw_shell`, what `chsh` writes and what `login(1)` reads — and
+`/bin/sh` only as the last resort. Both fallbacks earn their place. `$SHELL` is *absent* from
+the environment of anything a desktop launches rather than a shell: an application bundle
+opened from the Dock, a `.desktop` entry, a container. And `$SHELL` *outlives* the shell it
+names whenever a Homebrew or Nix package is removed or a `chsh` target moves — the first case
+would hand the user `/bin/sh` with none of their configuration on the launch path most people
+use, and the second a pane that cannot open at all. The answer comes from `portable-pty`'s own
+resolution on purpose: this same name is what `shell_integration::Shell::of` reads to decide
+which stubs to write, and a Crook that wrapped zsh's stubs around a `/bin/sh` would be worse
+than one that wrote none.
+
+**How.** As a *login* shell, which is what `login(1)`, Terminal.app, iTerm2 and WezTerm all
+start, because that is the only kind that reads the files a person's `PATH` is assembled in —
+and on macOS the only kind that runs `path_helper` at all. There are two conventions for
+asking, they are different mechanisms, and Crook uses both:
+
+- **`-l`** for zsh, bash and fish, whose switch is known. The shell is named explicitly, which
+  matters because `app/src/shell_integration` has by then written startup stubs shaped for
+  *that* shell.
+- **`argv[0]` with a leading hyphen** — `-tcsh`, `-ksh`, `-dash` — for everything else. It is
+  what `login(1)` itself does, it needs no option parsing, and so it works on a shell nobody
+  anticipated. Guessing `-l` there does not: tcsh answers ``Unknown option: `-l'`` and the
+  pane opens with nothing in it. `portable-pty` offers this only through `new_default_prog`, a
+  builder that takes no arguments and resolves the shell itself out of the `SHELL` it will
+  hand the child — which is why that variable is set to the shell being asked for.
+
+Windows gets neither, and should. PowerShell and cmd have no login mode: `PATH` is in the
+registry and every process already has all of it, and `$PROFILE` is read by every interactive
+PowerShell. Inventing an equivalent would be Crook making up a startup convention the platform
+does not have.
+
+The *default* — as opposed to the mechanism — is per platform, in
+`shell_integration::login_by_default`, and it is set by what the desktop's own terminal does:
+on for macOS, where every terminal starts a login shell and `path_helper` is only reachable
+that way, off for Linux, where GNOME Terminal and Konsole start non-login shells and
+configurations are written to match. `GeneralOptions::login_shell` is the switch either way,
+and the README's "Which files your shell reads" is the user-facing half of this.
+
+**Your files must not be able to tell.** `app/src/shell_integration/launch.rs` reaches zsh by
+pointing `ZDOTDIR` at a scratch directory of stubs that source the real files, and that
+borrowed variable is a trap in two directions. A `.zshenv` containing
+`ZDOTDIR=${ZDOTDIR:-$HOME/.config/zsh}` — a common spelling — takes the wrong branch against a
+`ZDOTDIR` somebody else set, and the person then loses `.zprofile`, `.zshrc` and `.zlogin`
+entirely; so each stub restores `ZDOTDIR` to the state it was in *before* Crook — unset, for
+almost everybody — before sourcing, and the `.zshrc` stub's last act restores it for good, so
+that a nested `zsh` or an `exec zsh` in the pane starts from the state a first zsh does.
+The other direction is macOS's `/etc/zshrc`, which runs *between* the stubs and does
+`HISTFILE=${ZDOTDIR:-$HOME}/.zsh_history` — pointing the history file inside a directory the
+pane deletes when it closes. Testing only for an empty `HISTFILE`, which is what every
+framework's own guard does, never fires there; the stub also tests for one that resolves
+inside Crook's own directory, which is the one answer that cannot have come from the user.
+
+bash is the shell that will not take the arrangement at all: `bash --rcfile <file> -l`
+silently never opens the file, and `bash -l --rcfile <file>` does not start. So its rc file
+plays the login shell itself — `/etc/profile`, then the first of `~/.bash_profile`,
+`~/.bash_login`, `~/.profile`, then `~/.bashrc` only as the fallback for a home with no
+profile in it — and plays the logout shell too, chaining an `EXIT` trap onto whatever it finds
+so `~/.bash_logout` still runs and `logout` still closes the pane.
+
+**What the child is told beside that.** `TERM=xterm-256color` and `COLORTERM=truecolor`,
+because `alacritty_terminal` implements those sequences and the entry is in every terminfo
+database old enough to matter. `LINES` and `COLUMNS` are *removed* rather than set: whatever
+started Crook may have had them, they described its window, and the kernel's `winsize` — which
+the pty is opened at before the child exists — is the truth. `TERM_PROGRAM=Crook` and
+`TERM_PROGRAM_VERSION` come from `shell_integration` and reach every shell, marks or no marks.
+
+One gap is worth naming because it is visible now that profiles run. A pane's pty is opened at
+80×24 and only the *first layout* resizes it, so a shell that prints its whole startup —
+a `~/.zprofile` banner, a greeting sized with `tput cols` — can do so before that. What it
+printed is copied out of the grid into a block the moment the first prompt mark arrives, so a
+later resize cannot reflow it. Closing that means measuring a pane that has no terminal in it
+yet, which is a change to how panes are laid out rather than to how shells are started;
+`INITIAL_GRID` in `app/src/terminal_model.rs` carries the note.
+
 ### Who drives it
 
 `app/src/terminal_model.rs`, in the shape `usage_model` and `git_model` established: work off

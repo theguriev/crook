@@ -32,9 +32,18 @@ const TERM: &str = "xterm-256color";
 /// What to run inside the pty.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Program {
-    /// The user's shell, as chosen by [`default_shell`].
+    /// The user's shell, as chosen by [`default_shell`], started as a login
+    /// shell. The same thing as [`Self::LoginShell`] with that shell named.
     #[default]
     Shell,
+    /// A named shell, started the way `login(1)` starts one — with `-l` where
+    /// [`login_arguments`] has one, and otherwise with the argv\[0\]
+    /// convention `login(1)` itself uses.
+    LoginShell {
+        /// The shell. A full path, since this is the shell a person chose
+        /// rather than a name to look up.
+        program: OsString,
+    },
     /// A specific executable, run instead of a shell.
     Command {
         /// The executable, resolved through `PATH` if it is not a full path.
@@ -57,15 +66,41 @@ impl Program {
             args: args.into_iter().map(Into::into).collect(),
         }
     }
+
+    /// This shell, started as a login shell.
+    pub fn login_shell<S: Into<OsString>>(program: S) -> Self {
+        Self::LoginShell {
+            program: program.into(),
+        }
+    }
 }
 
 /// The shell a terminal should open when the user has not asked for anything
 /// else.
 ///
-/// On Unix that is `$SHELL`, which is what the login process set from the
-/// password database, falling back to `/bin/sh` — the one shell POSIX promises
-/// exists. On Windows it is `%ComSpec%`, which is how a program is told which
-/// command processor to use, falling back to PowerShell when it is unset.
+/// On Unix that is `$SHELL` when it names something this user may execute, and
+/// otherwise the shell in the password database — `pw_shell`, which is what
+/// `chsh` writes and what `login(1)` reads — falling back to `/bin/sh`, the one
+/// shell POSIX promises exists. Both halves of that are load-bearing and
+/// neither is hypothetical:
+///
+/// * `$SHELL` is absent from the environment of anything a desktop launches
+///   rather than a shell — an application bundle opened from the Dock, a
+///   `.desktop` entry, a container. Falling straight to `/bin/sh` there would
+///   hand the user a POSIX shell with none of their configuration, no marks and
+///   a name Crook cannot recognise, on the launch path most people use.
+/// * `$SHELL` outliving the shell it names — a Homebrew or Nix package removed,
+///   a `chsh` to a path that moved — is a pane that cannot open at all, since a
+///   program that is not there cannot be spawned. Every other terminal reads
+///   `pw_shell` and keeps working.
+///
+/// The answer comes from `portable-pty`'s own resolution, deliberately: this is
+/// the name [`Program::Shell`] spawns *and* the name the app reads to decide
+/// which shell integration to install, and a Crook that installed zsh's stubs
+/// around a `/bin/sh` would be worse than one that installed none.
+///
+/// On Windows it is `%ComSpec%`, which is how a program is told which command
+/// processor to use, falling back to PowerShell when it is unset.
 pub fn default_shell() -> OsString {
     #[cfg(windows)]
     {
@@ -75,9 +110,103 @@ pub fn default_shell() -> OsString {
     }
     #[cfg(not(windows))]
     {
-        std::env::var_os("SHELL")
-            .filter(|shell| !shell.is_empty())
-            .unwrap_or_else(|| OsString::from("/bin/sh"))
+        OsString::from(CommandBuilder::new_default_prog().get_shell())
+    }
+}
+
+/// The arguments that make `shell` a *login* shell, or none for a shell whose
+/// switch Crook has not checked.
+///
+/// A login shell is what reads `/etc/zprofile`, `$ZDOTDIR/.zprofile` and
+/// `$ZDOTDIR/.zlogin` on zsh, `/etc/profile` and `~/.bash_profile` on bash, and
+/// what makes fish's own `config.fish` run `path_helper`. Those are the files a
+/// person puts the facts about their whole session in — `PATH` before anything
+/// else — and on macOS `/etc/zprofile` is where `path_helper` builds `PATH` out
+/// of `/etc/paths` and `/etc/paths.d` at all. A terminal that starts a non-login
+/// shell therefore shows a machine with different tools on it, in a different
+/// order, than every other terminal on the same desktop does.
+///
+/// Empty is not "no login shell": it is "not by an argument". A shell with no
+/// switch here is started as a login shell the way `login(1)` does it, by
+/// argv\[0\] — see [`Program::LoginShell`].
+///
+/// # Windows
+///
+/// Nothing is returned there and nothing should be. PowerShell and cmd have no
+/// login shell: there is no per-machine profile a session inherits its `PATH`
+/// from, because `PATH` is in the registry and every process already has the
+/// whole of it. `$PROFILE` is read by every interactive PowerShell, login or
+/// not. Inventing an equivalent — running `profile.ps1` by hand, say — would
+/// be Crook making up a startup convention that the platform does not have and
+/// that no other terminal implements.
+///
+/// # Not the same table as the integration's
+///
+/// The app's `shell_integration::Shell` names the shells Crook has an OSC 133
+/// snippet for; this names the shells whose login switch Crook has checked.
+/// They hold the same three names today and they answer different questions —
+/// a shell can take `-l` without Crook having anything to inject into it.
+pub fn login_arguments(shell: &Path) -> Vec<OsString> {
+    let name = shell
+        .file_stem()
+        .and_then(OsStr::to_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match name.as_str() {
+        "zsh" | "bash" | "fish" => vec![OsString::from("-l")],
+        _ => Vec::new(),
+    }
+}
+
+/// A spawn of `shell` as a login shell, by whichever of the two conventions
+/// this shell can be asked in.
+///
+/// There are two, and they are different mechanisms rather than two spellings
+/// of one:
+///
+/// * `-l`, which zsh, bash and fish all take, and which says exactly which
+///   binary is being run.
+/// * argv\[0\] set to the shell's file name with a leading hyphen, which is
+///   what `login(1)` itself does and what every shell that has a login mode at
+///   all understands — including the ones that answer ``Unknown option: `-l'``,
+///   which tcsh does unless `-l` is the only argument on the line.
+///
+/// Crook uses the switch where it knows one and argv\[0\] where it does not,
+/// and the split is not arbitrary. `portable-pty` offers the argv\[0\]
+/// convention only through `new_default_prog`, a builder that takes no
+/// arguments at all and resolves the shell itself, from `SHELL` in the
+/// environment the child will get. That resolution is a feature for a shell
+/// nobody recognised — a `SHELL` naming something unrunnable falls back to the
+/// password database rather than to a pane that will not open — and a hazard
+/// for the three that are recognised, because the app has by then written
+/// startup stubs shaped for *that* shell, and a silent substitution would hand
+/// a fish the stubs zsh was going to read. So the named three are spawned by
+/// name, with `-l`; everything else is handed to `login(1)`'s own convention
+/// with `SHELL` pinned to the shell that was asked for.
+///
+/// On Windows neither convention exists — see [`login_arguments`] — so the
+/// shell is started exactly as it would have been.
+fn login_command(shell: &OsStr) -> CommandBuilder {
+    let arguments = login_arguments(Path::new(shell));
+    if !arguments.is_empty() {
+        let mut command = CommandBuilder::new(shell);
+        command.args(arguments);
+        return command;
+    }
+
+    #[cfg(unix)]
+    {
+        let mut command = CommandBuilder::new_default_prog();
+        // How `new_default_prog` is told which shell to run: it reads `SHELL`
+        // out of the environment it is going to hand the child. Setting it is
+        // also correct on its own terms — a shell's `$SHELL` should name the
+        // shell that is running.
+        command.env("SHELL", shell);
+        command
+    }
+    #[cfg(not(unix))]
+    {
+        CommandBuilder::new(shell)
     }
 }
 
@@ -153,10 +282,22 @@ pub struct Pty {
 impl Pty {
     /// Opens a pty of the given size and starts `program` on it.
     ///
+    /// The size is set on the pty *before* the child exists, so the very first
+    /// thing it can ask the kernel is already the right answer. A prompt that
+    /// measures its terminal — a right-aligned segment, a rule across the width
+    /// — is drawn correctly the first time rather than reflowed after a
+    /// `SIGWINCH` it might not handle.
+    ///
     /// The child inherits this process's environment, with `TERM` and
     /// `COLORTERM` set to describe the emulator and the stale `LINES` and
     /// `COLUMNS` of whatever started Crook removed — the pty's own size is the
     /// truth, and a child that believed those would lay itself out wrong.
+    ///
+    /// `working_directory` is where it starts, and when it is `None` — or names
+    /// a directory that no longer exists, which is what a restored session can
+    /// hand over — the child starts in `$HOME`, which is where a terminal opens
+    /// a new window.
+    ///
     /// Anything in `environment` is applied last and wins.
     pub fn spawn(
         program: &Program,
@@ -168,22 +309,7 @@ impl Pty {
             .openpty(pty_size(size))
             .context("Failed to open a pseudo-terminal")?;
 
-        let mut command = match program {
-            Program::Shell => CommandBuilder::new(default_shell()),
-            Program::Command { program, args } => {
-                let mut command = CommandBuilder::new(program);
-                command.args(args);
-                command
-            }
-        };
-
-        command.env("TERM", TERM);
-        command.env("COLORTERM", "truecolor");
-        command.env_remove("LINES");
-        command.env_remove("COLUMNS");
-        for (key, value) in environment {
-            command.env(key, value);
-        }
+        let mut command = command_for(program, environment);
         if let Some(directory) = working_directory {
             command.cwd(directory);
         }
@@ -316,6 +442,39 @@ impl fmt::Debug for Pty {
     }
 }
 
+/// What a spawn will run, and the environment it will run it in.
+///
+/// Separated from [`Pty::spawn`] so that the answers to "what is the child
+/// told about its terminal?" can be asked without a pty and without a process:
+/// every one of them is a property of this value.
+///
+/// `LINES` and `COLUMNS` are removed rather than set. Whatever started Crook
+/// may have had them, they described *its* window, and a child that believed
+/// them would lay itself out to a size that is not the one it is on — the
+/// kernel's `winsize`, which the pty was opened at before the child existed, is
+/// the truth and is what `ioctl` and `$COLUMNS` in an interactive shell both
+/// come back to.
+fn command_for(program: &Program, environment: &[(String, String)]) -> CommandBuilder {
+    let mut command = match program {
+        Program::Shell => login_command(&default_shell()),
+        Program::LoginShell { program } => login_command(program),
+        Program::Command { program, args } => {
+            let mut command = CommandBuilder::new(program);
+            command.args(args);
+            command
+        }
+    };
+
+    command.env("TERM", TERM);
+    command.env("COLORTERM", "truecolor");
+    command.env_remove("LINES");
+    command.env_remove("COLUMNS");
+    for (key, value) in environment {
+        command.env(key, value);
+    }
+    command
+}
+
 /// The pty's idea of a size, which is the grid plus the pixel dimensions some
 /// full-screen programs ask the kernel for.
 fn pty_size(size: TerminalSize) -> PtySize {
@@ -331,7 +490,7 @@ fn pty_size(size: TerminalSize) -> PtySize {
 fn describe(program: &Program) -> String {
     let name = match program {
         Program::Shell => default_shell(),
-        Program::Command { program, .. } => program.clone(),
+        Program::LoginShell { program } | Program::Command { program, .. } => program.clone(),
     };
     OsStr::new(&name).to_string_lossy().into_owned()
 }

@@ -571,6 +571,12 @@ impl Harness {
             .read(&self.app, |workspace, _| workspace.general())
     }
 
+    /// Whether the next shell opened in this window would be a login shell.
+    fn shell_login(&self) -> bool {
+        self.workspace
+            .read(&self.app, |workspace, app| workspace.shell_login(app))
+    }
+
     /// Whether the usage poll chain is meant to be running.
     fn usage_is_wanted(&self) -> bool {
         self.workspace.read(&self.app, |workspace, ctx| {
@@ -705,6 +711,14 @@ impl Harness {
         self.app.update(|ctx| {
             workspace.update(ctx, |workspace, ctx| {
                 workspace.set_shell_marks(marks, ctx);
+                // **Not a login shell**, though a real pane is one. A login
+                // shell reads the startup files of whoever is running the
+                // suite, and a `~/.zprofile` that prints a greeting — or an
+                // ASCII pirate — puts thirty rows on screen before the first
+                // prompt and moves every row these tests count. The login
+                // shell is proved where it can be proved honestly, against a
+                // home directory the test owns: see `shell_integration::tests`.
+                workspace.set_shell_login(false, ctx);
                 workspace.start_terminals(ctx);
             });
         });
@@ -5106,10 +5120,10 @@ fn the_rail_switches_pages_and_the_pane_shows_the_one_it_names() {
     harness.open_settings_page();
 
     let rail = settings_rail_boxes(&harness.frame());
-    assert_eq!(rail.len(), 4, "four pages in the rail");
+    assert_eq!(rail.len(), 5, "five pages in the rail");
 
-    // The third: Keys.
-    harness.click(center(rail[2]), MouseButton::Left);
+    // The fourth: Keys.
+    harness.click(center(rail[3]), MouseButton::Left);
     assert_eq!(Section::Keys, harness.settings_section());
 
     let text = frame_text(&harness.frame());
@@ -5257,6 +5271,30 @@ fn turning_the_usage_chip_off_takes_the_pill_out_of_the_header_and_stops_the_pol
     assert!(
         !frame_text(&harness.frame()).contains("claude"),
         "the chip is still in the header"
+    );
+}
+
+#[test]
+fn turning_the_login_shell_off_reaches_the_thing_that_opens_shells() {
+    // The switch is worth nothing on its own: what matters is that it arrives
+    // at the model that starts the shell, before the next one is started. A
+    // setting written to a file and read by nobody is the shape of bug this
+    // catches.
+    let mut harness = Harness::new(1);
+    assert!(harness.general().login_shell, "on, out of the box");
+    assert!(harness.shell_login(), "and the model was told at startup");
+
+    harness.open_settings_page();
+    harness.select_settings_section(Section::Shell);
+
+    let switches = settings_switch_boxes(&harness.frame());
+    assert_eq!(switches.len(), 1, "one switch on the shell page");
+    harness.click(center(switches[0]), MouseButton::Left);
+
+    assert!(!harness.general().login_shell);
+    assert!(
+        !harness.shell_login(),
+        "the switch wrote the file and left the shells alone"
     );
 }
 

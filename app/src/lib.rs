@@ -372,6 +372,11 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 println!("crook {} ({})", env!("CARGO_PKG_VERSION"), channel.name());
                 return Ok(Startup::Answered);
             }
+            "--shell-integration" => {
+                let shell = args.next();
+                println!("{}", shell_integration_text(shell.as_deref())?);
+                return Ok(Startup::Answered);
+            }
             "--snapshot" => {
                 let path = args.next().context("`--snapshot` needs a path")?;
                 snapshot = Some(PathBuf::from(path));
@@ -411,11 +416,15 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 // mean what it looks like it means.
                 let section = match args.peek().map(String::as_str) {
                     Some("appearance") => Some(Section::Appearance),
+                    Some("shell") => Some(Section::Shell),
                     Some("usage") => Some(Section::Usage),
                     Some("keys") => Some(Section::Keys),
                     Some("about") => Some(Section::About),
                     Some(other) if !other.starts_with("--") => {
-                        bail!("`--settings` takes appearance, usage, keys or about, not {other}");
+                        bail!(
+                            "`--settings` takes appearance, shell, usage, keys or about, \
+                             not {other}"
+                        );
                     }
                     _ => None,
                 };
@@ -498,6 +507,32 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
     }
 }
 
+/// The integration snippet for a shell, with the line that says where to put
+/// it, for a machine Crook cannot start the shell on itself.
+///
+/// The whole scheme in `shell_integration` only reaches shells Crook spawns. A
+/// shell on the far side of `ssh`, inside a container or in a `docker exec` was
+/// never spawned by Crook and cannot be reached into, and this is the honest
+/// answer to that: the same text Crook would have installed, for a person to
+/// paste into their own configuration on that machine. Without it the snippets
+/// exist only inside the binary, and the module's own documented answer to
+/// "what about ssh?" is one nobody can act on.
+fn shell_integration_text(shell: Option<&str>) -> Result<String> {
+    let named = shell.context(
+        "`--shell-integration` needs a shell: zsh, bash or fish.          Paste what it prints at the end of that shell's own configuration on a          machine Crook cannot start the shell on itself — over ssh, in a container.",
+    )?;
+    let shell = shell_integration::Shell::of(std::path::Path::new(named));
+    let (snippet, file) = shell_integration::snippet(shell)
+        .zip(shell_integration::manual_install_file(shell))
+        .with_context(|| {
+            format!("Crook has no shell integration for {named}; it has one for zsh, bash and fish")
+        })?;
+    Ok(format!(
+        "# Crook shell integration for {named}. Append this to {file} on the \
+machine you want blocks on.\n\n{snippet}"
+    ))
+}
+
 fn help_text() -> String {
     format!(
         "crook {version} \u{2014} a terminal whose unit of work is an agent
@@ -523,7 +558,7 @@ OPTIONS:
                        block: what a drag across several commands takes
     --menu             Start with the tab options menu open
     --settings [PAGE]  Start with a settings tab open, on `appearance`,
-                       `usage`, `keys` or `about`
+                       `shell`, `usage`, `keys` or `about`
     --search <TEXT>    Type TEXT into the settings page\'s search box, opening it
     --theme <NAME>     Start in this theme rather than the saved one
     --worktrees        Start with the active tab's worktree menu open
@@ -537,6 +572,10 @@ OPTIONS:
     --controls <OS>    Draw `macos`, `windows` or `linux` window controls in the
                        header rather than this platform's, for a picture of the
                        title bar the other two get
+    --shell-integration <SHELL>
+                       Print the OSC 133 snippet for `zsh`, `bash` or `fish`,
+                       to paste into that shell\'s own configuration on a machine
+                       Crook cannot start the shell on — over ssh, in a container
     -h, --help         Print this message
     -V, --version      Print the version and channel
 
@@ -1679,6 +1718,39 @@ mod tests {
                 frames: None,
                 overrides: Overrides::default()
             }
+        );
+    }
+
+    #[test]
+    fn the_shell_integration_snippet_can_be_asked_for_by_name() {
+        // The module's own answer to "what about ssh, what about containers?"
+        // is this text, and until it can be printed the answer is one nobody
+        // can act on.
+        for (name, file, guard) in [
+            ("zsh", "~/.zshrc", "CROOK_SHELL_INTEGRATION"),
+            ("bash", "~/.bashrc", "CROOK_SHELL_INTEGRATION"),
+            (
+                "fish",
+                "~/.config/fish/config.fish",
+                "CROOK_SHELL_INTEGRATION",
+            ),
+        ] {
+            let text = shell_integration_text(Some(name))
+                .unwrap_or_else(|error| panic!("{name} has an integration: {error:#}"));
+            assert!(
+                text.contains(file),
+                "a person pasting {name}'s snippet has to be told where it goes"
+            );
+            assert!(text.contains(guard), "and it has to be the snippet itself");
+        }
+
+        assert!(
+            shell_integration_text(Some("/usr/bin/nu")).is_err(),
+            "a shell with no snippet has to say so rather than print nothing"
+        );
+        assert!(
+            shell_integration_text(None).is_err(),
+            "and the flag needs its argument"
         );
     }
 

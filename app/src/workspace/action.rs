@@ -224,6 +224,9 @@ pub enum SettingsAction {
     /// "Bring the tabs back": whether a window opens holding the tabs the last
     /// one had.
     ToggleRestoreSession,
+    /// "Start a login shell": whether a pane's shell reads the startup files
+    /// that only a login shell reads.
+    ToggleLoginShell,
 }
 
 /// What the options menu writes.

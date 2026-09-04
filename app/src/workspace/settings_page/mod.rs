@@ -124,6 +124,9 @@ pub enum Section {
     /// The tab strip: where it lives, what a row stands for, what a row says.
     #[default]
     Appearance,
+    /// How a pane's shell is started, and therefore which of the person's own
+    /// files it reads.
+    Shell,
     /// The usage chip, and therefore whether Crook talks to the network.
     Usage,
     /// The bindings, which are fixed. Read-only, and honest about it.
@@ -134,12 +137,19 @@ pub enum Section {
 
 impl Section {
     /// Every page, in rail order.
-    pub(super) const ALL: [Self; 4] = [Self::Appearance, Self::Usage, Self::Keys, Self::About];
+    pub(super) const ALL: [Self; 5] = [
+        Self::Appearance,
+        Self::Shell,
+        Self::Usage,
+        Self::Keys,
+        Self::About,
+    ];
 
     /// What the rail calls it, and what the page's own heading says.
     pub(super) fn label(self) -> &'static str {
         match self {
             Self::Appearance => "Appearance",
+            Self::Shell => "Shell",
             Self::Usage => "Usage",
             Self::Keys => "Keys",
             Self::About => "About",
@@ -188,6 +198,8 @@ pub(super) enum Control {
     FollowSystemTheme,
     /// "Bring the tabs back".
     RestoreSession,
+    /// "Start a login shell".
+    LoginShell,
     /// The minus of "Text size".
     FontSmaller,
     /// The plus of it.
@@ -280,7 +292,7 @@ impl SettingsState {
 ///
 /// So while something is being searched for, **every** page is built — the
 /// rail says how many rows each of them holds, and it cannot say that about a
-/// page it has not built. Four pages of about thirty rows once per frame is a
+/// page it has not built. Five pages of about thirty rows once per frame is a
 /// rounding error beside the frame they are part of, and at rest only the page
 /// on screen is built at all.
 pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {

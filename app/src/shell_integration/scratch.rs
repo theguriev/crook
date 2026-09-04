@@ -96,15 +96,15 @@ impl Session {
         let shell = Shell::of(&program);
 
         if !options.enabled || opted_out() {
-            return Self::unmarked(shell, &program);
+            return Self::unmarked(shell, &program, options.login);
         }
 
         SWEPT.call_once(|| sweep(&root(), &mine(), STALE_AFTER));
 
         let scratch = scratch_directory();
-        let launch = plan(shell, &program, &scratch, &host);
+        let launch = plan(shell, &program, &scratch, options.login, &host);
         if !launch.marks() {
-            return Self::unmarked(shell, &program);
+            return Self::unmarked(shell, &program, options.login);
         }
 
         if let Err(error) = write(&launch.files) {
@@ -114,7 +114,7 @@ impl Session {
                 scratch.display()
             );
             remove(&scratch);
-            return Self::unmarked(shell, &program);
+            return Self::unmarked(shell, &program, options.login);
         }
 
         Self::from_launch(shell, launch, Some(scratch))
@@ -156,9 +156,10 @@ impl Session {
         options.environment.extend(self.environment.iter().cloned());
     }
 
-    /// The launch with no integration in it.
-    fn unmarked(shell: Shell, program: &Path) -> Self {
-        Self::from_launch(shell, plain(program), None)
+    /// The launch with no integration in it. Still a login shell, when that is
+    /// what the setting says and the shell has a switch for it.
+    fn unmarked(shell: Shell, program: &Path, login: bool) -> Self {
+        Self::from_launch(shell, plain(program, login), None)
     }
 
     /// Where the shell reads a completion request from and writes its answer.

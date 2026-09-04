@@ -98,7 +98,7 @@ pub use crate::harvest::{BlockRows, RowCombining, StyleRun};
 pub use crate::input::{InputModes, Key, KeyboardModes, KeypadKey, Modifiers};
 pub use crate::marks::{PromptKind, ShellMark};
 pub use crate::mouse::{MouseButton, MouseEventKind, MouseModes};
-pub use crate::pty::{ChildExit, Program, Pty, PtyReader, default_shell};
+pub use crate::pty::{ChildExit, Program, Pty, PtyReader, default_shell, login_arguments};
 pub use crate::rows::Rows;
 pub use crate::selection::{CellSide, SelectionKind};
 pub use crate::snapshot::{
@@ -125,7 +125,9 @@ pub struct TerminalOptions {
     pub size: TerminalSize,
     /// What to run. Defaults to the user's shell.
     pub program: Program,
-    /// Where to run it, or the current process's directory when unset.
+    /// Where to run it. When unset — or when it names a directory that has
+    /// since been removed, which is what a restored session can hand over — the
+    /// child starts in `$HOME`, the way a terminal opens a new window.
     pub working_directory: Option<PathBuf>,
     /// Environment variables applied on top of the inherited ones.
     pub environment: Vec<(String, String)>,

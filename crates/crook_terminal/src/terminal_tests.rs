@@ -313,3 +313,55 @@ fn test_a_child_that_ignores_the_hangup_is_still_ended() {
         "shutting down took {took:?}, which is longer than the escalation should need"
     );
 }
+
+#[test]
+fn test_a_real_child_is_told_which_terminal_it_is_on() {
+    if cfg!(windows) {
+        return;
+    }
+    let Some(program) = shell_command("printf '[%s][%s]\\n' \"$TERM\" \"$COLORTERM\"") else {
+        return;
+    };
+    let mut terminal = Terminal::spawn(TerminalOptions {
+        program,
+        size: TerminalSize::new(60, 6),
+        ..TerminalOptions::default()
+    })
+    .expect("a shell should start on a pty");
+    let output = read_on_a_thread(terminal.take_reader().expect("a reader"));
+
+    assert!(
+        feed_until(&mut terminal, &output, "[xterm-256color][truecolor]"),
+        "the two variables that say what the grid can do have to reach the \
+         child itself, not just the builder, got: {:?}",
+        terminal.snapshot().text()
+    );
+}
+
+#[test]
+fn test_a_child_with_no_working_directory_starts_where_a_new_window_would() {
+    if cfg!(windows) {
+        return;
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return;
+    };
+    let Some(program) = shell_command("pwd") else {
+        return;
+    };
+    let mut terminal = Terminal::spawn(TerminalOptions {
+        program,
+        size: TerminalSize::new(120, 6),
+        ..TerminalOptions::default()
+    })
+    .expect("a shell should start on a pty");
+    let output = read_on_a_thread(terminal.take_reader().expect("a reader"));
+
+    // Not the directory Crook itself was started in, which is whatever the
+    // Finder or a launcher happened to leave: a new window opens at home.
+    assert!(
+        feed_until(&mut terminal, &output, &home.to_string_lossy()),
+        "a pane with no directory of its own should open at $HOME, got: {:?}",
+        terminal.snapshot().text()
+    );
+}

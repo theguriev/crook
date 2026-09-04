@@ -302,6 +302,32 @@ pub struct GeneralOptions {
     ///
     /// [`Workspace`]: crate::workspace::Workspace
     pub show_usage_chip: bool,
+    /// Whether a pane's shell is started as a *login* shell.
+    ///
+    /// A login shell reads `/etc/zprofile`, `~/.zprofile` and `~/.zlogin` on
+    /// zsh and `/etc/profile` and `~/.bash_profile` on bash, and on macOS it is
+    /// what runs `path_helper` — which is what builds `PATH` out of
+    /// `/etc/paths` and `/etc/paths.d` at all. A terminal that gets this wrong
+    /// shows a different `PATH`, and therefore different tools, than the
+    /// terminal beside it on the same machine.
+    ///
+    /// Which way that points is the desktop's answer and not Crook's, so the
+    /// default is per platform: see [`login_by_default`]. On macOS it is on,
+    /// because every macOS terminal starts a login shell; on Linux it is off,
+    /// because GNOME Terminal and Konsole do not and Linux configurations are
+    /// written for that.
+    ///
+    /// Turn it on where the default is off if your `~/.zprofile` or
+    /// `~/.bash_profile` is where your `PATH` lives. Turn it off where the
+    /// default is on if a profile of yours prints, or measures, or takes two
+    /// seconds, and was written on the understanding that it runs once when you
+    /// log in rather than once per pane.
+    ///
+    /// Only shells opened after the change: a shell's startup files are read
+    /// once, at startup, and cannot be read into one that is already running.
+    ///
+    /// [`login_by_default`]: crate::shell_integration::login_by_default
+    pub login_shell: bool,
 }
 
 impl Default for GeneralOptions {
@@ -313,6 +339,7 @@ impl Default for GeneralOptions {
             use_system_theme: false,
             restore_session: true,
             show_usage_chip: true,
+            login_shell: crate::shell_integration::login_by_default(),
         }
     }
 }
@@ -1153,6 +1180,9 @@ mod tests {
                 "font_size",
                 "layout",
                 "light_theme",
+                // Crook's own, and the one key here that changes what the
+                // shell itself is rather than what the window looks like.
+                "login_shell",
                 "primary_info",
                 "restore_session",
                 "show_details_on_hover",
@@ -1312,11 +1342,11 @@ mod tests {
         let written: Map<String, Value> =
             serde_json::from_str(&contents).expect("the file should be a JSON object");
 
-        // Eight tab options, four general ones and three theme names, and
+        // Eight tab options, five general ones and three theme names, and
         // nothing else: the 8KB key the file started with is gone. The font
         // family is not among them — an absent key is what "no preference"
         // is, so a save writes no `font_family` unless one was chosen.
-        assert_eq!(15, written.len());
+        assert_eq!(16, written.len());
         assert!(!contents.contains("padding"));
         assert_eq!(
             everything_flipped(),

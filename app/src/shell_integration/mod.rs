@@ -29,10 +29,10 @@
 //!   real file first and the integration second, with `USER_ZDOTDIR` naming
 //!   where the real files live. This is VS Code's arrangement, whose scripts
 //!   are MIT and were read as a reference.
-//! * **bash** — `--rcfile <stub> -i`, where the stub sources `~/.bashrc`
-//!   itself. `--rcfile` replaces the user's rc rather than adding to it, so
-//!   that line is load-bearing: forget it and the shell starts with none of
-//!   their configuration and nothing on screen explains why.
+//! * **bash** — `--rcfile <stub> -i`, where the stub sources the user's own
+//!   startup files itself. `--rcfile` replaces the user's rc rather than adding
+//!   to it, so those lines are load-bearing: forget them and the shell starts
+//!   with none of their configuration and nothing on screen explains why.
 //! * **fish** — a scratch directory at the front of `XDG_DATA_DIRS` holding
 //!   `fish/vendor_conf.d/crook.fish`. fish sources it on its own; no argument
 //!   changes and the user's configuration loads exactly as it did. fish 4.0
@@ -45,6 +45,24 @@
 //!   supports marks for the one the user chose; a terminal that quietly runs a
 //!   different shell than `$SHELL` names is a worse bug than a terminal
 //!   without blocks.
+//!
+//! # Started the way a terminal starts a shell
+//!
+//! All of that is about *marks*. The other half of "this is my terminal" is
+//! that the shell reads the files the person actually configured, and that is
+//! a login shell — `/etc/zprofile` and `~/.zprofile` on zsh, `/etc/profile` and
+//! `~/.bash_profile` on bash, `path_helper` on macOS in both. A non-login shell
+//! skips every one of them, which on a Mac means a `PATH` that nobody
+//! assembled: different tools, different versions, in a different order than
+//! the same person sees in Terminal.app. [`Options::login`] is that switch and
+//! [`login_by_default`] is where its default is argued out per platform, since
+//! macOS terminals start login shells and Linux ones do not. The *how* is in
+//! [`crook_terminal::login_arguments`] and [`crook_terminal::Program`]: `-l`
+//! for the shells whose switch Crook has checked, and `login(1)`'s own argv\[0\]
+//! convention for the ones it has not, so tcsh and ksh are login shells too.
+//! bash is the exception and [`launch::bash`] is where it is explained: bash
+//! will not accept a login shell and an rc file at the same time, so its rc
+//! file runs bash's own login sequence — and its logout sequence — instead.
 //!
 //! Every shell also gets `TERM_PROGRAM=Crook` and `TERM_PROGRAM_VERSION`,
 //! including the unrecognised ones. Those are how a script or a prompt
@@ -68,11 +86,11 @@
 //! Injection only reaches shells Crook starts. A shell on the far side of
 //! `ssh`, inside a container, or in a `docker exec` is a shell Crook never
 //! spawned and cannot reach into, and there is no honest way around that.
-//! [`snippet`] returns the same text for a person to paste into their own
-//! configuration on that machine, and [`manual_install_file`] names the file it
-//! belongs at the end of. The snippets are written to be sourced that way:
-//! interactive-only, guarded against being sourced twice, and chaining onto
-//! whatever hooks they find rather than replacing them.
+//! `crook --shell-integration <shell>` prints the same text for a person to
+//! paste into their own configuration on that machine, with the file
+//! [`manual_install_file`] names at the top of it. The snippets are written to
+//! be sourced that way: interactive-only, guarded against being sourced twice,
+//! and chaining onto whatever hooks they find rather than replacing them.
 //!
 //! # Layout
 //!
@@ -105,6 +123,38 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Setting this in the environment to anything but `0` or the empty string
 /// stops Crook injecting anything into any shell, whatever the setting says.
 pub const OPT_OUT_VARIABLE: &str = "CROOK_NO_SHELL_INTEGRATION";
+
+/// Whether a pane's shell is a login shell when nobody has said otherwise.
+///
+/// The question this answers is not "which is better" but "what does the
+/// terminal beside it on this desktop do", and the two mainstream desktops
+/// answer it differently for reasons that are true of each of them:
+///
+/// * **macOS: yes.** Terminal.app runs `login(1)`, iTerm2 and WezTerm start
+///   login shells, and `/etc/zprofile` is where `path_helper` assembles `PATH`
+///   out of `/etc/paths` and `/etc/paths.d` — nothing else runs it. A non-login
+///   shell on a Mac has a `PATH` nobody assembled, so it finds different tools,
+///   and different versions of them, than every other terminal on the machine.
+/// * **Linux: no.** GNOME Terminal, Konsole and xfce4-terminal all start a
+///   non-login shell, and Linux configurations are written to match: `PATH` and
+///   the prompt go in `~/.bashrc` or `~/.zshrc`, and a `~/.bash_profile` that
+///   does not source `~/.bashrc` is an ordinary thing to have. Defaulting to a
+///   login shell there would read `/etc/profile` and the profile, skip
+///   `~/.bashrc` — that is bash's rule, not Crook's — and hand the person a
+///   shell with no aliases and no prompt, unlike the terminal next to it.
+///
+/// Windows keeps the macOS answer, and it costs nothing: PowerShell and cmd
+/// have no login mode at all, and a bash there is Git Bash, which mintty starts
+/// with `--login`.
+///
+/// It is a default and not a rule. `GeneralOptions::login_shell` is the switch,
+/// and someone who keeps the same dotfiles on both platforms can have the same
+/// shell on both by setting it.
+///
+/// [`GeneralOptions::login_shell`]: crate::settings::GeneralOptions::login_shell
+pub const fn login_by_default() -> bool {
+    !cfg!(target_os = "linux")
+}
 
 /// The zsh integration, for a person to paste into their own `~/.zshrc`.
 const ZSH_SNIPPET: &str = include_str!("crook.zsh");
@@ -159,15 +209,28 @@ pub struct Options {
     /// The setting, and only the setting: [`OPT_OUT_VARIABLE`] in the
     /// environment turns injection off regardless of what this says.
     pub enabled: bool,
+    /// Whether the shell is started as a *login* shell — the way `login(1)`,
+    /// Terminal.app, iTerm2 and WezTerm all start one.
+    ///
+    /// A person's `PATH` is assembled by the files only a login shell reads, so
+    /// a terminal that disagrees with the one beside it about this is showing a
+    /// different machine. Which way that points is the desktop's answer rather
+    /// than Crook's: see [`login_by_default`].
+    ///
+    /// Independent of [`Self::enabled`]: the marks and the startup files are
+    /// two different promises and a person may want either without the other.
+    pub login: bool,
     /// The shell to run, or the user's own when unset.
     pub shell: Option<PathBuf>,
 }
 
 impl Default for Options {
-    /// Marks on, the user's shell.
+    /// Marks on, the user's shell, and a login shell where that is what the
+    /// desktop's own terminal does — see [`login_by_default`].
     fn default() -> Self {
         Self {
             enabled: true,
+            login: login_by_default(),
             shell: None,
         }
     }
