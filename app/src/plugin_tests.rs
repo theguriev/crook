@@ -28,6 +28,23 @@ use super::*;
 /// which is what makes these tests about the plugins rather than about
 /// whichever host the workspace happens to be holding.
 fn with_host(test: impl FnOnce(&mut Host)) {
+    with_host_and_context(|host, _| test(host));
+}
+
+/// The same, with some of the plugins switched off the way a settings file
+/// switches them off.
+fn with_disabled(disabled: &[String], test: impl FnOnce(&mut Host)) {
+    with_context(disabled, |host, _| test(host));
+}
+
+/// The same, for a test that needs the context too — switching a plugin back
+/// on runs its `build`, which needs one.
+fn with_host_and_context(test: impl FnOnce(&mut Host, &mut ViewContext<Workspace>)) {
+    with_context(&[], test);
+}
+
+/// The whole of it: an app, a window, and a host built inside a real context.
+fn with_context(disabled: &[String], test: impl FnOnce(&mut Host, &mut ViewContext<Workspace>)) {
     let queue = LocalQueue::new();
     let mut app = App::new(queue.foreground(), Arc::new(Background::new(2)));
     app.update(|ctx| ctx.add_singleton_model(UsageModel::new));
@@ -52,8 +69,8 @@ fn with_host(test: impl FnOnce(&mut Host)) {
     });
 
     workspace.update(&mut app, |_, ctx| {
-        let mut host = load(plugins::defaults(), fonts, ctx);
-        test(&mut host);
+        let mut host = load(plugins::defaults(), disabled, fonts, ctx);
+        test(&mut host, ctx);
     });
 }
 
@@ -215,7 +232,10 @@ fn the_settings_rail_is_what_the_plugins_put_in_it() {
             .map(|(_, title)| title)
             .collect();
 
-        assert_eq!(titles, ["Appearance", "Shell", "Usage", "Keys", "About"]);
+        assert_eq!(
+            titles,
+            ["Appearance", "Shell", "Usage", "Keys", "Plugins", "About"]
+        );
     });
 }
 
@@ -240,6 +260,67 @@ fn disabling_a_plugin_takes_its_settings_page_off_the_rail() {
             .into_iter()
             .map(|(_, title)| title)
             .collect();
-        assert_eq!(titles, ["Appearance", "Shell", "Keys", "About"]);
+        assert_eq!(titles, ["Appearance", "Shell", "Keys", "Plugins", "About"]);
+    });
+}
+
+#[test]
+fn a_plugin_switched_off_can_be_switched_back_on() {
+    // The other half of `unload`, and what makes the switch a switch rather
+    // than a door. Building again is not resuming: nothing of the previous
+    // life survives, which is correct — a plugin that was off saw nothing
+    // happen while it was off.
+    with_host_and_context(|host, ctx| {
+        let usage = PluginId::parse("crook/usage").expect("a literal that parses");
+        assert!(host.is_loaded(&usage));
+
+        host.unload(&usage);
+        assert!(!host.is_loaded(&usage));
+        assert!(host.slots().is_empty(crate::plugins::header::HEADER_RIGHT));
+
+        host.enable(&usage, ctx);
+
+        assert!(host.is_loaded(&usage));
+        assert!(
+            !host.slots().is_empty(crate::plugins::header::HEADER_RIGHT),
+            "the chip did not come back"
+        );
+        assert!(host.settings_page_id("crook/usage/page").is_some());
+        assert!(host.audit().is_empty(), "{:?}", host.audit());
+    });
+}
+
+#[test]
+fn a_plugin_the_settings_switched_off_is_carried_and_not_built() {
+    // What "off" means: `build` never runs, so the plugin registers nothing
+    // and makes nothing — but it is still in the list, because a switch you
+    // cannot see is a switch you cannot turn back on.
+    let disabled = vec!["crook/usage".to_owned()];
+    with_disabled(&disabled, |host| {
+        let usage = PluginId::parse("crook/usage").expect("a literal that parses");
+
+        assert!(!host.is_loaded(&usage));
+        assert!(
+            host.available().iter().any(|manifest| manifest.id == usage),
+            "a switched-off plugin has to stay visible"
+        );
+        assert!(host.slots().is_empty(crate::plugins::header::HEADER_RIGHT));
+        assert!(host.settings_page_id("crook/usage/page").is_none());
+        // And nothing else noticed: a plugin that is off is not a plugin that
+        // failed.
+        assert!(host.refused().is_empty());
+        assert!(host.audit().is_empty(), "{:?}", host.audit());
+    });
+}
+
+#[test]
+fn a_name_in_the_disabled_list_that_answers_to_nothing_costs_nothing() {
+    // A plugin somebody uninstalled, or one from a build they no longer run.
+    // The name is kept in their file — dropping it would switch the feature
+    // back on the day they reinstall it — and it switches nothing off here.
+    let disabled = vec!["eugen/never-installed".to_owned()];
+    with_disabled(&disabled, |host| {
+        assert_eq!(host.loaded().len(), host.available().len());
+        assert!(host.refused().is_empty());
     });
 }

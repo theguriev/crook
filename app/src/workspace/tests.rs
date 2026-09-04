@@ -5224,7 +5224,7 @@ fn the_rail_switches_pages_and_the_pane_shows_the_one_it_names() {
     harness.open_settings_page();
 
     let rail = settings_rail_boxes(&harness.frame());
-    assert_eq!(rail.len(), 5, "five pages in the rail");
+    assert_eq!(rail.len(), 6, "six pages in the rail");
 
     // The fourth: Keys.
     harness.click(center(rail[3]), MouseButton::Left);
@@ -9195,7 +9195,7 @@ fn the_settings_rail_lists_the_pages_the_plugins_contributed() {
     let scene = harness.frame();
 
     let rail = settings_rail_boxes(&scene);
-    assert_eq!(rail.len(), 5, "five pages in the rail");
+    assert_eq!(rail.len(), 6, "six pages in the rail");
     // Top to bottom, which is the `order` each plugin asked for.
     assert_eq!(harness.settings_section(), "Appearance");
 
@@ -9222,4 +9222,106 @@ fn a_settings_page_can_be_reached_by_the_name_on_its_rail_row() {
 
     assert!(found.is_some(), "the Usage page is not reachable by name");
     assert!(missing.is_none());
+}
+
+#[test]
+fn the_plugins_page_lists_what_the_build_is_made_of() {
+    // The first surface on which "everything is a plugin" is something a
+    // person can see rather than a claim about the source. It lists itself,
+    // which is the honest thing for it to do.
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.select_settings_section("Plugins");
+    let text = frame_text(&harness.frame());
+
+    for name in [
+        "Window commands",
+        "Command palette",
+        "Usage chip",
+        "Plugins",
+    ] {
+        assert!(text.contains(name), "{name} is not listed: {text}");
+    }
+    // Every plugin the binary carries has a switch, and the two that draw
+    // this page say why theirs is inert.
+    assert_eq!(
+        settings_switch_boxes(&harness.frame()).len(),
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace
+                .host()
+                .available()
+                .len()),
+        "one switch per plugin the binary carries"
+    );
+    assert!(
+        !text.contains("Did not load"),
+        "a plugin in the box failed to load: {text}"
+    );
+    assert!(
+        !text.contains("Problems"),
+        "the plugins in the box have something to complain about: {text}"
+    );
+}
+
+#[test]
+fn a_plugin_switched_off_on_the_plugins_page_leaves_the_window() {
+    // The switch does two things and both matter: the next frame is drawn
+    // without what the plugin contributed, and the answer is written down.
+    // This asserts the first; `Settings` is where the second is tested.
+    let mut harness = Harness::new(1);
+    assert!(
+        frame_text(&harness.frame()).contains("claude"),
+        "the usage chip is not in the header to begin with"
+    );
+
+    harness.open_settings_page();
+    harness.select_settings_section("Plugins");
+    harness.frame();
+    harness.type_text("usage chip");
+    let scene = harness.frame();
+    let switches = settings_switch_boxes(&scene);
+    assert_eq!(switches.len(), 1, "one switch for the usage plugin");
+    harness.click(center(switches[0]), MouseButton::Left);
+
+    assert!(
+        !harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.host().is_loaded(
+                &crate::plugin::PluginId::parse("crook/usage").expect("a literal")
+            )),
+        "the plugin is still loaded"
+    );
+    let text = frame_text(&harness.frame());
+    assert!(
+        !text.contains("claude"),
+        "the chip outlived the plugin that contributes it: {text}"
+    );
+    // And the Usage page went with it, because that page was the plugin's
+    // too. Asked of the host rather than counted in the rail, because the
+    // query typed above is still filtering what the rail lists.
+    assert!(
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace
+                .host()
+                .settings_page_id("crook/usage/page"))
+            .is_none(),
+        "the Usage page outlived its plugin"
+    );
+}
+
+#[test]
+fn the_switch_that_would_take_the_switch_away_is_inert() {
+    // A one-way door whose way back is editing a JSON file. The page says so
+    // rather than offering it.
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.select_settings_section("Plugins");
+    let text = frame_text(&harness.frame());
+
+    assert!(
+        text.contains("This is what draws the page you are on."),
+        "the page does not say which switches are inert: {text}"
+    );
 }

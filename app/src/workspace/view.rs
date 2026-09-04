@@ -34,7 +34,7 @@ use crate::pane_selection::PaneSelection;
 use crate::pane_split::{DividerDrag, PaneExtent};
 use crate::pane_surface;
 use crate::platform_insets::{ControlLayout, LayoutInsets, TabsPlacement, WindowChrome};
-use crate::plugin::{ActionId, Host, PageId};
+use crate::plugin::{ActionId, Host, PageId, PluginId};
 use crate::selection::{Blocks, Cells};
 use crate::settings::{
     DEFAULT_FONT_SIZE, Density, FONT_SIZE_STEP, GeneralOptions, Granularity, Layout, Settings,
@@ -556,7 +556,12 @@ impl Workspace {
         // makes it with this context. Nothing it registers can reach the
         // workspace yet — the contributions are closures, and they are not
         // called until there is a frame to draw.
-        let host = crate::plugin::load(crate::plugins::defaults(), fonts, ctx);
+        let host = crate::plugin::load(
+            crate::plugins::defaults(),
+            settings.disabled_plugins(),
+            fonts,
+            ctx,
+        );
 
         let options = settings.tab_options();
         let settings_path = settings.path().map(Path::to_owned);
@@ -812,6 +817,29 @@ impl Workspace {
     ///
     /// An id whose plugin has been disabled resolves to nothing and this does
     /// nothing — see [`ActionId`].
+    /// Switches one plugin off, or back on, and remembers the answer.
+    ///
+    /// Both halves matter. The host is changed now, so the next frame is drawn
+    /// without whatever the plugin was contributing — or with it — and the
+    /// settings file is written, so the answer survives a restart. A switch
+    /// that only did the first would be a switch that lies the next time the
+    /// window opens.
+    pub fn toggle_plugin(&mut self, plugin: &PluginId, ctx: &mut ViewContext<Self>) {
+        let turning_off = self.host.is_loaded(plugin);
+        self.settings
+            .set_plugin_disabled(plugin.as_str(), turning_off);
+        self.save_settings(ctx);
+
+        if turning_off {
+            self.host.unload(plugin);
+        } else {
+            self.host.enable(plugin, ctx);
+        }
+        // A plugin's surface may have been what was holding the keyboard.
+        self.sync_input_keys();
+        ctx.notify();
+    }
+
     pub fn run_action(&mut self, id: ActionId, ctx: &mut ViewContext<Self>) {
         let Some(name) = self.host.action_name(id).cloned() else {
             return;

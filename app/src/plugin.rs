@@ -188,6 +188,21 @@ pub struct Host {
     /// `build` so a plugin cannot register in another's name by accident.
     building: Option<PluginId>,
     kept: Vec<(PluginId, Registration)>,
+    /// Every plugin the binary carries, kept so that one switched off can be
+    /// switched back on without restarting.
+    ///
+    /// A plugin object is not its registrations: `build` is what makes those,
+    /// and it can be run again. What it costs is that the objects outlive
+    /// being disabled, which for a `struct Usage;` is nothing.
+    plugins: Vec<Box<dyn Plugin>>,
+    /// What every plugin the binary carries says about itself, in load order,
+    /// whether or not it is loaded.
+    ///
+    /// Separate from `plugins` because it is filled *before* the second pass
+    /// and `plugins` cannot be: `ready` runs with the objects lent out, and a
+    /// plugin whose whole job is to offer a switch per plugin has to be able
+    /// to ask how many there are while it does.
+    carried: Vec<&'static Manifest>,
     /// The plugins that built, in the order they did.
     loaded: Vec<&'static Manifest>,
     /// The ones that did not, and what went wrong.
@@ -209,6 +224,8 @@ impl Host {
             surfaces: Vec::new(),
             building: None,
             kept: Vec::new(),
+            plugins: Vec::new(),
+            carried: Vec::new(),
             loaded: Vec::new(),
             refused: Vec::new(),
         }
@@ -521,6 +538,44 @@ impl Host {
         complaints
     }
 
+    /// Every plugin the binary carries, whether or not it is loaded.
+    ///
+    /// What the Plugins page lists: a switched-off plugin has to be visible,
+    /// or there is no way to switch it back on.
+    pub fn available(&self) -> &[&'static Manifest] {
+        &self.carried
+    }
+
+    /// Whether this plugin is loaded right now.
+    pub fn is_loaded(&self, plugin: &PluginId) -> bool {
+        self.loaded.iter().any(|manifest| manifest.id == *plugin)
+    }
+
+    /// Builds a plugin that is not loaded, and does nothing to one that is.
+    ///
+    /// The other half of [`Self::unload`], and the reason the plugin objects
+    /// are kept: switching one back on runs its `build` again, which makes its
+    /// entities and its registrations afresh. It is not a resumption — nothing
+    /// of the previous life survives — and that is what makes it correct: a
+    /// plugin that was off saw nothing happen while it was off, so there is no
+    /// state it could have been holding.
+    pub fn enable(&mut self, plugin: &PluginId, ctx: &mut ViewContext<Workspace>) {
+        if self.is_loaded(plugin) {
+            return;
+        }
+        // Taken out and put back, because `build_one` needs the host and the
+        // plugin at the same time and both live here.
+        let mut plugins = std::mem::take(&mut self.plugins);
+        if let Some(found) = plugins
+            .iter_mut()
+            .find(|carried| carried.manifest().id == *plugin)
+        {
+            self.build_one(found.as_mut(), ctx);
+            self.ready_one(found.as_mut(), ctx);
+        }
+        self.plugins = plugins;
+    }
+
     /// Takes back everything one plugin registered.
     ///
     /// Which is the whole of what disabling a plugin does: the guards drop, the
@@ -532,6 +587,29 @@ impl Host {
         self.suggested.retain(|(by, _, _)| by != plugin);
         self.surfaces.retain(|(by, _, _)| by != plugin);
         self.loaded.retain(|manifest| &manifest.id != plugin);
+    }
+
+    /// Runs one plugin's `ready`, filing what it registers under its name.
+    fn ready_one(&mut self, plugin: &mut dyn Plugin, ctx: &mut ViewContext<Workspace>) {
+        let manifest = plugin.manifest();
+        if !self.is_loaded(&manifest.id) {
+            return;
+        }
+        self.building = Some(manifest.id.clone());
+        let outcome = plugin.ready(self, ctx);
+        self.building = None;
+
+        if let Err(problem) = outcome {
+            // The same rule `build_one` follows, and it has to be: a plugin
+            // that gave up halfway through its second step has left the same
+            // half-built surface as one that gave up in its first.
+            self.unload(&manifest.id);
+            log::warn!(
+                "the plugin {} did not finish loading: {problem}",
+                manifest.id
+            );
+            self.refused.push((manifest.id.clone(), problem));
+        }
     }
 
     /// Builds one plugin, filing everything it registers under its own name.
@@ -585,6 +663,25 @@ pub trait Plugin {
         host: &mut Host,
         ctx: &mut ViewContext<Workspace>,
     ) -> Result<(), BuildError>;
+
+    /// Registers whatever depends on *every other* plugin having built.
+    ///
+    /// Run after the last `build`, in load order, on every plugin that loaded.
+    /// Bevy calls the same step `finish`, and the reason both have one is the
+    /// same: a plugin that wants to know what is registered cannot ask during
+    /// `build`, because half of it has not been registered yet. The Plugins
+    /// page's switches are the case here — one per plugin the binary carries,
+    /// and it cannot know how many that is until they have all arrived.
+    ///
+    /// Nothing about it is different from `build` otherwise: what it registers
+    /// is filed under the same plugin and taken back by the same `unload`.
+    fn ready(
+        &mut self,
+        _host: &mut Host,
+        _ctx: &mut ViewContext<Workspace>,
+    ) -> Result<(), BuildError> {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -598,12 +695,35 @@ mod tests;
 /// anything resolved at runtime: a dependency here is a `use`, and a plugin
 /// that will not compile is a build failure with a name on it rather than a
 /// window that comes up silently missing a feature.
-pub fn load(plugins: Vec<Box<dyn Plugin>>, fonts: Fonts, ctx: &mut ViewContext<Workspace>) -> Host {
+pub fn load(
+    plugins: Vec<Box<dyn Plugin>>,
+    disabled: &[String],
+    fonts: Fonts,
+    ctx: &mut ViewContext<Workspace>,
+) -> Host {
     let mut host = Host::new(fonts);
     let mut plugins = plugins;
+    host.carried = plugins.iter().map(|plugin| plugin.manifest()).collect();
     for plugin in &mut plugins {
+        // A plugin somebody switched off is carried and not built, which is
+        // the whole of what "off" means: its `build` never runs, so it
+        // registers nothing and makes nothing. The bytes are in the binary
+        // either way — see `docs/plugins.md` on why there is no "carried but
+        // switched off" tier.
+        if disabled
+            .iter()
+            .any(|off| *off == plugin.manifest().id.as_str())
+        {
+            continue;
+        }
         host.build_one(plugin.as_mut(), ctx);
     }
+    // Second pass, once everything that is going to register has. See
+    // `Plugin::ready`.
+    for plugin in &mut plugins {
+        host.ready_one(plugin.as_mut(), ctx);
+    }
+    host.plugins = plugins;
 
     for complaint in host.audit() {
         log::warn!("{complaint}");

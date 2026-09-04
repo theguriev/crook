@@ -58,6 +58,9 @@ const THEME_KEY: &str = "theme";
 /// The key the terminal's monospace family is stored under.
 const FONT_FAMILY_KEY: &str = "font_family";
 
+/// The key the list of switched-off plugins is stored under.
+const DISABLED_PLUGINS_KEY: &str = "disabled_plugins";
+
 /// The keys the two halves of the desktop-following pair are stored under.
 const LIGHT_THEME_KEY: &str = "light_theme";
 /// See [`LIGHT_THEME_KEY`].
@@ -468,6 +471,16 @@ pub struct Settings {
     light_theme: String,
     /// The theme to use while the desktop is dark.
     dark_theme: String,
+    /// Which plugins a person has switched off, by `owner/name`.
+    ///
+    /// Names rather than anything richer, and *only the ones that are off*: a
+    /// build that gains a plugin has it on for everybody, which is what
+    /// shipping a feature means, and a list of the ones that are on would go
+    /// stale the moment it did. A name this build has never heard of is kept
+    /// and ignored — it is a plugin that has been uninstalled or renamed, and
+    /// dropping it would silently switch the feature back on for somebody who
+    /// reinstalls it.
+    disabled_plugins: Vec<String>,
     /// The name of the theme to open in.
     ///
     /// A name rather than the palette itself, and that is the whole design: a
@@ -510,6 +523,7 @@ impl Settings {
                 document: Map::new(),
                 tab_options: TabOptions::default(),
                 general: GeneralOptions::default(),
+                disabled_plugins: Vec::new(),
                 theme: crate::theme::DEFAULT_NAME.to_owned(),
                 light_theme: crate::theme::DEFAULT_LIGHT_NAME.to_owned(),
                 dark_theme: crate::theme::DEFAULT_NAME.to_owned(),
@@ -531,6 +545,7 @@ impl Settings {
             document: Map::new(),
             tab_options: TabOptions::default(),
             general: GeneralOptions::default(),
+            disabled_plugins: Vec::new(),
             theme: crate::theme::DEFAULT_NAME.to_owned(),
             light_theme: crate::theme::DEFAULT_LIGHT_NAME.to_owned(),
             dark_theme: crate::theme::DEFAULT_NAME.to_owned(),
@@ -576,6 +591,23 @@ impl Settings {
             .filter(|name| !name.is_empty())
             .map(str::to_owned);
 
+        // Anything in the list that is not a string is dropped with the rest
+        // of the line's meaning intact: one unusable entry costs that plugin's
+        // switch and not the whole list.
+        let disabled_plugins = document
+            .get(DISABLED_PLUGINS_KEY)
+            .and_then(Value::as_array)
+            .map(|names| {
+                names
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_owned)
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let light_theme = named_theme(&document, LIGHT_THEME_KEY, crate::theme::DEFAULT_LIGHT_NAME);
         let dark_theme = named_theme(&document, DARK_THEME_KEY, crate::theme::DEFAULT_NAME);
 
@@ -584,6 +616,7 @@ impl Settings {
             document,
             tab_options,
             general,
+            disabled_plugins,
             theme,
             light_theme,
             dark_theme,
@@ -666,6 +699,20 @@ impl Settings {
         self.theme = name.into();
     }
 
+    /// Which plugins are switched off, by `owner/name`.
+    pub fn disabled_plugins(&self) -> &[String] {
+        &self.disabled_plugins
+    }
+
+    /// Switches one on or off. Touches no file.
+    pub fn set_plugin_disabled(&mut self, plugin: &str, disabled: bool) {
+        self.disabled_plugins.retain(|name| name != plugin);
+        if disabled {
+            self.disabled_plugins.push(plugin.to_owned());
+        }
+        self.disabled_plugins.sort();
+    }
+
     /// The options that are not the tab strip's.
     pub fn general(&self) -> GeneralOptions {
         self.general
@@ -731,6 +778,22 @@ impl Settings {
         document.extend(owned_keys(self.tab_options, "tab options")?);
         document.extend(owned_keys(self.general, "general options")?);
         document.insert(THEME_KEY.to_owned(), Value::String(self.theme.clone()));
+        // Written back only when something is off, so a person who has never
+        // switched a plugin off does not find an empty array in a file they
+        // opened to read.
+        if self.disabled_plugins.is_empty() {
+            document.remove(DISABLED_PLUGINS_KEY);
+        } else {
+            document.insert(
+                DISABLED_PLUGINS_KEY.to_owned(),
+                Value::Array(
+                    self.disabled_plugins
+                        .iter()
+                        .map(|name| Value::String(name.clone()))
+                        .collect(),
+                ),
+            );
+        }
         document.insert(
             LIGHT_THEME_KEY.to_owned(),
             Value::String(self.light_theme.clone()),
@@ -1453,5 +1516,55 @@ mod tests {
         if let Some(path) = user_settings_path() {
             assert!(path.ends_with(Path::new(CONFIG_DIRECTORY).join(SETTINGS_FILE)));
         }
+    }
+
+    #[test]
+    fn test_a_plugin_switched_off_is_remembered_and_one_switched_back_on_is_forgotten() {
+        // The half of the switch that is not on screen. A list that only held
+        // the plugins that are *on* would go stale the day the build gains
+        // one, which is why the file records the exceptions.
+        let scratch = ScratchDirectory::new("disabled-plugins");
+        let mut settings = Settings::load(scratch.settings_file());
+        assert!(settings.disabled_plugins().is_empty());
+
+        settings.set_plugin_disabled("crook/usage", true);
+        settings.set_plugin_disabled("crook/usage", true);
+        assert_eq!(settings.disabled_plugins(), ["crook/usage"]);
+        settings
+            .save_blocking()
+            .expect("the file should be written");
+
+        let read_back = Settings::load(scratch.settings_file());
+        assert_eq!(read_back.disabled_plugins(), ["crook/usage"]);
+
+        let mut read_back = read_back;
+        read_back.set_plugin_disabled("crook/usage", false);
+        read_back
+            .save_blocking()
+            .expect("the file should be written");
+        assert!(
+            Settings::load(scratch.settings_file())
+                .disabled_plugins()
+                .is_empty()
+        );
+        // And the key is gone rather than left as an empty array, because a
+        // person who has never switched a plugin off should not find one in a
+        // file they opened to read.
+        let text = fs::read_to_string(scratch.settings_file()).expect("readable");
+        assert!(!text.contains("disabled_plugins"), "{text}");
+    }
+
+    #[test]
+    fn test_an_unusable_entry_in_the_disabled_list_costs_only_itself() {
+        let scratch = ScratchDirectory::new("disabled-plugins-rubbish");
+        fs::write(
+            scratch.settings_file(),
+            r#"{"disabled_plugins": ["crook/usage", 7, "", "  ", "eugen/themes"]}"#,
+        )
+        .expect("the file should be writable");
+
+        let settings = Settings::load(scratch.settings_file());
+
+        assert_eq!(settings.disabled_plugins(), ["crook/usage", "eugen/themes"]);
     }
 }
