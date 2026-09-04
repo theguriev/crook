@@ -737,7 +737,7 @@ a keystroke is: positions are byte offsets on grapheme boundaries, movements arr
 already-resolved `Motion`, and clipboard text goes in and out as a `String`. That is what
 makes the whole behaviour of the input — every movement from every position, undo grouping,
 history, grapheme-aware deletion — testable in microseconds with no window, no GPU and no
-fonts. `app/src/pane_input.rs` is the per-pane state the element tree is rebuilt around;
+fonts. `app/src/text_input.rs` is the per-pane state the element tree is rebuilt around;
 `app/src/workspace/input_element.rs` draws it on the grid's own cell metrics.
 
 ### Selecting the output
@@ -1062,7 +1062,7 @@ The omission is search: Warp filters the rail and the content together from one 
 widget, with match counts. That needs a text input, and what Crook has is half of one. The
 model is there and is general — `app/src/editor` draws nothing, touches no clipboard and
 knows no keystroke — but the only element that draws it is `CommandInput`, which measures in
-terminal cells against a `CellFont` and reads a pane's `PaneInput`. `crookui_core` still has
+terminal cells against a `CellFont` and reads a pane's `TextInput`. `crookui_core` still has
 no text field of its own, so the gap here is an element, not a model.
 
 **A theme *system* the size of Warp's.** Themes themselves are in — see below — but Warp's

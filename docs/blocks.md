@@ -128,7 +128,7 @@ where every key goes once there is no field. A shell with no integration is ther
 terminal, and everything a plain terminal does still works.
 
 A line half-composed when a pane changes surfaces is not lost — the text belongs to
-`PaneInput`, which outlives every element — but it is not drawn either, and the keys that
+`TextInput`, which outlives every element — but it is not drawn either, and the keys that
 follow it go to the shell. In practice an un-integrated pane has crossed to the grid before
 anybody has typed into it, and an integrated one only crosses while a command is running,
 which is the case the composer is taken away for anyway.

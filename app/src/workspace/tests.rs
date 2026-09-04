@@ -6711,7 +6711,7 @@ mod shells {
                 harness.frame();
                 let columns = harness.terminal_columns(pane);
                 let digits: String = (100..200).map(|number| number.to_string()).collect();
-                let long = format!("HEAD{digits}TAIL");
+                let long = format!("FOLDSTART{digits}FOLDEND");
                 assert!(
                     long.len() > columns,
                     "the line has to be long enough to fold"
@@ -6719,15 +6719,21 @@ mod shells {
                 if run(
                     &mut harness,
                     pane,
-                    "printf 'HEAD'; printf '%s' $(seq 100 199); printf 'TAIL\\n'",
+                    // Markers no prompt prints. `HEAD` and `TAIL` were the
+                    // obvious choice and the wrong one: `drag` takes the LAST
+                    // occurrence on screen, and a prompt showing a detached
+                    // HEAD — which is every prompt during a rebase — supplies
+                    // one below the block, so the drag copied the gap between
+                    // the two instead of the fold.
+                    "printf 'FOLDSTART'; printf '%s' $(seq 100 199); printf 'FOLDEND\\n'",
                 ) == 0
                 {
                     return;
                 }
                 await_prompt(&mut harness, pane);
 
-                let copied =
-                    drag(&mut harness, pane, "HEAD", "TAIL").expect("the folded line is on screen");
+                let copied = drag(&mut harness, pane, "FOLDSTART", "FOLDEND")
+                    .expect("the folded line is on screen");
                 assert_eq!(long, copied, "the fold came back as a break in the text");
 
                 // And the block's own copy control says the same thing. Two
