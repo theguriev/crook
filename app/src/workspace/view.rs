@@ -923,18 +923,18 @@ impl Workspace {
         &self.tab_menu
     }
 
-    /// Every tab, with the directory its focused pane is in.
+    /// Every pane in the window, with the directory it is in.
     ///
-    /// The focused pane's, because a tab has no directory of its own: a split
-    /// tab has two panes and can have two, and the one being looked at is the
-    /// same answer [`crate::tab::Tab::title`] gives to the same question.
-    pub(super) fn tab_directories(&self) -> Vec<(TabId, PathBuf)> {
+    /// Every pane rather than every tab's focused one, and that is what makes
+    /// "this checkout is already open" a true answer: a worktree opened from a
+    /// tab now lands in a pane *beside* the one that asked for it, so the tab
+    /// whose row a person is looking at is very often not the pane the branch
+    /// is in. Asking the focused pane only would offer to remove a checkout an
+    /// agent is working in, and would open a second pane on it a moment later.
+    pub(super) fn pane_directories(&self) -> Vec<(PaneId, PathBuf)> {
         self.tabs
-            .iter()
-            .filter_map(|tab| {
-                let pane = tab.panes().focused()?;
-                Some((tab.id(), pane.session().working_directory.clone()?))
-            })
+            .panes()
+            .filter_map(|(_, pane)| Some((pane.id(), pane.session().working_directory.clone()?)))
             .collect()
     }
 
@@ -1371,24 +1371,34 @@ impl Workspace {
                 // entirely.
                 let worktrees = self.tab_menu.worktrees();
                 let existing = self
-                    .tab_directories()
+                    .pane_directories()
                     .into_iter()
                     .find(|(_, directory)| {
                         super::tab_menu::holding(worktrees, Some(directory)) == Some(index)
                     })
-                    .map(|(tab, _)| tab);
+                    .map(|(pane, _)| pane);
 
+                let opened_on = self.tab_menu.tab;
                 self.close_tab_menu(ctx);
                 match existing {
                     // Already open: bring it forward rather than opening a
-                    // second tab on the same checkout. Two agents in one
+                    // second pane on the same checkout. Two agents in one
                     // worktree is the thing this whole feature exists to stop.
-                    Some(tab) => {
-                        self.apply(TabAction::Select(tab), ctx);
+                    // By pane, because that is where a checkout lives now, and
+                    // focusing one activates the tab holding it.
+                    Some(pane) => {
+                        self.apply(TabAction::FocusPane(pane), ctx);
                     }
-                    None => {
-                        self.open_tab_in(path, ctx);
-                    }
+                    // Beside the tab that asked, so the branch keeps the
+                    // company of the checkout it came from.
+                    None => match opened_on {
+                        Some(tab) => {
+                            self.open_pane_in(tab, path, ctx);
+                        }
+                        None => {
+                            self.open_tab_in(path, ctx);
+                        }
+                    },
                 }
             }
 
@@ -1581,7 +1591,7 @@ impl Workspace {
         ctx.notify();
     }
 
-    /// Makes the worktree the creator describes, and opens a tab in it.
+    /// Makes the worktree the creator describes, and opens a pane in it.
     fn create_worktree(&mut self, ctx: &mut ViewContext<Self>) {
         if self.tab_menu.working {
             return;
@@ -1627,7 +1637,13 @@ impl Workspace {
                     if answering {
                         workspace.close_tab_menu(ctx);
                     }
-                    workspace.open_tab_in(path, ctx);
+                    // Beside the tab it was asked for, which is what
+                    // `open_pane_in` falls back out of if that tab has closed
+                    // in the meantime.
+                    match opened_on {
+                        Some(tab) => workspace.open_pane_in(tab, path, ctx),
+                        None => workspace.open_tab_in(path, ctx),
+                    };
                 }
                 Err(problem) => {
                     if answering {
@@ -2548,6 +2564,49 @@ impl Workspace {
 
         // `New` inserts after the active tab and makes it active, so the
         // focused pane is the one it just made.
+        if let Some(pane) = self.tabs.focused_pane_id()
+            && let Some(pane) = self.tabs.pane_mut(pane)
+        {
+            pane.session_mut().working_directory = Some(directory);
+        }
+
+        self.settle(effect, ctx)
+    }
+
+    /// Opens a pane whose shell starts in `directory`, inside `tab`.
+    ///
+    /// What the worktree menu opens into. A worktree opened from a tab belongs
+    /// *with* that tab: it is the same repository, one checkout over, and the
+    /// panel says so by drawing the two under one group header — which is a
+    /// header that appears the moment the second pane arrives, so there is no
+    /// group to make first and none to tidy away when one of them closes. The
+    /// alternative, a tab of its own, puts the branch somewhere else in the
+    /// list with nothing left to say where it came from.
+    ///
+    /// [`TabAction::Split`] is about the active tab, so the tab named here
+    /// becomes the active one first. That is not a workaround: a person who
+    /// asked a tab for a worktree is about to be looking at it, and the split
+    /// focuses what it made.
+    ///
+    /// A tab that closed while git was checking the worktree out gets the tab
+    /// this used to open every time. The checkout happened and it is still
+    /// what was asked for; only the place to put it has gone.
+    pub fn open_pane_in(
+        &mut self,
+        tab: TabId,
+        directory: PathBuf,
+        ctx: &mut ViewContext<Self>,
+    ) -> TabEffect {
+        if self.tabs.get(tab).is_none() {
+            return self.open_tab_in(directory, ctx);
+        }
+
+        self.tabs.apply(TabAction::Select(tab));
+        let effect = self.tabs.apply(TabAction::Split(Direction::Right));
+
+        // The directory before the shells are synced, for the reason
+        // `open_tab_in` writes it there: syncing is the moment a pty's
+        // working directory is decided.
         if let Some(pane) = self.tabs.focused_pane_id()
             && let Some(pane) = self.tabs.pane_mut(pane)
         {
