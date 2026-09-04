@@ -19,7 +19,7 @@ use crook_terminal::{Rows, Snapshot};
 use crookui_core::elements::MouseStateHandle;
 use crookui_core::event::Keystroke;
 use crookui_core::fonts::FamilyId;
-use crookui_core::geometry::RectF;
+use crookui_core::geometry::{RectF, vec2f};
 use crookui_core::prelude::*;
 
 use crate::clipboard::Clipboard;
@@ -64,6 +64,16 @@ use super::tabs_panel::geometry::RowGeometry;
 use super::tabs_panel::search::SearchState;
 use super::theme_panel::{Mode, ThemePanelState};
 use super::{body, header_toolbar, tabs_panel};
+
+/// How far into a panel row `--carry` presses.
+///
+/// Left of centre: inside the row whatever the density, and clear of the close
+/// button reserved at its trailing edge, which would answer the press itself.
+const PANEL_GRIP_X: f32 = 40.;
+
+/// And how far into a block, measured from its top edge — a point inside the
+/// heading, which is the part of a block that is not one of its rows.
+const PANEL_HEADING_GRIP: f32 = 8.;
 
 /// The two font families the interface is set in, resolved once at startup.
 ///
@@ -1359,6 +1369,15 @@ impl Workspace {
     /// the first selection of a session, before any frame — scrolls nowhere,
     /// and the next selection finds it.
     fn scroll_row_into_view(&self) {
+        // Never under a hand that is carrying a row. Every step of a drag is a
+        // strip action, so this would run on every one of them — and the row
+        // it scrolls to is the row being carried, whose slot is wherever the
+        // last step put it. The list would chase the hand down the panel at
+        // whatever rate the mouse reports, which is a list that scrolls to its
+        // own end because somebody dragged a tab a little too far.
+        if self.panel_drag.carrying().is_some() {
+            return;
+        }
         let Some(pane) = self.tabs.focused_pane_id() else {
             return;
         };
@@ -2125,6 +2144,24 @@ impl Workspace {
         }
         self.menu.open = true;
         ctx.notify();
+    }
+
+    /// Where to press to pick the `index`th row of the panel up, and where to
+    /// press to pick the `index`th group's whole block up.
+    ///
+    /// For `--carry`, which is how a picture is taken of a gesture nobody can
+    /// hold still in an unattended run. Left of centre, which is inside every
+    /// row and clear of the close button at its trailing edge; a block is
+    /// gripped by its heading, which is the top of its box.
+    pub fn panel_row_grip(&self, index: usize) -> Option<Vector2F> {
+        let row = self.panel_drag.row(index)?;
+        Some(vec2f(PANEL_GRIP_X, (row.start + row.end) / 2.))
+    }
+
+    /// See [`Self::panel_row_grip`].
+    pub fn panel_block_grip(&self, index: usize) -> Option<Vector2F> {
+        let block = self.panel_drag.block(index)?;
+        Some(vec2f(PANEL_GRIP_X, block.start + PANEL_HEADING_GRIP))
     }
 
     /// Arms the detail card on the first row, for a run that was asked to start
@@ -3086,6 +3123,12 @@ impl Workspace {
     pub(super) fn shows_details_for(&self, pane: PaneId) -> bool {
         self.options.show_details_on_hover
             && !self.a_popup_is_open()
+            // Never while a row is being carried. The carried row is under the
+            // pointer for the whole gesture, so its own card would be up for
+            // all of it — a 320px panel travelling beside the hand, over the
+            // rows the drag is aiming at. Warp hides a row's action buttons
+            // for the duration for the same reason.
+            && self.panel_drag.carrying().is_none()
             && self.hovered_row == Some(pane)
     }
 
@@ -4053,7 +4096,17 @@ impl TypedActionView for Workspace {
                 // half that has to happen: a box that kept it after a row was
                 // clicked would collect the first command typed into the tab it
                 // opened, which is the trap this whole box is arranged around.
-                self.stop_searching();
+                //
+                // Except while a row is being carried. A drag asks the strip
+                // for something on every event it produces, and clearing the
+                // query on the first of them would put every filtered-out tab
+                // back into the list *under the hand* — the rows the gesture is
+                // being measured against would all be different ones, halfway
+                // through. The query is a thing about the list, and this
+                // gesture is a thing about one row of it.
+                if self.panel_drag.carrying().is_none() {
+                    self.stop_searching();
+                }
                 if self.apply(action, ctx) == TabEffect::CloseWindow {
                     (self.quit)();
                 }

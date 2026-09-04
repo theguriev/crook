@@ -1319,8 +1319,13 @@ a neighbour, and the two are clamped against each other rather than trusted, whi
 lets a drop be computed from a pointer position by a pure function that is allowed to be
 approximately right. The drag itself needed no new element in `crookui_core` — a press is
 noted, moves past a threshold become a gesture, and the row that was picked up is the one that
-reads the boxes every row wrote down during paint — and it draws one line between two rows
-rather than Warp's detached overlay that follows the cursor.
+reads the boxes every row wrote down during paint. It is Warp's gesture and not a line drawn
+in a gap: the row is painted on an overlay layer at the pointer, its slot stays open behind
+it, and the strip reorders itself one step per event while the hand is still moving, so
+letting go resolves nothing because everything has already happened. Which group a row is in
+is answered by the group's own box rather than by the row under the pointer, which is the only
+way the gap under a group's last member can mean "out of this group" — the question a list
+whose groups are decided row by row cannot answer at all.
 
 Groups exist because worktrees needed them: a checkout opened from a tab has to land somewhere
 that says it belongs with that tab, and the answer that was there before was a split.

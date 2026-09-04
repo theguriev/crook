@@ -4661,17 +4661,15 @@ fn panel_heading(scene: &Scene) -> RectF {
     chevrons[0]
 }
 
-/// The line the panel draws where a drop would land, if it is drawing one.
-fn insertion_lines(scene: &Scene) -> Vec<RectF> {
-    let panel = panel_box(scene);
-    visible_rects(scene)
-        .filter(|(rect, bounds)| {
-            rect.background == Fill::Solid(theme().accent)
-                && bounds.max_x() <= panel.max_x()
-                && bounds.height() < 4.
-        })
-        .map(|(_, bounds)| bounds)
-        .collect()
+/// How many moves a test gesture is made of. See [`Harness::drag`].
+const STEPS: usize = 24;
+
+/// The row a drag is carrying, if the panel is drawing one: the one row whose
+/// middle is at the pointer rather than in the list's own flow.
+fn carried_row(scene: &Scene, pointer: Vector2F) -> Option<RectF> {
+    panel_rows(scene)
+        .into_iter()
+        .find(|row| (center(*row).y() - pointer.y()).abs() < 1.)
 }
 
 impl Harness {
@@ -4692,12 +4690,16 @@ impl Harness {
         self.frame();
         self.hold(from, 1);
         self.frame();
-        // Two moves, because the first is what turns the press into a drag and
-        // a gesture that arrived in one jump is not one a person can make.
-        self.drag_to(from + (to - from) * 0.5);
-        self.frame();
-        self.drag_to(to);
-        self.frame();
+        // A hand does not arrive in one jump, and this list reorders itself
+        // under it: every position is answered against the frame the last one
+        // produced, and a change of group ends a frame before a change of
+        // place begins. A gesture made in two leaps would skip the states a
+        // real one passes through, which is where the interesting failures
+        // are — and it is not a thing a hand can do.
+        for step in 1..=STEPS {
+            self.drag_to(from + (to - from) * (step as f32 / STEPS as f32));
+            self.frame();
+        }
         self.let_go(to);
         self.frame();
     }
@@ -4727,46 +4729,41 @@ fn a_row_can_be_picked_up_with_its_hover_card_up() {
 }
 
 #[test]
-fn a_drop_at_the_end_of_a_group_draws_its_line_inside_the_group() {
+fn a_row_carried_to_the_bottom_of_a_group_joins_it_at_its_end() {
     // The gap under a group's last member is also the gap above the block
-    // beneath it, and the row the pointer is nearest belongs to that block.
-    // Named as that row, the drop is one the panel has no line for: it joins a
-    // group in front of something the group does not contain. It has to be
-    // said as the group's end, which is the same slot and is drawable.
+    // beneath it, so a list that decides the group from the nearest row puts a
+    // tab aimed there outside the group it was aimed into. The group's own box
+    // is what settles it: that gap is inside the box, so it is inside the
+    // group, and the row it names is the group's end.
     let (mut harness, group) = Harness::grouped_panel(2);
     let members = harness.members_of(group);
+    let loose = *harness.tab_ids().last().expect("three tabs and a worktree");
     let rows = panel_rows(&harness.frame());
-    let loose = *rows.last().expect("three rows");
-
-    harness.hold(inside(loose), 1);
-    // The bottom of the group's last member, which is above the loose row.
     let last_member = rows[1];
-    harness.drag_to(last_member.origin() + vec2f(40., last_member.height() - 1.));
 
-    let scene = harness.frame();
-    let lines = insertion_lines(&scene);
-    assert_eq!(lines.len(), 1, "no line for a drop at the end of a group");
-    assert!(
-        lines[0].min_x() > loose.min_x(),
-        "the line is not indented into the group it joins: {lines:?}"
+    harness.drag(
+        inside(*rows.last().expect("three rows")),
+        last_member.origin() + vec2f(40., last_member.height() - 1.),
     );
 
-    harness.let_go(last_member.origin() + vec2f(40., last_member.height() - 1.));
+    assert_eq!(harness.members_of(group).len(), members.len() + 1);
     assert_eq!(
-        harness.members_of(group).len(),
-        members.len() + 1,
-        "the drop the line promised did not happen"
+        harness.members_of(group).last(),
+        Some(&loose),
+        "it joined the group somewhere other than its end"
     );
 }
 
 #[test]
-fn a_pointer_held_still_leaves_the_line_where_it_is() {
-    // The line takes room, and the room pushes the rows under it down. Answer
-    // the pointer against the rows that were painted and the answer undoes
-    // itself: the line appears, the row moves out from under the pointer, the
-    // gap it named is no longer the one the pointer is in, the line goes. A
-    // person aiming at a boundary holds the pointer exactly where that runs at
-    // the frame rate.
+fn a_pointer_held_still_leaves_the_list_where_it_is() {
+    // The list moves under the hand now, so it has to be able to stop. Every
+    // step is decided against the frame the last one produced, and a pair of
+    // steps that each undo the other is a list that runs at the frame rate
+    // under a hand that is holding perfectly still — which is exactly what a
+    // hand does while it aims at a boundary.
+    //
+    // A step towards the pointer is allowed; a second one after the list has
+    // settled is not.
     let (mut harness, _) = Harness::grouped_panel(3);
     let rows = panel_rows(&harness.frame());
     let from = inside(rows[3]);
@@ -4775,17 +4772,21 @@ fn a_pointer_held_still_leaves_the_line_where_it_is() {
     harness.hold(from, 1);
     harness.frame();
 
-    // Every boundary in the list, and every position within the room the line
-    // would take on either side of one.
+    // Every boundary in the list, and every pixel of both margins of the
+    // group's band — the two four- and eight-pixel strips are exactly where a
+    // pair of steps that undid each other would hide.
     for step in 0..120 {
         let at = vec2f(from.x(), rows[0].min_y() + step as f32);
+        for _ in 0..5 {
+            harness.drag_to(at);
+            harness.frame();
+        }
+        let settled = harness.tab_ids();
         harness.drag_to(at);
-        let first = insertion_lines(&harness.frame());
-        harness.drag_to(at);
-        let again = insertion_lines(&harness.frame());
+        harness.frame();
         assert_eq!(
-            first,
-            again,
+            harness.tab_ids(),
+            settled,
             "the list moved under a pointer that did not, at y {}",
             at.y()
         );
@@ -4830,6 +4831,176 @@ fn dragging_a_member_out_of_a_group_leaves_it() {
 }
 
 #[test]
+fn carrying_a_member_past_the_bottom_of_its_group_takes_it_out() {
+    // The gesture a person actually makes, and the one the panel used to
+    // refuse: pull the row down until it is below the last row of the group.
+    // The strip of padding under that row belongs to the block and to nothing
+    // else, so it is the one place that can mean "out of here" without
+    // meaning "into whatever is next".
+    let (mut harness, group) = Harness::grouped_panel(3);
+    let member = harness.members_of(group)[1];
+    let rows = panel_rows(&harness.frame());
+    let last_member = rows[1];
+
+    // Past the bottom of the last member, into the strip of padding the block
+    // keeps under it.
+    harness.drag(
+        inside(last_member),
+        last_member.origin() + vec2f(40., last_member.height() + 12.),
+    );
+
+    assert_eq!(harness.group_of(member), None);
+    assert_eq!(harness.members_of(group).len(), 1);
+    assert_eq!(
+        harness.tab_ids().len(),
+        4,
+        "a drag closed or opened something"
+    );
+}
+
+#[test]
+fn a_member_of_the_last_group_can_still_be_carried_out_of_it() {
+    // The case a panel whose groups are decided by the row under the pointer
+    // cannot do at all: with nothing drawn below the block there is no row to
+    // aim at that could mean "out of this group". The group's own box is what
+    // says it instead, so the empty column under the last block says it.
+    let (mut harness, group) = Harness::grouped_panel(1);
+    let member = harness.members_of(group)[1];
+    let rows = panel_rows(&harness.frame());
+    let last = *rows.last().expect("a group of two");
+
+    harness.drag(inside(last), last.origin() + vec2f(40., last.height() * 2.));
+
+    assert_eq!(harness.group_of(member), None);
+    assert_eq!(harness.members_of(group).len(), 1);
+    assert_eq!(
+        harness.tab_ids().len(),
+        2,
+        "a drag closed or opened something"
+    );
+}
+
+#[test]
+fn a_row_carried_past_the_bottom_of_the_list_lands_last() {
+    // The end of the list is a place with no row under it, so it is the one
+    // position a rule written in terms of neighbours has to be told about.
+    let mut harness = Harness::panel(3);
+    let first = harness.tab_ids()[0];
+    let rows = panel_rows(&harness.frame());
+    let last = *rows.last().expect("three rows");
+
+    harness.drag(inside(rows[0]), last.origin() + vec2f(40., last.height()));
+
+    assert_eq!(
+        harness.tab_ids().last(),
+        Some(&first),
+        "the row did not land at the end: {:?}",
+        harness.tab_ids()
+    );
+}
+
+#[test]
+fn a_row_flicked_the_length_of_the_list_arrives_with_the_hand() {
+    // One event, where the gesture helper sends twenty-four. A hand reports
+    // its position far more often than the display draws, and every one of
+    // those positions is answered against the same painted list — so a rule
+    // that moved the row one place per answer would move it one place per
+    // *frame*, and a flick down a long list would put the row down three rows
+    // short of where it was let go.
+    let mut harness = Harness::panel(6);
+    let first = harness.tab_ids()[0];
+    let rows = panel_rows(&harness.frame());
+    let last = *rows.last().expect("six rows");
+    let from = inside(rows[0]);
+
+    harness.move_to(from);
+    harness.frame();
+    harness.hold(from, 1);
+    harness.frame();
+    let to = last.origin() + vec2f(40., last.height());
+    harness.drag_to(to);
+    harness.frame();
+    harness.let_go(to);
+    harness.frame();
+
+    assert_eq!(
+        harness.tab_ids().last(),
+        Some(&first),
+        "the row was left behind by the hand: {:?}",
+        harness.tab_ids()
+    );
+}
+
+#[test]
+fn the_wheel_still_reaches_the_list_under_a_carried_row() {
+    // The carried row is painted at the pointer, on a layer above everything,
+    // and every element under a point asks whether a layer above it covers
+    // that point. A drag image that answered "yes" would take the wheel away
+    // for the whole gesture — from the one list a person dragging a row
+    // through forty tabs has to be able to scroll.
+    let mut harness = Harness::panel(OVERFLOWING);
+    let rows = panel_rows(&harness.frame());
+    let from = inside(rows[1]);
+
+    harness.move_to(from);
+    harness.frame();
+    harness.hold(from, 1);
+    harness.drag_to(from + vec2f(0., 8.));
+    let carried = panel_rows(&harness.frame());
+
+    harness.dispatch(Event::ScrollWheel {
+        position: from,
+        delta: ScrollDelta::Lines(vec2f(0., -3.)),
+        modifiers: Modifiers::default(),
+    });
+
+    let scrolled = panel_rows(&harness.frame());
+    assert_ne!(
+        scrolled.first().map(|row| row.min_y()),
+        carried.first().map(|row| row.min_y()),
+        "the list did not scroll under the row being carried"
+    );
+}
+
+#[test]
+fn a_filtered_list_keeps_its_filter_while_a_row_is_being_carried() {
+    // Every step of a drag asks the strip to move a row, and the strip ending
+    // the search is what every other way of asking it for something means.
+    // Here it would put the filtered-out tabs back into the list *under the
+    // hand*, halfway through the one gesture whose whole meaning is which rows
+    // it is passing.
+    let mut harness = Harness::panel(3);
+    for (index, pane) in harness.pane_ids().into_iter().enumerate() {
+        harness.update_session(pane, |session| {
+            session.derived_title = Some(format!("kettle {index}"));
+        });
+    }
+    let odd = harness.pane_ids()[1];
+    harness.update_session(odd, |session| {
+        session.derived_title = Some("teapot".to_owned());
+    });
+
+    harness.click_panel_search();
+    harness.type_text("kettle");
+    let rows = panel_rows(&harness.frame());
+    assert_eq!(rows.len(), 2, "the filter kept the wrong rows");
+
+    harness.drag(inside(rows[1]), inside(rows[0]) - vec2f(0., 4.));
+
+    let scene = harness.frame();
+    assert_eq!(
+        panel_rows(&scene).len(),
+        2,
+        "the filter was dropped mid-gesture: {:?}",
+        panel_text(&scene)
+    );
+    assert!(
+        panel_text(&scene).contains("kettle 2"),
+        "the list is not the filtered one any more"
+    );
+}
+
+#[test]
 fn dragging_a_heading_moves_the_whole_group() {
     let (mut harness, group) = Harness::grouped_panel(3);
     let members = harness.members_of(group);
@@ -4855,51 +5026,86 @@ fn dragging_a_heading_moves_the_whole_group() {
 }
 
 #[test]
-fn a_drag_draws_a_line_where_the_drop_would_land() {
-    // The only thing a drag draws, and the only way a person knows what
-    // letting go will do.
-    let (mut harness, _) = Harness::grouped_panel(2);
+fn a_carried_row_follows_the_pointer_and_leaves_its_slot_behind() {
+    // What a drag draws, and all of it: the row is taken out of the list and
+    // painted under the hand, and the room it was taking stays taken so that
+    // the list shows the slot it will drop into.
+    let mut harness = Harness::panel(3);
+    let order = harness.tab_ids();
     let rows = panel_rows(&harness.frame());
-    let last = *rows.last().expect("three rows");
+    let from = inside(rows[2]);
 
-    harness.hold(inside(rows[0]), 1);
-    assert!(
-        insertion_lines(&harness.frame()).is_empty(),
-        "a press that has not travelled is still a click"
+    harness.move_to(from);
+    harness.frame();
+    harness.hold(from, 1);
+    assert_eq!(
+        panel_rows(&harness.frame()).len(),
+        rows.len(),
+        "a press that has not travelled has picked nothing up"
     );
 
-    harness.drag_to(last.origin() + vec2f(40., last.height()));
+    // Up by more than the threshold and by less than half a row: far enough to
+    // be a drag, not far enough to have reached a neighbour's middle.
+    let at = from - vec2f(0., 8.);
+    harness.drag_to(at);
+    let scene = harness.frame();
 
-    let lines = insertion_lines(&harness.frame());
-    assert_eq!(lines.len(), 1, "expected one line, got {lines:?}");
-    assert!(
-        lines[0].min_y() > last.min_y(),
-        "the line is not under the row the pointer is over"
+    carried_row(&scene, at).expect("no row was drawn at the pointer");
+    // Two boxes more than there are rows: the hole the row came out of, left
+    // open at its old place, and the ground the row is carried on, which is
+    // what stops the words on it landing on the words underneath.
+    assert_eq!(
+        panel_rows(&scene).len(),
+        rows.len() + 2,
+        "the slot the row came from was closed up instead of left where it was"
+    );
+    assert_eq!(
+        harness.tab_ids(),
+        order,
+        "the list reordered itself for a gesture that had not passed a row"
     );
 
-    harness.let_go(last.origin() + vec2f(40., last.height()));
+    harness.let_go(at);
+    let scene = harness.frame();
     assert!(
-        insertion_lines(&harness.frame()).is_empty(),
-        "the line outlived the gesture"
+        carried_row(&scene, at).is_none(),
+        "the carried row outlived the gesture"
+    );
+    assert_eq!(
+        panel_rows(&scene).len(),
+        rows.len(),
+        "the list did not go back to being a list of rows"
     );
 }
 
 #[test]
-fn a_row_let_go_of_outside_the_panel_stays_where_it_was() {
-    // There is no line drawn out over the terminal to have promised anything,
-    // so letting go there has to do nothing. A list that reordered itself
-    // because somebody released the button in the wrong half of the window
-    // would be a list nobody could trust with a drag.
+fn a_row_carried_out_over_the_body_still_only_moves_in_its_column() {
+    // The panel is one tab wide and there is nowhere else in the window to put
+    // a tab, so the row is locked to the column and the hand's height is all
+    // of the gesture that means anything. Warp says the same thing with
+    // `DragAxis::VerticalOnly`, and says it for the same reason whenever a tab
+    // cannot be dragged out into a window of its own.
     let (mut harness, group) = Harness::grouped_panel(2);
     let member = harness.members_of(group)[1];
-    let order = harness.tab_ids();
     let rows = panel_rows(&harness.frame());
-    let outside = vec2f(WINDOW.x() - 40., rows[0].min_y());
+    let panel = panel_box(&harness.frame());
 
+    // Level with the top of the first row, but out over the terminal.
+    let outside = vec2f(WINDOW.x() - 40., rows[0].min_y() + 2.);
     harness.drag(inside(rows[1]), outside);
 
-    assert_eq!(harness.tab_ids(), order);
-    assert_eq!(harness.group_of(member), Some(group));
+    let carried = harness.frame();
+    assert!(
+        panel_rows(&carried)
+            .iter()
+            .all(|row| row.max_x() <= panel.max_x()),
+        "a row was drawn outside the panel"
+    );
+    assert_eq!(
+        harness.tab_ids().first(),
+        Some(&member),
+        "the row did not follow the pointer's height"
+    );
 }
 
 #[test]
@@ -4910,9 +5116,13 @@ fn a_press_that_does_not_travel_still_selects_the_row() {
     let panes = harness.pane_ids();
 
     harness.hold(inside(rows[2]), 1);
-    // A pixel of wobble, which every hand has.
+    // A pixel of wobble, which every hand has — and a slide across the row,
+    // which a thumb on a trackpad has. Sideways is not a direction a row in a
+    // one-tab-wide column can go, so a gesture that only went that way asked
+    // for nothing and is still the click it started as.
     harness.drag_to(inside(rows[2]) + vec2f(0., 1.));
-    harness.let_go(inside(rows[2]));
+    harness.drag_to(inside(rows[2]) + vec2f(30., 2.));
+    harness.let_go(inside(rows[2]) + vec2f(30., 2.));
 
     assert_eq!(harness.focused_pane_id(), Some(panes[2]));
 }

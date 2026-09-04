@@ -28,8 +28,9 @@ Seven features, and the page that configures them:
   Tabs that belong together are folded into a **group**: a heading with a chevron, a count and
   a close button, and its tabs indented under it. A worktree opened from a tab makes one out of
   the two of them, which is what says the two checkouts are one piece of work. Drag a row into a
-  group to add it, out of one to take it out, and a heading to move the whole block; the panel
-  draws a line where the drop will land, and a group whose last tab leaves it goes away by
+  group to add it, past the group's edge to take it out, and a heading to move the whole block.
+  The row leaves the list and follows the pointer, the list reorders itself under it as it goes
+  and shows the slot it will drop into, and a group whose last tab leaves it goes away by
   itself. A group is not a split screen — the tabs in it are still one at a time, and splitting
   a tab is still `cmd-d` (`ctrl-shift-d` off macOS), asked for on purpose.
 - **The window's own title bar.** There is no strip of system chrome above Crook. The window is
