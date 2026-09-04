@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 /// How often the themes folder is re-read while the Themes panel is open.
@@ -285,6 +285,77 @@ impl Overridden {
     }
 }
 
+/// What makes the last write asked for the one the file ends up holding.
+///
+/// **A number on its own is not enough, and that is the whole of this type.**
+/// Every write is a background task, and a task that has been overtaken has
+/// nothing to do — so each carries the number it was asked at and looks at the
+/// last number asked for before writing. That much was here before. What it
+/// could not do is *order* the two writes it does allow: a task that looked
+/// while it was still the latest is free to be descheduled between the look
+/// and its `rename`, and the later task, which looked afterwards and was also
+/// the latest when it did, can then land first and be overwritten by the
+/// earlier snapshot. The file settles on the state before the last click and
+/// stays there — which is exactly what a person sees as "the setting did not
+/// stick", and what a test that reads the file sees as the value it asked for
+/// never arriving.
+///
+/// So the look and the write are one step, under [`SaveOrder::writing`]. A
+/// task only writes while holding that lock and only while it is still the
+/// last one asked for, and both facts are true at the same instant. Any task
+/// asked for earlier than one that has already written finds a larger number
+/// when its turn at the lock comes and does nothing; any task asked for later
+/// waits at the lock until the write in progress is finished and then
+/// overwrites it. Either way the bytes on disk are the last snapshot asked
+/// for.
+///
+/// The lock is per file, not per process: one of these belongs to the settings
+/// and another to the session, because they are two files and neither has to
+/// wait on the other.
+#[derive(Debug, Default)]
+struct SaveOrder {
+    /// How many writes have been asked for.
+    ///
+    /// Only ever increases, which is what lets a task compare its own number
+    /// with it and know whether it has been overtaken.
+    asked_for: AtomicU64,
+    /// Held across the decision *and* the write.
+    ///
+    /// A `()` because it guards an order rather than a value: the state being
+    /// protected is the file, and the file is not something this type can
+    /// hold.
+    writing: Mutex<()>,
+}
+
+impl SaveOrder {
+    /// Records that a write has been asked for and hands back its number.
+    ///
+    /// Called on the thread the change was made on, *before* the task is
+    /// spawned, so that a write asked for later is already counted by the time
+    /// an earlier task reaches the lock.
+    fn ask(&self) -> u64 {
+        self.asked_for.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    /// Runs `write` unless a later write has been asked for since, with every
+    /// other write to the same file held off until it returns.
+    ///
+    /// Blocking, on both counts: the lock is waited for and `write` is a file
+    /// being written. This belongs on the background pool.
+    ///
+    /// A poisoned lock is taken anyway. It guards no data — see
+    /// [`SaveOrder::writing`] — so the only thing a panicking writer leaves
+    /// behind is a file that may not have been written, and refusing every
+    /// later save because of it would turn one lost write into all of them.
+    fn write_if_last(&self, asked_at: u64, write: impl FnOnce()) {
+        let _ordered = self.writing.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.asked_for.load(Ordering::Relaxed) != asked_at {
+            return;
+        }
+        write();
+    }
+}
+
 /// The window's root view.
 pub struct Workspace {
     tabs: TabStrip,
@@ -313,8 +384,8 @@ pub struct Workspace {
     divider_drag: DividerDrag,
 
     /// Makes the last session save the one that lands. See
-    /// [`Self::save_session`].
-    session_generation: Arc<AtomicU64>,
+    /// [`Self::save_session`] and [`SaveOrder`].
+    session_saves: Arc<SaveOrder>,
 
     /// How big the window was when it was last laid out, in logical pixels.
     ///
@@ -396,16 +467,14 @@ pub struct Workspace {
     /// with no data directory, where the creator has nowhere to put one and
     /// says so rather than guessing.
     worktrees_directory: Option<PathBuf>,
-    /// How many settings saves have been asked for.
+    /// Makes the last settings save the one the file ends up holding.
     ///
-    /// Each save task carries the number it was asked at and does nothing if a
-    /// later one has been asked for since. Browsing themes with the arrow keys
-    /// asks for one per keystroke, which is exactly the case `save_settings`
-    /// said it would need this for.
+    /// Browsing themes with the arrow keys asks for one save per keystroke,
+    /// which is exactly the case `save_settings` said it would need this for.
     ///
-    /// An `Arc<AtomicU64>` rather than a `Cell`, because the check happens on
-    /// the worker that is about to write.
-    save_generation: Arc<AtomicU64>,
+    /// An `Arc<SaveOrder>` rather than a `Cell`, because the deciding and the
+    /// writing both happen on the worker. See [`SaveOrder`].
+    saves: Arc<SaveOrder>,
     /// How far the tabs panel's list has been scrolled.
     ///
     /// On the workspace rather than inside the panel module for the reason
@@ -498,7 +567,7 @@ impl Workspace {
             inputs: HashMap::new(),
             clipboard: Clipboard::new(),
             divider_drag: DividerDrag::new(),
-            session_generation: Arc::new(AtomicU64::new(0)),
+            session_saves: Arc::default(),
             // Blocking, and deliberately: one small file, read once, on the
             // same startup path the settings are read on. A run with no
             // settings file to write is an ephemeral one — a test, the
@@ -525,7 +594,7 @@ impl Workspace {
             theme_before_draft: None,
             themes_directory: crate::theme::user_themes_directory(),
             worktrees_directory: worktree_store(),
-            save_generation: Arc::new(AtomicU64::new(0)),
+            saves: Arc::default(),
             panel_scroll: ScrollStateHandle::default(),
             panel_rows: RowGeometry::new(),
             hovered_row: None,
@@ -838,7 +907,10 @@ impl Workspace {
     /// gone, and an application that is idle by design stays idle.
     ///
     /// The read happens on the background pool, because it is a directory walk
-    /// and a parse per file, and neither belongs on the thread that draws.
+    /// and a parse per file, and neither belongs on the thread that draws. The
+    /// wait and the read are one task, so this is one of the chains
+    /// [`crate::PARKED_WORKERS`] counts — the only one that comes and goes with
+    /// a panel rather than running for the life of the window.
     fn watch_themes(&self, ctx: &mut ViewContext<Self>) {
         if !self.panel.open {
             return;
@@ -1765,11 +1837,11 @@ impl Workspace {
     ///
     /// A chain rather than a timer, for the reason the poll chains are one: the
     /// next round is started by the previous one finishing, so there is exactly
-    /// one wait outstanding and nothing to cancel. It is the third thing in the
-    /// process that parks a background worker — see [`crate::PARKED_WORKERS`] —
-    /// and, like the other two, it is deliberately not started by a test or by
-    /// the headless snapshot, both of which want a frame rather than a
-    /// heartbeat.
+    /// one wait outstanding and nothing to cancel. It is one of the things in
+    /// the process that park a background worker — see
+    /// [`crate::PARKED_WORKERS`] for the list — and, like the others, it is
+    /// deliberately not started by a test or by the headless snapshot, both of
+    /// which want a frame rather than a heartbeat.
     pub fn start_caret_blink(&self, ctx: &mut ViewContext<Self>) {
         self.blink_caret(ctx);
     }
@@ -3067,12 +3139,8 @@ impl Workspace {
     /// screen, because the option itself has already been applied.
     ///
     /// Each save carries a complete snapshot and writes through its own
-    /// temporary, so two of them racing is a question of which lands last
-    /// rather than of a half-written file. Two clicks a millisecond apart could
-    /// in principle land out of order and persist the earlier state; the fix
-    /// for that is one save task the model owns rather than one per click, and
-    /// it is not worth the machinery until an option can be changed from
-    /// somewhere other than a person's hand.
+    /// temporary, so two of them racing is never a half-written file — and
+    /// [`SaveOrder`] is what decides which of the two the file keeps.
     fn save_settings(&self, ctx: &mut ViewContext<Self>) {
         if self.settings.path().is_none() {
             // An ephemeral run, or a machine with no configuration directory.
@@ -3080,30 +3148,22 @@ impl Workspace {
             return;
         }
 
-        // **Only the last one asked for lands.** This function's own comment
-        // used to say that two clicks a millisecond apart could persist the
-        // earlier state, and that the fix was worth having when an option
-        // could be changed from somewhere other than a person's hand. Browsing
-        // themes with the arrow keys is that: one save per keystroke, each on
-        // its own background task, racing each other to the same file. A
-        // generation number makes the race decidable — a task that finds a
-        // later one has been asked for since simply does nothing.
-        let generation = self.save_generation.fetch_add(1, Ordering::Relaxed) + 1;
-        let latest = self.save_generation.clone();
+        // **Only the last one asked for lands.** Browsing themes with the
+        // arrow keys asks for one save per keystroke, each on its own
+        // background task, racing the others to the same file — and a click on
+        // one option followed by a click on another is the same race with two
+        // runners. [`SaveOrder`] is the whole of the answer.
+        let asked_at = self.saves.ask();
+        let saves = self.saves.clone();
         let settings = self.settings.clone();
 
         ctx.background()
             .spawn(async move {
-                // Checked on the worker, immediately before the write: a task
-                // that has been overtaken has nothing to do, and the one that
-                // was asked for last is the one holding the state a person can
-                // see.
-                if latest.load(Ordering::Relaxed) != generation {
-                    return;
-                }
-                if let Err(error) = settings.save_blocking() {
-                    log::warn!("could not save the settings: {error:#}");
-                }
+                saves.write_if_last(asked_at, || {
+                    if let Err(error) = settings.save_blocking() {
+                        log::warn!("could not save the settings: {error:#}");
+                    }
+                });
             })
             .detach();
     }
@@ -3119,9 +3179,9 @@ impl Workspace {
     /// enough — a tab opened, a pane closed, a split — that a small file per
     /// gesture is not worth debouncing.
     ///
-    /// The same generation trick as the settings save, for the same reason: two
-    /// gestures a millisecond apart must not race each other to the file with
-    /// the earlier one winning.
+    /// Ordered by the same [`SaveOrder`] the settings save uses, for the same
+    /// reason: two gestures a millisecond apart must not race each other to the
+    /// file with the earlier one winning.
     fn save_session(&self, ctx: &mut ViewContext<Self>) {
         if !self.general().restore_session {
             return;
@@ -3136,18 +3196,17 @@ impl Workspace {
             return;
         }
 
-        let generation = self.session_generation.fetch_add(1, Ordering::Relaxed) + 1;
-        let latest = self.session_generation.clone();
+        let asked_at = self.session_saves.ask();
+        let saves = self.session_saves.clone();
         let session = crate::session::Session::of(&self.tabs, self.window_size());
 
         ctx.background()
             .spawn(async move {
-                if latest.load(Ordering::Relaxed) != generation {
-                    return;
-                }
-                if let Err(error) = session.save_blocking(&path) {
-                    log::warn!("could not save the session: {error:#}");
-                }
+                saves.write_if_last(asked_at, || {
+                    if let Err(error) = session.save_blocking(&path) {
+                        log::warn!("could not save the session: {error:#}");
+                    }
+                });
             })
             .detach();
     }

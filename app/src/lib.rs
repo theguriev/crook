@@ -665,21 +665,37 @@ THE INPUT FIELD:
 
 /// How many workers are parked on a timer at any moment.
 ///
-/// Four: the usage poll between readings, the git gather between cycles, the
-/// caret blink between halves of its phase, and the one that asks the shells
-/// whether they are still alive. Each is one background task for the whole
-/// cycle — the wait *and* the work — so each holds its worker across the wait
-/// rather than yielding it, and none is ever counted as idle. Raise this when a
-/// fifth such chain appears, and see the test at the bottom of this file for
-/// what happens if it is not raised.
+/// Five: the usage poll between readings, the git gather between cycles, the
+/// caret blink between halves of its phase, the one that asks the shells
+/// whether they are still alive, and the themes folder being re-read while the
+/// Themes panel is open. Each is one background task for the whole cycle — the
+/// wait *and* the work — so each holds its worker across the wait rather than
+/// yielding it, and none is ever counted as idle. All five can be parked at
+/// once: a window with shells in it, the usage chip on and the panel open is
+/// an ordinary afternoon. Raise this when a sixth such chain appears.
 ///
 /// The number is a count of *chains*, never of panes. That is why the child
 /// check is one task for the whole terminal model rather than one per session:
 /// a chain per pane would park a worker per pane, and a window with more panes
 /// than the machine has cores would have nothing left to run a save on.
-const PARKED_WORKERS: usize = 4;
+///
+/// One thing does park per pane and is deliberately not counted here:
+/// `TerminalModel::schedule_long_running` arms a timer per running command, to
+/// draw the frame in which that command takes the pane. It is bounded by
+/// `pane_surface::LONG_RUNNING` — fifty milliseconds — rather than by a poll
+/// interval, so what it can cost a save queued behind it is a fiftieth of a
+/// second rather than the fifteen the usage poll could. Sizing the pool for a
+/// pane count is not possible; keeping the wait short is.
+///
+/// **The test at the bottom of this file cannot check this number.** It builds
+/// its scenario out of the constant itself, so it proves what
+/// [`background_pool`] does with whatever the number says and nothing at all
+/// about how many chains there really are. Counting them is what this comment
+/// is for, and the themes poll is here because it went uncounted for as long
+/// as the comment was the only thing that could have counted it.
+const PARKED_WORKERS: usize = 5;
 
-/// A pool with a worker left over once both poll chains are asleep.
+/// A pool with a worker left over once every chain that parks is asleep.
 ///
 /// The floor is not a round number, it is [`PARKED_WORKERS`] plus one. On a
 /// two-core machine a pool the size of the chains has nothing left to run a
@@ -688,7 +704,17 @@ const PARKED_WORKERS: usize = 4;
 /// fifteen seconds, and be discarded outright if the window closed first.
 fn background_pool() -> Arc<Background> {
     let cores = std::thread::available_parallelism().map_or(1, |count| count.get());
-    Arc::new(Background::new(cores.max(PARKED_WORKERS + 1)))
+    Arc::new(Background::new(pool_size(cores)))
+}
+
+/// How many workers a machine with `cores` of them gets.
+///
+/// Split out from [`background_pool`] so the floor can be checked on a machine
+/// that does not have it: on anything with more cores than
+/// [`PARKED_WORKERS`] the `max` never fires, and a test that called
+/// `background_pool` would pass on a developer's laptop with the floor deleted.
+fn pool_size(cores: usize) -> usize {
+    cores.max(PARKED_WORKERS + 1)
 }
 
 /// The two families the window draws in.
@@ -1915,6 +1941,11 @@ mod tests {
     ///
     /// The parked tasks report that they are *running* before they park, so
     /// the answer never depends on how quickly the pool picked them up.
+    ///
+    /// Note what this does *not* establish: the count of parked tasks comes
+    /// from [`PARKED_WORKERS`] itself, so a chain added to the application
+    /// without raising that constant changes this scenario in step and goes on
+    /// passing. Only the comment on the constant counts the chains.
     fn a_worker_is_left_over(workers: usize, patience: std::time::Duration) -> bool {
         use std::sync::mpsc;
 
@@ -1964,6 +1995,17 @@ mod tests {
             a_worker_is_left_over(PARKED_WORKERS + 1, std::time::Duration::from_secs(30)),
             "one worker per parked chain plus one was not enough to run a              settings save"
         );
+
+        // And that the floor is actually applied, on the machines that need
+        // it rather than on whichever one is running the suite. Everything
+        // above is about a pool the test built for itself; this is the only
+        // line about the pool the application builds.
+        for cores in 1..=PARKED_WORKERS {
+            assert!(
+                pool_size(cores) > PARKED_WORKERS,
+                "a {cores}-core machine would get a pool with nothing left to                  run a settings save on"
+            );
+        }
     }
 
     #[test]

@@ -2727,6 +2727,32 @@ impl Scratch {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
+
+    /// The file once it has stopped changing.
+    ///
+    /// Two reads in a row that agree, rather than a wait for a value: a save
+    /// that lands and is then overwritten by an earlier one passes
+    /// [`Scratch::written_containing`] if the poll happens to fall in the
+    /// window between the two writes, and the whole question here is what the
+    /// file holds *afterwards*.
+    fn settled(&self) -> String {
+        let path = self.directory.join("settings.json");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let mut before = None;
+        loop {
+            let now = std::fs::read_to_string(&path).ok();
+            if now.is_some() && now == before {
+                return now.unwrap_or_default();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "{} never stopped changing",
+                path.display()
+            );
+            before = now;
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
 }
 
 impl Drop for Scratch {
@@ -2794,6 +2820,58 @@ fn choosing_a_different_density_ends_the_override_too() {
     harness.dispatch_option(OptionsAction::ToggleShowPrLink);
     assert_eq!(Density::Expanded, harness.saved_options().density);
     scratch.written_containing("\"view_mode\": \"expanded\"");
+}
+
+/// How many times [`two_choices_in_a_row_leave_the_second_one_in_the_file`]
+/// plays out its race.
+///
+/// The failure it is looking for is decided by the scheduler, not by the code
+/// path: before the fix, the earlier of two saves overwrote the later one in
+/// roughly two rounds out of five on the machine this was written on, so
+/// thirty-two rounds miss it about seven times in a hundred million. After the
+/// fix it cannot happen at all, so this is not a flaky test in either
+/// direction — it is a coin the fix stops flipping.
+const RACE_ROUNDS: usize = 32;
+
+#[test]
+fn two_choices_in_a_row_leave_the_second_one_in_the_file() {
+    // Two clicks, each of which asks for a save of the whole options snapshot,
+    // and the two saves run on different workers of the background pool. Both
+    // used to be allowed to write — each looked at the save counter before the
+    // other had been asked for — and which of the two `rename`s landed last
+    // was up to the scheduler. When it was the first, the file settled on the
+    // state before the second click and stayed there: the option a person had
+    // just chosen was on screen, in memory and in `saved_options`, and simply
+    // not in the file the next launch reads.
+    //
+    // Every other test here waits for the file to *contain* what it asked for,
+    // which a lost write can still satisfy for the instant before it is
+    // overwritten. This one asks what the file holds once it has stopped
+    // moving.
+    for round in 0..RACE_ROUNDS {
+        let scratch = Scratch::new();
+        let mut harness = Harness::with_settings(1, scratch.settings());
+
+        harness.dispatch_option(OptionsAction::SetDensity(Density::Expanded));
+        harness.dispatch_option(OptionsAction::SetSubtitle(Subtitle::WorkingDirectory));
+
+        let settled = scratch.settled();
+        assert!(
+            settled.contains("\"compact_subtitle\": \"working_directory\""),
+            "round {round}: the save from the first click overwrote the one \
+             from the second, so the file holds {settled}"
+        );
+        // And the first click is still in it: the second save carries the whole
+        // snapshot, so a file that lost the first choice would mean the two
+        // saves had been ordered by dropping one of them rather than by
+        // sequencing them.
+        assert!(
+            settled.contains("\"view_mode\": \"expanded\""),
+            "round {round}: the last save did not carry the earlier choice; \
+             the file holds {settled}"
+        );
+        assert_eq!(harness.options(), harness.saved_options());
+    }
 }
 
 #[test]
