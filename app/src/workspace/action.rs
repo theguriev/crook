@@ -212,6 +212,12 @@ pub enum SettingsAction {
     /// Show a different page of the settings in the pane already holding
     /// them.
     Select(PageId),
+    /// Move the keyboard to one of the fields on the page, or back to the
+    /// rail's search box.
+    ///
+    /// By index rather than by name, because this enum is `Copy`; see
+    /// [`SettingsState::field`](crate::workspace::settings_page::SettingsState::field).
+    FocusField(Option<usize>),
     /// "Show the usage chip", which is also what starts and stops the poll.
     ToggleUsageChip,
     /// Put every tab option back to the value a fresh install opens with.

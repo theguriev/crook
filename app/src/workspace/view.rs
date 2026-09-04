@@ -2102,7 +2102,7 @@ impl Workspace {
     }
 
     /// The system clipboard every field copies to and pastes from.
-    pub(super) fn clipboard(&self) -> &Clipboard {
+    pub(crate) fn clipboard(&self) -> &Clipboard {
         &self.clipboard
     }
 
@@ -2799,6 +2799,8 @@ impl Workspace {
         // explains why is at the top of a rail somebody has to look at.
         if self.tabs.settings_pane().is_none() {
             self.page.search.edit(crate::editor::Editor::clear);
+            self.page.clear_fields();
+            self.page.set_focus(None);
         }
 
         // A row that has gone cannot receive the hover-out that would clear
@@ -2854,7 +2856,13 @@ impl Workspace {
         let settings_focused = listening
             .and_then(|id| self.tabs.pane(id))
             .is_some_and(|pane| pane.is_settings());
-        self.page.search.set_has_keys(settings_focused);
+        // A page may bring a field of its own, and then exactly one of them is
+        // being typed into: the rail's when nothing else has been pressed, and
+        // whichever was pressed last after that.
+        self.page
+            .search
+            .set_has_keys(settings_focused && self.page.focus().is_none());
+        self.page.sync_fields(settings_focused);
     }
 
     /// Tells the git model which directories the strip is showing.
@@ -2983,6 +2991,9 @@ impl Workspace {
                     return;
                 }
                 self.page.page = key;
+                // The fields belong to the page that drew them, and the next
+                // page may have none at all.
+                self.page.set_focus(None);
                 // A page is a different set of controls at a different set of
                 // positions. Both of the things that survive a section change
                 // would otherwise be wrong: the scroll offset belongs to the
@@ -2990,6 +3001,14 @@ impl Workspace {
                 // over is about to stop existing without a hover-out.
                 self.page.scroll.lock().scroll_to_top();
                 self.page.forget_hover_state();
+                ctx.notify();
+            }
+            SettingsAction::FocusField(field) => {
+                if self.page.focus() == field {
+                    return;
+                }
+                self.page.set_focus(field);
+                self.sync_input_keys();
                 ctx.notify();
             }
             SettingsAction::ToggleUsageChip => {

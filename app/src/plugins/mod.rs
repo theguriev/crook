@@ -48,7 +48,7 @@ pub fn defaults() -> Vec<Box<dyn Plugin>> {
         Box::new(shell::Shell),
         Box::new(usage::Usage),
         Box::new(keys::Keys),
-        Box::new(plugins_page::Plugins),
+        Box::new(plugins_page::Plugins::new()),
         Box::new(about::About),
         Box::new(palette::CommandPalette),
     ]

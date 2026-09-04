@@ -20,6 +20,7 @@ mod empty;
 pub mod flex;
 mod hoverable;
 mod icon;
+mod paragraph;
 mod scrollable;
 pub mod stack;
 mod text;
@@ -40,6 +41,7 @@ pub use flex::{
 };
 pub use hoverable::{Hoverable, MouseState, MouseStateHandle};
 pub use icon::Icon;
+pub use paragraph::Paragraph;
 pub use scrollable::{ScrollState, ScrollStateHandle, Scrollable};
 pub use stack::{AnchorTo, Corner, Stack};
 pub use text::Text;

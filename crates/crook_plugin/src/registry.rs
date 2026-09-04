@@ -128,6 +128,37 @@ pub enum Complaint {
     },
 }
 
+impl Complaint {
+    /// The slot this is about, where it is about one.
+    ///
+    /// For a surface that has to decide whose problem a complaint is:
+    /// [`Self::SlotIsSingle`] names no plugin because it is about a slot with
+    /// too many things in it, and the plugins it concerns are the ones that
+    /// put them there.
+    pub fn slot(&self) -> Option<SlotId> {
+        match self {
+            Self::SlotDeclaredTwice { slot, .. }
+            | Self::SlotNotDeclared { slot, .. }
+            | Self::SlotIsSingle { slot, .. } => Some(*slot),
+            Self::ActionTaken { .. } => None,
+        }
+    }
+
+    /// Whether this names `plugin`.
+    ///
+    /// The plugin that was refused *and* the one that was already there: both
+    /// of them are in a collision, and a person looking at either card wants
+    /// to know about it.
+    pub fn names(&self, plugin: &PluginId) -> bool {
+        match self {
+            Self::SlotDeclaredTwice { owner, second, .. }
+            | Self::ActionTaken { owner, second, .. } => owner == plugin || second == plugin,
+            Self::SlotNotDeclared { by, .. } => by == plugin,
+            Self::SlotIsSingle { .. } => false,
+        }
+    }
+}
+
 impl std::fmt::Display for Complaint {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
