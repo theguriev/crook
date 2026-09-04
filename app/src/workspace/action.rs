@@ -125,7 +125,7 @@ pub enum ThemeAction {
 /// closing a pane, through the same close button, middle click and close
 /// chord — `cmd-w`, `ctrl-shift-w` off macOS — as every other pane in the
 /// window.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum SettingsAction {
     /// Show a different page of the settings in the pane already holding
     /// them.
@@ -134,6 +134,13 @@ pub enum SettingsAction {
     ToggleUsageChip,
     /// Put every tab option back to the value a fresh install opens with.
     ResetTabOptions,
+    /// Set the terminal's type size, in logical pixels.
+    ///
+    /// A size rather than a step, so that the zoom chords, the settings page's
+    /// buttons and its reset all send the same action. Whoever sends it has
+    /// already asked [`GeneralOptions`](crate::settings::GeneralOptions) what
+    /// the next size is, which is the one place the bounds are applied.
+    SetFontSize(f32),
 }
 
 /// What the options menu writes.

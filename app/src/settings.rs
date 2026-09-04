@@ -55,6 +55,9 @@ const SETTINGS_FILE: &str = "settings.json";
 /// The key the chosen theme's name is stored under.
 const THEME_KEY: &str = "theme";
 
+/// The key the terminal's monospace family is stored under.
+const FONT_FAMILY_KEY: &str = "font_family";
+
 /// What one row of the tab strip stands for — the menu's "View as".
 ///
 /// Warp's `VerticalTabsDisplayGranularity`, under
@@ -238,9 +241,19 @@ pub fn subtitle_options_for(primary: PrimaryInfo) -> [Subtitle; 2] {
 /// `docs/architecture.md` is explicit that a `serde` struct in a file is the
 /// right answer until there are ten of them, and this is the second struct,
 /// not the beginning of a schema.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GeneralOptions {
+    /// How big the terminal's own text is, in logical pixels.
+    ///
+    /// The grid, the composer and every measurement made of a cell come from
+    /// this one number: a pane's columns and rows are the pane's box divided
+    /// by a cell, so changing it resizes every pty in the window.
+    ///
+    /// Read through [`GeneralOptions::font_size`] rather than directly, which
+    /// is what keeps a hand-edited `0` — or a `NaN`, which JSON cannot hold
+    /// but a future writer could — out of a division.
+    pub font_size: f32,
     /// Whether the header carries the Claude Code usage chip.
     ///
     /// Off is not merely a hidden pill: the chip is the only thing that reads
@@ -254,11 +267,53 @@ pub struct GeneralOptions {
 }
 
 impl Default for GeneralOptions {
-    /// The chip on, because it is half of what Crook v1 is for.
+    /// The chip on, because it is half of what Crook v1 is for, and the type
+    /// size the body panel already printed its one monospace line at.
     fn default() -> Self {
         Self {
+            font_size: DEFAULT_FONT_SIZE,
             show_usage_chip: true,
         }
+    }
+}
+
+/// The em size a terminal grid is set at by default, in logical pixels.
+pub const DEFAULT_FONT_SIZE: f32 = 12.5;
+
+/// The smallest and largest the terminal's text may be set to.
+///
+/// Below the floor a cell is smaller than the subpixel grid the renderer
+/// positions glyphs on; above the ceiling a pane holds fewer columns than the
+/// two the emulator will accept. Both ends are reachable by holding a zoom
+/// chord down, so both have to be answers rather than accidents.
+pub const MIN_FONT_SIZE: f32 = 6.;
+/// See [`MIN_FONT_SIZE`].
+pub const MAX_FONT_SIZE: f32 = 48.;
+
+/// How much one press of the zoom chord changes the size, in logical pixels.
+///
+/// A whole pixel, because a cell's width is derived from it and a step that
+/// did not change the cell width would be a keystroke that did nothing.
+pub const FONT_SIZE_STEP: f32 = 1.;
+
+impl GeneralOptions {
+    /// The terminal's type size, as a number a cell can be divided by.
+    ///
+    /// Clamped rather than trusted: this file is meant to be hand-edited, and
+    /// a `0` in it would be a division by zero in every grid measurement in
+    /// the window. A value that is not a number at all falls back to the
+    /// default, because there is nothing sensible to clamp it to.
+    pub fn font_size(self) -> f32 {
+        if !self.font_size.is_finite() {
+            return DEFAULT_FONT_SIZE;
+        }
+        self.font_size.clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
+    }
+
+    /// The same size, `step` logical pixels bigger — or smaller, for a
+    /// negative step — and still within the bounds.
+    pub fn zoomed(self, step: f32) -> f32 {
+        (self.font_size() + step).clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
     }
 }
 
@@ -349,6 +404,21 @@ pub struct Settings {
     /// A [`String`], which is why it is here rather than in [`GeneralOptions`]:
     /// that one is `Copy`, and a renderer reads it dozens of times a frame.
     theme: String,
+    /// The monospace family the terminal draws in, by name.
+    ///
+    /// `None` — and an absent key — means the platform's own default, which is
+    /// what a machine with no preference should get and what every machine had
+    /// before this key existed.
+    ///
+    /// Applied at startup and nowhere else. Changing a font family means
+    /// re-selecting four faces, re-measuring the cell and resizing every pty
+    /// in the window, and the family a name resolves to depends on what is
+    /// installed — so a name that answers to nothing is a warning and the
+    /// default rather than a window that fails to open.
+    ///
+    /// Here rather than in [`GeneralOptions`] for the same reason the theme
+    /// is: that struct is `Copy`.
+    font_family: Option<String>,
 }
 
 impl Settings {
@@ -365,6 +435,7 @@ impl Settings {
                 tab_options: TabOptions::default(),
                 general: GeneralOptions::default(),
                 theme: crate::theme::DEFAULT_NAME.to_owned(),
+                font_family: None,
             };
         };
 
@@ -383,6 +454,7 @@ impl Settings {
             tab_options: TabOptions::default(),
             general: GeneralOptions::default(),
             theme: crate::theme::DEFAULT_NAME.to_owned(),
+            font_family: None,
         }
     }
 
@@ -412,13 +484,32 @@ impl Settings {
             .unwrap_or(crate::theme::DEFAULT_NAME)
             .to_owned();
 
+        // Read the same way the theme is, and for the same reason: a family
+        // name that answers to nothing on this machine is not a parse failure,
+        // it is a font that has been uninstalled since the file was written.
+        // An empty string is treated as absent — it names no family, and the
+        // alternative is a warning on every launch for a key somebody cleared.
+        let font_family = document
+            .get(FONT_FAMILY_KEY)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned);
+
         Self {
             path: Some(path),
             document,
             tab_options,
             general,
             theme,
+            font_family,
         }
+    }
+
+    /// The monospace family the terminal draws in, or `None` for the
+    /// platform's default.
+    pub fn font_family(&self) -> Option<&str> {
+        self.font_family.as_deref()
     }
 
     /// The file this instance reads and writes.
@@ -514,6 +605,16 @@ impl Settings {
         document.extend(owned_keys(self.tab_options, "tab options")?);
         document.extend(owned_keys(self.general, "general options")?);
         document.insert(THEME_KEY.to_owned(), Value::String(self.theme.clone()));
+        // Written back only when there is one, so a person who never chose a
+        // font does not find a null in a file they opened to read.
+        match self.font_family.as_ref() {
+            Some(family) => {
+                document.insert(FONT_FAMILY_KEY.to_owned(), Value::String(family.clone()));
+            }
+            None => {
+                document.remove(FONT_FAMILY_KEY);
+            }
+        }
         Ok(document)
     }
 }
@@ -782,6 +883,73 @@ mod tests {
     }
 
     #[test]
+    fn test_a_hand_edited_font_size_cannot_divide_by_zero() {
+        // Every grid measurement in the window is a box divided by a cell, and
+        // a cell's width comes from this number. The file is meant to be
+        // hand-edited, so the guard is here rather than at each division.
+        for written in [0., -12., f32::INFINITY, f32::NAN] {
+            let options = GeneralOptions {
+                font_size: written,
+                ..GeneralOptions::default()
+            };
+            let size = options.font_size();
+            assert!(
+                size.is_finite() && (MIN_FONT_SIZE..=MAX_FONT_SIZE).contains(&size),
+                "a stored {written} resolved to {size}"
+            );
+        }
+
+        assert_eq!(GeneralOptions::default().font_size(), DEFAULT_FONT_SIZE);
+    }
+
+    #[test]
+    fn test_zooming_stops_at_both_ends() {
+        // Both ends are reachable by holding the chord down, so both have to
+        // be answers rather than accidents.
+        let mut options = GeneralOptions::default();
+        for _ in 0..200 {
+            options.font_size = options.zoomed(FONT_SIZE_STEP);
+        }
+        assert_eq!(options.font_size(), MAX_FONT_SIZE);
+
+        for _ in 0..200 {
+            options.font_size = options.zoomed(-FONT_SIZE_STEP);
+        }
+        assert_eq!(options.font_size(), MIN_FONT_SIZE);
+    }
+
+    #[test]
+    fn test_a_font_family_survives_a_save_and_an_absent_one_stays_absent() {
+        let scratch = ScratchDirectory::new("font-family");
+        fs::write(scratch.settings_file(), r#"{"font_family": "  Hack  "}"#)
+            .expect("the file should be writable");
+
+        let settings = Settings::load(scratch.settings_file());
+        assert_eq!(
+            settings.font_family(),
+            Some("Hack"),
+            "a name is trimmed, because a file is hand-edited"
+        );
+        settings.save_blocking().expect("the save should succeed");
+        assert_eq!(
+            Settings::load(scratch.settings_file()).font_family(),
+            Some("Hack")
+        );
+
+        // An empty string names no family, and writing `null` back for it
+        // would put a key in a file nobody asked for one in.
+        let empty = ScratchDirectory::new("font-family-empty");
+        fs::write(empty.settings_file(), r#"{"font_family": "   "}"#)
+            .expect("the file should be writable");
+        let settings = Settings::load(empty.settings_file());
+        assert_eq!(settings.font_family(), None);
+        settings.save_blocking().expect("the save should succeed");
+
+        let written = fs::read_to_string(empty.settings_file()).expect("readable");
+        assert!(!written.contains("font_family"), "{written}");
+    }
+
+    #[test]
     fn test_the_file_uses_warps_key_names_and_spellings() {
         let scratch = ScratchDirectory::new("key-names");
         let mut settings = Settings::load(scratch.settings_file());
@@ -797,6 +965,9 @@ mod tests {
             vec![
                 "compact_subtitle",
                 "display_granularity",
+                // Crook's own: Warp keeps the terminal's type size in its
+                // appearance settings, which this file is not a copy of.
+                "font_size",
                 "layout",
                 "primary_info",
                 "show_details_on_hover",
@@ -955,9 +1126,11 @@ mod tests {
         let written: Map<String, Value> =
             serde_json::from_str(&contents).expect("the file should be a JSON object");
 
-        // Eight tab options, one general one and the theme's name, and
-        // nothing else: the 8KB key the file started with is gone.
-        assert_eq!(10, written.len());
+        // Eight tab options, two general ones and the theme's name, and
+        // nothing else: the 8KB key the file started with is gone. The font
+        // family is not among them — an absent key is what "no preference"
+        // is, so a save writes no `font_family` unless one was chosen.
+        assert_eq!(11, written.len());
         assert!(!contents.contains("padding"));
         assert_eq!(
             everything_flipped(),

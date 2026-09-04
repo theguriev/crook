@@ -98,7 +98,10 @@ Six features, and the page that configures them:
   (`cmd-w`, `ctrl-shift-w` off macOS) as any other pane. Four pages: Appearance, Usage, Keys
   and About. Every option on it is one the application actually reads; there is nothing there
   that does not do something. Changes apply on the click and are written to
-  `<config>/crook/settings.json`, which is the same eight keys the gear menu writes plus one.
+  `<config>/crook/settings.json`, which is the same eight keys the gear menu writes plus the
+  theme, the terminal's type size and — set in the file rather than on the page — its font
+  family. The type size is also on `cmd/ctrl-plus`, `-minus` and `-0`, and every pane resizes
+  with it: a pane's columns and rows are its box divided by a cell, so the ptys follow.
   It is the one pane with no shell under it and no field: every control on it is a click.
 
 Everything else is out of scope on purpose. There is no keymap system, no persistence, no

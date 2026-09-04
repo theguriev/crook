@@ -470,6 +470,8 @@ KEYS (macOS):
     cmd-w                      Close the focused pane, and its tab with the last one
     cmd-alt-left/right         Select the previous/next tab
     cmd-ctrl-left/right        Move the active tab
+    cmd-plus / cmd-minus       Make the terminal's text bigger / smaller
+    cmd-0                      Put the text back to its default size
 
 KEYS (Linux and Windows):
     ctrl-shift-t               New agent tab
@@ -479,6 +481,8 @@ KEYS (Linux and Windows):
     ctrl-shift-w               Close the focused pane, and its tab with the last one
     ctrl-pageup/pagedown       Select the previous/next tab
     ctrl-shift-pageup/pagedown Move the active tab
+    ctrl-plus / ctrl-minus     Make the terminal's text bigger / smaller
+    ctrl-0                     Put the text back to its default size
 
     Control-Shift, because a bare ctrl-letter belongs to the program in the
     pane: ctrl-c interrupts it, ctrl-d ends its input and ctrl-w takes back a
@@ -564,14 +568,32 @@ fn background_pool() -> Arc<Background> {
     Arc::new(Background::new(cores.max(PARKED_WORKERS + 1)))
 }
 
-fn resolve_fonts(font_db: &CosmicFontDb) -> Result<Fonts> {
+/// The two families the window draws in.
+///
+/// `monospace` is the settings file's if it names one this machine answers to,
+/// and the platform's default otherwise. A name that resolves to nothing is a
+/// warning and the default rather than a window that fails to open: a font can
+/// be uninstalled between two launches, and that is not a reason to refuse to
+/// start — it is exactly the same rule the theme name is read under.
+fn resolve_fonts(font_db: &CosmicFontDb, monospace: Option<&str>) -> Result<Fonts> {
+    let chosen = monospace.and_then(|name| match font_db.load_family_from_system(name) {
+        Ok(family) => Some(family),
+        Err(error) => {
+            log::warn!("no font family called {name:?} on this machine: {error:#}");
+            None
+        }
+    });
+
     Ok(Fonts {
         ui: font_db
             .default_ui_family()
             .context("no usable interface font")?,
-        monospace: font_db
-            .default_monospace_family()
-            .context("no usable monospace font")?,
+        monospace: match chosen {
+            Some(family) => family,
+            None => font_db
+                .default_monospace_family()
+                .context("no usable monospace font")?,
+        },
     })
 }
 
@@ -625,16 +647,20 @@ fn open_window(channel: Channel, frames: Option<u32>, overrides: Overrides) -> R
     // Everything fallible happens before the event loop takes over, because
     // the delegate is built inside a closure that cannot report an error.
     let font_db = CosmicFontDb::new().context("no usable system fonts")?;
-    let fonts = resolve_fonts(&font_db)?;
+    // Blocking, and deliberately: one small file, read once, before there is a
+    // window to stall. Before the fonts, because it names one of them.
+    let settings = Settings::for_user();
+    let fonts = resolve_fonts(&font_db, settings.font_family())?;
     // Resolved here, from the database, because this is the last moment
     // anything can hold it: it is moved into the event loop on the next line
     // but one, and a grid needs to ask it for a glyph on every frame after
     // that. See `CosmicGlyphs`.
-    let cell_font = CellFont::new(font_db.glyphs(), fonts.monospace, CELL_FONT_SIZE)?;
+    let cell_font = CellFont::new(
+        font_db.glyphs(),
+        fonts.monospace,
+        settings.general().font_size(),
+    )?;
     let text_layout: Arc<dyn TextLayoutSystem> = Arc::new(font_db.text_layout());
-    // Blocking, and deliberately: one small file, read once, before there is a
-    // window to stall.
-    let settings = Settings::for_user();
     apply_startup_theme(&settings, &launch.overrides);
 
     let options = WindowOptions {
@@ -681,7 +707,11 @@ fn apply_startup_theme(settings: &Settings, overrides: &Overrides) {
 /// changing, and the frame that is written is the one with the output in it.
 fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
     let font_db = CosmicFontDb::new().context("no usable system fonts")?;
-    let fonts = resolve_fonts(&font_db)?;
+    // The platform's default family at the default size, and never the
+    // settings file's: a snapshot is a picture of the *application*, and one
+    // that came out in whatever font and size the person running it happens to
+    // have chosen would be a different picture on every machine.
+    let fonts = resolve_fonts(&font_db, None)?;
     let cell_font = CellFont::new(font_db.glyphs(), fonts.monospace, CELL_FONT_SIZE)?;
     let text_layout: Arc<dyn TextLayoutSystem> = Arc::new(font_db.text_layout());
 

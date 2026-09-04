@@ -22,7 +22,8 @@ use super::widgets::{self, Segment};
 use super::{Control, Section};
 use crate::input_keys::Platform;
 use crate::settings::{
-    Density, Granularity, Layout, PrimaryInfo, TabOptions, resolve_subtitle, subtitle_options_for,
+    Density, FONT_SIZE_STEP, Granularity, Layout, PrimaryInfo, TabOptions, resolve_subtitle,
+    subtitle_options_for,
 };
 
 /// A binding as this platform spells it.
@@ -146,9 +147,68 @@ fn appearance(workspace: &Workspace) -> Box<dyn Element> {
 
     page(vec![
         widgets::category("Theme", true, theme_category(workspace), ui),
+        widgets::category("Text", false, text_category(workspace), ui),
         widgets::category("Tabs", false, vec![placement, granularity, density], ui),
         widgets::category("Rows", false, rows_category(workspace), ui),
     ])
+}
+
+/// The "Text" category: how big the terminal's own type is, and which family
+/// it is set in.
+///
+/// The size is a control; the family is a fact. Changing a family means
+/// re-selecting four faces, re-measuring the cell and resizing every pty in
+/// the window against a list of what is installed — and there is no element to
+/// choose from such a list with, because `crookui_core` has no text field and
+/// no combo box. So the family is set in the settings file, under
+/// `font_family`, and this row says which one answered.
+fn text_category(workspace: &Workspace) -> Vec<Box<dyn Element>> {
+    let ui = workspace.fonts().ui;
+    let state = workspace.settings_page();
+    let general = workspace.general();
+    let size = general.font_size();
+
+    // `None` at each end of the range, which draws the button de-emphasised
+    // and inert — the same "there is nothing to do here" the reset button has.
+    let step = |by: f32| {
+        let next = general.zoomed(by);
+        (next != size).then(|| SettingsAction::SetFontSize(next).into())
+    };
+
+    let size_row = widgets::row(
+        "Text size",
+        Some("How big the terminal's own text is. Every pane resizes with it."),
+        true,
+        widgets::stepper(
+            format!("{size}"),
+            step(-FONT_SIZE_STEP),
+            state.control(Control::FontSmaller),
+            step(FONT_SIZE_STEP),
+            state.control(Control::FontBigger),
+            ui,
+        ),
+        ui,
+    );
+
+    // What the settings file asked for, which is not quite the same as what
+    // answered: a family is resolved once, at startup, and a name nothing on
+    // this machine answers to falls back with a line in the log. The note
+    // under the row says so rather than this row pretending to know.
+    let chosen = workspace
+        .settings()
+        .font_family()
+        .map_or_else(|| "System default".to_owned(), str::to_owned);
+
+    vec![
+        size_row,
+        widgets::fact("Font", chosen, false, workspace.fonts()),
+        widgets::note(
+            "The font is whichever monospace family this machine calls its default, unless the \
+             settings file names another under \"font_family\". It is read once, when Crook \
+             starts, and a name nothing answers to is a line in the log and the default.",
+            ui,
+        ),
+    ]
 }
 
 /// The "Theme" category: which theme is in force, and the way to another.
@@ -493,6 +553,11 @@ fn keys(workspace: &Workspace) -> Box<dyn Element> {
             vec![
                 binding("Move the tabs panel", chord("cmd-b", "ctrl-shift-b")),
                 binding("Open these settings", chord("cmd-,", "ctrl-,")),
+                binding(
+                    "Make the text bigger / smaller",
+                    chord("cmd-+ / cmd--", "ctrl-+ / ctrl--"),
+                ),
+                binding("Put the text back to its size", chord("cmd-0", "ctrl-0")),
                 widgets::note(
                     "These settings are a pane, like a session is, so they close the way every \
                      pane does and have no key of their own for it. Pressing the binding again \

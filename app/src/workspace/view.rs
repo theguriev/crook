@@ -25,7 +25,10 @@ use crate::pane_selection::PaneSelection;
 use crate::pane_split::{DividerDrag, PaneExtent};
 use crate::pane_surface;
 use crate::platform_insets::{LayoutInsets, TabsPlacement, layout_insets};
-use crate::settings::{Density, GeneralOptions, Granularity, Layout, Settings, TabOptions};
+use crate::settings::{
+    DEFAULT_FONT_SIZE, Density, FONT_SIZE_STEP, GeneralOptions, Granularity, Layout, Settings,
+    TabOptions,
+};
 use crate::tab::{
     AgentSession, AgentStatus, Direction, Pane, PaneId, Tab, TabAction, TabEffect, TabId, TabStrip,
 };
@@ -1361,6 +1364,22 @@ impl Workspace {
             // than toggle it away, which is what `OpenSettings` does and a
             // toggle could not.
             Binding::OpenSettings => TabAction::OpenSettings,
+            // The zoom chords are not tab actions: they change the font the
+            // whole window is drawn in, and the size lives in the settings
+            // beside the theme.
+            Binding::ZoomIn => {
+                return Some(
+                    SettingsAction::SetFontSize(self.general().zoomed(FONT_SIZE_STEP)).into(),
+                );
+            }
+            Binding::ZoomOut => {
+                return Some(
+                    SettingsAction::SetFontSize(self.general().zoomed(-FONT_SIZE_STEP)).into(),
+                );
+            }
+            Binding::ZoomReset => {
+                return Some(SettingsAction::SetFontSize(DEFAULT_FONT_SIZE).into());
+            }
         };
 
         Some(WorkspaceAction::Tab(tab))
@@ -1697,7 +1716,41 @@ impl Workspace {
                 // control by hand would.
                 self.set_options(TabOptions::default(), ctx);
             }
+            SettingsAction::SetFontSize(size) => self.set_font_size(size, ctx),
         }
+    }
+
+    /// Sets the terminal's type size and re-measures every grid in the window.
+    ///
+    /// The size is a fact about the *font*, not about a pane, so the whole
+    /// window changes at once — which is also why the ptys follow without
+    /// anything here telling them: a pane's columns and rows are its box
+    /// divided by a cell, so the next layout measures a different grid and
+    /// `PaneSizer` reports it.
+    ///
+    /// A font that will not re-measure at the new size leaves the old one in
+    /// place. That is a family whose metrics have gone — a font uninstalled
+    /// mid-session — and the honest answer to it is the size that was working
+    /// a moment ago rather than a window that stops drawing.
+    pub fn set_font_size(&mut self, size: f32, ctx: &mut ViewContext<Self>) {
+        let mut general = self.general();
+        general.font_size = size;
+        let size = general.font_size();
+        if (self.cell_font.font_size() - size).abs() < f32::EPSILON {
+            return;
+        }
+
+        match self.cell_font.resized(size) {
+            Ok(font) => self.cell_font = font,
+            Err(error) => {
+                log::warn!("could not set the terminal font to {size}: {error:#}");
+                return;
+            }
+        }
+        // After the font, because the save is what makes the size outlive the
+        // process and there is no point remembering one that could not be
+        // applied.
+        self.set_general(general, ctx);
     }
 
     /// Everything the Themes panel does.

@@ -6295,6 +6295,86 @@ fn the_row_height_the_panel_scrolls_by_is_the_height_it_draws() {
     );
 }
 
+/// Zooming: one number that every measurement in the window comes from.
+mod text_size {
+    use super::*;
+    use crate::settings::{DEFAULT_FONT_SIZE, FONT_SIZE_STEP, MAX_FONT_SIZE};
+
+    fn size(harness: &Harness) -> f32 {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.cell_font().font_size()
+        })
+    }
+
+    /// The chord, sent the way the window delegate sends a bound keystroke.
+    fn zoom(harness: &mut Harness, key: &str) -> bool {
+        harness.press_key(
+            key,
+            Modifiers {
+                ctrl: true,
+                ..Modifiers::default()
+            },
+        )
+    }
+
+    #[test]
+    fn the_chords_change_the_font_every_grid_is_measured_with() {
+        let mut harness = Harness::new(1);
+        assert_eq!(size(&harness), DEFAULT_FONT_SIZE);
+
+        assert!(zoom(&mut harness, "="));
+        assert_eq!(size(&harness), DEFAULT_FONT_SIZE + FONT_SIZE_STEP);
+
+        assert!(zoom(&mut harness, "-"));
+        assert_eq!(size(&harness), DEFAULT_FONT_SIZE);
+    }
+
+    #[test]
+    fn a_bigger_cell_is_a_wider_cell() {
+        // The point of the whole feature: the cell is what a pane's columns
+        // and rows are its box divided by, so a pty resizes because the font
+        // did and nothing has to tell it.
+        let mut harness = Harness::new(1);
+        let before = harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.cell_font().metrics());
+
+        assert!(zoom(&mut harness, "="));
+        let after = harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.cell_font().metrics());
+
+        assert!(after.width > before.width, "{after:?} vs {before:?}");
+        assert!(after.height >= before.height);
+    }
+
+    #[test]
+    fn the_reset_chord_goes_back_to_the_size_a_fresh_install_opens_at() {
+        let mut harness = Harness::new(1);
+        for _ in 0..4 {
+            zoom(&mut harness, "=");
+        }
+        assert_ne!(size(&harness), DEFAULT_FONT_SIZE);
+
+        assert!(zoom(&mut harness, "0"));
+        assert_eq!(size(&harness), DEFAULT_FONT_SIZE);
+    }
+
+    #[test]
+    fn holding_the_chord_down_stops_at_the_end_of_the_range() {
+        // Key repeat reaches the end of the range in a second, so the end has
+        // to be an answer rather than an accident — and the frame that changed
+        // nothing must not repaint.
+        let mut harness = Harness::new(1);
+        for _ in 0..200 {
+            zoom(&mut harness, "=");
+        }
+
+        assert_eq!(size(&harness), MAX_FONT_SIZE);
+        harness.frame();
+    }
+}
+
 /// The bell: what a shell asks for that only the tab strip can answer.
 ///
 /// Driven through `apply_terminal_update`, which is the exact call the

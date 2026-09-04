@@ -473,6 +473,43 @@ pub(super) fn text_button(
     with_command(control, command)
 }
 
+/// A stepper: a minus, the value, and a plus.
+///
+/// The control the terminal's type size is set with. Not a `segmented`,
+/// because that control lights the chosen segment and nothing here is chosen —
+/// and not a text field, because `crookui_core` has no such element yet and
+/// the one half of one that exists measures in terminal cells.
+///
+/// Either button is `None` at its end of the range, which is the same "does
+/// nothing and says so" [`text_button`] already draws for the reset button.
+pub(super) fn stepper(
+    value: String,
+    decrease: Command,
+    decrease_state: MouseStateHandle,
+    increase: Command,
+    increase_state: MouseStateHandle,
+    ui: FamilyId,
+) -> Box<dyn Element> {
+    Flex::row()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_child(text_button("\u{2212}", decrease, decrease_state, ui))
+        .with_child(
+            Container::new(
+                Text::new(value, ui, DESCRIPTION_SIZE)
+                    .with_color(theme().text_primary)
+                    .finish(),
+            )
+            // Wide enough that the row does not shuffle sideways as the number
+            // gains and loses a digit under a pointer that is holding still on
+            // one of the two buttons.
+            .with_horizontal_padding(12.)
+            .finish(),
+        )
+        .with_child(text_button("+", increase, increase_state, ui))
+        .finish()
+}
+
 /// The row that says which theme is in force, and opens the panel.
 ///
 /// Warp's shape: the preview on the left, the name to its right, and the whole

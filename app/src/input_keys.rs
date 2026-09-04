@@ -178,6 +178,12 @@ pub enum Binding {
     ToggleLayout,
     /// Open the settings page.
     OpenSettings,
+    /// Make the terminal's text bigger.
+    ZoomIn,
+    /// Make it smaller.
+    ZoomOut,
+    /// Put it back to the size a fresh install opens at.
+    ZoomReset,
 }
 
 /// **The whole keyboard policy of a pane, in one function.**
@@ -283,6 +289,13 @@ pub fn binding(keystroke: &Keystroke, platform: Platform) -> Option<Binding> {
                 ("right", false, true, false) => Some(Binding::NextTab),
                 ("left", false, false, true) => Some(Binding::MoveTabLeft),
                 ("right", false, false, true) => Some(Binding::MoveTabRight),
+                // The zoom chords every application has. `=` is the unshifted
+                // key `+` is printed on, and both are accepted because which
+                // one the platform reports depends on the layout and on
+                // whether Shift was held.
+                ("=" | "+", _, false, false) => Some(Binding::ZoomIn),
+                ("-" | "_", _, false, false) => Some(Binding::ZoomOut),
+                ("0", false, false, false) => Some(Binding::ZoomReset),
                 _ => None,
             }
         }
@@ -309,6 +322,13 @@ pub fn binding(keystroke: &Keystroke, platform: Platform) -> Option<Binding> {
                 ("pagedown", false) => Some(Binding::NextTab),
                 ("pageup", true) => Some(Binding::MoveTabLeft),
                 ("pagedown", true) => Some(Binding::MoveTabRight),
+                // The zoom chords, with and without the Shift that reaches the
+                // `+` and `_` printed on the same two keys. Ctrl-minus does
+                // not collide with anything a shell wants: the C0 range has no
+                // code for it, so it was already sending a bare `-`.
+                ("=" | "+", _) => Some(Binding::ZoomIn),
+                ("-" | "_", _) => Some(Binding::ZoomOut),
+                ("0", false) => Some(Binding::ZoomReset),
                 _ => None,
             }
         }
@@ -1230,6 +1250,46 @@ mod tests {
                 binding(&keystroke(key, ctrl()), Platform::Other),
                 None,
                 "ctrl-{key} is Crook's, and the tty cannot have it"
+            );
+        }
+    }
+
+    #[test]
+    fn the_zoom_chords_are_bound_on_both_platforms() {
+        // Both keys of each pair, because which one the platform reports for
+        // the same physical key depends on the layout and on whether Shift
+        // was held.
+        for (key, expected) in [
+            ("=", Binding::ZoomIn),
+            ("+", Binding::ZoomIn),
+            ("-", Binding::ZoomOut),
+            ("_", Binding::ZoomOut),
+            ("0", Binding::ZoomReset),
+        ] {
+            assert_eq!(
+                binding(&keystroke(key, cmd()), Platform::Mac),
+                Some(expected),
+                "cmd-{key}"
+            );
+            assert_eq!(
+                binding(&keystroke(key, ctrl()), Platform::Other),
+                Some(expected),
+                "ctrl-{key}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_bare_minus_is_not_a_zoom() {
+        // The chord is the modifier. Typing a `-` into a command line must not
+        // resize every pane in the window.
+        for key in ["-", "=", "0", "+"] {
+            assert_eq!(binding(&keystroke(key, none()), Platform::Other), None);
+            assert_eq!(binding(&keystroke(key, none()), Platform::Mac), None);
+            assert_eq!(
+                binding(&keystroke(key, shift()), Platform::Other),
+                None,
+                "shift-{key} types a character"
             );
         }
     }
