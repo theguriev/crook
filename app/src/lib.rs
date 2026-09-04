@@ -1105,6 +1105,9 @@ struct Shell {
     /// What the command line asked to leave on screen, until the first frame
     /// has been drawn. See [`Composed`].
     composed: Composed,
+    /// The rectangle the input method was last told the caret occupies, so a
+    /// frame that did not move it sends no message.
+    ime_area: Option<crookui_core::geometry::RectF>,
 }
 
 /// The state of a `--run` in a windowed session.
@@ -1203,6 +1206,7 @@ impl Shell {
             frames_drawn: 0,
             frame_budget: launch.frames,
             run,
+            ime_area: None,
         }
     }
 
@@ -1276,6 +1280,32 @@ impl Shell {
         log::info!("the shell printed:\n{}", printed.trim_end());
     }
 
+    /// Moves the rectangle an input method puts its candidate list beside, so
+    /// that a half-composed word and the list of things it could become are in
+    /// the same place on screen.
+    ///
+    /// After the frame rather than during it: the caret's position is a result
+    /// of laying the line out at the width the field was given, so it is not
+    /// known until the field has been painted. Sent only when it moved,
+    /// because every window system takes this as a message.
+    fn follow_caret_with_the_input_method(&mut self) {
+        let caret = self
+            .workspace
+            .read(&self.app, |workspace, _| workspace.caret_rect());
+        if caret == self.ime_area {
+            return;
+        }
+        self.ime_area = caret;
+
+        // A field that has no caret keeps the last rectangle rather than
+        // being given a meaningless one: there is no composition to place, and
+        // moving the box to the origin would drag a candidate list somebody is
+        // looking at into the corner.
+        if let Some(caret) = caret {
+            self.proxy.set_ime_area(caret.origin(), caret.size());
+        }
+    }
+
     /// Handles a keystroke, if it is bound to something.
     fn handle_keystroke(&mut self, event: &Event) -> bool {
         let Event::KeyDown { keystroke, .. } = event else {
@@ -1327,6 +1357,7 @@ impl WindowDelegate for Shell {
     }
 
     fn frame_drawn(&mut self) {
+        self.follow_caret_with_the_input_method();
         self.type_pending_run();
         self.compose_pending_pane();
 

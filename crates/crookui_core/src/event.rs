@@ -171,6 +171,44 @@ pub enum Event {
         /// The new modifier state.
         modifiers: Modifiers,
     },
+
+    /// The input method said something.
+    Ime(Ime),
+}
+
+/// What an input method is doing to the text being composed.
+///
+/// A dead key, a Pinyin syllable, a Japanese conversion: on every platform the
+/// path is the same. The IME takes the key presses, shows a string that is not
+/// yet text — the *preedit* — and eventually either commits a result or gives
+/// up. Between [`Ime::Enabled`] and [`Ime::Disabled`], key presses that belong
+/// to the composition do not arrive as
+/// [`KeyDown`](Event::KeyDown) at all, which is exactly why a field that
+/// ignores these events cannot type Japanese: the keys never reach it and the
+/// commit never does either.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Ime {
+    /// A composition has begun. Anything the field had in flight is stale.
+    Enabled,
+    /// The composition so far, and where the IME wants its caret inside it, as
+    /// a byte range.
+    ///
+    /// This is *not* text yet. It is drawn where the caret is, underlined, and
+    /// replaced wholesale by the next preedit or by the commit. An empty string
+    /// means the composition was cleared without committing.
+    Preedit {
+        /// The string being composed.
+        text: String,
+        /// Where the IME's own caret or selection sits within `text`, when it
+        /// says. Byte offsets, and always on character boundaries.
+        cursor: Option<(usize, usize)>,
+    },
+    /// The composition finished and this is the text it produced. It is
+    /// inserted exactly as if it had been typed.
+    Commit(String),
+    /// The composition ended without producing anything. Any preedit on screen
+    /// belongs to nothing and must go.
+    Disabled,
 }
 
 impl Event {
@@ -183,7 +221,7 @@ impl Event {
             | Self::MouseMoved { position, .. }
             | Self::ScrollWheel { position, .. }
             | Self::ModifiersChanged { position, .. } => Some(*position),
-            Self::KeyDown { .. } | Self::KeyUp { .. } => None,
+            Self::KeyDown { .. } | Self::KeyUp { .. } | Self::Ime(_) => None,
         }
     }
 
@@ -208,6 +246,10 @@ impl Event {
             | Self::MouseMoved { modifiers, .. }
             | Self::ScrollWheel { modifiers, .. }
             | Self::ModifiersChanged { modifiers, .. } => *modifiers,
+            // An input method reports what it composed, never what was held to
+            // compose it: the modifiers went into the composition and came out
+            // the other side as text.
+            Self::Ime(_) => Modifiers::default(),
         }
     }
 
@@ -258,6 +300,7 @@ impl DispatchedEvent {
             }
             Event::KeyDown { .. }
             | Event::KeyUp { .. }
+            | Event::Ime(_)
             | Event::MouseMoved { .. }
             | Event::ModifiersChanged { .. } => Some(&self.event),
         }

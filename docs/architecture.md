@@ -865,8 +865,22 @@ short pane — is the other half of the same decision.
 
 ### What the emulator does not do
 
-IME composition, and key *releases* — which is the one kitty flag that is carried and not
-acted on, because a release never reaches `crook_terminal`.
+Key *releases*, which is the one kitty flag that is carried and not acted on, because a
+release never reaches `crook_terminal`.
+
+**IME composition is in**, and it lives in the composer rather than in the emulator, which is
+where it belongs: the field is what a line is typed into. `winit` is told
+`set_ime_allowed(true)` — without which the platform never starts a composition and the keys
+that would have begun one arrive as themselves — and its four `Ime` events become one
+`Event::Ime`. The preedit is kept *beside* the editor, in `PaneInput`, never in it: a preedit
+is not text, it is replaced wholesale by the next one, and putting it in the editor would put
+it in the undo history, in a copy and in a submitted line. Only the drawing composes the two,
+and `CommandInput` underlines the result so a half-converted word does not read as a committed
+one. A click cannot move the caret while a composition is open, because the offsets a pointer
+resolves against are offsets into a line the editor has never seen. The caret's painted
+rectangle travels back out to the window through `Proxy::set_ime_area`, so the candidate list
+stands beside the text being composed; it has to come from the paint path, because where the
+caret is is the result of wrapping the line at the width the field was given.
 
 **The kitty keyboard protocol is in**, in `crook_terminal::input`. Alacritty's `Term` already
 maintained the mode stack behind a config flag that was off; turning it on and reading the

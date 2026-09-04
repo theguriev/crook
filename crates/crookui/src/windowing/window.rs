@@ -72,6 +72,17 @@ impl Window {
                 .context("failed to create the window")?,
         );
 
+        // Without this the platform never starts a composition, and the keys
+        // that would have begun one arrive as themselves — which is a window
+        // that cannot type Japanese, Chinese or Korean at all. It costs
+        // nothing on a machine with no input method: no composition ever
+        // begins, and no `Ime` event is ever sent.
+        window.set_ime_allowed(true);
+
+        // The candidate list starts under the top-left corner, which is where
+        // a caret that has never been drawn is. The first painted frame moves
+        // it.
+
         // A surface may never be zero-sized, and a window that has not been
         // mapped yet can report exactly that.
         let surface_size = physical_size(&window).max(Vector2F::splat(1.));
@@ -103,6 +114,17 @@ impl Window {
     /// Physical pixels per logical pixel.
     pub(super) fn scale_factor(&self) -> f32 {
         self.window.scale_factor() as f32
+    }
+
+    /// Puts the rectangle an input method draws its candidate list beside.
+    ///
+    /// The coordinates are logical, like everything else that crosses the
+    /// window seam, and winit takes logical ones here — so nothing is scaled.
+    pub(super) fn set_ime_area(&self, origin: Vector2F, size: Vector2F) {
+        self.window.set_ime_cursor_area(
+            winit::dpi::LogicalPosition::new(origin.x() as f64, origin.y() as f64),
+            winit::dpi::LogicalSize::new(size.x() as f64, size.y() as f64),
+        );
     }
 
     /// Whether a frame is already built and waiting to be drawn.

@@ -10,6 +10,7 @@ use crook_terminal::Snapshot;
 use crookui_core::elements::MouseStateHandle;
 use crookui_core::event::Keystroke;
 use crookui_core::fonts::FamilyId;
+use crookui_core::geometry::RectF;
 use crookui_core::prelude::*;
 
 use crate::clipboard::Clipboard;
@@ -953,6 +954,18 @@ impl Workspace {
     }
 
     /// The command line being composed in a pane.
+    /// Where the caret of the field with the keyboard was last painted.
+    ///
+    /// What the window puts an input method's candidate list beside. `None`
+    /// when no field has the keyboard — a full-screen program is up, or the
+    /// settings page is the focused pane — and when the caret has been
+    /// scrolled out of a field taller than its box.
+    pub fn caret_rect(&self) -> Option<RectF> {
+        let pane = self.tabs.focused_pane_id()?;
+        let input = self.inputs.get(&pane)?;
+        input.has_keys().then(|| input.caret_rect()).flatten()
+    }
+
     pub(super) fn input(&self, pane: PaneId) -> Option<&PaneInput> {
         self.inputs.get(&pane)
     }

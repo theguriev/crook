@@ -108,6 +108,16 @@ impl Proxy {
         self.send(CrookEvent::Exit);
     }
 
+    /// Says where the text being composed is, so the platform can put an input
+    /// method's candidate list beside it rather than in a corner.
+    ///
+    /// In logical pixels, like everything else that crosses this seam. Sending
+    /// the same rectangle twice is harmless and does nothing; a caller that
+    /// sends one per frame is only paying for a message.
+    pub fn set_ime_area(&self, origin: Vector2F, size: Vector2F) {
+        self.send(CrookEvent::SetImeArea { origin, size });
+    }
+
     /// An executor whose tasks run on the main thread, through this proxy.
     pub fn foreground(&self) -> Rc<Foreground> {
         let proxy = self.clone();
@@ -149,6 +159,13 @@ enum CrookEvent {
     RunTask(ManuallyDrop<Runnable>),
     /// Drop the cached scene and draw a fresh one.
     RedrawRequested,
+    /// Move the rectangle an input method puts its candidate list beside.
+    SetImeArea {
+        /// The top-left corner, in logical pixels.
+        origin: Vector2F,
+        /// How big the composed text's box is, in logical pixels.
+        size: Vector2F,
+    },
     /// Leave the event loop.
     Exit,
 }
@@ -273,6 +290,11 @@ impl ApplicationHandler<CrookEvent> for App {
             CrookEvent::RedrawRequested => {
                 if let Some(window) = self.window.as_mut() {
                     window.request_redraw();
+                }
+            }
+            CrookEvent::SetImeArea { origin, size } => {
+                if let Some(window) = self.window.as_mut() {
+                    window.set_ime_area(origin, size);
                 }
             }
             CrookEvent::Exit => event_loop.exit(),

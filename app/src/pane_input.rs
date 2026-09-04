@@ -18,6 +18,8 @@ use std::cell::{Cell, Ref, RefCell};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
+use crookui_core::geometry::RectF;
+
 use crate::clipboard::Clipboard;
 use crate::editor::{Editor, Selection};
 use crate::input_keys::Intent;
@@ -52,6 +54,53 @@ struct Inner {
     /// which is what stops a keystroke arriving in that gap from landing in a
     /// field nothing can draw or read back.
     has_keys: Cell<bool>,
+
+    /// What an input method is composing, and where its own caret sits inside
+    /// it.
+    ///
+    /// **Not in the editor**, and that is the whole design. A preedit is not
+    /// text: it is replaced wholesale by the next one, it can be abandoned
+    /// without leaving anything behind, and it must never reach the undo
+    /// history or a submitted line. Keeping it beside the editor means every
+    /// existing operation — a copy, a submit, `is_empty` — goes on answering
+    /// about what was actually typed, and only the drawing has to know.
+    preedit: RefCell<Preedit>,
+
+    /// Where the caret was last painted, in window coordinates.
+    ///
+    /// Written by the element that draws the field and read by the window,
+    /// which puts the input method's candidate list beside it. It has to come
+    /// from the paint path: the caret's position is the result of wrapping the
+    /// line at the width the field was given, and nothing else in the
+    /// application knows either.
+    caret_rect: Cell<Option<RectF>>,
+}
+
+/// The text an input method is composing, before it becomes text.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Preedit {
+    /// The string being composed. Empty means there is no composition.
+    text: String,
+    /// Where the input method's own caret sits within [`Self::text`], as a
+    /// byte offset. Always on a character boundary.
+    caret: usize,
+}
+
+impl Preedit {
+    /// Whether nothing is being composed.
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+
+    /// The string being composed.
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// How far into the composition the input method's caret is, in bytes.
+    pub fn caret(&self) -> usize {
+        self.caret
+    }
 }
 
 /// A selection being dragged out: where it started, and in what units.
@@ -91,7 +140,75 @@ impl PaneInput {
             drag: Cell::new(None),
             active_since: Cell::new(Instant::now()),
             has_keys: Cell::new(false),
+            preedit: RefCell::new(Preedit::default()),
+            caret_rect: Cell::new(None),
         }))
+    }
+
+    /// What an input method is composing in this field, if anything.
+    pub fn preedit(&self) -> Ref<'_, Preedit> {
+        self.0.preedit.borrow()
+    }
+
+    /// Whether an input method is mid-composition here.
+    ///
+    /// The one question the rest of the field asks: while this is true a click
+    /// does not move the caret, because the offsets the pointer resolves
+    /// against are offsets into a string that includes a preedit the editor
+    /// has never heard of.
+    pub fn is_composing(&self) -> bool {
+        !self.0.preedit.borrow().is_empty()
+    }
+
+    /// Replaces what the input method is composing.
+    ///
+    /// `caret` is clamped onto a character boundary of `text`, because an
+    /// input method reporting a range this build does not understand must not
+    /// be able to panic the field. Reports whether anything changed, which is
+    /// what decides if the frame is worth redrawing.
+    pub fn set_preedit(&self, text: &str, caret: usize) -> bool {
+        let mut caret = caret.min(text.len());
+        while caret > 0 && !text.is_char_boundary(caret) {
+            caret -= 1;
+        }
+
+        let mut preedit = self.0.preedit.borrow_mut();
+        let replacement = Preedit {
+            text: text.to_owned(),
+            caret,
+        };
+        if *preedit == replacement {
+            return false;
+        }
+        *preedit = replacement;
+        drop(preedit);
+        // The caret is solid while somebody is composing, for the same reason
+        // it is solid while somebody is typing: it is being looked at.
+        self.0.active_since.set(Instant::now());
+        true
+    }
+
+    /// Abandons any composition, reporting whether there was one.
+    ///
+    /// What an input method that gave up produces, and what a commit does
+    /// before it inserts: in both cases what was on screen belongs to nothing.
+    pub fn clear_preedit(&self) -> bool {
+        let had = !self.0.preedit.borrow().is_empty();
+        if had {
+            *self.0.preedit.borrow_mut() = Preedit::default();
+        }
+        had
+    }
+
+    /// Where the caret was last painted, in window coordinates.
+    pub fn caret_rect(&self) -> Option<RectF> {
+        self.0.caret_rect.get()
+    }
+
+    /// Records where the caret has just been painted, so the window can put an
+    /// input method's candidate list beside it.
+    pub fn set_caret_rect(&self, rect: Option<RectF>) {
+        self.0.caret_rect.set(rect);
     }
 
     /// Whether the keyboard belongs to this field.

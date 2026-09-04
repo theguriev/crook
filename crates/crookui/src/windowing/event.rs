@@ -12,7 +12,7 @@
 
 use std::time::{Duration, Instant};
 
-use crookui_core::event::{Event, Keystroke, Modifiers, MouseButton, ScrollDelta};
+use crookui_core::event::{Event, Ime, Keystroke, Modifiers, MouseButton, ScrollDelta};
 use crookui_core::geometry::{Vector2F, vec2f};
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
@@ -115,6 +115,19 @@ impl InputState {
                 },
                 modifiers: self.modifiers,
             }),
+
+            // An input method is composing. These arrive *instead of* the key
+            // presses that belong to the composition, which is why a field
+            // that ignores them cannot type Japanese, Chinese or Korean at all.
+            WindowEvent::Ime(ime) => Some(Event::Ime(match ime {
+                winit::event::Ime::Enabled => Ime::Enabled,
+                winit::event::Ime::Preedit(text, cursor) => Ime::Preedit {
+                    text: text.clone(),
+                    cursor: *cursor,
+                },
+                winit::event::Ime::Commit(text) => Ime::Commit(text.clone()),
+                winit::event::Ime::Disabled => Ime::Disabled,
+            })),
 
             WindowEvent::KeyboardInput {
                 event,
