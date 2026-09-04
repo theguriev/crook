@@ -9526,16 +9526,16 @@ mod plugins_page {
     }
 }
 
-/// The Themes panel's place in the window, which is the sidebar's.
+/// The Themes panel's place in the window: a second sidebar, beside the first.
 mod theme_panel_placement {
     use super::*;
 
     #[test]
-    fn the_panel_is_the_sidebar_whatever_section_is_showing() {
+    fn the_panel_is_drawn_whatever_section_is_showing() {
         // The bug this test exists for: the panel was composed inside the
         // tabs' own branch of the render, so opening the chooser from the
-        // Appearance page set the flag and drew nothing at all. It is one
-        // place now, and every section goes through it.
+        // Appearance page set the flag and drew nothing at all. It is composed
+        // once now, beside the sidebar, for every section.
         for section in [None, Some("Settings"), Some("Plugins")] {
             let mut harness = Harness::new(1);
             match section {
@@ -9551,51 +9551,108 @@ mod theme_panel_placement {
                 !theme_cards(&scene).is_empty(),
                 "the panel drew no theme cards with {section:?} showing"
             );
-            let panel = panel_box(&scene);
+            let sidebar = panel_box(&scene);
             for card in theme_cards(&scene) {
                 assert!(
-                    card.max_x() <= panel.max_x() + 0.5,
-                    "a theme card at {card:?} is outside the sidebar, which \
+                    card.min_x() >= sidebar.max_x() - 0.5,
+                    "a theme card at {card:?} is over the first sidebar, which \
                      ends at {}",
-                    panel.max_x()
+                    sidebar.max_x()
                 );
             }
         }
     }
 
     #[test]
-    fn the_panel_stands_in_for_the_section_rather_than_beside_it() {
-        // A column of its own would have squeezed whatever was beside it: in
-        // the 1024-wide window Crook opens, a sidebar and a panel and a
-        // settings page left the page too narrow to print its own values.
+    fn the_panel_stands_beside_the_sidebar_rather_than_over_it() {
+        // The whole of what this arrangement is for: the sidebar keeps what it
+        // was showing, and the panel is a column of its own next to it.
         let mut harness = Harness::new(1);
         harness.open_settings_page();
-        let before = frame_text(&harness.frame());
-        assert!(before.contains("Appearance"));
+        assert!(frame_text(&harness.frame()).contains("Appearance"));
 
         harness.open_theme_panel();
         let text = frame_text(&harness.frame());
 
         assert!(text.contains("Themes"), "the panel is not up: {text}");
         assert!(
-            !text.contains("Shell"),
-            "the settings rail is still in the sidebar beside the panel: {text}"
+            text.contains("Shell"),
+            "the settings rail lost its place to the panel: {text}"
         );
-        // And the page it was opened from is untouched, at its own width.
+        // And the page it was opened from is still there, narrower.
         assert!(text.contains("Follow the desktop"), "{text}");
     }
 
     #[test]
-    fn closing_the_panel_gives_the_section_its_sidebar_back() {
-        let mut harness = Harness::new(1);
-        harness.open_settings_page();
+    fn the_tab_list_keeps_its_rows_and_its_search_box() {
+        // The tabs are a section like the others, and the panel does not take
+        // their sidebar either.
+        let mut harness = Harness::new(2);
+        let before = panel_rows(&harness.frame()).len();
+        assert!(before > 0);
+
         harness.open_theme_panel();
-        assert!(!frame_text(&harness.frame()).contains("Shell"));
+        let scene = harness.frame();
+
+        assert_eq!(panel_rows(&scene).len(), before, "the tab list went away");
+        assert!(!theme_cards(&scene).is_empty(), "the panel drew nothing");
+        assert!(
+            panel_search_box(&scene).max_x() <= panel_box(&scene).max_x() + 0.5,
+            "the search box left the sidebar"
+        );
+    }
+
+    #[test]
+    fn the_panel_suspends_the_search_box_rather_than_ending_it() {
+        // The box stays on screen, because the sidebar is not covered any
+        // more — but the panel takes the keyboard whole while it is up, so a
+        // letter typed at an open chooser is not quietly filed into a filter
+        // behind it. The wish outlives the panel: closing it gives the box
+        // back, query and keyboard together.
+        let mut harness = Harness::panel(2);
+        harness.press_search_chord();
+        harness.type_text("kettle");
+
+        harness.open_theme_panel();
+        assert!(
+            !harness.panel_search_takes_keys(),
+            "the box kept the keyboard with the panel up"
+        );
+        panel_search_box(&harness.frame());
+
+        harness.close_theme_panel();
+        assert!(
+            harness.panel_search_takes_keys(),
+            "the box never got the keyboard back"
+        );
+        assert_eq!(harness.panel_search_text(), "kettle");
+    }
+
+    #[test]
+    fn the_work_is_pushed_aside_and_gets_its_width_back() {
+        // Warp's docked chooser: it pushes the terminal over rather than
+        // covering it, so a theme is judged against real output — and the
+        // width it took is the width the work gets back when it closes.
+        let mut harness = Harness::new(1);
+        let wide = panel_boxes(&harness.frame())[0];
+
+        harness.open_theme_panel();
+        let squeezed = panel_boxes(&harness.frame())[0];
+        assert!(
+            (wide.width() - squeezed.width() - tabs_panel::PANEL_WIDTH).abs() < 1.,
+            "the pane went from {} to {} wide, which is not the panel's {}",
+            wide.width(),
+            squeezed.width(),
+            tabs_panel::PANEL_WIDTH
+        );
+        assert!(
+            squeezed.min_x() >= wide.min_x() + tabs_panel::PANEL_WIDTH - 1.,
+            "the panel covered the work instead of pushing it aside"
+        );
 
         harness.dispatch_workspace_action(WorkspaceAction::Theme(ThemeAction::ClosePanel));
-
         let text = frame_text(&harness.frame());
-        assert!(text.contains("Shell"), "the rail did not come back: {text}");
         assert!(!text.contains("Change your current theme."), "{text}");
+        assert!((panel_boxes(&harness.frame())[0].width() - wide.width()).abs() < 1.);
     }
 }

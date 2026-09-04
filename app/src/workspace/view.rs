@@ -1143,13 +1143,14 @@ impl Workspace {
 
     /// Whether that box is on screen at all.
     ///
-    /// It belongs to the tabs, so it is drawn when the tabs are — and the
-    /// Themes panel takes the sidebar's body while it is up, tab list and box
-    /// together. Asked in two places and answered in one: the panel draws the
-    /// box by it, and [`Self::search_takes_keys`] refuses the keyboard to a box
+    /// It belongs to the tabs, so it is drawn when the tabs are. The Themes
+    /// panel does not come into it: it is a column of its own beside the
+    /// sidebar, and the tab list and its box stay where they were while it is
+    /// up. Asked in two places and answered in one: the panel draws the box by
+    /// it, and [`Self::search_takes_keys`] refuses the keyboard to a box
     /// nobody can see.
     pub(super) fn panel_search_is_showing(&self) -> bool {
-        self.section.is_none() && !self.panel.open
+        self.section.is_none()
     }
 
     /// Whether the keyboard is the search box's rather than the pane's.
@@ -1161,13 +1162,18 @@ impl Workspace {
     /// they are settled by asking one question, which is why they cannot both
     /// be true.
     ///
-    /// A menu or a panel opening over the box suspends the wish rather than
-    /// ending it, so closing one a person opened by accident gives them back
-    /// the box they were typing in. Leaving the section is the one thing that
-    /// ends it, in [`Self::show_section`]: the box is gone, not covered.
+    /// A menu or a panel opening suspends the wish rather than ending it, so
+    /// closing one a person opened by accident gives them back the box they
+    /// were typing in. The Themes panel is in that list even though it no
+    /// longer covers the box — it is a column beside the sidebar now — because
+    /// it takes the keyboard whole while it is up, arrow keys and letters
+    /// together; see [`Self::action_for`]. Leaving the section is the one
+    /// thing that ends the wish, in [`Self::show_section`]: the box is gone,
+    /// not covered.
     pub(super) fn search_takes_keys(&self) -> bool {
         self.panel_search.is_focused()
             && self.panel_search_is_showing()
+            && !self.panel.open
             && !self.a_popup_is_open()
             && !self.host.a_surface_is_up()
     }
@@ -3740,12 +3746,22 @@ impl View for Workspace {
             .with_child(Expanded::new(1., body).finish())
             .finish();
 
-        let content = Flex::row()
+        // The Themes panel is a *second* sidebar, docked between the first
+        // and the work — Warp's arrangement, and the only one in which the
+        // sidebar keeps whatever it was showing while a theme is chosen.
+        // Composed here rather than inside a section's branch of the render:
+        // that is what makes it the same panel from the tabs, the settings and
+        // the plugins, instead of one section's panel and nothing anywhere
+        // else.
+        let mut content = Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_child(tabs_panel::render(self, self.or_theme_panel(sidebar, app)))
-            .with_child(Expanded::new(1., main).finish())
-            .finish();
+            .with_child(tabs_panel::render(self, sidebar));
+        if self.panel.open {
+            content.add_child(super::theme_panel::render(self, app));
+        }
+        content.add_child(Expanded::new(1., main).finish());
+        let content = content.finish();
 
         let window = Container::new(content)
             .with_background_color(theme().ground)
@@ -3792,23 +3808,6 @@ const OVERLAY_ANCHOR: AnchorTo = AnchorTo {
     keep_on_screen: false,
     keep_clear_of_parent: false,
 };
-
-impl Workspace {
-    /// The Themes panel in the sidebar's place, while it is up.
-    ///
-    /// One place, called for whatever the section was going to put there —
-    /// which is what keeps the panel from being drawn in one section and
-    /// nowhere in the others. It was a column of its own beside the work once,
-    /// composed inside the tabs' branch of the render, and the bug that made
-    /// was exactly that: opening the chooser from the Appearance page set the
-    /// flag and drew nothing.
-    fn or_theme_panel(&self, sidebar: Box<dyn Element>, app: &AppContext) -> Box<dyn Element> {
-        if !self.panel.open {
-            return sidebar;
-        }
-        super::theme_panel::render(self, app)
-    }
-}
 
 /// Where Crook keeps the checkouts it makes.
 ///
