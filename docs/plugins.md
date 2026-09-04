@@ -32,6 +32,11 @@ description of something that was never built.
     `crook/usage`, `crook/keys`, `crook/about` — so disabling a plugin takes its page off the
     rail with the rest of it. `--settings <name>` now matches a page's title, so a plugin's
     page is as reachable as one of Crook's.
+  - There is a **Plugins page**, and the switches on it work: `Host::enable` is the other
+    half of `unload`, `Plugin::ready` is a second pass so a page can offer a switch per
+    plugin, and `disabled_plugins` in `settings.json` is where the answer is kept. A plugin
+    switched off is carried and not built — its `build` never runs, so it registers nothing
+    and makes nothing.
   - Still to move: the worktree menu, the Themes panel, the Omarchy palettes.
 
 ## 0. What was asked for, and what it means

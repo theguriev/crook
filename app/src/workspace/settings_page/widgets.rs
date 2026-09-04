@@ -726,7 +726,30 @@ pub(crate) fn fact(
 const NOTE_LINE_CHARS: usize = 80;
 
 /// A paragraph of explanation that belongs to a page rather than to a row.
-pub(crate) fn note(text: &'static str, ui: FamilyId) -> Entry {
+///
+/// Unsearchable, deliberately: a note explains the rows around it, so it goes
+/// wherever its category goes and is left out the moment something is being
+/// searched for. [`found_by`] is the version for a paragraph that is itself an
+/// answer.
+pub(crate) fn note(text: &str, ui: FamilyId) -> Entry {
+    Entry::unsearchable(paragraph(text, ui))
+}
+
+/// The same paragraph, but something a query can find.
+///
+/// For a line that *is* the information — a complaint from the plugin audit,
+/// which is a thing somebody goes looking for rather than an explanation of
+/// the row beside it.
+pub(crate) fn found_by(words: Words, text: &str, ui: FamilyId) -> Entry {
+    Entry {
+        words: Some(words),
+        value: None,
+        element: paragraph(text, ui),
+    }
+}
+
+/// The wrapped, muted lines both of the above are made of.
+fn paragraph(text: &str, ui: FamilyId) -> Box<dyn Element> {
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Start);
@@ -740,11 +763,9 @@ pub(crate) fn note(text: &'static str, ui: FamilyId) -> Entry {
         );
     }
 
-    Entry::unsearchable(
-        Container::new(column.finish())
-            .with_margin_bottom(10.)
-            .finish(),
-    )
+    Container::new(column.finish())
+        .with_margin_bottom(10.)
+        .finish()
 }
 
 /// Attaches the click handler, or does not.

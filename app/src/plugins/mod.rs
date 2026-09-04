@@ -26,6 +26,7 @@ mod appearance;
 pub mod header;
 mod keys;
 mod palette;
+mod plugins_page;
 mod settings;
 mod shell;
 mod usage;
@@ -46,6 +47,7 @@ pub fn defaults() -> Vec<Box<dyn Plugin>> {
         Box::new(shell::Shell),
         Box::new(usage::Usage),
         Box::new(keys::Keys),
+        Box::new(plugins_page::Plugins),
         Box::new(about::About),
         Box::new(palette::CommandPalette),
     ]
