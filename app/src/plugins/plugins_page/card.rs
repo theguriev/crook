@@ -31,7 +31,25 @@ use crate::theme::theme;
 use crate::workspace::settings_page::{named, widgets};
 use crate::workspace::{Workspace, WorkspaceAction};
 
-use super::{HOLDS_THE_PAGE, action, tier_words};
+use super::{HOLDS_THE_PAGE, Stance, action, covered, stance, tier_words, wanted};
+
+/// The corner of the box a control sits in.
+///
+/// The card's own rounding, so the box reads as part of the card rather than
+/// as something dropped on top of it.
+const CONTROL_RADIUS: f32 = 8.;
+
+/// The inset inside that box.
+///
+/// Wider than it is tall, which is what the switch has carried since it was
+/// the only control here: a label at one end and a control at the other need
+/// more air along the row than across it, or both sit against a corner.
+const CONTROL_PADDING: Padding = Padding {
+    top: 10.,
+    bottom: 10.,
+    left: 12.,
+    right: 12.,
+};
 
 /// The body of the card: everything under the plugin's name.
 pub(super) fn render(workspace: &Workspace, manifest: &'static Manifest) -> Box<dyn Element> {
@@ -45,6 +63,14 @@ pub(super) fn render(workspace: &Workspace, manifest: &'static Manifest) -> Box<
         .with_child(facts(manifest, on, ui))
         .with_child(description(manifest, ui))
         .with_child(switch(workspace, manifest, on, ui));
+
+    // Directly under the switch, and above everything that merely describes
+    // the plugin: what it may do is the other decision this card exists to
+    // let somebody make, and an escalation is a thing to see without
+    // scrolling past four sections of prose first.
+    if let Some(block) = permissions(workspace, manifest, ui) {
+        column.add_child(block);
+    }
 
     if let Some(problem) = host
         .refused()
@@ -156,38 +182,171 @@ fn switch(workspace: &Workspace, manifest: &Manifest, on: bool, ui: FamilyId) ->
         .action(&action("toggle", &manifest.id))
         .map(WorkspaceAction::Run)
         .filter(|_| !holds_the_page);
+    let live = command.is_some();
 
+    answer(
+        "Enabled",
+        live,
+        widgets::switch(
+            on,
+            command,
+            workspace
+                .settings_page()
+                .control(named(&format!("plugins.switch.{}", manifest.id))),
+        ),
+        ui,
+    )
+}
+
+/// What the plugin asked to be allowed to do, and the one control that answers.
+///
+/// Absent — rather than a heading with nothing under it — for a plugin that
+/// asked for nothing, which is every native one: a section saying "nothing" on
+/// nine cards out of ten is a section a person has learned to skip by the time
+/// they reach the one where it matters.
+///
+/// Read from the settings rather than from the host, and the difference is the
+/// point: the host holds what each plugin was *built* with, which is what a
+/// request is answered against, while the settings hold the answer as it
+/// stands. A card that showed the host's copy would go on saying "Not allowed"
+/// after somebody pressed Allow. What it shows instead is the answer, and the
+/// paragraph under the list says when the plugin acts on it.
+fn permissions(
+    workspace: &Workspace,
+    manifest: &Manifest,
+    ui: FamilyId,
+) -> Option<Box<dyn Element>> {
+    if manifest.capabilities.is_empty() {
+        return None;
+    }
+
+    let granted = workspace.settings().granted_to(manifest.id.as_str());
+    let stance = stance(&wanted(manifest), granted);
+
+    let mut rows: Vec<widgets::Entry> = manifest
+        .capabilities
+        .iter()
+        .map(|capability| {
+            let sentence = capability.sentence();
+            // Marked only in the state where a mark says something. A column
+            // of "allowed" beside every line is a column nobody reads to the
+            // bottom; on the card where the list has grown, which line is new
+            // is the whole message.
+            let line = match stance {
+                Stance::Escalated if covered(capability, granted) => {
+                    format!("{sentence} \u{2014} allowed")
+                }
+                Stance::Escalated => format!("{sentence} \u{2014} new"),
+                _ => sentence,
+            };
+            widgets::note(&line, ui)
+        })
+        .collect();
+    rows.push(widgets::note(explanation(stance), ui));
+
+    let (title, state, label, verb) = match stance {
+        Stance::Unanswered => (
+            "What it wants to be allowed to do",
+            "Not allowed",
+            "Allow",
+            "allow",
+        ),
+        Stance::Allowed => ("What it is allowed to do", "Allowed", "Revoke", "revoke"),
+        Stance::Escalated => (
+            "It is asking for more than you allowed",
+            "Partly allowed",
+            "Allow",
+            "allow",
+        ),
+    };
+
+    let command = workspace
+        .host()
+        .action(&action(verb, &manifest.id))
+        .map(WorkspaceAction::Run);
+    let live = command.is_some();
+    let control = widgets::text_button(
+        label,
+        command,
+        workspace
+            .settings_page()
+            .control(named(&format!("plugins.grant.{}", manifest.id))),
+        ui,
+    );
+
+    Some(
+        Flex::column()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_child(section(title, rows, ui))
+            .with_child(answer(state, live, control, ui))
+            .finish(),
+    )
+}
+
+/// The paragraph under the list, where the mechanism is said out loud.
+///
+/// Three things the sentences themselves cannot say: that anything not allowed
+/// is refused rather than quietly working, that allowing answers the whole list
+/// rather than the line somebody was looking at, and that a plugin reads its
+/// grant when it is *built* — so answering rebuilds it, there and then, and a
+/// plugin that was refused a minute ago asks again a moment later. That last
+/// one is worth saying on the card rather than only in a comment: a person who
+/// allows something and is told nothing about what happens next has no way to
+/// tell a control that worked from one that did not.
+fn explanation(stance: Stance) -> &'static str {
+    match stance {
+        Stance::Unanswered => {
+            "None of this is allowed yet, and a plugin is refused everything it has not been \
+             allowed. Allowing starts it again with the answer, which takes a moment."
+        }
+        Stance::Allowed => {
+            "Allowed, and nothing beyond it \u{2014} anything else this plugin asks for is \
+             refused. Revoking starts it again with nothing allowed."
+        }
+        Stance::Escalated => {
+            "This version asks for more than you allowed. What you allowed still holds and the \
+             lines marked new are refused until you allow them; allowing answers the whole list \
+             above and starts the plugin again with it."
+        }
+    }
+}
+
+/// The box a control that answers a question about this plugin sits in.
+///
+/// One shape for both of them. "Is it on?" and "may it do this?" are the same
+/// kind of question — the two decisions this card exists to let somebody make —
+/// and two boxes differing by a couple of pixels would read as two mechanisms.
+///
+/// `live` is whether the control does anything, and it is the label that says
+/// so: a muted word beside a control that cannot be pressed is the only hint
+/// there is, since a disabled control carries no handler at all.
+fn answer(
+    label: &'static str,
+    live: bool,
+    control: Box<dyn Element>,
+    ui: FamilyId,
+) -> Box<dyn Element> {
     Container::new(
         Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_child(
-                Text::new("Enabled", ui, widgets::LABEL_SIZE)
-                    .with_color(if holds_the_page {
-                        theme().text_muted
-                    } else {
+                Text::new(label, ui, widgets::LABEL_SIZE)
+                    .with_color(if live {
                         theme().text_primary
+                    } else {
+                        theme().text_muted
                     })
                     .finish(),
             )
             .with_child(Expanded::new(1., Empty::new().finish()).finish())
-            .with_child(widgets::switch(
-                on,
-                command,
-                workspace
-                    .settings_page()
-                    .control(named(&format!("plugins.switch.{}", manifest.id))),
-            ))
+            .with_child(control)
             .finish(),
     )
     .with_background_color(theme().overlay_1)
-    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(8.)))
-    .with_padding(Padding {
-        top: 10.,
-        bottom: 10.,
-        left: 12.,
-        right: 12.,
-    })
+    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CONTROL_RADIUS)))
+    .with_padding(CONTROL_PADDING)
     .finish()
 }
 

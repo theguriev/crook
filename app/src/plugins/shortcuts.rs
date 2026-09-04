@@ -61,6 +61,7 @@ fn manifest() -> &'static Manifest {
         description: "Every command the window answers to, and the chord that reaches it.",
         version: env!("CARGO_PKG_VERSION"),
         tier: Tier::Native,
+        capabilities: &[],
     })
 }
 

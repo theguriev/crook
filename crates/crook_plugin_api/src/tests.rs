@@ -60,6 +60,7 @@ fn every_capability_says_what_it_is_in_a_sentence() {
         Capability::Network(vec!["api.github.com".into(), "example.invalid".into()]),
         Capability::Clipboard,
         Capability::Storage,
+        Capability::ReadFiles(vec!["~/.claude/.credentials.json".into()]),
     ] {
         let sentence = capability.sentence();
         assert!(!sentence.is_empty(), "{capability:?} says nothing");
@@ -117,4 +118,136 @@ fn the_wire_is_compact_enough_to_run_every_frame() {
     let bytes = to_bytes(&chip).expect("it should encode");
 
     assert!(bytes.len() < 16, "{} bytes for a chip", bytes.len());
+}
+
+#[test]
+fn a_grant_is_written_down_one_thing_at_a_time() {
+    // The point of a key per host rather than per capability: allowing one
+    // host today is not allowing whatever the next version puts beside it.
+    assert_eq!(
+        Capability::Network(vec!["api.anthropic.com".into(), "example.invalid".into()]).keys(),
+        vec![
+            String::from("net:api.anthropic.com"),
+            String::from("net:example.invalid"),
+        ]
+    );
+    assert_eq!(
+        Capability::ReadFiles(vec!["~/.claude/.credentials.json".into()]).keys(),
+        vec![String::from("file:~/.claude/.credentials.json")]
+    );
+
+    // And every capability answers with something, or a plugin asking for it
+    // could never be granted.
+    for capability in [
+        Capability::ReadSettings,
+        Capability::ReadTabs,
+        Capability::ReadWorkingDirectory,
+        Capability::Clipboard,
+        Capability::Storage,
+    ] {
+        assert_eq!(capability.keys().len(), 1, "{capability:?}");
+    }
+}
+
+#[test]
+fn asking_and_being_answered_survive_the_wire() {
+    let asking = Request::Fetch {
+        method: Method::Post,
+        url: "https://api.anthropic.com/api/oauth/usage".into(),
+        headers: vec![("authorization".into(), "Bearer …".into())],
+        body: Some(vec![b'{', b'}']),
+    };
+    let bytes = to_bytes(&asking).expect("a request should encode");
+    assert_eq!(
+        from_bytes::<Request>(&bytes).expect("a request should decode"),
+        asking
+    );
+
+    for answer in [
+        Answer::Fetched {
+            status: 200,
+            body: vec![1, 2, 3],
+        },
+        Answer::Read { bytes: vec![4, 5] },
+        Answer::Refused("Reach api.anthropic.com".into()),
+        Answer::Failed("timed out".into()),
+    ] {
+        let bytes = to_bytes(&answer).expect("an answer should encode");
+        assert_eq!(
+            from_bytes::<Answer>(&bytes).expect("an answer should decode"),
+            answer
+        );
+    }
+}
+
+#[test]
+fn a_panel_survives_the_wire() {
+    // The whole of what version 2 added to the vocabulary, in one tree: the
+    // shape a chip with a panel under it actually has.
+    let tree = Node::Anchored {
+        content: Box::new(Node::Pressable {
+            content: Box::new(Node::Row(vec![
+                Node::Icon {
+                    name: "pirate".into(),
+                    tone: Tone::Primary,
+                },
+                Node::Gap(Gap::Small),
+                Node::Text {
+                    text: "47%".into(),
+                    size: Size::Small,
+                    tone: Tone::Primary,
+                },
+            ])),
+            action: "panel".into(),
+        }),
+        panel: Some(Box::new(Node::Column(vec![
+            Node::Row(vec![
+                Node::Text {
+                    text: "Session".into(),
+                    size: Size::Small,
+                    tone: Tone::Muted,
+                },
+                Node::Fill,
+                Node::Text {
+                    text: "3h 12m left".into(),
+                    size: Size::Small,
+                    tone: Tone::Primary,
+                },
+            ]),
+            Node::Meter {
+                fraction: 0.47,
+                tone: Tone::Success,
+            },
+            Node::Rule,
+            Node::Note {
+                text: "Read from the session Claude Code stores on this machine.".into(),
+                tone: Tone::Muted,
+            },
+        ]))),
+        dismiss: "dismiss".into(),
+    };
+
+    let bytes = to_bytes(&tree).expect("a tree should encode");
+    assert_eq!(
+        from_bytes::<Node>(&bytes).expect("a tree should decode"),
+        tree
+    );
+}
+
+#[test]
+fn a_shut_panel_costs_almost_nothing() {
+    // A chip is asked for its tree every frame and is shut on nearly all of
+    // them, so the shut shape is the one whose size matters.
+    let shut = Node::Anchored {
+        content: Box::new(Node::Badge {
+            text: "47%".into(),
+            tone: Tone::Primary,
+        }),
+        panel: None,
+        dismiss: "dismiss".into(),
+    };
+
+    let bytes = to_bytes(&shut).expect("it should encode");
+
+    assert!(bytes.len() < 32, "{} bytes for a shut chip", bytes.len());
 }

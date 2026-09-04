@@ -1,6 +1,7 @@
 //! What the plugins a release binary carries promise each other.
 
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -70,7 +71,7 @@ fn with_context(disabled: &[String], test: impl FnOnce(&mut Host, &mut ViewConte
     });
 
     workspace.update(&mut app, |_, ctx| {
-        let mut host = load(plugins::defaults(), disabled, fonts, ctx);
+        let mut host = load(plugins::defaults(), disabled, BTreeMap::new(), fonts, ctx);
         test(&mut host, ctx);
     });
 }

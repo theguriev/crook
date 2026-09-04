@@ -228,5 +228,6 @@ fn manifest() -> &'static Manifest {
         description: "Everything the window and its plugins can be asked to do, by name.",
         version: env!("CARGO_PKG_VERSION"),
         tier: Tier::Native,
+        capabilities: &[],
     })
 }

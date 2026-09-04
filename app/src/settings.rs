@@ -35,6 +35,7 @@
 //! be read, logs one line, and carries on. A truncated config file is a
 //! nuisance, not a startup failure.
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Write as _;
@@ -60,6 +61,9 @@ const FONT_FAMILY_KEY: &str = "font_family";
 
 /// The key the list of switched-off plugins is stored under.
 const DISABLED_PLUGINS_KEY: &str = "disabled_plugins";
+
+/// The key the things a person has allowed a plugin to do are stored under.
+const PLUGIN_GRANTS_KEY: &str = "plugin_grants";
 
 /// The keys the two halves of the desktop-following pair are stored under.
 const LIGHT_THEME_KEY: &str = "light_theme";
@@ -434,6 +438,22 @@ pub struct Settings {
     /// dropping it would silently switch the feature back on for somebody who
     /// reinstalls it.
     disabled_plugins: Vec<String>,
+    /// What each plugin has been allowed to do, by `owner/name`, as
+    /// [`Capability::keys`](crook_plugin_api::Capability::keys) writes it
+    /// down.
+    ///
+    /// Only what was *allowed*, and one entry per host and per path rather
+    /// than one per capability. That is what makes an escalation visible: a
+    /// plugin whose next version wants a second host asks for a key that is
+    /// not in this list, so it is refused and the Plugins page can say which
+    /// line is new — where a stored "yes" would have covered whatever the
+    /// plugin asked for next.
+    ///
+    /// Keys for plugins this build has never heard of are kept and ignored,
+    /// for the reason [`Settings::disabled_plugins`] keeps names it does not
+    /// know: it is a plugin that has been uninstalled, and forgetting the
+    /// grant would mean asking again for something already answered.
+    plugin_grants: BTreeMap<String, Vec<String>>,
     /// The name of the theme to open in.
     ///
     /// A name rather than the palette itself, and that is the whole design: a
@@ -477,6 +497,7 @@ impl Settings {
                 tab_options: TabOptions::default(),
                 general: GeneralOptions::default(),
                 disabled_plugins: Vec::new(),
+                plugin_grants: BTreeMap::new(),
                 theme: crate::theme::DEFAULT_NAME.to_owned(),
                 light_theme: crate::theme::DEFAULT_LIGHT_NAME.to_owned(),
                 dark_theme: crate::theme::DEFAULT_NAME.to_owned(),
@@ -499,6 +520,7 @@ impl Settings {
             tab_options: TabOptions::default(),
             general: GeneralOptions::default(),
             disabled_plugins: Vec::new(),
+            plugin_grants: BTreeMap::new(),
             theme: crate::theme::DEFAULT_NAME.to_owned(),
             light_theme: crate::theme::DEFAULT_LIGHT_NAME.to_owned(),
             dark_theme: crate::theme::DEFAULT_NAME.to_owned(),
@@ -561,6 +583,29 @@ impl Settings {
             })
             .unwrap_or_default();
 
+        // Read the way the list above is: one unusable entry costs that
+        // plugin's grant and not everybody's.
+        let plugin_grants = document
+            .get(PLUGIN_GRANTS_KEY)
+            .and_then(Value::as_object)
+            .map(|plugins| {
+                plugins
+                    .iter()
+                    .filter_map(|(plugin, keys)| {
+                        let keys: Vec<String> = keys
+                            .as_array()?
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::trim)
+                            .filter(|key| !key.is_empty())
+                            .map(str::to_owned)
+                            .collect();
+                        (!keys.is_empty()).then(|| (plugin.clone(), keys))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let light_theme = named_theme(&document, LIGHT_THEME_KEY, crate::theme::DEFAULT_LIGHT_NAME);
         let dark_theme = named_theme(&document, DARK_THEME_KEY, crate::theme::DEFAULT_NAME);
 
@@ -570,6 +615,7 @@ impl Settings {
             tab_options,
             general,
             disabled_plugins,
+            plugin_grants,
             theme,
             light_theme,
             dark_theme,
@@ -666,6 +712,36 @@ impl Settings {
         self.disabled_plugins.sort();
     }
 
+    /// What a plugin has been allowed to do.
+    ///
+    /// Empty for a plugin nobody has answered for, which is the state every
+    /// plugin installs in: asking is not being granted.
+    pub fn granted_to(&self, plugin: &str) -> &[String] {
+        self.plugin_grants
+            .get(plugin)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// Everything allowed, for handing to the plugins as they build.
+    pub fn plugin_grants(&self) -> &BTreeMap<String, Vec<String>> {
+        &self.plugin_grants
+    }
+
+    /// Records what a plugin may do, replacing whatever it could before.
+    ///
+    /// Replacing rather than adding, because this is the answer to a dialog
+    /// that showed a whole list: allowing a plugin that now wants two hosts is
+    /// allowing both, and revoking is the same call with nothing in it.
+    /// Touches no file.
+    pub fn set_granted(&mut self, plugin: &str, keys: Vec<String>) {
+        if keys.is_empty() {
+            self.plugin_grants.remove(plugin);
+        } else {
+            self.plugin_grants.insert(plugin.to_owned(), keys);
+        }
+    }
+
     /// The options that are not the tab strip's.
     pub fn general(&self) -> GeneralOptions {
         self.general
@@ -743,6 +819,29 @@ impl Settings {
                     self.disabled_plugins
                         .iter()
                         .map(|name| Value::String(name.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        // Written back only when something has been allowed, for the reason
+        // the list above is: a person who has installed no plugin should not
+        // find an empty object in a file they opened to read.
+        if self.plugin_grants.is_empty() {
+            document.remove(PLUGIN_GRANTS_KEY);
+        } else {
+            document.insert(
+                PLUGIN_GRANTS_KEY.to_owned(),
+                Value::Object(
+                    self.plugin_grants
+                        .iter()
+                        .map(|(plugin, keys)| {
+                            (
+                                plugin.clone(),
+                                Value::Array(
+                                    keys.iter().map(|key| Value::String(key.clone())).collect(),
+                                ),
+                            )
+                        })
                         .collect(),
                 ),
             );

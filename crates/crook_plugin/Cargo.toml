@@ -7,9 +7,17 @@ edition.workspace = true
 version.workspace = true
 publish.workspace = true
 
-# Deliberately none, and it is worth keeping that way. This crate is the one
-# every plugin compiles against, so every dependency it takes is a dependency it
-# imposes on the whole ecosystem — and a version of it somebody else's plugin
-# has to agree with. Identities are strings, registries are vectors, and the
-# guard is a boxed closure.
+# One, and it is worth keeping it at that. This crate is the one every plugin
+# compiles against, so every dependency it takes is a dependency it imposes on
+# the whole ecosystem — and a version of it somebody else's plugin has to agree
+# with. Identities are strings, registries are vectors, and the guard is a boxed
+# closure.
 [dependencies]
+# The one exception, and it is the rule above applied rather than broken. What
+# a plugin may ask for is the *wire's* vocabulary: `crook_plugin_api` is what
+# every sandboxed plugin is compiled against, and a host and a guest that each
+# kept their own list of capabilities would be two lists that disagree — one
+# renaming `net:` while the other still writes it, and a grant that silently
+# stops matching what it granted. So the manifest names that enum rather than
+# a copy of it.
+crook_plugin_api.workspace = true

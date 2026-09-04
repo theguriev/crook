@@ -162,5 +162,6 @@ fn manifest() -> &'static Manifest {
         description: "Tabs, panes, splits, the layout and the text size, each reachable by name.",
         version: env!("CARGO_PKG_VERSION"),
         tier: Tier::Native,
+        capabilities: &[],
     })
 }

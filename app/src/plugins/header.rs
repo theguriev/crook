@@ -48,5 +48,6 @@ fn manifest() -> &'static Manifest {
         description: "The row across the top of the window, and what may be pinned to it.",
         version: env!("CARGO_PKG_VERSION"),
         tier: Tier::Native,
+        capabilities: &[],
     })
 }
