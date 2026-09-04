@@ -2,10 +2,15 @@
 //! the right — and, since the window has no title bar of its own, the window's
 //! controls and the place to pick it up by.
 //!
-//! There is one right-hand item and its slot is hard-coded. Warp's header
-//! items are a persisted, user-reorderable, cloud-synced setting, which means
-//! adding one is a settings-schema migration; at two features that is a cost
-//! with nothing on the other side of it.
+//! What is pinned to the right is whatever a plugin put in
+//! [`HEADER_RIGHT`](crate::plugins::header::HEADER_RIGHT), and this row does
+//! not know what that is. It used to name the usage chip; that chip is now
+//! contributed by the plugin that owns it, and this is the first surface in
+//! Crook that draws something it was given rather than something it imports.
+//!
+//! One item, not a list, and that is a judgement about the surface: this row is
+//! also the window's title bar, and a line of competing chips across it is how
+//! a status bar becomes a place nobody reads.
 //!
 //! # What the layout changes here
 //!
@@ -41,14 +46,6 @@ use super::tab_bar;
 use super::title_bar;
 use super::view::Workspace;
 
-/// Space between the tab strip and the chip, so a wide title never runs into
-/// a percentage.
-const CHIP_GUTTER: f32 = 12.;
-
-/// Lifts the chip off the header's bottom edge, which the tabs sit flush
-/// against.
-const CHIP_LIFT: f32 = 5.;
-
 /// The header's own padding, before anything the window asked for.
 const PADDING: Padding = Padding {
     top: 6.,
@@ -83,14 +80,15 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
             // the poll off as well as the pill, and a chip that was still in
             // the tree would still be a view being rendered, observed and laid
             // out for a number nobody asked for.
-            .with_child(if workspace.general().show_usage_chip {
-                Container::new(ChildView::new(workspace.chip()).finish())
-                    .with_margin_left(CHIP_GUTTER)
-                    .with_margin_bottom(CHIP_LIFT)
-                    .finish()
-            } else {
-                Empty::new().finish()
-            })
+            .with_child(
+                workspace
+                    .host()
+                    .slots()
+                    .one(crate::plugins::header::HEADER_RIGHT, |build| {
+                        build(workspace, app)
+                    })
+                    .unwrap_or_else(|| Empty::new().finish()),
+            )
             .finish(),
     )
     .with_padding(Padding {

@@ -34,6 +34,7 @@ use crate::pane_selection::PaneSelection;
 use crate::pane_split::{DividerDrag, PaneExtent};
 use crate::pane_surface;
 use crate::platform_insets::{ControlLayout, LayoutInsets, TabsPlacement, WindowChrome};
+use crate::plugin::Host;
 use crate::selection::{Blocks, Cells};
 use crate::settings::{
     DEFAULT_FONT_SIZE, Density, FONT_SIZE_STEP, GeneralOptions, Granularity, Layout, Settings,
@@ -436,6 +437,12 @@ pub struct Workspace {
     /// The settings page: whether it is up, which page it is on, and what the
     /// mouse is doing to each of its controls.
     page: SettingsState,
+    /// Every plugin that loaded, and everything they registered.
+    ///
+    /// Built before the workspace, because a contribution is a closure over
+    /// `&Workspace` rather than anything captured — so the registries can be
+    /// filled without a workspace to fill them from.
+    host: Host,
     /// The menu a tab opens, which is about worktrees.
     tab_menu: TabMenuState,
     /// The Themes panel, which is the other surface that lists themes.
@@ -588,6 +595,7 @@ impl Workspace {
             overridden: Overridden::default(),
             menu: MenuState::default(),
             page: SettingsState::default(),
+            host: crate::plugin::load(crate::plugins::defaults()),
             tab_menu: TabMenuState::default(),
             panel: ThemePanelState::default(),
             themes: crate::theme::available(),
@@ -789,6 +797,11 @@ impl Workspace {
     /// Whether the menu is making a worktree. For a test.
     pub fn worktree_menu_is_creating(&self) -> bool {
         self.tab_menu.mode == WorktreeMode::Creating
+    }
+
+    /// The plugins, and the slots and actions they registered.
+    pub(super) fn host(&self) -> &Host {
+        &self.host
     }
 
     /// The menu a tab opens, which is about worktrees.
@@ -2469,7 +2482,7 @@ impl Workspace {
         Some(WorkspaceAction::Theme(action))
     }
 
-    pub(super) fn chip(&self) -> &ViewHandle<UsageChip> {
+    pub fn chip(&self) -> &ViewHandle<UsageChip> {
         &self.chip
     }
 
