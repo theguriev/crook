@@ -53,6 +53,9 @@ pub fn reset_wgpu_instance(display: Box<dyn WgpuHasDisplayHandle>) {
     init_wgpu_instance(display);
 }
 
+/// Held across adapter selection and device creation. See [`Resources::new`].
+static OPENING: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
 /// The process-wide instance, built without a display handle if none exists.
 ///
 /// A display-less instance can still enumerate adapters and open a device —
@@ -113,6 +116,17 @@ impl Resources {
     /// constraining the choice would fail on a machine with no display.
     pub fn new(compatible_surface: Option<&wgpu::Surface<'static>>) -> Result<Self> {
         let instance = instance();
+        // One device at a time, process-wide. `request_adapter` enumerates
+        // every backend, and the GL one initialises EGL to do it: an EGL
+        // context is current on one thread at a time, so two threads asking
+        // for an adapter at once get `BadAccess` — which wgpu-hal answers with
+        // an `unwrap`, so it is a panic rather than an error the caller could
+        // fall back from.
+        //
+        // Crook opens one window and therefore one device, so this costs
+        // nothing there. What it buys is a test suite that can run its
+        // renderer tests in parallel, which is what `cargo test` does.
+        let _opening = OPENING.lock();
 
         pollster::block_on(async {
             let adapter = instance
