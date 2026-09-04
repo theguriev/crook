@@ -7,17 +7,16 @@
 //!
 //! # A list beside a card, which is VS Code's shape
 //!
-//! A column of every plugin the binary carries with a field above it, and
-//! beside it whatever the list has selected: the name, what it is, where it
-//! came from, what it puts on screen, and the switch. That is the shape every
-//! extension manager has settled on, and the reason is the same everywhere —
-//! a row can say a plugin's name and whether it is on, and nothing else worth
-//! reading fits on one line.
+//! A column of every plugin the binary carries with a field above it — in the
+//! sidebar, where the tab list otherwise is — and beside it whatever the list
+//! has selected: the name, what it is, where it came from, what it puts on
+//! screen, and the switch. That is the shape every extension manager has
+//! settled on, and the reason is the same everywhere: a row can say a plugin's
+//! name and whether it is on, and nothing else worth reading fits on one line.
 //!
-//! It is a *page that draws itself* rather than a column of settings rows;
-//! see [`Host::add_settings_view`]. What that costs is written where it is
-//! paid: the rail's search does not reach inside it, because it has no rows to
-//! count. This page has a field of its own instead, and it filters the list.
+//! It is a *section of the sidebar* and not a page of the settings. Plugins
+//! are not a setting — they are what the application is made of, and a person
+//! looking for them is not looking for a preference.
 //!
 //! # It is a plugin listing plugins, and that is not a joke
 //!
@@ -98,9 +97,13 @@ impl Plugin for Plugins {
         // belongs: after everything that configures the application and before
         // the one that describes it.
         let state = self.state.clone();
-        host.add_settings_view("page", "Plugins", 35, move |workspace, _| {
-            page(workspace, &state)
-        });
+        host.add_sidebar_section(
+            "section",
+            "Plugins",
+            Lucide::Blocks,
+            10,
+            move |workspace, _| page(workspace, &state),
+        );
         Ok(())
     }
 
@@ -131,22 +134,20 @@ impl Plugin for Plugins {
     }
 }
 
-/// The page: a list on the left, and what it has selected on the right.
+/// The section: the list in the sidebar, and what it has selected beside it.
 ///
 /// The list is worked out once and handed to both halves, because the card is
 /// about *what the list is showing*: a query that filters the chosen plugin
 /// out of the list leaves a card describing something nobody can see, so the
 /// selection falls to the first row that survived.
-fn page(workspace: &Workspace, state: &Rc<PluginsState>) -> Box<dyn Element> {
+fn page(workspace: &Workspace, state: &Rc<PluginsState>) -> (Box<dyn Element>, Box<dyn Element>) {
     let matching = list::matching(workspace);
     let selected = state.showing(&matching);
 
-    Flex::row()
-        .with_main_axis_size(MainAxisSize::Max)
-        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_child(list::render(workspace, &matching, selected.as_ref()))
-        .with_child(Expanded::new(1., card::render(workspace, selected.as_ref())).finish())
-        .finish()
+    (
+        list::render(workspace, &matching, selected.as_ref()),
+        card::render(workspace, selected.as_ref()),
+    )
 }
 
 /// What one of this page's per-plugin actions is called.

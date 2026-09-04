@@ -39,6 +39,13 @@ pub use crook_plugin::{
 use crate::keymap::parse_chord;
 use crate::workspace::{Category, Fonts, Workspace};
 
+/// A section of the sidebar: a button at its foot, and what the window shows
+/// while it is chosen.
+///
+/// Declared by `crook/window`, which owns the sidebar; contributed to by
+/// whichever plugin the section belongs to.
+pub const SIDEBAR_SECTION: SlotId = SlotId::new("sidebar.section");
+
 /// Where a page of the settings goes.
 ///
 /// Declared by `crook/settings`, which owns the rail; contributed to by
@@ -70,39 +77,38 @@ pub type ActionHandler = Box<dyn Fn(&mut Workspace, &mut ViewContext<Workspace>)
 /// back an element would have to be searched by looking at pixels.
 pub(crate) type SettingsContribution = Box<dyn Fn(&Workspace, &AppContext) -> Vec<Category>>;
 
-/// A page that draws itself, rather than handing back rows.
+/// One section of the sidebar.
 ///
-/// For a page whose shape is not a column of settings: the Plugins page is a
-/// list beside a detail, which is not a thing `Vec<Category>` can describe.
-pub(crate) type ViewContribution = Box<dyn Fn(&Workspace, &AppContext) -> Box<dyn Element>>;
-
-/// What a settings page is made of.
-///
-/// Two kinds, and the difference is who does the searching. Rows are filtered
-/// by the rail's query and counted beside the rail's row, which is what makes
-/// one query narrow the whole page. A view is not: it has no rows to count,
-/// and a page that had both would be two designs in one place.
-pub(crate) enum PageBody {
-    /// Rows, searched and counted by the settings page.
-    Rows(SettingsContribution),
-    /// A page that draws itself, given the whole content column.
-    View(ViewContribution),
+/// The two halves are built together rather than by two closures, because a
+/// section's list and its detail are two views of one answer: the settings
+/// page works out which page is showing from a query that filters both, and
+/// the Plugins page's card is about whatever its list has selected. Two
+/// builders would work it out twice and could disagree.
+pub(crate) struct SidebarSection {
+    /// What the button says.
+    pub(crate) title: String,
+    /// What it draws.
+    pub(crate) icon: Lucide,
+    /// The sidebar's body and the window's, in that order.
+    pub(crate) build: SectionContribution,
 }
+
+/// What a section draws: the sidebar's body, then the window's.
+pub(crate) type SectionContribution =
+    Box<dyn Fn(&Workspace, &AppContext) -> (Box<dyn Element>, Box<dyn Element>)>;
+
+/// One sidebar section, as something `Copy`.
+///
+/// The same trick [`PageId`] plays, for the same reason.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SectionId(usize);
 
 /// One page of the settings: what the rail calls it, and what is on it.
 pub(crate) struct SettingsPage {
     /// What the rail row and the page's heading both say.
     pub(crate) title: String,
     /// What is on it.
-    pub(crate) body: PageBody,
-}
-
-/// One page, built.
-pub(crate) enum BuiltPage {
-    /// Rows for the settings page to filter and lay out.
-    Rows(Vec<Category>),
-    /// A page that has drawn itself.
-    View(Box<dyn Element>),
+    pub(crate) build: SettingsContribution,
 }
 
 /// One settings page, as something `Copy`.
@@ -183,6 +189,13 @@ pub struct Host {
     /// contribution to them *is* is different: rows to be searched rather than
     /// an element to be drawn.
     pages: Slots<SettingsPage>,
+    /// The sidebar's sections, which are a slot of their own for the reason
+    /// the settings pages are: what a contribution to them *is* is different.
+    sections: Slots<SidebarSection>,
+    /// Every section key that has ever been registered, in order; the index is
+    /// a [`SectionId`]. Appended to and never removed from, as
+    /// [`Host::action_names`] is.
+    section_keys: Vec<String>,
     /// Every settings page key that has ever been registered, in order; the
     /// index is a [`PageId`]. Appended to and never removed from, for the
     /// reason [`Host::action_names`] is.
@@ -244,6 +257,8 @@ impl Host {
             slots: Slots::new(),
             pages: Slots::new(),
             page_keys: Vec::new(),
+            sections: Slots::new(),
+            section_keys: Vec::new(),
             actions: Actions::new(),
             action_names: Vec::new(),
             commands: Vec::new(),
@@ -335,42 +350,6 @@ impl Host {
         order: i32,
         build: impl Fn(&Workspace, &AppContext) -> Vec<Category> + 'static,
     ) -> PageId {
-        self.add_page(
-            entry,
-            title,
-            order,
-            PageBody::Rows(Box::new(build) as SettingsContribution),
-        )
-    }
-
-    /// Adds a page that draws itself.
-    ///
-    /// The escape hatch from `Vec<Category>`, for a page whose shape is not a
-    /// column of settings. It costs the rail's search: a view has no rows to
-    /// count, so a query finds it by its title or not at all.
-    pub(crate) fn add_settings_view(
-        &mut self,
-        entry: &str,
-        title: impl Into<String>,
-        order: i32,
-        build: impl Fn(&Workspace, &AppContext) -> Box<dyn Element> + 'static,
-    ) -> PageId {
-        self.add_page(
-            entry,
-            title,
-            order,
-            PageBody::View(Box::new(build) as ViewContribution),
-        )
-    }
-
-    /// What both of the above do.
-    fn add_page(
-        &mut self,
-        entry: &str,
-        title: impl Into<String>,
-        order: i32,
-        body: PageBody,
-    ) -> PageId {
         let who = self.who();
         let key = format!("{who}/{entry}");
         let registration = self.pages.contribute(
@@ -380,7 +359,7 @@ impl Host {
             order,
             SettingsPage {
                 title: title.into(),
-                body,
+                build: Box::new(build) as SettingsContribution,
             },
         );
         self.kept.push((who, registration));
@@ -392,6 +371,103 @@ impl Host {
                 PageId(self.page_keys.len() - 1)
             }
         }
+    }
+
+    /// Adds a section to the sidebar.
+    ///
+    /// `entry` names it within the plugin, so the key a person's state
+    /// remembers is `owner/entry` — stable across restarts and across every
+    /// other plugin they have installed.
+    pub(crate) fn add_sidebar_section(
+        &mut self,
+        entry: &str,
+        title: impl Into<String>,
+        icon: Lucide,
+        order: i32,
+        build: impl Fn(&Workspace, &AppContext) -> (Box<dyn Element>, Box<dyn Element>) + 'static,
+    ) -> SectionId {
+        let who = self.who();
+        let key = format!("{who}/{entry}");
+        let registration = self.sections.contribute(
+            &who,
+            SIDEBAR_SECTION,
+            EntryId::new(entry),
+            order,
+            SidebarSection {
+                title: title.into(),
+                icon,
+                build: Box::new(build) as SectionContribution,
+            },
+        );
+        self.kept.push((who, registration));
+
+        match self.section_keys.iter().position(|known| *known == key) {
+            Some(index) => SectionId(index),
+            None => {
+                self.section_keys.push(key);
+                SectionId(self.section_keys.len() - 1)
+            }
+        }
+    }
+
+    /// Declares the sidebar slot. Called by the plugin that owns the sidebar.
+    pub(crate) fn declare_sidebar_slot(&mut self) {
+        let who = self.who();
+        let registration = self
+            .sections
+            .declare(&who, SIDEBAR_SECTION, Cardinality::List);
+        self.kept.push((who, registration));
+    }
+
+    /// Every section there is, in the order their buttons are drawn.
+    pub fn sidebar_sections(&self) -> Vec<(SectionId, String, Lucide)> {
+        let titles = self.sections.map(SIDEBAR_SECTION, |section| {
+            (section.title.clone(), section.icon)
+        });
+        self.sections
+            .contributors(SIDEBAR_SECTION)
+            .into_iter()
+            .zip(titles)
+            .filter_map(|((owner, entry), (title, icon))| {
+                let id = self.sidebar_section_id(&format!("{owner}/{entry}"))?;
+                Some((id, title, icon))
+            })
+            .collect()
+    }
+
+    /// The id for a section key, if a section answers to it right now.
+    pub fn sidebar_section_id(&self, key: &str) -> Option<SectionId> {
+        self.section_index(key)?;
+        self.section_keys
+            .iter()
+            .position(|known| known == key)
+            .map(SectionId)
+    }
+
+    /// What a section id is called: `owner/entry`.
+    pub fn sidebar_section_key(&self, id: SectionId) -> Option<&str> {
+        self.section_keys.get(id.0).map(String::as_str)
+    }
+
+    /// Builds one section's two halves, without building the others.
+    pub(crate) fn build_sidebar_section(
+        &self,
+        id: SectionId,
+        workspace: &Workspace,
+        app: &AppContext,
+    ) -> Option<(Box<dyn Element>, Box<dyn Element>)> {
+        let index = self.section_index(self.sidebar_section_key(id)?)?;
+        self.sections.at(SIDEBAR_SECTION, index, |section| {
+            (section.build)(workspace, app)
+        })
+    }
+
+    /// Where a section sits in the bar right now.
+    fn section_index(&self, key: &str) -> Option<usize> {
+        self.sections
+            .contributors(SIDEBAR_SECTION)
+            .into_iter()
+            .position(|(owner, entry)| format!("{owner}/{entry}") == key)
     }
 
     /// Declares the settings slot itself. Called by the plugin that owns it.
@@ -428,37 +504,16 @@ impl Host {
         self.page_keys.get(id.0).map(String::as_str)
     }
 
-    /// Builds one page, without building the others.
+    /// Builds one page's rows, without building the others.
     pub(crate) fn build_settings_page(
         &self,
         id: PageId,
         workspace: &Workspace,
         app: &AppContext,
-    ) -> Option<BuiltPage> {
+    ) -> Option<Vec<Category>> {
         let index = self.page_index(self.settings_page_key(id)?)?;
         self.pages
-            .at(SETTINGS_PAGE, index, |page| match &page.body {
-                PageBody::Rows(build) => BuiltPage::Rows(build(workspace, app)),
-                PageBody::View(build) => BuiltPage::View(build(workspace, app)),
-            })
-    }
-
-    /// Whether a page draws itself, without building it.
-    ///
-    /// For the rail, which counts a page's rows while something is being
-    /// searched for and has none to count for a view.
-    pub(crate) fn settings_page_is_a_view(&self, id: PageId) -> bool {
-        let Some(index) = self
-            .settings_page_key(id)
-            .and_then(|key| self.page_index(key))
-        else {
-            return false;
-        };
-        self.pages
-            .at(SETTINGS_PAGE, index, |page| {
-                matches!(page.body, PageBody::View(_))
-            })
-            .unwrap_or(false)
+            .at(SETTINGS_PAGE, index, |page| (page.build)(workspace, app))
     }
 
     /// What one page's rail row says.

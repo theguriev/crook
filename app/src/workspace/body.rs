@@ -1,5 +1,5 @@
 //! The active tab's body: one pane per pane the tab holds, each running a
-//! shell — or, for one of them, the settings page.
+//! shell.
 //!
 //! A pane is its terminal and nothing else. Not a card: no corner radius, no
 //! border, no margin, no heading. What the session is called and what its
@@ -100,7 +100,6 @@ use super::action::WorkspaceAction;
 use super::block_list::{self, BlockList};
 use super::input_element::{CommandInput, Ink};
 use super::pane_output::Keys;
-use super::settings_page;
 use super::terminal_element::{TerminalElement, color};
 use super::view::Workspace;
 
@@ -251,7 +250,6 @@ fn panel(
     app: &AppContext,
 ) -> Box<dyn Element> {
     let id = pane.id();
-    let is_settings = pane.is_settings();
     let PaneState { is_focused } = state;
 
     let Some(interaction) = workspace.interaction(id) else {
@@ -262,11 +260,7 @@ fn panel(
 
     // Fetched once and used twice: the grid draws it, and the pane is painted
     // in whatever background it resolved. See `pane_ground`.
-    let terminal = if is_settings {
-        None
-    } else {
-        workspace.terminal(id, app)
-    };
+    let terminal = workspace.terminal(id, app);
     let ground = pane_ground(terminal.as_ref());
 
     // **Where the keyboard line is drawn.** A pane takes typing only when it is
@@ -278,20 +272,12 @@ fn panel(
     // consumed by `Workspace::action_for` in the window delegate, so nothing
     // here has to know which chords those are.
     //
-    // The settings page is not in that argument: it is a pane with no shell,
-    // and every control on it is a click. There is nothing to give the
-    // keyboard to, and nothing to compose a line for either, so it is the one
-    // pane that is drawn without a grid and without a field.
-    let content = if is_settings {
-        settings_page::render(workspace, app)
-    } else {
-        let keys = match (is_focused, workspace.a_popup_is_open()) {
-            (false, _) => Keys::None,
-            (true, true) => Keys::Signals,
-            (true, false) => Keys::All,
-        };
-        contents(workspace, pane, terminal, keys, app)
+    let keys = match (is_focused, workspace.a_popup_is_open()) {
+        (false, _) => Keys::None,
+        (true, true) => Keys::Signals,
+        (true, false) => Keys::All,
     };
+    let content = contents(workspace, pane, terminal, keys, app);
 
     // The `Hoverable` is here for its click handler alone — nothing about a
     // pane changes under the pointer any more — and it is what records the hit
@@ -791,7 +777,8 @@ fn divider(axis: SplitAxis) -> Box<dyn Element> {
 /// twenty pixels has to become a share before the group can act on it. So the
 /// pane writes down what it measured and the divider beside it reads it.
 ///
-/// It is not a `PaneSizer` because a settings pane has no pty to size and is
+/// It is not a `PaneSizer` because a pane whose shell has not started has no
+/// pty to size and is
 /// still a pane a divider can be dragged against.
 struct Measured {
     axis: SplitAxis,

@@ -129,6 +129,32 @@ pub(super) static PLUS: &[Segment] = &[
     Line(12.0, 19.0),
 ];
 
+/// Lucide's `blocks`.
+pub(super) static BLOCKS: &[Segment] = &[
+    Move(10.0, 22.0),
+    Line(10.0, 7.0),
+    Cubic(10.0, 6.4514, 9.5486, 6.0, 9.0, 6.0),
+    Line(4.0, 6.0),
+    Cubic(2.9028, 6.0, 2.0, 6.9028, 2.0, 8.0),
+    Line(2.0, 20.0),
+    Cubic(2.0, 21.0972, 2.9028, 22.0, 4.0, 22.0),
+    Line(16.0, 22.0),
+    Cubic(17.0972, 22.0, 18.0, 21.0972, 18.0, 20.0),
+    Line(18.0, 15.0),
+    Cubic(18.0, 14.4514, 17.5486, 14.0, 17.0, 14.0),
+    Line(2.0, 14.0),
+    Move(15.0, 2.0),
+    Line(21.0, 2.0),
+    Cubic(21.5523, 2.0, 22.0, 2.4477, 22.0, 3.0),
+    Line(22.0, 9.0),
+    Cubic(22.0, 9.5523, 21.5523, 10.0, 21.0, 10.0),
+    Line(15.0, 10.0),
+    Cubic(14.4477, 10.0, 14.0, 9.5523, 14.0, 9.0),
+    Line(14.0, 3.0),
+    Cubic(14.0, 2.4477, 14.4477, 2.0, 15.0, 2.0),
+    Close,
+];
+
 /// Lucide's `search`.
 pub(super) static SEARCH: &[Segment] = &[
     Move(21.0, 21.0),
@@ -196,13 +222,14 @@ pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [
     (Lucide::LayoutGrid, "layout-grid", LAYOUT_GRID),
     (Lucide::Menu, "menu", MENU),
     (Lucide::Plus, "plus", PLUS),
+    (Lucide::Blocks, "blocks", BLOCKS),
     (Lucide::Search, "search", SEARCH),
     (Lucide::Settings, "settings", SETTINGS),
     (Lucide::X, "x", X),
 ];
 
 /// How many there are.
-pub const ICONS: usize = 10;
+pub const ICONS: usize = 11;
 
 /// The icons Crook draws, from Lucide.
 ///
@@ -238,6 +265,10 @@ pub enum Lucide {
     ///
     /// Lucide's [`plus`](https://lucide.dev/icons/plus).
     Plus,
+    /// The Plugins section, at the foot of the sidebar.
+    ///
+    /// Lucide's [`blocks`](https://lucide.dev/icons/blocks).
+    Blocks,
     /// The settings page's search box, in the rail.
     ///
     /// Lucide's [`search`](https://lucide.dev/icons/search).

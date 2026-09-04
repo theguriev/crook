@@ -25,14 +25,6 @@ use crate::workspace::{SettingsAction, TextField, Workspace, WorkspaceAction};
 
 use super::{action, tier_words};
 
-/// How wide the list is.
-///
-/// VS Code's extensions sidebar is 300 at a 13px body and holds a publisher, a
-/// version, a rating and an install button. This holds a name and a dot, so it
-/// is the width of the tabs panel Crook already has — two lists of about the
-/// same weight should not be two different widths.
-pub(super) const LIST_WIDTH: f32 = 248.;
-
 /// The inset around it.
 const PADDING: f32 = 12.;
 
@@ -45,12 +37,15 @@ const DOT: f32 = 6.;
 /// What the field says while nothing has been typed.
 const PLACEHOLDER: &str = "Search plugins";
 
-/// The key this page's field is registered under.
-const FIELD: &str = "crook/plugins:search";
+/// The section this list is the sidebar of, and the name its field is
+/// registered under.
+const SECTION: &str = "crook/plugins/section";
+/// See [`SECTION`].
+const FIELD: &str = "search";
 
 /// Every plugin the field has not filtered out, in the host's own order.
 pub(super) fn matching(workspace: &Workspace) -> Vec<&'static Manifest> {
-    let (_, input) = workspace.settings_page().field(FIELD);
+    let (_, input) = workspace.field(SECTION, FIELD);
     let query = Query::new(input.editor().text());
     workspace
         .host()
@@ -69,7 +64,7 @@ pub(super) fn render(
 ) -> Box<dyn Element> {
     let settings = workspace.settings_page();
     let ui = workspace.fonts().ui;
-    let (index, input) = settings.field(FIELD);
+    let (index, input) = workspace.field(SECTION, FIELD);
 
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Max)
@@ -129,19 +124,16 @@ pub(super) fn render(
         );
     }
 
-    ConstrainedBox::new(
-        Container::new(column.finish())
-            .with_border(Border::right(1.).with_border_color(theme().border))
-            .with_padding(Padding {
-                top: PADDING,
-                bottom: PADDING,
-                left: PADDING,
-                right: PADDING,
-            })
-            .finish(),
-    )
-    .with_width(LIST_WIDTH)
-    .finish()
+    // No width and no border of its own: this *is* the sidebar's body now, and
+    // the panel around it is what has both.
+    Container::new(column.finish())
+        .with_padding(Padding {
+            top: PADDING,
+            bottom: PADDING,
+            left: PADDING,
+            right: PADDING,
+        })
+        .finish()
 }
 
 /// Whether a query is looking for this plugin.

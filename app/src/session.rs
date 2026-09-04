@@ -145,12 +145,7 @@ impl Session {
         let mut active = 0;
 
         for tab in strip.iter() {
-            let panes: Vec<_> = tab
-                .panes()
-                .iter()
-                .filter(|pane| !pane.is_settings())
-                .map(PaneSnapshot::of)
-                .collect();
+            let panes: Vec<_> = tab.panes().iter().map(PaneSnapshot::of).collect();
             if panes.is_empty() {
                 continue;
             }
@@ -158,13 +153,9 @@ impl Session {
             if strip.is_active(tab.id()) {
                 active = tabs.len();
             }
-            // The focused pane's position among the ones that were *kept*,
-            // which is not its position in the tab once a settings pane has
-            // been dropped out of the middle.
             let focused = tab
                 .panes()
                 .iter()
-                .filter(|pane| !pane.is_settings())
                 .position(|pane| tab.panes().is_focused(pane.id()))
                 .unwrap_or(0);
 
@@ -293,8 +284,8 @@ impl PaneSnapshot {
     fn of(pane: &Pane) -> Self {
         let session = pane.session();
         Self {
-            title: session.map_or_else(|| pane.title().to_owned(), |s| s.title.clone()),
-            working_directory: session.and_then(|s| s.working_directory.clone()),
+            title: session.title.clone(),
+            working_directory: session.working_directory.clone(),
             flex: pane.flex(),
         }
     }
@@ -316,19 +307,17 @@ impl PaneSnapshot {
     fn apply(&self, group: &mut PaneGroup, id: crate::tab::PaneId) {
         if let Some(pane) = group.get_mut(id) {
             pane.set_flex(self.flex);
-            if let Some(session) = pane.session_mut() {
-                // Only a directory that still exists. A repository moved or
-                // deleted between two launches would otherwise start a shell
-                // in a directory that is not there, which most shells answer
-                // by starting in `/` — a worse answer than the one Crook was
-                // started from.
-                if self
-                    .working_directory
-                    .as_ref()
-                    .is_some_and(|path| path.is_dir())
-                {
-                    session.working_directory = self.working_directory.clone();
-                }
+            // Only a directory that still exists. A repository moved or
+            // deleted between two launches would otherwise start a shell in a
+            // directory that is not there, which most shells answer by
+            // starting in `/` — a worse answer than the one Crook was started
+            // from.
+            if self
+                .working_directory
+                .as_ref()
+                .is_some_and(|path| path.is_dir())
+            {
+                pane.session_mut().working_directory = self.working_directory.clone();
             }
         }
     }

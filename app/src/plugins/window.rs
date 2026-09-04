@@ -47,6 +47,8 @@ impl Plugin for Window {
 
     fn build(&mut self, host: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
         host.declare_slot(WINDOW_OVERLAY, Cardinality::List);
+        // The sidebar is the window's, so the slot its sections go in is too.
+        host.declare_sidebar_slot();
 
         // The order is the order the settings page's Keys section lists the
         // bindings in, so a person reading one and the other is reading the

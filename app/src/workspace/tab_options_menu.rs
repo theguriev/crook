@@ -48,7 +48,6 @@ use crookui_core::fonts::FamilyId;
 use crookui_core::prelude::*;
 
 use crate::settings::{Density, Granularity, PrimaryInfo, resolve_subtitle, subtitle_options_for};
-use crate::tab::TabAction;
 use crate::theme::theme;
 
 use super::action::{OptionsAction, WorkspaceAction};
@@ -251,7 +250,13 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
     // opens a tab, so it is a `TabAction`, and the workspace takes the menu
     // down as it applies it.
     column.add_child(divider());
-    column.add_child(settings_row(menu.settings.clone(), ui));
+    column.add_child(settings_row(
+        workspace
+            .host()
+            .sidebar_section_id(crate::plugins::settings::SETTINGS_SECTION),
+        menu.settings.clone(),
+        ui,
+    ));
 
     ConstrainedBox::new(
         // Warp finishes this with `DropShadow::default()`. Crook's fragment
@@ -276,7 +281,11 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
 /// named `is_checked` would be a worse lie than eleven lines of layout. It
 /// keeps that function's geometry — the same 16px slot, the same 8px gap — so
 /// its label starts where every other label in the popup starts.
-fn settings_row(state: MouseStateHandle, ui: FamilyId) -> Box<dyn Element> {
+fn settings_row(
+    settings: Option<crate::plugin::SectionId>,
+    state: MouseStateHandle,
+    ui: FamilyId,
+) -> Box<dyn Element> {
     Hoverable::new(state, move |mouse| {
         let background = if mouse.is_hovered() {
             theme().overlay_1
@@ -309,8 +318,8 @@ fn settings_row(state: MouseStateHandle, ui: FamilyId) -> Box<dyn Element> {
         .with_background_color(background)
         .finish()
     })
-    .on_click(|_, ctx, _| {
-        ctx.dispatch_typed_action(WorkspaceAction::Tab(TabAction::OpenSettings));
+    .on_click(move |_, ctx, _| {
+        ctx.dispatch_typed_action(WorkspaceAction::ShowSection(settings));
     })
     .finish()
 }

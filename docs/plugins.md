@@ -43,6 +43,11 @@ description of something that was never built.
     plugin, and `disabled_plugins` in `settings.json` is where the answer is kept. A plugin
     switched off is carried and not built — its `build` never runs, so it registers nothing
     and makes nothing.
+  - The sidebar's **sections** are a slot: `sidebar.section`, declared by `crook/window`,
+    contributed to by `crook/settings` and `crook/plugins`. A section is a button at the foot
+    of the panel plus what the window shows while it is chosen — the sidebar's body and the
+    main area, built together because they are two views of one answer. The settings stopped
+    being a pane and the plugins left the settings rail entirely.
   - Still to move: the worktree menu, the Themes panel, the Omarchy palettes.
 - **Phase 2 — in progress.** `crook_plugin_api` is the wire — a manifest, capabilities that
   each say what they are in a sentence, and a `Node` vocabulary that *describes* rather than
