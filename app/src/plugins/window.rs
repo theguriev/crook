@@ -66,6 +66,7 @@ impl Plugin for Window {
                 "Move the tab right",
                 Binding::MoveTabRight,
             ),
+            ("search-tabs", "Search the tabs", Binding::SearchTabs),
             ("open-settings", "Settings", Binding::OpenSettings),
             ("zoom-in", "Make the text bigger", Binding::ZoomIn),
             ("zoom-out", "Make the text smaller", Binding::ZoomOut),

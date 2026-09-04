@@ -242,6 +242,15 @@ struct Overrides {
     /// box rather than doing anything with it, because leaving it there *is*
     /// what the box does — the page is filtered on every keystroke.
     search: Option<String>,
+    /// Type this into the tabs panel's search box at startup.
+    ///
+    /// The panel's box rather than the settings page's, which is why it is not
+    /// the same flag: they filter two different lists and are on screen at two
+    /// different times. Like `--search` it leaves the text in the box, because
+    /// leaving it there *is* what the box does — the list is filtered on every
+    /// keystroke — and it takes the keyboard, so the picture is of a box being
+    /// typed into rather than of one that happens to have words in it.
+    find: Option<String>,
     /// Draw another platform's window controls rather than this one's.
     ///
     /// The only override here that changes nothing a person can set. It exists
@@ -412,6 +421,12 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                     overrides.settings = Some(None);
                 }
             }
+            "--find" => {
+                let query = args
+                    .next()
+                    .context("`--find` needs something to search for")?;
+                overrides.find = Some(query);
+            }
             "--settings" => {
                 // The section is optional, and a bare `--settings` opens the
                 // page where a click on the menu entry opens it. Peeking
@@ -556,6 +571,7 @@ OPTIONS:
     --menu             Start with the tab options menu open
     --settings [PAGE]  Start with a settings tab open, on `appearance`,
                        `shell`, `usage`, `keys` or `about`
+    --find <TEXT>      Type TEXT into the tabs panel\'s search box, filtering the list
     --search <TEXT>    Type TEXT into the settings page\'s search box, opening it
     --theme <NAME>     Start in this theme rather than the saved one
     --worktrees        Start with the active tab's worktree menu open
@@ -795,6 +811,11 @@ fn apply_overrides(
     }
     if let Some(query) = &overrides.search {
         workspace.type_into_settings_search(query, ctx);
+    }
+    // After `--section`, so that a run asking for both ends where the box is:
+    // typing into it shows the tabs, whichever section was named.
+    if let Some(query) = &overrides.find {
+        workspace.type_into_panel_search(query, ctx);
     }
     if overrides.themes {
         workspace.open_theme_panel(overrides.creating, ctx);
@@ -1904,6 +1925,21 @@ mod tests {
             }
         );
 
+        // The two search boxes are two flags, because they are two lists
+        // filtered at two different times. `--find` opens nothing: the panel
+        // is on screen in every window there is.
+        assert_eq!(
+            parse(&["--find", "kettle"]).expect("valid"),
+            Startup::Window {
+                frames: None,
+                overrides: Overrides {
+                    find: Some("kettle".to_owned()),
+                    ..Overrides::default()
+                }
+            }
+        );
+        assert!(parse(&["--find"]).is_err());
+
         assert!(parse(&["--density", "cosy"]).is_err());
         assert!(parse(&["--density"]).is_err());
         assert!(parse(&["--granularity", "sessions"]).is_err());
@@ -1926,6 +1962,7 @@ mod tests {
             "--menu",
             "--hover",
             "--section",
+            "--find",
             "--granularity",
             "--density",
         ] {

@@ -60,6 +60,8 @@ pub enum WorkspaceAction {
     /// of them. **Nothing may change what is selected in the output while a
     /// keystroke is being dispatched.**
     ReleaseSelection(PaneId),
+    /// Something happened to the search box above the tabs.
+    Search(SearchAction),
     /// Show one section of the sidebar, or `None` for the tab list.
     ///
     /// The sections come from a slot, so this carries a
@@ -79,6 +81,32 @@ pub enum WorkspaceAction {
     /// and it is the model that knows where this session's scratch directory
     /// is. See [`crate::completion`].
     Complete(PaneId),
+}
+
+/// What the search box above the tabs does.
+///
+/// Three, and the shape of them is the whole difference between this box and
+/// the settings rail's. That one is the only thing on its screen that takes a
+/// key, so it needs no way to be left; this one shares its screen with a
+/// shell, so two of the three are ways out of it — and both of them empty the
+/// box on the way, because a filter left in force over the list a person
+/// navigates by is a panel that has quietly lost most of its tabs.
+///
+/// See [`search`](super::tabs_panel::search).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum SearchAction {
+    /// Put the keyboard in the box: a press on it, or the chord.
+    Focus,
+    /// Empty it and hand the keyboard back to the pane. Escape.
+    Dismiss,
+    /// Select the top match, then dismiss. Enter.
+    Accept,
+}
+
+impl From<SearchAction> for WorkspaceAction {
+    fn from(action: SearchAction) -> Self {
+        Self::Search(action)
+    }
 }
 
 /// What the header does as a title bar.

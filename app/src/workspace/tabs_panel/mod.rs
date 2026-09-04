@@ -7,11 +7,10 @@
 //! Warp's early return at `view.rs:20916` does. There is no state in which
 //! both a strip and a panel show tabs.
 //!
-//! Top to bottom: a control bar, then the list. Warp's panel also has a search
-//! field in that bar and a scrollbar down the list; Crook has neither a text
-//! input nor a scrollable element, so the search slot is an empty flexible gap
-//! that keeps the gear and the `+` where they belong, and the list is
-//! [`Clipped`] with a ceiling written down below.
+//! Top to bottom: a control bar, the search box, the list, and the row of
+//! buttons that says what the list is. Warp keeps its search field *in* that
+//! bar; this one is a row of its own, which is Telegram's arrangement and is
+//! what the bar being the window's title bar forces — see [`search`].
 //!
 //! # Granularity is two changes, not one
 //!
@@ -71,11 +70,13 @@ use crate::theme::theme;
 
 use super::action::WorkspaceAction;
 use super::controls;
+use super::settings_page::search::Query;
 use super::title_bar;
 use super::view::Workspace;
 
 pub(super) mod geometry;
 mod row;
+pub(crate) mod search;
 
 /// Warp's `PANEL_WIDTH`.
 ///
@@ -140,19 +141,27 @@ const SECTION_LABEL_SIZE: f32 = 10.;
 /// because the window builds it and its other half together: see
 /// [`SidebarSection`](crate::plugin::SidebarSection).
 pub(super) fn render(workspace: &Workspace, body: Box<dyn Element>) -> Box<dyn Element> {
+    let mut column = Flex::column()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_child(control_bar(workspace));
+
+    // Only over the tabs, because it filters the tabs. Every other section
+    // brings its own search where it needs one — the settings rail has one at
+    // the top of the very same column — and a second box above it, filtering a
+    // list that is not on screen, would be two boxes and one meaning.
+    if workspace.panel_search_is_showing() {
+        column.add_child(search::render(workspace));
+    }
+
+    column.add_child(Expanded::new(1., body).finish());
+    column.add_child(sections(workspace));
+
     ConstrainedBox::new(
-        Container::new(
-            Flex::column()
-                .with_main_axis_size(MainAxisSize::Max)
-                .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-                .with_child(control_bar(workspace))
-                .with_child(Expanded::new(1., body).finish())
-                .with_child(sections(workspace))
-                .finish(),
-        )
-        .with_background_color(theme().surface)
-        .with_border(Border::right(1.).with_border_color(theme().border))
-        .finish(),
+        Container::new(column.finish())
+            .with_background_color(theme().surface)
+            .with_border(Border::right(1.).with_border_color(theme().border))
+            .finish(),
     )
     .with_width(PANEL_WIDTH)
     .finish()
@@ -277,13 +286,14 @@ fn button(
     .finish()
 }
 
-/// The bar across the top of the panel: a search slot, the gear, the `+`.
+/// The bar across the top of the panel: the gear and the `+`, at its right
+/// edge.
 ///
-/// The search slot is an [`Empty`] that takes the surplus width, not a
-/// placeholder for a control that is coming: Crook has no text input, and a
-/// search field that cannot be typed into would be worse than a gap. What the
-/// slot does earn today is the layout — the gear and the `+` sit against the
-/// panel's right edge, where they will still be when something fills it.
+/// The flexible [`Empty`] in front of them is what puts them there, and it is
+/// now the whole of the bar's left half: the search box that Warp keeps *in*
+/// this bar is a row of its own underneath, because this one is also the
+/// window's title bar and a field wide enough to type a path into would leave
+/// nothing to pick the window up by. See [`search`].
 ///
 /// In this layout the bar is also half of the window's title bar: it is the
 /// top-left corner, so it is what the traffic lights sit on and what a person
@@ -319,17 +329,19 @@ fn control_bar(workspace: &Workspace) -> Box<dyn Element> {
     )
 }
 
-/// The tabs, wrapped in whichever chrome the granularity asks for.
+/// The tabs the search left, wrapped in whichever chrome the granularity asks
+/// for.
 fn list(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
     let granularity = workspace.options().granularity;
-    let rows = rows_by_tab(workspace, granularity);
+    let query = workspace.panel_search().query();
+    let rows = rows_by_tab(workspace, app, &query, granularity);
 
     if rows.is_empty() {
-        // Unreachable: the strip refuses to empty itself and closes the window
-        // instead. Warp's panel can genuinely be empty — its search filters
-        // live — so the state is drawn rather than asserted away, and it costs
-        // one `Text`.
-        return empty_state(workspace.fonts().ui);
+        // Reachable exactly one way, and it is the search: the strip refuses
+        // to empty itself and closes the window instead, which is why the
+        // empty state says what the filter did rather than what a panel with
+        // no tabs would say. Warp's panel is empty in the same one case.
+        return empty_state(workspace.fonts().ui, &query);
     }
 
     let last = rows.len() - 1;
@@ -368,11 +380,25 @@ fn list(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
 ///
 /// Built from [`TabStrip::rows`](crate::tab::TabStrip::rows) rather than by
 /// walking the tabs again, because that function *is* the granularity rule —
-/// a second walk here would be a second copy of it, free to disagree.
-fn rows_by_tab(workspace: &Workspace, granularity: Granularity) -> Vec<(TabId, Vec<PaneId>)> {
+/// a second walk here would be a second copy of it, free to disagree. The
+/// filter is applied to what it yields, so a query narrows the rows the
+/// granularity chose rather than choosing rows of its own.
+fn rows_by_tab(
+    workspace: &Workspace,
+    app: &AppContext,
+    query: &Query,
+    granularity: Granularity,
+) -> Vec<(TabId, Vec<PaneId>)> {
     let mut grouped: Vec<(TabId, Vec<PaneId>)> = Vec::new();
 
     for (tab, pane) in workspace.tabs().rows(granularity) {
+        // The one thing the search does, and the only place it does it: a row
+        // the query does not answer for is not built, so nothing downstream —
+        // the chrome, the group header, the geometry a scroll reads — has to
+        // know that a filter exists.
+        if !search::keeps(workspace, app, query, granularity, tab, pane) {
+            continue;
+        }
         match grouped.last_mut() {
             // `rows` walks the tabs in order, so a tab's rows are always
             // contiguous and this never has to search backwards.
@@ -568,9 +594,19 @@ fn group_header(
 }
 
 /// What the panel says when there is nothing in it.
-fn empty_state(ui: FamilyId) -> Box<dyn Element> {
+fn empty_state(ui: FamilyId, query: &Query) -> Box<dyn Element> {
+    let line = if query.is_empty() {
+        "No tabs open"
+    } else {
+        // The settings page's wording, for the box that behaves like the
+        // settings page's box. A person who has emptied both lists in one
+        // session should not have to read two sentences to learn the same
+        // thing.
+        "No tabs match your search."
+    };
+
     Container::new(
-        Text::new("No tabs open", ui, 12.)
+        Text::new(line, ui, 12.)
             .with_color(theme().text_muted)
             .finish(),
     )
