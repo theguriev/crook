@@ -33,7 +33,7 @@ mod header_toolbar;
 mod input_element;
 mod pane_output;
 mod row_content;
-mod settings_page;
+pub(crate) mod settings_page;
 mod tab_bar;
 mod tab_menu;
 mod tab_options_menu;
@@ -41,7 +41,7 @@ mod tabs_panel;
 mod terminal_element;
 mod text_field;
 mod theme_panel;
-mod theme_preview;
+pub(crate) mod theme_preview;
 mod title_bar;
 mod view;
 
@@ -58,7 +58,7 @@ pub use action::{
 pub use block_list::BlockList;
 pub use input_element::CommandInput;
 pub use pane_output::{Keys, Output};
-pub use settings_page::Section;
+pub(crate) use settings_page::widgets::Category;
 pub use terminal_element::TerminalElement;
 pub use text_field::TextField;
 pub(crate) use title_bar::caption_area;

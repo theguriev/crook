@@ -55,6 +55,23 @@
 //! which page is shown is worked out from the query, so clearing the box puts
 //! you back.
 //!
+//! # Every page comes from a plugin
+//!
+//! This module owns the *pane* — the rail, the search field, the scrolling
+//! column, and the rule about which page is showing — and none of the pages.
+//! They are contributed to `settings.page`, which `crook/settings` declares,
+//! and each of the five Crook ships belongs to the plugin whose feature it
+//! configures: the Usage page is `crook/usage`'s, so somebody who disables
+//! that plugin loses the page along with the chip.
+//!
+//! What that costs is written down where it is paid. A page is named by a key
+//! (`owner/entry`) rather than by a variant of an enum, so the rail's order is
+//! the `order` each page asks for; the mouse-state map is keyed by a string
+//! rather than by a `Control` variant, because a plugin's rows are not
+//! enumerable here; and [`Words`](search::Words) and
+//! [`Category`](widgets::Category) hold owned text, because a plugin's labels
+//! are not literals in this crate.
+//!
 //! # What it does not have
 //!
 //! **A settings-file footer.** Warp's rail ends in "Open settings file", and
@@ -63,16 +80,15 @@
 //! so there is nothing to alert about, and the path is on the About page for
 //! anyone who wants to open it themselves.
 
-mod pages;
-mod search;
-mod widgets;
+pub(crate) mod search;
+pub(crate) mod widgets;
 
 use std::collections::HashMap;
+use std::fmt;
 
 use crookui_core::elements::{MouseStateHandle, Padding};
 use crookui_core::prelude::*;
 
-use crate::settings::{Density, Granularity, Layout, PrimaryInfo, Subtitle};
 use crate::text_input::TextInput;
 use crate::theme::theme;
 
@@ -81,6 +97,7 @@ use widgets::Category;
 
 use super::action::{SettingsAction, WorkspaceAction};
 use super::view::Workspace;
+use crate::plugin::{Host, PageId};
 
 /// The widest the content column is allowed to get, before it is centred in
 /// whatever is left.
@@ -113,108 +130,43 @@ const CONTENT_PADDING: f32 = 20.;
 /// the thumb crosses every segmented control on the page.
 const SCROLLBAR_GUTTER: f32 = 12.;
 
-/// One page of the settings, and one row of the rail.
+/// One clickable thing on the page, by a name of its own.
 ///
-/// Warp's order — the account, then what the application does, then what it
-/// looks like, then the shortcuts, then About — with everything Crook does not
-/// have removed. About stays last, because that is where every settings window
-/// ever written puts it.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
-pub enum Section {
-    /// The tab strip: where it lives, what a row stands for, what a row says.
-    #[default]
-    Appearance,
-    /// How a pane's shell is started, and therefore which of the person's own
-    /// files it reads.
-    Shell,
-    /// The usage chip, and therefore whether Crook talks to the network.
-    Usage,
-    /// The bindings, which are fixed. Read-only, and honest about it.
-    Keys,
-    /// Version, channel, where the settings live, and the licence.
-    About,
+/// The key of the mouse-state map the view holds. It used to be a closed enum
+/// with a variant per control, which was right while every row on this page
+/// was written down in this crate: a page's rows come and go with the section
+/// on screen, so a struct with a field per handle would need every field
+/// reachable from a renderer that does not know which page it is drawing.
+///
+/// It is a string now for the reason [`Words`](super::search::Words) holds
+/// owned text: a page contributed by a plugin has controls nobody enumerated,
+/// and an enum cannot have a variant for them. What that costs is that two
+/// plugins can collide on a name, so each writes its own id in front — the
+/// same discipline an [`ActionName`](crate::plugin::ActionName) enforces, one
+/// rung less formally.
+pub(crate) type Control = String;
+
+/// A control with a name of its own.
+///
+/// The name is the page's to choose and has to be unique within the whole
+/// page, not within the plugin — one map serves every page, because the map
+/// outlives whichever page is on screen. A plugin's page should put its own
+/// name in front.
+pub(crate) fn named(name: &str) -> Control {
+    name.to_owned()
 }
 
-impl Section {
-    /// Every page, in rail order.
-    pub(super) const ALL: [Self; 5] = [
-        Self::Appearance,
-        Self::Shell,
-        Self::Usage,
-        Self::Keys,
-        Self::About,
-    ];
-
-    /// What the rail calls it, and what the page's own heading says.
-    pub(super) fn label(self) -> &'static str {
-        match self {
-            Self::Appearance => "Appearance",
-            Self::Shell => "Shell",
-            Self::Usage => "Usage",
-            Self::Keys => "Keys",
-            Self::About => "About",
-        }
-    }
+/// One of a group of controls, told apart by the value it stands for.
+///
+/// Keyed by the *value* rather than by its place in the group, so that
+/// changing which options are offered — the subtitle row does exactly that —
+/// cannot hand a control the hover state of the option that used to be in its
+/// slot.
+pub(crate) fn keyed(group: &str, value: impl fmt::Debug) -> Control {
+    format!("{group}.{value:?}")
 }
 
-/// One clickable thing on the page.
-///
-/// The key of the mouse-state map the view holds. [`MenuState`] names its
-/// fourteen handles one field at a time, which is right for a popup whose
-/// controls are fixed; a page whose rows come and go with the section on
-/// screen would need every field of that struct to be reachable from a
-/// renderer that does not know which section it is drawing. Keying by identity
-/// gives the same guarantee the struct does — one handle per control, never a
-/// shared one — with the identity written once, at the call site, instead of
-/// once in a declaration and once in a renderer that can drift from it.
-///
-/// [`MenuState`]: super::view::MenuState
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
-pub(super) enum Control {
-    /// A row of the rail.
-    Section(Section),
-    /// One half of "Tab placement".
-    Layout(Layout),
-    /// One half of "View as".
-    Granularity(Granularity),
-    /// One half of "Density".
-    Density(Density),
-    /// One row of "Pane title as".
-    PrimaryInfo(PrimaryInfo),
-    /// One row of "Additional metadata". Keyed by the value rather than by the
-    /// slot, so that changing the title field — which changes *which* two of
-    /// the three are offered — cannot hand a row the hover state of the option
-    /// that used to be in its place.
-    Subtitle(Subtitle),
-    /// "Show: PR link".
-    ShowPrLink,
-    /// "Show: Diff stats".
-    ShowDiffStats,
-    /// "Show details on hover".
-    ShowDetailsOnHover,
-    /// "Show the usage chip".
-    ShowUsageChip,
-    /// "Follow the desktop".
-    FollowSystemTheme,
-    /// "Bring the tabs back".
-    RestoreSession,
-    /// "Start a login shell".
-    LoginShell,
-    /// The minus of "Text size".
-    FontSmaller,
-    /// The plus of it.
-    FontBigger,
-    /// "Reset to defaults".
-    ResetTabOptions,
-    /// The preview in the "Current theme" row.
-    ThemeRow,
-    /// The row around it, which is what opens the Themes panel.
-    ThemeRowButton,
-    /// The rail's search box.
-    Search,
-}
-
-/// Which page the rail has selected, and what the mouse is doing to each of
+/// Which page the rail has selected/// Which page the rail has selected, and what the mouse is doing to each of
 /// its controls.
 ///
 /// Whether the page is *open* is not here: the settings pane's existence is
@@ -224,12 +176,20 @@ pub(super) enum Control {
 /// left it, which is what Warp's per-window pane manager buys by holding its
 /// view handle across a close.
 #[derive(Default)]
-pub(super) struct SettingsState {
-    /// Which page the rail has selected. Not persisted to disk: where somebody
-    /// was last time they changed a setting is not a preference, and a
-    /// settings file that recorded it would rewrite itself on a click that
-    /// changed nothing.
-    pub(super) section: Section,
+pub(crate) struct SettingsState {
+    /// Which page the rail has selected, by its `owner/entry` key, or `None`
+    /// for "whichever is first".
+    ///
+    /// A key rather than a variant, because the pages come from a slot and the
+    /// set of them depends on which plugins are loaded. A key whose page has
+    /// gone — the plugin was disabled while the pane was closed — reads as
+    /// `None` and the rail lands on the first page, which is the same thing it
+    /// does before anything has been chosen.
+    ///
+    /// Not persisted to disk: where somebody was last time they changed a
+    /// setting is not a preference, and a settings file that recorded it would
+    /// rewrite itself on a click that changed nothing.
+    pub(crate) page: Option<String>,
     /// How far the content column has been scrolled.
     pub(super) scroll: ScrollStateHandle,
     /// What has been typed into the rail's search box.
@@ -252,9 +212,18 @@ pub(super) struct SettingsState {
 }
 
 impl SettingsState {
+    /// Which page the rail has selected, resolved against what is loaded.
+    pub(crate) fn selected(&self, host: &Host) -> Option<PageId> {
+        let chosen = self
+            .page
+            .as_deref()
+            .and_then(|key| host.settings_page_id(key));
+        chosen.or_else(|| host.settings_pages().first().map(|(id, _)| *id))
+    }
+
     /// The mouse state for one control, creating it if this is its first
     /// frame.
-    pub(super) fn control(&self, control: Control) -> MouseStateHandle {
+    pub(crate) fn control(&self, control: Control) -> MouseStateHandle {
         self.controls
             .borrow_mut()
             .entry(control)
@@ -297,33 +266,55 @@ impl SettingsState {
 /// on screen is built at all.
 pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
     let state = workspace.settings_page();
+    let host = workspace.host();
     let query = state.query();
-
-    let built: Vec<(Section, Vec<Category>)> = if query.is_empty() {
-        vec![(state.section, pages::of(workspace, state.section, app))]
-    } else {
-        Section::ALL
-            .into_iter()
-            .map(|section| (section, pages::of(workspace, section, app)))
-            .collect()
+    let pages = host.settings_pages();
+    let Some(selected) = state.selected(host) else {
+        // No plugin contributed a page, which is a build with the settings
+        // plugins taken out rather than a state to design for.
+        return Empty::new().finish();
     };
 
-    let counts: Vec<(Section, usize)> = built
+    let build = |id: PageId| {
+        host.build_settings_page(id, workspace, app)
+            .unwrap_or_default()
+    };
+    let built: Vec<(PageId, Vec<Category>)> = if query.is_empty() {
+        vec![(selected, build(selected))]
+    } else {
+        pages.iter().map(|(id, _)| (*id, build(*id))).collect()
+    };
+
+    let title_of = |id: PageId| {
+        pages
+            .iter()
+            .find(|(page, _)| *page == id)
+            .map(|(_, title)| title.clone())
+            .unwrap_or_default()
+    };
+
+    let counts: Vec<(PageId, usize)> = built
         .iter()
-        .map(|(section, categories)| (*section, matches_in(categories, &query, section.label())))
+        .map(|(id, categories)| (*id, matches_in(categories, &query, &title_of(*id))))
         .collect();
-    let showing = showing(state.section, &counts, &query);
+    let showing = showing(selected, &counts, &query);
     let categories = built
         .into_iter()
-        .find(|(section, _)| *section == showing)
+        .find(|(id, _)| *id == showing)
         .map(|(_, categories)| categories)
         .unwrap_or_default();
 
     Flex::row()
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_child(rail(workspace, showing, &counts, &query))
-        .with_child(Expanded::new(1., content(workspace, categories, showing, &query)).finish())
+        .with_child(rail(workspace, &pages, showing, &counts, &query))
+        .with_child(
+            Expanded::new(
+                1.,
+                content(workspace, categories, &title_of(showing), &query),
+            )
+            .finish(),
+        )
         .finish()
 }
 
@@ -336,7 +327,7 @@ fn matches_in(categories: &[Category], query: &Query, page: &str) -> usize {
                 .entries
                 .iter()
                 .filter(|entry| entry.words.is_some())
-                .filter(|entry| entry.matches(query, &[page, category.title]))
+                .filter(|entry| entry.matches(query, &[page, &category.title]))
                 .count()
         })
         .sum()
@@ -352,13 +343,13 @@ fn matches_in(categories: &[Category], query: &Query, page: &str) -> usize {
 /// Warp moves the selection when a page filters out, and has then lost where
 /// you were. Here the selection never moves on its own, so clearing the box
 /// puts you back on the page you were reading.
-fn showing(selected: Section, counts: &[(Section, usize)], query: &Query) -> Section {
+fn showing(selected: PageId, counts: &[(PageId, usize)], query: &Query) -> PageId {
     if query.is_empty() {
         return selected;
     }
     if counts
         .iter()
-        .any(|(section, found)| *section == selected && *found > 0)
+        .any(|(page, found)| *page == selected && *found > 0)
     {
         return selected;
     }
@@ -366,11 +357,11 @@ fn showing(selected: Section, counts: &[(Section, usize)], query: &Query) -> Sec
     counts
         .iter()
         .find(|(_, found)| *found > 0)
-        .map(|(section, _)| *section)
+        .map(|(page, _)| *page)
         .unwrap_or(selected)
 }
 
-/// The rail: the four pages, and what this build is.
+/// The rail: every page there is, and what this build is.
 ///
 /// No background of its own — the panel behind it already painted one — and a
 /// right border instead, which is what Warp's rail is too. A filled rail
@@ -378,8 +369,9 @@ fn showing(selected: Section, counts: &[(Section, usize)], query: &Query) -> Sec
 /// avoid painting square into it.
 fn rail(
     workspace: &Workspace,
-    showing: Section,
-    counts: &[(Section, usize)],
+    pages: &[(PageId, String)],
+    showing: PageId,
+    counts: &[(PageId, usize)],
     query: &Query,
 ) -> Box<dyn Element> {
     let ui = workspace.fonts().ui;
@@ -395,7 +387,7 @@ fn rail(
                 state.search.clone(),
                 workspace.clipboard().clone(),
                 workspace.fonts(),
-                state.control(Control::Search),
+                state.control(named("search")),
                 SEARCH_PLACEHOLDER,
             )
             .with_icon(Lucide::Search)
@@ -405,10 +397,10 @@ fn rail(
         .finish(),
     );
 
-    for section in Section::ALL {
+    for (id, title) in pages {
         let found = counts
             .iter()
-            .find(|(page, _)| *page == section)
+            .find(|(page, _)| page == id)
             .map(|(_, found)| *found);
 
         // A page with nothing in it is not listed at all while something is
@@ -419,8 +411,9 @@ fn rail(
         }
         column.add_child(rail_row(
             workspace,
-            section,
-            section == showing,
+            *id,
+            title,
+            *id == showing,
             found.filter(|_| !query.is_empty()),
             ui,
         ));
@@ -464,18 +457,19 @@ fn rail(
 
 fn rail_row(
     workspace: &Workspace,
-    section: Section,
+    id: PageId,
+    title: &str,
     selected: bool,
     found: Option<usize>,
     ui: crookui_core::fonts::FamilyId,
 ) -> Box<dyn Element> {
-    let state = workspace.settings_page().control(Control::Section(section));
+    let state = workspace.settings_page().control(keyed("page", id));
     // Warp's `Features (3)`: the count is part of the label rather than a
     // badge beside it, which is what keeps a rail of counted and uncounted
     // rows from having two different shapes.
     let label = match found {
-        Some(found) => format!("{} ({found})", section.label()),
-        None => section.label().to_owned(),
+        Some(found) => format!("{title} ({found})"),
+        None => title.to_owned(),
     };
 
     Hoverable::new(state, move |mouse| {
@@ -504,7 +498,7 @@ fn rail_row(
         .finish()
     })
     .on_click(move |_, ctx, _| {
-        ctx.dispatch_typed_action(WorkspaceAction::Settings(SettingsAction::Select(section)));
+        ctx.dispatch_typed_action(WorkspaceAction::Settings(SettingsAction::Select(id)));
     })
     .finish()
 }
@@ -517,18 +511,18 @@ fn rail_row(
 fn content(
     workspace: &Workspace,
     categories: Vec<Category>,
-    showing: Section,
+    title: &str,
     query: &Query,
 ) -> Box<dyn Element> {
     let settings = workspace.settings_page();
     let ui = workspace.fonts().ui;
-    let body = page(categories, showing, query, ui).unwrap_or_else(|| nothing_found(query, ui));
+    let body = page(categories, title, query, ui).unwrap_or_else(|| nothing_found(query, ui));
 
     Container::new(
         Flex::column()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_child(centred(widgets::page_title(showing.label(), ui)))
+            .with_child(centred(widgets::page_title(title, ui)))
             .with_child(
                 Expanded::new(
                     1.,
@@ -558,7 +552,7 @@ fn content(
 /// because which category is first is a property of what survived.
 fn page(
     categories: Vec<Category>,
-    section: Section,
+    title: &str,
     query: &Query,
     ui: crookui_core::fonts::FamilyId,
 ) -> Option<Box<dyn Element>> {
@@ -571,7 +565,7 @@ fn page(
         let rows: Vec<Box<dyn Element>> = category
             .entries
             .into_iter()
-            .filter(|entry| entry.matches(query, &[section.label(), category.title]))
+            .filter(|entry| entry.matches(query, &[title, &category.title]))
             .map(|entry| entry.element)
             .collect();
 
@@ -579,7 +573,7 @@ fn page(
             continue;
         }
         column.add_child(widgets::category_element(
-            category.title,
+            &category.title,
             drawn == 0,
             rows,
             ui,

@@ -411,3 +411,30 @@ fn a_handler_that_unregisters_itself_is_gone_when_it_returns() {
         "the handler put itself back after taking itself out"
     );
 }
+
+#[test]
+fn one_entry_can_be_reached_by_its_place_in_the_order() {
+    // What a rail of pages needs: show the third one without building the
+    // other four.
+    let slots: Slots<&'static str> = Slots::new();
+    let owner = plugin("crook/settings");
+    slots
+        .declare(&owner, CHIPS, Cardinality::List)
+        .keep_forever();
+    for (order, payload) in [(10, "keys"), (0, "appearance"), (20, "about")] {
+        slots
+            .contribute(&owner, CHIPS, EntryId::new(payload), order, payload)
+            .keep_forever();
+    }
+
+    assert_eq!(slots.at(CHIPS, 0, |entry| *entry), Some("appearance"));
+    assert_eq!(slots.at(CHIPS, 2, |entry| *entry), Some("about"));
+    assert_eq!(slots.at(CHIPS, 3, |entry| *entry), None);
+    // And it is the same order the contributors are listed in, so an index
+    // taken from one names the same entry in the other.
+    assert_eq!(
+        slots.contributors(CHIPS)[1].1,
+        EntryId::new("keys"),
+        "the two orders disagree"
+    );
+}

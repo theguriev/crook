@@ -36,8 +36,8 @@ use crate::usage_model::UsageModel;
 use crate::window_controls::{Recorder, Request, WindowState};
 
 use super::{
-    Fonts, OptionsAction, QuitRequest, Section, SettingsAction, ThemeAction, Workspace,
-    WorkspaceAction, WorktreeAction, controls, settings_page, tab_options_menu, tabs_panel,
+    Fonts, OptionsAction, QuitRequest, SettingsAction, ThemeAction, Workspace, WorkspaceAction,
+    WorktreeAction, controls, settings_page, tab_options_menu, tabs_panel,
 };
 
 /// Big enough that two tabs both reach their maximum width, so the geometry
@@ -496,10 +496,11 @@ impl Harness {
             .read(&self.app, |workspace, _| workspace.theme_name().to_owned())
     }
 
-    /// Which page of the settings the rail has selected.
-    fn settings_section(&self) -> Section {
+    /// What the rail row of the selected settings page says.
+    fn settings_section(&self) -> String {
         self.workspace
-            .read(&self.app, |workspace, _| workspace.settings_section())
+            .read(&self.app, |workspace, _| workspace.settings_page_title())
+            .unwrap_or_default()
     }
 
     /// Types `text` into whatever has the keyboard, a key at a time.
@@ -548,9 +549,16 @@ impl Harness {
         self.dispatch_workspace_action(WorkspaceAction::Worktree(action));
     }
 
-    /// Shows a different page, the way a click on the rail does.
-    fn select_settings_section(&mut self, section: Section) {
-        self.dispatch_workspace_action(WorkspaceAction::Settings(SettingsAction::Select(section)));
+    /// Shows the page whose rail row says `title`, the way a click on the rail
+    /// does.
+    fn select_settings_section(&mut self, title: &str) {
+        let page = self
+            .workspace
+            .read(&self.app, |workspace, _| {
+                workspace.settings_page_named(title)
+            })
+            .unwrap_or_else(|| panic!("no settings page is called {title:?}"));
+        self.dispatch_workspace_action(WorkspaceAction::Settings(SettingsAction::Select(page)));
     }
 
     /// Whether any popup is up, which is the one question five parts of the
@@ -5127,7 +5135,7 @@ fn a_query_that_empties_the_page_shows_the_first_page_that_has_something() {
     );
     assert_eq!(
         harness.settings_section(),
-        Section::Appearance,
+        "Appearance",
         "the rail moved its own selection"
     );
 }
@@ -5220,7 +5228,7 @@ fn the_rail_switches_pages_and_the_pane_shows_the_one_it_names() {
 
     // The fourth: Keys.
     harness.click(center(rail[3]), MouseButton::Left);
-    assert_eq!(Section::Keys, harness.settings_section());
+    assert_eq!("Keys", harness.settings_section());
 
     let text = frame_text(&harness.frame());
     assert!(
@@ -5241,7 +5249,7 @@ fn the_page_and_the_scroll_position_outlive_the_tab_they_were_in() {
     // same guarantee with nothing to keep alive.
     let mut harness = Harness::new(1);
     harness.open_settings_page();
-    harness.select_settings_section(Section::About);
+    harness.select_settings_section("About");
     let pane = harness
         .focused_pane_id()
         .expect("the settings pane is focused");
@@ -5251,7 +5259,7 @@ fn the_page_and_the_scroll_position_outlive_the_tab_they_were_in() {
 
     harness.open_settings_page();
     assert_eq!(
-        Section::About,
+        "About",
         harness.settings_section(),
         "reopening the settings went back to the first page"
     );
@@ -5353,7 +5361,7 @@ fn turning_the_usage_chip_off_takes_the_pill_out_of_the_header_and_stops_the_pol
     );
 
     harness.open_settings_page();
-    harness.select_settings_section(Section::Usage);
+    harness.select_settings_section("Usage");
 
     let switches = settings_switch_boxes(&harness.frame());
     assert_eq!(switches.len(), 1, "one switch on the usage page");
@@ -5391,7 +5399,7 @@ fn turning_the_login_shell_off_reaches_the_thing_that_opens_shells() {
     );
 
     harness.open_settings_page();
-    harness.select_settings_section(Section::Shell);
+    harness.select_settings_section("Shell");
 
     let switches = settings_switch_boxes(&harness.frame());
     assert_eq!(switches.len(), 1, "one switch on the shell page");
@@ -8969,7 +8977,7 @@ fn the_keys_page_lists_what_a_plugin_registered_and_the_chord_that_reaches_it() 
     harness.open_settings_page();
     let rail = settings_rail_boxes(&harness.frame());
     harness.click(center(rail[3]), MouseButton::Left);
-    assert_eq!(Section::Keys, harness.settings_section());
+    assert_eq!("Keys", harness.settings_section());
 
     let text = frame_text(&harness.frame());
 
@@ -9176,4 +9184,42 @@ fn palette_selected_row(scene: &Scene) -> RectF {
 
     assert_eq!(rows.len(), 1, "exactly one selected palette row per frame");
     rows[0]
+}
+
+#[test]
+fn the_settings_rail_lists_the_pages_the_plugins_contributed() {
+    // Through the real presenter, because the rail's order is worked out from
+    // what is registered and the assertion worth making is about pixels.
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    let scene = harness.frame();
+
+    let rail = settings_rail_boxes(&scene);
+    assert_eq!(rail.len(), 5, "five pages in the rail");
+    // Top to bottom, which is the `order` each plugin asked for.
+    assert_eq!(harness.settings_section(), "Appearance");
+
+    harness.click(center(rail[2]), MouseButton::Left);
+    assert_eq!(harness.settings_section(), "Usage");
+    assert!(
+        frame_text(&harness.frame()).contains("Show the usage chip"),
+        "the Usage page did not come up"
+    );
+}
+
+#[test]
+fn a_settings_page_can_be_reached_by_the_name_on_its_rail_row() {
+    // What `--settings usage` resolves through, and the only name a person
+    // ever sees: the key is `owner/entry` and nobody types that.
+    let harness = Harness::new(1);
+
+    let (found, missing) = harness.workspace.read(&harness.app, |workspace, _| {
+        (
+            workspace.settings_page_named("usage"),
+            workspace.settings_page_named("nonesuch"),
+        )
+    });
+
+    assert!(found.is_some(), "the Usage page is not reachable by name");
+    assert!(missing.is_none());
 }

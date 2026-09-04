@@ -21,8 +21,13 @@
 //! startup audit stays quiet — though it need not, and a contribution that
 //! arrives early is kept rather than refused.
 
+mod about;
+mod appearance;
 pub mod header;
+mod keys;
 mod palette;
+mod settings;
+mod shell;
 mod usage;
 pub mod window;
 
@@ -33,7 +38,15 @@ pub fn defaults() -> Vec<Box<dyn Plugin>> {
     vec![
         Box::new(window::Window),
         Box::new(header::Header),
+        Box::new(settings::Settings),
+        // The rail's order is these five, and it is the `order` each of them
+        // asks for rather than this list — a plugin that adds a page cannot
+        // be made to load in the right place in somebody else's list.
+        Box::new(appearance::Appearance),
+        Box::new(shell::Shell),
         Box::new(usage::Usage),
+        Box::new(keys::Keys),
+        Box::new(about::About),
         Box::new(palette::CommandPalette),
     ]
 }

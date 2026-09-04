@@ -202,3 +202,44 @@ fn a_plugins_chord_is_a_suggestion_and_not_a_claim() {
         assert_eq!(host.suggested_for(&keystroke), host.action(&palette));
     });
 }
+
+#[test]
+fn the_settings_rail_is_what_the_plugins_put_in_it() {
+    // Nothing enumerates these. The rail's order is the `order` each page
+    // asked for, so a plugin that adds one lands where it asked to and not
+    // where a list in the settings module happens to put it.
+    with_host(|host| {
+        let titles: Vec<String> = host
+            .settings_pages()
+            .into_iter()
+            .map(|(_, title)| title)
+            .collect();
+
+        assert_eq!(titles, ["Appearance", "Shell", "Usage", "Keys", "About"]);
+    });
+}
+
+#[test]
+fn disabling_a_plugin_takes_its_settings_page_off_the_rail() {
+    // The whole point of the page belonging to the feature: somebody who turns
+    // the usage plugin off loses the chip *and* the page that configures it,
+    // rather than being left with a page whose switch controls nothing.
+    with_host(|host| {
+        let usage = PluginId::parse("crook/usage").expect("a literal that parses");
+        let key = "crook/usage/page";
+        assert!(host.settings_page_id(key).is_some());
+
+        host.unload(&usage);
+
+        assert!(
+            host.settings_page_id(key).is_none(),
+            "the page outlived the plugin that added it"
+        );
+        let titles: Vec<String> = host
+            .settings_pages()
+            .into_iter()
+            .map(|(_, title)| title)
+            .collect();
+        assert_eq!(titles, ["Appearance", "Shell", "Keys", "About"]);
+    });
+}

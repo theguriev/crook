@@ -37,7 +37,14 @@ pub use crook_plugin::{
 };
 
 use crate::keymap::parse_chord;
-use crate::workspace::{Fonts, Workspace};
+use crate::workspace::{Category, Fonts, Workspace};
+
+/// Where a page of the settings goes.
+///
+/// Declared by `crook/settings`, which owns the rail; contributed to by
+/// whichever plugin the page belongs to, which for the five Crook ships is one
+/// plugin each.
+pub const SETTINGS_PAGE: SlotId = SlotId::new("settings.page");
 
 /// What a plugin contributes to a slot: something that can build an element
 /// out of the workspace, every frame.
@@ -54,6 +61,31 @@ pub type UiContribution = Box<dyn Fn(&Workspace, &AppContext) -> Box<dyn Element
 /// `Workspace::handle_action` already receives — a named action is the same
 /// thing an enum variant was, addressable by people who cannot add a variant.
 pub type ActionHandler = Box<dyn Fn(&mut Workspace, &mut ViewContext<Workspace>)>;
+
+/// What one page of the settings is made of, built fresh every frame.
+///
+/// A `Vec<Category>` rather than an element, because the settings page's
+/// search filters *rows* — which rows survive decides which category is first
+/// and therefore which one draws no divider above itself. A page that handed
+/// back an element would have to be searched by looking at pixels.
+pub(crate) type SettingsContribution = Box<dyn Fn(&Workspace, &AppContext) -> Vec<Category>>;
+
+/// One page of the settings: what the rail calls it, and what is on it.
+pub(crate) struct SettingsPage {
+    /// What the rail row and the page's heading both say.
+    pub(crate) title: String,
+    /// What is on it.
+    pub(crate) build: SettingsContribution,
+}
+
+/// One settings page, as something `Copy`.
+///
+/// The same trick [`ActionId`] plays and for the same reason: a page is named
+/// by `owner/entry`, `SettingsAction` is `Copy`, and a `String` is not. The
+/// key is the identity — an id whose page has been disabled resolves to a key
+/// no page answers to, and the rail falls back to the first page there is.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PageId(usize);
 
 /// Whether a plugin's floating surface is up.
 ///
@@ -120,6 +152,14 @@ pub struct Host {
     /// the other way, and it is short on purpose.
     fonts: Fonts,
     slots: Slots<UiContribution>,
+    /// The settings pages, which are a slot of their own because what a
+    /// contribution to them *is* is different: rows to be searched rather than
+    /// an element to be drawn.
+    pages: Slots<SettingsPage>,
+    /// Every settings page key that has ever been registered, in order; the
+    /// index is a [`PageId`]. Appended to and never removed from, for the
+    /// reason [`Host::action_names`] is.
+    page_keys: Vec<String>,
     actions: Actions<ActionHandler>,
     /// Every action name that has ever been registered here, in order.
     ///
@@ -160,6 +200,8 @@ impl Host {
         Self {
             fonts,
             slots: Slots::new(),
+            pages: Slots::new(),
+            page_keys: Vec::new(),
             actions: Actions::new(),
             action_names: Vec::new(),
             commands: Vec::new(),
@@ -234,6 +276,104 @@ impl Host {
                 ActionId(self.action_names.len() - 1)
             }
         }
+    }
+
+    /// Adds a page to the settings.
+    ///
+    /// `entry` is this page's name within the plugin that adds it, so the key
+    /// a person writes on the command line and the key the state remembers is
+    /// `owner/entry` — stable across restarts and across every other plugin
+    /// they have installed.
+    pub(crate) fn add_settings_page(
+        &mut self,
+        entry: &str,
+        title: impl Into<String>,
+        order: i32,
+        build: impl Fn(&Workspace, &AppContext) -> Vec<Category> + 'static,
+    ) -> PageId {
+        let who = self.who();
+        let key = format!("{who}/{entry}");
+        let registration = self.pages.contribute(
+            &who,
+            SETTINGS_PAGE,
+            EntryId::new(entry),
+            order,
+            SettingsPage {
+                title: title.into(),
+                build: Box::new(build) as SettingsContribution,
+            },
+        );
+        self.kept.push((who, registration));
+
+        match self.page_keys.iter().position(|known| *known == key) {
+            Some(index) => PageId(index),
+            None => {
+                self.page_keys.push(key);
+                PageId(self.page_keys.len() - 1)
+            }
+        }
+    }
+
+    /// Declares the settings slot itself. Called by the plugin that owns it.
+    pub fn declare_settings_slot(&mut self) {
+        let who = self.who();
+        let registration = self.pages.declare(&who, SETTINGS_PAGE, Cardinality::List);
+        self.kept.push((who, registration));
+    }
+
+    /// Every settings page there is, in rail order.
+    pub fn settings_pages(&self) -> Vec<(PageId, String)> {
+        let titles = self.pages.map(SETTINGS_PAGE, |page| page.title.clone());
+        self.pages
+            .contributors(SETTINGS_PAGE)
+            .into_iter()
+            .zip(titles)
+            .filter_map(|((owner, entry), title)| {
+                Some((self.settings_page_id(&format!("{owner}/{entry}"))?, title))
+            })
+            .collect()
+    }
+
+    /// The id for a page key, if a page answers to it right now.
+    pub fn settings_page_id(&self, key: &str) -> Option<PageId> {
+        self.page_index(key)?;
+        self.page_keys
+            .iter()
+            .position(|known| known == key)
+            .map(PageId)
+    }
+
+    /// What a page id is called: `owner/entry`.
+    pub fn settings_page_key(&self, id: PageId) -> Option<&str> {
+        self.page_keys.get(id.0).map(String::as_str)
+    }
+
+    /// Builds one page's rows, without building the others.
+    pub(crate) fn build_settings_page(
+        &self,
+        id: PageId,
+        workspace: &Workspace,
+        app: &AppContext,
+    ) -> Option<Vec<Category>> {
+        let index = self.page_index(self.settings_page_key(id)?)?;
+        self.pages
+            .at(SETTINGS_PAGE, index, |page| (page.build)(workspace, app))
+    }
+
+    /// What one page's rail row says.
+    pub fn settings_page_title(&self, id: PageId) -> Option<String> {
+        let index = self.page_index(self.settings_page_key(id)?)?;
+        self.pages
+            .at(SETTINGS_PAGE, index, |page| page.title.clone())
+    }
+
+    /// Where a page sits in the rail right now, or `None` if no page answers
+    /// to that key any more.
+    fn page_index(&self, key: &str) -> Option<usize> {
+        self.pages
+            .contributors(SETTINGS_PAGE)
+            .into_iter()
+            .position(|(owner, entry)| format!("{owner}/{entry}") == key)
     }
 
     /// Registers an action *and* offers it under a title.

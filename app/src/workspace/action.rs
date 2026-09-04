@@ -9,11 +9,9 @@
 //! other direction, with one `WorkspaceAction` that carries tab actions and
 //! vertical-tab display options side by side.
 
-use crate::plugin::ActionId;
+use crate::plugin::{ActionId, PageId};
 use crate::settings::{Density, Granularity, Layout, PrimaryInfo, Subtitle};
 use crate::tab::{PaneId, TabAction, TabId};
-
-use super::settings_page::Section;
 
 /// Everything the header dispatches.
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -213,7 +211,7 @@ pub enum ThemeAction {
 pub enum SettingsAction {
     /// Show a different page of the settings in the pane already holding
     /// them.
-    Select(Section),
+    Select(PageId),
     /// "Show the usage chip", which is also what starts and stops the poll.
     ToggleUsageChip,
     /// Put every tab option back to the value a fresh install opens with.

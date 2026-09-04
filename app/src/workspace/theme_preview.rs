@@ -29,20 +29,20 @@ use super::action::WorkspaceAction;
 use super::view::Fonts;
 
 /// The card in the chooser panel, which is Warp's own 190 x 100.
-pub(super) const PANEL_CARD: Vector2F = vec2f(190., 100.);
+pub(crate) const PANEL_CARD: Vector2F = vec2f(190., 100.);
 
 /// The card on the settings page, beside the name of the theme in force.
 ///
 /// Warp draws its settings row at 0.6 of the panel's card; this is that,
 /// rounded to whole pixels.
-pub(super) const ROW_CARD: Vector2F = vec2f(114., 60.);
+pub(crate) const ROW_CARD: Vector2F = vec2f(114., 60.);
 
 /// A miniature terminal in `card`, sized to `size`.
 ///
 /// `command` is what clicking it does; `None` draws a card that is not a
 /// control at all — which is what the settings page's row wants, since there
 /// the whole row is the button.
-pub(super) fn card(
+pub(crate) fn card(
     card: Theme,
     size: Vector2F,
     selected: bool,

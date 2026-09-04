@@ -51,17 +51,17 @@ use super::super::wrap;
 /// 10 and 14, and a 23px heading inside a 720px card reads as a different
 /// application's dialog dropped into this one, so the ratio is kept and the
 /// absolute size is not.
-pub(super) const TITLE_SIZE: f32 = 16.;
+pub(crate) const TITLE_SIZE: f32 = 16.;
 
 /// A category heading, above a group of rows.
-pub(super) const CATEGORY_SIZE: f32 = 11.;
+pub(crate) const CATEGORY_SIZE: f32 = 11.;
 
 /// A row's label, and the interface's default size everywhere else.
-pub(super) const LABEL_SIZE: f32 = 12.;
+pub(crate) const LABEL_SIZE: f32 = 12.;
 
 /// A row's second line, and every other piece of text that is explaining
 /// rather than naming.
-pub(super) const DESCRIPTION_SIZE: f32 = 11.;
+pub(crate) const DESCRIPTION_SIZE: f32 = 11.;
 
 /// The gap under one row, before the next one's label.
 /// The check on the chosen row of a picker.
@@ -89,7 +89,7 @@ const CONTROL_RADIUS: f32 = 6.;
 /// `None` is the disabled state, and it carries no action precisely so that a
 /// disabled control cannot be given one by accident: the click handler is
 /// attached in exactly one place, behind a match on this.
-pub(super) type Command = Option<WorkspaceAction>;
+pub(crate) type Command = Option<WorkspaceAction>;
 
 /// One thing in a category: what is drawn, and the words that find it.
 ///
@@ -97,9 +97,9 @@ pub(super) type Command = Option<WorkspaceAction>;
 /// than to any row in it, so there is nothing for a query to land on — and a
 /// search that answered with four paragraphs of prose because one of them
 /// contains the word "tab" would be worse than one that answered with the row.
-pub(super) struct Entry {
+pub(crate) struct Entry {
     /// What finds it, unless nothing does.
-    pub(super) words: Option<Words>,
+    pub(crate) words: Option<Words>,
     /// What the row *says* on its right-hand side, where that is a string
     /// rather than a control: a chord, a path, a version.
     ///
@@ -109,7 +109,7 @@ pub(super) struct Entry {
     /// remembers a key and not what it does types the key.
     value: Option<String>,
     /// What is drawn.
-    pub(super) element: Box<dyn Element>,
+    pub(crate) element: Box<dyn Element>,
 }
 
 impl Entry {
@@ -127,7 +127,7 @@ impl Entry {
     /// `context` is the page and the category the row is in. A note goes
     /// wherever its category goes: drawn when nothing is being searched for,
     /// and left out the moment something is.
-    pub(super) fn matches(&self, query: &Query, context: &[&str]) -> bool {
+    pub(crate) fn matches(&self, query: &Query, context: &[&str]) -> bool {
         let Some(words) = &self.words else {
             return query.is_empty();
         };
@@ -148,18 +148,21 @@ impl Entry {
 /// Built as a value rather than as an element because the search filters it:
 /// which categories survive — and therefore which one is *first* and draws no
 /// divider above itself — is not known until the query has been applied.
-pub(super) struct Category {
+pub(crate) struct Category {
     /// What the heading says, which is also a word every row in it is found
     /// by.
-    pub(super) title: &'static str,
+    ///
+    /// Owned, like everything else a row is described by: a page contributed
+    /// by a plugin has headings nobody wrote down here.
+    pub(crate) title: String,
     /// The rows and the notes, in order.
-    pub(super) entries: Vec<Entry>,
+    pub(crate) entries: Vec<Entry>,
 }
 
 /// A page's heading.
-pub(super) fn page_title(title: &'static str, ui: FamilyId) -> Box<dyn Element> {
+pub(crate) fn page_title(title: &str, ui: FamilyId) -> Box<dyn Element> {
     Container::new(
-        Text::new(title, ui, TITLE_SIZE)
+        Text::new(title.to_owned(), ui, TITLE_SIZE)
             .with_color(theme().text_primary)
             .with_style(Properties {
                 weight: Weight::Semibold,
@@ -172,8 +175,11 @@ pub(super) fn page_title(title: &'static str, ui: FamilyId) -> Box<dyn Element> 
 }
 
 /// A heading and the rows under it, gathered.
-pub(super) fn category(title: &'static str, entries: Vec<Entry>) -> Category {
-    Category { title, entries }
+pub(crate) fn category(title: impl Into<String>, entries: Vec<Entry>) -> Category {
+    Category {
+        title: title.into(),
+        entries,
+    }
 }
 
 /// One category, drawn.
@@ -187,8 +193,8 @@ pub(super) fn category(title: &'static str, entries: Vec<Entry>) -> Category {
 /// `first` is a property of the category rather than of the list it happens to
 /// be in. The search made that false: a category is first when every category
 /// before it has been filtered away.
-pub(super) fn category_element(
-    title: &'static str,
+pub(crate) fn category_element(
+    title: &str,
     first: bool,
     rows: Vec<Box<dyn Element>>,
     ui: FamilyId,
@@ -213,7 +219,7 @@ pub(super) fn category_element(
 
     column.add_child(
         Container::new(
-            Text::new(title, ui, CATEGORY_SIZE)
+            Text::new(title.to_owned(), ui, CATEGORY_SIZE)
                 .with_color(theme().text_muted)
                 .with_style(Properties {
                     weight: Weight::Semibold,
@@ -230,7 +236,7 @@ pub(super) fn category_element(
 }
 
 /// One setting: a label, an optional description under it, and a control.
-pub(super) fn row(words: Words, enabled: bool, control: Box<dyn Element>, ui: FamilyId) -> Entry {
+pub(crate) fn row(words: Words, enabled: bool, control: Box<dyn Element>, ui: FamilyId) -> Entry {
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
@@ -297,7 +303,7 @@ fn description_text(description: String, ui: FamilyId) -> Box<dyn Element> {
 /// beside a control that is not there. The bottom margin belongs to the group
 /// rather than to the last value, which is what keeps the gap between two
 /// groups the same as the gap between two rows.
-pub(super) fn choice_group(
+pub(crate) fn choice_group(
     words: Words,
     enabled: bool,
     choices: Vec<Box<dyn Element>>,
@@ -335,7 +341,7 @@ pub(super) fn choice_group(
 /// ends up only after it has been measured, so "12 pixels from the left of
 /// something 28 wide" is not a thing this layer can say. Main-axis alignment
 /// is, and it says the same thing in the one vocabulary the box protocol has.
-pub(super) fn switch(on: bool, command: Command, state: MouseStateHandle) -> Box<dyn Element> {
+pub(crate) fn switch(on: bool, command: Command, state: MouseStateHandle) -> Box<dyn Element> {
     let enabled = command.is_some();
 
     let control = Hoverable::new(state, move |mouse| {
@@ -387,19 +393,19 @@ pub(super) fn switch(on: bool, command: Command, state: MouseStateHandle) -> Box
 }
 
 /// One half of a segmented control.
-pub(super) struct Segment {
+pub(crate) struct Segment {
     /// What it says.
-    pub(super) label: &'static str,
+    pub(crate) label: &'static str,
     /// Whether it is the one currently chosen.
-    pub(super) selected: bool,
+    pub(crate) selected: bool,
     /// What clicking it does, or `None` while the control is inert.
-    pub(super) command: Command,
+    pub(crate) command: Command,
     /// Its own hover state, never shared with the other segments.
-    pub(super) state: MouseStateHandle,
+    pub(crate) state: MouseStateHandle,
 }
 
 /// A track holding two or more segments, of which exactly one is lit.
-pub(super) fn segmented(segments: Vec<Segment>, ui: FamilyId) -> Box<dyn Element> {
+pub(crate) fn segmented(segments: Vec<Segment>, ui: FamilyId) -> Box<dyn Element> {
     let mut row = Flex::row().with_main_axis_size(MainAxisSize::Min);
 
     for segment in segments {
@@ -444,7 +450,7 @@ pub(super) fn segmented(segments: Vec<Segment>, ui: FamilyId) -> Box<dyn Element
 /// Warp draws these as a dropdown. This is the gear menu's check row at the
 /// page's size, and it is what a three-value option looks like when there is
 /// no popup to put a list in.
-pub(super) fn choice(
+pub(crate) fn choice(
     label: &'static str,
     selected: bool,
     command: Command,
@@ -507,7 +513,7 @@ pub(super) fn choice(
 /// default" indicator either application has: the reset button is drawn
 /// de-emphasised and does nothing while there is nothing to reset, so the
 /// control that undoes a change is also the one that says a change was made.
-pub(super) fn text_button(
+pub(crate) fn text_button(
     label: &'static str,
     command: Command,
     state: MouseStateHandle,
@@ -557,7 +563,7 @@ pub(super) fn text_button(
 ///
 /// Either button is `None` at its end of the range, which is the same "does
 /// nothing and says so" [`text_button`] already draws for the reset button.
-pub(super) fn stepper(
+pub(crate) fn stepper(
     value: String,
     decrease: Command,
     decrease_state: MouseStateHandle,
@@ -591,7 +597,7 @@ pub(super) fn stepper(
 /// row is the button. Hovering draws the accent border Warp draws, because the
 /// row is the only control on the page that leads somewhere rather than
 /// changing something.
-pub(super) fn current_theme_row(
+pub(crate) fn current_theme_row(
     words: Words,
     card: Box<dyn Element>,
     name: String,
@@ -673,7 +679,7 @@ pub(super) fn current_theme_row(
 /// `monospace` is for the values that are paths: a settings file's location is
 /// something a person copies into a shell, and proportional text turns runs of
 /// slashes and dots into a smear.
-pub(super) fn fact(
+pub(crate) fn fact(
     words: Words,
     value: String,
     monospace: bool,
@@ -720,7 +726,7 @@ pub(super) fn fact(
 const NOTE_LINE_CHARS: usize = 80;
 
 /// A paragraph of explanation that belongs to a page rather than to a row.
-pub(super) fn note(text: &'static str, ui: FamilyId) -> Entry {
+pub(crate) fn note(text: &'static str, ui: FamilyId) -> Entry {
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Start);
