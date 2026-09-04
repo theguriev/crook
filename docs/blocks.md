@@ -297,7 +297,10 @@ There is no box. A block has no border, no corner radius and no fill in its rest
   character and no combining accent dropped. That is the thing scrollback cannot do.
 
   The second is **three dots**, and it opens the block's menu — `app/src/workspace/block_menu.rs`,
-  Warp's shape and eight of Warp's entries. The split between the two controls is what a menu is
+  Warp's shape and eight of Warp's entries. What is *in* it is a slot, `block.menu`, declared by
+  the `crook/blocks` plugin; Crook's own entries are that plugin's four contributions to its own
+  slot, and anything else may add a group of its own. A menu nothing has contributed to never
+  opens and its dots are not drawn. The split between the two controls is what a menu is
   for: copying is the thing done over and over and keeps a click of its own, and everything else
   is a list that gets read. The menu is not the pane's context menu — a secondary click in the
   output belongs to the shell, and taking a button away from every full-screen program would be

@@ -470,10 +470,11 @@ fn blocks(
     // The block whose menu is up over this list, which the list is told about
     // so that the block keeps its controls painted under the menu hanging off
     // them. See `block_list::paint_control`.
-    let menu = workspace.block_menu().block_in(pane);
+    let available = workspace.block_menu_is_available();
+    let menu = workspace.block_menu().block_in(pane).filter(|_| available);
     let mut list = BlockList::new(history, snapshot, font, view.clone())
         .with_terminal(handle.clone(), keys)
-        .with_menu(menu);
+        .with_menu(available, menu);
     // The list reads the composer's line to tell an end of input from a
     // delete, so it is given it here for the same reason the grid is.
     if let Some(input) = workspace.input(pane) {
@@ -502,7 +503,7 @@ fn blocks(
     // differ by whatever the composer under them is worth.
     let mut stack = Stack::new().with_child(list);
     stack.add_anchored_overlay_child(
-        Dismiss::new(block_menu::render(workspace))
+        Dismiss::new(block_menu::render(workspace, app))
             // The window behind it is inert while it is up, which is what
             // makes a second press on the same dots one toggle rather than
             // two, and what stops the block underneath from re-hovering.

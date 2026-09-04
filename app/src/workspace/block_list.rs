@@ -198,6 +198,14 @@ pub struct BlockList {
     /// element the workspace builds, and what the list does with the fact is
     /// keep the block's controls painted under it.
     menu: Option<BlockId>,
+    /// Whether there is a menu to open at all, which is whether anything has
+    /// contributed to the slot it is drawn from.
+    ///
+    /// A list built without one draws the copy square alone, in the place the
+    /// square has when it is the only control — so switching
+    /// [`crook/blocks`](crate::plugins::blocks) off leaves no gap where its
+    /// button was.
+    menu_available: bool,
 }
 
 /// Where one item's rows are painted, and which of them are on screen.
@@ -245,6 +253,7 @@ impl BlockList {
             output: Output::detached(),
             links: None,
             menu: None,
+            menu_available: false,
             size: None,
             origin: None,
             window: Vec::new(),
@@ -460,10 +469,16 @@ impl BlockList {
         let top = (item.top.max(0.) + CONTROL_OFFSET)
             .min(lowest)
             .max(item.top.max(0.));
-        let from_right = match control {
-            Control::Menu => CONTROL_INSET,
-            Control::Copy => CONTROL_INSET + CONTROL_SIZE + CONTROL_GAP,
-        };
+        // Counted from the outermost control inwards, so that a list with no
+        // menu puts its copy square where the menu's dots would have been
+        // rather than leaving a hole out at the pane's edge.
+        let from_end = self
+            .controls()
+            .iter()
+            .rev()
+            .position(|drawn| *drawn == control)
+            .unwrap_or(0) as f32;
+        let from_right = CONTROL_INSET + from_end * (CONTROL_SIZE + CONTROL_GAP);
 
         RectF::new(
             origin + vec2f(size.x() - from_right - CONTROL_SIZE, top),
@@ -490,7 +505,7 @@ impl BlockList {
         if item.index == self.live_index() {
             return None;
         }
-        let control = [Control::Copy, Control::Menu].into_iter().find(|control| {
+        let control = self.controls().iter().copied().find(|control| {
             self.control_at(bounds.origin(), *item, *control)
                 .contains_point(position)
         });
@@ -564,11 +579,22 @@ impl BlockList {
         self
     }
 
-    /// Says which block's menu is up over this list, so its controls stay
-    /// drawn under it.
-    pub fn with_menu(mut self, block: Option<BlockId>) -> Self {
-        self.menu = block;
+    /// Says whether a block can be given a menu at all, and which block's is
+    /// up — so the block under an open menu keeps its controls drawn beneath
+    /// it.
+    pub fn with_menu(mut self, available: bool, open_on: Option<BlockId>) -> Self {
+        self.menu_available = available;
+        self.menu = open_on.filter(|_| available);
         self
+    }
+
+    /// The controls a hovered block carries, outermost last.
+    fn controls(&self) -> &'static [Control] {
+        if self.menu_available {
+            &[Control::Copy, Control::Menu]
+        } else {
+            &[Control::Copy]
+        }
     }
 
     /// The link under the pointer, or `None`.
@@ -1208,7 +1234,7 @@ impl BlockList {
             return;
         };
 
-        for control in [Control::Copy, Control::Menu] {
+        for control in self.controls().iter().copied() {
             let bounds = self.control_at(origin, *item, control);
             // The dots stay lit while their menu is up, because they are what
             // it belongs to.

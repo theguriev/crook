@@ -8936,6 +8936,131 @@ mod shells {
             );
         }
 
+        /// Every plugin a release binary carries except the one that owns the
+        /// block menu.
+        fn without_the_menu() -> Vec<Box<dyn crate::plugin::Plugin>> {
+            let blocks = crook_plugin::PluginId::parse("crook/blocks").expect("a literal");
+            let mut plugins = crate::plugins::defaults();
+            plugins.retain(|plugin| plugin.manifest().id != blocks);
+            plugins
+        }
+
+        /// A plugin that is not in the box and puts one entry in the menu.
+        ///
+        /// The proof the slot is a seam rather than a way of writing Crook's
+        /// own four groups down: this one is a stranger to every module the
+        /// menu is built from, and it reaches the same list.
+        struct Probe;
+
+        impl crate::plugin::Plugin for Probe {
+            fn manifest(&self) -> &'static crook_plugin::Manifest {
+                static MANIFEST: std::sync::OnceLock<crook_plugin::Manifest> =
+                    std::sync::OnceLock::new();
+                MANIFEST.get_or_init(|| crook_plugin::Manifest {
+                    schema: crook_plugin::Manifest::SCHEMA,
+                    id: crook_plugin::PluginId::parse("eugen/probe").expect("a literal"),
+                    name: "Probe",
+                    description: "A plugin that exists to be looked at.",
+                    version: "0.1.0",
+                    tier: crook_plugin::Tier::Native,
+                    capabilities: &[],
+                })
+            }
+
+            fn build(
+                &mut self,
+                host: &mut crate::plugin::Host,
+                _: &mut ViewContext<Workspace>,
+            ) -> Result<(), crate::plugin::BuildError> {
+                host.contribute(
+                    crate::plugins::blocks::BLOCK_MENU,
+                    "probe",
+                    5,
+                    |workspace, _| {
+                        Text::new("Probe this block", workspace.fonts().ui, 12.)
+                            .with_color(theme().text_primary)
+                            .finish()
+                    },
+                );
+                Ok(())
+            }
+        }
+
+        #[test]
+        fn what_a_plugin_puts_in_the_menu_is_drawn_in_it() {
+            // `block.menu` is the first surface in the application that is
+            // about the work rather than about the window, and this is the
+            // whole claim: a plugin nothing in the menu's own modules knows
+            // about is drawn in it, in its own group, under a rule.
+            let mut plugins = crate::plugins::defaults();
+            plugins.push(Box::new(Probe));
+            let mut harness = Harness::with_plugins(1, Settings::ephemeral(), plugins);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, "echo ALPHA") == 0 {
+                return;
+            }
+
+            let scene = open_block_menu(&mut harness, pane, 0);
+            let popup = block_menu_box(&scene);
+            let lines: Vec<String> = text_lines(&scene, |at| {
+                at.x() >= popup.min_x() && at.x() <= popup.max_x()
+            })
+            .into_iter()
+            .map(|(_, line)| line.trim().to_owned())
+            .collect();
+
+            assert!(
+                lines.iter().any(|line| line == "Probe this block"),
+                "the plugin's entry is not in the menu: {lines:?}"
+            );
+            // At order 5, which is between Crook's own copy group and the
+            // facts under it — a plugin can land between two of them rather
+            // than only at the ends.
+            let probe = lines.iter().position(|line| line == "Probe this block");
+            let facts = lines
+                .iter()
+                .position(|line| line == "Copy working directory");
+            assert!(
+                probe < facts,
+                "the slot's order did not decide where it went: {lines:?}"
+            );
+        }
+
+        #[test]
+        fn a_block_carries_no_dots_when_nothing_puts_anything_in_the_menu() {
+            // Switching the plugin that owns the menu off has to take its
+            // control with it. A button that opened an empty popup would be
+            // the plugin still on screen after it was gone.
+            let mut harness = Harness::with_plugins(1, Settings::ephemeral(), without_the_menu());
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, "echo ALPHA") == 0 {
+                return;
+            }
+
+            let panel = panel_of_the_pane(&mut harness);
+            let scene = hover_block(&mut harness, pane, 0);
+            let controls = block_controls(&scene, panel);
+            assert_eq!(controls.len(), 1, "the copy square, and nothing beside it");
+            assert!(
+                icons_in(&scene, controls[0], Lucide::EllipsisVertical).is_empty(),
+                "the dots are drawn with no menu behind them"
+            );
+
+            harness.workspace_update(|workspace, ctx| {
+                assert!(
+                    !workspace.open_block_menu_at(pane, 0, ctx),
+                    "a menu with nothing in it opened anyway"
+                );
+            });
+            assert!(!harness.a_popup_is_open());
+        }
+
         #[test]
         fn the_dots_open_a_menu_that_copies_the_command_and_the_output_apart() {
             // The whole of what a block menu is for: the two halves of a block

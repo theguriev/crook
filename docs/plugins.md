@@ -81,6 +81,21 @@ description of something that was never built.
     against it answer in a table lookup and a boolean; a slot per *block* would be the same
     arithmetic against a list that is thousands long, and would need something this does not
     have.
+  - The **menu on a block** is a slot: `block.menu`, declared by `crook/blocks`, whose own
+    four groups — the copies, the two facts, running the command again, the two scrolls — go
+    in through the same door a stranger's would. It is the first surface in the application
+    that is about *the work* rather than about the window: the header is one chip and a
+    settings page is a page, and neither of them knows what a person is looking at. The unit
+    of the slot is a *group* rather than an entry, and the menu draws a hairline between
+    contributions, so what a plugin adds arrives together and under a rule of its own instead
+    of interleaved with Crook's, where it would read as something the terminal does. Nothing
+    declaring the slot means no menu and no dots on a block to open one with, which is what a
+    plugin being switched off has to mean.
+
+    **It is not a slot per block**, which the paragraph above warns about: it is drawn
+    once, for the one menu that is open, and only while it is up. A sandboxed contribution
+    to it costs one guest call per frame for as long as somebody is reading a menu, which
+    is the header's arithmetic rather than the panel's.
   - Still to move: the worktree menu, the Themes panel, the Omarchy palettes.
   - `crook/tabs` owns `tab.menu.entries`, and a tab's secondary press opens a *place*
     rather than a feature. The menu it opens knows no entry by name: four of them are

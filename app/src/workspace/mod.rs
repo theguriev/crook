@@ -25,7 +25,7 @@
 
 mod action;
 mod block_list;
-mod block_menu;
+pub(crate) mod block_menu;
 mod body;
 mod controls;
 mod header_toolbar;

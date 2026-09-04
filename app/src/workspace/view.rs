@@ -245,7 +245,7 @@ impl MenuState {
 /// underlay is over the window. It is the same reason the worktree menu reads
 /// its repository once.
 #[derive(Default)]
-pub(super) struct BlockMenuState {
+pub(crate) struct BlockMenuState {
     /// Whose list the menu is up on, and which block of it.
     pub(super) on: Option<(PaneId, BlockId)>,
     /// The branch the block's directory was on when the menu opened, when it
@@ -1271,8 +1271,22 @@ impl Workspace {
     }
 
     /// The menu a block opens, which is about that block.
-    pub(super) fn block_menu(&self) -> &BlockMenuState {
+    pub(crate) fn block_menu(&self) -> &BlockMenuState {
         &self.block_menu
+    }
+
+    /// Whether anything has put a group in the block menu.
+    ///
+    /// The dots are drawn only where the answer is yes, and opening the menu
+    /// is refused where it is no. Nothing declares the slot when
+    /// [`crook/blocks`](crate::plugins::blocks) is switched off, and a control
+    /// that opened an empty popup would be a plugin that was disabled and left
+    /// its button behind.
+    pub(super) fn block_menu_is_available(&self) -> bool {
+        !self
+            .host
+            .slots()
+            .is_empty(crate::plugins::blocks::BLOCK_MENU)
     }
 
     /// The Themes panel's state.
@@ -2142,6 +2156,12 @@ impl Workspace {
     fn open_block_menu(&mut self, pane: PaneId, block: BlockId, ctx: &mut ViewContext<Self>) {
         if self.block_menu.on == Some((pane, block)) {
             self.close_block_menu(ctx);
+            return;
+        }
+        if !self.block_menu_is_available() {
+            // Nothing to show. The dots are not drawn either, so this is the
+            // keyboard's and the command line's way in rather than the
+            // pointer's.
             return;
         }
 
