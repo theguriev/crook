@@ -4,7 +4,7 @@
 //!
 //! Settings are not a modal and are not a tab. They are one of the buttons at
 //! the foot of the panel: pressing it puts the rail of pages where the tab
-//! list was and the page itself where the panes were, and pressing `Agents`
+//! list was and the page itself where the panes were, and pressing `Sessions`
 //! puts the work back. They were a pane once — Warp's design, and the right
 //! one for Warp, where the thing you are configuring stays on screen while you
 //! configure it — and `crook/settings` says what replaced it and why.
@@ -136,7 +136,7 @@ pub(crate) fn keyed(group: &str, value: impl fmt::Debug) -> Control {
 /// Whether the settings are *showing* is not here: which section the sidebar
 /// has chosen is that answer, and a flag beside it would be a second copy of
 /// it to keep true. What is here outlives the section on purpose — going to
-/// the Agents and coming back lands on the page you were on, scrolled where
+/// the sessions and coming back lands on the page you were on, scrolled where
 /// you left it, which is what Warp's per-window pane manager buys by holding
 /// its view handle across a close.
 #[derive(Default)]
