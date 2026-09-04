@@ -63,12 +63,15 @@
 //!
 //! * **Escape** is Cancel: back to the list from the creator and from the
 //!   confirmation, and down from the list itself. One key, one step back.
-//! * **Enter** is Create, in the creator only. The name is selected the moment
-//!   the creator opens, so making a worktree is a name and a press.
+//! * **Enter** is the button that face leads with: Create in the creator,
+//!   where the name is selected the moment it opens so making a worktree is a
+//!   name and a press, and Remove in the confirmation, which is a question
+//!   already asked once and answered with the pointer that opened it.
 //!
-//! Enter does nothing in the confirmation. Removing a checkout is the only
-//! destructive thing here, and it is not a thing to hand to the key beside
-//! the one that dismisses dialogs.
+//! Enter stops at the second question. When git refuses over local work the
+//! button becomes "Remove anyway", and that one stays a click: a person who
+//! pressed Enter and got a warning back should not be able to delete the work
+//! it warns about by pressing the same key again.
 //!
 //! # Reading git off the frame
 //!

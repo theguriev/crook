@@ -3444,11 +3444,11 @@ fn the_creator_answers_enter_with_its_button_and_escape_with_cancel() {
 }
 
 #[test]
-fn escape_takes_the_menu_down_and_enter_never_removes_a_checkout() {
-    // The other two answers. Escape on the list is the press outside it; Enter
-    // on the confirmation is nothing at all, and that is the point: the
-    // destructive button is the one thing in this menu the keyboard does not
-    // reach, so nobody deletes a checkout by dismissing a dialog too fast.
+fn escape_takes_the_menu_down_and_enter_removes_the_checkout() {
+    // The other two answers. Escape on the list is the press outside it, and
+    // Enter on the confirmation is its Remove — the face a person got to by
+    // pressing an × and reading a question has a keyboard as well as a
+    // pointer.
     let scratch = Scratch::new();
     let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
         eprintln!("skipped: no git here to make a repository with");
@@ -3495,11 +3495,6 @@ fn escape_takes_the_menu_down_and_enter_never_removes_a_checkout() {
         "the confirmation did not open"
     );
 
-    assert_eq!(
-        harness.action_for("enter", Modifiers::default()),
-        None,
-        "enter is bound to the button that deletes a checkout"
-    );
     assert!(
         harness.press_key("escape", Modifiers::default()),
         "escape was not claimed by the confirmation"
@@ -3507,6 +3502,13 @@ fn escape_takes_the_menu_down_and_enter_never_removes_a_checkout() {
     assert!(
         !harness.worktree_menu_is_confirming(),
         "escape did not leave the confirmation"
+    );
+    assert!(
+        crate::git::worktree::list(&repository)
+            .expect("the repository still lists")
+            .len()
+            == 2,
+        "backing out of the confirmation removed the checkout anyway"
     );
 
     // And from the list itself, one more press puts the menu away.
@@ -3518,12 +3520,111 @@ fn escape_takes_the_menu_down_and_enter_never_removes_a_checkout() {
         !harness.a_popup_is_open(),
         "escape did not take the menu down"
     );
+
+    // Then the same question again, answered with the other key. A clean
+    // checkout is one git removes without a second question, so this press is
+    // the whole of it.
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("both checkouts to be read", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    let index = harness
+        .worktree_index_under(&store)
+        .expect("the checkout that was made is not in the menu");
+    harness.dispatch_worktree(WorktreeAction::AskRemove(index));
     assert!(
+        harness.press_key("enter", Modifiers::default()),
+        "enter was not claimed by the confirmation"
+    );
+    harness.wait_for("the checkout to go", |_| {
+        crate::git::worktree::list(&repository)
+            .map(|worktrees| worktrees.len() == 1)
+            .unwrap_or(false)
+    });
+}
+
+#[test]
+fn enter_does_not_remove_a_checkout_git_has_already_refused() {
+    // The second question, which the keyboard does not answer. git declines to
+    // throw away work nobody asked it to throw away, and the button that then
+    // says "Remove anyway" is the one destructive thing in this menu that
+    // stays a click: a person who pressed Enter and was answered with a
+    // warning must not be able to delete what it warns about by pressing the
+    // same key again.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let tab = harness.active_id();
+    let first = harness.pane_ids()[0];
+    harness.update_session(first, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(first, "main", None);
+    harness.frame();
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    harness.dispatch_worktree(WorktreeAction::Create);
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.pane_ids().len() > 1
+    });
+    let made = harness
+        .focused_pane_id()
+        .expect("the split focused its pane");
+    harness.dispatch_action(TabAction::ClosePane(made));
+
+    // The work git will refuse over: one file that is in the checkout and in
+    // nothing else.
+    let checkout = crate::git::worktree::list(&repository)
+        .expect("the repository lists")
+        .into_iter()
+        .map(|worktree| worktree.path)
+        .find(|path| path.starts_with(&store))
+        .expect("nothing was checked out under the store");
+    std::fs::write(checkout.join("unsaved.txt"), "work").expect("the checkout is writable");
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("both checkouts to be read", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    let index = harness
+        .worktree_index_under(&store)
+        .expect("the checkout that was made is not in the menu");
+    harness.dispatch_worktree(WorktreeAction::AskRemove(index));
+    assert!(
+        harness.press_key("enter", Modifiers::default()),
+        "enter was not claimed by the confirmation"
+    );
+    harness.wait_for("git to refuse over the work in there", |harness| {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.worktree_menu_was_refused()
+        })
+    });
+
+    assert_eq!(
+        harness.action_for("enter", Modifiers::default()),
+        None,
+        "enter is bound to the button that deletes work git refused to delete"
+    );
+    assert_eq!(
         crate::git::worktree::list(&repository)
             .expect("the repository still lists")
-            .len()
-            == 2,
-        "a checkout went missing on the way through the keyboard"
+            .len(),
+        2,
+        "the checkout went with a second press of the same key"
+    );
+    assert!(
+        checkout.join("unsaved.txt").exists(),
+        "the work in the checkout went with it"
     );
 }
 
