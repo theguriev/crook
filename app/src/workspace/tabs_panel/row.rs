@@ -42,7 +42,7 @@ use crate::settings::{Density, Granularity, TabOptions};
 use crate::tab::{AgentStatus, PaneId, TabAction, TabId};
 use crate::theme::theme;
 
-use super::super::action::WorkspaceAction;
+use super::super::action::{WorkspaceAction, WorktreeAction};
 use super::super::row_content::{
     Chips, DetailSection, PANEL_PATH_CHARS, RowFacts, detail_card, detail_panes, metadata_line,
 };
@@ -125,6 +125,16 @@ pub(super) fn render(
     let status = pane_data.status();
     let home = workspace.home();
 
+    // What the row's own click does, and whether the menu it opens is up. See
+    // the strip's row: the rule is the same in both layouts because it is
+    // about the tab rather than about how the tab is drawn.
+    let is_the_tabs_row = tab_data.panes().focused_id() == pane;
+    let menu_is_open = is_the_tabs_row && workspace.tab_menu().tab == Some(tab);
+    let opens_menu = menu_is_open
+        || (workspace.tabs().is_active(tab)
+            && is_the_tabs_row
+            && git.is_some_and(|facts| facts.branch.is_some()));
+
     // A conjunction, and that is the whole of what `Panes` granularity is for:
     // the active tab's container is lifted while only its focused pane's row
     // is selected, so "which tab" and "which pane" stay two separate signals.
@@ -194,7 +204,13 @@ pub(super) fn render(
         if guard.lock().is_hovered() {
             return;
         }
-        ctx.dispatch_typed_action(WorkspaceAction::Tab(TabAction::FocusPane(pane)));
+        // The row you are already in opens its menu. See the strip's own
+        // click, which is the same rule.
+        ctx.dispatch_typed_action(if opens_menu {
+            WorkspaceAction::Worktree(WorktreeAction::OpenMenu(tab))
+        } else {
+            WorkspaceAction::Tab(TabAction::FocusPane(pane))
+        });
     })
     .on_middle_click(move |_, ctx, _| {
         ctx.dispatch_typed_action(WorkspaceAction::Tab(close_action));
@@ -203,6 +219,23 @@ pub(super) fn render(
         ctx.dispatch_typed_action(WorkspaceAction::HoverRow { pane, entered });
     })
     .finish();
+
+    if menu_is_open {
+        // Below the row and inside the panel. Beside it — where the card goes
+        // — would put a 260px menu over the body, which is the same argument
+        // that right-aligns the gear's menu in this column.
+        let mut stack = Stack::new().with_child(element);
+        stack.add_anchored_overlay_child(
+            Dismiss::new(super::super::tab_menu::render(workspace))
+                .modal()
+                .on_dismiss(|ctx, _| {
+                    ctx.dispatch_typed_action(WorkspaceAction::Worktree(WorktreeAction::CloseMenu));
+                })
+                .finish(),
+            AnchorTo::below(vec2f(0., 4.)),
+        );
+        return stack.finish();
+    }
 
     if !workspace.shows_details_for(pane) {
         return element;

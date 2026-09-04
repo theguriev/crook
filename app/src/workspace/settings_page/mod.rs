@@ -63,7 +63,6 @@
 //! so there is nothing to alert about, and the path is on the About page for
 //! anyone who wants to open it themselves.
 
-mod field;
 mod pages;
 mod search;
 mod widgets;
@@ -90,6 +89,10 @@ use super::view::Workspace;
 /// has a 160px rail in front of it. Past it a row's label and its control end
 /// up so far apart that the eye loses which control belongs to which row.
 const CONTENT_MAX_WIDTH: f32 = 560.;
+
+/// What the rail's search box says while nothing has been typed. Warp's word,
+/// and there is only one word this box can say.
+const SEARCH_PLACEHOLDER: &str = "Search";
 
 /// The rail down the left edge.
 ///
@@ -376,12 +379,14 @@ fn rail(
 
     column.add_child(
         Container::new(
-            field::SearchField::new(
+            super::text_field::TextField::new(
                 state.search.clone(),
                 workspace.clipboard().clone(),
                 workspace.fonts(),
                 state.control(Control::Search),
+                SEARCH_PLACEHOLDER,
             )
+            .with_icon(Lucide::Search)
             .finish(),
         )
         .with_margin_bottom(10.)

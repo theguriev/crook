@@ -35,9 +35,11 @@ mod pane_output;
 mod row_content;
 mod settings_page;
 mod tab_bar;
+mod tab_menu;
 mod tab_options_menu;
 mod tabs_panel;
 mod terminal_element;
+mod text_field;
 mod theme_panel;
 mod theme_preview;
 mod title_bar;
@@ -51,7 +53,9 @@ use crookui_core::icons::Lucide;
 
 use crate::theme::theme;
 
-pub use action::{OptionsAction, SettingsAction, ThemeAction, WindowAction, WorkspaceAction};
+pub use action::{
+    OptionsAction, SettingsAction, ThemeAction, WindowAction, WorkspaceAction, WorktreeAction,
+};
 pub use block_list::BlockList;
 pub use input_element::CommandInput;
 pub use pane_output::{Keys, Output};

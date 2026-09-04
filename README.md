@@ -15,7 +15,7 @@ dropped, and why.
 
 ## v1 scope
 
-Six features, and the page that configures them:
+Seven features, and the page that configures them:
 
 - **Tabs.** Open, close, switch, reorder. One agent session per tab, with a derived title.
   They live in a panel down the left edge or in a strip across the header, and the gear menu
@@ -120,6 +120,17 @@ Six features, and the page that configures them:
   of the one you are looking at — five candidate colours clustered out of its palette, one
   click to choose the background, and everything else decided so the result is legible. What
   it writes is a file in your themes folder, in the same format as any other.
+- **Git worktrees, one click away.** Click the tab you are already in and, if it is inside a
+  repository, its menu lists that repository's checkouts: the one this tab is in, the ones
+  other tabs are in, and the rest. Choosing one opens a tab there — or brings forward the tab
+  already in it, because two agents editing one checkout is exactly what a worktree exists to
+  prevent. `New worktree…` asks for a branch name, fills one in that nothing is using, shows
+  where the checkout will go, and opens a tab in it. Removal is offered only for a checkout
+  that is not locked, not the main one, and not one a tab is working in; it says what it will
+  delete first, and it never deletes the branch. Checkouts go in a store of Crook's own —
+  neither inside the repository, where git will happily let you put one and every build and
+  every search then trips over it, nor beside it in a directory somebody else laid out.
+
 - **A settings page**, which opens the way a shell does: `cmd/ctrl-,` — or the gear menu's
   last entry — puts it in a **tab of its own**, listed in the strip beside the work it
   configures, splittable next to that work, and closed by the same × and the same close chord

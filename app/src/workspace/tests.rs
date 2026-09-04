@@ -37,7 +37,7 @@ use crate::window_controls::{Recorder, Request, WindowState};
 
 use super::{
     Fonts, OptionsAction, QuitRequest, Section, SettingsAction, ThemeAction, Workspace,
-    WorkspaceAction, controls, settings_page, tab_options_menu, tabs_panel,
+    WorkspaceAction, WorktreeAction, controls, settings_page, tab_options_menu, tabs_panel,
 };
 
 /// Big enough that two tabs both reach their maximum width, so the geometry
@@ -523,9 +523,41 @@ impl Harness {
             .read(&self.app, |workspace, _| workspace.settings_search_text())
     }
 
+    /// Whether the menu is asking about removing a checkout.
+    fn worktree_menu_is_confirming(&self) -> bool {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.worktree_menu_is_confirming()
+        })
+    }
+
+    /// Whether the menu is making a worktree.
+    fn worktree_menu_is_creating(&self) -> bool {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.worktree_menu_is_creating()
+        })
+    }
+
+    /// How many worktrees the menu has read, if it has finished reading.
+    fn worktrees_listed(&self) -> Option<usize> {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.worktrees_listed())
+    }
+
+    /// What one of the worktree menu's controls dispatches.
+    fn dispatch_worktree(&mut self, action: WorktreeAction) {
+        self.dispatch_workspace_action(WorkspaceAction::Worktree(action));
+    }
+
     /// Shows a different page, the way a click on the rail does.
     fn select_settings_section(&mut self, section: Section) {
         self.dispatch_workspace_action(WorkspaceAction::Settings(SettingsAction::Select(section)));
+    }
+
+    /// Whether any popup is up, which is the one question five parts of the
+    /// window ask before deciding what a key or a hover means.
+    fn a_popup_is_open(&self) -> bool {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.a_popup_is_open())
     }
 
     fn is_settings_page_open(&self) -> bool {
@@ -2776,6 +2808,384 @@ fn every_mark_in_the_chrome_is_an_icon_rather_than_a_codepoint() {
             "{codepoint:?} is still being drawn as text"
         );
     }
+}
+
+/// A git repository in `directory`, or `None` where git is not installed.
+///
+/// One commit, because `git worktree list` on a repository with no commits at
+/// all answers about a checkout with an unborn HEAD — a real state, and not
+/// the one this is testing.
+fn scratch_repository(directory: &Path) -> Option<PathBuf> {
+    fs::create_dir_all(directory).ok()?;
+    let run = |args: &[&str]| {
+        crate::process::command("git")
+            .args(args)
+            .current_dir(directory)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .ok()
+            .filter(std::process::ExitStatus::success)
+    };
+
+    run(&["init", "--quiet"])?;
+    run(&["config", "user.email", "crook@example.invalid"])?;
+    run(&["config", "user.name", "crook"])?;
+    fs::write(directory.join("README"), "worktree test\n").ok()?;
+    run(&["add", "-A"])?;
+    run(&["commit", "--quiet", "-m", "one"])?;
+    Some(directory.to_path_buf())
+}
+
+/// The worktree row whose branch label begins with `prefix`, by its box.
+///
+/// The rows are the menu's only hoverable full-width bands, so a row is found
+/// by the glyphs on it and returned as the band they sit in.
+fn worktree_row_saying(scene: &Scene, prefix: &str) -> RectF {
+    let menu = worktree_menu_box(scene).expect("the menu is not up");
+    let baseline = scene
+        .layers()
+        .flat_map(|layer| layer.glyphs.iter())
+        .filter(|glyph| menu.contains_point(glyph.position))
+        .map(|glyph| glyph.position.y())
+        .find(|y| {
+            text_where(scene, |position| {
+                menu.contains_point(position) && (position.y() - y).abs() < 0.5
+            })
+            .contains(prefix)
+        })
+        .unwrap_or_else(|| panic!("no row of the menu begins with {prefix:?}"));
+
+    RectF::new(
+        vec2f(menu.min_x() + 8., baseline - 3.),
+        vec2f(menu.width() - 16., 6.),
+    )
+}
+
+/// The × a hovered worktree row offers, by its 16px square.
+///
+/// Drawn only while the pointer is on a removable row, so the frame it is
+/// found in has to be one taken with that row hovered.
+fn worktree_remove_cross(scene: &Scene) -> RectF {
+    let menu = worktree_menu_box(scene).expect("the menu is not up");
+    scene
+        .layers()
+        .flat_map(|layer| layer.icons.iter())
+        .filter(|icon| icon.icon_key.icon == Lucide::X)
+        .map(|icon| icon.bounds)
+        .find(|bounds| menu.contains_point(center(*bounds)))
+        .expect("no row offers a ×")
+}
+
+/// The worktree menu the active tab opens, by its popup box.
+///
+/// Found the way the options menu is: the one surface-raised, 6px-rounded box
+/// that is wide enough to be it. The gear's menu is 200 wide and this is 260,
+/// which is what tells the two apart in a frame that could hold either.
+fn worktree_menu_box(scene: &Scene) -> Option<RectF> {
+    visible_rects(scene)
+        .filter(|(rect, _)| {
+            rect.corner_radius.get_top_left() == Radius::Pixels(6.)
+                && rect.background == Fill::Solid(theme().surface_raised)
+                && (rect.bounds.width() - super::tab_menu::MENU_WIDTH).abs() < 0.5
+        })
+        .map(|(_, bounds)| bounds)
+        .next()
+}
+
+#[test]
+fn clicking_the_tab_you_are_already_in_opens_its_worktree_menu() {
+    // The gesture, and the whole of why it is this one: clicking the active
+    // row dispatched `FocusPane` on a pane that was already focused, which
+    // resolved to `Unchanged` and repainted nothing. It was free.
+    let mut harness = Harness::seeded();
+    let scene = harness.frame();
+    assert!(
+        worktree_menu_box(&scene).is_none(),
+        "the menu was up before anything was clicked"
+    );
+
+    let tab = tab_boxes(&scene)[0];
+    harness.click(center(tab), MouseButton::Left);
+
+    assert!(
+        worktree_menu_box(&harness.frame()).is_some(),
+        "the row you are in did not open its menu"
+    );
+}
+
+#[test]
+fn clicking_it_again_takes_the_menu_down() {
+    let mut harness = Harness::seeded();
+    let tab = tab_boxes(&harness.frame())[0];
+
+    harness.click(center(tab), MouseButton::Left);
+    harness.frame();
+    harness.click(center(tab), MouseButton::Left);
+
+    assert!(
+        worktree_menu_box(&harness.frame()).is_none(),
+        "a second click on the same row left the menu up"
+    );
+}
+
+#[test]
+fn a_tab_outside_a_repository_opens_no_menu() {
+    // "If it is under git, there should be worktree options" — and if it is
+    // not, the click goes on doing what it always did. A menu that opened
+    // everywhere and was empty half the time would teach people not to click.
+    let mut harness = Harness::new(1);
+    let scene = harness.frame();
+    let tab = tab_boxes(&scene)[0];
+
+    harness.click(center(tab), MouseButton::Left);
+
+    assert!(
+        worktree_menu_box(&harness.frame()).is_none(),
+        "a tab with no repository behind it opened a worktree menu"
+    );
+}
+
+#[test]
+fn clicking_a_tab_that_is_not_the_active_one_still_just_selects_it() {
+    // The gesture is only free on the row you are already in. Everywhere else
+    // a click is how a person changes tabs, and it must stay that.
+    let mut harness = Harness::seeded();
+    harness.dispatch_action(TabAction::New);
+    let pane = harness.pane_ids()[0];
+    harness.record_git(pane, BRANCH, None);
+    let scene = harness.frame();
+
+    let first = tab_boxes(&scene)[0];
+    harness.click(center(first), MouseButton::Left);
+    let scene = harness.frame();
+
+    assert!(
+        worktree_menu_box(&scene).is_none(),
+        "clicking away from the active tab opened a menu instead of selecting"
+    );
+    assert_eq!(
+        harness.focused_pane_id(),
+        Some(pane),
+        "and it did not select the tab that was clicked"
+    );
+}
+
+#[test]
+fn the_menu_takes_the_keyboard_away_from_the_pane_under_it() {
+    // The rule every popup in this window obeys: while one is up the grid
+    // keeps only the three signal keys, and no field has the keyboard. A menu
+    // that let typing through would be typing into a shell nobody can see.
+    let mut harness = Harness::seeded();
+    let tab = tab_boxes(&harness.frame())[0];
+
+    harness.click(center(tab), MouseButton::Left);
+    harness.frame();
+
+    assert!(
+        harness.a_popup_is_open(),
+        "the menu is up but nothing in the window knows it"
+    );
+}
+
+#[test]
+fn the_menu_reads_the_repository_the_click_landed_on() {
+    // The click, the background read, and the answer arriving — the half of
+    // the path the state-level test below does not go through a pointer for.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(scratch.path()) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+
+    let mut harness = Harness::seeded();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+
+    let tab = tab_boxes(&harness.frame())[0];
+    harness.click(center(tab), MouseButton::Left);
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+
+    assert_eq!(
+        harness.worktrees_listed(),
+        Some(1),
+        "a fresh repository has one checkout"
+    );
+}
+
+#[test]
+fn closing_the_tab_a_menu_is_open_on_takes_the_menu_with_it() {
+    // `tab_menu.tab` *is* the open flag, so a tab that closed under its own
+    // menu would leave a popup nothing can dismiss — and a window where
+    // `a_popup_is_open` is true forever is a window where no pane ever gets
+    // the keyboard again.
+    let mut harness = Harness::seeded();
+    harness.dispatch_action(TabAction::New);
+    let tab = harness.active_id();
+    let pane = harness.focused_pane_id().expect("the new tab has a pane");
+    harness.record_git(pane, BRANCH, None);
+    harness.frame();
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    assert!(harness.a_popup_is_open(), "the menu did not open");
+
+    harness.dispatch_action(TabAction::Close(tab));
+    harness.frame();
+
+    assert!(
+        !harness.a_popup_is_open(),
+        "the menu outlived the tab it was open on"
+    );
+}
+
+#[test]
+fn the_cross_on_a_row_asks_about_removing_it_rather_than_opening_it() {
+    // The × is a descendant of the row, and a `Hoverable` runs its own click
+    // handler whether or not a child already handled the release. Without a
+    // guard the × dispatches `AskRemove` and the row dispatches `Show` on top
+    // of it: the confirmation is unreachable, and a tab opens in the very
+    // checkout somebody was asking to delete. The theme panel paid for this
+    // lesson once already.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    // A second checkout to have something removable: the main one never is.
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(harness.active_id()));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    let before = harness.tab_ids().len();
+    harness.dispatch_worktree(WorktreeAction::Create);
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.tab_ids().len() > before
+    });
+
+    // The tab that opened on it has to go before the × will be offered: a
+    // checkout somebody is working in is exactly the one that must not be
+    // removable, and that rule is what this test would otherwise trip over.
+    harness.dispatch_action(TabAction::Close(harness.active_id()));
+
+    // Back on the first tab's menu, with two checkouts in it now.
+    let first = harness.tab_ids()[0];
+    harness.dispatch_action(TabAction::Select(first));
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(first));
+    harness.wait_for("the repository to be read again", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+
+    // The × is drawn only while the pointer is on a removable row, so the row
+    // has to be hovered before there is anything to click.
+    let scene = harness.frame();
+    harness.move_to(center(worktree_row_saying(&scene, "worktree/")));
+    let scene = harness.frame();
+    let cross = worktree_remove_cross(&scene);
+
+    // Onto the × itself before pressing it, which is what a pointer does and
+    // what the guard reads: the row declines a press the × is hovering over,
+    // exactly as a tab declines one its close button is under.
+    harness.move_to(center(cross));
+    harness.frame();
+
+    let tabs = harness.tab_ids().len();
+    harness.click(center(cross), MouseButton::Left);
+
+    assert!(
+        harness.worktree_menu_is_confirming(),
+        "the × did not open the confirmation"
+    );
+    assert_eq!(
+        harness.tab_ids().len(),
+        tabs,
+        "the row's own click fired too and opened a tab"
+    );
+}
+
+#[test]
+fn making_a_worktree_checks_it_out_and_opens_a_tab_in_it() {
+    // The whole feature with a real repository and a real `git worktree add`
+    // at the end of it: the menu reads the repository, the creator names a
+    // branch nothing is using, git checks it out, and a tab opens whose shell
+    // would start there.
+    //
+    // Asserted against the workspace's own state rather than against pixels.
+    // A glyph under a popup is still in the scene — the tab behind this menu
+    // says "main" too — so a frame cannot answer "has the menu read the
+    // repository" without answering "is that word the row's or the menu's".
+    // The clicks that reach these controls are covered by the tests above.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(harness.active_id()));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    assert_eq!(
+        harness.worktrees_listed(),
+        Some(1),
+        "a fresh repository has one checkout and the menu should say so"
+    );
+
+    let before = harness.tab_ids().len();
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    assert!(
+        harness.worktree_menu_is_creating(),
+        "the creator did not open"
+    );
+
+    harness.dispatch_worktree(WorktreeAction::Create);
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.tab_ids().len() > before
+    });
+
+    // A tab, in a directory that is really there, which git really knows is a
+    // worktree of the repository the menu was opened on.
+    let opened = harness
+        .workspace
+        .read(&harness.app, |workspace, _| workspace.tab_directories())
+        .into_iter()
+        .map(|(_, directory)| directory)
+        .find(|directory| directory.starts_with(&store))
+        .expect("no tab was opened in the new checkout");
+    assert!(opened.is_dir(), "{} was not checked out", opened.display());
+
+    let listed = crate::git::worktree::list(&repository).expect("the repository still lists");
+    assert!(
+        listed.iter().any(|worktree| worktree.path == opened),
+        "git does not know about the checkout that was made: {listed:?}"
+    );
 }
 
 #[test]
