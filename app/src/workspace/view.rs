@@ -829,7 +829,12 @@ impl Workspace {
         self.keymap = keymap;
     }
 
-    pub(super) fn host(&self) -> &Host {
+    /// The plugins, and everything they registered.
+    ///
+    /// `pub` because a plugin's contribution is handed `&Workspace` and the
+    /// registries are what it was contributing to — a palette that could not
+    /// ask what commands exist is a palette with a hard-coded list.
+    pub fn host(&self) -> &Host {
         &self.host
     }
 
@@ -2433,6 +2438,16 @@ impl Workspace {
             return Some(action);
         }
 
+        // A plugin's floating surface, while one is up. Before the bindings
+        // for the same reason the panel is: a palette that is showing owns its
+        // arrow keys, and a keystroke that both moved its selection and did
+        // something to the window would be worse than either. A surface that
+        // does not claim this keystroke lets it fall through, so `cmd-t` still
+        // opens a tab over an open palette.
+        if let Some(action) = self.host.keys_for(keystroke) {
+            return Some(WorkspaceAction::Run(action));
+        }
+
         // The person's own table first, and only where it has something to
         // say: a chord it does not mention keeps Crook's binding, and one it
         // binds to nothing has none at all — which is how a chord is given
@@ -2440,20 +2455,41 @@ impl Workspace {
         // what a *pane* does with a key; see `crate::keymap`.
         let bound = match self.keymap.binding(keystroke) {
             Some(binding) => binding?,
-            None => Bound::Builtin(input_keys::binding(keystroke, Platform::current())?),
+            None => match input_keys::binding(keystroke, Platform::current()) {
+                Some(binding) => Bound::Builtin(binding),
+                // Last, so that a plugin cannot take a chord from the window
+                // or from the person's own file by loading first.
+                None => {
+                    return self.host.suggested_for(keystroke).map(WorkspaceAction::Run);
+                }
+            },
         };
 
-        let bound = match bound {
-            Bound::Builtin(binding) => binding,
+        match bound {
+            Bound::Builtin(binding) => self.command(binding),
             // A plugin's action, resolved now rather than when the file was
             // read: which plugins are loaded is a question with a different
             // answer at every moment. A name nothing answers to is a chord
             // that does nothing, and is not passed on to the pane — a person
             // who bound a chord meant to take it away from the shell.
-            Bound::Named(name) => return self.host.action(&name).map(WorkspaceAction::Run),
-        };
+            Bound::Named(name) => self.host.action(&name).map(WorkspaceAction::Run),
+        }
+    }
 
-        let tab = match bound {
+    /// What one of Crook's own commands does, right now.
+    ///
+    /// Split out of [`Self::action_for`] so that the keyboard is not the only
+    /// way to reach it: `crook/window` registers every one of these under a
+    /// name, and its handlers come back through here. One implementation, two
+    /// entry points — a palette entry and a chord cannot drift apart, which is
+    /// the same rule the mouse and the keyboard already follow.
+    ///
+    /// `None` where the command does not apply — closing a pane when there is
+    /// no focused one. From a chord that means the keystroke goes on to the
+    /// shell, which is what a person pressing a chord the window has no use
+    /// for expects.
+    pub fn command(&self, binding: Binding) -> Option<WorkspaceAction> {
+        let tab = match binding {
             Binding::NewTab => TabAction::New,
             // Warp's `pane_group:close_current_session`: the pane goes, and
             // the tab only goes with it when it was the tab's last one.
@@ -2697,12 +2733,18 @@ impl Workspace {
     /// split, a tab selected, the modal menu opened — because the element that
     /// asks is a frame behind: it was built before whatever moved the focus,
     /// and by the time a keystroke reaches it, what it was told is history.
-    fn sync_input_keys(&self) {
+    ///
+    /// Reachable from a plugin, because a plugin's surface going up or down is
+    /// one of the things that moves the focus and nothing else would say so.
+    pub fn sync_input_keys(&self) {
         // The menu is modal and the Themes panel owns the arrow keys, so
         // neither leaves the keyboard with a pane.
-        let listening = (!self.a_popup_is_open() && !self.panel.open)
-            .then(|| self.tabs.focused_pane_id())
-            .flatten();
+        // A plugin's surface counts exactly as an open menu does: while a
+        // palette is up nothing under it is typing into a shell.
+        let listening =
+            (!self.a_popup_is_open() && !self.panel.open && !self.host.a_surface_is_up())
+                .then(|| self.tabs.focused_pane_id())
+                .flatten();
         for (id, input) in &self.inputs {
             input.set_has_keys(Some(*id) == listening);
         }
@@ -3340,11 +3382,51 @@ impl View for Workspace {
                 .finish(),
         };
 
-        Container::new(content)
+        let window = Container::new(content)
             .with_background_color(theme().ground)
-            .finish()
+            .finish();
+
+        // Anything a plugin floats over the whole window. Anchored children of
+        // a stack whose box *is* the window, so a palette is laid out against
+        // the window rather than against whatever it happens to hang off, and
+        // painted into an overlay layer above every menu the chrome opened.
+        //
+        // Built even when there is nothing showing: a contribution that has
+        // nothing to say returns `Empty`, which lays out to nothing and paints
+        // nothing, and the alternative is the workspace knowing which plugin's
+        // surface is up.
+        let overlays = self
+            .host
+            .slots()
+            .map(crate::plugins::window::WINDOW_OVERLAY, |build| {
+                build(self, app)
+            });
+        if overlays.is_empty() {
+            return window;
+        }
+
+        let mut stack = Stack::new().with_child(window);
+        for overlay in overlays {
+            stack.add_anchored_overlay_child(overlay, OVERLAY_ANCHOR);
+        }
+        stack.finish()
     }
 }
+
+/// Where a plugin's floating surface lands: the window's own top-left corner,
+/// with the surface's top-left on it.
+///
+/// The offset is nothing, so a contribution is placed against the window and
+/// puts itself where it wants inside that — which is the only way a surface
+/// can be centred, since an anchor's offset is a constant and the window's
+/// width is not.
+const OVERLAY_ANCHOR: AnchorTo = AnchorTo {
+    parent: Corner::TopLeft,
+    child: Corner::TopLeft,
+    offset: Vector2F::zero(),
+    keep_on_screen: false,
+    keep_clear_of_parent: false,
+};
 
 impl Workspace {
     /// `work` with the Themes panel beside it, when the panel is up.

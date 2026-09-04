@@ -54,7 +54,7 @@ use crate::theme::theme;
 use super::view::Fonts;
 
 /// The field's height, which is the rail's row height plus its padding.
-pub(super) const HEIGHT: f32 = 26.;
+pub(crate) const HEIGHT: f32 = 26.;
 
 /// The type size, matching the rail's own rows.
 const TEXT_SIZE: f32 = 12.;
@@ -70,7 +70,7 @@ const PADDING: f32 = 7.;
 const CARET_WIDTH: f32 = 1.5;
 
 /// One field.
-pub(super) struct TextField {
+pub struct TextField {
     input: TextInput,
     clipboard: Clipboard,
     fonts: Fonts,
@@ -91,7 +91,7 @@ pub(super) struct TextField {
 
 impl TextField {
     /// A field over `input`, which is where everything typed into it lives.
-    pub(super) fn new(
+    pub fn new(
         input: TextInput,
         clipboard: Clipboard,
         fonts: Fonts,
@@ -113,7 +113,7 @@ impl TextField {
     }
 
     /// Puts a mark at the field's left edge.
-    pub(super) fn with_icon(mut self, icon: Lucide) -> Self {
+    pub fn with_icon(mut self, icon: Lucide) -> Self {
         self.icon = Some(icon);
         self
     }

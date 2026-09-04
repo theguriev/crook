@@ -140,3 +140,65 @@ fn unloading_a_plugin_takes_its_contribution_off_the_header() {
         assert!(!host.loaded().iter().any(|manifest| manifest.id == usage));
     });
 }
+
+#[test]
+fn disabling_a_plugin_takes_its_commands_and_its_chord_with_it() {
+    // Everything a plugin registered goes back out together, or a palette
+    // keeps offering a row that does nothing and a chord keeps reaching an
+    // action nobody answers to.
+    with_host(|host| {
+        let window = PluginId::parse("crook/window").expect("a literal that parses");
+        let open_a_tab = ActionName::parse("crook/window/new-tab").expect("a literal");
+        assert!(
+            host.commands()
+                .iter()
+                .any(|(_, name, _)| *name == open_a_tab)
+        );
+
+        host.unload(&window);
+
+        assert!(
+            !host.commands().iter().any(|(by, _, _)| *by == window),
+            "a disabled plugin is still offering commands"
+        );
+        assert!(
+            host.action(&open_a_tab).is_none(),
+            "a disabled plugin's action still answers"
+        );
+    });
+}
+
+#[test]
+fn a_surface_that_is_down_claims_nothing() {
+    // The palette claims Escape while it is up. Nothing is up in a host
+    // nobody has opened anything on, so Escape belongs to whatever is under
+    // it — which is the difference between a modal and a keyboard grab.
+    with_host(|host| {
+        assert!(!host.a_surface_is_up());
+        assert!(
+            host.keys_for(&crookui_core::event::Keystroke::new(
+                "escape",
+                crookui_core::event::Modifiers::default()
+            ))
+            .is_none()
+        );
+    });
+}
+
+#[test]
+fn a_plugins_chord_is_a_suggestion_and_not_a_claim() {
+    // A plugin cannot take a chord the window owns. `crook/palette` asks for
+    // the palette chord and gets it because nothing else wants it; a plugin
+    // asking for the one that opens a tab would be ignored.
+    with_host(|host| {
+        let palette = ActionName::parse("crook/palette/open").expect("a literal");
+        let chord = if cfg!(target_os = "macos") {
+            "cmd-shift-p"
+        } else {
+            "ctrl-shift-p"
+        };
+        let keystroke = crate::keymap::parse_chord(chord).expect("a chord");
+
+        assert_eq!(host.suggested_for(&keystroke), host.action(&palette));
+    });
+}
