@@ -37,6 +37,8 @@ pub use crook_plugin::{
     Slots, Tier,
 };
 
+use crook_plugin_api::Event;
+
 use crate::keybindings::{Rule, Source, rule_from};
 use crate::plugins::tabs::TabRow;
 use crate::workspace::{Category, Fonts, Workspace};
@@ -173,6 +175,16 @@ impl Showing {
 /// then to the pane.
 pub type KeyClaim = Box<dyn Fn(&Keystroke) -> Option<ActionName>>;
 
+/// What a plugin does when something it is watching happens.
+///
+/// Shaped like [`ActionHandler`] and dispatched like one, because it is the
+/// same thing arriving for a different reason: something outside the plugin
+/// happened, and the plugin gets the workspace and a context to answer it
+/// with. Behind an [`Rc`] so a dispatch can take a handle and let go of the
+/// host before it calls anything — a watcher that reached back into the host
+/// while the host was lending out its list would be a borrow inside a borrow.
+pub type CommandWatcher = Rc<dyn Fn(&mut Workspace, &Event, &mut ViewContext<Workspace>)>;
+
 /// A registered action, as something `Copy`.
 ///
 /// [`WorkspaceAction`](crate::workspace::WorkspaceAction) is compared by value
@@ -256,6 +268,12 @@ pub struct Host {
     /// The floating surfaces plugins own, and what each does with a keystroke
     /// while it is up.
     surfaces: Vec<(PluginId, Showing, KeyClaim)>,
+    /// Who asked to be told when a command finishes.
+    ///
+    /// A list rather than a slot: nobody *owns* the fact that a command ended,
+    /// every watcher hears it, and the order they hear it in is load order
+    /// because there is nothing better to sort it by.
+    watchers: Vec<(PluginId, CommandWatcher)>,
     /// Whose registrations are being made right now. Set around each plugin's
     /// `build` so a plugin cannot register in another's name by accident.
     building: Option<PluginId>,
@@ -298,6 +316,7 @@ impl Host {
             commands: Vec::new(),
             suggested: Vec::new(),
             surfaces: Vec::new(),
+            watchers: Vec::new(),
             building: None,
             kept: Vec::new(),
             plugins: Vec::new(),
@@ -644,6 +663,26 @@ impl Host {
         self.surfaces
             .push((who, showing.clone(), Box::new(keys) as KeyClaim));
         showing
+    }
+
+    /// Asks to be told when a command in a pane finishes.
+    ///
+    /// Whether the plugin is *allowed* to hear it is not checked here: this is
+    /// the registration, and the grant is read where every other grant is —
+    /// by the thing that registers, while it builds. A native plugin has no
+    /// grant to read because a native plugin is the binary.
+    pub fn watch_commands(&mut self, watch: CommandWatcher) {
+        let who = self.who();
+        self.watchers.push((who, watch));
+    }
+
+    /// Handles for every watcher, so a dispatch can call them with the host
+    /// no longer borrowed.
+    pub fn command_watchers(&self) -> Vec<CommandWatcher> {
+        self.watchers
+            .iter()
+            .map(|(_, watch)| Rc::clone(watch))
+            .collect()
     }
 
     /// Whether any plugin's surface is up.

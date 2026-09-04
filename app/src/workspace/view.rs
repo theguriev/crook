@@ -15,6 +15,7 @@ use std::time::Duration;
 /// all while the panel is closed — see [`Workspace::watch_themes`].
 pub(super) const THEMES_POLL: Duration = Duration::from_millis(750);
 
+use crook_plugin_api::Event;
 use crook_terminal::{Rows, Snapshot};
 use crookui_core::elements::MouseStateHandle;
 use crookui_core::event::Keystroke;
@@ -2717,6 +2718,10 @@ impl Workspace {
                 true
             }
             TerminalUpdate::Bell(pane) => self.ring(*pane, ctx),
+            TerminalUpdate::CommandFinished { pane, exit, took } => {
+                self.command_finished(*pane, *exit, *took, ctx);
+                true
+            }
             TerminalUpdate::Completions(pane, serial, answer) => {
                 let Some(input) = self.inputs.get(pane) else {
                     return;
@@ -2732,6 +2737,41 @@ impl Workspace {
             // The pane closed between the shell saying something and the main
             // thread hearing it. Nothing to write it into, and nothing wrong.
             log::debug!("a terminal reported {update:?} for a pane that has gone");
+        }
+    }
+
+    /// Tells every plugin watching that a command ended.
+    ///
+    /// The handles come out of the host first and the host is let go of before
+    /// any of them is called, because a watcher is handed the whole workspace
+    /// and the host is part of it: calling one while the list was still
+    /// borrowed would be a borrow of `self` inside a borrow of `self`. Same
+    /// reason [`Self::apply_action`] takes the actions by handle.
+    fn command_finished(
+        &mut self,
+        pane: PaneId,
+        exit: Option<i32>,
+        took: Option<Duration>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let watchers = self.host.command_watchers();
+        if watchers.is_empty() {
+            return;
+        }
+
+        let event = Event::CommandFinished {
+            // The plugin gets a number it can key on and nothing it could use
+            // to reach the pane; what a `PaneId` *is* is the host's business.
+            pane: pane.as_u64(),
+            // A status that does not fit a byte is one no shell reports: the
+            // wire says `u8` because 0-255 is what a process exits with, and
+            // anything else is better read as "it did not say".
+            exit: exit.and_then(|status| u8::try_from(status).ok()),
+            took_millis: took.map(|took| took.as_millis().min(u128::from(u64::MAX)) as u64),
+        };
+
+        for watch in watchers {
+            watch(self, &event, ctx);
         }
     }
 

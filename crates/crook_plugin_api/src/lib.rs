@@ -47,6 +47,14 @@ use serde::{Deserialize, Serialize};
 /// counts: postcard encodes a variant by its index, so an older host reading a
 /// newer plugin's `Node` would read the wrong variant rather than fail.
 ///
+/// **5** is the version a plugin can be *noticed* in.
+/// [`Capability::PlaySound`] and [`Capability::WatchCommands`], which together
+/// are a plugin that can ring when a command finishes; the
+/// [`Request::PlaySound`] that carries the audio itself rather than a path;
+/// [`Event`], the first thing the host says to a plugin that the plugin did
+/// not ask for; and [`Node::Explained`], which lets one hang what it would
+/// otherwise have to say permanently off the thing it is about.
+///
 /// **4** is the version a plugin can be asked the same question twice in. A
 /// render used to carry a slot name and nothing else, which is enough for a
 /// slot there is one of — the header has one right-hand end — and nothing at
@@ -71,7 +79,7 @@ use serde::{Deserialize, Serialize};
 /// behalf, and the six [`Node`] variants a panel needs. Version 1 could
 /// describe a badge and register an action, which is a plugin that can say
 /// what it already knew.
-pub const ABI_VERSION: u32 = 4;
+pub const ABI_VERSION: u32 = 5;
 
 /// What a sandboxed plugin says about itself, before any of it runs.
 ///
@@ -136,6 +144,22 @@ pub enum Capability {
     /// can be asked for at all: they are a directory of files whose names
     /// nobody knows in advance.
     ReadFiles(Vec<String>),
+    /// Make a sound, by handing the host the audio to play.
+    ///
+    /// The guest never reaches an audio device: it sends bytes with
+    /// [`Request::PlaySound`] and the host plays them, the same shape every
+    /// other request has. What is being granted is *interrupting a person* —
+    /// which is why it is a capability at all, and why the sentence says
+    /// "sound" rather than naming a device nobody has an opinion about.
+    PlaySound,
+    /// Be told when a command in a pane finishes.
+    ///
+    /// Not a sight of what ran: the event carries which pane and how it
+    /// exited, and no command line. Even so it is a capability, because when
+    /// somebody's commands finish and whether they failed is a picture of how
+    /// their day is going, and a plugin that could watch that unasked would be
+    /// one nobody had the chance to refuse.
+    WatchCommands,
 }
 
 impl Capability {
@@ -176,6 +200,8 @@ impl Capability {
                 }
                 sentence
             }
+            Self::PlaySound => "Play a sound".into(),
+            Self::WatchCommands => "Know when a command finishes".into(),
         }
     }
 
@@ -203,6 +229,8 @@ impl Capability {
             Self::Clipboard => vec![String::from("clipboard")],
             Self::Storage => vec![String::from("storage")],
             Self::ReadFiles(paths) => paths.iter().map(|path| format!("file:{path}")).collect(),
+            Self::PlaySound => vec![String::from("sound.play")],
+            Self::WatchCommands => vec![String::from("commands.watch")],
         }
     }
 }
@@ -584,6 +612,24 @@ pub enum Request {
         /// for the hundred megabytes twice.
         tables: Vec<Table>,
     },
+    /// Play a sound. Needs [`Capability::PlaySound`].
+    ///
+    /// The audio travels rather than a path, because a plugin's own chime is
+    /// something it ships and not something on the machine: sending bytes
+    /// costs it no [`Capability::ReadFiles`] over its own directory, and the
+    /// host never resolves a name a guest chose into a file it then opens.
+    ///
+    /// One format, `wav`: the host does not decode audio and has no library
+    /// that could, so what it can hand a player is what every player on every
+    /// platform already reads. Anything else is [`Answer::Failed`].
+    PlaySound {
+        /// A RIFF/WAVE file, whole, as it would sit on disk.
+        wav: Vec<u8>,
+        /// How loud, 0 to 100. Clamped, and best effort: some players cannot
+        /// be told, and the host would rather play at their volume than not
+        /// play.
+        volume: u8,
+    },
 }
 
 /// A floor under one field.
@@ -703,6 +749,48 @@ pub enum Answer {
     Refused(String),
     /// It was granted and attempted, and did not work.
     Failed(String),
+    /// The sound was handed to a player, which is as far as this goes.
+    ///
+    /// Not "the person heard it": the host spawns a player and does not wait
+    /// for it, so what it can honestly report is that something took the
+    /// audio. A plugin that rings twice because it disbelieved this answer
+    /// would be worse than one that trusts it.
+    Played,
+}
+
+/// Something that happened, which a plugin asked to be told about.
+///
+/// The other direction from [`Request`], and the only one there is: a guest
+/// still never reaches anything. The host calls `crook_event` off the frame
+/// path with one of these, on the plugins whose capabilities cover it, and a
+/// plugin that exports no `crook_event` is simply not called.
+///
+/// Deliberately small, and for the reason [`Node`] is: every variant has to be
+/// something Crook already knows, described in terms a plugin can act on
+/// without being told anything about the person using it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Event {
+    /// A command in a pane finished. Needs [`Capability::WatchCommands`].
+    ///
+    /// This is OSC 133 `D` — the shell saying it is done — so it arrives for
+    /// every shell Crook's integration is installed in, and not at all in one
+    /// where it is not. What ran is *not* here: a plugin that wanted to ring
+    /// when something finished does not need the command line, and a plugin
+    /// that had it would be reading somebody's history.
+    CommandFinished {
+        /// Which pane, stable for as long as the pane is open. A plugin that
+        /// keeps state per pane can key on it; it means nothing across runs.
+        pane: u64,
+        /// How it exited, or `None` when the shell reported no status.
+        exit: Option<u8>,
+        /// How long it ran, in milliseconds, or `None` when the boundary that
+        /// started it was never seen.
+        ///
+        /// Here because "ring only for the slow ones" is the first thing
+        /// anybody wants from this and the host is the only side that can
+        /// measure it.
+        took_millis: Option<u64>,
+    },
 }
 
 /// A gap, in units rather than pixels.

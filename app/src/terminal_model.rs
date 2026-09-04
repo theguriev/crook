@@ -174,6 +174,21 @@ pub enum TerminalUpdate {
     /// about the tab strip rather than about the grid: a bell in a pane nobody
     /// is looking at is the only interesting kind.
     Bell(PaneId),
+    /// A command in a pane finished, because the shell said so with OSC 133
+    /// `D`.
+    ///
+    /// Carried up rather than answered here for the same reason the bell is:
+    /// what to do about a command ending is a question about the whole window
+    /// — which plugins are watching, and whether this pane is the one being
+    /// looked at — and the model of one pane cannot see any of that.
+    CommandFinished {
+        /// Which pane it ran in.
+        pane: PaneId,
+        /// The status the shell reported, or `None` when it reported none.
+        exit: Option<i32>,
+        /// How long it ran, timed from the submit.
+        took: Option<Duration>,
+    },
     /// The shell answered a completion request, and this is what it said.
     ///
     /// The serial is the request's, echoed back through the shell: pressing
@@ -771,6 +786,9 @@ impl TerminalModel {
                 // being readable anyway, so this is only ever early notice.
                 TerminalEvent::Exit => log::debug!("the shell in pane {pane:?} asked to close"),
                 TerminalEvent::Bell => updates.push(TerminalUpdate::Bell(pane)),
+                TerminalEvent::CommandFinished { exit, took } => {
+                    updates.push(TerminalUpdate::CommandFinished { pane, exit, took });
+                }
                 // The escape sequence says only that an answer is ready; the
                 // answer itself is a file, in a directory this session owns.
                 TerminalEvent::Completions(serial) => {

@@ -26,6 +26,7 @@
 mod install;
 mod render;
 mod runtime;
+mod sound;
 
 use std::cell::{Cell, RefCell};
 use std::fs;
@@ -35,7 +36,9 @@ use std::rc::Rc;
 use crookui_core::prelude::*;
 
 use crook_plugin::{ActionName, Manifest, PluginId, Tier};
-use crook_plugin_api::{Capability, Node, Place, Render, Status, Subject, TabFacts, TabInfo};
+use crook_plugin_api::{
+    Capability, Event, Node, Place, Render, Status, Subject, TabFacts, TabInfo,
+};
 use crook_wasm::{Fuel, Sandbox};
 
 use crate::plugin::{BuildError, Host, Plugin};
@@ -187,6 +190,23 @@ impl Plugin for WasmPlugin {
         // lands changes what the chip says, and the row around it has to be
         // laid out again.
         ctx.observe(&runtime, |_, _, ctx| ctx.notify());
+
+        // Registered on the grant rather than on the export, so a plugin that
+        // was refused hears nothing at all rather than being handed events it
+        // is not allowed and having them dropped further in. A plugin that
+        // asked and was allowed but exports no `crook_event` registers a watch
+        // that does nothing, which is its own affair.
+        if host
+            .granted(&self.manifest.id)
+            .iter()
+            .any(|key| Capability::WatchCommands.keys().contains(key))
+        {
+            let watching = runtime.clone();
+            host.watch_commands(Rc::new(move |_workspace, event: &Event, ctx| {
+                let event = event.clone();
+                watching.update(ctx, |runtime, ctx| runtime.notify(&event, ctx));
+            }));
+        }
 
         for contribution in registered.contributions {
             let sandbox = self.sandbox.clone();
