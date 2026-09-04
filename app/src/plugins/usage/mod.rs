@@ -32,8 +32,9 @@
 //!
 //! `crook/usage/refresh` is the first thing in Crook that can be asked for by
 //! name. It does what clicking the pill does, and the difference is who can
-//! ask: a line in `keymap.json` reading `"cmd-shift-u": "crook/usage/refresh"`
-//! now works, and did not before, because there was no way to name it. Nothing
+//! ask: a line in `keybindings.json` reading
+//! `{ "key": "shift+cmd+u", "command": "crook/usage/refresh" }` now works, and
+//! did not before, because there was no way to name it. Nothing
 //! about the chip changed to make that true — the action is the seam.
 //!
 //! # The setting is still the poll's switch

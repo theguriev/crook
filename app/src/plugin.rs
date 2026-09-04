@@ -36,7 +36,7 @@ pub use crook_plugin::{
     Slots, Tier,
 };
 
-use crate::keymap::parse_chord;
+use crate::keybindings::{Rule, Source, rule_from};
 use crate::workspace::{Category, Fonts, Workspace};
 
 /// A section of the sidebar: a button at its foot, and what the window shows
@@ -216,11 +216,14 @@ pub struct Host {
     /// to itself are actions and not commands, which is the whole of the
     /// distinction.
     commands: Vec<(PluginId, ActionName, String)>,
-    /// The chords a plugin asked for, consulted after the built-in table.
+    /// The chords a plugin asked for, as the weakest layer of the
+    /// keybindings.
     ///
-    /// *After*, so a plugin cannot take `cmd-t` away from the tabs by loading
-    /// first. A person's own file still wins over both.
-    suggested: Vec<(PluginId, Keystroke, ActionName)>,
+    /// The weakest, so a plugin cannot take `cmd+t` away from the tabs by
+    /// loading first, and a person's own file wins over both. They are
+    /// [`Rule`]s like every other binding — see [`crate::keybindings`] — which
+    /// is what lets a person remove one by name.
+    suggested: Vec<(PluginId, Rule)>,
     /// The floating surfaces plugins own, and what each does with a keystroke
     /// while it is up.
     surfaces: Vec<(PluginId, Showing, KeyClaim)>,
@@ -550,14 +553,16 @@ impl Host {
 
     /// Asks for a chord to reach an action, if nothing else claims it.
     ///
-    /// A *default*, not a binding: a person's own keymap wins, and so does
-    /// every built-in chord, so a plugin cannot take `cmd-t` from the tabs.
-    /// A chord that does not parse is dropped with a line in the log, exactly
-    /// as one in a keymap file is.
+    /// A *default*, not a binding: it is the weakest layer of the keybindings,
+    /// so a person's own file wins and so does every one of the window's own
+    /// chords — a plugin cannot take `cmd+t` from the tabs. The chord is
+    /// written the way a `keybindings.json` line writes one, and one that does
+    /// not parse is dropped with a line in the log, exactly as that line would
+    /// be.
     pub fn suggest_binding(&mut self, chord: &str, action: ActionName) {
         let who = self.who();
-        match parse_chord(chord) {
-            Some(keystroke) => self.suggested.push((who, keystroke, action)),
+        match rule_from(chord, action, Source::Plugin) {
+            Some(rule) => self.suggested.push((who, rule)),
             None => log::warn!("{who} asked for {chord:?}, which is not a chord"),
         }
     }
@@ -600,14 +605,16 @@ impl Host {
         self.action(&name)
     }
 
-    /// The action a plugin asked to put on this chord, if one did.
-    pub fn suggested_for(&self, keystroke: &Keystroke) -> Option<ActionId> {
-        let name = self
-            .suggested
+    /// Every chord the plugins that are loaded asked for.
+    ///
+    /// Handed to the keybindings once the plugins have built, which is the
+    /// only moment this is knowable: a plugin can be switched off, and one
+    /// that failed to load has already had its rules taken back out.
+    pub fn suggested_rules(&self) -> Vec<Rule> {
+        self.suggested
             .iter()
-            .find(|(_, chord, _)| chord == keystroke)
-            .map(|(_, _, action)| action)?;
-        self.action(name)
+            .map(|(_, rule)| rule.clone())
+            .collect()
     }
 
     /// Every action offered under a title, with who owns it.
@@ -737,7 +744,7 @@ impl Host {
     pub fn unload(&mut self, plugin: &PluginId) {
         self.kept.retain(|(by, _)| by != plugin);
         self.commands.retain(|(by, _, _)| by != plugin);
-        self.suggested.retain(|(by, _, _)| by != plugin);
+        self.suggested.retain(|(by, _)| by != plugin);
         self.surfaces.retain(|(by, _, _)| by != plugin);
         self.loaded.retain(|manifest| &manifest.id != plugin);
     }

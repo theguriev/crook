@@ -35,7 +35,7 @@
 //!   Telegram's rule, and the one that makes the box worth a chord: type three
 //!   letters, press Enter, and you are in that tab with the keyboard back in
 //!   the shell.
-//! - **cmd-k**, `ctrl-shift-k` off macOS, is what puts the keyboard *in* the
+//! - **cmd+k**, `ctrl+shift+k` off macOS, is what puts the keyboard *in* the
 //!   box, from anywhere in the window — including from another section of the
 //!   sidebar, which it switches away from first. See
 //!   [`Binding::SearchTabs`](crate::input_keys::Binding::SearchTabs).
@@ -74,12 +74,14 @@ const BOTTOM_GAP: f32 = 6.;
 /// The chord is *in* the placeholder, which is Telegram's "Search (⌘K)" and is
 /// the only place a chord for this can be discovered: the box has no label and
 /// the panel has no menu. Spelled the way every other chord in Crook is
-/// spelled — see the Keys page — rather than in Mac symbols, and spelled per
-/// platform because the two keymaps are not one chord with a modifier swapped.
+/// spelled — the notation `keybindings.json` uses, which is the one the
+/// Keyboard Shortcuts page prints — rather than in Mac symbols, and spelled
+/// per platform because the two keymaps are not one chord with a modifier
+/// swapped.
 fn placeholder() -> &'static str {
     match Platform::current() {
-        Platform::Mac => "Search (cmd-k)",
-        Platform::Other => "Search (ctrl-shift-k)",
+        Platform::Mac => "Search (cmd+k)",
+        Platform::Other => "Search (ctrl+shift+k)",
     }
 }
 

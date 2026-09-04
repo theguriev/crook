@@ -678,6 +678,9 @@ pub(crate) fn current_theme_row(
 /// `monospace` is for the values that are paths: a settings file's location is
 /// something a person copies into a shell, and proportional text turns runs of
 /// slashes and dots into a smear.
+///
+/// A description, where the words carry one, goes on a second line under the
+/// label, exactly as it does on a row with a control.
 pub(crate) fn fact(
     words: Words,
     value: String,
@@ -687,30 +690,42 @@ pub(crate) fn fact(
     let family = if monospace { fonts.monospace } else { fonts.ui };
     let value_text = value.clone();
 
-    let element = Container::new(
-        Flex::row()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_child(
-                Text::new(words.label.clone(), fonts.ui, LABEL_SIZE)
-                    .with_color(theme().text_muted)
-                    .finish(),
-            )
-            .with_child(Expanded::new(1., Empty::new().finish()).finish())
-            .with_child(
-                Text::new(value, family, if monospace { 10.5 } else { LABEL_SIZE })
-                    .with_color(theme().text_primary)
-                    .finish(),
-            )
-            .finish(),
-    )
-    .with_margin_bottom(10.)
-    .finish();
+    let mut column = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_child(
+            Flex::row()
+                .with_main_axis_size(MainAxisSize::Max)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_child(
+                    Text::new(words.label.clone(), fonts.ui, LABEL_SIZE)
+                        .with_color(theme().text_muted)
+                        .finish(),
+                )
+                .with_child(Expanded::new(1., Empty::new().finish()).finish())
+                .with_child(
+                    Text::new(value, family, if monospace { 10.5 } else { LABEL_SIZE })
+                        .with_color(theme().text_primary)
+                        .finish(),
+                )
+                .finish(),
+        );
+
+    // The second line every other row in this file already has. A fact used to
+    // print its label and its value and drop the description on the floor,
+    // which was invisible while the only facts were a version and a path — and
+    // wrong the moment a page had something to say about a row it prints, like
+    // the name a chord is bound by.
+    if let Some(description) = words.description.clone() {
+        column.add_child(description_text(description, fonts.ui));
+    }
 
     Entry {
         words: Some(words),
         value: Some(value_text),
-        element,
+        element: Container::new(column.finish())
+            .with_margin_bottom(10.)
+            .finish(),
     }
 }
 

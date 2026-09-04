@@ -74,6 +74,16 @@ pub enum WorkspaceAction {
     /// because this enum is `Copy` and a name is a `String`; the host resolves
     /// one to the other. See [`ActionId`](crate::plugin::ActionId).
     Run(ActionId),
+    /// The first half of a chord sequence was pressed, and the window is
+    /// waiting for the rest of it.
+    ///
+    /// Nothing happens; the point of the action is that *something* is
+    /// returned, because a keystroke the window has no action for goes on to
+    /// the element under it and from there to the shell. A person spelling
+    /// `ctrl+k ctrl+s` must not have the `ctrl+k` typed into their command
+    /// line while they reach for the second half. See
+    /// [`crate::keybindings`].
+    Chord,
     /// Ask this pane's shell what the word before the caret could become.
     ///
     /// An action rather than a call, for the reason `ReleaseSelection` is one:

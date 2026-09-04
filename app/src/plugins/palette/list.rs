@@ -152,7 +152,7 @@ fn row(
                 .finish(),
         )
         .with_child(Expanded::new(1., Empty::new().finish()).finish())
-        // The name, which is what a person copies into their keymap.
+        // The name, which is what a person copies into their keybindings.
         .with_child(
             Text::new(command.action.to_string(), ui, 10.5)
                 .with_color(theme().text_muted)

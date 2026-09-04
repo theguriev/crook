@@ -184,7 +184,7 @@ pub(super) struct Command {
     /// The name, printed on the right of the row.
     ///
     /// Because it is the only way a person finds out what to write in their
-    /// keymap, and because two plugins may reasonably both offer "Refresh" —
+    /// keybindings file, and because two plugins may reasonably both offer "Refresh" —
     /// the name is what tells them apart.
     pub(super) action: ActionName,
     /// What it is called.

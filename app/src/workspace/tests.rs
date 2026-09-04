@@ -666,15 +666,15 @@ impl Harness {
         })
     }
 
-    /// Reads a keymap out of `text` and puts it in force.
+    /// Reads a keybindings file out of `text` and puts it in force.
     fn bind(&mut self, text: &str) {
         let directory = Scratch::new();
-        let path = directory.path().join("keymap.json");
-        fs::write(&path, text).expect("a scratch keymap");
-        let keymap = crate::keymap::Keymap::load(&path);
-        assert!(!keymap.is_empty(), "nothing in {text:?} was a binding");
+        let path = directory.path().join("keybindings.json");
+        fs::write(&path, text).expect("a scratch keybindings file");
+        let keybindings = crate::keybindings::Keybindings::load(&path);
+        assert!(!keybindings.is_empty(), "nothing in {text:?} was a binding");
 
-        self.workspace_update(|workspace, _| workspace.set_keymap(keymap));
+        self.workspace_update(|workspace, _| workspace.set_keybindings(keybindings));
     }
 
     /// Whether the usage poll chain is meant to be running.
@@ -5381,14 +5381,14 @@ fn the_rail_switches_pages_and_the_pane_shows_the_one_it_names() {
     let rail = settings_rail_boxes(&harness.frame());
     assert_eq!(rail.len(), 5, "five pages in the rail");
 
-    // The fourth: Keys.
+    // The fourth: Keyboard Shortcuts.
     harness.click(center(rail[3]), MouseButton::Left);
-    assert_eq!("Keys", harness.settings_section());
+    assert_eq!("Keyboard Shortcuts", harness.settings_section());
 
     let text = frame_text(&harness.frame());
     assert!(
-        text.contains("Tabs and panes"),
-        "the Keys page did not come up: {text}"
+        text.contains("New agent tab"),
+        "the Keyboard Shortcuts page did not come up: {text}"
     );
     assert!(
         !text.contains("Tab placement"),
@@ -8947,7 +8947,7 @@ fn a_chord_bound_to_a_plugins_action_reaches_the_plugin() {
     let mut harness = Harness::new(1);
     assert!(!harness.usage_is_busy_for_user());
 
-    harness.bind(r#"{"cmd-shift-u": "crook/usage/refresh"}"#);
+    harness.bind(r#"[{ "key": "shift+cmd+u", "command": "crook/usage/refresh" }]"#);
     harness.press(
         "u",
         Modifiers {
@@ -8966,12 +8966,12 @@ fn a_chord_bound_to_a_plugins_action_reaches_the_plugin() {
 
 #[test]
 fn a_chord_bound_to_an_action_nothing_answers_to_does_nothing() {
-    // A keymap written for a plugin that is not installed, which is the
-    // ordinary state of any keymap somebody copied from a friend. It costs
+    // A keybindings file written for a plugin that is not installed, which is
+    // the ordinary state of any file somebody copied from a friend. It costs
     // that one chord and nothing else.
     let mut harness = Harness::new(1);
 
-    harness.bind(r#"{"cmd-shift-u": "eugen/not-installed/go"}"#);
+    harness.bind(r#"[{ "key": "shift+cmd+u", "command": "eugen/not-installed/go" }]"#);
 
     assert_eq!(
         harness.action_for(
@@ -8988,27 +8988,159 @@ fn a_chord_bound_to_an_action_nothing_answers_to_does_nothing() {
 }
 
 #[test]
-fn the_keys_page_lists_what_a_plugin_registered_and_the_chord_that_reaches_it() {
-    // Where somebody finds out an action's name, which is the only way they
+fn the_shortcuts_page_lists_what_a_plugin_registered_and_the_chord_that_reaches_it() {
+    // Where somebody finds out a command's name, which is the only way they
     // can bind it. The page cannot have been written with this row in it: the
-    // name belongs to a plugin.
+    // name belongs to a plugin, and so does the chord.
     let mut harness = Harness::new(1);
-    harness.bind(r#"{"cmd-shift-u": "crook/usage/refresh"}"#);
+    harness.bind(r#"[{ "key": "shift+cmd+u", "command": "crook/usage/refresh" }]"#);
     harness.open_settings_page();
     let rail = settings_rail_boxes(&harness.frame());
     harness.click(center(rail[3]), MouseButton::Left);
-    assert_eq!("Keys", harness.settings_section());
+    assert_eq!("Keyboard Shortcuts", harness.settings_section());
 
     let text = frame_text(&harness.frame());
 
     assert!(
         text.contains("crook/usage/refresh"),
-        "the Keys page does not name the action: {text}"
+        "the page does not name the command: {text}"
     );
     assert!(
-        text.contains("cmd-shift-u"),
-        "the Keys page does not say what reaches it: {text}"
+        text.contains("shift+cmd+u"),
+        "the page does not say what reaches it: {text}"
     );
+}
+
+#[test]
+fn a_sequence_takes_two_keystrokes_and_neither_of_them_reaches_the_shell() {
+    // VSCode's chord mode, end to end. The first keystroke is consumed with
+    // nothing to show for it — that is the point, since the alternative is a
+    // stray `ctrl+k` typed into the command line while somebody reaches for
+    // the second half — and the second one opens the tab.
+    let mut harness = Harness::new(1);
+    harness.bind(r#"[{ "key": "ctrl+k ctrl+t", "command": "crook/window/new-tab" }]"#);
+
+    let ctrl = Modifiers {
+        ctrl: true,
+        ..Modifiers::default()
+    };
+    assert_eq!(harness.tab_ids().len(), 1);
+
+    // Asked once, like the window delegate asks: the answer is "the window
+    // took it", and the window is now waiting for the rest of the sequence.
+    assert_eq!(
+        harness.action_for("k", ctrl),
+        Some(WorkspaceAction::Chord),
+        "the first half of the sequence was not consumed"
+    );
+    assert_eq!(harness.tab_ids().len(), 1, "half a chord opened a tab");
+
+    harness.press("t", ctrl, "");
+    assert_eq!(harness.tab_ids().len(), 2, "the sequence did not complete");
+}
+
+#[test]
+fn a_sequence_nothing_completes_ends_and_costs_the_key_that_ended_it() {
+    // The other half of chord mode, and the one that has to be deliberate: a
+    // keystroke that finishes nothing is swallowed rather than passed on,
+    // because it was typed as part of a chord.
+    let mut harness = Harness::new(1);
+    harness.bind(r#"[{ "key": "ctrl+k ctrl+t", "command": "crook/window/new-tab" }]"#);
+
+    let ctrl = Modifiers {
+        ctrl: true,
+        ..Modifiers::default()
+    };
+    harness.press("k", ctrl, "");
+
+    assert_eq!(
+        harness.action_for("j", ctrl),
+        Some(WorkspaceAction::Chord),
+        "the key that ended the chord went on to the pane"
+    );
+
+    // And the window is out of chord mode: `ctrl+t` on its own is nobody's
+    // chord again, rather than the second half of the abandoned sequence.
+    assert_eq!(harness.action_for("t", ctrl), None);
+    assert_eq!(harness.tab_ids().len(), 1);
+}
+
+#[test]
+fn a_command_taken_off_a_chord_gives_the_chord_back() {
+    // The only way to unbind, and the reason it matters here rather than in
+    // an editor: the chord goes back to the shell, which is what somebody
+    // whose shell wants that key is asking for.
+    let mut harness = Harness::new(1);
+    let chord = tab_chord();
+    assert!(harness.action_for("t", chord).is_some());
+
+    harness.bind(&format!(
+        r#"[{{ "key": "{}", "command": "-crook/window/new-tab" }}]"#,
+        if cfg!(target_os = "macos") {
+            "cmd+t"
+        } else {
+            "ctrl+shift+t"
+        }
+    ));
+
+    assert_eq!(
+        harness.action_for("t", chord),
+        None,
+        "the chord is still the window's"
+    );
+    assert!(
+        harness.action_for("w", close_chord()).is_some(),
+        "removing one binding took another with it"
+    );
+}
+
+#[test]
+fn a_when_clause_decides_whether_a_chord_is_in_force() {
+    // The context comes from the window rather than from the file, so this is
+    // the whole of what a clause is worth: the same chord means one thing on
+    // the settings page and nothing in a shell.
+    let mut harness = Harness::new(1);
+    harness.bind(
+        r#"[{
+            "key": "ctrl+alt+shift+n",
+            "command": "crook/window/new-tab",
+            "when": "settingsFocused"
+        }]"#,
+    );
+    let chord = Modifiers {
+        ctrl: true,
+        alt: true,
+        shift: true,
+        ..Modifiers::default()
+    };
+
+    assert_eq!(
+        harness.action_for("n", chord),
+        None,
+        "the binding fired with its condition false"
+    );
+
+    harness.open_settings_page();
+
+    assert!(
+        harness.action_for("n", chord).is_some(),
+        "the binding did not fire with its condition true"
+    );
+}
+
+/// The chord that opens a tab on this platform.
+fn tab_chord() -> Modifiers {
+    Modifiers {
+        cmd: cfg!(target_os = "macos"),
+        ctrl: !cfg!(target_os = "macos"),
+        shift: !cfg!(target_os = "macos"),
+        ..Default::default()
+    }
+}
+
+/// The chord that closes a pane on this platform, which is the same shape.
+fn close_chord() -> Modifiers {
+    tab_chord()
 }
 
 /// The chord `crook/palette` asks for: the one every editor uses, plus the
