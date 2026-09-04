@@ -740,7 +740,7 @@ fn a_process_that_outlives_its_deadline_is_killed_and_reaped() {
 
     let started = std::time::Instant::now();
     let timeout = Duration::from_millis(50);
-    let outcome = wait_for(&mut child, timeout);
+    let outcome = wait_for(&mut child, started + timeout, timeout);
 
     match outcome {
         Err(Error::TimedOut { after }) => assert_eq!(after, timeout),
@@ -767,9 +767,100 @@ fn a_process_that_finishes_in_time_is_not_killed() {
         .spawn()
         .expect("true is on PATH");
 
-    let status = wait_for(&mut child, Duration::from_secs(30)).expect("it exits immediately");
+    let timeout = Duration::from_secs(30);
+    let status =
+        wait_for(&mut child, Instant::now() + timeout, timeout).expect("it exits immediately");
 
     assert!(status.success());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_hook_that_backgrounds_something_does_not_hold_add_past_its_deadline() {
+    if without_git("a_hook_that_backgrounds_something_does_not_hold_add_past_its_deadline") {
+        return;
+    }
+    let scratch = ScratchDir::new("hook-daemon");
+    let repo = repo_with_a_commit(&scratch, "repo");
+
+    // What a real `post-checkout` hook does when it starts `direnv reload &`, a
+    // file watcher or a dev server: git exits immediately and hands something
+    // that outlives it the write end of both pipes. Killing git would not help
+    // — it is not git that is holding them — so a `run` that joined its readers
+    // would return when the `sleep` did and not before.
+    let marker = scratch.spot("the-hook-ran");
+    let hook = repo.join(".git/hooks/post-checkout");
+    write(
+        &hook,
+        &format!(
+            "#!/bin/sh\ntouch '{}'\nsleep 5 &\nexit 0\n",
+            marker.display()
+        ),
+    );
+    executable(&hook);
+
+    // Five seconds of `sleep` against a call that should come back in about
+    // one leaves no doubt about which of the two ended it, and five is as long
+    // as this test is willing to leave a stray process behind. That matters
+    // more than the margin does: the `sleep` inherits every descriptor git had
+    // — which is why the call would block on it — and the suite runs its tests
+    // in parallel, so a background process that lives for twenty seconds is
+    // twenty seconds of it holding descriptors while a *different* test drives
+    // a real shell through a pty. That is not a hypothetical; at twenty
+    // seconds this test reliably starved the shell test three tests away.
+    //
+    // The deadline is deliberately longer than the grace `run` gives a reader
+    // once git is reaped, so what this proves is the abandoning and not the
+    // deadline: git exits in milliseconds here, and the call is timed against
+    // the reader that will never finish.
+    let deadline = Duration::from_secs(2);
+    WRITE_DEADLINE.with(|budget| budget.set(deadline));
+
+    let path = scratch.spot("hooked");
+    let started = Instant::now();
+    let outcome = add(&repo, &path, "hooked", Some("main"));
+    let took = started.elapsed();
+
+    if !marker.is_file() {
+        // A global `core.hooksPath` — plenty of people have one — sends git
+        // somewhere else for its hooks, and then there is no hook and nothing
+        // to prove. Saying so beats asserting something the run did not test.
+        eprintln!(
+            "skipping a_hook_that_backgrounds_something_does_not_hold_add_past_its_deadline: \
+             git did not run the repository's own post-checkout hook"
+        );
+        return;
+    }
+
+    // Bounded by the grace rather than by the daemon. Before this was fixed the
+    // call came back when the `sleep` did, seconds after git had gone, with a
+    // worker of the background pool parked for every one of them — and for a
+    // hook that starts something that never exits, for ever.
+    assert!(
+        took < Duration::from_secs(3),
+        "add waited {took:?} on a process git left behind"
+    );
+    // And honest about what happened. git exited zero and the checkout is on
+    // disk, so however little of its output arrived this is not a failure:
+    // reporting one would tell a person the directory they are looking at was
+    // never made.
+    outcome.expect("git made the worktree");
+    assert!(path.join("tracked.txt").is_file());
+    assert_eq!(
+        entry(&list(&repo).expect("git answered"), &path)
+            .branch
+            .as_deref(),
+        Some("hooked")
+    );
+}
+
+/// Makes `path` runnable, for the hook the test above installs.
+#[cfg(unix)]
+fn executable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+        .expect("the scratch directory is writable");
 }
 
 // --- reading what git said when it refused ------------------------------------
@@ -877,10 +968,10 @@ fn an_unrecognised_failure_keeps_both_of_gits_lines_and_none_of_its_hints() {
 
 #[test]
 fn a_suggested_branch_avoids_every_branch_already_checked_out() {
-    let first = suggested_branch(&[]);
+    let first = suggested_branch(&[], &[]);
     let taken = vec![worktree_on(&first)];
-    let second = suggested_branch(&taken);
-    let third = suggested_branch(&[worktree_on(&first), worktree_on(&second)]);
+    let second = suggested_branch(&taken, &[]);
+    let third = suggested_branch(&[worktree_on(&first), worktree_on(&second)], &[]);
 
     assert_ne!(first, second);
     assert_ne!(second, third);
@@ -888,8 +979,24 @@ fn a_suggested_branch_avoids_every_branch_already_checked_out() {
     assert!(first.starts_with("worktree/"));
     // Deterministic: the same set of worktrees always suggests the same name,
     // which is what makes a retry after a failed add predictable.
-    assert_eq!(suggested_branch(&[]), first);
-    assert_eq!(suggested_branch(&taken), second);
+    assert_eq!(suggested_branch(&[], &[]), first);
+    assert_eq!(suggested_branch(&taken, &[]), second);
+}
+
+#[test]
+fn a_suggested_branch_avoids_a_branch_nothing_has_checked_out() {
+    // The half a worktree listing cannot see. `remove` never deletes a branch,
+    // so a checkout that has been made and unmade leaves its name taken with
+    // nothing holding it — and `add` refuses a name that merely exists.
+    let first = suggested_branch(&[], &[]);
+    let second = suggested_branch(&[], std::slice::from_ref(&first));
+
+    assert_ne!(second, first);
+    // Both sources are consulted, not one or the other: a name in either list
+    // is a name that is spoken for.
+    let third = suggested_branch(&[worktree_on(&second)], std::slice::from_ref(&first));
+    assert_ne!(third, first);
+    assert_ne!(third, second);
 }
 
 #[test]
@@ -897,7 +1004,10 @@ fn a_suggested_branch_ignores_a_detached_worktree_that_has_no_branch_at_all() {
     let mut detached = worktree_on("unused");
     detached.branch = None;
 
-    assert_eq!(suggested_branch(&[detached]), suggested_branch(&[]));
+    assert_eq!(
+        suggested_branch(&[detached], &[]),
+        suggested_branch(&[], &[])
+    );
 }
 
 #[test]
@@ -908,7 +1018,10 @@ fn a_suggested_branch_is_a_name_git_will_accept() {
     let scratch = ScratchDir::new("suggest");
     let repo = repo_with_a_commit(&scratch, "repo");
 
-    let name = suggested_branch(&list(&repo).expect("git answered"));
+    let name = suggested_branch(
+        &list(&repo).expect("git answered"),
+        &branches(&repo).expect("git answered"),
+    );
 
     // Two ways of asking, because the second is the one that matters: git's own
     // ref grammar, and git actually taking the name.
@@ -923,7 +1036,77 @@ fn a_suggested_branch_is_a_name_git_will_accept() {
         Some(name.as_str())
     );
     // And the next suggestion steps over the one just taken.
-    assert_ne!(suggested_branch(&worktrees), name);
+    assert_ne!(
+        suggested_branch(&worktrees, &branches(&repo).expect("git answered")),
+        name
+    );
+}
+
+#[test]
+fn a_suggested_branch_steps_over_the_branch_a_removed_worktree_left_behind() {
+    if without_git("a_suggested_branch_steps_over_the_branch_a_removed_worktree_left_behind") {
+        return;
+    }
+    let scratch = ScratchDir::new("suggest-after-remove");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    let first_path = scratch.spot("first");
+
+    // The whole loop a person takes: accept the offered name, make the
+    // worktree, remove it again. Before this was fixed the next suggestion was
+    // the same name, `add` failed with "a branch named … already exists", and
+    // it failed that way for ever, because the walk is deterministic and the
+    // branch is never deleted.
+    let first = suggested(&repo);
+    add(&repo, &first_path, &first, Some("main")).expect("the offered name is free");
+    remove(&repo, &first_path, false).expect("nothing loose in it");
+
+    assert!(
+        branches(&repo)
+            .expect("git answered")
+            .contains(&first.clone()),
+        "remove deleted the branch, which it is documented never to do"
+    );
+    assert!(
+        !list(&repo)
+            .expect("git answered")
+            .iter()
+            .any(|worktree| worktree.branch.as_deref() == Some(first.as_str())),
+        "the checkout survived its own removal"
+    );
+
+    let second = suggested(&repo);
+
+    assert_ne!(second, first);
+    add(&repo, &scratch.spot("second"), &second, Some("main")).expect("the next name is free too");
+}
+
+#[test]
+fn every_branch_is_listed_whether_or_not_it_is_checked_out() {
+    if without_git("every_branch_is_listed_whether_or_not_it_is_checked_out") {
+        return;
+    }
+    let scratch = ScratchDir::new("branches");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    git(&repo, &["branch", "sitting/idle"]);
+    git(&repo, &["worktree", "add", "-b", "busy", "../busy", "main"]);
+    // A tag by the same name as a branch, which is what `%(refname:short)`
+    // would have printed as `heads/busy` — a name neither `add` nor the
+    // worktree listing ever spells that way.
+    git(&repo, &["tag", "busy", "main"]);
+
+    let mut listed = branches(&repo).expect("git answered");
+    listed.sort();
+
+    assert_eq!(listed, ["busy", "main", "sitting/idle"]);
+}
+
+/// The name Crook would offer for the next worktree of `repo`, read the way
+/// the menu reads it.
+fn suggested(repo: &Path) -> String {
+    suggested_branch(
+        &list(repo).expect("git answered"),
+        &branches(repo).expect("git answered"),
+    )
 }
 
 /// A worktree that exists only to say a branch name is taken.

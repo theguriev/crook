@@ -155,6 +155,15 @@ pub(super) struct TabMenuState {
     pub(super) mode: Mode,
     /// The repository's worktrees, as of when the menu opened.
     pub(super) contents: Contents,
+    /// Every branch the repository has, checked out or not, as of when the
+    /// menu opened.
+    ///
+    /// Kept beside the worktrees rather than derived from them, because it
+    /// cannot be derived from them: a branch whose checkout has been removed is
+    /// in this list and not in that one, and it is precisely the name the next
+    /// suggestion must step over. Empty when the read failed, which costs a
+    /// worse suggestion and nothing else.
+    pub(super) branches: Vec<String>,
     /// What the repository is called: the name of its main checkout's
     /// directory, which is what a person calls it.
     pub(super) repository: Option<String>,
@@ -306,6 +315,14 @@ fn worktree_row(
     };
 
     let remove = state.control(Control::Remove(index));
+    // The row's own click has to decline the press the × claimed. A
+    // `Hoverable` runs its handler whether or not a descendant already
+    // handled the release, so without this the × dispatches `AskRemove` and
+    // the row dispatches `Show` on top of it — the confirmation is unreachable
+    // and a tab opens in the checkout somebody was asking to delete. The tab
+    // strip's close button is guarded exactly this way, and for exactly this
+    // reason.
+    let guard = remove.clone();
     Hoverable::new(state.control(Control::Worktree(index)), move |mouse| {
         let hovered = mouse.is_hovered();
 
@@ -366,6 +383,9 @@ fn worktree_row(
         .finish()
     })
     .on_click(move |_, ctx, _| {
+        if guard.lock().is_hovered() {
+            return;
+        }
         ctx.dispatch_typed_action(WorkspaceAction::Worktree(WorktreeAction::Show(index)));
     })
     .finish()
@@ -535,6 +555,14 @@ fn confirmation(
 
     if let Some(local) = local.filter(|local| !local.is_empty()) {
         column.add_child(note(local_summary(local), ui));
+    }
+
+    // The other two faces show what git said; this one showed nothing, so
+    // every refusal but "there is work in there" — a locked checkout, a path
+    // that is not a worktree, git timing out — took the button press and left
+    // the dialog exactly as it was.
+    if let Some(problem) = &state.problem {
+        column.add_child(note(problem.as_str(), ui));
     }
 
     let label = if refused { "Remove anyway" } else { "Remove" };

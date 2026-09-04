@@ -461,6 +461,13 @@ impl Harness {
             .read(&self.app, |workspace, _| workspace.settings_search_text())
     }
 
+    /// Whether the menu is asking about removing a checkout.
+    fn worktree_menu_is_confirming(&self) -> bool {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.worktree_menu_is_confirming()
+        })
+    }
+
     /// Whether the menu is making a worktree.
     fn worktree_menu_is_creating(&self) -> bool {
         self.workspace.read(&self.app, |workspace, _| {
@@ -2504,6 +2511,46 @@ fn scratch_repository(directory: &Path) -> Option<PathBuf> {
     Some(directory.to_path_buf())
 }
 
+/// The worktree row whose branch label begins with `prefix`, by its box.
+///
+/// The rows are the menu's only hoverable full-width bands, so a row is found
+/// by the glyphs on it and returned as the band they sit in.
+fn worktree_row_saying(scene: &Scene, prefix: &str) -> RectF {
+    let menu = worktree_menu_box(scene).expect("the menu is not up");
+    let baseline = scene
+        .layers()
+        .flat_map(|layer| layer.glyphs.iter())
+        .filter(|glyph| menu.contains_point(glyph.position))
+        .map(|glyph| glyph.position.y())
+        .find(|y| {
+            text_where(scene, |position| {
+                menu.contains_point(position) && (position.y() - y).abs() < 0.5
+            })
+            .contains(prefix)
+        })
+        .unwrap_or_else(|| panic!("no row of the menu begins with {prefix:?}"));
+
+    RectF::new(
+        vec2f(menu.min_x() + 8., baseline - 3.),
+        vec2f(menu.width() - 16., 6.),
+    )
+}
+
+/// The × a hovered worktree row offers, by its 16px square.
+///
+/// Drawn only while the pointer is on a removable row, so the frame it is
+/// found in has to be one taken with that row hovered.
+fn worktree_remove_cross(scene: &Scene) -> RectF {
+    let menu = worktree_menu_box(scene).expect("the menu is not up");
+    scene
+        .layers()
+        .flat_map(|layer| layer.icons.iter())
+        .filter(|icon| icon.icon_key.icon == Lucide::X)
+        .map(|icon| icon.bounds)
+        .find(|bounds| menu.contains_point(center(*bounds)))
+        .expect("no row offers a ×")
+}
+
 /// The worktree menu the active tab opens, by its popup box.
 ///
 /// Found the way the options menu is: the one surface-raised, 6px-rounded box
@@ -2642,6 +2689,107 @@ fn the_menu_reads_the_repository_the_click_landed_on() {
         harness.worktrees_listed(),
         Some(1),
         "a fresh repository has one checkout"
+    );
+}
+
+#[test]
+fn closing_the_tab_a_menu_is_open_on_takes_the_menu_with_it() {
+    // `tab_menu.tab` *is* the open flag, so a tab that closed under its own
+    // menu would leave a popup nothing can dismiss — and a window where
+    // `a_popup_is_open` is true forever is a window where no pane ever gets
+    // the keyboard again.
+    let mut harness = Harness::seeded();
+    harness.dispatch_action(TabAction::New);
+    let tab = harness.active_id();
+    let pane = harness.focused_pane_id().expect("the new tab has a pane");
+    harness.record_git(pane, BRANCH, None);
+    harness.frame();
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    assert!(harness.a_popup_is_open(), "the menu did not open");
+
+    harness.dispatch_action(TabAction::Close(tab));
+    harness.frame();
+
+    assert!(
+        !harness.a_popup_is_open(),
+        "the menu outlived the tab it was open on"
+    );
+}
+
+#[test]
+fn the_cross_on_a_row_asks_about_removing_it_rather_than_opening_it() {
+    // The × is a descendant of the row, and a `Hoverable` runs its own click
+    // handler whether or not a child already handled the release. Without a
+    // guard the × dispatches `AskRemove` and the row dispatches `Show` on top
+    // of it: the confirmation is unreachable, and a tab opens in the very
+    // checkout somebody was asking to delete. The theme panel paid for this
+    // lesson once already.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    // A second checkout to have something removable: the main one never is.
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(harness.active_id()));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    let before = harness.tab_ids().len();
+    harness.dispatch_worktree(WorktreeAction::Create);
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.tab_ids().len() > before
+    });
+
+    // The tab that opened on it has to go before the × will be offered: a
+    // checkout somebody is working in is exactly the one that must not be
+    // removable, and that rule is what this test would otherwise trip over.
+    harness.dispatch_action(TabAction::Close(harness.active_id()));
+
+    // Back on the first tab's menu, with two checkouts in it now.
+    let first = harness.tab_ids()[0];
+    harness.dispatch_action(TabAction::Select(first));
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(first));
+    harness.wait_for("the repository to be read again", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+
+    // The × is drawn only while the pointer is on a removable row, so the row
+    // has to be hovered before there is anything to click.
+    let scene = harness.frame();
+    harness.move_to(center(worktree_row_saying(&scene, "worktree/")));
+    let scene = harness.frame();
+    let cross = worktree_remove_cross(&scene);
+
+    // Onto the × itself before pressing it, which is what a pointer does and
+    // what the guard reads: the row declines a press the × is hovering over,
+    // exactly as a tab declines one its close button is under.
+    harness.move_to(center(cross));
+    harness.frame();
+
+    let tabs = harness.tab_ids().len();
+    harness.click(center(cross), MouseButton::Left);
+
+    assert!(
+        harness.worktree_menu_is_confirming(),
+        "the × did not open the confirmation"
+    );
+    assert_eq!(
+        harness.tab_ids().len(),
+        tabs,
+        "the row's own click fired too and opened a tab"
     );
 }
 

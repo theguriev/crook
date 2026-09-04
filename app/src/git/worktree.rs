@@ -24,11 +24,20 @@
 //! materialises a working tree and then runs the repository's own
 //! `post-checkout` hook, which is arbitrary code somebody else wrote. So
 //! everything here runs under a deadline and is killed at it.
+//!
+//! The deadline bounds the *call*, not only git. Killing a process does not
+//! reach what it left behind: a hook that backgrounds a helper — `direnv
+//! reload &`, a file watcher, a dev server — hands that helper the two pipes
+//! git was writing down, and they stay open for as long as it lives, so
+//! reading them to the end can outlive git by hours. The readers therefore run
+//! under the same deadline as git itself and are abandoned at it; `collect`
+//! says what abandoning one costs and why it is the cheaper of the two prices.
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
 use crate::process::command;
@@ -382,6 +391,54 @@ pub fn list(directory: &Path) -> Result<Vec<Worktree>, Error> {
     Ok(parse_list(&finished.stdout))
 }
 
+/// Every branch the repository containing `directory` has, checked out or not.
+///
+/// **Blocking.** One subprocess, background executor only, like everything
+/// else here — and the cheapest of the three reads: it walks `refs/heads` and
+/// touches no working tree.
+///
+/// The names come back short — `main`, `worktree/amber-anchor-0155` — which is
+/// the form [`Worktree::branch`] carries and the form [`add`] is handed, so the
+/// three can be compared without any of them being reshaped first.
+///
+/// This exists for [`suggested_branch`], and the reason is worth stating where
+/// it can be read: [`remove`] deliberately never deletes a branch, so every
+/// checkout Crook has made and unmade has left its branch behind with nothing
+/// checked out on it. Those are exactly the names a listing of *worktrees*
+/// cannot see and `add` still refuses.
+pub fn branches(directory: &Path) -> Result<Vec<String>, Error> {
+    let finished = run(
+        directory,
+        &[
+            OsStr::new("for-each-ref"),
+            // `lstrip=2` rather than the more obvious `%(refname:short)`, which
+            // is short in a way that is not always this: it shortens only as
+            // far as the name stays unambiguous, so a repository holding both a
+            // tag and a branch called `release` prints the branch as
+            // `heads/release` — a name nothing else in this module would match
+            // and `add` would never be given. Stripping two components off
+            // `refs/heads/release` is the branch name and nothing else.
+            OsStr::new("--format=%(refname:lstrip=2)"),
+            OsStr::new("refs/heads"),
+        ],
+        Intent::Read,
+    )?;
+
+    if !finished.success {
+        return Err(classify(&finished.stderr));
+    }
+
+    // Split on newlines, and not for want of the care `list` takes: that one
+    // needs `-z` because a *path* may contain a newline, and a ref may not —
+    // git's own `check-ref-format` refuses every ASCII control character in a
+    // ref name. So a line here is exactly one branch.
+    Ok(String::from_utf8_lossy(&finished.stdout)
+        .lines()
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
 /// What is loose in `worktree`: what a removal would refuse over, and what it
 /// would delete without mentioning.
 ///
@@ -511,22 +568,42 @@ pub fn remove(repository: &Path, path: &Path, force: bool) -> Result<(), Error> 
 
 // MARK: - Naming the next one
 
-/// A branch name no worktree in `existing` is using.
+/// A branch name that is neither one of `branches` nor checked out in one of
+/// `worktrees`.
 ///
 /// Shaped like herdr's: `worktree/<adjective>-<noun>-<four hex digits>`. Short
 /// enough to fit a tab row, lowercase and hyphenated so it is a legal ref and a
 /// legal path component, and prefixed so that every branch Crook invented is
 /// one `git branch --list 'worktree/*'` away from being found again.
 ///
-/// Deterministic, and not seeded by the clock: the same set of worktrees always
+/// Two lists, and the branches are the half that matters. [`add`] collides
+/// with a *name*, not with a checkout — it refuses `worktree/amber-anchor-0155`
+/// whether or not anybody has it out — and [`remove`] never deletes a branch,
+/// so every checkout Crook has ever made and unmade is still a name that is
+/// taken. Suggesting against the worktrees alone offers the first of those
+/// names back the moment its checkout is gone, and goes on offering it, because
+/// the walk below is deterministic and starts from the beginning every time.
+///
+/// The worktrees are not redundant for all that a healthy repository makes
+/// them a subset of the branches. The two are separate reads and either can
+/// fail, and a suggestion made from half an answer should still step over the
+/// half it was given.
+///
+/// Pure, and deliberately so. The caller reads the repository when its menu
+/// opens and calls this from the frame that draws the creator, which is no
+/// place for a subprocess — and a function that took a `&Path` could not be
+/// tested against a repository that does not exist.
+///
+/// Deterministic, and not seeded by the clock: the same repository always
 /// suggests the same name. That makes the function testable, makes a retry
 /// after a failed `add` predictable, and costs nothing — the vocabulary is
 /// walked in order and the first free name wins, so collisions are avoided
 /// outright instead of being made unlikely.
-pub fn suggested_branch(existing: &[Worktree]) -> String {
-    let taken: HashSet<&str> = existing
+pub fn suggested_branch(worktrees: &[Worktree], branches: &[String]) -> String {
+    let taken: HashSet<&str> = worktrees
         .iter()
         .filter_map(|worktree| worktree.branch.as_deref())
+        .chain(branches.iter().map(String::as_str))
         .collect();
 
     (0u32..)
@@ -948,9 +1025,38 @@ impl Intent {
     fn timeout(self) -> Duration {
         match self {
             Self::Read => READ_TIMEOUT,
-            Self::Write => WRITE_TIMEOUT,
+            Self::Write => write_timeout(),
         }
     }
+}
+
+/// [`WRITE_TIMEOUT`], which nothing outside a test build can change.
+#[cfg(not(test))]
+fn write_timeout() -> Duration {
+    WRITE_TIMEOUT
+}
+
+/// The write deadline the calling thread is running under.
+///
+/// The one behaviour here that cannot be demonstrated any other way is [`run`]
+/// returning *at* its deadline when something a hook started is holding the
+/// pipes: proving it means outliving the deadline, and two minutes is not a
+/// thing to spend in a suite that runs in seconds. So the tests can shorten it.
+///
+/// Thread-local rather than a global, because the suite runs its tests in
+/// parallel threads and a global would shorten the deadline for every write
+/// test running beside the one that asked. `run` waits on the thread that
+/// called it, so a thread-local is exactly the scope of one test.
+#[cfg(test)]
+fn write_timeout() -> Duration {
+    WRITE_DEADLINE.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// See [`write_timeout`].
+    static WRITE_DEADLINE: std::cell::Cell<Duration> =
+        const { std::cell::Cell::new(WRITE_TIMEOUT) };
 }
 
 /// What one git invocation produced.
@@ -965,6 +1071,11 @@ struct Finished {
 
 /// Runs `git <args>` in `directory` and waits for it under [`Intent`]'s
 /// deadline.
+///
+/// The deadline is the whole call's, not git's. Spawning, waiting and reading
+/// both pipes to the end all come out of the one budget, because the last of
+/// those can outlive git by as long as whatever a hook backgrounded cares to
+/// live — see `collect`.
 fn run(directory: &Path, args: &[&OsStr], intent: Intent) -> Result<Finished, Error> {
     if git_is_missing() {
         return Err(Error::GitMissing);
@@ -1026,13 +1137,27 @@ fn run(directory: &Path, args: &[&OsStr], intent: Intent) -> Result<Finished, Er
     let stdout = child.stdout.take().map(drain);
     let stderr = child.stderr.take().map(drain);
 
-    let waited = wait_for(&mut child, intent.timeout());
+    let timeout = intent.timeout();
+    let deadline = Instant::now() + timeout;
+    let waited = wait_for(&mut child, deadline, timeout);
 
-    // Joined either way: a kill closes the pipes, so a reader on a killed child
-    // reaches end of file rather than blocking, and joining is what makes sure
-    // no thread outlives the call that made it.
-    let stdout = stdout.map(collect).unwrap_or_default();
-    let stderr = stderr.map(collect).unwrap_or_default();
+    // Collected against a grace that starts *here*, and pointedly not joined.
+    // A join has no deadline to give, and the thread on the other end of one
+    // can be blocked for ever: killing git closes git's handles on the pipes
+    // and nothing else's, so anything git left running still holds the write
+    // end and `read_to_end` still has no end to read to.
+    //
+    // The grace is short and does not come out of the command's own budget,
+    // because by this line git has been reaped. Everything it was ever going
+    // to write is already in the pipe, at most a buffer of it, and a reader
+    // that is going to finish finishes in microseconds. A reader still blocked
+    // after a moment is blocked on somebody else's descriptor and will be
+    // blocked on it just as much two minutes later — so spending the rest of a
+    // 120-second write budget on it parks a pool worker for two minutes to
+    // learn what a second already said.
+    let drained_by = (Instant::now() + DRAIN_GRACE).min(deadline);
+    let stdout = collect(stdout, drained_by);
+    let stderr = collect(stderr, drained_by);
 
     let status = waited?;
     if !status.success() {
@@ -1043,37 +1168,118 @@ fn run(directory: &Path, args: &[&OsStr], intent: Intent) -> Result<Finished, Er
         );
     }
 
+    // Whether an abandoned reader has cost this call its answer depends on
+    // which pipe it was and on what git did, and the rule is the narrow one:
+    // never report a command as having failed when it did not, and never hand
+    // back a fragment of an answer as though it were the answer.
+    let lost = if status.success() {
+        // Only a read is its output. A write is its *effect* — `worktree add`
+        // that exited zero has made the checkout, and saying otherwise because
+        // a daemon the hook started still holds a pipe would be telling a
+        // person the directory they are looking at is not there. Its stdout is
+        // never parsed, and its stderr only ever matters when it failed.
+        matches!(intent, Intent::Read) && stdout.is_none()
+    } else {
+        // Every failure is classified out of stderr, and classifying a
+        // fragment of one names the wrong error or, more often, none at all.
+        stderr.is_none()
+    };
+    if lost {
+        log::warn!(
+            "git {args:?} in {} exited but left its output held open past {}s",
+            directory.display(),
+            timeout.as_secs()
+        );
+        return Err(Error::TimedOut { after: timeout });
+    }
+
     Ok(Finished {
         success: status.success(),
-        stdout,
-        stderr: String::from_utf8_lossy(&stderr).into_owned(),
+        stdout: stdout.unwrap_or_default(),
+        stderr: String::from_utf8_lossy(&stderr.unwrap_or_default()).into_owned(),
     })
 }
 
-/// Reads a pipe to the end on a thread of its own.
-fn drain<R: std::io::Read + Send + 'static>(mut pipe: R) -> std::thread::JoinHandle<Vec<u8>> {
+/// Reads a pipe to the end on a thread of its own, answering through a channel
+/// rather than through a join.
+///
+/// The channel is the difference between having a deadline and promising one.
+/// `read_to_end` returns when the *last* handle on the pipe's write end closes,
+/// and git's is not necessarily the last one: a `post-checkout` hook that ran
+/// `direnv reload &` handed the same two descriptors to something that is still
+/// running, and killing git does not touch it. A join would then wait on this
+/// thread for as long as that process lives; a channel can be given up on.
+fn drain<R: std::io::Read + Send + 'static>(mut pipe: R) -> Receiver<Vec<u8>> {
+    let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut bytes = Vec::new();
         // A read that fails keeps whatever arrived before it. There is nothing
         // better to do with the error: the exit status is what decides whether
         // the output is worth trusting.
         let _ = pipe.read_to_end(&mut bytes);
-        bytes
-    })
+        // Ignored because the only way this fails is `run` having given up and
+        // dropped the receiver, which is not this thread's problem — and is
+        // what lets it end rather than block on a send nobody will take.
+        let _ = sender.send(bytes);
+    });
+    receiver
 }
 
-/// The bytes a [`drain`] thread collected, or none if it panicked.
-fn collect(handle: std::thread::JoinHandle<Vec<u8>>) -> Vec<u8> {
-    handle.join().unwrap_or_default()
+/// How long a reader is given once git itself has been reaped.
+///
+/// Not a share of the command's timeout: see the comment at the call. This is
+/// the time a pipe's remaining buffer takes to reach a thread that is already
+/// sitting in `read`, which is microseconds, with four orders of magnitude of
+/// slack for a machine under load.
+const DRAIN_GRACE: Duration = Duration::from_secs(1);
+
+/// The bytes one [`drain`] collected, or `None` if it was still reading at
+/// `deadline`.
+///
+/// The argument is an `Option` because [`std::process::Child`]'s pipes are: a
+/// handle somebody already took is no bytes and no waiting.
+///
+/// `None` back means the reader has been abandoned — left blocked in a read on
+/// a pipe nothing is going to close, holding a thread, a stack and a buffer
+/// until whatever inherited the write end exits, which for a daemon is never.
+/// That is a leak, and it is the cheaper of the two prices. The other is
+/// blocking *this* thread on the same pipe, and this thread is a worker of the
+/// background pool: a leaked reader sleeps in a syscall and costs some pages,
+/// where a lost pool worker costs every git read, every worktree command and
+/// every other background task Crook meant to run for the rest of the session.
+///
+/// It is also usually temporary. The abandoned reader ends itself the instant
+/// the pipe does close — its send finds the receiver gone and it returns — so a
+/// hook that merely takes a while past the deadline cleans up after itself, and
+/// only one that leaves something running for ever leaks for ever.
+fn collect(reader: Option<Receiver<Vec<u8>>>, deadline: Instant) -> Option<Vec<u8>> {
+    let Some(reader) = reader else {
+        return Some(Vec::new());
+    };
+
+    let left = deadline.saturating_duration_since(Instant::now());
+    match reader.recv_timeout(left) {
+        Ok(bytes) => Some(bytes),
+        // The thread ended without sending, which it only does by panicking.
+        // Nothing arrived and nothing is coming — which is not the same as
+        // still waiting, because there is no reader left to abandon.
+        Err(RecvTimeoutError::Disconnected) => Some(Vec::new()),
+        Err(RecvTimeoutError::Timeout) => None,
+    }
 }
 
-/// Waits for `child`, killing it if it outlives `timeout`.
+/// Waits for `child`, killing it at `deadline`.
+///
+/// `timeout` is the span `deadline` was made from and is only what the error
+/// and the log line report. The waiting itself is against the instant, so a
+/// caller that shares one deadline between this and the reading of the pipes
+/// hands out its budget once rather than twice.
 fn wait_for(
     child: &mut std::process::Child,
+    deadline: Instant,
     timeout: Duration,
 ) -> Result<std::process::ExitStatus, Error> {
     let started = Instant::now();
-    let deadline = started + timeout;
 
     loop {
         match child.try_wait() {
@@ -1084,10 +1290,17 @@ fn wait_for(
 
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
-            // Killing closes both pipes, which is what lets the draining
-            // threads finish. Reaping afterwards matters as much: a process id
+            // Reaping after the kill matters as much as the kill: a process id
             // that is never waited for stays a zombie, and one that is reaped
             // by somebody else can be handed out again to a stranger.
+            //
+            // What killing does *not* do is close the pipes. It closes the
+            // handles git itself held on them and nothing else's, and a hook
+            // that backgrounded a helper gave that helper the same two
+            // descriptors — so a kill can leave a reader with no end of file
+            // coming and a process nothing here has a way to signal, `command`
+            // putting git in no process group of its own. That is why the
+            // readers are bounded by this same deadline instead; see `collect`.
             let _ = child.kill();
             let _ = child.wait();
             log::warn!(

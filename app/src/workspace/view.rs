@@ -671,6 +671,11 @@ impl Workspace {
         }
     }
 
+    /// Whether the menu is asking about removing a checkout. For a test.
+    pub fn worktree_menu_is_confirming(&self) -> bool {
+        matches!(self.tab_menu.mode, WorktreeMode::Removing { .. })
+    }
+
     /// Whether the menu is making a worktree. For a test.
     pub fn worktree_menu_is_creating(&self) -> bool {
         self.tab_menu.mode == WorktreeMode::Creating
@@ -968,10 +973,19 @@ impl Workspace {
                     return;
                 };
                 let path = worktree.path.clone();
+                // By the same longest-match rule the badges use, and for the
+                // same reason: a linked worktree is very often *inside* the
+                // main checkout — Crook's own are — so a tab in the nested one
+                // is under both paths, and a plain prefix would have the main
+                // checkout's row bring forward a tab that is somewhere else
+                // entirely.
+                let worktrees = self.tab_menu.worktrees();
                 let existing = self
                     .tab_directories()
                     .into_iter()
-                    .find(|(_, directory)| directory.starts_with(&path))
+                    .find(|(_, directory)| {
+                        super::tab_menu::holding(worktrees, Some(directory)) == Some(index)
+                    })
                     .map(|(tab, _)| tab);
 
                 self.close_tab_menu(ctx);
@@ -1003,7 +1017,15 @@ impl Workspace {
                 // through is to press the button. herdr does the same, and the
                 // reason is that a person who has not decided on a name yet
                 // still wants the worktree.
-                let branch = crate::git::worktree::suggested_branch(self.tab_menu.worktrees());
+                //
+                // Both lists, because the branches are the half that decides:
+                // `remove` never deletes a branch, so a name offered against
+                // the worktrees alone comes back the moment its checkout goes
+                // and `add` refuses it every time after that.
+                let branch = crate::git::worktree::suggested_branch(
+                    self.tab_menu.worktrees(),
+                    &self.tab_menu.branches,
+                );
                 self.tab_menu.branch.edit(|editor| {
                     editor.set_text(&branch);
                     editor.select_all();
@@ -1057,6 +1079,7 @@ impl Workspace {
         self.tab_menu.pane_directory = Some(directory.clone());
         self.tab_menu.mode = WorktreeMode::Listing;
         self.tab_menu.contents = Contents::Reading;
+        self.tab_menu.branches.clear();
         self.tab_menu.problem = None;
         self.tab_menu.working = false;
         self.tab_menu.store = self.worktrees_directory.clone();
@@ -1064,9 +1087,18 @@ impl Workspace {
         self.sync_input_keys();
         ctx.notify();
 
-        let reading = ctx
-            .background()
-            .spawn(async move { crate::git::worktree::list(&directory) });
+        let reading = ctx.background().spawn(async move {
+            let worktrees = crate::git::worktree::list(&directory)?;
+            // Best effort, and second, because the two answers are not worth
+            // the same. The listing *is* the menu, and failing to read it is a
+            // message where the rows would be; the branches only feed the name
+            // the creator offers, and a suggestion made without them is worse
+            // than one made with them and far better than no menu at all.
+            let branches = crate::git::worktree::branches(&directory).unwrap_or_default();
+            // Named, because the branches are read with their own error
+            // swallowed and nothing else in the block says what this one is.
+            Ok::<_, crate::git::worktree::Error>((worktrees, branches))
+        });
 
         ctx.spawn(reading, move |workspace, listed, ctx| {
             // The menu may have been taken down, or opened on another tab,
@@ -1076,11 +1108,12 @@ impl Workspace {
                 return;
             }
             workspace.tab_menu.contents = match listed {
-                Ok(worktrees) => {
+                Ok((worktrees, branches)) => {
                     workspace.tab_menu.repository = worktrees
                         .first()
                         .and_then(|worktree| worktree.path.file_name())
                         .map(|name| name.to_string_lossy().into_owned());
+                    workspace.tab_menu.branches = branches;
                     Contents::Ready(worktrees)
                 }
                 Err(problem) => Contents::Failed(problem.to_string()),
@@ -1126,6 +1159,8 @@ impl Workspace {
                     .first()
                     .and_then(|worktree| worktree.path.file_name())
                     .map(|name| name.to_string_lossy().into_owned());
+                self.tab_menu.branches =
+                    crate::git::worktree::branches(&directory).unwrap_or_default();
                 Contents::Ready(worktrees)
             }
             Err(problem) => Contents::Failed(problem.to_string()),
@@ -1147,6 +1182,7 @@ impl Workspace {
         self.tab_menu.tab = None;
         self.tab_menu.mode = WorktreeMode::Listing;
         self.tab_menu.contents = Contents::Reading;
+        self.tab_menu.branches.clear();
         self.tab_menu.problem = None;
         self.tab_menu.working = false;
         self.tab_menu.forget_hover_state();
@@ -1176,23 +1212,39 @@ impl Workspace {
         self.tab_menu.problem = None;
         ctx.notify();
 
+        let opened_on = self.tab_menu.tab;
         let made = ctx.background().spawn({
             let path = path.clone();
             async move { crate::git::worktree::add(&repository, &path, &branch, None) }
         });
 
         ctx.spawn(made, move |workspace, made, ctx| {
-            workspace.tab_menu.working = false;
+            // The menu this was asked for may have been taken down, or opened
+            // on another tab, while git was checking a working tree out. The
+            // checkout still happened and the tab still opens — that is what
+            // was asked for — but the *dialog's* state belongs to the menu
+            // that asked, and writing "working = false" or a failure into a
+            // different one is writing into somebody else's question.
+            let answering = workspace.tab_menu.tab == opened_on;
+            if answering {
+                workspace.tab_menu.working = false;
+            }
             match made {
                 // Creating one opens it, which is the whole point: a worktree
                 // nobody is working in is a directory.
                 Ok(()) => {
-                    workspace.close_tab_menu(ctx);
+                    if answering {
+                        workspace.close_tab_menu(ctx);
+                    }
                     workspace.open_tab_in(path, ctx);
                 }
                 Err(problem) => {
-                    workspace.tab_menu.problem = Some(problem.to_string());
-                    ctx.notify();
+                    if answering {
+                        workspace.tab_menu.problem = Some(problem.to_string());
+                        ctx.notify();
+                    } else {
+                        log::warn!("a worktree nobody is waiting for failed: {problem}");
+                    }
                 }
             }
         })
@@ -1257,12 +1309,20 @@ impl Workspace {
         self.tab_menu.problem = None;
         ctx.notify();
 
+        let asked_about = index;
+        let opened_on = self.tab_menu.tab;
         let removed = ctx.background().spawn({
             let path = path.clone();
             async move { crate::git::worktree::remove(&repository, &path, force) }
         });
 
         ctx.spawn(removed, move |workspace, removed, ctx| {
+            if workspace.tab_menu.tab != opened_on {
+                if let Err(problem) = removed {
+                    log::warn!("a removal nobody is waiting for failed: {problem}");
+                }
+                return;
+            }
             workspace.tab_menu.working = false;
             match removed {
                 Ok(()) => {
@@ -1275,8 +1335,15 @@ impl Workspace {
                 }
                 // The one refusal that is a question rather than an error:
                 // there is work in there, and the person can still say yes.
+                // Marked on the confirmation that *asked* — `refused` is what
+                // turns the button into the one that deletes anyway, and
+                // setting it on whichever confirmation happens to be up would
+                // arm that button over a checkout git never objected to.
                 Err(crate::git::worktree::Error::HoldsLocalWork { .. }) => {
-                    if let WorktreeMode::Removing { refused, .. } = &mut workspace.tab_menu.mode {
+                    if let WorktreeMode::Removing { index, refused, .. } =
+                        &mut workspace.tab_menu.mode
+                        && *index == asked_about
+                    {
                         *refused = true;
                     }
                     ctx.notify();
@@ -2331,6 +2398,25 @@ impl Workspace {
             }
             open
         });
+        // A menu is open *on a tab*, and nothing else clears it when that tab
+        // goes: `tab_menu.tab` is the open flag, so a tab closed under an open
+        // menu leaves a popup nothing can dismiss — and with it a window where
+        // `a_popup_is_open` is true forever, which is a window where no pane
+        // ever gets the keyboard again. This is the same reaping the line
+        // below does for a hover card anchored to a row that no longer paints.
+        if self
+            .tab_menu
+            .tab
+            .is_some_and(|tab| self.tabs.get(tab).is_none())
+        {
+            self.tab_menu.tab = None;
+            self.tab_menu.mode = super::tab_menu::Mode::Listing;
+            self.tab_menu.contents = Contents::Reading;
+            self.tab_menu.problem = None;
+            self.tab_menu.working = false;
+            self.tab_menu.forget_hover_state();
+        }
+
         self.sync_input_keys();
 
         // The query lives exactly as long as the page it filters. The page's
