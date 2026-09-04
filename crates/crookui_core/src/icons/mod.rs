@@ -26,19 +26,24 @@
 //! and cubics. Nothing parses SVG at runtime, because the icons cannot change
 //! at runtime.
 //!
-//! # What it cannot draw
+//! # What Lucide cannot draw
 //!
-//! Fills. Every Lucide icon is `fill="none"` and the rasterizer strokes what
-//! it is given, so an icon with a filled region would come out as its own
-//! outline. The generator refuses such an icon rather than letting it render
-//! wrongly.
+//! Fills. Every Lucide icon is `fill="none"` and the generator refuses one
+//! with a filled region rather than letting it render as its own outline. The
+//! set is therefore not the whole vocabulary: [`Art`] is the other half, for
+//! the marks that are *pictures* — filled, multi-coloured, and outside the
+//! stroke rule on purpose. [`Mark`] is the pair of them, and it is what a
+//! caller and the atlas both hold, so nothing between an element and the
+//! rasterizer has to know which kind it has.
 
+mod art;
 mod data;
 mod raster;
 
 #[cfg(test)]
 mod tests;
 
+pub use art::{Art, Chomp};
 pub use data::{ICONS, Lucide};
 pub use raster::rasterize;
 
@@ -112,27 +117,58 @@ impl Lucide {
     }
 }
 
-/// Everything needed to rasterize one icon, and the key it is cached under.
+/// Something that rasterizes into a mask: an icon, or one layer of a drawing.
+///
+/// The two are one type because everything between a caller and the atlas —
+/// the [`Icon`](crate::elements::Icon) element, the scene, the cache — does
+/// the same thing with either: rasterize it once at a size and tint the mask.
+/// Only [`rasterize`] cares which it has.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Mark {
+    /// One of Lucide's icons, stroked.
+    Icon(Lucide),
+    /// One layer of a drawing, filled.
+    Art(Art),
+}
+
+impl From<Lucide> for Mark {
+    fn from(icon: Lucide) -> Self {
+        Self::Icon(icon)
+    }
+}
+
+impl From<Art> for Mark {
+    fn from(art: Art) -> Self {
+        Self::Art(art)
+    }
+}
+
+/// Everything needed to rasterize one mark, and the key it is cached under.
 ///
 /// The shape [`GlyphKey`](crate::fonts::GlyphKey) has, and for the same
 /// reason: floats participate in equality by their bit pattern, because two
 /// sizes that are not bitwise identical rasterize differently anyway.
 #[derive(Copy, Clone, Debug)]
 pub struct IconKey {
-    /// Which icon.
-    pub icon: Lucide,
+    /// What to draw.
+    pub mark: Mark,
     /// The edge of the square it is drawn in, in logical pixels.
     pub size: f32,
     /// The stroke width, in the 24-unit grid rather than in pixels — so an
     /// icon drawn smaller keeps Lucide's proportions.
+    ///
+    /// Read only for a [`Mark::Icon`]: a drawing carries a width per stroke,
+    /// because its strap and its grin are not the same weight. Two keys for
+    /// one drawing that differ only here therefore rasterize to the same
+    /// mask, which costs a duplicate atlas entry and nothing else.
     pub stroke_width: f32,
 }
 
 impl IconKey {
-    /// An icon at `size`, with Lucide's own stroke.
-    pub fn new(icon: Lucide, size: f32) -> Self {
+    /// A mark at `size`, with Lucide's own stroke.
+    pub fn new(mark: impl Into<Mark>, size: f32) -> Self {
         Self {
-            icon,
+            mark: mark.into(),
             size,
             stroke_width: STROKE_WIDTH,
         }
@@ -141,7 +177,7 @@ impl IconKey {
 
 impl PartialEq for IconKey {
     fn eq(&self, other: &Self) -> bool {
-        self.icon == other.icon
+        self.mark == other.mark
             && self.size.to_bits() == other.size.to_bits()
             && self.stroke_width.to_bits() == other.stroke_width.to_bits()
     }
@@ -151,7 +187,7 @@ impl Eq for IconKey {}
 
 impl Hash for IconKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.icon.hash(state);
+        self.mark.hash(state);
         self.size.to_bits().hash(state);
         self.stroke_width.to_bits().hash(state);
     }

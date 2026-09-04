@@ -94,6 +94,7 @@ use crookui_core::scene::Scene;
 use crookui_core::{AddSingletonModel as _, App, Presenter, WindowId};
 
 use crate::platform_insets::{ControlLayout, WindowChrome};
+use crate::plugin::ActionName;
 use crate::settings::{Density, Granularity, Settings};
 use crate::tab::{AgentStatus, Direction, PaneId, Tab, TabAction};
 use crate::terminal_font::{CELL_FONT_SIZE, CellFont};
@@ -130,6 +131,10 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long the grid has to stop changing before a `--run` calls it finished.
 const RUN_QUIET: Duration = Duration::from_millis(400);
+
+/// The named command `--usage-panel` dispatches. The panel belongs to a
+/// plugin, so this is the only handle anything outside it has on the panel.
+const USAGE_PANEL_ACTION: &str = "crook/usage/panel";
 
 /// How long the headless `--run` sleeps between pumps while it waits.
 const RUN_POLL: Duration = Duration::from_millis(10);
@@ -264,6 +269,22 @@ struct Overrides {
     granularity: Option<Granularity>,
     /// Start in this density rather than the saved one.
     density: Option<Density>,
+    /// Start with the usage panel open under the chip.
+    ///
+    /// The panel is a popover, which is the one kind of surface no unattended
+    /// run can hold up on its own — and it is also the one that reads the
+    /// local transcripts, so `--snapshot` waits for that read before drawing
+    /// the frame.
+    usage_panel: bool,
+    /// Show this percentage in the usage chip rather than reading one.
+    ///
+    /// The chip's own override, and the only way to take a picture of it: what
+    /// it draws comes from a session on the machine taking the picture, so a
+    /// run on a machine that has never opened Claude Code draws a dash, and a
+    /// run on one that has draws whatever that person happens to have spent.
+    /// Whole percent rather than a fraction, because the chip rounds to one
+    /// anyway.
+    usage: Option<u8>,
     /// Type these into the first pane's shell at startup, in order, waiting
     /// for what each one prints. See the module docs for why a frame budget
     /// alone is not enough.
@@ -453,6 +474,16 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                     .context("`--section` needs the name on a section's button")?;
                 overrides.section = Some(name);
             }
+            "--usage-panel" => overrides.usage_panel = true,
+            "--usage" => {
+                let percent = args.next().context("`--usage` needs a percentage")?;
+                let percent: u8 = percent.parse().context("`--usage` takes 0 to 100")?;
+                // Refused rather than clamped: a run that asked for 140 asked
+                // for something the chip cannot draw, and a picture that came
+                // back saying 100% would look like it had worked.
+                anyhow::ensure!(percent <= 100, "`--usage` takes 0 to 100");
+                overrides.usage = Some(percent);
+            }
             "--hover" => overrides.hover = true,
             "--run" => {
                 let command = args.next().context("`--run` needs a command")?;
@@ -578,6 +609,8 @@ OPTIONS:
     --new-worktree     Start with that menu making a worktree
     --themes           Start with the Themes panel open
     --new-theme        Start with the Themes panel making a theme
+    --usage <PERCENT>  Show PERCENT in the usage chip rather than reading a session
+    --usage-panel      Start with the usage panel open under the chip
     --hover            Start with the first row's detail card up
     --section <NAME>   Start showing a sidebar section by the name on its button
     --granularity <M>  Start with rows standing for `panes` or `tabs` rather than as saved
@@ -837,6 +870,19 @@ fn apply_overrides(
     if let Some(layout) = overrides.controls {
         workspace.override_control_layout(layout, ctx);
     }
+    if let Some(percent) = overrides.usage {
+        UsageModel::handle(ctx).update(ctx, |model, ctx| model.show_reading(percent, ctx));
+    }
+    // By name rather than through a method on the workspace, because the panel
+    // is a plugin's and the workspace does not know it exists. This is what a
+    // named command buys beyond a keymap line.
+    if overrides.usage_panel {
+        let name = ActionName::parse(USAGE_PANEL_ACTION).expect("a literal that parses");
+        match workspace.host().action(&name) {
+            Some(action) => workspace.run_action(action, ctx),
+            None => log::warn!("nothing answers to {USAGE_PANEL_ACTION}; is the plugin off?"),
+        }
+    }
     if overrides.worktrees {
         workspace.open_tab_menu_for_snapshot(ctx);
         if overrides.creating_worktree {
@@ -1026,6 +1072,13 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
         aim_at_blocks(&mut app, &workspace, pane, &overrides);
     }
 
+    // The panel's week comes off the disk on a background thread, so a frame
+    // drawn the instant it opened would be a picture of "Reading this
+    // machine's transcripts…" rather than of the panel.
+    if overrides.usage_panel {
+        await_usage_history(&queue, &mut app);
+    }
+
     let scene = frame(&mut app, &mut presenter);
 
     let (pixels, width, height) = render_scene_to_rgba(&scene, WINDOW_SIZE, &font_db)
@@ -1044,6 +1097,29 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
 
     println!("wrote {} ({width}x{height})", path.display());
     Ok(())
+}
+
+/// Pumps the queue until the usage panel has a week to draw.
+///
+/// The read is one pass over the transcripts written inside the window, which
+/// is a tenth of a second on a busy machine — but it is on another thread, and
+/// a snapshot is one frame with nothing after it to redraw. Times out rather
+/// than hanging: a machine with no transcripts has nothing to wait for, and
+/// the panel says so itself.
+fn await_usage_history(queue: &LocalQueue, app: &mut App) {
+    let deadline = Instant::now() + RUN_TIMEOUT;
+    while Instant::now() < deadline {
+        queue.run_until_parked();
+        let read = app.update(|ctx| {
+            let usage = ctx.get_singleton_model_handle::<UsageModel>();
+            !usage.as_ref(ctx).is_reading_history() && usage.as_ref(ctx).history().is_some()
+        });
+        if read {
+            return;
+        }
+        std::thread::sleep(RUN_POLL);
+    }
+    log::warn!("the transcripts were still being read after {RUN_TIMEOUT:?}");
 }
 
 /// Opens the shells and reports the pane the command line is aimed at.
@@ -1864,6 +1940,36 @@ mod tests {
                 overrides: Overrides::default()
             }
         );
+    }
+
+    #[test]
+    fn a_usage_percentage_is_a_number_or_it_is_an_error() {
+        assert_eq!(
+            parse(&["--usage", "82"]).expect("valid"),
+            Startup::Window {
+                frames: None,
+                overrides: Overrides {
+                    usage: Some(82),
+                    ..Overrides::default()
+                }
+            }
+        );
+        // A percentage is 0 to 100. Refusing 140 is the same answer as
+        // refusing "eighty": a picture of a chip reading 140% would be a
+        // picture of a bug rather than of the chip.
+        assert_eq!(
+            parse(&["--usage-panel"]).expect("valid"),
+            Startup::Window {
+                frames: None,
+                overrides: Overrides {
+                    usage_panel: true,
+                    ..Overrides::default()
+                }
+            }
+        );
+        assert!(parse(&["--usage", "140"]).is_err());
+        assert!(parse(&["--usage", "eighty"]).is_err());
+        assert!(parse(&["--usage"]).is_err());
     }
 
     #[test]

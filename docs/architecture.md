@@ -481,10 +481,25 @@ two bands — half a pixel either side of the centre, half a stroke either side 
 which is exact for a straight run at any width, including the two-thirds-of-a-pixel stroke a
 16px icon has.
 
-**A mask per size, cached forever.** The key is the icon, the size in whole device pixels and
+**A mask per size, cached forever.** The key is the mark, the size in whole device pixels and
 the stroke width; there is no subpixel bucket, because an icon is snapped to the pixel grid on
 both axes where a glyph is snapped only vertically. Nothing is rasterized twice, and the whole
 set at the three sizes the chrome uses is a few dozen kilobytes of atlas.
+
+The one place the stroke rule does not reach is the usage chip, whose mark is a *picture*: a
+Pac-Man pirate in an eyepatch, three frames of him, drawn in the same 24-unit grid as
+`crookui_core::icons::art`. Three things follow from that, and each is smaller than it sounds.
+A picture needs a **fill**, which is `raster::fill` — signed area accumulated per edge and run
+along each row, no sorted crossing list and no winding rule to configure, in about forty lines
+beside the distance field rather than in place of it. A picture has **more than one colour**,
+and a mask has none, so each frame is two layers — the yellow head and the black on it —
+stacked as two `Icon` elements, which is also why they are cached and tinted like everything
+else. And a picture is **clipped by its own artwork**: the strap runs off both sides of the
+box and the grin is an arc of a circle that is mostly outside it, so every layer is multiplied
+by the coverage of the layer beneath — the ink by its frame's face, a bitten face by the whole
+head — rather than by a clip rectangle nobody could see in the geometry. `icons::Mark` is the
+pair of the two kinds, and it is what the element, the scene and the atlas all hold: only the
+rasterizer ever asks which one it has.
 
 What this replaces is worth naming, because it is the argument for having done it at all.
 Before this, a gear was `⚙` and a close button `×` — codepoints, drawn out of whatever font
@@ -1499,7 +1514,7 @@ platforms, and treat a build script as the cost it is.
 | Settings | ~800, with a macro DSL and cloud sync | 10, two `serde` structs and a name in one JSON file |
 | Themes | 21 built in, gradients, images, a creator, OS sync, hot reload | 13 built in, the same file format, a creator without the image, no OS sync |
 | Theme chooser | a 240px docked panel with search and virtualisation | a 248px docked panel, no search, every row built |
-| Icons | its own `WarpIcon` and `UiIcon` sets, rendered from SVG | Lucide, vendored as path commands, one distance-field rasterizer (§4) |
+| Icons | its own `WarpIcon` and `UiIcon` sets, rendered from SVG | Lucide, vendored as path commands, one distance-field rasterizer — and one drawn mark, filled (§4) |
 | Settings UI | a pane, 16 pages, search over ~800 widgets | a pane, 4 pages, search over 30 (§4) |
 | Git worktrees | none | a right-click menu on a tab, after herdr's model (§7) |
 

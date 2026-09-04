@@ -43,6 +43,15 @@ fn test_parses_a_full_usage_response() {
     );
     assert_eq!(Some(73.), snapshot.weekly_percent);
     assert_eq!(
+        Some(
+            Utc.with_ymd_and_hms(2026, 7, 27, 1, 59, 59)
+                .unwrap()
+                .timestamp()
+        ),
+        snapshot.weekly_resets_at.map(|at| at.timestamp()),
+        "the weekly window's reset is reported beside the session's"
+    );
+    assert_eq!(
         Some(ClaudeExtraUsage {
             used_credits: 1250.,
             monthly_limit: 5000.,
@@ -112,6 +121,7 @@ fn test_percent_is_clamped_and_rounded_for_display() {
         session_percent: percent,
         session_resets_at: None,
         weekly_percent: None,
+        weekly_resets_at: None,
         extra_usage: None,
     };
 
@@ -127,6 +137,7 @@ fn test_countdown_to_the_session_reset() {
         session_percent: 10.,
         session_resets_at: Some(resets_at),
         weekly_percent: None,
+        weekly_resets_at: None,
         extra_usage: None,
     };
 

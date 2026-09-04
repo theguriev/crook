@@ -19,6 +19,9 @@ description of something that was never built.
   - Named actions are reachable: `crook/usage/refresh` is registered by a plugin, bindable
     from `keybindings.json` by its name, dispatched as `WorkspaceAction::Run`, and listed on
     the settings page's Keyboard Shortcuts page with whatever chord reaches it.
+    `crook/usage/panel` opens the panel the same way — and is also how `--usage-panel`
+    reaches a popover the workspace itself has no handle on, which is the plainest
+    demonstration of what a named action is for.
   - `crook/window` registers every one of Crook's own commands under a name, and owns the
     `window.overlay` slot — where anything that floats over the whole window goes.
   - `crook/palette` is the first plugin that is not an extraction: a command palette, built

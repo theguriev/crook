@@ -560,6 +560,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arboard",
+ "chrono",
  "crook_plugin",
  "crook_plugin_api",
  "crook_terminal",

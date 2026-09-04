@@ -27,10 +27,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::time::Duration;
 
+use chrono::Utc;
 use crook_usage::{
-    ClaudeUsageError, ClaudeUsageSnapshot, RefreshOutcome, RefreshTrigger, UsagePoller,
+    ClaudeUsageError, ClaudeUsageSnapshot, RefreshOutcome, RefreshTrigger, UsageHistory,
+    UsagePoller,
 };
 use crookui_core::prelude::*;
+
+/// How long a read of the transcripts is reused before the panel scans again.
+///
+/// A minute, the same interval the reading itself is polled at: long enough
+/// that opening and closing the panel does not rescan the disk, short enough
+/// that the week's totals move while a person watches their own turn land.
+const HISTORY_FRESH_FOR: chrono::TimeDelta = chrono::TimeDelta::seconds(60);
 
 /// Why the chip has no percentage to show.
 ///
@@ -65,6 +74,18 @@ impl UsageProblem {
             Self::NoSession => "no session",
             Self::SessionExpired => "session expired",
             Self::Unreachable => "unavailable",
+        }
+    }
+
+    /// The same thing said in a sentence, for the panel, which has room for
+    /// one and can therefore say what to do about it.
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::NoSession => "Run Claude Code once to show usage here.",
+            Self::SessionExpired => {
+                "The Claude Code session expired. Run Claude Code to refresh it."
+            }
+            Self::Unreachable => "Couldn't reach Claude. The last reading may be out of date.",
         }
     }
 }
@@ -113,6 +134,15 @@ pub struct UsageModel {
 
     /// Whether a person is waiting on a reading right now.
     busy_for_user: bool,
+
+    /// The last read of the local transcripts, if the panel has ever been
+    /// opened. `None` is "never read", not "nothing there": an empty week is
+    /// a [`UsageHistory`] with nothing in it.
+    history: Option<UsageHistory>,
+
+    /// Whether a read of the transcripts is in flight, so that opening the
+    /// panel twice cannot start two scans of a few hundred megabytes.
+    reading_history: bool,
 }
 
 impl Entity for UsageModel {
@@ -135,6 +165,8 @@ impl UsageModel {
             wake: None,
             user_request: Arc::new(AtomicBool::new(false)),
             busy_for_user: false,
+            history: None,
+            reading_history: false,
         }
     }
 
@@ -146,6 +178,82 @@ impl UsageModel {
     /// Why there is no reading, if there is not one.
     pub fn problem(&self) -> Option<UsageProblem> {
         self.problem
+    }
+
+    /// What the transcripts said the last time they were read.
+    pub fn history(&self) -> Option<&UsageHistory> {
+        self.history.as_ref()
+    }
+
+    /// Whether a read of the transcripts is running right now.
+    pub fn is_reading_history(&self) -> bool {
+        self.reading_history
+    }
+
+    /// Reads the transcripts, unless a recent enough read is already in hand.
+    ///
+    /// Called when the panel opens, and never on a timer: the week's totals
+    /// are not worth a repeat scan of the disk while nobody is looking at
+    /// them, and a panel that is open is looking at one moment rather than at
+    /// a live figure. What makes the scan affordable at all is that it reads
+    /// only the files written inside the window — a tenth of a second on a
+    /// heavy week — but the cheapest scan is still the one not run.
+    pub fn read_history(&mut self, ctx: &mut ModelContext<Self>) {
+        let fresh = self
+            .history
+            .as_ref()
+            .is_some_and(|history| Utc::now() - history.read_at < HISTORY_FRESH_FOR);
+        if fresh || self.reading_history {
+            return;
+        }
+
+        self.reading_history = true;
+        ctx.notify();
+
+        let reading = ctx
+            .background()
+            .spawn(async move { crook_usage::read_history(Utc::now()) });
+        ctx.spawn(reading, |model, history, ctx| {
+            model.reading_history = false;
+            match history {
+                Ok(history) => model.history = Some(history),
+                // The panel keeps whatever it had and says nothing new: an
+                // unreadable home directory is not something a person can act
+                // on from a popover.
+                Err(err) => log::warn!("Could not read the Claude Code transcripts: {err:#}"),
+            }
+            ctx.notify();
+        })
+        .detach();
+    }
+
+    /// Puts a reading in front of the renderer without asking Anthropic for
+    /// one.
+    ///
+    /// `--usage`'s seam and nothing else's. What the chip draws otherwise
+    /// comes from a Claude Code session on the machine it is running on, which
+    /// is exactly the state a picture cannot be taken of: a run on a machine
+    /// that has never opened Claude Code draws a dash, and a run on one that
+    /// has draws a number that is nobody's business but that person's.
+    ///
+    /// It does not stop the poll: the next cycle to land replaces this, which
+    /// is right for a flag whose whole job is the frame after startup.
+    ///
+    /// One number fills every limit the panel draws, resets included. A
+    /// picture of the panel with only the session row in it would be a picture
+    /// of a corner of the feature, and there is nothing to be gained from a
+    /// second flag for a second invented number.
+    pub fn show_reading(&mut self, percent: u8, ctx: &mut ModelContext<Self>) {
+        let now = Utc::now();
+        self.snapshot = Some(ClaudeUsageSnapshot {
+            session_percent: percent as f32,
+            session_resets_at: Some(now + chrono::TimeDelta::minutes(138)),
+            weekly_percent: Some(percent as f32),
+            weekly_resets_at: Some(now + chrono::TimeDelta::hours(76)),
+            extra_usage: None,
+        });
+        self.problem = None;
+        ctx.notify();
     }
 
     /// Whether a person clicked and is still waiting.
