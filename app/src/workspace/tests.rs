@@ -3379,6 +3379,155 @@ fn making_a_worktree_checks_it_out_and_opens_a_tab_in_the_group() {
 }
 
 #[test]
+fn the_creator_answers_enter_with_its_button_and_escape_with_cancel() {
+    // The popup's two keys, on the face a person types into. The branch field
+    // eats both by itself — Escape empties it, Enter does nothing — so this is
+    // the test that says `Workspace::action_for` gets them first: without that
+    // claim the dialog can only be finished with a pointer.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(harness.active_id()));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+
+    // Escape backs out of the creator without taking the menu with it, which
+    // is what the Cancel button beside it does.
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    assert!(
+        harness.press_key("escape", Modifiers::default()),
+        "escape was not claimed by the creator"
+    );
+    assert!(
+        !harness.worktree_menu_is_creating(),
+        "escape did not leave the creator"
+    );
+    assert!(
+        harness.a_popup_is_open(),
+        "escape closed the whole menu instead of stepping back one face"
+    );
+
+    // And Enter is the Create button: a name is already in the field, so this
+    // is the whole of making a worktree from the keyboard.
+    let before = harness.pane_ids().len();
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    assert!(
+        harness.press_key("enter", Modifiers::default()),
+        "enter was not claimed by the creator"
+    );
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.pane_ids().len() > before
+    });
+
+    let opened = harness
+        .workspace
+        .read(&harness.app, |workspace, _| workspace.pane_directories())
+        .into_iter()
+        .map(|(_, directory)| directory)
+        .find(|directory| directory.starts_with(&store))
+        .expect("enter did not check anything out");
+    assert!(opened.is_dir(), "{} was not checked out", opened.display());
+}
+
+#[test]
+fn escape_takes_the_menu_down_and_enter_never_removes_a_checkout() {
+    // The other two answers. Escape on the list is the press outside it; Enter
+    // on the confirmation is nothing at all, and that is the point: the
+    // destructive button is the one thing in this menu the keyboard does not
+    // reach, so nobody deletes a checkout by dismissing a dialog too fast.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let tab = harness.active_id();
+    let first = harness.pane_ids()[0];
+    harness.update_session(first, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(first, "main", None);
+    harness.frame();
+
+    // A second checkout, so there is a row with an × behind it — the main one
+    // is never removable.
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    harness.dispatch_worktree(WorktreeAction::Create);
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.pane_ids().len() > 1
+    });
+    let made = harness
+        .focused_pane_id()
+        .expect("the split focused its pane");
+    harness.dispatch_action(TabAction::ClosePane(made));
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("both checkouts to be read", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    let index = harness
+        .worktree_index_under(&store)
+        .expect("the checkout that was made is not in the menu");
+    harness.dispatch_worktree(WorktreeAction::AskRemove(index));
+    assert!(
+        harness.worktree_menu_is_confirming(),
+        "the confirmation did not open"
+    );
+
+    assert_eq!(
+        harness.action_for("enter", Modifiers::default()),
+        None,
+        "enter is bound to the button that deletes a checkout"
+    );
+    assert!(
+        harness.press_key("escape", Modifiers::default()),
+        "escape was not claimed by the confirmation"
+    );
+    assert!(
+        !harness.worktree_menu_is_confirming(),
+        "escape did not leave the confirmation"
+    );
+
+    // And from the list itself, one more press puts the menu away.
+    assert!(
+        harness.press_key("escape", Modifiers::default()),
+        "escape was not claimed by the list"
+    );
+    assert!(
+        !harness.a_popup_is_open(),
+        "escape did not take the menu down"
+    );
+    assert!(
+        crate::git::worktree::list(&repository)
+            .expect("the repository still lists")
+            .len()
+            == 2,
+        "a checkout went missing on the way through the keyboard"
+    );
+}
+
+#[test]
 fn showing_a_checkout_opens_it_in_the_group_and_never_twice() {
     // The other half of the same rule, on the path that opens a checkout that
     // already exists. Two things it has to get right, and the second is what

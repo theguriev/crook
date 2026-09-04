@@ -52,6 +52,24 @@
 //! `--base`: a worktree made from anything other than the head you are looking
 //! at is a question a menu cannot ask well.
 //!
+//! # The two keys
+//!
+//! Escape and Enter, claimed by
+//! [`Workspace::action_for`](super::view::Workspace::action_for) before the
+//! element tree sees them — the search box's arrangement, for the search box's
+//! reason: [`TextField`](super::text_field::TextField) answers Escape by
+//! emptying itself and Enter by doing nothing, so a creator whose branch field
+//! holds the keyboard would have no way out that is not a pointer.
+//!
+//! * **Escape** is Cancel: back to the list from the creator and from the
+//!   confirmation, and down from the list itself. One key, one step back.
+//! * **Enter** is Create, in the creator only. The name is selected the moment
+//!   the creator opens, so making a worktree is a name and a press.
+//!
+//! Enter does nothing in the confirmation. Removing a checkout is the only
+//! destructive thing here, and it is not a thing to hand to the key beside
+//! the one that dismisses dialogs.
+//!
 //! # Reading git off the frame
 //!
 //! Every git call here happens on the background pool and lands through
