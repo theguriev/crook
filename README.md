@@ -99,7 +99,13 @@ Six features, and the page that configures them:
   and About. Every option on it is one the application actually reads; there is nothing there
   that does not do something. Changes apply on the click and are written to
   `<config>/crook/settings.json`, which is the same eight keys the gear menu writes plus one.
-  It is the one pane with no shell under it and no field: every control on it is a click.
+
+  At the top of its rail is a **search box**, and it narrows both halves of the page at once:
+  the rail keeps only the pages that hold an answer and says how many each of them holds, and
+  the page keeps only the rows that are one. A row is found by its own name, by the line under
+  it, by the value on its right — so `cmd-w` finds "Close the focused pane" and a path finds
+  the settings file — by the page and category it is in, and by a hand-written list of the
+  words somebody would actually type: nothing on the "Tab placement" row says *sidebar*.
 
 Everything else is out of scope on purpose. There is no keymap system, no persistence, no
 telemetry, and no mouse reporting or IME composition. The shell integration reports command

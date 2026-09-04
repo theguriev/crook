@@ -71,7 +71,7 @@
 //!
 //! # What it does not own
 //!
-//! Not the text: that is the [`PaneInput`] the workspace keeps per pane, which
+//! Not the text: that is the [`TextInput`] the workspace keeps per pane, which
 //! is what survives this element being thrown away and rebuilt on every frame.
 //! Not the keymap either — see [`crate::input_keys`], which is also where the
 //! decision to hand a keystroke to the shell instead is made.
@@ -92,9 +92,9 @@ use unicode_width::UnicodeWidthStr;
 use crate::clipboard::Clipboard;
 use crate::input_keys::{self, Platform, Route};
 use crate::pane_blocks::{PaneBlocks, ScrollCause};
-use crate::pane_input::PaneInput;
 use crate::terminal_font::{CellFont, CellMetrics};
 use crate::terminal_model::TerminalHandle;
+use crate::text_input::TextInput;
 use crate::theme::theme;
 
 use super::terminal_element::color;
@@ -160,7 +160,7 @@ impl Default for Ink {
 
 /// One pane's command input.
 pub struct CommandInput {
-    input: PaneInput,
+    input: TextInput,
     font: CellFont,
     clipboard: Clipboard,
     ink: Ink,
@@ -174,7 +174,7 @@ pub struct CommandInput {
 
     /// Whether this pane's field was the one listening when the frame was
     /// built. The caret's business and the prompt's; a keystroke asks
-    /// [`PaneInput::has_keys`] instead, because by then this is a frame old.
+    /// [`TextInput::has_keys`] instead, because by then this is a frame old.
     focused: bool,
 
     /// Whether the program on the far end owns the screen. Passed to
@@ -201,7 +201,7 @@ pub struct CommandInput {
 
 impl CommandInput {
     /// A field over `input`, attached to no shell and listening to nothing.
-    pub fn new(input: PaneInput, font: CellFont, clipboard: Clipboard) -> Self {
+    pub fn new(input: TextInput, font: CellFont, clipboard: Clipboard) -> Self {
         Self {
             input,
             font,
@@ -921,7 +921,7 @@ fn columns_for(width: f32, metrics: CellMetrics) -> usize {
 /// selection and the caret all go through it, so none of the three can end up
 /// a column or a row away from the other two.
 fn paint_input(
-    input: &PaneInput,
+    input: &TextInput,
     font: &CellFont,
     origin: Vector2F,
     rows: &Rows,

@@ -372,7 +372,19 @@ fn signal(keystroke: &Keystroke) -> Option<Signal> {
 
 /// What the editor should do about a keystroke, or `None` for one it has no
 /// meaning for.
-fn intent(keystroke: &Keystroke, chars: &str, platform: Platform) -> Option<Intent> {
+///
+/// The keymap without the pane: [`route`] above is the whole keyboard policy
+/// of a *pane*, and its first three rules — a selection owns the copy chord,
+/// the alternate screen owns everything, a signal reaches the shell — are all
+/// about a shell. A field with no shell under it wants none of them and all of
+/// this: word movement, the line ends, the clipboard chords, undo, and the
+/// emacs bindings macOS puts in every text field.
+///
+/// Callers outside a pane must still answer for the intents that assume one.
+/// [`Intent::Submit`], [`Intent::Newline`], [`Intent::HistoryUp`] and
+/// [`Intent::HistoryDown`] all mean "a line, and a place to send it"; a field
+/// that has neither has to decide what those keys mean before it gets here.
+pub fn intent(keystroke: &Keystroke, chars: &str, platform: Platform) -> Option<Intent> {
     let modifiers = keystroke.modifiers;
     if let Some(intent) = named_intent(&keystroke.key, modifiers, platform) {
         return Some(intent);

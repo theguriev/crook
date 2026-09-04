@@ -20,11 +20,11 @@ use crookui_core::presenter::EventContext;
 
 use crate::clipboard::Clipboard;
 use crate::input_keys::{self, Platform, Route};
-use crate::pane_input::PaneInput;
 use crate::pane_selection::PaneSelection;
 use crate::tab::PaneId;
 use crate::terminal_keys;
 use crate::terminal_model::TerminalHandle;
+use crate::text_input::TextInput;
 
 use super::action::WorkspaceAction;
 
@@ -87,7 +87,7 @@ pub struct Output {
     /// Read at the moment a key arrives rather than baked in when the frame
     /// was built, because it decides what Ctrl-D means: an end of input on an
     /// empty line, and a delete over a written one.
-    input: Option<PaneInput>,
+    input: Option<TextInput>,
 
     /// The pointer gesture that selects text out of this output, and where a
     /// copy of it goes.
@@ -116,7 +116,7 @@ impl Output {
 
     /// Attaches the composer under this output, whose line decides what Ctrl-D
     /// means.
-    pub fn with_input(mut self, input: PaneInput) -> Self {
+    pub fn with_input(mut self, input: TextInput) -> Self {
         self.input = Some(input);
         self
     }

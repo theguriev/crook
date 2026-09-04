@@ -39,6 +39,7 @@ use crookui_core::elements::{MouseStateHandle, Padding};
 use crookui_core::fonts::{FamilyId, Properties, Weight};
 use crookui_core::prelude::*;
 
+use super::search::{Query, Words};
 use crate::theme::theme;
 
 use super::super::action::WorkspaceAction;
@@ -90,6 +91,71 @@ const CONTROL_RADIUS: f32 = 6.;
 /// attached in exactly one place, behind a match on this.
 pub(super) type Command = Option<WorkspaceAction>;
 
+/// One thing in a category: what is drawn, and the words that find it.
+///
+/// `words` is `None` for a note. A paragraph belongs to the category rather
+/// than to any row in it, so there is nothing for a query to land on — and a
+/// search that answered with four paragraphs of prose because one of them
+/// contains the word "tab" would be worse than one that answered with the row.
+pub(super) struct Entry {
+    /// What finds it, unless nothing does.
+    pub(super) words: Option<Words>,
+    /// What the row *says* on its right-hand side, where that is a string
+    /// rather than a control: a chord, a path, a version.
+    ///
+    /// Searchable, and it has to be a `String` rather than one more
+    /// `&'static str` in [`Words`] because these are computed — the chord
+    /// depends on the platform and the path on the machine. Somebody who
+    /// remembers a key and not what it does types the key.
+    value: Option<String>,
+    /// What is drawn.
+    pub(super) element: Box<dyn Element>,
+}
+
+impl Entry {
+    /// An entry nothing can search for.
+    fn unsearchable(element: Box<dyn Element>) -> Self {
+        Self {
+            words: None,
+            value: None,
+            element,
+        }
+    }
+
+    /// Whether `query` is looking for this.
+    ///
+    /// `context` is the page and the category the row is in. A note goes
+    /// wherever its category goes: drawn when nothing is being searched for,
+    /// and left out the moment something is.
+    pub(super) fn matches(&self, query: &Query, context: &[&str]) -> bool {
+        let Some(words) = &self.words else {
+            return query.is_empty();
+        };
+
+        match &self.value {
+            Some(value) => {
+                let mut haystack = context.to_vec();
+                haystack.push(value);
+                query.matches(words, &haystack)
+            }
+            None => query.matches(words, context),
+        }
+    }
+}
+
+/// A heading and the rows under it.
+///
+/// Built as a value rather than as an element because the search filters it:
+/// which categories survive — and therefore which one is *first* and draws no
+/// divider above itself — is not known until the query has been applied.
+pub(super) struct Category {
+    /// What the heading says, which is also a word every row in it is found
+    /// by.
+    pub(super) title: &'static str,
+    /// The rows and the notes, in order.
+    pub(super) entries: Vec<Entry>,
+}
+
 /// A page's heading.
 pub(super) fn page_title(title: &'static str, ui: FamilyId) -> Box<dyn Element> {
     Container::new(
@@ -105,15 +171,23 @@ pub(super) fn page_title(title: &'static str, ui: FamilyId) -> Box<dyn Element> 
     .finish()
 }
 
-/// A group of rows under a heading.
+/// A heading and the rows under it, gathered.
+pub(super) fn category(title: &'static str, entries: Vec<Entry>) -> Category {
+    Category { title, entries }
+}
+
+/// One category, drawn.
 ///
 /// The separator goes *above* the heading rather than below the last row, so
 /// that a page never ends in a rule with nothing under it — Warp's rule, which
 /// it implements by not drawing the separator after the final category. Here
-/// the first category is the one that skips it, which is the same frame with
-/// one fewer special case: `first` is a property of the category, not of the
-/// list it happens to be in.
-pub(super) fn category(
+/// the first category is the one that skips it.
+///
+/// Which one that is used to be settled at the call site, on the grounds that
+/// `first` is a property of the category rather than of the list it happens to
+/// be in. The search made that false: a category is first when every category
+/// before it has been filtered away.
+pub(super) fn category_element(
     title: &'static str,
     first: bool,
     rows: Vec<Box<dyn Element>>,
@@ -156,13 +230,7 @@ pub(super) fn category(
 }
 
 /// One setting: a label, an optional description under it, and a control.
-pub(super) fn row(
-    label: &'static str,
-    description: Option<&'static str>,
-    enabled: bool,
-    control: Box<dyn Element>,
-    ui: FamilyId,
-) -> Box<dyn Element> {
+pub(super) fn row(words: Words, enabled: bool, control: Box<dyn Element>, ui: FamilyId) -> Entry {
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
@@ -170,7 +238,7 @@ pub(super) fn row(
             Flex::row()
                 .with_main_axis_size(MainAxisSize::Max)
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                .with_child(label_text(label, enabled, ui))
+                .with_child(label_text(words.label, enabled, ui))
                 // The control is pushed against the right edge by a spacer
                 // rather than placed at a column position, so that rows with
                 // labels of wildly different lengths still line their controls
@@ -184,13 +252,17 @@ pub(super) fn row(
     // of the row's column rather than of the label's: a description confined
     // to the label's share of the line would be cut off at the width of
     // whatever control happens to sit beside it.
-    if let Some(description) = description {
+    if let Some(description) = words.description {
         column.add_child(description_text(description, ui));
     }
 
-    Container::new(column.finish())
-        .with_margin_bottom(ROW_SPACING)
-        .finish()
+    Entry {
+        words: Some(words),
+        value: None,
+        element: Container::new(column.finish())
+            .with_margin_bottom(ROW_SPACING)
+            .finish(),
+    }
 }
 
 /// A row's label, greyed when the row is inert.
@@ -226,18 +298,17 @@ fn description_text(description: &'static str, ui: FamilyId) -> Box<dyn Element>
 /// rather than to the last value, which is what keeps the gap between two
 /// groups the same as the gap between two rows.
 pub(super) fn choice_group(
-    label: &'static str,
-    description: Option<&'static str>,
+    words: Words,
     enabled: bool,
     choices: Vec<Box<dyn Element>>,
     ui: FamilyId,
-) -> Box<dyn Element> {
+) -> Entry {
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_child(label_text(label, enabled, ui));
+        .with_child(label_text(words.label, enabled, ui));
 
-    if let Some(description) = description {
+    if let Some(description) = words.description {
         column.add_child(description_text(description, ui));
     }
 
@@ -248,9 +319,13 @@ pub(super) fn choice_group(
     );
     column.add_children(choices);
 
-    Container::new(column.finish())
-        .with_margin_bottom(ROW_SPACING)
-        .finish()
+    Entry {
+        words: Some(words),
+        value: None,
+        element: Container::new(column.finish())
+            .with_margin_bottom(ROW_SPACING)
+            .finish(),
+    }
 }
 
 /// A switch: on, off, or inert.
@@ -480,12 +555,14 @@ pub(super) fn text_button(
 /// row is the only control on the page that leads somewhere rather than
 /// changing something.
 pub(super) fn current_theme_row(
+    words: Words,
     card: Box<dyn Element>,
     name: String,
     action: WorkspaceAction,
     state: MouseStateHandle,
     ui: FamilyId,
-) -> Box<dyn Element> {
+) -> Entry {
+    let name_text = name.clone();
     let mut card = Some(card);
     let mut name = Some(name);
 
@@ -547,7 +624,11 @@ pub(super) fn current_theme_row(
     // The gap under the row goes *outside* the `Hoverable`: a margin inside it
     // is part of the box the hit test is resolved against, so the row lit up —
     // and opened the panel — from ten pixels below where it is drawn.
-    Container::new(row).with_margin_bottom(10.).finish()
+    Entry {
+        words: Some(words),
+        value: Some(name_text),
+        element: Container::new(row).with_margin_bottom(10.).finish(),
+    }
 }
 
 /// A label and a value that cannot be edited, for the About page.
@@ -556,19 +637,20 @@ pub(super) fn current_theme_row(
 /// something a person copies into a shell, and proportional text turns runs of
 /// slashes and dots into a smear.
 pub(super) fn fact(
-    label: &'static str,
+    words: Words,
     value: String,
     monospace: bool,
     fonts: super::super::view::Fonts,
-) -> Box<dyn Element> {
+) -> Entry {
     let family = if monospace { fonts.monospace } else { fonts.ui };
+    let value_text = value.clone();
 
-    Container::new(
+    let element = Container::new(
         Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_child(
-                Text::new(label, fonts.ui, LABEL_SIZE)
+                Text::new(words.label, fonts.ui, LABEL_SIZE)
                     .with_color(theme().text_muted)
                     .finish(),
             )
@@ -581,7 +663,13 @@ pub(super) fn fact(
             .finish(),
     )
     .with_margin_bottom(10.)
-    .finish()
+    .finish();
+
+    Entry {
+        words: Some(words),
+        value: Some(value_text),
+        element,
+    }
 }
 
 /// How many characters of a note go on one line.
@@ -595,7 +683,7 @@ pub(super) fn fact(
 const NOTE_LINE_CHARS: usize = 80;
 
 /// A paragraph of explanation that belongs to a page rather than to a row.
-pub(super) fn note(text: &'static str, ui: FamilyId) -> Box<dyn Element> {
+pub(super) fn note(text: &'static str, ui: FamilyId) -> Entry {
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Start);
@@ -609,9 +697,11 @@ pub(super) fn note(text: &'static str, ui: FamilyId) -> Box<dyn Element> {
         );
     }
 
-    Container::new(column.finish())
-        .with_margin_bottom(10.)
-        .finish()
+    Entry::unsearchable(
+        Container::new(column.finish())
+            .with_margin_bottom(10.)
+            .finish(),
+    )
 }
 
 /// Attaches the click handler, or does not.

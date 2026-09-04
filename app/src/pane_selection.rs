@@ -14,7 +14,7 @@
 //! can: the element tree is thrown away and rebuilt on every render, and a
 //! press is only half a gesture. So the workspace keeps one of these per pane
 //! and hands the element a clone each frame, exactly as it does with
-//! [`PaneInput`](crate::pane_input::PaneInput) and every mouse state — and a
+//! [`TextInput`](crate::text_input::TextInput) and every mouse state — and a
 //! pane that closes takes its gesture with it, along with the selection in the
 //! terminal it closed.
 

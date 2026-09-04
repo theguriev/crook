@@ -43,6 +43,7 @@ ICONS = [
     ("LayoutGrid", "layout-grid", "The Expanded density, in the gear menu's segmented control."),
     ("Menu", "menu", "The Compact density, in the same control. Warp draws `Menu01` here."),
     ("Plus", "plus", "New tab, and new theme."),
+    ("Search", "search", "The settings page's search box, in the rail."),
     ("Settings", "settings", "The gear that opens the options menu."),
     ("X", "x", "Close: a tab, a panel row, the Themes panel."),
 ]

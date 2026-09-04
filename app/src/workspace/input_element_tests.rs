@@ -18,8 +18,8 @@ fn font() -> CellFont {
 }
 
 /// An input holding `text`, with the caret left at the end of it.
-fn holding(text: &str) -> PaneInput {
-    let input = PaneInput::new();
+fn holding(text: &str) -> TextInput {
+    let input = TextInput::new();
     input.edit(|editor| editor.set_text(text));
     input
 }
@@ -61,12 +61,12 @@ fn wrap(text: &str, columns: usize) -> Vec<Range<usize>> {
 }
 
 /// Paints a field `columns` cells wide, tall enough for everything in it.
-fn painted(input: &PaneInput, columns: usize, focused: bool) -> Scene {
+fn painted(input: &TextInput, columns: usize, focused: bool) -> Scene {
     painted_in(input, columns, focused, Ink::default())
 }
 
 /// The same, with the first row continuing a prompt that ended at `inline`.
-fn painted_inline(input: &PaneInput, columns: usize, inline: Option<usize>) -> Scene {
+fn painted_inline(input: &TextInput, columns: usize, inline: Option<usize>) -> Scene {
     painted_rows(
         input,
         &{
@@ -79,7 +79,7 @@ fn painted_inline(input: &PaneInput, columns: usize, inline: Option<usize>) -> S
 }
 
 /// The same, in colours a shell resolved rather than the theme's.
-fn painted_in(input: &PaneInput, columns: usize, focused: bool, ink: Ink) -> Scene {
+fn painted_in(input: &TextInput, columns: usize, focused: bool, ink: Ink) -> Scene {
     let editor = input.editor();
     let rows = rows_of(editor.text(), editor.caret(), columns);
     drop(editor);
@@ -87,7 +87,7 @@ fn painted_in(input: &PaneInput, columns: usize, focused: bool, ink: Ink) -> Sce
 }
 
 /// Paints a field into a scene from rows somebody else wrapped.
-fn painted_rows(input: &PaneInput, rows: &Rows, focused: bool, ink: Ink) -> Scene {
+fn painted_rows(input: &TextInput, rows: &Rows, focused: bool, ink: Ink) -> Scene {
     let mut scene = Scene::new(1.);
     scene.start_layer(ClipBounds::None);
     paint_input(
@@ -120,7 +120,7 @@ fn rects(scene: &Scene) -> Vec<Rect> {
 }
 
 /// Where a point inside a field `columns` wide lands in the text.
-fn offset_at(input: &PaneInput, columns: usize, local: Vector2F) -> usize {
+fn offset_at(input: &TextInput, columns: usize, local: Vector2F) -> usize {
     let editor = input.editor();
     let rows = rows_of(editor.text(), editor.caret(), columns);
     rows.at_point(editor.text(), local, font().metrics())
@@ -547,7 +547,7 @@ fn the_caret_sits_in_the_cell_after_the_prompt_when_the_field_is_empty() {
     // that used to read as a widget: a caret alone on a row of its own under
     // a prompt that ends in `❯`.
     let metrics = font().metrics();
-    let caret = rects(&painted_inline(&PaneInput::new(), 20, Some(2)))
+    let caret = rects(&painted_inline(&TextInput::new(), 20, Some(2)))
         .pop()
         .expect("a focused composer draws a caret");
 

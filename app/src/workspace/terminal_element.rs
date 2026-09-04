@@ -78,12 +78,12 @@ use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 use crookui_core::scene::Scene;
 
 use crate::clipboard::Clipboard;
-use crate::pane_input::PaneInput;
 use crate::pane_selection::PaneSelection;
 use crate::pane_surface;
 use crate::tab::PaneId;
 use crate::terminal_font::{CellFont, CellMetrics};
 use crate::terminal_model::TerminalHandle;
+use crate::text_input::TextInput;
 use crate::theme::theme;
 
 use super::pane_output::{Keys, Output, Typed, selection_kind};
@@ -142,7 +142,7 @@ impl TerminalElement {
 
     /// Attaches the field under this grid, whose line decides what Ctrl-D
     /// means.
-    pub fn with_input(mut self, input: PaneInput) -> Self {
+    pub fn with_input(mut self, input: TextInput) -> Self {
         self.output = self.output.with_input(input);
         self
     }

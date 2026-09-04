@@ -1,7 +1,7 @@
 //! Where a pane's block list is scrolled to, and which block the pointer is
 //! over, kept between the frames that draw it.
 //!
-//! The same reason [`PaneInput`](crate::pane_input::PaneInput) and
+//! The same reason [`TextInput`](crate::text_input::TextInput) and
 //! [`PaneSelection`](crate::pane_selection::PaneSelection) exist: the element
 //! tree is thrown away and rebuilt on every render, so an offset stored in it
 //! would snap back to the top the first moment scrolling caused a repaint —

@@ -129,6 +129,18 @@ pub(super) static PLUS: &[Segment] = &[
     Line(12.0, 19.0),
 ];
 
+/// Lucide's `search`.
+pub(super) static SEARCH: &[Segment] = &[
+    Move(21.0, 21.0),
+    Line(16.66, 16.66),
+    Move(19.0, 11.0),
+    Cubic(19.0, 15.4183, 15.4183, 19.0, 11.0, 19.0),
+    Cubic(6.5817, 19.0, 3.0, 15.4183, 3.0, 11.0),
+    Cubic(3.0, 6.5817, 6.5817, 3.0, 11.0, 3.0),
+    Cubic(15.4183, 3.0, 19.0, 6.5817, 19.0, 11.0),
+    Close,
+];
+
 /// Lucide's `settings`.
 pub(super) static SETTINGS: &[Segment] = &[
     Move(9.671, 4.136),
@@ -184,12 +196,13 @@ pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [
     (Lucide::LayoutGrid, "layout-grid", LAYOUT_GRID),
     (Lucide::Menu, "menu", MENU),
     (Lucide::Plus, "plus", PLUS),
+    (Lucide::Search, "search", SEARCH),
     (Lucide::Settings, "settings", SETTINGS),
     (Lucide::X, "x", X),
 ];
 
 /// How many there are.
-pub const ICONS: usize = 9;
+pub const ICONS: usize = 10;
 
 /// The icons Crook draws, from Lucide.
 ///
@@ -225,6 +238,10 @@ pub enum Lucide {
     ///
     /// Lucide's [`plus`](https://lucide.dev/icons/plus).
     Plus,
+    /// The settings page's search box, in the rail.
+    ///
+    /// Lucide's [`search`](https://lucide.dev/icons/search).
+    Search,
     /// The gear that opens the options menu.
     ///
     /// Lucide's [`settings`](https://lucide.dev/icons/settings).
