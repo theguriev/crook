@@ -1,6 +1,6 @@
-//! The header row: the tab strip when there is one, then whatever is pinned to
-//! the right — and, since the window has no title bar of its own, the window's
-//! controls and the place to pick it up by.
+//! The header row: whatever is pinned to the right of it — and, since the
+//! window has no title bar of its own, the window's controls and the place to
+//! pick it up by.
 //!
 //! What is pinned to the right is whatever a plugin put in
 //! [`HEADER_RIGHT`](crate::plugins::header::HEADER_RIGHT), and this row does
@@ -12,20 +12,19 @@
 //! also the window's title bar, and a line of competing chips across it is how
 //! a status bar becomes a place nobody reads.
 //!
-//! # What the layout changes here
+//! # It holds no tabs at all
 //!
-//! With the tabs in a panel this row holds *no tab items at all* — not a
-//! narrower strip, not a collapsed one. Warp takes the same early return at
-//! `view.rs:20916` and leaves a flexible slot where its title-bar search bar
-//! would go; Crook has no search bar, so the slot is empty and the usage chip
-//! is the whole of the header.
+//! The tabs live in the panel down the left edge and nowhere else. Warp takes
+//! the same early return at `view.rs:20916` when its vertical tabs are on, and
+//! leaves a flexible slot where its title-bar search bar would go; Crook has no
+//! search bar, so the slot is empty and whatever a plugin pinned to the right
+//! is the whole of this row.
 //!
-//! The window-control reservation moves with the tabs. With a strip, this row
-//! spans the top edge and owes both ends of it; with a panel, the panel owns
-//! the top-left corner and this row owes only the right. Neither of those is
-//! decided here — [`Workspace::window_insets`](super::view::Workspace) hands
-//! back the share that belongs to this element, which is what keeps the two
-//! halves of one answer from being written in two places.
+//! The panel owns the window's top-left corner, so this row owes only the
+//! right end of the window-control reservation. That is not decided here —
+//! [`Workspace::window_insets`](super::view::Workspace) hands back the share
+//! that belongs to this element, which is what keeps the two halves of one
+//! answer from being written in two places.
 //!
 //! # The reservation is spent once
 //!
@@ -39,10 +38,8 @@
 use crookui_core::elements::Padding;
 use crookui_core::prelude::*;
 
-use crate::settings::Layout;
 use crate::theme::theme;
 
-use super::tab_bar;
 use super::title_bar;
 use super::view::Workspace;
 
@@ -58,24 +55,19 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
     // Crook's window is the application's to decorate, so this row is the
     // title bar and something is over it: the traffic lights on macOS, the
     // controls below on Windows and Linux. Which end, and how much, is one
-    // answer given per layout rather than per platform.
+    // answer, given once rather than per platform.
     let insets = workspace.window_insets();
     let controls = title_bar::caption_buttons(workspace);
-
-    let leading = match workspace.options().layout {
-        Layout::Horizontal => tab_bar::render(workspace, app),
-        // The panel is drawing the tabs. An `Empty` rather than a shortened
-        // strip: the two are mutually exclusive, and a strip that rendered
-        // "no rows" would still be listening for the clicks the panel is
-        // handling.
-        Layout::Vertical => Empty::new().finish(),
-    };
 
     let items = Container::new(
         Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::End)
-            .with_child(Expanded::new(1., leading).finish())
+            // The panel draws the tabs; this row draws none. Warp takes the
+            // same early return and leaves a flexible slot where its
+            // title-bar search bar would go; Crook has no search bar, so the
+            // slot is empty and whatever a plugin pinned is the whole of it.
+            .with_child(Expanded::new(1., Empty::new().finish()).finish())
             // Not a chip drawn transparently: the settings page's switch turns
             // the poll off as well as the pill, and a chip that was still in
             // the tree would still be a view being rendered, observed and laid

@@ -1,6 +1,8 @@
-//! What a row says, and the small pieces both layouts draw it out of.
+//! What a row says, and the small pieces it is drawn out of.
 //!
-//! The horizontal strip and the vertical panel are two shapes for one row.
+//! One shape now — the panel's — and this file is what is left of the day
+//! there were two: a row is described here and laid out there, which is why
+//! the description survived the strip that used to share it.
 //! They differ in how many lines they have room for and in what wraps them,
 //! and they must not differ in *which fact goes on which line* — that is
 //! Warp's table, it is what the "Pane title as" menu section writes, and two
@@ -38,15 +40,6 @@ use crate::theme::theme;
 /// letting it size to content means every arriving diff stat, and every flick
 /// of the "Diff stats" toggle, reflows the entire list.
 pub(super) const METADATA_ROW_HEIGHT: f32 = 14.;
-
-/// How much of a working directory a strip row has room for.
-///
-/// A stand-in for the `ClipConfig::start()` Warp gives every path — clipped
-/// from the *front*, so the tail survives. Crook's `Text` clips from the back,
-/// which for a path throws away the only part worth reading, so the string is
-/// cut before it gets there. Delete this the day the renderer grows a clip
-/// config.
-pub(super) const ROW_PATH_CHARS: usize = 30;
 
 /// The same, for a panel row: 248px of column, minus the icon and the padding,
 /// holds fewer characters than a strip row that may be 220 wide with no icon.

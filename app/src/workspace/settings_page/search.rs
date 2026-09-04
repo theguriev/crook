@@ -9,8 +9,8 @@
 ///
 /// The label and the description are what the row already says. The keywords
 /// are what it does not: the words somebody would type looking for it, which
-/// are very often not the words the interface chose. "Tab placement" is what
-/// the row is called; "sidebar" is what a person types.
+/// are very often not the words the interface chose. "View as" is what the
+/// row is called; "split" is what a person types.
 /// Owned rather than `&'static str`, and that is not an accident of
 /// convenience. A row's label used to be a literal in this crate because every
 /// row was; a plugin's named action is a string that does not exist until the

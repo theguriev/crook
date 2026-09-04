@@ -10,7 +10,7 @@
 //! vertical-tab display options side by side.
 
 use crate::plugin::{ActionId, PageId};
-use crate::settings::{Density, Granularity, Layout, PrimaryInfo, Subtitle};
+use crate::settings::{Density, Granularity, PrimaryInfo, Subtitle};
 use crate::tab::{PaneId, TabAction, TabId};
 
 /// Everything the header dispatches.
@@ -265,20 +265,4 @@ pub enum OptionsAction {
     ToggleShowDiffStats,
     /// "Show details on hover".
     ToggleShowDetailsOnHover,
-    /// Move the tabs between the panel and the strip.
-    ///
-    /// A toggle rather than a `SetLayout`, because what sends it is a
-    /// keystroke that means "the other one". The gear menu has no control for
-    /// it — Warp keeps `use_vertical_tabs` in its settings window rather than
-    /// in this popup, and a popup that could move itself out from under the
-    /// pointer is a worse place for it.
-    ToggleLayout,
-    /// Put the tabs somewhere by name.
-    ///
-    /// What the settings page's segmented control sends. A named value rather
-    /// than a toggle because a segmented control has two halves and clicking
-    /// the selected one must do nothing: a toggle there would swap the layout
-    /// under a pointer that had just been told it was already on the right
-    /// half.
-    SetLayout(Layout),
 }

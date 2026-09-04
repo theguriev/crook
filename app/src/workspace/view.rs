@@ -33,12 +33,11 @@ use crate::pane_link::PaneLink;
 use crate::pane_selection::PaneSelection;
 use crate::pane_split::{DividerDrag, PaneExtent};
 use crate::pane_surface;
-use crate::platform_insets::{ControlLayout, LayoutInsets, TabsPlacement, WindowChrome};
+use crate::platform_insets::{ControlLayout, LayoutInsets, WindowChrome};
 use crate::plugin::{ActionId, Host, PageId, PluginId};
 use crate::selection::{Blocks, Cells};
 use crate::settings::{
-    DEFAULT_FONT_SIZE, Density, FONT_SIZE_STEP, GeneralOptions, Granularity, Layout, Settings,
-    TabOptions,
+    DEFAULT_FONT_SIZE, Density, FONT_SIZE_STEP, GeneralOptions, Granularity, Settings, TabOptions,
 };
 use crate::tab::{
     AgentSession, AgentStatus, Direction, Pane, PaneId, Tab, TabAction, TabEffect, TabId, TabStrip,
@@ -236,7 +235,6 @@ impl MenuState {
 struct Overridden {
     density: bool,
     granularity: bool,
-    layout: bool,
 }
 
 impl Overridden {
@@ -244,19 +242,11 @@ impl Overridden {
     const DENSITY: Self = Self {
         density: true,
         granularity: false,
-        layout: false,
     };
     /// Only the granularity.
     const GRANULARITY: Self = Self {
         density: false,
         granularity: true,
-        layout: false,
-    };
-    /// Only the layout.
-    const LAYOUT: Self = Self {
-        density: false,
-        granularity: false,
-        layout: true,
     };
 
     /// Whether nothing at all is overridden.
@@ -268,7 +258,6 @@ impl Overridden {
     fn mark(&mut self, also: Self) {
         self.density |= also.density;
         self.granularity |= also.granularity;
-        self.layout |= also.layout;
     }
 
     /// Clears every flag `chosen` marks, and says whether that changed
@@ -280,7 +269,6 @@ impl Overridden {
         let before = *self;
         self.density &= !chosen.density;
         self.granularity &= !chosen.granularity;
-        self.layout &= !chosen.layout;
         *self != before
     }
 }
@@ -1142,9 +1130,6 @@ impl Workspace {
     /// the first selection of a session, before any frame — scrolls nowhere,
     /// and the next selection finds it.
     fn scroll_row_into_view(&self) {
-        if self.options.layout != Layout::Vertical {
-            return;
-        }
         let Some(pane) = self.tabs.focused_pane_id() else {
             return;
         };
@@ -1639,18 +1624,7 @@ impl Workspace {
         self.overridden.clear(Overridden {
             density: options.density != self.options.density,
             granularity: options.granularity != self.options.granularity,
-            layout: options.layout != self.options.layout,
         });
-
-        if options.layout != self.options.layout {
-            // The whole window is about to be rebuilt somewhere else, so every
-            // control the pointer was on is about to stop existing without
-            // ever seeing a hover-out. Left alone, a row that was hovered in
-            // the strip comes back hovered in the panel with the pointer
-            // nowhere near it — the same trap the close button and the info
-            // dot each close for themselves.
-            self.forget_hover_state();
-        }
 
         self.options = options;
         let persisted = self.persisted();
@@ -1719,15 +1693,6 @@ impl Workspace {
         });
     }
 
-    /// Starts in a layout the command line asked for, without adopting it.
-    ///
-    /// The same contract again, and the one that matters most: `--layout
-    /// horizontal` is how somebody looks at the strip once, and it must not
-    /// quietly become the layout their next launch opens in.
-    pub fn override_layout(&mut self, layout: Layout, ctx: &mut ViewContext<Self>) {
-        self.override_with(ctx, Overridden::LAYOUT, |options| options.layout = layout);
-    }
-
     /// Puts one option on screen and records that the file did not ask for it.
     fn override_with(
         &mut self,
@@ -1743,9 +1708,6 @@ impl Workspace {
             return;
         }
 
-        if options.layout != self.options.layout {
-            self.forget_hover_state();
-        }
         self.options = options;
         self.overridden.mark(flag);
         ctx.notify();
@@ -1769,13 +1731,10 @@ impl Workspace {
         if self.overridden.granularity {
             options.granularity = saved.granularity;
         }
-        if self.overridden.layout {
-            options.layout = saved.layout;
-        }
         options
     }
 
-    /// Where the window's own controls land, given where the tabs are.
+    /// Where the window's own controls land.
     ///
     /// The one call a renderer makes about window chrome. It answers "how
     /// much" and "which element owes it" together, so no view can get the
@@ -1786,13 +1745,9 @@ impl Workspace {
     /// takes the traffic lights away there and the room reserved for them has
     /// to go with them. See [`WindowControls`](crate::window_controls).
     pub(super) fn window_insets(&self) -> LayoutInsets {
-        let placement = match self.options.layout {
-            Layout::Vertical => TabsPlacement::LeftPanel,
-            Layout::Horizontal => TabsPlacement::Header,
-        };
         self.control_layout
             .insets(WINDOW_CHROME, self.window.state().fullscreen)
-            .split_for(placement)
+            .split()
     }
 
     /// Who draws this window's controls.
@@ -1849,31 +1804,6 @@ impl Workspace {
             // end the process, and a title bar's close button is not a second
             // one.
             WindowAction::Close => (self.quit)(),
-        }
-    }
-
-    /// Drops every mouse state the frame about to be replaced was holding.
-    ///
-    /// Called when the layout changes, which is the one edit that throws away
-    /// the whole element tree rather than a row of it.
-    fn forget_hover_state(&mut self) {
-        self.hovered_row = None;
-        for interaction in self.interactions.values() {
-            interaction.chip.lock().reset_interaction_state();
-            interaction.close.lock().reset_interaction_state();
-            interaction.body.lock().reset_interaction_state();
-        }
-        for chrome in self.tab_chrome.values() {
-            chrome.container.lock().reset_interaction_state();
-            chrome.header.lock().reset_interaction_state();
-        }
-        self.new_tab.lock().reset_interaction_state();
-        for state in [
-            &self.caption.minimize,
-            &self.caption.maximize,
-            &self.caption.close,
-        ] {
-            state.lock().reset_interaction_state();
         }
     }
 
@@ -2587,9 +2517,6 @@ impl Workspace {
             Binding::MoveTabRight => TabAction::MoveRight,
             // The sidebar chord every editor uses for the same gesture: move
             // the list of things you are working on out of the way, or back.
-            Binding::ToggleLayout => {
-                return Some(WorkspaceAction::Options(OptionsAction::ToggleLayout));
-            }
             // The binding every application on all three platforms uses for
             // this, and the one Warp binds `ShowSettings` to. A tab action
             // rather than a settings one, because what it opens is a tab —
@@ -2918,10 +2845,6 @@ impl Workspace {
         let chosen = Overridden {
             density: matches!(action, OptionsAction::SetDensity(_)),
             granularity: matches!(action, OptionsAction::SetGranularity(_)),
-            layout: matches!(
-                action,
-                OptionsAction::ToggleLayout | OptionsAction::SetLayout(_)
-            ),
         };
 
         match action {
@@ -2949,8 +2872,6 @@ impl Workspace {
             OptionsAction::ToggleShowDetailsOnHover => {
                 options.show_details_on_hover = !options.show_details_on_hover;
             }
-            OptionsAction::ToggleLayout => options.layout = options.layout.toggled(),
-            OptionsAction::SetLayout(layout) => options.layout = layout,
         }
 
         if self.overridden.clear(chosen) && options == self.options {
@@ -3455,11 +3376,14 @@ impl View for Workspace {
     }
 
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
-        // The header and the body, which sit one above the other in both
-        // layouts. What changes is whether the header holds the tabs.
+        // The panel is the full height of the window and the header starts
+        // beside it, not above it. That is what puts the panel's control bar
+        // in the window's top-left corner — where a client-decorated macOS
+        // window draws its traffic lights — and it is why `window_insets` has
+        // a `panel_left` at all.
         //
-        // The Themes panel goes *between* the tabs and the work in both, which
-        // is where Warp puts its chooser: a docked sibling that pushes the
+        // The Themes panel goes *between* the tabs and the work, which is
+        // where Warp puts its chooser: a docked sibling that pushes the
         // terminal aside rather than a modal that covers it, so a theme is
         // judged against a running shell.
         let stacked = Flex::column()
@@ -3468,24 +3392,12 @@ impl View for Workspace {
             .with_child(Expanded::new(1., self.beside_panel(body::render(self, app), app)).finish())
             .finish();
 
-        let content = match self.options.layout {
-            // With the tabs in a strip the header spans the window, so the
-            // panel sits beside the body under it — otherwise it would push
-            // the strip sideways and take the window's top-left corner from
-            // it.
-            Layout::Horizontal => stacked,
-            // The panel is the full height of the window and the header starts
-            // beside it, not above it. That is what puts the panel's control
-            // bar in the window's top-left corner — where a client-decorated
-            // macOS window draws its traffic lights — and it is why
-            // `window_insets` has a `panel_left` at all.
-            Layout::Vertical => Flex::row()
-                .with_main_axis_size(MainAxisSize::Max)
-                .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-                .with_child(tabs_panel::render(self, app))
-                .with_child(Expanded::new(1., stacked).finish())
-                .finish(),
-        };
+        let content = Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_child(tabs_panel::render(self, app))
+            .with_child(Expanded::new(1., stacked).finish())
+            .finish();
 
         let window = Container::new(content)
             .with_background_color(theme().ground)
@@ -3536,7 +3448,7 @@ const OVERLAY_ANCHOR: AnchorTo = AnchorTo {
 impl Workspace {
     /// `work` with the Themes panel beside it, when the panel is up.
     ///
-    /// One place, called from the one point both layouts share, so the panel
+    /// One place, called from the one point the whole window shares, so the panel
     /// cannot end up on a different side of the window depending on where the
     /// tabs are.
     fn beside_panel(&self, work: Box<dyn Element>, app: &AppContext) -> Box<dyn Element> {

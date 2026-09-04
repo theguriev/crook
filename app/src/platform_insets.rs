@@ -22,17 +22,14 @@
 //!
 //! # Which element the reservation belongs to
 //!
-//! "How much" is only half the answer. The other half is *who pays*, and that
-//! moved the day the tabs became a panel down the left edge: the controls sit
-//! at the two top corners of the window, and which of Crook's elements owns
-//! each corner depends on the layout. With a horizontal strip the header spans
-//! the whole top edge and owes both ends; with a vertical panel the panel owns
-//! the top-left corner and the header only the top-right. Reserving on the
-//! header in the vertical layout puts macOS's traffic lights straight through
-//! the panel's gear button, and it is invisible on Windows and Linux, where
-//! the controls are on the other side. [`TabsPlacement`] is what makes that
-//! one decision instead of two guesses, and it is tested for every platform in
-//! both layouts.
+//! "How much" is only half the answer. The other half is *who pays*: the
+//! controls sit at the two top corners of the window, and Crook's tabs are a
+//! panel down the left edge — so the panel's control bar owns the top-left
+//! corner and the header owns only the top-right. Reserving the left end on
+//! the header instead puts macOS's traffic lights straight through the panel's
+//! gear button, and it is invisible on Windows and Linux, where the controls
+//! are on the other side. [`WindowControlInsets::split`] is what makes that one
+//! decision instead of two guesses, and it is tested for every platform.
 
 /// Who draws the window's controls, and therefore whether they overlap the
 /// header.
@@ -60,22 +57,6 @@ impl WindowControlInsets {
     };
 }
 
-/// Where the window's tabs are, which decides who is under the controls.
-///
-/// Derived from the layout rather than from the platform: it is Crook's own
-/// arrangement, and the same two values mean the same two things on all three
-/// operating systems.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
-pub enum TabsPlacement {
-    /// A strip inside the header, so the header spans the whole top edge and
-    /// carries both ends of the reservation.
-    Header,
-    /// A panel down the left edge, full window height. The panel's control bar
-    /// is the top-left corner and the header is only the top-right, so the two
-    /// ends of the reservation go to two different elements.
-    LeftPanel,
-}
-
 /// The reservation, already handed to the elements that owe it.
 ///
 /// Three numbers rather than two because two elements can be under the
@@ -93,24 +74,18 @@ pub struct LayoutInsets {
 }
 
 impl WindowControlInsets {
-    /// Which element owes which end of this reservation, under `placement`.
+    /// Which element owes which end of this reservation.
     ///
-    /// The left end follows the top-left corner of the window and the right
-    /// end follows the top-right one; all a placement changes is which element
-    /// each corner belongs to. The right end never moves, because no layout
-    /// puts anything but the header in the top-right corner.
-    pub const fn split_for(self, placement: TabsPlacement) -> LayoutInsets {
-        match placement {
-            TabsPlacement::Header => LayoutInsets {
-                panel_left: 0.,
-                header_left: self.left,
-                header_right: self.right,
-            },
-            TabsPlacement::LeftPanel => LayoutInsets {
-                panel_left: self.left,
-                header_left: 0.,
-                header_right: self.right,
-            },
+    /// The left end follows the top-left corner of the window, which the tabs
+    /// panel's control bar owns; the right end follows the top-right, which is
+    /// the header's. There was once a second arrangement to choose between —
+    /// a strip across the header, owing both ends — and this was a `split_for`
+    /// that took it as a parameter.
+    pub const fn split(self) -> LayoutInsets {
+        LayoutInsets {
+            panel_left: self.left,
+            header_left: 0.,
+            header_right: self.right,
         }
     }
 }
@@ -201,14 +176,10 @@ pub fn window_control_insets(chrome: WindowChrome, fullscreen: bool) -> WindowCo
 ///
 /// For the platform this build is running on. The workspace composes the same
 /// two calls itself — [`ControlLayout::insets`] then
-/// [`WindowControlInsets::split_for`] — because `--controls` lets it be asked
+/// [`WindowControlInsets::split`] — because `--controls` lets it be asked
 /// about a platform that is not this one.
-pub fn layout_insets(
-    placement: TabsPlacement,
-    chrome: WindowChrome,
-    fullscreen: bool,
-) -> LayoutInsets {
-    window_control_insets(chrome, fullscreen).split_for(placement)
+pub fn layout_insets(chrome: WindowChrome, fullscreen: bool) -> LayoutInsets {
+    window_control_insets(chrome, fullscreen).split()
 }
 
 #[cfg(test)]
@@ -290,27 +261,21 @@ mod tests {
         }
     }
 
-    const PLACEMENTS: [TabsPlacement; 2] = [TabsPlacement::Header, TabsPlacement::LeftPanel];
-
     #[test]
-    fn a_natively_decorated_window_costs_either_layout_nothing_anywhere() {
-        // The state Crook actually ships in, on every platform and in both
-        // layouts. A regression here is a hole in the header or in the panel.
+    fn a_natively_decorated_window_costs_nothing_anywhere() {
+        // The state Crook actually ships in, on every platform. A regression
+        // here is a hole in the header or in the panel.
         for layout in LAYOUTS {
-            for placement in PLACEMENTS {
-                assert_eq!(
-                    layout
-                        .insets(WindowChrome::Native, false)
-                        .split_for(placement),
-                    LayoutInsets::default(),
-                    "{layout:?} reserved space in {placement:?} for controls drawn elsewhere"
-                );
-            }
+            assert_eq!(
+                layout.insets(WindowChrome::Native, false).split(),
+                LayoutInsets::default(),
+                "{layout:?} reserved space for controls drawn elsewhere"
+            );
         }
     }
 
     #[test]
-    fn the_panel_takes_over_the_left_reservation_and_only_the_left_one() {
+    fn the_panel_takes_the_left_reservation_and_the_header_takes_none_of_it() {
         // macOS is the platform where this is visible at all: its lights are
         // top-left, which is the corner the panel owns. Getting it wrong there
         // puts them through the panel's gear, and nobody on Windows or Linux
@@ -318,17 +283,7 @@ mod tests {
         assert_eq!(
             ControlLayout::MacOs
                 .insets(WindowChrome::Client, false)
-                .split_for(TabsPlacement::Header),
-            LayoutInsets {
-                panel_left: 0.,
-                header_left: TRAFFIC_LIGHTS,
-                header_right: 0.
-            }
-        );
-        assert_eq!(
-            ControlLayout::MacOs
-                .insets(WindowChrome::Client, false)
-                .split_for(TabsPlacement::LeftPanel),
+                .split(),
             LayoutInsets {
                 panel_left: TRAFFIC_LIGHTS,
                 header_left: 0.,
@@ -338,52 +293,45 @@ mod tests {
     }
 
     #[test]
-    fn a_right_hand_reservation_stays_on_the_header_in_both_layouts() {
+    fn a_right_hand_reservation_stays_on_the_header() {
         // Windows and Linux put their controls in the top-right corner, which
-        // no layout takes away from the header — so moving the tabs must not
-        // move this. A `split_for` that swapped both ends would still pass the
-        // macOS test above and would leave the usage chip under the close
-        // button on the other two platforms.
+        // belongs to the header. A `split` that swapped both ends would still
+        // pass the macOS test above and would leave whatever is pinned to the
+        // header under the close button on the other two platforms.
         for (layout, right) in [
             (ControlLayout::Windows, 136.),
             (ControlLayout::Freedesktop, 116.),
         ] {
-            for placement in PLACEMENTS {
-                assert_eq!(
-                    layout
-                        .insets(WindowChrome::Client, false)
-                        .split_for(placement),
-                    LayoutInsets {
-                        panel_left: 0.,
-                        header_left: 0.,
-                        header_right: right
-                    },
-                    "{layout:?} moved its right-hand reservation in {placement:?}"
-                );
-            }
+            assert_eq!(
+                layout.insets(WindowChrome::Client, false).split(),
+                LayoutInsets {
+                    panel_left: 0.,
+                    header_left: 0.,
+                    header_right: right
+                },
+                "{layout:?} moved its right-hand reservation"
+            );
         }
     }
 
     #[test]
-    fn every_platform_and_layout_reserves_exactly_what_the_controls_need() {
+    fn every_platform_reserves_exactly_what_the_controls_need() {
         // The whole table at once: what a split hands out is never more and
         // never less than what the platform asked for.
         for layout in LAYOUTS {
             for chrome in [WindowChrome::Native, WindowChrome::Client] {
                 for fullscreen in [false, true] {
                     let insets = layout.insets(chrome, fullscreen);
-                    for placement in PLACEMENTS {
-                        let split = insets.split_for(placement);
-                        assert_eq!(
-                            split.panel_left + split.header_left,
-                            insets.left,
-                            "{layout:?}/{chrome:?}/{placement:?} lost or invented left inset"
-                        );
-                        assert_eq!(
-                            split.header_right, insets.right,
-                            "{layout:?}/{chrome:?}/{placement:?} moved the right inset"
-                        );
-                    }
+                    let split = insets.split();
+                    assert_eq!(
+                        split.panel_left + split.header_left,
+                        insets.left,
+                        "{layout:?}/{chrome:?} lost or invented left inset"
+                    );
+                    assert_eq!(
+                        split.header_right, insets.right,
+                        "{layout:?}/{chrome:?} moved the right inset"
+                    );
                 }
             }
         }
@@ -404,13 +352,9 @@ mod tests {
             window_control_insets(WindowChrome::Client, false),
             expected.insets(WindowChrome::Client, false)
         );
-        for placement in PLACEMENTS {
-            assert_eq!(
-                layout_insets(placement, WindowChrome::Client, false),
-                expected
-                    .insets(WindowChrome::Client, false)
-                    .split_for(placement)
-            );
-        }
+        assert_eq!(
+            layout_insets(WindowChrome::Client, false),
+            expected.insets(WindowChrome::Client, false).split()
+        );
     }
 }

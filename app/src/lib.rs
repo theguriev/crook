@@ -94,7 +94,7 @@ use crookui_core::scene::Scene;
 use crookui_core::{AddSingletonModel as _, App, Presenter, WindowId};
 
 use crate::platform_insets::{ControlLayout, WindowChrome};
-use crate::settings::{Density, Granularity, Layout, Settings};
+use crate::settings::{Density, Granularity, Settings};
 use crate::tab::{AgentStatus, Direction, PaneId, Tab, TabAction};
 use crate::terminal_font::{CELL_FONT_SIZE, CellFont};
 use crate::usage_model::UsageModel;
@@ -239,8 +239,6 @@ struct Overrides {
     /// box rather than doing anything with it, because leaving it there *is*
     /// what the box does — the page is filtered on every keystroke.
     search: Option<String>,
-    /// Start in this layout rather than the saved one.
-    layout: Option<Layout>,
     /// Draw another platform's window controls rather than this one's.
     ///
     /// The only override here that changes nothing a person can set. It exists
@@ -487,14 +485,6 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                     other => bail!("`--controls` takes macos, windows or linux, not {other}"),
                 });
             }
-            "--layout" => {
-                let mode = args.next().context("`--layout` needs a mode")?;
-                overrides.layout = Some(match mode.as_str() {
-                    "vertical" => Layout::Vertical,
-                    "horizontal" => Layout::Horizontal,
-                    other => bail!("`--layout` takes vertical or horizontal, not {other}"),
-                });
-            }
             other => bail!("unrecognised argument {other}; try --help"),
         }
     }
@@ -564,7 +554,6 @@ OPTIONS:
     --themes           Start with the Themes panel open
     --new-theme        Start with the Themes panel making a theme
     --hover            Start with the first row's detail card up
-    --layout <MODE>    Start with the tabs `vertical` or `horizontal` rather than as saved
     --granularity <M>  Start with rows standing for `panes` or `tabs` rather than as saved
     --density <MODE>   Start in `compact` or `expanded` density rather than the saved one
     --controls <OS>    Draw `macos`, `windows` or `linux` window controls in the
@@ -579,7 +568,6 @@ OPTIONS:
 
 KEYS (macOS):
     cmd-t                      New agent tab
-    cmd-b                      Move the tabs between the side panel and the header strip
     cmd-,                      Open the settings tab, or bring it forward
     cmd-d / cmd-shift-d        Split the focused pane to the right / downwards
     cmd-w                      Close the focused pane, and its tab with the last one
@@ -590,7 +578,6 @@ KEYS (macOS):
 
 KEYS (Linux and Windows):
     ctrl-shift-t               New agent tab
-    ctrl-shift-b               Move the tabs between the side panel and the header strip
     ctrl-,                     Open the settings tab, or bring it forward
     ctrl-shift-d / ctrl-shift-e  Split the focused pane to the right / downwards
     ctrl-shift-w               Close the focused pane, and its tab with the last one
@@ -761,9 +748,6 @@ fn apply_overrides(
     overrides: &Overrides,
     ctx: &mut ViewContext<Workspace>,
 ) {
-    if let Some(layout) = overrides.layout {
-        workspace.override_layout(layout, ctx);
-    }
     if let Some(granularity) = overrides.granularity {
         workspace.override_granularity(granularity, ctx);
     }
@@ -1838,8 +1822,6 @@ mod tests {
             parse(&[
                 "--menu",
                 "--hover",
-                "--layout",
-                "horizontal",
                 "--granularity",
                 "tabs",
                 "--density",
@@ -1852,7 +1834,6 @@ mod tests {
                     menu: true,
                     hover: true,
                     settings: None,
-                    layout: Some(Layout::Horizontal),
                     granularity: Some(Granularity::Tabs),
                     density: Some(Density::Expanded),
                     ..Overrides::default()
@@ -1910,8 +1891,6 @@ mod tests {
 
         assert!(parse(&["--density", "cosy"]).is_err());
         assert!(parse(&["--density"]).is_err());
-        assert!(parse(&["--layout", "diagonal"]).is_err());
-        assert!(parse(&["--layout"]).is_err());
         assert!(parse(&["--granularity", "sessions"]).is_err());
         assert!(parse(&["--granularity"]).is_err());
     }
@@ -1931,7 +1910,6 @@ mod tests {
             "--select-output",
             "--menu",
             "--hover",
-            "--layout",
             "--granularity",
             "--density",
         ] {
@@ -1942,37 +1920,6 @@ mod tests {
             assert!(
                 !complaint.is_some_and(|complaint| complaint.contains("unrecognised")),
                 "--help documents {flag}, which the parser has never heard of"
-            );
-        }
-
-        // The layout binding is the one KEYS entry that is not a tab action,
-        // so it is the one that can quietly stop being dispatched — and since
-        // the two platforms no longer share a chord, it is also the entry the
-        // list can most easily go on naming after the keymap has moved.
-        for (chord, key, platform) in [
-            (
-                "cmd-b",
-                Modifiers {
-                    cmd: true,
-                    ..Modifiers::default()
-                },
-                crate::input_keys::Platform::Mac,
-            ),
-            (
-                "ctrl-shift-b",
-                Modifiers {
-                    ctrl: true,
-                    shift: true,
-                    ..Modifiers::default()
-                },
-                crate::input_keys::Platform::Other,
-            ),
-        ] {
-            assert!(help.contains(chord), "{chord} is not in --help");
-            assert_eq!(
-                crate::input_keys::binding(&Keystroke::new("b", key), platform),
-                Some(crate::input_keys::Binding::ToggleLayout),
-                "--help names {chord} and nothing is bound to it"
             );
         }
     }

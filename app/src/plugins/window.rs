@@ -64,7 +64,6 @@ impl Plugin for Window {
                 "Move the tab right",
                 Binding::MoveTabRight,
             ),
-            ("toggle-layout", "Move the tabs", Binding::ToggleLayout),
             ("open-settings", "Settings", Binding::OpenSettings),
             ("zoom-in", "Make the text bigger", Binding::ZoomIn),
             ("zoom-out", "Make the text smaller", Binding::ZoomOut),

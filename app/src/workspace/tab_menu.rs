@@ -2,7 +2,7 @@
 //!
 //! # The gesture
 //!
-//! Right-clicking a tab's row, in the strip or in the panel. This is a context
+//! Right-clicking a tab's row in the panel. This is a context
 //! menu — it is *about* the tab rather than a way to switch to it — and the
 //! secondary button is the one every desktop opens a context menu with. It was
 //! on the left button at first, on the row you were already in, where the
