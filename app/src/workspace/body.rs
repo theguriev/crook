@@ -433,11 +433,13 @@ fn blocks(
     // follows it are separated by however many frames the pointer takes to
     // move, and every one of them throws this tree away.
     if let Some(interaction) = workspace.interaction(pane) {
-        list = list.with_selection(
-            pane,
-            interaction.selection.clone(),
-            workspace.clipboard().clone(),
-        );
+        list = list
+            .with_selection(
+                pane,
+                interaction.selection.clone(),
+                workspace.clipboard().clone(),
+            )
+            .with_links(interaction.links.clone());
     }
     list.finish()
 }
@@ -457,11 +459,13 @@ fn grid(
         grid = grid.with_input(input.clone());
     }
     if let Some(interaction) = workspace.interaction(pane) {
-        grid = grid.with_selection(
-            pane,
-            interaction.selection.clone(),
-            workspace.clipboard().clone(),
-        );
+        grid = grid
+            .with_selection(
+                pane,
+                interaction.selection.clone(),
+                workspace.clipboard().clone(),
+            )
+            .with_links(interaction.links.clone());
     }
     // The grid's own gutter, rather than the pane's: the pane has none, so
     // that the composer's rule can run edge to edge.

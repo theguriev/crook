@@ -919,6 +919,24 @@ mouse actually draws: every one of them takes the alternate screen, which is the
 with a fixed height is the only common one — gets no reports, and the block list goes on
 selecting under it.
 
+**URLs are clickable**, on both surfaces. `crook_terminal::url` finds the link under one cell
+of one row, on demand: walking the whole grid every frame to build a table nobody reads would
+be work proportional to the screen for an answer about a single cell. Holding the platform's
+own chord key — Command on macOS, Control elsewhere — underlines it and makes a click open it;
+without the key the pointer goes on selecting, because a terminal where clicking a URL opened a
+browser is a terminal you cannot copy a URL out of. `app::browser` hands it to `open`,
+`xdg-open` or `cmd /c start`, and checks the scheme against a list first: a program's output is
+not trustworthy, and nothing printed into a pane should be able to ask the platform to open a
+scheme some application has registered a handler for.
+
+**OSC 8 is not read**, and that is a decision rather than an omission. Carrying a per-cell
+hyperlink to the renderer means either putting it on `SnapshotCell` — twelve bytes and `Copy`
+precisely so a full screen is one flat allocation — or threading a side table through the
+harvest path too, so a link keeps working after its command ends. Doing it on the live grid
+alone would be worse than not doing it: a link that dies when the command finishes is a link
+nobody can trust. Most OSC 8 links a terminal sees have the URL as their own text, and those
+work through the scan above.
+
 OSC 52 clipboard writes are in too: the write reaches the window's one clipboard through
 `TerminalUpdate::ClipboardStore`, an empty payload is dropped rather than destroying what
 somebody had copied, and the *read* direction stays refused in the emulator, where answering

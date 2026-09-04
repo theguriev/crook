@@ -77,6 +77,7 @@ pub mod mouse;
 mod pty;
 pub mod selection;
 mod snapshot;
+pub mod url;
 
 use std::fmt;
 use std::io::{self, Write};

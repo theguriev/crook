@@ -66,6 +66,7 @@
 
 use std::sync::Arc;
 
+use crook_terminal::url::{self, Url};
 use crook_terminal::{
     CellFlags, CellSide, Cursor, CursorShape, MouseEventKind, Rgb, RowCombining, Snapshot,
     SnapshotCell, ViewportPoint,
@@ -83,8 +84,11 @@ use crookui_core::geometry::{Color, Point, RectF, Vector2F, vec2f};
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 use crookui_core::scene::Scene;
 
+use crate::browser;
 use crate::clipboard::Clipboard;
+use crate::input_keys::Platform;
 use crate::pane_input::PaneInput;
+use crate::pane_link::{LinkRow, LinkSpan, PaneLink};
 use crate::pane_selection::{Gesture, PaneSelection};
 use crate::pane_surface;
 use crate::tab::PaneId;
@@ -119,6 +123,48 @@ const CURSOR_STROKE: f32 = 2.;
 /// scroll as far as it has lines.
 const MAX_WHEEL_NOTCHES: u32 = 16;
 
+/// Whether these modifiers mean "the pointer is following links right now".
+///
+/// The platform's own chord key, which is the one every terminal uses for
+/// this: Command on macOS, Control everywhere else. It has to be a modifier
+/// rather than a plain click, because the pointer is already spoken for — a
+/// terminal where clicking a URL opened a browser is a terminal you cannot
+/// select a URL in.
+pub(super) fn opens_links(modifiers: Modifiers) -> bool {
+    match Platform::current() {
+        Platform::Mac => modifiers.cmd && !modifiers.ctrl,
+        // Not with Shift, which suspends mouse reporting and is how a drag is
+        // taken out of a program that has the pointer. Two meanings for one
+        // combination is one too many.
+        Platform::Other => modifiers.ctrl && !modifiers.cmd && !modifiers.shift,
+    }
+}
+
+/// Underlines the cells a link occupies.
+///
+/// Its own function because both surfaces draw it: a URL printed by a running
+/// command is on the grid, and the same URL a moment later is a row of a
+/// finished block.
+pub(super) fn paint_link_rule(
+    row_origin: Vector2F,
+    start: usize,
+    len: usize,
+    metrics: CellMetrics,
+    color: Color,
+    scene: &mut Scene,
+) {
+    let thickness = (metrics.height * RULE_THICKNESS_RATIO).max(1.);
+    scene
+        .draw_rect_without_hit_recording(RectF::new(
+            vec2f(
+                row_origin.x() + start as f32 * metrics.width,
+                row_origin.y() + metrics.height - thickness,
+            ),
+            vec2f(len as f32 * metrics.width, thickness),
+        ))
+        .with_background(color);
+}
+
 /// The terminal's name for a button the window reported, or `None` for one the
 /// mouse protocol has no number for.
 ///
@@ -147,6 +193,11 @@ pub struct TerminalElement {
     /// same way. See [`Output`].
     output: Output,
 
+    /// The link under the pointer, which the workspace keeps per pane because
+    /// the move that finds one and the frame that underlines it are different
+    /// frames. `None` for a grid nothing can be clicked in.
+    links: Option<PaneLink>,
+
     size: Option<Vector2F>,
     origin: Option<Point>,
 }
@@ -158,6 +209,7 @@ impl TerminalElement {
             snapshot,
             font,
             output: Output::detached(),
+            links: None,
             size: None,
             origin: None,
         }
@@ -188,6 +240,73 @@ impl TerminalElement {
     ) -> Self {
         self.output = self.output.with_selection(pane, gesture, clipboard);
         self
+    }
+
+    /// Makes the URLs the shell printed clickable, through the link state the
+    /// workspace keeps for this pane.
+    pub fn with_links(mut self, links: PaneLink) -> Self {
+        self.links = Some(links);
+        self
+    }
+
+    /// Finds the link under the pointer, or lets go of the one that was there.
+    ///
+    /// Only while the platform's own chord key is held: the pointer is already
+    /// spoken for by the selection, and a click that opened a browser instead
+    /// of placing a selection would be a terminal you cannot copy a URL out
+    /// of. Reports whether the frame changed.
+    fn track_link(&self, position: Vector2F, modifiers: Modifiers) -> bool {
+        let Some(links) = self.links.as_ref() else {
+            return false;
+        };
+
+        let found = self
+            .link_at(position, modifiers)
+            .map(|(row, url)| LinkSpan {
+                row: LinkRow::Viewport(row),
+                start: url.start,
+                len: url.len,
+                uri: url.uri,
+            });
+        links.set(found)
+    }
+
+    /// The URL under a window position, and the viewport row it is on.
+    ///
+    /// `None` unless the link modifier is held, which is what keeps this scan
+    /// off every ordinary pointer move.
+    fn link_at(&self, position: Vector2F, modifiers: Modifiers) -> Option<(usize, Url)> {
+        if !opens_links(modifiers) {
+            return None;
+        }
+        if !self
+            .bounds()
+            .is_some_and(|bounds| bounds.contains_point(position))
+        {
+            return None;
+        }
+
+        let (at, _) = self.cell_at(position)?;
+        if at.row >= self.snapshot.rows {
+            return None;
+        }
+        // One `char` per cell, which is what `url::at` counts in.
+        let text: String = self
+            .snapshot
+            .row(at.row)
+            .iter()
+            .map(|cell| cell.c)
+            .collect();
+        let url = url::at(&text, at.column)?;
+        Some((at.row, url))
+    }
+
+    /// Opens the link under the pointer, reporting whether there was one.
+    fn open_link(&self, position: Vector2F, modifiers: Modifiers) -> bool {
+        let Some((_, url)) = self.link_at(position, modifiers) else {
+            return false;
+        };
+        browser::open(&url.uri)
     }
 
     /// The typed keystroke, if this pane is the one that should have it and
@@ -530,6 +649,27 @@ impl Element for TerminalElement {
             owns_caret,
             ctx.scene,
         );
+
+        // Over the grid, because it is an affordance rather than something the
+        // shell printed: it appears when the chord key goes down and goes away
+        // when it comes up, and the cells under it are unchanged.
+        if let Some(link) = self
+            .links
+            .as_ref()
+            .and_then(|links| links.on_viewport_rows(self.snapshot.rows))
+        {
+            let LinkRow::Viewport(row) = link.row else {
+                return;
+            };
+            paint_link_rule(
+                origin + vec2f(0., row as f32 * self.font.metrics().height),
+                link.start,
+                link.len,
+                self.font.metrics(),
+                color(self.snapshot.foreground),
+                ctx.scene,
+            );
+        }
     }
 
     fn dispatch_event(
@@ -581,6 +721,17 @@ impl Element for TerminalElement {
 
         match event {
             Event::MouseDown {
+                button: MouseButton::Left,
+                position,
+                modifiers,
+                ..
+            } if self.open_link(*position, *modifiers) => {
+                // Before the press below, and instead of it. A chord-click on a
+                // link is not a selection gesture, and starting one would leave
+                // a highlight behind the browser that just opened.
+                true
+            }
+            Event::MouseDown {
                 button,
                 position,
                 click_count,
@@ -591,15 +742,42 @@ impl Element for TerminalElement {
             {
                 self.press(*button, *position, *click_count, *modifiers, ctx)
             }
-            // A bare move, for a program that asked to hear about every one.
-            // It is last because it is the only mouse event that is *usually*
-            // nothing to do with this element, and `moved` answers `false`
-            // without touching the terminal unless `?1003` is in force.
+            // A bare move: it lights up a link under the pointer, and it is
+            // reported to a program that asked to hear about every one. Last,
+            // because it is the only mouse event that is *usually* nothing to
+            // do with this element, and both halves answer `false` cheaply.
+            //
+            // A synthetic move is included, and deliberately: it is replayed
+            // after a frame that changed layout, and a link is exactly the
+            // kind of thing whose position moved out from under a pointer that
+            // did not.
             Event::MouseMoved {
                 position,
                 modifiers,
-                is_synthetic: false,
-            } => self.moved(*position, *modifiers),
+                is_synthetic,
+            } => {
+                let mut changed = self.track_link(*position, *modifiers);
+                if changed {
+                    ctx.notify();
+                }
+                if !is_synthetic {
+                    changed |= self.moved(*position, *modifiers);
+                }
+                changed
+            }
+            // Letting go of the chord key puts the pointer back to selecting,
+            // and the underline has to go with it — under a pointer that never
+            // moved, which is why this is not handled by the move above.
+            Event::ModifiersChanged {
+                position,
+                modifiers,
+            } => {
+                let changed = self.track_link(*position, *modifiers);
+                if changed {
+                    ctx.notify();
+                }
+                changed
+            }
             _ => false,
         }
     }

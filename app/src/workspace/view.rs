@@ -20,6 +20,7 @@ use crate::git_model::GitModel;
 use crate::input_keys::{self, Binding, Platform};
 use crate::pane_blocks::PaneBlocks;
 use crate::pane_input::{CARET_PHASE, PaneInput};
+use crate::pane_link::PaneLink;
 use crate::pane_selection::PaneSelection;
 use crate::pane_surface;
 use crate::platform_insets::{LayoutInsets, TabsPlacement, layout_insets};
@@ -78,6 +79,8 @@ pub(super) struct PaneInteraction {
     pub(super) body: MouseStateHandle,
     /// The selection gesture in the pane's output. See [`PaneSelection`].
     pub(super) selection: PaneSelection,
+    /// The link under the pointer in the pane's output. See [`PaneLink`].
+    pub(super) links: PaneLink,
     /// Where the pane's block list is scrolled to and what the pointer is
     /// over. See [`PaneBlocks`].
     pub(super) blocks: PaneBlocks,
@@ -1467,6 +1470,7 @@ impl Workspace {
                     close: MouseStateHandle::default(),
                     body: MouseStateHandle::default(),
                     selection: PaneSelection::new(),
+                    links: PaneLink::new(),
                     blocks: PaneBlocks::new(),
                 });
             self.inputs.entry(*id).or_default();

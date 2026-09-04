@@ -42,6 +42,7 @@
 //! which is the state a person is in the instant before they press copy and one
 //! nobody can hold a button down for in a headless run.
 
+pub mod browser;
 pub mod clipboard;
 pub mod editor;
 pub mod git;
@@ -49,6 +50,7 @@ pub mod git_model;
 pub mod input_keys;
 pub mod pane_blocks;
 pub mod pane_input;
+pub mod pane_link;
 pub mod pane_selection;
 pub mod pane_surface;
 pub mod platform_insets;
