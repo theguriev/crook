@@ -173,10 +173,6 @@ What that costs a plugin today, concretely:
   subscriber is `Workspace` through a private handle.
 - **No notification primitive, no command palette, no general tooltip.** The bell becomes an
   amber dot, and that is the whole attention model.
-- **Keybindings cannot be edited from the interface.** The file is VSCode's — rules, `when`
-  clauses, chord sequences, removal by name — and the Keyboard Shortcuts page prints what is
-  in force without being able to record a chord into it. That needs a control the settings
-  page does not have.
 - **`AgentStatus::Running` and `Failed` are never set at runtime.** There is no agent runtime
   behind the product's noun. This is the largest empty seam in the tree, and the first thing a
   real plugin ecosystem will want to fill.

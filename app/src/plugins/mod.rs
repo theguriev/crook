@@ -28,7 +28,7 @@ mod palette;
 mod plugins_page;
 pub mod settings;
 mod shell;
-mod shortcuts;
+pub mod shortcuts;
 mod usage;
 pub mod wasm;
 pub mod window;

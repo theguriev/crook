@@ -282,6 +282,34 @@ pub enum SettingsAction {
     /// "Start a login shell": whether a pane's shell reads the startup files
     /// that only a login shell reads.
     ToggleLoginShell,
+    /// Start recording a chord for this command, on the Keyboard Shortcuts
+    /// page.
+    ///
+    /// The command is carried as an [`ActionId`] for the reason
+    /// [`WorkspaceAction::Run`] carries one: this enum is `Copy` and a name is
+    /// a `String`.
+    ///
+    /// While a recording is up the keyboard belongs to it — see
+    /// [`Workspace::action_for`](crate::workspace::Workspace::action_for) —
+    /// which is what lets a chord a pane would otherwise eat be recorded at
+    /// all.
+    RecordBinding(ActionId),
+    /// A chord went into the recording.
+    ///
+    /// Nothing is carried: the keystroke was written down where it was seen,
+    /// exactly as a half-typed chord sequence is. What the action is for is
+    /// the repaint — the row is showing what has been pressed, and it has just
+    /// changed.
+    RecordedKey,
+    /// Keep what has been recorded, and write it to the keybindings file.
+    KeepBinding,
+    /// Throw away what has been recorded and leave the binding as it was.
+    StopRecording,
+    /// Take every chord away from this command, giving the keys back to the
+    /// pane.
+    UnbindCommand(ActionId),
+    /// Put this command back to the chord this build ships with.
+    ResetBinding(ActionId),
 }
 
 /// What the options menu writes.

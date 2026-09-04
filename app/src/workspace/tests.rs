@@ -27,6 +27,7 @@ use crookui_core::{AddSingletonModel as _, App, Presenter, WindowId};
 
 use crate::Channel;
 use crate::git::{DiffStats, GitFacts, Head};
+use crate::keybindings::Recording;
 use crate::platform_insets::{ControlLayout, WindowChrome};
 use crate::settings::{
     Density, GeneralOptions, Granularity, PrimaryInfo, Settings, Subtitle, TabOptions,
@@ -665,6 +666,12 @@ impl Harness {
         self.workspace.read(&self.app, |workspace, ctx| {
             workspace.usage().as_ref(ctx).is_busy_for_user()
         })
+    }
+
+    /// The binding being recorded on the Keyboard Shortcuts page, if one is.
+    fn recording(&self) -> Option<Recording> {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.recording())
     }
 
     /// Reads a keybindings file out of `text` and puts it in force.
@@ -4737,6 +4744,28 @@ fn plus_box(scene: &Scene) -> RectF {
         .collect();
     assert_eq!(boxes.len(), 1, "expected one + button, got {boxes:?}");
     boxes[0]
+}
+
+/// The buttons on the settings page itself, in reading order.
+///
+/// Found the way the rail's rows are — a six-pixel box — and told apart from
+/// them by being on the page rather than in the sidebar. On the Keyboard
+/// Shortcuts page that is two per row: the chord, and the button that puts it
+/// back.
+fn settings_page_button_boxes(scene: &Scene) -> Vec<RectF> {
+    let panel = panel_box(scene);
+    let mut buttons: Vec<RectF> = visible_rects(scene)
+        .filter(|(rect, _)| rect.corner_radius.get_top_left() == Radius::Pixels(6.))
+        .filter(|(rect, _)| rect.border != Border::default())
+        .map(|(_, bounds)| bounds)
+        .filter(|bounds| center(*bounds).x() > panel.max_x())
+        .collect();
+    buttons.sort_by(|left, right| {
+        left.min_y()
+            .total_cmp(&right.min_y())
+            .then(left.min_x().total_cmp(&right.min_x()))
+    });
+    buttons
 }
 
 /// The rail's page buttons, top to bottom.
@@ -9064,6 +9093,300 @@ fn the_shortcuts_page_lists_what_a_plugin_registered_and_the_chord_that_reaches_
     assert!(
         text.contains("shift+cmd+u"),
         "the page does not say what reaches it: {text}"
+    );
+}
+
+/// Points the window's keybindings at a file of its own and hands back the
+/// path, so a test can read what an edit made on the page wrote.
+///
+/// The point of a real path, exactly as it is [`Scratch`]'s: `Keybindings::bind`
+/// writes nothing when there is nowhere to write, so a test on ephemeral
+/// bindings cannot see what a recording would have saved — and what it saves is
+/// the whole question.
+fn keybindings_in(harness: &mut Harness, scratch: &Scratch) -> PathBuf {
+    let path = scratch.path().join("keybindings.json");
+    let keybindings = crate::keybindings::Keybindings::load(&path);
+    harness.workspace_update(|workspace, _| workspace.set_keybindings(keybindings));
+    path
+}
+
+/// The keybindings file, once a save has written `needle` into it.
+///
+/// Waits, for the reason [`Scratch::written_containing`] waits: the write is
+/// handed to the background pool.
+fn keybindings_written(path: &Path, needle: &str) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut last = String::new();
+    loop {
+        last = fs::read_to_string(path).unwrap_or(last);
+        if last.contains(needle) {
+            return last;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{needle:?} was never written to {}: {last:?}",
+            path.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Starts recording a chord for `command`, the way clicking its row does.
+fn record(harness: &mut Harness, command: &str) {
+    let name = crate::plugin::ActionName::parse(command).expect("a literal that parses");
+    let id = harness
+        .workspace
+        .read(&harness.app, |workspace, _| workspace.host().action(&name))
+        .unwrap_or_else(|| panic!("nothing answers to {command}"));
+    harness.dispatch_workspace_action(SettingsAction::RecordBinding(id).into());
+    harness.frame();
+}
+
+#[test]
+fn a_chord_recorded_on_the_page_replaces_the_shipped_one_and_is_written_down() {
+    // The whole gesture, end to end: click a chord, press the keys, press
+    // Enter. What comes out is a window that answers to the new chord, does
+    // not answer to the old one, and a file that says so for the next launch.
+    let mut harness = Harness::new(1);
+    let scratch = Scratch::new();
+    let path = keybindings_in(&mut harness, &scratch);
+    harness.open_settings_page();
+
+    record(&mut harness, "crook/window/new-tab");
+    let ctrl_alt = Modifiers {
+        ctrl: true,
+        alt: true,
+        ..Modifiers::default()
+    };
+    harness.press("n", ctrl_alt, "");
+    harness.press("enter", Modifiers::default(), "");
+
+    assert_eq!(harness.tab_ids().len(), 1, "the recording opened a tab");
+    assert_eq!(
+        harness.action_for("n", ctrl_alt),
+        Some(WorkspaceAction::Tab(TabAction::New))
+    );
+    assert_eq!(
+        harness.action_for(
+            "t",
+            Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Modifiers::default()
+            }
+        ),
+        None,
+        "the shipped chord still opens a tab"
+    );
+    let written = keybindings_written(&path, "ctrl+alt+n");
+    assert!(
+        written.contains("-crook/window/new-tab"),
+        "the shipped chord was not taken away: {written}"
+    );
+}
+
+#[test]
+fn clicking_the_chord_on_a_row_hands_it_the_keyboard() {
+    // The gesture itself, through the hit test: a click on the chord starts a
+    // recording, and the very next chord goes into it rather than doing what
+    // it is bound to. `ctrl+shift+d` splits a pane, and here it splits
+    // nothing.
+    let mut harness = Harness::new(1);
+    let scratch = Scratch::new();
+    keybindings_in(&mut harness, &scratch);
+    harness.open_settings_page();
+    harness.select_settings_section("Keyboard Shortcuts");
+
+    let buttons = settings_page_button_boxes(&harness.frame());
+    harness.click(center(buttons[0]), MouseButton::Left);
+
+    assert_eq!(
+        harness.recording().as_ref().map(Recording::command),
+        Some(&crate::plugin::ActionName::parse("crook/window/new-tab").expect("a literal"))
+    );
+
+    harness.press(
+        "d",
+        Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Modifiers::default()
+        },
+        "",
+    );
+
+    assert_eq!(
+        harness.pane_ids().len(),
+        1,
+        "the recorded chord split a pane"
+    );
+    assert_eq!(
+        harness.recording().map(|recording| recording.chord()),
+        Some("ctrl+shift+d".to_owned())
+    );
+}
+
+#[test]
+fn a_row_that_is_recording_says_so_and_says_what_the_chord_is_already_for() {
+    // The two things the row has to say while the keyboard belongs to it: how
+    // to finish, and that the chord being pressed is one somebody else has.
+    // The second is VSCode's warning, and without it the last rule quietly
+    // wins and a person finds out the next time they reach for the chord.
+    let mut harness = Harness::new(1);
+    let scratch = Scratch::new();
+    keybindings_in(&mut harness, &scratch);
+    harness.open_settings_page();
+    harness.select_settings_section("Keyboard Shortcuts");
+
+    record(&mut harness, "crook/window/new-tab");
+    let text = frame_text(&harness.frame());
+    assert!(
+        text.contains("press a chord"),
+        "the row does not say it is recording: {text}"
+    );
+
+    harness.press(
+        "d",
+        Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Modifiers::default()
+        },
+        "",
+    );
+    let text = frame_text(&harness.frame());
+
+    assert!(
+        text.contains("ctrl+shift+d"),
+        "the row does not show what was pressed: {text}"
+    );
+    assert!(
+        text.contains("Split to the right"),
+        "the row does not say what the chord is already for: {text}"
+    );
+}
+
+#[test]
+fn a_recording_can_take_a_chord_the_pane_would_otherwise_have_eaten() {
+    // "Any key on any action" is only true if the recorder is asked *first*.
+    // ctrl-l is the shell's own — nothing in the window is bound to it, so
+    // every keystroke of it reaches the pty — and it is bindable all the same.
+    let mut harness = Harness::new(1);
+    let scratch = Scratch::new();
+    let path = keybindings_in(&mut harness, &scratch);
+    harness.open_settings_page();
+
+    record(&mut harness, "crook/window/split-right");
+    let ctrl = Modifiers {
+        ctrl: true,
+        ..Modifiers::default()
+    };
+    harness.press("l", ctrl, "\u{c}");
+    harness.press("enter", Modifiers::default(), "");
+
+    keybindings_written(&path, "ctrl+l");
+    assert_eq!(
+        harness.action_for("l", ctrl),
+        Some(WorkspaceAction::Tab(TabAction::Split(Direction::Right)))
+    );
+}
+
+#[test]
+fn escape_leaves_the_binding_exactly_as_it_was() {
+    // Nothing is written until a recording is kept, so reaching for a chord,
+    // seeing it is the wrong one and pressing Escape costs nothing.
+    let mut harness = Harness::new(1);
+    let scratch = Scratch::new();
+    let path = keybindings_in(&mut harness, &scratch);
+    harness.open_settings_page();
+
+    record(&mut harness, "crook/window/new-tab");
+    harness.press(
+        "n",
+        Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::default()
+        },
+        "",
+    );
+    harness.press("escape", Modifiers::default(), "");
+
+    assert_eq!(
+        harness.action_for(
+            "t",
+            Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Modifiers::default()
+            }
+        ),
+        Some(WorkspaceAction::Tab(TabAction::New)),
+        "the shipped chord was lost to a recording nobody kept"
+    );
+    assert!(!path.exists(), "a cancelled recording wrote a file");
+}
+
+#[test]
+fn a_recording_that_is_never_finished_does_not_keep_the_keyboard() {
+    // The one way this feature could cost somebody their window: a recorder
+    // holding every keystroke with nothing on screen to say so. Leaving the
+    // settings ends it, and the next chord works.
+    let mut harness = Harness::new(1);
+    let scratch = Scratch::new();
+    keybindings_in(&mut harness, &scratch);
+    harness.open_settings_page();
+    record(&mut harness, "crook/window/new-tab");
+
+    harness.show_tabs();
+
+    assert_eq!(
+        harness.action_for(
+            "t",
+            Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Modifiers::default()
+            }
+        ),
+        Some(WorkspaceAction::Tab(TabAction::New))
+    );
+}
+
+#[test]
+fn a_command_unbound_on_the_page_gives_the_chord_back_and_a_reset_takes_it_again() {
+    let mut harness = Harness::new(1);
+    let scratch = Scratch::new();
+    let path = keybindings_in(&mut harness, &scratch);
+    harness.open_settings_page();
+    let name = crate::plugin::ActionName::parse("crook/window/new-tab").expect("a literal");
+    let id = harness
+        .workspace
+        .read(&harness.app, |workspace, _| workspace.host().action(&name))
+        .expect("the window's own command");
+    let shipped = Modifiers {
+        ctrl: true,
+        shift: true,
+        ..Modifiers::default()
+    };
+
+    harness.dispatch_workspace_action(SettingsAction::UnbindCommand(id).into());
+    harness.frame();
+
+    assert_eq!(harness.action_for("t", shipped), None);
+    keybindings_written(&path, "-crook/window/new-tab");
+
+    harness.dispatch_workspace_action(SettingsAction::ResetBinding(id).into());
+    harness.frame();
+
+    assert_eq!(
+        harness.action_for("t", shipped),
+        Some(WorkspaceAction::Tab(TabAction::New))
+    );
+    let written = keybindings_written(&path, "[");
+    assert!(
+        !written.contains("crook/window/new-tab"),
+        "a reset left the person's line in the file: {written}"
     );
 }
 

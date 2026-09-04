@@ -240,6 +240,15 @@ struct Overrides {
     /// button.
     section: Option<String>,
     settings: Option<Option<String>>,
+    /// Start with the Keyboard Shortcuts page recording a chord for this
+    /// command, by its action name.
+    ///
+    /// A way to look at a frame, like `--menu` and `--themes`: the recorder is
+    /// a state of a row that a person is in for two seconds, and a snapshot of
+    /// it is a snapshot of the real thing. It records nothing on its own — the
+    /// keys still have to be pressed — so a run that takes a picture and exits
+    /// writes no keybindings file.
+    record: Option<String>,
     /// Type this into the settings page's search box at startup.
     ///
     /// Implies `--settings`: a query with no page to filter is nothing to
@@ -468,6 +477,19 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 }
                 overrides.settings = Some(page);
             }
+            "--record" => {
+                let command = args
+                    .next()
+                    .context("`--record` needs the name of a command")?;
+                overrides.record = Some(command);
+                // The recorder is a row on that page, so the page has to be
+                // showing for there to be a row: `--record` implies
+                // `--settings "Keyboard Shortcuts"` rather than making a
+                // person write both.
+                overrides
+                    .settings
+                    .get_or_insert(Some(crate::plugins::shortcuts::PAGE_TITLE.to_owned()));
+            }
             "--section" => {
                 let name = args
                     .next()
@@ -604,6 +626,8 @@ OPTIONS:
                        `shell`, `usage`, `keys` or `about`
     --find <TEXT>      Type TEXT into the tabs panel\'s search box, filtering the list
     --search <TEXT>    Type TEXT into the settings page\'s search box, opening it
+    --record <COMMAND> Start with the Keyboard Shortcuts page recording a chord for
+                       COMMAND, which is an action name like `crook/window/new-tab`
     --theme <NAME>     Start in this theme rather than the saved one
     --worktrees        Start with the active tab's worktree menu open
     --new-worktree     Start with that menu making a worktree
@@ -855,6 +879,18 @@ fn apply_overrides(
             found
         });
         workspace.open_settings_page(chosen, ctx);
+    }
+    // After `--settings`, which is the page the row being recorded for is on.
+    if let Some(command) = &overrides.record {
+        match ActionName::parse(command) {
+            Ok(name) if workspace.host().action(&name).is_some() => {
+                workspace.start_recording(name, ctx)
+            }
+            // A name nothing answers to has no row to record on, which is a
+            // line in the log and a window that opens anyway — the rule every
+            // other unreadable input follows.
+            _ => log::warn!("no command is called {command:?}"),
+        }
     }
     if let Some(query) = &overrides.search {
         workspace.type_into_settings_search(query, ctx);
@@ -2044,6 +2080,34 @@ mod tests {
                 }
             }
         );
+
+        // `--record` is a state of a row on one page, so it opens that page
+        // rather than making somebody name it twice.
+        assert_eq!(
+            parse(&["--record", "crook/window/new-tab"]).expect("valid"),
+            Startup::Window {
+                frames: None,
+                overrides: Overrides {
+                    record: Some("crook/window/new-tab".to_owned()),
+                    settings: Some(Some("Keyboard Shortcuts".to_owned())),
+                    ..Overrides::default()
+                }
+            }
+        );
+        // Unless a page was already asked for, which is the person being more
+        // specific rather than less.
+        assert_eq!(
+            parse(&["--settings", "about", "--record", "crook/window/new-tab"]).expect("valid"),
+            Startup::Window {
+                frames: None,
+                overrides: Overrides {
+                    record: Some("crook/window/new-tab".to_owned()),
+                    settings: Some(Some("about".to_owned())),
+                    ..Overrides::default()
+                }
+            }
+        );
+        assert!(parse(&["--record"]).is_err());
 
         // The two search boxes are two flags, because they are two lists
         // filtered at two different times. `--find` opens nothing: the panel

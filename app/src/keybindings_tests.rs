@@ -669,3 +669,214 @@ fn the_page_is_told_which_chords_reach_a_command_and_where_they_came_from() {
     );
     assert_eq!(keybindings.source_of(&command("crook/nothing/here")), None);
 }
+
+/// A keybindings file at `path`, loaded, with `text` already in it.
+///
+/// The shape every edit test needs: an edit is made against a file that is
+/// there, and what it did is then read off the file rather than off the object
+/// that made it.
+fn editable(name: &str, text: &str) -> (PathBuf, Keybindings) {
+    let path = scratch(name).join(KEYBINDINGS_FILE);
+    if text.is_empty() {
+        let _ = fs::remove_file(&path);
+    } else {
+        fs::write(&path, text).expect("a scratch keybindings file");
+    }
+    let keybindings = Keybindings::load(&path);
+    (path, keybindings)
+}
+
+/// Writes the edit, as the workspace's background task would, and reads the
+/// file back.
+fn saved(save: Option<PendingSave>) -> String {
+    let save = save.expect("an edit that has a file to write");
+    save.write_blocking().expect("the file should be writable");
+    fs::read_to_string(save.path()).expect("the file should be readable")
+}
+
+#[test]
+fn a_binding_made_on_the_page_beats_the_shipped_one_and_replaces_it() {
+    // VSCode's own edit: the command is taken off every chord it had, and then
+    // given the one that was recorded. Without the first half the window would
+    // answer to both.
+    let (path, mut keybindings) = editable("bind", "");
+    let new_tab = command("crook/window/new-tab");
+    let shipped = keybindings.chords_for(&new_tab);
+
+    saved(keybindings.bind(&new_tab, &keys("ctrl+alt+n")));
+
+    assert_eq!(
+        meaning(&keybindings, "ctrl+alt+n"),
+        Resolution::Command(new_tab.clone())
+    );
+    for chord in shipped {
+        assert_eq!(meaning(&keybindings, &chord), Resolution::Nothing);
+    }
+    assert_eq!(keybindings.chords_for(&new_tab), vec!["ctrl+alt+n"]);
+    assert_eq!(keybindings.source_of(&new_tab), Some(Source::User));
+    assert!(keybindings.is_yours(&new_tab));
+    // And the same file read again means the same thing, which is the only
+    // sense in which an edit was made at all.
+    assert_eq!(Keybindings::load(&path), keybindings);
+}
+
+#[test]
+fn changing_one_binding_four_times_leaves_two_lines_in_the_file() {
+    // The person's earlier lines about the command go before the new pair is
+    // written, or a chord somebody keeps fiddling with grows the file forever.
+    let (_, mut keybindings) = editable("rebind", "");
+    let new_tab = command("crook/window/new-tab");
+
+    let mut text = String::new();
+    for chord in ["ctrl+alt+n", "ctrl+alt+m", "ctrl+alt+o", "ctrl+alt+p"] {
+        text = saved(keybindings.bind(&new_tab, &keys(chord)));
+    }
+
+    assert_eq!(text.matches("crook/window/new-tab").count(), 2);
+    assert_eq!(keybindings.chords_for(&new_tab), vec!["ctrl+alt+p"]);
+}
+
+#[test]
+fn a_command_unbound_on_the_page_gives_its_chord_back() {
+    let (_, mut keybindings) = editable("unbind", "");
+    let close = command("crook/window/close-pane");
+    let shipped = keybindings.chords_for(&close);
+
+    saved(keybindings.unbind(&close));
+
+    assert!(keybindings.chords_for(&close).is_empty());
+    for chord in shipped {
+        assert_eq!(meaning(&keybindings, &chord), Resolution::Nothing);
+    }
+}
+
+#[test]
+fn resetting_puts_the_shipped_chords_back() {
+    let (_, mut keybindings) = editable("reset", "");
+    let new_tab = command("crook/window/new-tab");
+    let shipped = keybindings.chords_for(&new_tab);
+
+    keybindings.bind(&new_tab, &keys("ctrl+alt+n"));
+    let text = saved(keybindings.reset(&new_tab));
+
+    assert_eq!(keybindings.chords_for(&new_tab), shipped);
+    assert!(!keybindings.is_yours(&new_tab));
+    assert!(!text.contains("crook/window/new-tab"));
+}
+
+#[test]
+fn an_edit_leaves_the_rest_of_the_file_where_it_was() {
+    // A person's file is a file a person wrote: their comment, their line
+    // about another command, and their line about a plugin this build has
+    // never heard of are all still there afterwards.
+    let file = "\
+// Mine.
+[
+    { \"key\": \"ctrl+alt+j\", \"command\": \"crook/window/next-tab\" },
+    { \"key\": \"ctrl+alt+q\", \"command\": \"nobody/at/all\" }
+]
+";
+    let (_, mut keybindings) = editable("untouched", file);
+
+    let text = saved(keybindings.bind(&command("crook/window/new-tab"), &keys("ctrl+alt+n")));
+
+    assert!(text.starts_with("// Mine.\n"));
+    assert!(text.contains(r#"{ "key": "ctrl+alt+j", "command": "crook/window/next-tab" }"#));
+    assert!(text.contains(r#"{ "key": "ctrl+alt+q", "command": "nobody/at/all" }"#));
+    assert_eq!(
+        meaning(&keybindings, "ctrl+alt+j"),
+        Resolution::Command(command("crook/window/next-tab"))
+    );
+}
+
+#[test]
+fn a_binding_can_be_a_sequence_and_a_key_the_page_has_no_default_for() {
+    // "Any key on any action", which is the point: a chord nothing ships with,
+    // spelled over two presses, against a command that had another chord.
+    let (_, mut keybindings) = editable("sequence", "");
+    let settings = command("crook/window/open-settings");
+
+    saved(keybindings.bind(&settings, &keys("ctrl+k ctrl+s")));
+
+    assert_eq!(meaning(&keybindings, "ctrl+k"), Resolution::Chord);
+    assert_eq!(
+        meaning(&keybindings, "ctrl+k ctrl+s"),
+        Resolution::Command(settings)
+    );
+}
+
+#[test]
+fn nothing_is_written_where_there_is_nowhere_to_write() {
+    // A run with no configuration directory — a test, the headless snapshot —
+    // reads no file and writes none, and the page draws its controls dead
+    // rather than pretending an edit was kept.
+    let mut keybindings = Keybindings::new();
+
+    assert!(!keybindings.is_editable());
+    assert_eq!(
+        keybindings.bind(&command("crook/window/new-tab"), &keys("ctrl+alt+n")),
+        None
+    );
+}
+
+#[test]
+fn a_file_that_is_not_a_list_is_left_alone_rather_than_replaced() {
+    // Somebody's settings pasted into the wrong file. Refusing the edit costs
+    // one binding; writing over it costs the file.
+    let file = "{ \"key\": \"ctrl+t\" }\n";
+    let (path, mut keybindings) = editable("not-a-list", file);
+
+    assert_eq!(
+        keybindings.bind(&command("crook/window/new-tab"), &keys("ctrl+alt+n")),
+        None
+    );
+    assert_eq!(
+        fs::read_to_string(&path).expect("the file should be readable"),
+        file
+    );
+}
+
+#[test]
+fn a_chord_another_command_has_taken_is_not_printed_on_the_row_that_lost_it() {
+    // The page's own honesty. Binding a chord somebody else already had is
+    // allowed — the last rule wins, which is VSCode's whole model — and the
+    // row that lost it must stop claiming it, or the page says two commands
+    // answer to one chord.
+    let keybindings = written(
+        "shadowed",
+        r#"[{ "key": "ctrl+shift+d", "command": "crook/window/new-tab" }]"#,
+    );
+
+    assert!(
+        keybindings
+            .chords_for(&command("crook/window/split-right"))
+            .is_empty()
+    );
+    // The line only *adds* a chord, so the command still has the one it
+    // shipped with beside the one it took.
+    assert_eq!(
+        keybindings.chords_for(&command("crook/window/new-tab")),
+        vec!["ctrl+shift+t", "ctrl+shift+d"]
+    );
+    assert_eq!(
+        meaning(&keybindings, "ctrl+shift+d"),
+        Resolution::Command(command("crook/window/new-tab"))
+    );
+}
+
+#[test]
+fn a_conditional_rule_does_not_take_a_chord_off_the_row_that_owns_it() {
+    // The other half: a rule that only holds sometimes takes the chord only
+    // sometimes, and a row that went blank over a clause which does not hold
+    // while somebody is reading the settings page would be the same lie the
+    // other way round.
+    let keybindings = written(
+        "conditional",
+        r#"[{ "key": "ctrl+shift+d", "command": "crook/window/new-tab", "when": "searchFocused" }]"#,
+    );
+
+    assert_eq!(
+        keybindings.chords_for(&command("crook/window/split-right")),
+        vec!["ctrl+shift+d"]
+    );
+}

@@ -173,7 +173,11 @@ Seven features, and the page that configures them:
   `ctrl-c` interrupts and `ctrl-d` ends an input, and a binding that could take one of those
   away would be one that breaks a terminal. The **Keyboard Shortcuts** page lists every
   command, the chord that reaches it and where that chord came from — none of it written down
-  by hand.
+  by hand — and it **records new ones**: click a chord, press the keys you want, Enter to keep
+  them and Escape to leave it alone. Keeping one writes VSCode's own two lines into the file
+  — the command taken off the chords it had, then the chord you pressed — and touches nothing
+  else in it, comments included. Beside each chord is whichever of "Reset" and "Unbind" that
+  row can still be asked for.
 
 Everything else is out of scope on purpose. There is no telemetry, and OSC 8 hyperlinks are
 not read — though a URL a program *printed* is clickable, because the scan that finds one
