@@ -890,6 +890,12 @@ impl Workspace {
         matches!(self.tab_menu.mode, WorktreeMode::Removing { .. })
     }
 
+    /// Whether the confirmation has already been refused once, which is what
+    /// arms its "Remove anyway". For a test.
+    pub fn worktree_menu_was_refused(&self) -> bool {
+        matches!(self.tab_menu.mode, WorktreeMode::Removing { refused, .. } if refused)
+    }
+
     /// Whether the menu is making a worktree. For a test.
     pub fn worktree_menu_is_creating(&self) -> bool {
         self.tab_menu.mode == WorktreeMode::Creating
@@ -2991,15 +2997,15 @@ impl Workspace {
     ///
     /// The two keys its buttons are: Escape is Cancel — back to the list from
     /// either face that left it, and out of the menu from the list itself, so
-    /// one key always undoes one step — and Enter is the creator's Create, so
-    /// the whole of making a worktree is a name and a press. Unmodified only,
-    /// like the panel's, because a chord is a window command wherever the
-    /// pointer is.
+    /// one key always undoes one step — and Enter is whichever button that
+    /// face leads with: Create in the creator, Remove in the confirmation.
+    /// Unmodified only, like the panel's, because a chord is a window command
+    /// wherever the pointer is.
     ///
-    /// Enter does **nothing** in the confirmation, on purpose. Removing a
-    /// checkout is the one destructive thing in this menu, and a button that
-    /// answered to the key next to the one people dismiss dialogs with is how
-    /// somebody deletes work they meant to keep. That one stays a click.
+    /// Enter stops at the *second* question. Once git has refused over local
+    /// work the button becomes "Remove anyway", and a person who pressed Enter
+    /// and was answered with a warning would throw away the very work it warns
+    /// about by repeating the press. That one stays a click.
     fn tab_menu_action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
         if !self.tab_menu.is_open() || !keystroke.modifiers.is_empty() {
             return None;
@@ -3009,6 +3015,9 @@ impl Workspace {
             ("escape", WorktreeMode::Listing) => WorktreeAction::CloseMenu,
             ("escape", _) => WorktreeAction::Cancel,
             ("enter", WorktreeMode::Creating) => WorktreeAction::Create,
+            ("enter", WorktreeMode::Removing { refused: false, .. }) => {
+                WorktreeAction::Remove { force: false }
+            }
             _ => return None,
         };
         Some(action.into())
