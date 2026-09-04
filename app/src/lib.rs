@@ -86,7 +86,7 @@ use crookui::{
     CosmicFontDb, Platform, Proxy, WindowControls as PlatformWindow, WindowDelegate, WindowOptions,
     render_scene_to_rgba,
 };
-use crookui_core::event::{Event, Keystroke, Modifiers};
+use crookui_core::event::{Event, Keystroke, Modifiers, MouseButton};
 use crookui_core::executor::{Background, LocalQueue};
 use crookui_core::geometry::{Vector2F, vec2f};
 use crookui_core::platform::TextLayoutSystem;
@@ -136,6 +136,16 @@ const RUN_QUIET: Duration = Duration::from_millis(400);
 /// The named command `--usage-panel` dispatches. The panel belongs to a
 /// plugin, so this is the only handle anything outside it has on the panel.
 const USAGE_PANEL_ACTION: &str = "crook/usage/panel";
+
+/// How far `--carry` carries a row when the command line did not say.
+///
+/// Three ordinary rows in the default density, which is far enough to be
+/// unmistakably a drag and short enough to leave the row it came out of on
+/// screen beside it.
+const CARRY_DISTANCE: f32 = 120.;
+
+/// In how many moves, because the list moves between them.
+const CARRY_STEPS: u32 = 12;
 
 /// How long the headless `--run` sleeps between pumps while it waits.
 const RUN_POLL: Duration = Duration::from_millis(10);
@@ -298,6 +308,20 @@ struct Overrides {
     /// A hover is a state that only exists while a pointer is over something,
     /// which is the other thing no unattended run can hold still.
     hover_block: Option<usize>,
+    /// Pick this row of the tabs panel up and carry it, without letting go.
+    ///
+    /// The third state no unattended run can hold still, after a hovered row
+    /// and a selection dragged through a shell's output: a drag lasts exactly
+    /// as long as a button is held down. The frame is drawn mid-gesture — the
+    /// row in the air under the pointer, the hole it came out of, and the list
+    /// already in the order it is going to be in, because the panel reorders
+    /// itself while the hand is still moving rather than when it lets go.
+    carry: Option<usize>,
+    /// The same for a whole group's block, which is gripped by its heading.
+    carry_group: Option<usize>,
+    /// How far down the column to carry it, in whole pixels. Negative carries
+    /// it up.
+    carry_by: Option<i32>,
     /// Scroll the first pane's block list up by this many lines.
     ///
     /// What puts output under the composer, which is the only thing that draws
@@ -331,6 +355,11 @@ struct Overrides {
 }
 
 impl Overrides {
+    /// Whether this run was asked to pick something up.
+    fn carries(&self) -> bool {
+        self.carry.is_some() || self.carry_group.is_some()
+    }
+
     /// Whether this run needs shells opened for it.
     ///
     /// Neither the field nor the grid is worth a picture without one: a pane
@@ -490,6 +519,19 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 let command = args.next().context("`--run` needs a command")?;
                 overrides.run.push(command);
             }
+            "--carry" => {
+                let index = args.next().context("`--carry` needs a row")?;
+                overrides.carry = Some(index.parse().context("`--carry` takes a number")?);
+            }
+            "--carry-group" => {
+                let index = args.next().context("`--carry-group` needs a group")?;
+                overrides.carry_group =
+                    Some(index.parse().context("`--carry-group` takes a number")?);
+            }
+            "--carry-by" => {
+                let pixels = args.next().context("`--carry-by` needs a distance")?;
+                overrides.carry_by = Some(pixels.parse().context("`--carry-by` takes a number")?);
+            }
             "--hover-block" => {
                 let index = args.next().context("`--hover-block` needs an index")?;
                 overrides.hover_block =
@@ -613,6 +655,10 @@ OPTIONS:
     --usage <PERCENT>  Show PERCENT in the usage chip rather than reading a session
     --usage-panel      Start with the usage panel open under the chip
     --hover            Start with the first row's detail card up
+    --carry <N>        Pick the Nth row of the tabs panel up and hold it there,
+                       for a picture of a drag in flight
+    --carry-group <N>  The same for the Nth group's whole block, by its heading
+    --carry-by <PX>    How far down the column to carry it; negative carries up
     --section <NAME>   Start showing a sidebar section by the name on its button
     --granularity <M>  Start with rows standing for `panes` or `tabs` rather than as saved
     --density <MODE>   Start in `compact` or `expanded` density rather than the saved one
@@ -1080,6 +1126,22 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
         await_usage_history(&queue, &mut app);
     }
 
+    // A frame first, and then the gesture: a press has to land on a row, and
+    // where the rows are is a thing only a paint pass knows.
+    if overrides.carries() {
+        frame(&mut app, &mut presenter);
+        carry_panel_row(
+            &mut app,
+            &mut presenter,
+            window_id,
+            &workspace,
+            &overrides,
+            |app, presenter| {
+                frame(app, presenter);
+            },
+        );
+    }
+
     let scene = frame(&mut app, &mut presenter);
 
     let (pixels, width, height) = render_scene_to_rgba(&scene, WINDOW_SIZE, &font_db)
@@ -1252,6 +1314,97 @@ fn aim_at_blocks(
             }
         });
     });
+}
+
+/// Presses on a row of the panel and carries it, and never lets go.
+///
+/// Through the window's own event dispatch, for the reason `--run` types its
+/// command as keystrokes rather than writing to the pty: a drag is a press,
+/// some travel and no release, and a state poked into the workspace instead
+/// would make the picture a picture of a second code path. Everything a real
+/// gesture goes through — the press's hit test, the threshold, the band, the
+/// strip — is on this path too.
+///
+/// In steps rather than in one leap, because the list reorders itself under
+/// the hand and every position is answered against the frame the last one
+/// produced. One leap is not a thing a hand does.
+fn carry_panel_row(
+    app: &mut App,
+    presenter: &mut Presenter,
+    window_id: WindowId,
+    workspace: &ViewHandle<Workspace>,
+    overrides: &Overrides,
+    mut frame: impl FnMut(&mut App, &mut Presenter),
+) {
+    let grip = workspace.read(&*app, |workspace, _| match overrides.carry {
+        Some(index) => workspace.panel_row_grip(index),
+        None => overrides
+            .carry_group
+            .and_then(|index| workspace.panel_block_grip(index)),
+    });
+    let Some(from) = grip else {
+        log::warn!("`--carry` found nothing at that index to pick up");
+        return;
+    };
+    let by = overrides
+        .carry_by
+        .map_or(CARRY_DISTANCE, |pixels| pixels as f32);
+
+    // The pointer arrives before it presses, which is not decoration: a row
+    // the pointer has reached is a row with its detail card up, and a press is
+    // hit-tested against the layer that card put the row into.
+    mouse(
+        app,
+        presenter,
+        window_id,
+        |position| Event::MouseMoved {
+            position,
+            modifiers: Modifiers::default(),
+            is_synthetic: false,
+        },
+        from,
+    );
+    frame(app, presenter);
+    mouse(
+        app,
+        presenter,
+        window_id,
+        |position| Event::MouseDown {
+            button: MouseButton::Left,
+            position,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        },
+        from,
+    );
+    frame(app, presenter);
+
+    for step in 1..=CARRY_STEPS {
+        let at = from + vec2f(0., by * step as f32 / CARRY_STEPS as f32);
+        mouse(
+            app,
+            presenter,
+            window_id,
+            |position| Event::MouseDragged {
+                button: MouseButton::Left,
+                position,
+                modifiers: Modifiers::default(),
+            },
+            at,
+        );
+        frame(app, presenter);
+    }
+}
+
+/// Dispatches one mouse event at `position` through the window.
+fn mouse(
+    app: &mut App,
+    presenter: &mut Presenter,
+    window_id: WindowId,
+    event: impl FnOnce(Vector2F) -> Event,
+    position: Vector2F,
+) {
+    app.update(|ctx| ctx.dispatch_window_event(window_id, event(position), presenter));
 }
 
 /// Types a `--run` command into the focused pane's field and sends it.

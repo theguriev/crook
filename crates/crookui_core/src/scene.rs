@@ -721,6 +721,13 @@ impl Scene {
 
         Layer {
             clip_bounds,
+            // Inherited, because a layer is not a fresh surface: it is a
+            // subtree of the one that started it, painted in the same place.
+            // A layer that has been declared invisible to hit testing has said
+            // that about everything it draws, and a child that quietly took
+            // the clicks back would leave a hole in the claim exactly where
+            // some element happened to need a clip.
+            click_through: self.active_layer().click_through,
             ..Default::default()
         }
     }
@@ -793,6 +800,27 @@ mod tests {
         scene.stop_layer();
 
         assert!(!scene.is_covered(Point::from_vec2f(vec2f(5., 5.), ZIndex::Normal(0))));
+    }
+
+    #[test]
+    fn a_layer_inside_a_click_through_one_is_click_through_too() {
+        // A drag image is one layer with a clip inside it — every row that
+        // clips its own content is — and half a claim about hit testing is
+        // worse than none: the wheel would work over the middle of a carried
+        // row and stop over the end of it.
+        let mut scene = Scene::new(1.);
+        scene.start_layer(ClipBounds::None);
+        let under = Point::from_vec2f(vec2f(5., 5.), scene.z_index());
+        scene.stop_layer();
+
+        scene.start_overlay_layer(ClipBounds::None);
+        scene.set_active_layer_click_through();
+        scene.start_layer(ClipBounds::None);
+        scene.draw_rect_with_hit_recording(RectF::new(vec2f(0., 0.), vec2f(10., 10.)));
+        scene.stop_layer();
+        scene.stop_layer();
+
+        assert!(!scene.is_covered(under));
     }
 
     #[test]

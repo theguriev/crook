@@ -145,17 +145,6 @@ const HEADING_ICON_SLOT: f32 = 24.;
 /// which is the gap on a row.
 const HEADING_ICON_GAP: f32 = 8.;
 
-/// How thick the line that says where a drop will land is, and how much room
-/// it takes between two rows.
-///
-/// Warp's `GROUP_INSERTION_INDICATOR_HEIGHT` and
-/// `GROUP_INSERTION_TARGET_HEIGHT`. The slot is taller than the line so that
-/// the rows part around it rather than the line being drawn over one of them:
-/// a list that does not move tells you nothing about where the gap is.
-const INSERTION_LINE_HEIGHT: f32 = 2.;
-/// See [`INSERTION_LINE_HEIGHT`].
-const INSERTION_SLOT_HEIGHT: f32 = 8.;
-
 /// The padding around the empty state, and the size it is set in.
 const EMPTY_STATE_PADDING: f32 = 12.;
 
@@ -400,8 +389,6 @@ fn list(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
     }
 
     let blocks = blocks_of(workspace, rows);
-    // Where a drop right now would land, which is the only thing a drag draws.
-    let pending = workspace.panel_drag().pending();
     let last = blocks.len().saturating_sub(1);
 
     let mut column = Flex::column()
@@ -410,22 +397,9 @@ fn list(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
 
     for (index, block) in blocks.into_iter().enumerate() {
         let is_last = index == last;
-        if let Some(first) = block.tabs.first().map(|(tab, _)| *tab)
-            && drag::line_above_block(pending, first)
-        {
-            column.add_child(insertion_line(workspace, false));
-        }
-
         match block.group {
             Some(group) => {
-                column.add_child(group_block(
-                    workspace,
-                    group,
-                    &block.tabs,
-                    is_last,
-                    pending,
-                    app,
-                ));
+                column.add_child(group_block(workspace, group, &block.tabs, is_last, app));
             }
             None => {
                 for (tab, panes) in &block.tabs {
@@ -433,10 +407,6 @@ fn list(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
                 }
             }
         }
-    }
-
-    if drag::line_at_end(pending) {
-        column.add_child(insertion_line(workspace, false));
     }
 
     match granularity {
@@ -518,13 +488,17 @@ fn tab_block(
         Granularity::Tabs => tabs_tab(workspace, tab, panes, app),
     };
 
-    drag::Handle::new(
-        drag::Grip::Tab { tab, group },
-        workspace.panel_drag(),
-        chrome.container.clone(),
-        element,
+    carried_hole(
+        workspace,
+        drag::Carried::Tab(tab),
+        drag::Handle::new(
+            drag::Grip::Tab { tab, group },
+            workspace.panel_drag(),
+            chrome.container.clone(),
+            carried_plate(workspace, drag::Carried::Tab(tab), element),
+        )
+        .finish(),
     )
-    .finish()
 }
 
 /// A group: its heading, and its members under it unless it is folded away.
@@ -539,7 +513,6 @@ fn group_block(
     group: GroupId,
     members: &[(TabId, Vec<PaneId>)],
     is_last: bool,
-    pending: Option<TabAction>,
     app: &AppContext,
 ) -> Box<dyn Element> {
     let Some(data) = workspace.tabs().group(group) else {
@@ -548,6 +521,10 @@ fn group_block(
     };
     let Some(chrome) = workspace.group_chrome(group) else {
         log::error!("group {group:?} has no interaction state and was skipped");
+        return Empty::new().finish();
+    };
+    let Some(first) = members.first().map(|(tab, _)| *tab) else {
+        log::error!("group {group:?} came from `blocks` with no members and was skipped");
         return Empty::new().finish();
     };
     let granularity = workspace.options().granularity;
@@ -577,13 +554,7 @@ fn group_block(
             });
 
         for (tab, panes) in members {
-            if drag::line_above_member(pending, group, *tab) {
-                rows.add_child(insertion_line(workspace, true));
-            }
             rows.add_child(tab_block(workspace, *tab, panes, Some(group), false, app));
-        }
-        if drag::line_ends_group(pending, group) {
-            rows.add_child(insertion_line(workspace, true));
         }
 
         column.add_child(
@@ -600,8 +571,12 @@ fn group_block(
 
     let column = column.finish();
     let heading_state = chrome.container.clone();
+    // The heading's own state, not the block's: the heading is what carries a
+    // click, so it is the press a gesture that turned into a drag has to take
+    // back. See [`drag::Handle::new`].
+    let grip_state = chrome.heading.clone();
 
-    Hoverable::new(heading_state, move |mouse| {
+    let block = Hoverable::new(heading_state, move |mouse| {
         let lit = holds_the_active_tab || mouse.is_hovered();
         let container = Container::new(column).with_background_color(if lit {
             theme().overlay_1
@@ -624,7 +599,91 @@ fn group_block(
                 .finish(),
         }
     })
-    .finish()
+    .finish();
+
+    // Around the whole block rather than around its heading, which is Warp's
+    // `Draggable` at `vertical_tabs.rs:3189` and is what makes a group carried
+    // by its heading *look* carried: the thing that follows the pointer is the
+    // block a person picked up, members and all. A press on a member still
+    // belongs to the member — its own handle notes the press second — so the
+    // two grips do not fight over one gesture.
+    //
+    // Including when the member is the only one. Warp takes the handle off a
+    // sole member so that the block moves instead, "rather than orphaning it";
+    // here that would leave a group of one with no way out of it at all, since
+    // Crook has no menu that dissolves a group and closing its tab is not the
+    // same thing. Dragging the last row out of a group and watching the
+    // heading go with it is the gesture that says "these two are not one piece
+    // of work after all", and it is the same gesture that made the group.
+    carried_hole(
+        workspace,
+        drag::Carried::Group(group),
+        drag::Handle::new(
+            drag::Grip::Group {
+                group,
+                first,
+                collapsed,
+            },
+            workspace.panel_drag(),
+            grip_state,
+            carried_plate(workspace, drag::Carried::Group(group), block),
+        )
+        .finish(),
+    )
+}
+
+/// The hole a carried box leaves in the list.
+///
+/// Warp's ghost slot: while the row is painted at the pointer, the room it was
+/// taking stays taken and is washed, so the list shows the slot the row will
+/// drop into instead of closing up behind it. It is the only thing besides the
+/// row's own movement that a drag draws.
+///
+/// A shade darker than Warp's, which uses the same 5% wash a hovered row
+/// wears. Crook's group container wears that wash too — whenever it is hovered
+/// *or* holds the active tab, which is most of the time a person is dragging
+/// inside one — and 5% over 5% is a hole nobody can find. This is the shade a
+/// selected row wears, on a box with no text in it, which is not a thing that
+/// can be mistaken for a row.
+fn carried_hole(
+    workspace: &Workspace,
+    carried: drag::Carried,
+    element: Box<dyn Element>,
+) -> Box<dyn Element> {
+    if workspace.panel_drag().carrying() != Some(carried) {
+        return element;
+    }
+    Container::new(element)
+        .with_background_color(theme().overlay_2)
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(GROUP_RADIUS)))
+        .finish()
+}
+
+/// The ground a carried box is drawn on while it is in the air.
+///
+/// A row wears no background of its own until it is hovered, and then a five
+/// percent wash — which is a row you can see the panel through, and that is
+/// exactly right for a row lying in a list and exactly wrong for one held
+/// above it. Painted over the rows it is passing, the two sets of words land
+/// on top of each other and the picture reads as a fault rather than as a
+/// thing being carried.
+///
+/// So the box gets the panel's own surface under it for the duration: opaque,
+/// and the same colour the row would be lying on, so what is carried looks
+/// like what was picked up. Warp leaves its row translucent and lives with the
+/// double exposure; this is one of the two places worth diverging.
+fn carried_plate(
+    workspace: &Workspace,
+    carried: drag::Carried,
+    element: Box<dyn Element>,
+) -> Box<dyn Element> {
+    if workspace.panel_drag().carrying() != Some(carried) {
+        return element;
+    }
+    Container::new(element)
+        .with_background_color(theme().surface)
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(GROUP_RADIUS)))
+        .finish()
 }
 
 /// A group's heading: a chevron saying which way it folds, its name, and how
@@ -653,9 +712,8 @@ fn heading(
     };
     let close = chrome.close.clone();
     let guard = chrome.close.clone();
-    let state = chrome.heading.clone();
 
-    let element = Hoverable::new(state.clone(), move |mouse| {
+    Hoverable::new(chrome.heading.clone(), move |mouse| {
         let hovered = mouse.is_hovered();
         Container::new(
             Flex::row()
@@ -729,50 +787,6 @@ fn heading(
         }
         ctx.dispatch_typed_action(WorkspaceAction::Tab(TabAction::ToggleGroup(group)));
     })
-    .finish();
-
-    drag::Handle::new(
-        drag::Grip::Heading { group, collapsed },
-        workspace.panel_drag(),
-        state,
-        element,
-    )
-    .finish()
-}
-
-/// The line that says where a drop will land.
-///
-/// Two pixels of the accent colour in the gap between two rows, inset to the
-/// indentation of whatever it is joining — so a drop *into* a group reads
-/// differently from a drop between blocks, which is the one thing the line has
-/// to be able to say. Warp draws exactly this, at exactly this inset.
-fn insertion_line(workspace: &Workspace, in_group: bool) -> Box<dyn Element> {
-    drag::Parting::new(
-        workspace.panel_drag(),
-        ConstrainedBox::new(
-            Container::new(
-                Container::new(Empty::new().finish())
-                    .with_background_color(theme().accent)
-                    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
-                        INSERTION_LINE_HEIGHT / 2.,
-                    )))
-                    .finish(),
-            )
-            .with_padding(Padding {
-                top: (INSERTION_SLOT_HEIGHT - INSERTION_LINE_HEIGHT) / 2.,
-                left: if in_group {
-                    0.
-                } else {
-                    GROUP_HORIZONTAL_PADDING
-                },
-                bottom: (INSERTION_SLOT_HEIGHT - INSERTION_LINE_HEIGHT) / 2.,
-                right: GROUP_HORIZONTAL_PADDING,
-            })
-            .finish(),
-        )
-        .with_height(INSERTION_SLOT_HEIGHT)
-        .finish(),
-    )
     .finish()
 }
 
