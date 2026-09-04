@@ -17,18 +17,18 @@
 /// plugin has built, and a page that could only describe rows written down at
 /// compile time is a page no plugin can appear on.
 #[derive(Clone, Debug)]
-pub(super) struct Words {
+pub(crate) struct Words {
     /// What the row is called.
-    pub(super) label: String,
+    pub(crate) label: String,
     /// The line under the label, where there is one.
-    pub(super) description: Option<String>,
+    pub(crate) description: Option<String>,
     /// Words that find the row but are not written on it.
-    pub(super) keywords: Vec<String>,
+    pub(crate) keywords: Vec<String>,
 }
 
 impl Words {
     /// A row found only by what it says.
-    pub(super) fn new(label: impl Into<String>) -> Self {
+    pub(crate) fn new(label: impl Into<String>) -> Self {
         Self {
             label: label.into(),
             description: None,
@@ -37,13 +37,13 @@ impl Words {
     }
 
     /// The same, with the line under it.
-    pub(super) fn with_description(mut self, description: impl Into<String>) -> Self {
+    pub(crate) fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
         self
     }
 
     /// The same, with words that are not written on the row.
-    pub(super) fn with_keywords(mut self, keywords: &[&str]) -> Self {
+    pub(crate) fn with_keywords(mut self, keywords: &[&str]) -> Self {
         self.keywords = keywords.iter().map(|word| (*word).to_owned()).collect();
         self
     }
@@ -56,7 +56,7 @@ impl Words {
 /// and — more to the point — is where the "every term has to match" rule is
 /// written down.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(super) struct Query {
+pub(crate) struct Query {
     terms: Vec<String>,
 }
 
@@ -68,7 +68,7 @@ impl Query {
     /// "Show the usage chip". Every term has to match *something* about a row,
     /// but they need not match the same thing or be in that order: this is a
     /// person narrowing a list, not writing a pattern.
-    pub(super) fn new(text: &str) -> Self {
+    pub(crate) fn new(text: &str) -> Self {
         Self {
             terms: text
                 .split_whitespace()
@@ -78,7 +78,7 @@ impl Query {
     }
 
     /// Whether nothing has been typed, in which case nothing is filtered.
-    pub(super) fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.terms.is_empty()
     }
 
@@ -88,7 +88,7 @@ impl Query {
     /// words of its own: searching "keys" should find every binding, and
     /// searching "theme" should find the row inside the category called
     /// Theme even though the row itself is called something else.
-    pub(super) fn matches(&self, words: &Words, context: &[&str]) -> bool {
+    pub(crate) fn matches(&self, words: &Words, context: &[&str]) -> bool {
         if self.is_empty() {
             return true;
         }

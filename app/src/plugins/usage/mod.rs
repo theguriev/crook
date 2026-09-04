@@ -19,9 +19,14 @@
 //!
 //! The *model* is not owned by anybody, here or before: [`UsageModel`] is a
 //! singleton on the app, so this asks for the same handle the workspace would
-//! and gets the same model. What is still on the workspace is the settings row
-//! that turns the chip off and the poll it starts, which are not chip code and
-//! move when there is a `settings.section` slot to move them into.
+//! and gets the same model. What is still on the workspace is the poll the
+//! setting starts, which is lifecycle rather than chip code.
+//!
+//! # The settings page is here too
+//!
+//! A person who disables this plugin should lose the page along with the chip,
+//! and the only way that is true is if the page is this plugin's. It is added
+//! through `settings.page`, which is a slot like any other.
 //!
 //! # A named action, and what that buys
 //!
@@ -45,7 +50,11 @@ use crook_plugin::{Manifest, PluginId, Tier};
 
 use crate::plugin::{ActionName, BuildError, Host, Plugin};
 use crate::usage_model::UsageModel;
+use crate::workspace::SettingsAction;
 use crate::workspace::Workspace;
+use crate::workspace::settings_page::named;
+use crate::workspace::settings_page::search::Words;
+use crate::workspace::settings_page::widgets::{self, Category};
 
 mod chip;
 
@@ -87,11 +96,23 @@ impl Plugin for Usage {
         // What clicking the pill does, reachable by a chord or by anything
         // else that can name an action.
         host.register_action(
-            ActionName::parse("crook/usage/refresh").expect("a literal that parses"),
-            move |_, ctx| {
-                usage.update(ctx, |model, ctx| model.refresh_from_user(ctx));
+            ActionName::parse("crook/usage/refresh").expect("a literal"),
+            {
+                let usage = usage.clone();
+                move |_, ctx| {
+                    usage.update(ctx, |model, ctx| model.refresh_from_user(ctx));
+                }
             },
         );
+
+        // The page that turns the chip off, which belongs here rather than in
+        // the settings module for the same reason the chip does: it is this
+        // feature's, and a person who disables this plugin should lose the
+        // page along with the chip.
+        host.add_settings_page("page", "Usage", 20, {
+            let usage = usage.clone();
+            move |workspace, app| page(workspace, &usage, app)
+        });
 
         host.contribute(HEADER_RIGHT, "chip", 0, move |workspace, _| {
             if !workspace.general().show_usage_chip {
@@ -121,4 +142,65 @@ fn manifest() -> &'static Manifest {
         version: env!("CARGO_PKG_VERSION"),
         tier: Tier::Native,
     })
+}
+
+/// The usage chip, and what turning it off actually stops.
+///
+/// The reading comes from the plugin's own handle rather than from
+/// `Workspace::usage`, which is the difference between a page the settings
+/// module happens to draw and a page this feature owns.
+fn page(workspace: &Workspace, usage: &ModelHandle<UsageModel>, app: &AppContext) -> Vec<Category> {
+    let ui = workspace.fonts().ui;
+    let state = workspace.settings_page();
+    let general = workspace.general();
+
+    let chip = widgets::row(
+        Words::new("Show the usage chip")
+            .with_description(
+                "The pill in the header, showing how much of the session budget is spent.",
+            )
+            .with_keywords(&[
+                "usage", "token", "budget", "claude", "limit", "quota", "network", "poll", "pill",
+            ]),
+        true,
+        widgets::switch(
+            general.show_usage_chip,
+            Some(SettingsAction::ToggleUsageChip.into()),
+            state.control(named("show-usage-chip")),
+        ),
+        ui,
+    );
+
+    let reading = usage.as_ref(app);
+    let current = match (reading.snapshot(), reading.problem()) {
+        (Some(snapshot), None) => format!(
+            "{}% of the session budget",
+            snapshot.session_percent_rounded()
+        ),
+        (_, Some(problem)) => problem.chip_label().to_owned(),
+        (None, None) if general.show_usage_chip => "not read yet".to_owned(),
+        (None, None) => "not being read".to_owned(),
+    };
+
+    vec![
+        widgets::category("Claude Code", vec![chip]),
+        widgets::category(
+            "Session",
+            vec![
+                widgets::note(
+                    "Crook reads the session Claude Code already stores on this machine and asks \
+                     Anthropic what it has spent. Turning the chip off stops both: a hidden chip \
+                     does not poll.",
+                    ui,
+                ),
+                widgets::fact(
+                    Words::new("Last reading")
+                        .with_keywords(&["usage", "percent", "spent", "session", "poll"]),
+                    current,
+                    false,
+                    workspace.fonts(),
+                ),
+            ],
+        ),
+    ]
 }

@@ -287,6 +287,25 @@ impl<C: 'static> Slots<C> {
         entries.iter().map(|entry| build(&entry.payload)).collect()
     }
 
+    /// Builds the one entry at `index` in the order the slot draws, if the
+    /// slot has that many.
+    ///
+    /// For a surface that shows one of its entries at a time — a rail of
+    /// settings pages shows one page — where building every entry to reach one
+    /// of them would be building four pages nobody is looking at. The order is
+    /// [`map`](Self::map)'s, so an index taken from
+    /// [`contributors`](Self::contributors) names the same entry here.
+    pub fn at<T>(&self, slot: SlotId, index: usize, use_it: impl FnOnce(&C) -> T) -> Option<T> {
+        let table = self.0.borrow();
+        let mut entries: Vec<&Entry<C>> = table
+            .entries
+            .iter()
+            .filter(|entry| entry.slot == slot)
+            .collect();
+        entries.sort_by_key(|entry| (entry.order, entry.seq));
+        entries.get(index).map(|entry| use_it(&entry.payload))
+    }
+
     /// Builds the one thing a [`Cardinality::Single`] slot draws, if anything
     /// was contributed to it.
     pub fn one<T>(&self, slot: SlotId, build: impl FnOnce(&C) -> T) -> Option<T> {

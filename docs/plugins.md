@@ -27,8 +27,12 @@ description of something that was never built.
     built-in chord win over it), and its Escape and arrows from `Host::claim_surface`, which
     names an action rather than doing anything, so they end at `WorkspaceAction::Run` like
     every other key.
-  - Still to move: the worktree menu, the settings sections, the Themes panel, the Omarchy
-    palettes.
+  - The settings pages come from a slot. `crook/settings` owns the rail; every page belongs
+    to the plugin whose feature it configures — `crook/appearance`, `crook/shell`,
+    `crook/usage`, `crook/keys`, `crook/about` — so disabling a plugin takes its page off the
+    rail with the rest of it. `--settings <name>` now matches a page's title, so a plugin's
+    page is as reachable as one of Crook's.
+  - Still to move: the worktree menu, the Themes panel, the Omarchy palettes.
 
 ## 0. What was asked for, and what it means
 

@@ -99,7 +99,7 @@ use crate::tab::{AgentStatus, Direction, PaneId, Tab, TabAction};
 use crate::terminal_font::{CELL_FONT_SIZE, CellFont};
 use crate::usage_model::UsageModel;
 use crate::window_controls::{Detached, WindowHandle, WindowState};
-use crate::workspace::{Fonts, QuitRequest, Section, Workspace};
+use crate::workspace::{Fonts, QuitRequest, Workspace};
 
 /// The window Crook opens, in logical pixels.
 const WINDOW_SIZE: Vector2F = vec2f(1024., 640.);
@@ -231,7 +231,7 @@ struct Overrides {
     /// looking at is not an option and is never written down. It does put an
     /// extra tab in the strip, which is the point — a snapshot of the
     /// settings page is a snapshot of a window with the settings open in it.
-    settings: Option<Section>,
+    settings: Option<Option<String>>,
     /// Type this into the settings page's search box at startup.
     ///
     /// Implies `--settings`: a query with no page to filter is nothing to
@@ -408,7 +408,7 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                     .context("`--search` needs something to search for")?;
                 overrides.search = Some(query);
                 if overrides.settings.is_none() {
-                    overrides.settings = Some(Section::default());
+                    overrides.settings = Some(None);
                 }
             }
             "--settings" => {
@@ -416,24 +416,20 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 // page where a click on the menu entry opens it. Peeking
                 // rather than consuming is what lets `--settings --hover`
                 // mean what it looks like it means.
-                let section = match args.peek().map(String::as_str) {
-                    Some("appearance") => Some(Section::Appearance),
-                    Some("shell") => Some(Section::Shell),
-                    Some("usage") => Some(Section::Usage),
-                    Some("keys") => Some(Section::Keys),
-                    Some("about") => Some(Section::About),
-                    Some(other) if !other.starts_with("--") => {
-                        bail!(
-                            "`--settings` takes appearance, shell, usage, keys or about, \
-                             not {other}"
-                        );
-                    }
+                //
+                // The name is a page's *title*, matched when the window opens
+                // rather than here: the pages come from plugins, so which of
+                // them exist is not known until they have built, and a build
+                // with an extra plugin should accept that plugin's page here
+                // without this list growing a line.
+                let page = match args.peek().map(String::as_str) {
+                    Some(other) if !other.starts_with("--") => Some(other.to_owned()),
                     _ => None,
                 };
-                if section.is_some() {
+                if page.is_some() {
                     args.next();
                 }
-                overrides.settings = Some(section.unwrap_or_default());
+                overrides.settings = Some(page);
             }
             "--hover" => overrides.hover = true,
             "--run" => {
@@ -780,8 +776,18 @@ fn apply_overrides(
     if overrides.hover {
         workspace.hover_first_row(ctx);
     }
-    if let Some(section) = overrides.settings {
-        workspace.open_settings_page(section, ctx);
+    if let Some(page) = overrides.settings.clone() {
+        // A name nothing answers to opens the page the menu entry opens, with
+        // a line in the log — the same rule every other unreadable input
+        // follows, and better than refusing to start.
+        let chosen = page.and_then(|name| {
+            let found = workspace.settings_page_named(&name);
+            if found.is_none() {
+                log::warn!("no settings page is called {name:?}");
+            }
+            found
+        });
+        workspace.open_settings_page(chosen, ctx);
     }
     if let Some(query) = &overrides.search {
         workspace.type_into_settings_search(query, ctx);
@@ -1851,7 +1857,7 @@ mod tests {
                 frames: None,
                 overrides: Overrides {
                     hover: true,
-                    settings: Some(Section::About),
+                    settings: Some(Some("about".to_owned())),
                     ..Overrides::default()
                 }
             }
@@ -1862,12 +1868,24 @@ mod tests {
                 frames: None,
                 overrides: Overrides {
                     menu: true,
-                    settings: Some(Section::Appearance),
+                    settings: Some(None),
                     ..Overrides::default()
                 }
             }
         );
-        assert!(parse(&["--settings", "keybindings"]).is_err());
+        // A page name is not checked here: the pages come from plugins, so
+        // which of them exist is not known until they have built. An unknown
+        // one is a line in the log and the page the menu entry opens.
+        assert_eq!(
+            parse(&["--settings", "keybindings"]).expect("valid"),
+            Startup::Window {
+                frames: None,
+                overrides: Overrides {
+                    settings: Some(Some("keybindings".to_owned())),
+                    ..Overrides::default()
+                }
+            }
+        );
 
         assert!(parse(&["--density", "cosy"]).is_err());
         assert!(parse(&["--density"]).is_err());

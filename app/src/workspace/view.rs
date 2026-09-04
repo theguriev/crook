@@ -34,7 +34,7 @@ use crate::pane_selection::PaneSelection;
 use crate::pane_split::{DividerDrag, PaneExtent};
 use crate::pane_surface;
 use crate::platform_insets::{ControlLayout, LayoutInsets, TabsPlacement, WindowChrome};
-use crate::plugin::{ActionId, Host};
+use crate::plugin::{ActionId, Host, PageId};
 use crate::selection::{Blocks, Cells};
 use crate::settings::{
     DEFAULT_FONT_SIZE, Density, FONT_SIZE_STEP, GeneralOptions, Granularity, Layout, Settings,
@@ -55,7 +55,7 @@ use crate::{Channel, WINDOW_CHROME};
 use super::action::{
     OptionsAction, SettingsAction, ThemeAction, WindowAction, WorkspaceAction, WorktreeAction,
 };
-use super::settings_page::{Section, SettingsState};
+use super::settings_page::SettingsState;
 use super::tab_menu::{Contents, Mode as WorktreeMode, TabMenuState};
 use super::tabs_panel::geometry::RowGeometry;
 use super::theme_panel::{Mode, ThemePanelState};
@@ -763,12 +763,18 @@ impl Workspace {
     }
 
     /// The usage model, for the settings page's live reading.
-    pub(super) fn usage(&self) -> &ModelHandle<UsageModel> {
+    /// The usage model, whose poll this workspace starts and stops.
+    ///
+    /// Public for the tests, which is the honest reason: what the workspace
+    /// still owns of the usage feature is the poll's switch — `crook/usage`
+    /// owns the chip and the page — and a test asserting that a hidden chip
+    /// stops polling has to be able to ask.
+    pub fn usage(&self) -> &ModelHandle<UsageModel> {
         &self.usage
     }
 
     /// The settings page's state.
-    pub(super) fn settings_page(&self) -> &SettingsState {
+    pub(crate) fn settings_page(&self) -> &SettingsState {
         &self.page
     }
 
@@ -815,7 +821,7 @@ impl Workspace {
     }
 
     /// The person's own bindings, for the page that prints them.
-    pub(super) fn keymap(&self) -> &Keymap {
+    pub(crate) fn keymap(&self) -> &Keymap {
         &self.keymap
     }
 
@@ -1024,14 +1030,35 @@ impl Workspace {
             .unwrap_or(0);
     }
 
-    /// Which page of the settings the rail has selected.
+    /// Which page of the settings the rail has selected, by its key.
     ///
     /// Public for the snapshot path and the tests: which page is showing is
     /// not something a renderer asks for — it reads
     /// [`Self::settings_page`] — and it is the one piece of the page's state
     /// worth asserting from outside.
-    pub fn settings_section(&self) -> Section {
-        self.page.section
+    pub fn settings_page_key(&self) -> Option<String> {
+        let id = self.page.selected(&self.host)?;
+        self.host.settings_page_key(id).map(str::to_owned)
+    }
+
+    /// What the rail row of the selected page says.
+    pub fn settings_page_title(&self) -> Option<String> {
+        let id = self.page.selected(&self.host)?;
+        self.host.settings_page_title(id)
+    }
+
+    /// The page whose rail row says `title`, however it is spelled.
+    ///
+    /// What `--settings appearance` resolves through, and what a test names a
+    /// page by. The title rather than the key, because the title is what is
+    /// written on the rail and the key is `owner/entry` — nobody types that,
+    /// and a plugin's page should be as reachable as one of Crook's.
+    pub fn settings_page_named(&self, title: &str) -> Option<PageId> {
+        self.host
+            .settings_pages()
+            .into_iter()
+            .find(|(_, name)| name.eq_ignore_ascii_case(title))
+            .map(|(id, _)| id)
     }
 
     /// How far the tabs panel's list has been scrolled.
@@ -1093,8 +1120,10 @@ impl Workspace {
     /// The same two steps a click on the menu entry and a click on the rail
     /// take, in that order, so a snapshot of the page is a snapshot of the
     /// real thing rather than of a second code path.
-    pub fn open_settings_page(&mut self, section: Section, ctx: &mut ViewContext<Self>) {
-        self.apply_settings(SettingsAction::Select(section), ctx);
+    pub fn open_settings_page(&mut self, page: Option<PageId>, ctx: &mut ViewContext<Self>) {
+        if let Some(page) = page {
+            self.apply_settings(SettingsAction::Select(page), ctx);
+        }
         if self.apply(TabAction::OpenSettings, ctx) == TabEffect::CloseWindow {
             // Unreachable: opening a tab never empties the strip.
             (self.quit)();
@@ -2892,11 +2921,12 @@ impl Workspace {
     /// handles three actions rather than fifteen.
     fn apply_settings(&mut self, action: SettingsAction, ctx: &mut ViewContext<Self>) {
         match action {
-            SettingsAction::Select(section) => {
-                if self.page.section == section {
+            SettingsAction::Select(page) => {
+                let key = self.host.settings_page_key(page).map(str::to_owned);
+                if self.page.page == key {
                     return;
                 }
-                self.page.section = section;
+                self.page.page = key;
                 // A page is a different set of controls at a different set of
                 // positions. Both of the things that survive a section change
                 // would otherwise be wrong: the scroll offset belongs to the
