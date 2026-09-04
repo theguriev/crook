@@ -450,6 +450,13 @@ fn draws(workspace: &Workspace, plugin: &PluginId) -> Vec<String> {
 fn drawn_in<C: 'static>(slots: &Slots<C>, plugin: &PluginId) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     for slot in slots.declared() {
+        // Not the card's own status line. This section exists to say where on
+        // screen a plugin's work shows up — which chip in the header is whose
+        // — and naming a thing drawn six inches above, on this page, is
+        // telling somebody about what they are looking at.
+        if slot == PLUGIN_CARD {
+            continue;
+        }
         let mine: Vec<EntryId> = slots
             .contributors(slot)
             .into_iter()
