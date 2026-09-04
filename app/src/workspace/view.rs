@@ -59,7 +59,6 @@ use super::settings_page::{Section, SettingsState};
 use super::tab_menu::{Contents, Mode as WorktreeMode, TabMenuState};
 use super::tabs_panel::geometry::RowGeometry;
 use super::theme_panel::{Mode, ThemePanelState};
-use super::usage_chip::UsageChip;
 use super::{body, header_toolbar, tabs_panel};
 
 /// The two font families the interface is set in, resolved once at startup.
@@ -365,7 +364,6 @@ pub struct Workspace {
     /// startup because measuring one is a search through the font database.
     cell_font: CellFont,
     usage: ModelHandle<UsageModel>,
-    chip: ViewHandle<UsageChip>,
     git: ModelHandle<GitModel>,
     /// The shells behind the panes.
     terminals: ModelHandle<TerminalModel>,
@@ -518,8 +516,8 @@ pub struct Workspace {
 }
 
 impl Workspace {
-    /// Builds the workspace, its usage chip, its git model, and one tab to
-    /// start in.
+    /// Builds the workspace, its git model, every plugin in the box, and one
+    /// tab to start in.
     pub fn new(
         fonts: Fonts,
         cell_font: CellFont,
@@ -530,14 +528,6 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) -> Self {
         let usage = UsageModel::handle(ctx);
-
-        // The canonical model-changed-so-repaint bridge. The chip observes the
-        // same model for itself; this is what keeps the header honest when the
-        // reading changes the chip's width and the row around it has to be
-        // laid out again.
-        ctx.observe(&usage, |_, _, ctx| ctx.notify());
-
-        let chip = ctx.add_view(|ctx| UsageChip::new(fonts, ctx));
 
         let git = ctx.add_model(GitModel::new);
         // A branch that arrives, or a diff count that changes, repaints the
@@ -561,6 +551,13 @@ impl Workspace {
         let login_shell = settings.general().login_shell;
         terminals.update(ctx, |model, _| model.set_shell_login(login_shell));
 
+        // Last, and before anything is placed on the workspace: every plugin
+        // in the box builds here, and a plugin that owns a model or a view
+        // makes it with this context. Nothing it registers can reach the
+        // workspace yet — the contributions are closures, and they are not
+        // called until there is a frame to draw.
+        let host = crate::plugin::load(crate::plugins::defaults(), fonts, ctx);
+
         let options = settings.tab_options();
         let settings_path = settings.path().map(Path::to_owned);
         let mut workspace = Self {
@@ -568,7 +565,6 @@ impl Workspace {
             fonts,
             cell_font,
             usage,
-            chip,
             git,
             terminals,
             inputs: HashMap::new(),
@@ -595,7 +591,7 @@ impl Workspace {
             overridden: Overridden::default(),
             menu: MenuState::default(),
             page: SettingsState::default(),
-            host: crate::plugin::load(crate::plugins::defaults()),
+            host,
             tab_menu: TabMenuState::default(),
             panel: ThemePanelState::default(),
             themes: crate::theme::available(),
@@ -2480,10 +2476,6 @@ impl Workspace {
             _ => return None,
         };
         Some(WorkspaceAction::Theme(action))
-    }
-
-    pub fn chip(&self) -> &ViewHandle<UsageChip> {
-        &self.chip
     }
 
     pub(super) fn menu(&self) -> &MenuState {

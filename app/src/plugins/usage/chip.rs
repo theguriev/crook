@@ -16,7 +16,7 @@ use crookui_core::prelude::*;
 use crate::theme::theme;
 use crate::usage_model::{UsageModel, UsageProblem};
 
-use super::view::Fonts;
+use crate::workspace::Fonts;
 
 /// What the chip prints before the first reading lands. An en dash, not a
 /// hyphen: a chip that showed nothing at all would read as a bug.

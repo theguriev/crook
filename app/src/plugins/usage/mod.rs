@@ -5,16 +5,23 @@
 //! thing that is genuinely a *feature*: a model that polls, a view that
 //! observes it, a place in the chrome, and a setting that turns both off.
 //!
-//! # What has moved, and what has not
+//! # The plugin owns the view
 //!
-//! What has moved is where it is drawn from. `header_toolbar` no longer names
-//! the chip; it renders whatever is in [`HEADER_RIGHT`], and this is what is in
-//! it. What has *not* moved is who owns the chip: the `UsageChip` view and the
-//! `UsageModel` behind it are still built by `Workspace::new` and still live on
-//! the workspace, so this plugin reads them rather than holding them. Moving
-//! ownership needs a plugin to be able to make an entity while it builds, which
-//! needs a context the workspace does not have until it exists — that is the
-//! next thing to do here, not something to pretend has been done.
+//! `chip.rs` is here rather than under `workspace/`, and that is the point of
+//! a plugin directory: what a feature is made of sits together, and what is
+//! left in `workspace/` is chrome.
+//!
+//! [`UsageChip`] is made here, while the plugin builds, and the handle is
+//! captured by the closure that draws it — so the workspace neither holds it
+//! nor knows it exists. That is the whole point of handing [`Plugin::build`] a
+//! context: a plugin that can only contribute closures can decorate the
+//! chrome, and a plugin that can make an entity is a feature.
+//!
+//! The *model* is not owned by anybody, here or before: [`UsageModel`] is a
+//! singleton on the app, so this asks for the same handle the workspace would
+//! and gets the same model. What is still on the workspace is the settings row
+//! that turns the chip off and the poll it starts, which are not chip code and
+//! move when there is a `settings.section` slot to move them into.
 //!
 //! # The setting is still the poll's switch
 //!
@@ -29,6 +36,12 @@ use crookui_core::prelude::*;
 use crook_plugin::{Manifest, PluginId, Tier};
 
 use crate::plugin::{BuildError, Host, Plugin};
+use crate::usage_model::UsageModel;
+use crate::workspace::Workspace;
+
+mod chip;
+
+use chip::UsageChip;
 
 use super::header::HEADER_RIGHT;
 
@@ -48,13 +61,27 @@ impl Plugin for Usage {
         manifest()
     }
 
-    fn build(&mut self, host: &mut Host) -> Result<(), BuildError> {
-        host.contribute(HEADER_RIGHT, "chip", 0, |workspace, _| {
+    fn build(
+        &mut self,
+        host: &mut Host,
+        ctx: &mut ViewContext<Workspace>,
+    ) -> Result<(), BuildError> {
+        let fonts = host.fonts();
+        let chip = ctx.add_view(|ctx| UsageChip::new(fonts, ctx));
+
+        // The canonical model-changed-so-repaint bridge. The chip observes the
+        // same model for itself; this is what keeps the header honest when the
+        // reading changes the chip's width and the row around it has to be
+        // laid out again.
+        let usage = UsageModel::handle(ctx);
+        ctx.observe(&usage, |_, _, ctx| ctx.notify());
+
+        host.contribute(HEADER_RIGHT, "chip", 0, move |workspace, _| {
             if !workspace.general().show_usage_chip {
                 return Empty::new().finish();
             }
 
-            Container::new(ChildView::new(workspace.chip()).finish())
+            Container::new(ChildView::new(&chip).finish())
                 .with_margin(Margin {
                     left: GUTTER,
                     bottom: LIFT,
