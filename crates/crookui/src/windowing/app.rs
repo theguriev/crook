@@ -272,7 +272,19 @@ impl ApplicationHandler<CrookEvent> for App {
         }
 
         match Window::new(event_loop, &self.options) {
-            Ok(window) => self.window = Some(window),
+            Ok(window) => {
+                // The desktop's setting as it stands, before any frame is
+                // built. Winit only *reports* a change, so an application that
+                // waited for `ThemeChanged` would open in the wrong one and
+                // stay there until somebody toggled the system setting. A
+                // desktop that will not say is taken as dark, which is what a
+                // terminal has always been.
+                let theme = window.system_theme();
+                self.window = Some(window);
+                if self.delegate.handle_event(Event::SystemTheme(theme)) {
+                    self.with_window(Window::request_redraw);
+                }
+            }
             Err(error) => {
                 log::error!("could not open the window: {error:#}");
                 event_loop.exit();

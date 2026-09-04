@@ -399,6 +399,25 @@ impl Harness {
             .read(&self.app, |workspace, _| workspace.pane_takes_keys(pane))
     }
 
+    /// Pumps the queue until `settled` is true or `patience` runs out.
+    ///
+    /// For the background chains that have no completion to wait on: a poll
+    /// that will re-arm itself for as long as the window is open.
+    fn settle_for(
+        &mut self,
+        patience: std::time::Duration,
+        mut settled: impl FnMut(&mut Self) -> bool,
+    ) {
+        let deadline = std::time::Instant::now() + patience;
+        loop {
+            self.queue.run_until_parked();
+            if settled(self) || std::time::Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
     /// The name of the theme in force.
     fn theme_name(&self) -> String {
         self.workspace
@@ -3862,6 +3881,65 @@ fn a_theme_dropped_into_the_folder_is_in_the_panel_the_next_time_it_opens() {
     assert!(names.contains(&"My Own".to_owned()));
 }
 
+#[test]
+fn a_theme_file_edited_while_the_panel_is_open_is_re_read_and_re_applied() {
+    // The half of a filesystem watcher that matters: somebody is editing a
+    // theme in one window and looking at Crook in the other. The panel being
+    // open is what the poll is gated on, because that is when it is happening.
+    let themes = Scratch::new();
+    let mut harness = Harness::new(1);
+    let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+    harness.set_themes_directory(themes.path().to_owned());
+
+    let path = themes.path().join("my_own.yaml");
+    fs::write(&path, theme_file_text()).expect("writable");
+    harness.open_theme_panel();
+    harness.workspace_update(|workspace, ctx| workspace.set_theme("My Own", ctx));
+
+    let before = crate::theme::theme().terminal.background;
+    assert_eq!(harness.theme_name(), "My Own");
+
+    // The same theme, one colour different, saved under the same name.
+    fs::write(&path, theme_file_text().replace("#2e3440", "#101010")).expect("writable");
+    harness.settle_for(std::time::Duration::from_secs(5), |harness| {
+        let _ = harness;
+        crate::theme::theme().terminal.background != before
+    });
+
+    assert_ne!(
+        crate::theme::theme().terminal.background,
+        before,
+        "the edit never reached the window"
+    );
+    assert_eq!(
+        harness.theme_name(),
+        "My Own",
+        "it is still the same theme, re-read"
+    );
+}
+
+#[test]
+fn the_themes_folder_is_not_polled_while_the_panel_is_closed() {
+    // An application that is idle by design stays idle: the chain ends at the
+    // first tick that finds the panel gone.
+    let themes = Scratch::new();
+    let mut harness = Harness::new(1);
+    let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+    harness.set_themes_directory(themes.path().to_owned());
+
+    let before = harness.theme_names().len();
+    fs::write(themes.path().join("my_own.yaml"), theme_file_text()).expect("writable");
+
+    // Long enough that a poll would have run several times.
+    harness.settle_for(std::time::Duration::from_millis(2500), |_| false);
+
+    assert_eq!(
+        harness.theme_names().len(),
+        before,
+        "the list moved with nobody looking at it"
+    );
+}
+
 /// A theme file in Warp's format, for the tests that drop one in.
 fn theme_file_text() -> String {
     let mut text = String::from(
@@ -6293,6 +6371,109 @@ fn the_row_height_the_panel_scrolls_by_is_the_height_it_draws() {
         "rows are drawn {drawn} apart and scrolled by {}",
         crate::workspace::theme_panel::ROW_HEIGHT
     );
+}
+
+/// Following the desktop's light or dark setting.
+mod system_theme {
+    use super::*;
+
+    /// A harness on settings that know where they would be written, so the
+    /// pair is really read back rather than kept in memory.
+    fn harness(themes: &Scratch, settings: &Scratch) -> Harness {
+        let mut harness = Harness::with_settings(1, settings.settings());
+        harness.set_themes_directory(themes.path().to_owned());
+        harness
+    }
+
+    /// Chooses a theme by name, the way a row of the panel does.
+    fn choose(harness: &mut Harness, name: &str) {
+        let name = name.to_owned();
+        harness.workspace_update(|workspace, ctx| workspace.set_theme(&name, ctx));
+    }
+
+    fn follow(harness: &mut Harness, on: bool) {
+        harness.workspace_update(|workspace, ctx| workspace.set_follow_system_theme(on, ctx));
+    }
+
+    fn desktop_is_dark(harness: &mut Harness, dark: bool) {
+        harness.workspace_update(|workspace, ctx| workspace.set_system_dark(dark, ctx));
+    }
+
+    #[test]
+    fn the_desktop_is_ignored_until_it_is_being_followed() {
+        // A terminal whose chosen theme changed colour at sunset without being
+        // asked would be a surprise, which is why the flag is off by default.
+        let themes = Scratch::new();
+        let files = Scratch::new();
+        let mut harness = harness(&themes, &files);
+        let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+
+        choose(&mut harness, "Midnight");
+        desktop_is_dark(&mut harness, false);
+
+        assert_eq!(harness.theme_name(), "Midnight");
+    }
+
+    #[test]
+    fn turning_it_on_applies_the_half_the_desktop_is_in() {
+        // A switch that changed nothing until the next sunset would look
+        // broken.
+        let themes = Scratch::new();
+        let files = Scratch::new();
+        let mut harness = harness(&themes, &files);
+        let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+
+        desktop_is_dark(&mut harness, false);
+        follow(&mut harness, true);
+
+        assert_eq!(harness.theme_name(), crate::theme::DEFAULT_LIGHT_NAME);
+    }
+
+    #[test]
+    fn the_desktop_moving_moves_the_theme_with_it() {
+        let themes = Scratch::new();
+        let files = Scratch::new();
+        let mut harness = harness(&themes, &files);
+        let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+
+        follow(&mut harness, true);
+        desktop_is_dark(&mut harness, false);
+        assert_eq!(harness.theme_name(), crate::theme::DEFAULT_LIGHT_NAME);
+
+        desktop_is_dark(&mut harness, true);
+        assert_eq!(harness.theme_name(), crate::theme::DEFAULT_NAME);
+    }
+
+    #[test]
+    fn choosing_a_theme_while_following_sets_only_the_half_in_force() {
+        // The other half is somebody's choice for the other half, and
+        // replacing it would silently throw it away.
+        let themes = Scratch::new();
+        let files = Scratch::new();
+        let mut harness = harness(&themes, &files);
+        let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+
+        follow(&mut harness, true);
+        desktop_is_dark(&mut harness, true);
+        choose(&mut harness, "Midnight");
+
+        let (light, dark) = harness.workspace.read(&harness.app, |workspace, _| {
+            (
+                workspace.settings().light_theme().to_owned(),
+                workspace.settings().dark_theme().to_owned(),
+            )
+        });
+        assert_eq!(dark, "Midnight");
+        assert_eq!(
+            light,
+            crate::theme::DEFAULT_LIGHT_NAME,
+            "the light half was left as it was"
+        );
+
+        // And going light comes back to it rather than to Midnight.
+        desktop_is_dark(&mut harness, false);
+        assert_eq!(harness.theme_name(), crate::theme::DEFAULT_LIGHT_NAME);
+    }
 }
 
 /// Zooming: one number that every measurement in the window comes from.

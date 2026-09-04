@@ -141,6 +141,9 @@ pub enum SettingsAction {
     /// already asked [`GeneralOptions`](crate::settings::GeneralOptions) what
     /// the next size is, which is the one place the bounds are applied.
     SetFontSize(f32),
+    /// "Follow the desktop": whether the theme tracks the system's light or
+    /// dark setting.
+    ToggleFollowSystemTheme,
 }
 
 /// What the options menu writes.

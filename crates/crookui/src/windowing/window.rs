@@ -16,6 +16,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use crookui_core::event::SystemTheme;
 use crookui_core::geometry::{Vector2F, vec2f};
 use crookui_core::platform::FontDb;
 use crookui_core::scene::Scene;
@@ -23,6 +24,8 @@ use wgpu::wgt::WgpuHasDisplayHandle;
 use winit::event_loop::ActiveEventLoop;
 
 use crate::rendering::{Error, Renderer, WindowResources, reset_wgpu_instance};
+
+use super::event::system_theme;
 
 use super::WindowOptions;
 
@@ -114,6 +117,15 @@ impl Window {
     /// Physical pixels per logical pixel.
     pub(super) fn scale_factor(&self) -> f32 {
         self.window.scale_factor() as f32
+    }
+
+    /// Whether the desktop is set to light or to dark, as it stands.
+    ///
+    /// A desktop that will not answer is taken as dark: winit reports `None`
+    /// for a platform with no such setting and for one it cannot read, and a
+    /// terminal has always been dark.
+    pub(super) fn system_theme(&self) -> SystemTheme {
+        self.window.theme().map_or(SystemTheme::Dark, system_theme)
     }
 
     /// Puts the rectangle an input method draws its candidate list beside.

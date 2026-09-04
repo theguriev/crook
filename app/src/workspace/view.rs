@@ -5,6 +5,15 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
+
+/// How often the themes folder is re-read while the Themes panel is open.
+///
+/// Fast enough that saving a theme file and looking at the window feels
+/// immediate, slow enough that a folder of fifty themes is a directory walk
+/// somebody would have to go looking for in a profiler. It costs nothing at
+/// all while the panel is closed — see [`Workspace::watch_themes`].
+const THEMES_POLL: Duration = Duration::from_millis(750);
 
 use crook_terminal::Snapshot;
 use crookui_core::elements::MouseStateHandle;
@@ -277,6 +286,17 @@ pub struct Workspace {
     /// that only one can be dragged at a time. See
     /// [`DividerDrag`](crate::pane_split::DividerDrag).
     divider_drag: DividerDrag,
+
+    /// Whether the desktop is set to dark, as of the last thing the window
+    /// said about it.
+    ///
+    /// Dark until told otherwise, which is what a terminal has always been and
+    /// what a desktop that will not answer is taken as. It is one bit rather
+    /// than a theme because the *resolution* is
+    /// [`Settings::theme_for`](crate::settings::Settings::theme_for), and
+    /// keeping a resolved theme here as well would be a second copy of an
+    /// answer that already has one.
+    system_is_dark: bool,
     interactions: HashMap<PaneId, PaneInteraction>,
     /// What the mouse is doing to each tab's chrome in the panel.
     ///
@@ -403,6 +423,7 @@ impl Workspace {
             inputs: HashMap::new(),
             clipboard: Clipboard::new(),
             divider_drag: DividerDrag::new(),
+            system_is_dark: true,
             interactions: HashMap::new(),
             tab_chrome: HashMap::new(),
             settings,
@@ -507,9 +528,60 @@ impl Workspace {
 
         crate::theme::set_theme(palette);
         self.settings.set_theme(name);
+        // And into whichever half of the desktop pair is in force, so that a
+        // theme chosen while following the system is the one it comes back to
+        // the next time the desktop is in this state. Writing both halves
+        // would be worse than writing neither: it would silently replace the
+        // theme somebody had chosen for the *other* half.
+        self.settings.set_system_theme(self.system_is_dark, name);
         self.save_settings(ctx);
         self.sync_palette(ctx);
         ctx.notify();
+    }
+
+    /// Records what the desktop is set to, and follows it if it is being
+    /// followed.
+    ///
+    /// Called once when the window opens and again whenever the setting moves.
+    /// The resolution itself is [`Settings::theme_for`] — a pure function of
+    /// the flag, the pair of names and this one bit — so nothing here decides
+    /// anything a test would need a desktop to reproduce.
+    pub fn set_system_dark(&mut self, dark: bool, ctx: &mut ViewContext<Self>) {
+        self.system_is_dark = dark;
+        if !self.general().use_system_theme {
+            return;
+        }
+
+        let wanted = self.settings.theme_for(dark).to_owned();
+        if wanted == self.settings.theme() {
+            return;
+        }
+        self.set_theme(&wanted, ctx);
+    }
+
+    /// Whether the desktop is set to dark, as of the last thing the window
+    /// said.
+    pub fn system_is_dark(&self) -> bool {
+        self.system_is_dark
+    }
+
+    /// Turns following the desktop on or off.
+    ///
+    /// Turning it on applies whichever half the desktop is currently in, which
+    /// is the only way the switch can be honest: a toggle that changed nothing
+    /// until the next sunset would look broken.
+    pub fn set_follow_system_theme(&mut self, follow: bool, ctx: &mut ViewContext<Self>) {
+        let mut general = self.general();
+        if general.use_system_theme == follow {
+            return;
+        }
+        general.use_system_theme = follow;
+        self.set_general(general, ctx);
+
+        if follow {
+            let wanted = self.settings.theme_for(self.system_is_dark).to_owned();
+            self.set_theme(&wanted, ctx);
+        }
     }
 
     /// Hands the terminals the palette the theme in force resolves to.
@@ -595,6 +667,69 @@ impl Workspace {
             None => crate::theme::available(),
         };
         self.select_theme_in_force();
+    }
+
+    /// Re-reads the themes folder while the panel is open, so a file edited in
+    /// an editor takes effect in the window beside it.
+    ///
+    /// **A poll, and only while somebody is looking.** Warp watches its themes
+    /// directory with a filesystem watcher; that is a dependency, a thread and
+    /// a per-platform API for a folder that changes when a person is editing a
+    /// theme — which is exactly when the panel is open. Closed, this costs
+    /// nothing at all: the chain ends at the first tick that finds the panel
+    /// gone, and an application that is idle by design stays idle.
+    ///
+    /// The read happens on the background pool, because it is a directory walk
+    /// and a parse per file, and neither belongs on the thread that draws.
+    fn watch_themes(&self, ctx: &mut ViewContext<Self>) {
+        if !self.panel.open {
+            return;
+        }
+
+        let directory = self.themes_directory.clone();
+        let reading = ctx.background().spawn(async move {
+            std::thread::sleep(THEMES_POLL);
+            match directory.as_deref() {
+                Some(directory) => crate::theme::available_in(directory),
+                None => crate::theme::available(),
+            }
+        });
+
+        ctx.spawn(reading, |workspace, themes, ctx| {
+            workspace.adopt_themes(themes, ctx);
+            workspace.watch_themes(ctx);
+        })
+        .detach();
+    }
+
+    /// Takes a freshly read themes folder, re-applying the theme in force if
+    /// its own file is what changed.
+    ///
+    /// By *name*, which is the only way an edit can be noticed: the palette in
+    /// force is the old one, so looking the theme up by palette would find the
+    /// row it used to be and conclude nothing had happened.
+    fn adopt_themes(&mut self, themes: Vec<crate::theme::Available>, ctx: &mut ViewContext<Self>) {
+        // The creator paints a draft on the window. Re-applying anything under
+        // it would replace a palette somebody is in the middle of choosing.
+        if !self.panel.open || self.panel.mode == Mode::Creating || self.themes == themes {
+            return;
+        }
+
+        self.themes = themes;
+        let name = self.settings.theme().to_owned();
+        if let Some(edited) = self
+            .themes
+            .iter()
+            .find(|available| available.name == name)
+            .map(|available| available.theme)
+            && edited != theme()
+        {
+            crate::theme::set_theme(edited);
+            self.sync_palette(ctx);
+        }
+
+        self.select_theme_in_force();
+        ctx.notify();
     }
 
     /// Puts the keyboard's row on the theme that is on screen.
@@ -1717,6 +1852,10 @@ impl Workspace {
                 self.set_options(TabOptions::default(), ctx);
             }
             SettingsAction::SetFontSize(size) => self.set_font_size(size, ctx),
+            SettingsAction::ToggleFollowSystemTheme => {
+                let follow = !self.general().use_system_theme;
+                self.set_follow_system_theme(follow, ctx);
+            }
         }
     }
 
@@ -1782,6 +1921,7 @@ impl Workspace {
                 self.scroll_selection_into_view();
                 self.panel.forget_hover_state();
                 self.sync_input_keys();
+                self.watch_themes(ctx);
                 ctx.notify();
             }
             ThemeAction::ClosePanel => {

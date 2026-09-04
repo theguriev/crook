@@ -58,6 +58,26 @@ const THEME_KEY: &str = "theme";
 /// The key the terminal's monospace family is stored under.
 const FONT_FAMILY_KEY: &str = "font_family";
 
+/// The keys the two halves of the desktop-following pair are stored under.
+const LIGHT_THEME_KEY: &str = "light_theme";
+/// See [`LIGHT_THEME_KEY`].
+const DARK_THEME_KEY: &str = "dark_theme";
+
+/// One theme name out of a settings document, falling back to `default`.
+///
+/// Not a parse: a name that answers to nothing on this machine is a theme file
+/// somebody deleted, not a broken setting, so the name is kept and whoever
+/// applies it decides. An empty string names nothing and is treated as absent.
+fn named_theme(document: &Map<String, Value>, key: &str, default: &str) -> String {
+    document
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .unwrap_or(default)
+        .to_owned()
+}
+
 /// What one row of the tab strip stands for — the menu's "View as".
 ///
 /// Warp's `VerticalTabsDisplayGranularity`, under
@@ -254,6 +274,17 @@ pub struct GeneralOptions {
     /// is what keeps a hand-edited `0` — or a `NaN`, which JSON cannot hold
     /// but a future writer could — out of a division.
     pub font_size: f32,
+    /// Whether the theme follows the desktop's light or dark setting.
+    ///
+    /// Off by default, because a terminal with a chosen theme that changed
+    /// colour at sunset without being asked would be a surprise. When it is
+    /// on, [`Settings::light_theme`] and [`Settings::dark_theme`] name the two
+    /// themes and the desktop chooses between them.
+    ///
+    /// The resolution is a pure function of these three facts, which is what
+    /// makes it testable with no window and no desktop: see
+    /// [`Settings::theme_for`].
+    pub use_system_theme: bool,
     /// Whether the header carries the Claude Code usage chip.
     ///
     /// Off is not merely a hidden pill: the chip is the only thing that reads
@@ -272,6 +303,7 @@ impl Default for GeneralOptions {
     fn default() -> Self {
         Self {
             font_size: DEFAULT_FONT_SIZE,
+            use_system_theme: false,
             show_usage_chip: true,
         }
     }
@@ -392,6 +424,15 @@ pub struct Settings {
     tab_options: TabOptions,
     /// The options that are not the tab strip's, resolved the same way.
     general: GeneralOptions,
+    /// The theme to use while the desktop is light, when it is being
+    /// followed.
+    ///
+    /// A name like [`Settings::theme`], and read the same way: one that
+    /// answers to nothing on this machine is a warning and the default rather
+    /// than a refusal to start.
+    light_theme: String,
+    /// The theme to use while the desktop is dark.
+    dark_theme: String,
     /// The name of the theme to open in.
     ///
     /// A name rather than the palette itself, and that is the whole design: a
@@ -435,6 +476,8 @@ impl Settings {
                 tab_options: TabOptions::default(),
                 general: GeneralOptions::default(),
                 theme: crate::theme::DEFAULT_NAME.to_owned(),
+                light_theme: crate::theme::DEFAULT_LIGHT_NAME.to_owned(),
+                dark_theme: crate::theme::DEFAULT_NAME.to_owned(),
                 font_family: None,
             };
         };
@@ -454,6 +497,8 @@ impl Settings {
             tab_options: TabOptions::default(),
             general: GeneralOptions::default(),
             theme: crate::theme::DEFAULT_NAME.to_owned(),
+            light_theme: crate::theme::DEFAULT_LIGHT_NAME.to_owned(),
+            dark_theme: crate::theme::DEFAULT_NAME.to_owned(),
             font_family: None,
         }
     }
@@ -496,13 +541,59 @@ impl Settings {
             .filter(|name| !name.is_empty())
             .map(str::to_owned);
 
+        let light_theme = named_theme(&document, LIGHT_THEME_KEY, crate::theme::DEFAULT_LIGHT_NAME);
+        let dark_theme = named_theme(&document, DARK_THEME_KEY, crate::theme::DEFAULT_NAME);
+
         Self {
             path: Some(path),
             document,
             tab_options,
             general,
             theme,
+            light_theme,
+            dark_theme,
             font_family,
+        }
+    }
+
+    /// The theme to be in, given what the desktop is set to.
+    ///
+    /// **A pure function of three facts**, which is why it is here rather than
+    /// in the workspace: the flag, the pair of names, and the desktop. It
+    /// needs no per-theme metadata — nothing has to declare itself light or
+    /// dark, and a theme can be either half of the pair — which is exactly the
+    /// design Warp arrived at.
+    pub fn theme_for(&self, dark: bool) -> &str {
+        if !self.general.use_system_theme {
+            return &self.theme;
+        }
+        if dark {
+            &self.dark_theme
+        } else {
+            &self.light_theme
+        }
+    }
+
+    /// The theme to follow the desktop into the light.
+    pub fn light_theme(&self) -> &str {
+        &self.light_theme
+    }
+
+    /// The theme to follow it into the dark.
+    pub fn dark_theme(&self) -> &str {
+        &self.dark_theme
+    }
+
+    /// Records which theme belongs to which half of the desktop's setting.
+    ///
+    /// Which of the two is written is decided by `dark` rather than by the
+    /// caller, so that "the theme just chosen" and "the half of the pair the
+    /// desktop is currently in" cannot come apart.
+    pub fn set_system_theme(&mut self, dark: bool, name: impl Into<String>) {
+        if dark {
+            self.dark_theme = name.into();
+        } else {
+            self.light_theme = name.into();
         }
     }
 
@@ -605,6 +696,14 @@ impl Settings {
         document.extend(owned_keys(self.tab_options, "tab options")?);
         document.extend(owned_keys(self.general, "general options")?);
         document.insert(THEME_KEY.to_owned(), Value::String(self.theme.clone()));
+        document.insert(
+            LIGHT_THEME_KEY.to_owned(),
+            Value::String(self.light_theme.clone()),
+        );
+        document.insert(
+            DARK_THEME_KEY.to_owned(),
+            Value::String(self.dark_theme.clone()),
+        );
         // Written back only when there is one, so a person who never chose a
         // font does not find a null in a file they opened to read.
         match self.font_family.as_ref() {
@@ -883,6 +982,60 @@ mod tests {
     }
 
     #[test]
+    fn test_the_theme_is_resolved_from_three_facts_and_nothing_else() {
+        // A pure function of the flag, the pair of names and the desktop. It
+        // needs no per-theme metadata: nothing declares itself light or dark,
+        // and either theme can be either half of the pair.
+        let scratch = ScratchDirectory::new("system-theme");
+        let mut settings = Settings::load(scratch.settings_file());
+        settings.set_theme("Midnight");
+        settings.set_system_theme(false, "Crook Light");
+        settings.set_system_theme(true, "Crook Dark");
+
+        // Off, the desktop is not consulted at all.
+        assert_eq!(settings.theme_for(true), "Midnight");
+        assert_eq!(settings.theme_for(false), "Midnight");
+
+        let mut general = settings.general();
+        general.use_system_theme = true;
+        settings.set_general(general);
+        assert_eq!(settings.theme_for(true), "Crook Dark");
+        assert_eq!(settings.theme_for(false), "Crook Light");
+    }
+
+    #[test]
+    fn test_the_pair_survives_a_save() {
+        let scratch = ScratchDirectory::new("system-theme-save");
+        let mut settings = Settings::load(scratch.settings_file());
+        settings.set_system_theme(false, "Gruvbox Light");
+        settings.set_system_theme(true, "Kanagawa");
+        settings.save_blocking().expect("the save should succeed");
+
+        let reread = Settings::load(scratch.settings_file());
+        assert_eq!(reread.light_theme(), "Gruvbox Light");
+        assert_eq!(reread.dark_theme(), "Kanagawa");
+    }
+
+    #[test]
+    fn test_a_missing_pair_falls_back_to_two_built_ins_that_match() {
+        // A person who turns following on and never touches it again gets a
+        // matched pair rather than two unrelated palettes.
+        let scratch = ScratchDirectory::new("system-theme-default");
+        let settings = Settings::load(scratch.settings_file());
+
+        assert_eq!(settings.light_theme(), crate::theme::DEFAULT_LIGHT_NAME);
+        assert_eq!(settings.dark_theme(), crate::theme::DEFAULT_NAME);
+        assert!(crate::theme::named(settings.light_theme()).is_some());
+        assert!(crate::theme::named(settings.dark_theme()).is_some());
+        assert!(
+            crate::theme::named(settings.light_theme())
+                .expect("a built-in")
+                .is_light,
+            "the light half of the pair has to be light"
+        );
+    }
+
+    #[test]
     fn test_a_hand_edited_font_size_cannot_divide_by_zero() {
         // Every grid measurement in the window is a box divided by a cell, and
         // a cell's width comes from this number. The file is meant to be
@@ -964,11 +1117,15 @@ mod tests {
         assert_eq!(
             vec![
                 "compact_subtitle",
+                // The dark half of the pair the desktop chooses between. Warp
+                // has this too, spelled the same way.
+                "dark_theme",
                 "display_granularity",
                 // Crook's own: Warp keeps the terminal's type size in its
                 // appearance settings, which this file is not a copy of.
                 "font_size",
                 "layout",
+                "light_theme",
                 "primary_info",
                 "show_details_on_hover",
                 "show_diff_stats",
@@ -979,6 +1136,7 @@ mod tests {
                 // The chosen theme's name, which is a string rather than an
                 // option with a type: see `Settings::theme`.
                 "theme",
+                "use_system_theme",
                 "view_mode",
             ],
             written.keys().collect::<Vec<_>>()
@@ -1126,11 +1284,11 @@ mod tests {
         let written: Map<String, Value> =
             serde_json::from_str(&contents).expect("the file should be a JSON object");
 
-        // Eight tab options, two general ones and the theme's name, and
+        // Eight tab options, three general ones and three theme names, and
         // nothing else: the 8KB key the file started with is gone. The font
         // family is not among them — an absent key is what "no preference"
         // is, so a save writes no `font_family` unless one was chosen.
-        assert_eq!(11, written.len());
+        assert_eq!(14, written.len());
         assert!(!contents.contains("padding"));
         assert_eq!(
             everything_flipped(),

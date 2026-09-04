@@ -12,7 +12,9 @@
 
 use std::time::{Duration, Instant};
 
-use crookui_core::event::{Event, Ime, Keystroke, Modifiers, MouseButton, ScrollDelta};
+use crookui_core::event::{
+    Event, Ime, Keystroke, Modifiers, MouseButton, ScrollDelta, SystemTheme,
+};
 use crookui_core::geometry::{Vector2F, vec2f};
 use winit::event::{ElementState, MouseScrollDelta, WindowEvent};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
@@ -116,6 +118,12 @@ impl InputState {
                 modifiers: self.modifiers,
             }),
 
+            // The desktop moved between light and dark. Every platform has its
+            // own way of being asked; winit is the one thing that knows all of
+            // them, so the answer crosses this line as an event like any
+            // other.
+            WindowEvent::ThemeChanged(theme) => Some(Event::SystemTheme(system_theme(*theme))),
+
             // An input method is composing. These arrive *instead of* the key
             // presses that belong to the composition, which is why a field
             // that ignores them cannot type Japanese, Chinese or Korean at all.
@@ -186,6 +194,18 @@ impl InputState {
         });
 
         count
+    }
+}
+
+/// Winit's word for the desktop's setting, in Crook's vocabulary.
+///
+/// A desktop that reports nothing at all never reaches here — winit sends no
+/// event for one — and the initial read in [`super::app`] treats it as dark,
+/// which is what a terminal has always been.
+pub(super) fn system_theme(theme: winit::window::Theme) -> SystemTheme {
+    match theme {
+        winit::window::Theme::Light => SystemTheme::Light,
+        winit::window::Theme::Dark => SystemTheme::Dark,
     }
 }
 

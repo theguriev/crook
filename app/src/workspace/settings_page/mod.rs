@@ -162,6 +162,8 @@ pub(super) enum Control {
     ShowDetailsOnHover,
     /// "Show the usage chip".
     ShowUsageChip,
+    /// "Follow the desktop".
+    FollowSystemTheme,
     /// The minus of "Text size".
     FontSmaller,
     /// The plus of it.

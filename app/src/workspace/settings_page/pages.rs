@@ -239,6 +239,33 @@ fn theme_category(workspace: &Workspace) -> Vec<Box<dyn Element>> {
             state.control(Control::ThemeRowButton),
             ui,
         ),
+        widgets::row(
+            "Follow the desktop",
+            Some("Use one theme while the desktop is light and another while it is dark."),
+            true,
+            widgets::switch(
+                workspace.general().use_system_theme,
+                Some(SettingsAction::ToggleFollowSystemTheme.into()),
+                state.control(Control::FollowSystemTheme),
+            ),
+            ui,
+        ),
+        widgets::fact(
+            "Light / dark",
+            format!(
+                "{} / {}",
+                workspace.settings().light_theme(),
+                workspace.settings().dark_theme()
+            ),
+            false,
+            fonts,
+        ),
+        widgets::note(
+            "While the desktop is being followed, choosing a theme sets the half it is currently \
+             in, so the other one is left as it was. The pair is remembered whether or not the \
+             switch is on.",
+            ui,
+        ),
         widgets::note(
             "Themes are read from your themes folder in Warp's own file format, so a theme \
              written for Warp works here unchanged. Drop a .yaml in and open the panel again.",

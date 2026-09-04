@@ -174,6 +174,31 @@ pub enum Event {
 
     /// The input method said something.
     Ime(Ime),
+
+    /// The desktop is set to light or to dark, or has just changed.
+    ///
+    /// Sent once when the window opens and again whenever the setting moves,
+    /// so an application that follows the system needs no query of its own —
+    /// which is what keeps every platform's way of asking behind the window
+    /// layer.
+    SystemTheme(SystemTheme),
+}
+
+/// Whether the desktop is set to light or to dark.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub enum SystemTheme {
+    /// Dark, or a desktop that says nothing and is assumed to be.
+    #[default]
+    Dark,
+    /// Light.
+    Light,
+}
+
+impl SystemTheme {
+    /// Whether this is the dark one.
+    pub fn is_dark(self) -> bool {
+        self == Self::Dark
+    }
 }
 
 /// What an input method is doing to the text being composed.
@@ -221,7 +246,7 @@ impl Event {
             | Self::MouseMoved { position, .. }
             | Self::ScrollWheel { position, .. }
             | Self::ModifiersChanged { position, .. } => Some(*position),
-            Self::KeyDown { .. } | Self::KeyUp { .. } | Self::Ime(_) => None,
+            Self::KeyDown { .. } | Self::KeyUp { .. } | Self::Ime(_) | Self::SystemTheme(_) => None,
         }
     }
 
@@ -249,7 +274,7 @@ impl Event {
             // An input method reports what it composed, never what was held to
             // compose it: the modifiers went into the composition and came out
             // the other side as text.
-            Self::Ime(_) => Modifiers::default(),
+            Self::Ime(_) | Self::SystemTheme(_) => Modifiers::default(),
         }
     }
 
@@ -301,6 +326,7 @@ impl DispatchedEvent {
             Event::KeyDown { .. }
             | Event::KeyUp { .. }
             | Event::Ime(_)
+            | Event::SystemTheme(_)
             | Event::MouseMoved { .. }
             | Event::ModifiersChanged { .. } => Some(&self.event),
         }

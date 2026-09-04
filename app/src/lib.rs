@@ -1374,6 +1374,21 @@ impl WindowDelegate for Shell {
     }
 
     fn handle_event(&mut self, event: Event) -> bool {
+        // Not hit-tested and not dispatched into the tree: the desktop's
+        // setting is about the window rather than about anything in it, and
+        // the workspace is the one thing that knows whether it is being
+        // followed.
+        if let Event::SystemTheme(theme) = event {
+            let workspace = &self.workspace;
+            let dark = theme.is_dark();
+            self.app.update(|ctx| {
+                workspace.update(ctx, |workspace, ctx| workspace.set_system_dark(dark, ctx));
+            });
+            return self
+                .app
+                .read(|ctx| ctx.has_window_invalidations(self.window_id));
+        }
+
         if self.handle_keystroke(&event) {
             return true;
         }

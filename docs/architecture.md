@@ -1057,12 +1057,24 @@ configs; and a filesystem watcher that hot-reloads the themes directory. Crook r
 file format and ignores every one of those fields rather than refusing a file that carries
 them, which is the property that matters: a theme written for Warp loads here.
 
-The one omission worth naming is **OS sync**. Warp resolves the active theme as a pure function
-of (a `use_system_theme` flag, an explicit `{light, dark}` pair of theme names, the OS mode) —
-a design worth copying exactly when it arrives, because it needs no per-theme pairing metadata.
-What it needs first is the OS mode, and that means plumbing `winit`'s system-theme query and
-its `ThemeChanged` event through `crookui`, which is a change to the windowing layer rather
-than to the theme one.
+**OS sync is in**, and it is Warp's design copied exactly: the active theme is a pure function
+of a `use_system_theme` flag, an explicit `{light, dark}` pair of theme names, and the OS mode.
+That is `Settings::theme_for`, which needs no per-theme pairing metadata — nothing has to
+declare itself light or dark, and either theme can be either half of the pair — and which is
+therefore testable with no window and no desktop. The OS mode reaches it as an ordinary
+`Event::SystemTheme`: `winit`'s `ThemeChanged`, plus one query when the window opens, because
+winit only ever reports a *change* and an application that waited for one would open in the
+wrong half. A desktop that will not answer is taken as dark, which is what a terminal has
+always been. Choosing a theme while following writes only the half in force, so the other half
+stays whatever somebody chose for it.
+
+**Hot reload is in, as a poll rather than a watcher, and only while the Themes panel is open.**
+A filesystem watcher is a dependency, a thread and a per-platform API for a folder that changes
+when a person is editing a theme — which is exactly when that panel is open. Closed, it costs
+nothing at all: the chain ends at the first tick that finds the panel gone. The re-read happens
+on the background pool, and the theme in force is looked up again *by name*, because the
+palette in force is the old one and a lookup by palette would find the row it used to be and
+conclude nothing had happened.
 
 **Themes, and what a theme is allowed to be.** `app/src/theme.rs` used to be one `const`
 struct of twenty colours with a comment saying this type is the shape themes would load into
