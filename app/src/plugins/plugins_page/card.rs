@@ -33,7 +33,9 @@ use crate::workspace::settings_page::widgets::Command;
 use crate::workspace::settings_page::{named, widgets};
 use crate::workspace::{Workspace, WorkspaceAction};
 
-use super::{HOLDS_THE_PAGE, Stance, action, covered, stance, tier_words, wanted};
+use super::{
+    HOLDS_THE_PAGE, PLUGIN_CARD, Stance, action, covered, stance, tier_words, wanted,
+};
 
 /// The corner of the box a control sits in.
 ///
@@ -54,7 +56,11 @@ const CONTROL_PADDING: Padding = Padding {
 };
 
 /// The body of the card: everything under the plugin's name.
-pub(super) fn render(workspace: &Workspace, manifest: &'static Manifest) -> Box<dyn Element> {
+pub(super) fn render(
+    workspace: &Workspace,
+    app: &AppContext,
+    manifest: &'static Manifest,
+) -> Box<dyn Element> {
     let ui = workspace.fonts().ui;
     let host = workspace.host();
 
@@ -72,6 +78,13 @@ pub(super) fn render(workspace: &Workspace, manifest: &'static Manifest) -> Box<
     // scrolling past four sections of prose first.
     if let Some(block) = permissions(workspace, manifest, ui) {
         column.add_child(block);
+    }
+
+    // What the plugin says about itself right now, if it says anything. Above
+    // the sections that merely describe it, because "Microwave, ringing" is
+    // the line somebody opened this card to read and the rest is reference.
+    if let Some(status) = status(workspace, app, &manifest.id) {
+        column.add_child(status);
     }
 
     if let Some(problem) = host
@@ -448,6 +461,31 @@ fn drawn_in<C: 'static>(slots: &Slots<C>, plugin: &PluginId) -> Vec<String> {
         }
     }
     lines
+}
+
+/// What the plugin is doing, drawn from its own contribution to
+/// [`PLUGIN_CARD`], or nothing when it contributed none.
+///
+/// Only its own: the slot is a list every plugin may put one entry on, and a
+/// card that drew the whole list would put every plugin's state on every one
+/// of their pages.
+fn status(workspace: &Workspace, app: &AppContext, plugin: &PluginId) -> Option<Box<dyn Element>> {
+    let host = workspace.host();
+    let slots = host.slots();
+    let index = slots
+        .contributors(PLUGIN_CARD)
+        .into_iter()
+        .position(|(owner, _)| &owner == plugin)?;
+    let drawn = slots.at(PLUGIN_CARD, index, |build| build(workspace, app))?;
+
+    Some(
+        Container::new(drawn)
+            .with_padding(CONTROL_PADDING)
+            .with_background_color(theme().overlay_1)
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CONTROL_RADIUS)))
+            .with_margin_bottom(18.)
+            .finish(),
+    )
 }
 
 /// What this plugin *offers*, and how many more it merely answers to.

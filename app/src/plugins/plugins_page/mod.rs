@@ -60,7 +60,7 @@ use crookui_core::prelude::*;
 use crook_plugin::{Manifest, PluginId, Tier};
 use crook_plugin_api::Capability;
 
-use crate::plugin::{ActionName, BuildError, Host, Plugin};
+use crate::plugin::{ActionName, BuildError, Cardinality, Host, Plugin, SlotId};
 use crate::workspace::Workspace;
 use crate::workspace::section;
 
@@ -68,6 +68,15 @@ use state::PluginsState;
 
 /// Where the card has been scrolled to.
 const CARD_SCROLL: &str = "plugins.card";
+
+/// Where a plugin may say, on its own card, what it is currently doing.
+///
+/// A plugin's card can describe everything about it except the one thing only
+/// the plugin knows: which of its choices is in force. A list of six sounds
+/// with no mark on the one that is playing is a list somebody has to press
+/// every row of to read. So the card carries a slot, and the entry drawn on it
+/// is the one its own plugin contributed — the rest belong to other cards.
+pub const PLUGIN_CARD: SlotId = SlotId::new("plugins.card.status");
 
 /// The two plugins whose switches are drawn inert.
 ///
@@ -111,13 +120,15 @@ impl Plugin for Plugins {
         // Just before About, which is where a "what is this build" page
         // belongs: after everything that configures the application and before
         // the one that describes it.
+        host.declare_slot(PLUGIN_CARD, Cardinality::List);
+
         let state = self.state.clone();
         host.add_sidebar_section(
             "section",
             "Plugins",
             Lucide::Blocks,
             10,
-            move |workspace, _| page(workspace, &state),
+            move |workspace, app| page(workspace, app, &state),
         );
         Ok(())
     }
@@ -179,7 +190,11 @@ impl Plugin for Plugins {
 /// Both halves are drawn in [`section`]'s frame, which is the frame the
 /// settings are drawn in: the plugin's name is the page title, so it stays put
 /// while the card scrolls, exactly as a settings page's name does.
-fn page(workspace: &Workspace, state: &Rc<PluginsState>) -> (Box<dyn Element>, Box<dyn Element>) {
+fn page(
+    workspace: &Workspace,
+    app: &AppContext,
+    state: &Rc<PluginsState>,
+) -> (Box<dyn Element>, Box<dyn Element>) {
     let matching = list::matching(workspace);
     let selected = state.showing(&matching);
     let showing = selected.as_ref().and_then(|id| {
@@ -201,7 +216,7 @@ fn page(workspace: &Workspace, state: &Rc<PluginsState>) -> (Box<dyn Element>, B
         list,
         section::content(
             manifest.name,
-            card::render(workspace, manifest),
+            card::render(workspace, app, manifest),
             workspace.settings_page().scroll_named(CARD_SCROLL),
             workspace.fonts().ui,
         ),
