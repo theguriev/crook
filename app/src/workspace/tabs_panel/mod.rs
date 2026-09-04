@@ -185,8 +185,10 @@ pub(super) fn tab_list(workspace: &Workspace, app: &AppContext) -> Box<dyn Eleme
 /// Telegram's shape, and the reason is Telegram's: one column, and what is in
 /// it is chosen by a short row of buttons at the bottom rather than by
 /// navigating away from it. They are not tabs and are not drawn as tabs —
-/// there is no strip, no separators and no bar — because what they switch is
-/// the whole window and a tab does not do that.
+/// there is no strip, no separators, no bar and no rule above them — because
+/// what they switch is the whole window and a tab does not do that. The panel
+/// already ends where the window does; a line saying so again only cuts the
+/// column in two.
 ///
 /// The first is the window's own and every other comes from a plugin, in the
 /// order the sections were contributed. A build with the settings plugin
@@ -216,7 +218,6 @@ fn sections(workspace: &Workspace) -> Box<dyn Element> {
     }
 
     Container::new(row.finish())
-        .with_border(Border::top(1.).with_border_color(theme().border))
         .with_padding(Padding {
             top: SECTION_BAR_PADDING,
             bottom: SECTION_BAR_PADDING,
