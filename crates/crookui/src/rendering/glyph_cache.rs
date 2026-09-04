@@ -13,7 +13,7 @@
 use anyhow::Result;
 use crookui_core::fonts::{Canvas, GlyphKey, RasterBounds, RasterFormat, SubpixelAlignment};
 use crookui_core::geometry::Vector2F;
-use crookui_core::icons::{self, IconKey, Lucide};
+use crookui_core::icons::{self, IconKey, Mark};
 use crookui_core::platform::FontDb;
 use rustc_hash::FxHashMap;
 
@@ -87,7 +87,7 @@ struct GlyphCacheKey {
     subpixel_alignment: SubpixelAlignment,
 }
 
-/// What one icon mask is cached under: an icon, a device size and a stroke.
+/// What one icon mask is cached under: a mark, a device size and a stroke.
 ///
 /// Whole device pixels rather than a logical size and a scale factor, because
 /// two windows on two monitors that arrive at the same physical size want the
@@ -95,7 +95,7 @@ struct GlyphCacheKey {
 /// grid on both axes, so there is only ever one alignment to rasterize.
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 struct IconCacheKey {
-    icon: Lucide,
+    mark: Mark,
     pixels: u32,
 
     /// The stroke width's bit pattern, for the reason `scale_factor` above is
@@ -189,7 +189,7 @@ impl GlyphCache {
     ) -> Result<Option<IconTextureOffset>> {
         let pixels = (icon_key.size * scale_factor).round().max(0.) as u32;
         let cache_key = IconCacheKey {
-            icon: icon_key.icon,
+            mark: icon_key.mark,
             pixels,
             stroke_width: icon_key.stroke_width.to_bits(),
         };
@@ -203,7 +203,7 @@ impl GlyphCache {
             return Ok(None);
         }
 
-        let mask = icons::rasterize(icon_key.icon, pixels, icon_key.stroke_width);
+        let mask = icons::rasterize(icon_key.mark, pixels, icon_key.stroke_width);
         let canvas = widen(&mask);
 
         let offset = self.atlas_manager.insert(canvas.size)?;
@@ -255,6 +255,7 @@ fn widen(mask: &Canvas) -> Canvas {
 
 #[cfg(test)]
 mod tests {
+    use crookui_core::icons::Lucide;
     use std::cell::Cell;
 
     use anyhow::bail;

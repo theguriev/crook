@@ -31,11 +31,15 @@
 //! # A named action, and what that buys
 //!
 //! `crook/usage/refresh` is the first thing in Crook that can be asked for by
-//! name. It does what clicking the pill does, and the difference is who can
-//! ask: a line in `keybindings.json` reading
+//! name. It reads usage again without opening anything, and the difference is
+//! who can ask: a line in `keybindings.json` reading
 //! `{ "key": "shift+cmd+u", "command": "crook/usage/refresh" }` now works, and
-//! did not before, because there was no way to name it. Nothing
-//! about the chip changed to make that true — the action is the seam.
+//! did not before, because there was no way to name it. Nothing about the chip
+//! changed to make that true — the action is the seam.
+//!
+//! `crook/usage/panel` is the same seam for the panel the chip opens, and it
+//! is also what `--usage-panel` dispatches: the only way to take a picture of
+//! a popover is to ask for it by name.
 //!
 //! # The setting is still the poll's switch
 //!
@@ -58,6 +62,7 @@ use crate::workspace::settings_page::search::Words;
 use crate::workspace::settings_page::widgets::{self, Category};
 
 mod chip;
+mod panel;
 
 use chip::UsageChip;
 
@@ -103,6 +108,21 @@ impl Plugin for Usage {
                 let usage = usage.clone();
                 move |_, ctx| {
                     usage.update(ctx, |model, ctx| model.refresh_from_user(ctx));
+                }
+            },
+        );
+
+        // The panel, by name, for the same reason the refresh is: a chord in
+        // `keymap.json` reading `"cmd-shift-u": "crook/usage/panel"` is a
+        // reasonable thing to want, and the only thing standing between a
+        // person and it is a name.
+        host.register_command(
+            ActionName::parse("crook/usage/panel").expect("a literal"),
+            "Show the usage panel",
+            {
+                let chip = chip.clone();
+                move |_, ctx| {
+                    chip.update(ctx, |chip, ctx| chip.toggle_panel(ctx));
                 }
             },
         );
@@ -159,10 +179,11 @@ fn page(workspace: &Workspace, usage: &ModelHandle<UsageModel>, app: &AppContext
     let chip = widgets::row(
         Words::new("Show the usage chip")
             .with_description(
-                "The pill in the header, showing how much of the session budget is spent.",
+                "The pirate in the header, showing how much of the session budget is spent.",
             )
             .with_keywords(&[
                 "usage", "token", "budget", "claude", "limit", "quota", "network", "poll", "pill",
+                "pirate",
             ]),
         true,
         widgets::switch(
@@ -174,6 +195,16 @@ fn page(workspace: &Workspace, usage: &ModelHandle<UsageModel>, app: &AppContext
     );
 
     let reading = usage.as_ref(app);
+    let week = match reading.history() {
+        Some(history) if !history.is_empty() => format!(
+            "{} turns across {} models",
+            history.requests,
+            history.by_model.len()
+        ),
+        Some(_) => "nothing on this machine".to_owned(),
+        None if reading.is_reading_history() => "reading\u{2026}".to_owned(),
+        None => "read when the panel is opened".to_owned(),
+    };
     let current = match (reading.snapshot(), reading.problem()) {
         (Some(snapshot), None) => format!(
             "{}% of the session budget",
@@ -195,10 +226,30 @@ fn page(workspace: &Workspace, usage: &ModelHandle<UsageModel>, app: &AppContext
                      does not poll.",
                     ui,
                 ),
+                widgets::note(
+                    "Clicking the chip opens the week behind the number: which models answered, \
+                     which days were busy, which projects they were spent on. That comes from the \
+                     transcripts Claude Code writes on this machine — read where they are, when \
+                     the panel is opened, and sent nowhere.",
+                    ui,
+                ),
                 widgets::fact(
                     Words::new("Last reading")
                         .with_keywords(&["usage", "percent", "spent", "session", "poll"]),
                     current,
+                    false,
+                    workspace.fonts(),
+                ),
+                widgets::fact(
+                    Words::new("Last 7 days").with_keywords(&[
+                        "history",
+                        "week",
+                        "model",
+                        "tokens",
+                        "transcripts",
+                        "projects",
+                    ]),
+                    week,
                     false,
                     workspace.fonts(),
                 ),

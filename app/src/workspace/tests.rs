@@ -18,6 +18,7 @@ use crookui_core::event::{Event, Keystroke, Modifiers, MouseButton, ScrollDelta}
 use crookui_core::executor::{Background, LocalQueue};
 use crookui_core::fonts::{FamilyId, FontId, LineStyle, StyleAndFont};
 use crookui_core::geometry::{RectF, Vector2F, vec2f};
+use crookui_core::icons::{Art, Mark};
 use crookui_core::platform::TextLayoutSystem;
 use crookui_core::prelude::*;
 use crookui_core::scene::{CornerRadius, Radius, Rect, Scene};
@@ -1370,13 +1371,38 @@ fn checked_rows(scene: &Scene) -> Vec<usize> {
         .collect()
 }
 
-/// Every icon the frame draws, in paint order.
+/// Every Lucide icon the frame draws, in paint order.
+///
+/// Marks that are drawings rather than icons — the usage chip's pirate — are
+/// not in here: they are two layers apiece and nothing that counts icons means
+/// to count them.
 fn icons_of(scene: &Scene) -> Vec<Lucide> {
     scene
         .layers()
         .flat_map(|layer| layer.icons.iter())
-        .map(|drawn| drawn.icon_key.icon)
+        .filter_map(|drawn| match drawn.icon_key.mark {
+            Mark::Icon(icon) => Some(icon),
+            Mark::Art(_) => None,
+        })
         .collect()
+}
+
+/// Whether the usage chip's pirate is on screen.
+///
+/// The chip has no word on it to look for — it is a picture and a percentage —
+/// so what says it is drawn is its own mark being in the frame.
+fn pirate_is_drawn(scene: &Scene) -> bool {
+    pirate_box(scene).is_some()
+}
+
+/// Where the pirate is, which is the only way to click the chip: everything
+/// else in the pill is a percentage that changes with the reading.
+fn pirate_box(scene: &Scene) -> Option<RectF> {
+    scene
+        .layers()
+        .flat_map(|layer| layer.icons.iter())
+        .find(|drawn| matches!(drawn.icon_key.mark, Mark::Art(Art::PirateFace(_))))
+        .map(|drawn| drawn.bounds)
 }
 
 /// Every icon of one kind painted inside `bounds`.
@@ -1384,7 +1410,7 @@ fn icons_in(scene: &Scene, bounds: RectF, icon: Lucide) -> Vec<RectF> {
     scene
         .layers()
         .flat_map(|layer| layer.icons.iter())
-        .filter(|drawn| drawn.icon_key.icon == icon)
+        .filter(|drawn| drawn.icon_key.mark == Mark::Icon(icon))
         .filter(|drawn| bounds.contains_point(center(drawn.bounds)))
         .map(|drawn| drawn.bounds)
         .collect()
@@ -2950,7 +2976,7 @@ fn worktree_remove_cross(scene: &Scene) -> RectF {
     scene
         .layers()
         .flat_map(|layer| layer.icons.iter())
-        .filter(|icon| icon.icon_key.icon == Lucide::X)
+        .filter(|icon| icon.icon_key.mark == Mark::Icon(Lucide::X))
         .map(|icon| icon.bounds)
         .find(|bounds| menu.contains_point(center(*bounds)))
         .expect("no row offers a ×")
@@ -5503,11 +5529,41 @@ fn the_reset_button_puts_every_tab_option_back_and_then_goes_quiet() {
 }
 
 #[test]
+fn clicking_the_chip_opens_the_panel_under_it_and_clicking_again_takes_it_down() {
+    let mut harness = Harness::new(1);
+    assert!(
+        !frame_text(&harness.frame()).contains("Last 7 days"),
+        "the panel should start closed"
+    );
+
+    let pirate = pirate_box(&harness.frame()).expect("the chip is in the header");
+    harness.click(center(pirate), MouseButton::Left);
+
+    let text = frame_text(&harness.frame());
+    assert!(
+        text.contains("Last 7 days"),
+        "the panel did not open on the chip's own mark: {text}"
+    );
+    assert!(
+        pirate_is_drawn(&harness.frame()),
+        "the panel covered the chip that opened it"
+    );
+
+    // The panel is modal, so the second click reaches the dismiss underlay
+    // rather than the chip — which is what makes re-clicking one toggle.
+    harness.click(center(pirate), MouseButton::Left);
+    assert!(
+        !frame_text(&harness.frame()).contains("Last 7 days"),
+        "the panel stayed up when the chip was clicked again"
+    );
+}
+
+#[test]
 fn turning_the_usage_chip_off_takes_the_pill_out_of_the_header_and_stops_the_poll() {
     let mut harness = Harness::new(1);
     assert!(harness.general().show_usage_chip);
     assert!(
-        frame_text(&harness.frame()).contains("claude"),
+        pirate_is_drawn(&harness.frame()),
         "the chip should be in the header to start with"
     );
 
@@ -5524,7 +5580,7 @@ fn turning_the_usage_chip_off_takes_the_pill_out_of_the_header_and_stops_the_pol
         "a hidden chip must not go on polling"
     );
     assert!(
-        !frame_text(&harness.frame()).contains("claude"),
+        !pirate_is_drawn(&harness.frame()),
         "the chip is still in the header"
     );
 }
@@ -9612,7 +9668,7 @@ mod plugins_page {
     #[test]
     fn the_switch_on_the_card_takes_the_plugin_out_of_the_window() {
         let mut harness = Harness::new(1);
-        assert!(frame_text(&harness.frame()).contains("claude"));
+        assert!(pirate_is_drawn(&harness.frame()));
         harness.show_plugins();
         harness.click_plugin("Usage chip");
 
@@ -9622,8 +9678,8 @@ mod plugins_page {
 
         let text = frame_text(&harness.frame());
         assert!(
-            !text.contains("claude"),
-            "the chip outlived the plugin: {text}"
+            !pirate_is_drawn(&harness.frame()),
+            "the chip outlived the plugin"
         );
         assert!(
             text.contains("switched off"),

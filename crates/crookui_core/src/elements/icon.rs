@@ -4,7 +4,7 @@ use crate::AppContext;
 use crate::element::{Element, SizeConstraint};
 use crate::event::DispatchedEvent;
 use crate::geometry::{Color, Point, RectF, Vector2F, vec2f};
-use crate::icons::{IconKey, Lucide};
+use crate::icons::{IconKey, Mark};
 use crate::presenter::{EventContext, LayoutContext, PaintContext};
 
 /// Draws one icon in a square of its own.
@@ -27,10 +27,15 @@ pub struct Icon {
 }
 
 impl Icon {
-    /// `icon` in a `size` x `size` square, with Lucide's own stroke width.
-    pub fn new(icon: Lucide, size: f32) -> Self {
+    /// `mark` in a `size` x `size` square, with Lucide's own stroke width.
+    ///
+    /// Takes anything a mark is made from, which is an
+    /// [`Lucide`](crate::icons::Lucide) icon or one layer of an
+    /// [`Art`](crate::icons::Art): a drawing is this element once per layer,
+    /// stacked, because a mask carries no colour of its own.
+    pub fn new(mark: impl Into<Mark>, size: f32) -> Self {
         Self {
-            key: IconKey::new(icon, size),
+            key: IconKey::new(mark, size),
             color: Color::WHITE,
             size: None,
             origin: None,

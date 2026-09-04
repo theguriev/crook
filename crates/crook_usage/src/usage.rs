@@ -44,7 +44,13 @@ pub enum ClaudeUsageLevel {
 }
 
 impl ClaudeUsageLevel {
-    fn from_percent(percent: f32) -> Self {
+    /// Which band a percentage falls in.
+    ///
+    /// Public because the chip is not the only thing that colours by usage:
+    /// the panel under it draws the weekly limit in the same four colours, and
+    /// two thresholds tables that agreed only by accident would be worse than
+    /// one.
+    pub fn from_percent(percent: f32) -> Self {
         if percent < 50. {
             Self::Normal
         } else if percent < 80. {
@@ -75,6 +81,8 @@ pub struct ClaudeUsageSnapshot {
     pub session_resets_at: Option<DateTime<Utc>>,
     /// Utilization of the weekly limit, 0–100, when the plan has one.
     pub weekly_percent: Option<f32>,
+    /// When the weekly window rolls over, when the plan reports one.
+    pub weekly_resets_at: Option<DateTime<Utc>>,
     /// Pay-as-you-go usage past the plan limit, when the user has enabled it.
     pub extra_usage: Option<ClaudeExtraUsage>,
 }
@@ -93,6 +101,12 @@ impl ClaudeUsageSnapshot {
     /// A short "2h 18m" style countdown to the session reset, if one is known.
     pub fn time_until_session_reset(&self, now: DateTime<Utc>) -> Option<String> {
         let resets_at = self.session_resets_at?;
+        Some(format_countdown(resets_at.signed_duration_since(now)))
+    }
+
+    /// The same countdown for the weekly window.
+    pub fn time_until_weekly_reset(&self, now: DateTime<Utc>) -> Option<String> {
+        let resets_at = self.weekly_resets_at?;
         Some(format_countdown(resets_at.signed_duration_since(now)))
     }
 }
@@ -198,7 +212,8 @@ impl From<UsageResponse> for ClaudeUsageSnapshot {
                 .map(|bucket| bucket.utilization)
                 .unwrap_or_default(),
             session_resets_at: response.five_hour.and_then(|bucket| bucket.resets_at),
-            weekly_percent: response.seven_day.map(|bucket| bucket.utilization),
+            weekly_percent: response.seven_day.as_ref().map(|bucket| bucket.utilization),
+            weekly_resets_at: response.seven_day.and_then(|bucket| bucket.resets_at),
             extra_usage,
         }
     }

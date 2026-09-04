@@ -16,7 +16,7 @@ use crate::element::{Element, ParentElement};
 use crate::event::{Event, Modifiers, MouseButton, ScrollDelta};
 use crate::fonts::{FamilyId, FontId, LineStyle, StyleAndFont};
 use crate::geometry::{Color, RectF, Vector2F, vec2f};
-use crate::icons::Lucide;
+use crate::icons::{Lucide, Mark};
 use crate::platform::TextLayoutSystem;
 use crate::presenter::Presenter;
 use crate::scene::{Border, Rect, Scene};
@@ -393,7 +393,7 @@ fn an_icon_fills_the_square_it_asked_for() {
         icons[0].bounds,
         RectF::new(Vector2F::zero(), vec2f(16., 16.))
     );
-    assert_eq!(icons[0].icon_key.icon, Lucide::X);
+    assert_eq!(icons[0].icon_key.mark, Mark::Icon(Lucide::X));
     assert_eq!(icons[0].icon_key.size, 16.);
 }
 

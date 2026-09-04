@@ -201,3 +201,76 @@ fn two_sizes_of_one_icon_are_two_keys() {
         "the repeat of the first key is the only pair"
     );
 }
+
+/// A face's coverage at the centre of the head, where a mark that was stroked
+/// rather than filled would have nothing.
+#[test]
+fn a_drawing_is_filled_rather_than_hollow() {
+    let face = rasterize(Art::PirateFace(Chomp::Shut), 24, STROKE_WIDTH);
+
+    assert_eq!(
+        at(&face, 12, 12),
+        255,
+        "the middle of the pirate's head came out empty, which is what a \
+         stroked outline looks like"
+    );
+}
+
+#[test]
+fn the_bite_takes_ink_out_of_the_face() {
+    let shut = ink(&rasterize(Art::PirateFace(Chomp::Shut), 48, STROKE_WIDTH));
+    let open = ink(&rasterize(Art::PirateFace(Chomp::Open), 48, STROKE_WIDTH));
+    let wide = ink(&rasterize(Art::PirateFace(Chomp::Wide), 48, STROKE_WIDTH));
+
+    assert!(
+        wide < open && open < shut,
+        "the frames are meant to be a mouth opening: {shut} shut, {open} open, {wide} wide"
+    );
+
+    // A shut mouth is a whole disc, and a bitten one is that disc minus a
+    // wedge — which is most of the way to pi over four either way.
+    let disc = std::f32::consts::PI * 24. * 24.;
+    assert!((shut - disc).abs() / disc < 0.01, "{shut} is not a disc");
+}
+
+#[test]
+fn the_ink_never_leaves_the_head_it_is_drawn_on() {
+    // The strap runs off both edges of the box in the artwork and the grin is
+    // an arc of a circle that is mostly outside it; both are cut to the face
+    // rather than to a rectangle, so a pixel the face does not cover cannot
+    // hold ink however far the geometry reaches.
+    for chomp in [Chomp::Shut, Chomp::Open, Chomp::Wide] {
+        let face = rasterize(Art::PirateFace(chomp), 32, STROKE_WIDTH);
+        let ink_mask = rasterize(Art::PirateInk(chomp), 32, STROKE_WIDTH);
+
+        for (i, (ink, face)) in ink_mask.pixels.iter().zip(&face.pixels).enumerate() {
+            assert!(
+                ink <= face,
+                "{chomp:?} draws ink at pixel {i} where the face has none"
+            );
+        }
+        assert!(
+            ink(&ink_mask) > 1.,
+            "{chomp:?} lost its eyepatch and its strap altogether"
+        );
+    }
+}
+
+#[test]
+fn a_shape_that_reaches_the_border_does_not_bleed_into_the_next_row() {
+    // The head is a disc inscribed in the box, so it touches the right border
+    // exactly. The area that balances that crossing has to land outside the
+    // mask: a column further right, where nothing reads it. Landing at the
+    // start of the row below instead would be carried across that whole row
+    // by the fill's running sum, and the mask would come out with a bar down
+    // one side of it.
+    let head = rasterize(Art::PirateFace(Chomp::Shut), 32, STROKE_WIDTH);
+
+    for y in [0, 1, 2, 29, 30, 31] {
+        assert_eq!(
+            at(&head, 0, y),
+            0,
+            "row {y} starts with ink no part of the disc is near"
+        );
+    }
+}
