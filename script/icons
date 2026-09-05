@@ -44,6 +44,7 @@ ICONS = [
     ("Info", "info", "The dot beside a setting that has a note attached."),
     ("LayoutGrid", "layout-grid", "The Expanded density, in the tab options menu's segmented control."),
     ("Menu", "menu", "The Compact density, in the same control. Warp draws `Menu01` here."),
+    ("Play", "play", "The mark on a control that plays a sound."),
     ("Plus", "plus", "New tab, and new theme."),
     ("Blocks", "blocks", "The Plugins section, at the foot of the sidebar."),
     ("Search", "search", "The settings page's search box, in the rail."),

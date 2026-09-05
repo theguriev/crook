@@ -105,6 +105,30 @@ fn the_cross_is_ink_through_the_middle_and_nothing_in_the_corners() {
 }
 
 #[test]
+fn the_play_triangle_points_right_and_is_hollow() {
+    let mask = rasterize(Lucide::Play, 24, STROKE_WIDTH);
+
+    // Stroked rather than filled, which is what every Lucide icon is: the SVG
+    // is `fill="none"` and the rasterizer strokes it. Worth pinning because
+    // this is the first closed curved outline in the set, and a filled
+    // triangle would be the only solid mark in Crook's chrome.
+    assert_eq!(
+        at(&mask, 12, 12),
+        0,
+        "the middle of a stroked outline is empty"
+    );
+
+    // Which way it points — the one thing a mirrored path would get wrong
+    // while still drawing a plausible triangle. The flat back is a tall
+    // straight edge on the left; the tip is a point on the right.
+    let back = (0..24).filter(|y| at(&mask, 5, *y) > 200).count();
+    let tip = (0..24).filter(|y| at(&mask, 21, *y) > 200).count();
+
+    assert!(back > 12, "the back edge covers only {back} rows");
+    assert!(tip < 4, "the tip covers {tip} rows, and a tip is a point");
+}
+
+#[test]
 fn a_symmetric_icon_rasterizes_symmetrically() {
     // A cross is symmetric about both axes, so the mask must be too. This is
     // the coverage rule's own test: an off-by-half-a-pixel in it would show up

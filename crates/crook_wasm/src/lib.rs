@@ -152,6 +152,16 @@ pub mod exports {
     ///
     /// Optional, for the same reason [`DELIVER`] is.
     pub const TICK: &str = "crook_tick";
+
+    /// `crook_event(ptr, len) -> i32`, zero for "taken", carrying an
+    /// [`Event`](crook_plugin_api::Event) the host is telling the guest about.
+    ///
+    /// The one export the guest does not ask for first, which is why what
+    /// arrives here is gated on capabilities rather than on a ticket: an
+    /// answer is a reply to a question the plugin asked, and an event is not.
+    ///
+    /// Optional, for the same reason [`DELIVER`] is.
+    pub const EVENT: &str = "crook_event";
 }
 
 /// Splits the `(ptr << 32) | len` a guest returns a slice as.

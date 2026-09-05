@@ -378,6 +378,19 @@ fn element_in(
             hovers,
             bounded,
         ),
+        // Both subtrees built here rather than inside the closure below, and
+        // that is [`Hovers`]'s doing: handles are handed out in the order they
+        // are asked for, so a note built only on the frames it is up would
+        // renumber every control after it for exactly as long as the pointer
+        // rested on this one.
+        Node::Explained {
+            content,
+            explanation,
+        } => explained(
+            element_in(content, chrome, action, hovers, bounded),
+            element_in(explanation, chrome, action, hovers, BOUNDED),
+            hovers.take(),
+        ),
     }
 }
 
@@ -689,6 +702,63 @@ fn anchored(
         },
     );
     stack.finish()
+}
+
+/// A contribution with a note above it while the pointer is on it.
+///
+/// [`anchored`] without the state and without the [`Dismiss`]. Both of those
+/// absences are the point. A panel is up because the plugin said so, so it
+/// needs an action to find out it was shut; a note is up exactly while the
+/// pointer is on the thing, so there is nothing to tell anybody and nothing
+/// that can be left open by a plugin that stopped answering.
+///
+/// **Not modal**, which is the difference that would be a bug if it were
+/// copied across. A modal overlay swallows the press that dismisses it, and a
+/// note that did so would eat the click aimed at the control it is explaining
+/// — the one click somebody who has just read it is most likely to make.
+///
+/// Above and left-aligned. Above for the reason the tab options menu's own
+/// note is: an overlay covers only what was painted *before* it, so a note
+/// hung below floats over rows that go on hit-testing as uncovered. Left
+/// rather than centred because centring needs the child's width as a constant
+/// — the info dot has one and a plugin's subtree does not.
+///
+/// And **clear of the parent**, which a panel does not need to be and this
+/// does. A contribution can sit at the very top of the window — that is what
+/// `header.right` is — and there is no room above it there, so the slide that
+/// keeps the note on screen would otherwise put it squarely over the control.
+/// [`AnchorTo::keep_clear_of_parent`] names the consequence exactly: it would
+/// take the clicks meant for the control, and the pointer that raised it would
+/// stop counting as being over it, so the note would be torn down and put back
+/// frame after frame.
+///
+/// The ground is [`chrome`], the same one a panel gets, so [`Node::Rule`]'s
+/// full-bleed inset still lands and a [`Node::Fill`] still has an axis to take
+/// a share of.
+fn explained(
+    content: Box<dyn Element>,
+    note: Box<dyn Element>,
+    mouse: MouseStateHandle,
+) -> Box<dyn Element> {
+    Hoverable::new(mouse, move |state| {
+        if !state.is_hovered() {
+            return content;
+        }
+
+        let mut stack = Stack::new().with_child(content);
+        stack.add_anchored_overlay_child(
+            panel_chrome(note),
+            AnchorTo {
+                parent: Corner::TopLeft,
+                child: Corner::BottomLeft,
+                offset: vec2f(0., -PANEL_OFFSET),
+                keep_on_screen: true,
+                keep_clear_of_parent: true,
+            },
+        );
+        stack.finish()
+    })
+    .finish()
 }
 
 /// The ground a panel's content sits on.

@@ -145,3 +145,105 @@ fn a_plugin_that_asks_for_nothing_has_nothing_to_allow() {
 
     assert!(wanted(&native).is_empty());
 }
+
+#[test]
+fn a_plugin_nobody_answered_for_says_so_where_its_own_controls_are() {
+    // The dead Play button, as the card now tells it. A sandboxed plugin that
+    // draws a control on its own card is drawing something the host will
+    // refuse every time, and the press before this line existed produced
+    // nothing at all — no sound, no message, no change to the button.
+    let manifest = asking(vec![Capability::PlaySound]);
+
+    assert_eq!(
+        stalled(&manifest, &[]),
+        Some(
+            "Nothing this plugin asks for has been allowed yet, so a control here that needs it \
+             is refused rather than broken. The answer is above."
+        )
+    );
+}
+
+#[test]
+fn a_plugin_that_was_allowed_is_left_to_speak_for_itself() {
+    // The line is about a refusal that is going to happen. A plugin whose
+    // grant covers what it asks for has nothing refused, and a warning drawn
+    // over working controls is a warning nobody believes the next time.
+    let manifest = asking(vec![Capability::PlaySound, Capability::WatchCommands]);
+
+    assert_eq!(
+        stalled(&manifest, &granted(&["sound.play", "commands.watch"])),
+        None
+    );
+}
+
+#[test]
+fn a_plugin_asking_for_more_than_was_allowed_says_which_way_it_is_stalled() {
+    // Half a grant is the case the sentence has to get right: what was
+    // allowed still works, so "nothing is allowed" would be a lie about the
+    // controls that do work.
+    let manifest = asking(vec![Capability::PlaySound, Capability::WatchCommands]);
+
+    assert_eq!(
+        stalled(&manifest, &granted(&["commands.watch"])),
+        Some(
+            "This plugin asks for more than you allowed, so a control here that needs the rest \
+             is refused rather than broken. The answer is above."
+        )
+    );
+}
+
+#[test]
+fn a_plugin_that_asks_for_nothing_cannot_be_stalled_by_a_grant() {
+    // Every native plugin, and the reason the check is on the capabilities
+    // rather than on the grant: a plugin that wants nothing is granted
+    // nothing, and reading that as "not allowed yet" would put the sentence
+    // under every built-in control on the page.
+    let native = asking(Vec::new());
+
+    assert_eq!(stalled(&native, &[]), None);
+}
+
+#[test]
+fn a_plugin_that_drew_its_own_controls_has_its_list_counted_instead() {
+    // The card's longest section, on the card of a plugin whose whole surface
+    // is one row. Both halves say where to go, because a count that only says
+    // a thing exists is worse than the list it replaced.
+    assert_eq!(
+        elsewhere(8, 2),
+        "8 commands, which the command palette lists, and 2 more reachable by name from your \
+         keybindings file."
+    );
+
+    // Nothing held back: no second clause about actions that are not there.
+    assert_eq!(
+        elsewhere(6, 0),
+        "6 commands, which the command palette lists."
+    );
+
+    // And nothing offered: the sentence has to be able to start on its own
+    // rather than opening with "and".
+    assert_eq!(
+        elsewhere(0, 3),
+        "3 actions, reachable by name from your keybindings file."
+    );
+}
+
+#[test]
+fn one_command_is_not_one_commands() {
+    assert_eq!(
+        elsewhere(1, 0),
+        "1 command, which the command palette lists."
+    );
+}
+
+#[test]
+fn an_action_that_is_not_offered_is_reachable_where_it_is_actually_reachable() {
+    // This used to send people to the Keyboard Shortcuts page, which is built
+    // from the *titled* commands and so lists none of these. The one place an
+    // untitled action can be reached is a rule naming it in the keybindings
+    // file, so that is what the card says.
+    assert_eq!(
+        only_by_name(4),
+        "and 4 more it does not offer, reachable by name from your keybindings file."
+    );
+}

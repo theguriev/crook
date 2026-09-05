@@ -281,6 +281,47 @@ fn what_a_render_is_about_survives_the_wire() {
 }
 
 #[test]
+fn an_explained_note_survives_the_wire() {
+    // The shape a control with its own explanation has: the thing in the slot,
+    // and beside it the whole of what a card would otherwise have to say
+    // permanently.
+    let tree = Node::Explained {
+        content: Box::new(Node::Pressable {
+            content: Box::new(Node::Badge {
+                text: "Microwave".into(),
+                tone: Tone::Accent,
+            }),
+            action: "open".into(),
+        }),
+        explanation: Box::new(Node::Column(vec![
+            Node::Row(vec![
+                Node::Text {
+                    text: "Microwave".into(),
+                    size: Size::Body,
+                    tone: Tone::Primary,
+                },
+                Node::Fill,
+                Node::Badge {
+                    text: "ringing".into(),
+                    tone: Tone::Accent,
+                },
+            ]),
+            Node::Rule,
+            Node::Note {
+                text: "Plays when a command that ran for two seconds or more finishes.".into(),
+                tone: Tone::Muted,
+            },
+        ])),
+    };
+
+    let bytes = to_bytes(&tree).expect("a tree should encode");
+    assert_eq!(
+        from_bytes::<Node>(&bytes).expect("a tree should decode"),
+        tree
+    );
+}
+
+#[test]
 fn a_plugin_granted_nothing_is_still_told_which_row_it_is_drawing() {
     // The redaction, which is what makes a mark per tab something a plugin
     // allowed to know nothing can draw: no title, no directory, and still two
@@ -302,5 +343,34 @@ fn a_plugin_granted_nothing_is_still_told_which_row_it_is_drawing() {
         bytes.len() < 8,
         "{} bytes for a row a plugin may know nothing about",
         bytes.len()
+    );
+}
+
+#[test]
+fn a_note_is_described_on_every_frame_and_that_is_what_it_costs() {
+    // The one price of the host showing a note itself rather than asking for
+    // it when the pointer arrives: the words are on the wire whether or not
+    // anybody is looking. The alternative is a call into the guest per pointer
+    // transition, on the thread that draws — so this is the trade, and the
+    // number is here so that a change to it is a change somebody notices.
+    let sheet = Node::Note {
+        text: "Plays when a command that ran for two seconds or more finishes.".into(),
+        tone: Tone::Muted,
+    };
+    let bare = Node::Badge {
+        text: "Microwave".into(),
+        tone: Tone::Accent,
+    };
+    let explained = Node::Explained {
+        content: Box::new(bare.clone()),
+        explanation: Box::new(sheet),
+    };
+
+    let cost = to_bytes(&explained).expect("it should encode").len()
+        - to_bytes(&bare).expect("it should encode").len();
+
+    assert!(
+        cost < 128,
+        "{cost} bytes a frame for one sentence of explanation"
     );
 }

@@ -44,7 +44,9 @@ use crookui_core::executor::Task;
 use crookui_core::prelude::*;
 
 use crook_plugin::PluginId;
-use crook_plugin_api::{Answer, Bound, Capability, Cell as Field, Method, Request, Table, Tallied};
+use crook_plugin_api::{
+    Answer, Bound, Capability, Cell as Field, Event, Method, Request, Table, Tallied,
+};
 use crook_wasm::Sandbox;
 
 use super::GIVE_UP_AFTER;
@@ -255,6 +257,51 @@ impl Runtime {
         .detach();
     }
 
+
+    /// Tells the guest something happened, and takes whatever that made it ask
+    /// for.
+    ///
+    /// The pump afterwards is the whole point: a plugin hears that a command
+    /// finished and answers by asking to play a sound, and without it that
+    /// request would sit in the registry until something else woke the
+    /// runtime up.
+    pub(super) fn notify(&mut self, event: &Event, ctx: &mut ModelContext<Self>) {
+        if self.failures.get() >= GIVE_UP_AFTER {
+            return;
+        }
+        // Said nothing about: a plugin that watches without exporting
+        // `crook_event` is one the host has nowhere to tell, and it registered
+        // the watch itself, so this is its own bug and not worth a line per
+        // command somebody runs.
+        if !self.sandbox.borrow().takes_events() {
+            return;
+        }
+
+        let sandbox = Rc::clone(&self.sandbox);
+        let outcome = match sandbox.try_borrow_mut() {
+            Ok(mut sandbox) => sandbox.event(event),
+            Err(_) => {
+                // Dropped rather than retried, which is the opposite of what
+                // an answer does — and the difference is that nothing is
+                // waiting on this. A ticket left unanswered strands a plugin
+                // forever; a missed event is one chime, and a queue of them
+                // would ring after the thing they were about.
+                log::warn!("{} was told of an event while it was running", self.id);
+                return;
+            }
+        };
+
+        match outcome {
+            Ok(()) => self.failures.set(0),
+            Err(problem) => {
+                self.give_up_on(&problem.to_string());
+                return;
+            }
+        }
+
+        self.pump(ctx);
+    }
+
     /// Hands one answer to the guest, and takes whatever that made it ask for.
     fn answer(&mut self, ticket: u32, answer: Answer, ctx: &mut ModelContext<Self>) {
         if self.failures.get() >= GIVE_UP_AFTER {
@@ -414,6 +461,7 @@ pub(super) fn allowed(granted: &[String], request: &Request) -> Result<(), Strin
         // file, and it is asked for differently: the grant has to name the
         // directory *and* say it means everything under it.
         Request::Tally { root, .. } => Capability::ReadFiles(vec![format!("{root}/**")]),
+        Request::PlaySound { .. } => Capability::PlaySound,
     };
 
     if wanted
@@ -480,6 +528,7 @@ fn perform(request: Request) -> Answer {
             &distinct_by,
             &tables,
         ),
+        Request::PlaySound { wav, volume } => super::sound::play(&wav, volume),
     }
 }
 

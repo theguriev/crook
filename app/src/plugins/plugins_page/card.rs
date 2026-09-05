@@ -28,10 +28,15 @@ use crookui_core::prelude::*;
 use crook_plugin::{EntryId, Manifest, PluginId, SlotId, Slots};
 
 use crate::theme::theme;
+use crate::workspace::settings_page::search::Words;
+use crate::workspace::settings_page::widgets::Command;
 use crate::workspace::settings_page::{named, widgets};
 use crate::workspace::{Workspace, WorkspaceAction};
 
-use super::{HOLDS_THE_PAGE, Stance, action, covered, stance, tier_words, wanted};
+use super::{
+    HOLDS_THE_PAGE, PLUGIN_CARD, Stance, action, covered, elsewhere, only_by_name, stalled, stance,
+    tier_words, wanted,
+};
 
 /// The corner of the box a control sits in.
 ///
@@ -52,7 +57,11 @@ const CONTROL_PADDING: Padding = Padding {
 };
 
 /// The body of the card: everything under the plugin's name.
-pub(super) fn render(workspace: &Workspace, manifest: &'static Manifest) -> Box<dyn Element> {
+pub(super) fn render(
+    workspace: &Workspace,
+    app: &AppContext,
+    manifest: &'static Manifest,
+) -> Box<dyn Element> {
     let ui = workspace.fonts().ui;
     let host = workspace.host();
 
@@ -70,6 +79,18 @@ pub(super) fn render(workspace: &Workspace, manifest: &'static Manifest) -> Box<
     // scrolling past four sections of prose first.
     if let Some(block) = permissions(workspace, manifest, ui) {
         column.add_child(block);
+    }
+
+    // What the plugin says about itself right now, if it says anything. Above
+    // the sections that merely describe it, because "Microwave, ringing" is
+    // the line somebody opened this card to read and the rest is reference.
+    //
+    // Kept, rather than only added, because whether the plugin drew its own
+    // controls is also what decides how the list at the foot is drawn.
+    let drawn = status(workspace, app, manifest, ui);
+    let drew_its_own = drawn.is_some();
+    if let Some(status) = drawn {
+        column.add_child(status);
     }
 
     if let Some(problem) = host
@@ -111,23 +132,56 @@ pub(super) fn render(workspace: &Workspace, manifest: &'static Manifest) -> Box<
 
     let (commands, unoffered) = offers(workspace, &manifest.id);
     if !commands.is_empty() || unoffered > 0 {
-        let mut rows: Vec<widgets::Entry> = commands
-            .into_iter()
-            .map(|line| widgets::note(&line, ui))
-            .collect();
-        if unoffered > 0 {
-            // Counted rather than listed. A plugin's own arrow keys are
-            // actions and not commands, and a page whose longest section is
-            // somebody's internal wiring is a page nobody reads. The Keyboard
-            // Shortcuts page lists every one of them.
-            rows.push(widgets::note(
-                &format!(
-                    "and {unoffered} more it does not offer, reachable by name \u{2014} the \
-                     Keyboard Shortcuts page lists them."
-                ),
-                ui,
-            ));
-        }
+        // A plugin that drew its own controls has already said what it can be
+        // asked to do, in the shape it chose to be asked in — so a column of
+        // Run buttons under it is the same commands a second time, in the
+        // shape the card invented, and on the card of a plugin whose whole
+        // surface is one row it is much the longest section on the page.
+        //
+        // Counted rather than hidden. A plugin that draws a chip has not
+        // thereby promised that the chip reaches everything it can do, and a
+        // card that answered "what can it be asked to do" with silence would
+        // be worse than one that answers at length. What the count keeps is
+        // the two facts a list of names is actually read for: how many there
+        // are, and where to go for them.
+        let rows: Vec<widgets::Entry> = if drew_its_own {
+            vec![widgets::note(&elsewhere(commands.len(), unoffered), ui)]
+        } else {
+            // A row with a button rather than a line of text. What this
+            // section used to be was nine action names a person could read and
+            // not reach: the only way to run one was the command palette,
+            // which the card never mentions. A command that is listed where it
+            // cannot be run is a command most people will never find.
+            let mut rows: Vec<widgets::Entry> = commands
+                .into_iter()
+                .map(|offered| {
+                    let live = offered.command.is_some();
+                    let control = widgets::text_button(
+                        "Run",
+                        offered.command,
+                        workspace
+                            .settings_page()
+                            .control(named(&format!("plugins.run.{}", offered.name))),
+                        ui,
+                    );
+                    widgets::row(
+                        Words::new(offered.title)
+                            .with_description(&offered.name)
+                            .with_keywords(&[&offered.name]),
+                        live,
+                        control,
+                        ui,
+                    )
+                })
+                .collect();
+            if unoffered > 0 {
+                // Counted rather than listed. A plugin's own arrow keys are
+                // actions and not commands, and a page whose longest section
+                // is somebody's internal wiring is a page nobody reads.
+                rows.push(widgets::note(&only_by_name(unoffered), ui));
+            }
+            rows
+        };
         column.add_child(section("What it can be asked to do", rows, ui));
     }
 
@@ -412,6 +466,13 @@ fn draws(workspace: &Workspace, plugin: &PluginId) -> Vec<String> {
 fn drawn_in<C: 'static>(slots: &Slots<C>, plugin: &PluginId) -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     for slot in slots.declared() {
+        // Not the card's own status line. This section exists to say where on
+        // screen a plugin's work shows up — which chip in the header is whose
+        // — and naming a thing drawn six inches above, on this page, is
+        // telling somebody about what they are looking at.
+        if slot == PLUGIN_CARD {
+            continue;
+        }
         let mine: Vec<EntryId> = slots
             .contributors(slot)
             .into_iter()
@@ -425,13 +486,59 @@ fn drawn_in<C: 'static>(slots: &Slots<C>, plugin: &PluginId) -> Vec<String> {
     lines
 }
 
+/// What the plugin is doing, drawn from its own contribution to
+/// [`PLUGIN_CARD`], or nothing when it contributed none.
+///
+/// Only its own: the slot is a list every plugin may put one entry on, and a
+/// card that drew the whole list would put every plugin's state on every one
+/// of their pages.
+fn status(
+    workspace: &Workspace,
+    app: &AppContext,
+    manifest: &Manifest,
+    ui: FamilyId,
+) -> Option<Box<dyn Element>> {
+    let host = workspace.host();
+    let slots = host.slots();
+    let index = slots
+        .contributors(PLUGIN_CARD)
+        .into_iter()
+        .position(|(owner, _)| owner == manifest.id)?;
+    let drawn = slots.at(PLUGIN_CARD, index, |build| build(workspace, app))?;
+
+    // Inside the box rather than under it, because what it is about is the
+    // controls in the box. A line of prose floating between two blocks belongs
+    // to whichever one the reader guesses.
+    let body = match stalled(
+        manifest,
+        workspace.settings().granted_to(manifest.id.as_str()),
+    ) {
+        None => drawn,
+        Some(why) => Flex::column()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_child(drawn)
+            .with_child(widgets::note(why, ui).element)
+            .finish(),
+    };
+
+    Some(
+        Container::new(body)
+            .with_padding(CONTROL_PADDING)
+            .with_background_color(theme().overlay_1)
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CONTROL_RADIUS)))
+            .with_margin_bottom(18.)
+            .finish(),
+    )
+}
+
 /// What this plugin *offers*, and how many more it merely answers to.
 ///
 /// The distinction `register_command` draws: an action is reachable by name,
 /// a command is one a person should be able to find. The card lists the
 /// commands and counts the rest — a plugin whose internal wiring is its
 /// longest section is a card nobody reads.
-fn offers(workspace: &Workspace, plugin: &PluginId) -> (Vec<String>, usize) {
+fn offers(workspace: &Workspace, plugin: &PluginId) -> (Vec<Offered>, usize) {
     let host = workspace.host();
     let mine: Vec<crate::plugin::ActionName> = host
         .actions()
@@ -441,13 +548,35 @@ fn offers(workspace: &Workspace, plugin: &PluginId) -> (Vec<String>, usize) {
         .map(|(name, _)| name)
         .collect();
 
-    let offered: Vec<String> = mine
+    let offered: Vec<Offered> = mine
         .iter()
         .filter_map(|name| {
-            host.title_of(name)
-                .map(|title| format!("{name} \u{2014} {title}"))
+            let title = host.title_of(name)?;
+            Some(Offered {
+                // The title is the label and the name goes under it. What a
+                // person is looking for is what the command *does*; the name
+                // is what they need only once they want to bind it, and
+                // putting it first left every row starting with three words
+                // of punctuation.
+                title: title.to_owned(),
+                name: name.to_string(),
+                command: host.action(name).map(WorkspaceAction::Run),
+            })
         })
         .collect();
     let rest = mine.len() - offered.len();
     (offered, rest)
+}
+
+/// One command a plugin offers, and how to run it.
+struct Offered {
+    /// What a palette would call it, which is the row's label.
+    title: String,
+    /// `owner/plugin/action`, under the label and in the row's keywords: it is
+    /// what somebody binding a chord to this needs, and what somebody reading
+    /// the card does not.
+    name: String,
+    /// What pressing it does, or `None` for a command that has gone — a plugin
+    /// switched off between the list being read and the frame being drawn.
+    command: Command,
 }

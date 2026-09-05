@@ -3,7 +3,9 @@
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crook_plugin_api::{ABI_VERSION, Answer, Manifest, Node, Registered, Render, Request};
+use crook_plugin_api::{
+    ABI_VERSION, Answer, Event, Manifest, Node, Registered, Render, Request,
+};
 use wasmi::{Caller, Engine, Instance, Linker, Memory, Module, Store, TypedFunc};
 
 use crate::host::Registry;
@@ -315,11 +317,36 @@ impl Sandbox {
         }
     }
 
+    /// Tells the guest something happened.
+    ///
+    /// Shaped like [`Sandbox::deliver`] and budgeted like it, because it is
+    /// the same thing from the other end: something arriving off the frame
+    /// path that the plugin then does its own work on.
+    pub fn event(&mut self, event: &Event) -> Result<(), Problem> {
+        let bytes =
+            crook_plugin_api::to_bytes(event).map_err(|why| Problem::Answer(why.to_string()))?;
+        let (pointer, length) = self.write(&bytes, self.fuel.event)?;
+
+        match self.call::<(i32, i32), i32>(
+            exports::EVENT,
+            (pointer, length),
+            self.fuel.event,
+        )? {
+            0 => Ok(()),
+            other => Err(Problem::Ran(format!("it answered {other} to an event"))),
+        }
+    }
+
     /// Whether this module has somewhere to put an answer.
     pub fn takes_answers(&self) -> bool {
         self.instance
             .get_func(&self.store, exports::DELIVER)
             .is_some()
+    }
+
+    /// Whether this module has somewhere to put an event.
+    pub fn takes_events(&self) -> bool {
+        self.instance.get_func(&self.store, exports::EVENT).is_some()
     }
 
     /// Whether this module has somewhere to put a tick.

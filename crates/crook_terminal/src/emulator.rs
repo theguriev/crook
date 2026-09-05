@@ -29,7 +29,7 @@
 use std::path::{Path, PathBuf};
 use std::str;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
@@ -61,6 +61,18 @@ pub enum TerminalEvent {
     WorkingDirectory(PathBuf),
     /// The bell rang.
     Bell,
+    /// A command finished, because the shell said so with OSC 133 `D`.
+    ///
+    /// Only that mark. A block also closes when the next prompt arrives or the
+    /// session ends, and neither is a command reporting on itself — so this
+    /// fires exactly as often as the shell integration is installed and no
+    /// more, which is the honest answer for something a plugin will ring on.
+    CommandFinished {
+        /// The status the shell reported, or `None` when it reported none.
+        exit: Option<i32>,
+        /// How long it ran, timed from the submit.
+        took: Option<Duration>,
+    },
     /// The child asked the terminal to close.
     Exit,
     /// The child process finished. Raised by [`crate::Terminal`], not by the
@@ -323,12 +335,18 @@ impl Emulator {
             let (piece, remaining) = rest.split_at(consumed);
             self.parser.advance(&mut self.term, piece);
             if let Some(mark) = self.osc_watcher.mark.take() {
-                self.blocks.mark(
+                let finished = self.blocks.mark(
                     mark,
                     &mut self.term,
                     &self.palette,
                     self.working_directory.as_deref(),
                 );
+                if let Some(finished) = finished {
+                    self.events.push(TerminalEvent::CommandFinished {
+                        exit: finished.exit,
+                        took: finished.took,
+                    });
+                }
             }
             rest = remaining;
         }

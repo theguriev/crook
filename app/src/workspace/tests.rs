@@ -10413,6 +10413,142 @@ mod sandboxed {
         assert!(text.contains("eugen/probe"), "{text}");
     }
 
+    /// Whether the frame says `phrase`, wherever the paragraph wrapped.
+    ///
+    /// [`frame_text`] joins the lines it found with nothing between them, so a
+    /// sentence that wrapped comes back with two of its words run together.
+    /// Comparing both sides with their spaces taken out is what lets a test
+    /// name a phrase without also knowing the width the card came out at.
+    fn says(scene: &Scene, phrase: &str) -> bool {
+        let bare = |text: &str| text.split_whitespace().collect::<String>();
+        bare(&frame_text(scene)).contains(&bare(phrase))
+    }
+
+    #[test]
+    fn a_plugin_nobody_answered_for_says_so_under_its_own_controls() {
+        // The dead Play button, end to end. The probe draws its own controls
+        // on its own card and asks for a capability nobody has granted, so
+        // every request those controls make is refused before it reaches
+        // anything — and the card used to draw them live and say nothing,
+        // which is what makes a working button read as a broken one.
+        let scratch = Scratch::new("stalled");
+        install(
+            scratch.path(),
+            "probe",
+            &wasm("eugen/probe", "plugins.card.status", 10),
+        );
+        let mut harness = harness(&scratch);
+        harness.show_plugins();
+        harness.click_plugin("Probe");
+        let scene = harness.frame();
+
+        assert!(
+            says(&scene, "refused rather than broken"),
+            "the card drew the plugin's own controls without saying they cannot work: {}",
+            frame_text(&scene)
+        );
+    }
+
+    #[test]
+    fn a_plugin_that_drew_its_own_controls_is_not_listed_twice() {
+        // Its own row says what it can be asked to do, in the shape it chose.
+        // The card counting the same commands underneath is the longest
+        // section on the page saying what the row above it already said.
+        let scratch = Scratch::new("counted");
+        install(
+            scratch.path(),
+            "probe",
+            &wasm("eugen/probe", "plugins.card.status", 10),
+        );
+        let mut harness = harness(&scratch);
+        harness.show_plugins();
+        harness.click_plugin("Probe");
+        let scene = harness.frame();
+
+        assert!(
+            says(&scene, "1 command, which the command palette lists."),
+            "the list was not counted: {}",
+            frame_text(&scene)
+        );
+        assert!(
+            !says(&scene, "Poke the probe"),
+            "the command is listed under the controls that already offer it: {}",
+            frame_text(&scene)
+        );
+    }
+
+    #[test]
+    fn a_plugin_that_drew_nothing_of_its_own_still_gets_the_whole_list() {
+        // The same plugin and the same command, contributed somewhere else.
+        // Nothing on this card offers it, so the card does — which is what
+        // keeps the section from being hidden by a rule about chips.
+        let scratch = Scratch::new("listed-in-full");
+        install(
+            scratch.path(),
+            "probe",
+            &wasm("eugen/probe", "header.right", 10),
+        );
+        let mut harness = harness(&scratch);
+        harness.show_plugins();
+        harness.click_plugin("Probe");
+        let scene = harness.frame();
+
+        assert!(says(&scene, "Poke the probe"), "{}", frame_text(&scene));
+        assert!(
+            !says(&scene, "which the command palette lists"),
+            "{}",
+            frame_text(&scene)
+        );
+    }
+
+    #[test]
+    fn a_panel_the_plugin_has_already_shut_leaves_the_screen() {
+        // The one thing a press does that a dismissal does not: notify. A
+        // guest's state is inside the module, so nothing out here can tell
+        // that running an action changed what it draws — and a plugin's panel
+        // is exactly that state. The dismissal ran, the guest shut the panel,
+        // and the frame went on drawing it, modal underlay and all, over the
+        // plugin's own controls. Every press after that was eaten by a menu
+        // that was not there.
+        let scratch = Scratch::new("dismissed");
+        install(
+            scratch.path(),
+            "probe",
+            &crate::plugins::wasm::tests::wasm_with_a_panel(
+                "eugen/probe",
+                "plugins.card.status",
+                10,
+            ),
+        );
+        let mut harness = harness(&scratch);
+        harness.show_plugins();
+        harness.click_plugin("Probe");
+
+        let scene = harness.frame();
+        let chip = scene
+            .layers()
+            .flat_map(|layer| layer.icons.iter())
+            .find(|drawn| drawn.icon_key.mark == Mark::Icon(Lucide::ChevronDown))
+            .expect("the plugin's own chip should have been drawn")
+            .bounds;
+        harness.click(chip.origin() + chip.size() / 2., MouseButton::Left);
+        assert!(
+            says(&harness.frame(), "the panel is up"),
+            "the chip did not open the panel, so this proves nothing"
+        );
+
+        // A press in the corner, which is what shuts a menu. The guest hears
+        // it — the dismissal names an action and the action ran — so what is
+        // being asked here is only whether anybody drew the answer.
+        harness.click(vec2f(1000., 100.), MouseButton::Left);
+        let scene = harness.frame();
+        assert!(
+            !says(&scene, "the panel is up"),
+            "a panel the plugin shut is still on screen: {}",
+            frame_text(&scene)
+        );
+    }
+
     #[test]
     fn a_sandboxed_plugins_action_is_reachable_by_name_like_any_other() {
         // Prefixed by the host with the plugin's own id, so a guest cannot
@@ -10763,10 +10899,11 @@ mod section_layout {
                 }
                 _ => {
                     harness.show_plugins();
-                    (
-                        "Window commands",
-                        "crook/window/close-pane — Close the focused pane",
-                    )
+                    // The command's *name*, which is the row's description
+                    // and has a line to itself. Not its title: that is the
+                    // label, and a label shares a baseline with the Run
+                    // button beside it, so the line holds both.
+                    ("Window commands", "crook/window/close-pane")
                 }
             };
 
