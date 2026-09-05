@@ -76,10 +76,10 @@ impl Plugin for Worktrees {
             );
         });
 
-        // Band 3: alone, after the hairline that follows "Close tab". A
+        // Band 4: alone, after the hairline that follows "Close tab". A
         // submenu is its own kind of row and does not belong in a group with
         // things that happen when you press them.
-        host.contribute(TAB_MENU_ENTRIES, "menu", 300, move |workspace, app| {
+        host.contribute(TAB_MENU_ENTRIES, "menu", 400, move |workspace, app| {
             let open = workspace.worktree_menu_is_open();
             if !open && !workspace.menu_tab_is_in_a_repository(app) {
                 return nothing();

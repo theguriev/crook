@@ -2494,8 +2494,8 @@ impl Workspace {
         if self.a_popup_is_open() {
             // Except a plugin's own field inside the menu that is up, which is
             // the one caret a popup can carry. Asked of the host rather than
-            // named, because it is not this struct's — and because the moment
-            // there is a second one, nothing here has to be told.
+            // named, because there are two of them now — a branch being
+            // invented and a tab being renamed — and neither is this struct's.
             return self.host.a_field_has_keys();
         }
         let Some(pane) = self.tabs.focused_pane_id() else {
@@ -2780,6 +2780,25 @@ impl Workspace {
     /// [`TabId`] would mean writing into whichever pane of that tab happens to
     /// be focused when the agent reports — a race between a person clicking
     /// and a background task finishing.
+    /// Renames a tab, or takes the rename back.
+    ///
+    /// `None` puts back the name the tab was opened with, which is where a
+    /// rename to an empty field lands: somebody who clears the box is asking
+    /// for the name they had before they touched it, not for a row with no
+    /// name.
+    ///
+    /// One of the tab services a plugin has and the strip's own `Copy` action
+    /// vocabulary cannot carry — a `TabAction` holds no `String` — so it is a
+    /// call rather than an action, the way `update_session` is for the other
+    /// half of the same gesture.
+    pub fn rename_tab(&mut self, id: TabId, name: Option<String>, ctx: &mut ViewContext<Self>) {
+        let Some(tab) = self.tabs.get_mut(id) else {
+            return;
+        };
+        tab.set_name(name);
+        ctx.notify();
+    }
+
     pub fn update_session(
         &mut self,
         id: PaneId,
