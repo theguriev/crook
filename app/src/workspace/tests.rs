@@ -616,6 +616,17 @@ impl Harness {
         self.dispatch_workspace_action(WorkspaceAction::Run(id));
     }
 
+    /// What a tab is called, whatever its panes are called.
+    fn tab_name(&self, tab: TabId) -> String {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace
+                .tabs()
+                .get(tab)
+                .map(|tab| tab.name().to_owned())
+                .unwrap_or_default()
+        })
+    }
+
     /// Whether the keyboard is in a field some plugin owns.
     fn a_plugin_field_has_keys(&self) -> bool {
         self.workspace.read(&self.app, |workspace, _| {
@@ -3377,6 +3388,8 @@ fn a_tabs_menu_is_the_entries_its_plugins_put_in_it() {
             "crook/tabs/new-group-with-tab",
             "crook/tabs/copy-pane-title",
             "crook/tabs/copy-working-directory",
+            "crook/tabs/rename-tab",
+            "crook/tabs/rename-pane",
             "crook/tabs/close-tab",
             "crook/worktrees/menu",
         ],
@@ -3522,6 +3535,132 @@ fn escape_takes_the_submenu_down_before_the_menu() {
         "the second Escape did nothing"
     );
     assert!(!harness.a_popup_is_open());
+}
+
+#[test]
+fn a_rename_takes_the_keyboard_and_gives_it_back() {
+    // The whole of why the host has a field registry. Nothing in the window's
+    // own source names this field: `sync_input_keys` asks the host, the host
+    // asks the plugin that claimed it, and the plugin answers from state the
+    // workspace has never heard of.
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the seeded tab has a pane");
+    let was = harness.tab_name(tab);
+
+    harness.open_tab_menu_on(tab, pane);
+    harness.run_command("crook/tabs/rename-tab");
+    // The field is only in the tree once the menu has been drawn with it, and
+    // a keystroke lands in an element rather than in a state.
+    harness.frame();
+
+    harness.type_text("release work");
+    assert!(
+        harness.press_key("enter", Modifiers::default()),
+        "enter was not claimed by the field being typed into"
+    );
+
+    assert_eq!(harness.tab_name(tab), "release work");
+    assert_ne!(was, "release work", "the tab was already called that");
+    assert!(
+        !harness.a_popup_is_open(),
+        "committing a rename left the menu up"
+    );
+}
+
+#[test]
+fn escape_abandons_a_rename_and_leaves_the_menu_standing() {
+    // One step back, which is the rule everywhere else in this menu: the first
+    // Escape undoes the gesture that opened the field, not the one that opened
+    // the menu the field is in.
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the seeded tab has a pane");
+    let was = harness.tab_name(tab);
+
+    harness.open_tab_menu_on(tab, pane);
+    harness.run_command("crook/tabs/rename-tab");
+    // The field is only in the tree once the menu has been drawn with it, and
+    // a keystroke lands in an element rather than in a state.
+    harness.frame();
+    harness.type_text("nope");
+    assert!(harness.press_key("escape", Modifiers::default()));
+
+    assert_eq!(harness.tab_name(tab), was, "escape renamed it anyway");
+    assert_eq!(
+        harness.tab_menu_row(),
+        Some(pane),
+        "escape took the menu down as well as the field"
+    );
+}
+
+#[test]
+fn a_person_s_name_for_a_pane_beats_the_one_its_agent_chose() {
+    // The precedence, through the gesture. An agent that renames its work
+    // every few turns would otherwise take the name back within the minute,
+    // and somebody who typed one would have no way to make it stick.
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the seeded tab has a pane");
+
+    harness.open_tab_menu_on(tab, pane);
+    harness.run_command("crook/tabs/rename-pane");
+    harness.frame();
+    harness.type_text("the long build");
+    assert!(harness.press_key("enter", Modifiers::default()));
+    assert_eq!(harness.pane_title(pane), "the long build");
+
+    harness.update_session(pane, |session| {
+        session.derived_title = Some("summarising the diff".to_owned());
+    });
+    assert_eq!(
+        harness.pane_title(pane),
+        "the long build",
+        "the agent took the name back"
+    );
+}
+
+#[test]
+fn emptying_the_field_puts_back_the_name_it_started_with() {
+    // A person who clears the box is asking for the name they had before they
+    // touched it, not for a row with no name — which is what a tab whose name
+    // is the empty string would be.
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the seeded tab has a pane");
+    let born_as = harness.tab_name(tab);
+
+    harness.open_tab_menu_on(tab, pane);
+    harness.run_command("crook/tabs/rename-tab");
+    // The field is only in the tree once the menu has been drawn with it, and
+    // a keystroke lands in an element rather than in a state.
+    harness.frame();
+    harness.type_text("something else");
+    assert!(harness.press_key("enter", Modifiers::default()));
+    assert_eq!(harness.tab_name(tab), "something else");
+
+    harness.open_tab_menu_on(tab, pane);
+    harness.run_command("crook/tabs/rename-tab");
+    harness.frame();
+    // The name is selected when the field opens, so one Backspace empties it.
+    // Through `press` rather than `press_key`: a key the field takes is one
+    // nothing in the window claimed, which is what `press_key` reports on.
+    harness.press("backspace", Modifiers::default(), "");
+    assert!(harness.press_key("enter", Modifiers::default()));
+
+    assert_eq!(
+        harness.tab_name(tab),
+        born_as,
+        "an emptied field left the tab with no name of its own"
+    );
 }
 
 #[test]

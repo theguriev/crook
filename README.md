@@ -192,8 +192,11 @@ Eight features, and the page that configures them:
   click to choose the background, and everything else decided so the result is legible. What
   it writes is a file in your themes folder, in the same format as any other.
 - **A tab's own menu.** Right-click any row and it opens over that row: new group with tab,
-  copy pane title, copy working directory, close tab, and — inside a repository — the
-  worktrees below. Not one of those entries is written into the menu. It is a
+  copy pane title, copy working directory, rename tab, rename pane, close tab, and — inside a
+  repository — the worktrees below. Renaming turns the entry itself into a field, in the
+  column you pressed it in; Enter keeps the name, Escape drops it, and an emptied field puts
+  back the name the tab was opened with. A name you typed beats the one the agent chose for
+  its own work, which is the whole point of typing one, and it comes back with the window. Not one of those entries is written into the menu. It is a
   [slot](docs/plugins.md), `tab.menu.entries`, and every row in it is a contribution: they
   come from two plugins today, each entry is also a named command the palette lists and a
   chord can reach, and a plugin outside the binary puts a row there the same way. Escape is

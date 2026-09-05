@@ -54,6 +54,28 @@
 //! be reachable by exactly one gesture, and the enum would grow an arm per row
 //! — which is the arrangement `WorkspaceAction::Run` was built to end.
 //!
+//! # Renaming, which is the whole of why the host has a field registry
+//!
+//! Two of these entries turn into a text field, and until this plugin was
+//! written nothing outside the binary could have done that. A plugin could put
+//! a popup on screen, draw a box in it and claim Escape — and still have
+//! nowhere for a keystroke to land, because which field is listening is a fact
+//! the element tree cannot work out and `Workspace::sync_input_keys` answered
+//! by naming, in source, every field in the window. There were two, and
+//! neither was a plugin's.
+//!
+//! [`Host::claim_field`](crate::plugin::Host::claim_field) is the other half
+//! of [`claim_surface`](crate::plugin::Host::claim_surface), and the two are
+//! used together here: the surface claims Enter and Escape while a rename is
+//! being typed, and the field is what the letters in between land in. Nothing
+//! about renaming is in the menu's shell — it draws the field, and that is the
+//! whole of its involvement.
+//!
+//! The state is a `Cell` on an `Rc` the contributions and the handlers share,
+//! which is how a native plugin owns anything: `build` runs before the
+//! workspace exists, so a plugin's state cannot live in the workspace and its
+//! closures cannot borrow one.
+//!
 //! # What a command acts on when no menu is up
 //!
 //! [`Workspace::menu_target`](crate::workspace::Workspace::menu_target): the
@@ -62,17 +84,20 @@
 //! means the tab a person is looking at, which is the only thing it could
 //! sensibly mean, and the same handler serves both without a branch.
 
-use std::path::Path;
-
 use crookui_core::prelude::*;
 
 use crook_plugin::{ActionName, Cardinality, Manifest, PluginId, SlotId, Tier};
 
+use std::cell::{Cell, RefCell};
+use std::path::Path;
+use std::rc::Rc;
+
 use crate::git::GitFacts;
-use crate::plugin::{BuildError, Host, Plugin};
+use crate::plugin::{BuildError, Host, Plugin, Showing};
 use crate::tab::{AgentStatus, PaneId, TabAction, TabId};
+use crate::text_input::TextInput;
 use crate::theme::theme;
-use crate::workspace::tab_context_menu::{entry, inert_entry};
+use crate::workspace::tab_context_menu::{entry, field_entry, inert_entry};
 use crate::workspace::{Workspace, WorkspaceAction, status_color};
 
 /// The mark at the head of a tab's row.
@@ -143,8 +168,93 @@ pub struct TabRow<'a> {
 /// what a band buys and why it is a division of `order` rather than a field.
 pub const TAB_MENU_ENTRIES: SlotId = SlotId::new("tab.menu.entries");
 
+/// What a rename in progress is about.
+///
+/// Two entries and not one, because a tab and its pane are two names that mean
+/// different things — the tab's is what the panel's heading says about a piece
+/// of work, the pane's is what a row says about one agent — and a tab with one
+/// pane shows only the second of them. Warp offers both for the same reason.
+#[derive(Copy, Clone, PartialEq, Eq)]
+enum Renaming {
+    /// The tab the menu is on.
+    Tab,
+    /// The pane whose row it was opened over.
+    Pane,
+}
+
+/// What a rename field says before anything is typed into it.
+const RENAME_PLACEHOLDER: &str = "name";
+
+/// Whether a rename is being typed, and what it is about.
+///
+/// The flag the surface is raised by lives in here beside the answer rather
+/// than next to it, because the two must never disagree: a surface left up
+/// with nothing being renamed would go on eating Escape from the menu, and one
+/// left down would leave Enter to be typed into a shell nobody can see.
+/// Setting them apart is a bug waiting for the one path that forgets.
+#[derive(Default)]
+struct Rename {
+    /// What is being renamed, if anything.
+    what: Cell<Option<Renaming>>,
+    /// The host's flag for this plugin's surface, once it has been claimed.
+    surface: RefCell<Option<Showing>>,
+}
+
+impl Rename {
+    /// Starts one.
+    fn begin(&self, what: Renaming) {
+        self.what.set(Some(what));
+        self.raise();
+    }
+
+    /// Ends one, and says what it was about.
+    fn end(&self) -> Option<Renaming> {
+        let was = self.what.take();
+        self.raise();
+        was
+    }
+
+    /// What is being renamed, if anything.
+    fn what(&self) -> Option<Renaming> {
+        self.what.get()
+    }
+
+    /// Puts the surface's flag where the answer is.
+    fn raise(&self) {
+        if let Some(surface) = self.surface.borrow().as_ref() {
+            surface.set(self.what.get().is_some());
+        }
+    }
+}
+
 /// The plugin that owns the tabs' menu.
-pub struct Tabs;
+///
+/// It holds the one thing a menu of contributions cannot hold for it: which of
+/// its two rename entries is being typed into. `Rc` because the contributions
+/// and the action handlers are closures that outlive `build` and share it.
+#[derive(Default)]
+pub struct Tabs {
+    rename: Rc<Rename>,
+}
+
+impl Tabs {
+    /// A plugin with nothing being renamed.
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// What the thing a rename is about is called right now.
+///
+/// `None` where there is no tab at all, which is a window on its way out.
+fn current_name(workspace: &Workspace, what: Renaming) -> Option<String> {
+    let (tab, pane) = workspace.menu_target()?;
+    let tab = workspace.tabs().get(tab)?;
+    Some(match what {
+        Renaming::Tab => tab.name().to_owned(),
+        Renaming::Pane => tab.panes().get(pane)?.title().to_owned(),
+    })
+}
 
 impl Plugin for Tabs {
     fn manifest(&self) -> &'static Manifest {
@@ -200,10 +310,100 @@ impl Plugin for Tabs {
             workspace.handle_action(&WorkspaceAction::Tab(TabAction::Close(tab)), ctx);
         });
 
-        // Band 0: what this tab is *with*. Band 1: what it says, as text.
-        // Band 2: it goes away. The gap between 2 and the worktree menu's 3 is
-        // deliberate — a destructive entry sits alone, so the pointer on its
-        // way down the column has a hairline to stop at before it.
+        // The field every rename is typed into. One, not two: only one of the
+        // two entries can be being renamed at a time, and a second field would
+        // be a second place the same answer could be kept.
+        let field = host.claim_field("rename", {
+            let rename = self.rename.clone();
+            move |workspace| rename.what().is_some() && workspace.tab_context_menu().is_open()
+        });
+
+        for (name, title, what) in [
+            ("rename-tab", "Rename tab", Renaming::Tab),
+            ("rename-pane", "Rename pane", Renaming::Pane),
+        ] {
+            let rename = self.rename.clone();
+            let field = field.clone();
+            host.register_command(action(name), title, move |workspace, ctx| {
+                let Some(current) = current_name(workspace, what) else {
+                    return;
+                };
+                // Selected, not just filled: the name is almost always being
+                // replaced rather than edited, so the first letter typed
+                // should be the new name's first letter. The worktree
+                // creator's branch field opens the same way.
+                field.edit(|editor| {
+                    editor.set_text(&current);
+                    editor.select_all();
+                });
+                rename.begin(what);
+                workspace.sync_input_keys();
+                ctx.notify();
+            });
+        }
+
+        // Neither of these is a command. A palette row that put the keyboard
+        // into a field behind the palette would be a row nobody could use, and
+        // a chord for "stop renaming" is a chord for a state that only exists
+        // while a field already has every key.
+        host.register_action(action("commit-rename"), {
+            let rename = self.rename.clone();
+            let field = field.clone();
+            move |workspace, ctx| {
+                let Some(what) = rename.end() else {
+                    return;
+                };
+                let typed = field.editor().text().trim().to_owned();
+                // An emptied field is "put back the name I started with",
+                // which is what `None` means everywhere this reaches.
+                let name = (!typed.is_empty()).then_some(typed);
+                match (what, workspace.menu_target()) {
+                    (Renaming::Tab, Some((tab, _))) => workspace.rename_tab(tab, name, ctx),
+                    (Renaming::Pane, Some((_, pane))) => {
+                        workspace.update_session(pane, ctx, |session| {
+                            session.custom_title = name;
+                        });
+                    }
+                    (_, None) => {}
+                }
+                workspace.close_tab_context_menu(ctx);
+            }
+        });
+
+        host.register_action(action("cancel-rename"), {
+            let rename = self.rename.clone();
+            move |workspace, ctx| {
+                if rename.end().is_none() {
+                    return;
+                }
+                // Back to the menu rather than out of it: Escape is one step
+                // back, which is the rule the worktree submenu follows and the
+                // one a person has already been taught by it.
+                workspace.sync_input_keys();
+                ctx.notify();
+            }
+        });
+
+        // Enter and Escape, while a rename is being typed. A surface rather
+        // than bindings, because these two keys belong to whatever is in front
+        // of a person and this is only in front of them sometimes.
+        let showing = host.claim_surface(|keystroke| {
+            if !keystroke.modifiers.is_empty() {
+                return None;
+            }
+            match keystroke.key.as_str() {
+                "enter" => Some(action("commit-rename")),
+                "escape" => Some(action("cancel-rename")),
+                _ => None,
+            }
+        });
+        *self.rename.surface.borrow_mut() = Some(showing);
+
+        // Warp's grouping, band for band. Band 0: what this tab is *with*.
+        // Band 1: what it says, copied. Band 2: what it is called. Band 3: it
+        // goes away, alone — so the pointer on its way down the column has a
+        // hairline to stop at before the one entry here that cannot be undone.
+        // Band 4 is the worktree menu's, and the gap is deliberate.
         contribute(host, "new-group-with-tab", 0, |workspace| {
             workspace.menu_target().is_some()
         });
@@ -213,7 +413,16 @@ impl Plugin for Tabs {
         contribute(host, "copy-working-directory", 101, |workspace| {
             workspace.menu_pane_directory().is_some()
         });
-        contribute(host, "close-tab", 200, |workspace| {
+        rename_entry(host, "rename-tab", 200, Renaming::Tab, &self.rename, &field);
+        rename_entry(
+            host,
+            "rename-pane",
+            201,
+            Renaming::Pane,
+            &self.rename,
+            &field,
+        );
+        contribute(host, "close-tab", 300, |workspace| {
             workspace.menu_target().is_some()
         });
 
@@ -247,6 +456,43 @@ fn contribute(
         let Some(id) = id.filter(|_| live(workspace)) else {
             return inert_entry(workspace, &key, label.clone());
         };
+        entry(workspace, &key, label.clone(), WorkspaceAction::Run(id))
+    });
+}
+
+/// Contributes one of the two entries that can turn into a field.
+///
+/// The row draws itself as a label until this is what is being renamed, and as
+/// the field from then on — in place, in the column the entry was pressed in.
+/// A dialog somewhere else would have to say which tab it was about; a row
+/// that became a box does not.
+fn rename_entry(
+    host: &mut Host,
+    name: &'static str,
+    order: i32,
+    what: Renaming,
+    rename: &Rc<Rename>,
+    field: &TextInput,
+) {
+    let label = host.title_of(&action(name)).unwrap_or(name).to_owned();
+    let id = host.action(&action(name));
+    let key = format!("crook/tabs/{name}");
+    let rename = rename.clone();
+    let field = field.clone();
+
+    host.contribute(TAB_MENU_ENTRIES, name, order, move |workspace, _| {
+        if rename.what() == Some(what) {
+            return field_entry(workspace, &key, &field, RENAME_PLACEHOLDER);
+        }
+        // Inert while the *other* one is being typed into, rather than absent:
+        // a menu that reflowed under the field a person is typing in would
+        // move the field.
+        let Some(id) = id.filter(|_| rename.what().is_none()) else {
+            return inert_entry(workspace, &key, label.clone());
+        };
+        if current_name(workspace, what).is_none() {
+            return inert_entry(workspace, &key, label.clone());
+        }
         entry(workspace, &key, label.clone(), WorkspaceAction::Run(id))
     });
 }
