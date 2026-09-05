@@ -218,8 +218,17 @@ struct Overrides {
     themes: bool,
     /// Start with the Themes panel making a theme.
     creating: bool,
+    /// Start with the active tab's own context menu open.
+    ///
+    /// A way to look at a frame, like `--menu`: the surface a secondary press
+    /// on a row opens, with whatever its plugins put in it.
+    tab_menu: bool,
     /// Start with the active tab's worktree menu open, and its creator with
     /// it when `creating_worktree`.
+    ///
+    /// Implies `tab_menu`, because the worktree list is drawn inside the menu
+    /// it is an entry of — asking for the submenu and not the menu is not a
+    /// frame this window can draw.
     worktrees: bool,
     /// Start with that menu making a worktree.
     creating_worktree: bool,
@@ -444,6 +453,7 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 frames = Some(count.parse().context("`--frames` takes a number")?);
             }
             "--menu" => overrides.menu = true,
+            "--tab-menu" => overrides.tab_menu = true,
             "--themes" => overrides.themes = true,
             "--worktrees" => overrides.worktrees = true,
             "--new-worktree" => {
@@ -632,6 +642,7 @@ OPTIONS:
                        Carry that selection on to TEXT, which may be in a later
                        block: what a drag across several commands takes
     --menu             Start with the tab options menu open
+    --tab-menu         Start with the active tab's own context menu open
     --settings [PAGE]  Start with a settings tab open, on `appearance`,
                        `shell`, `keys` or `about`
     --find <TEXT>      Type TEXT into the tabs panel\'s search box, filtering the list
@@ -914,6 +925,11 @@ fn apply_overrides(
     }
     if let Some(layout) = overrides.controls {
         workspace.override_control_layout(layout, ctx);
+    }
+    // Before `--worktrees`, which opens this menu itself and then opens the
+    // list inside it: asking for both must not toggle the menu shut again.
+    if overrides.tab_menu && !overrides.worktrees {
+        workspace.open_tab_context_menu_for_snapshot(ctx);
     }
     if overrides.worktrees {
         workspace.open_tab_menu_for_snapshot(ctx);

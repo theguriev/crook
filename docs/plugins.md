@@ -82,6 +82,28 @@ description of something that was never built.
     arithmetic against a list that is thousands long, and would need something this does not
     have.
   - Still to move: the worktree menu, the Themes panel, the Omarchy palettes.
+  - `crook/tabs` owns `tab.menu.entries`, and a tab's secondary press opens a *place*
+    rather than a feature. The menu it opens knows no entry by name: four of them are
+    `crook/tabs`'s own — new group with tab, the two copies, close tab — and the fifth is
+    `crook/worktrees`, which is the first half of moving that menu. The claim moved and the
+    code did not: the worktree popup is still `workspace::tab_menu`, because that column
+    holds a text field, a background git read and a two-step confirmation. What did move is
+    what matters for the API — the menu is a list a stranger's plugin can put a row in, and
+    switching `crook/worktrees` off leaves a tab's menu four entries long with nothing
+    anywhere saying a fifth is missing. Entries are grouped by dividing `order` by a hundred,
+    so a slot that hands its renderer a flat list still draws its bands, and no
+    plugin can draw a seam across somebody else's group.
+  - **A plugin can own a text field.** `host.claim_field` is the other half of
+    `claim_surface`, and it closes the last gap between a plugin and a built-in: a plugin could
+    already put a surface on screen and claim a keystroke, and still had nowhere for a *letter*
+    to land, because which field is listening is a fact the element tree cannot work out and
+    `Workspace::sync_input_keys` answered by naming, in source, every field in the window.
+    There were two and neither was a plugin's. The host hands the field back — a plugin builds
+    before the workspace exists and has nothing to take one from — asks each claim in
+    registration order, and the first to want the keyboard gets it. The worktree menu's branch
+    field has moved onto it, so it now goes out with `crook/worktrees` when that is switched
+    off, even though the popup that draws it has not moved yet.
+  - Still to move: the worktree menu's own popup, the Themes panel, the Omarchy palettes.
 - **Phase 2 — the sandbox: done, and dogfooded.** `crook_plugin_api` is the wire — a
   manifest, capabilities that each say what they are in a sentence, and a `Node` vocabulary
   that *describes* rather than paints: no colours, no pixels, tones and sizes the host
@@ -388,6 +410,11 @@ plugin any other way:
 - `host.settings` — register a schema under `plugins.<id>` in `settings.json`; the settings
   page renders it. The file already keeps unknown keys, so this is the one place a plugin can
   persist today; the schema is what makes it typed and visible.
+- `host.fields` — a text field the plugin owns, with the question that decides when the
+  keyboard is in it. Registered rather than handed over: a plugin builds before the workspace
+  and cannot be given one. This is what a rename, a search box or any other typing a plugin
+  offers is built out of, and without it a plugin's surface is one a person can look at and
+  not type into.
 - `host.keybindings` — default chords for the plugin's actions, as the weakest layer of the
   keybindings: the user's file wins, and so does every shipped binding. `Host::suggest_binding`
   is this, for a native plugin.

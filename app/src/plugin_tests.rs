@@ -92,6 +92,33 @@ fn every_plugin_in_the_box_loads() {
 }
 
 #[test]
+fn a_plugin_s_field_is_found_by_name_and_goes_out_with_it() {
+    // A field is addressed the way an action is, because the thing that draws
+    // this one — `workspace::tab_menu` — is not the plugin that owns it. And
+    // it goes out with that plugin: a field nothing can draw must not be left
+    // in the registry answering "the keyboard is mine".
+    with_host(|host| {
+        let worktrees = PluginId::parse("crook/worktrees").expect("a literal that parses");
+        let field = plugins::worktrees::BRANCH_FIELD;
+
+        let claimed = host.field(field).expect("the plugin registered no field");
+        claimed.set_has_keys(true);
+        assert!(host.a_field_has_keys());
+
+        host.unload(&worktrees);
+
+        assert!(
+            host.field(field).is_none(),
+            "a disabled plugin's field is still in the registry"
+        );
+        assert!(
+            !host.a_field_has_keys(),
+            "a field that went out with its plugin still says it has the keyboard"
+        );
+    });
+}
+
+#[test]
 fn the_plugins_in_the_box_have_nothing_to_complain_about() {
     // A misspelled slot name is the likeliest mistake in a plugin, and it is
     // invisible: the contribution is kept, nothing draws it, and the window
