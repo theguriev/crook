@@ -210,6 +210,24 @@ struct Overrides {
     menu: bool,
     /// Start with the first row's hover detail card up.
     hover: bool,
+    /// Run these named actions before the picture is taken, in order.
+    ///
+    /// A way to look at a frame, like `--menu` and `--themes`, and the only
+    /// one that reaches a *plugin's* surface: what a plugin puts up is put up
+    /// by one of its own actions, and a picture of a panel nobody can open
+    /// from the command line is a picture nobody can take. Run last, after the
+    /// shells have settled, because what a plugin draws usually depends on
+    /// what the pane has told it.
+    actions: Vec<String>,
+    /// Load the plugins this machine has installed, as a real run does.
+    ///
+    /// Off by default and opt-in for one reason: a snapshot is a picture of
+    /// *the application*, and one that quietly included whatever a person had
+    /// installed would be a different picture on every machine and in CI. It
+    /// is on the list all the same, because the only way to look at what a
+    /// plugin draws is to draw it — and a tier whose one worked example can
+    /// only be seen by launching a window is a tier nobody can screenshot.
+    with_plugins: bool,
     /// Start with the Themes panel open, and — with `creating` — on its
     /// creator.
     ///
@@ -500,6 +518,11 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 overrides.section = Some(name);
             }
             "--hover" => overrides.hover = true,
+            "--with-plugins" => overrides.with_plugins = true,
+            "--action" => {
+                let name = args.next().context("`--action` needs a command name")?;
+                overrides.actions.push(name);
+            }
             "--run" => {
                 let command = args.next().context("`--run` needs a command")?;
                 overrides.run.push(command);
@@ -642,6 +665,15 @@ OPTIONS:
     --themes           Start with the Themes panel open
     --new-theme        Start with the Themes panel making a theme
     --hover            Start with the first row's detail card up
+    --action <name [argument]>
+                       Run this named action before the picture is taken, so a
+                       plugin's own panel can be looked at. Anything after the
+                       name is what the action is told — what a picker's row or
+                       a menu's entry would have said. Repeatable
+    --with-plugins     Load the plugins this machine has installed, so that a
+                       snapshot shows what they draw. Off by default: a picture
+                       of the application is the same everywhere and one of a
+                       plugin is not
     --carry <N>        Pick the Nth row of the tabs panel up and hold it there,
                        for a picture of a drag in flight
     --carry-group <N>  The same for the Nth group's whole block, by its heading
@@ -1024,7 +1056,17 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
     let mut app = App::new(queue.foreground(), background_pool());
 
     let quit: QuitRequest = Rc::new(|| {});
-    let settings = Settings::ephemeral();
+    let mut settings = Settings::ephemeral();
+    // The one thing a snapshot takes from the machine it runs on, and only
+    // when it was asked to load that machine's plugins: what a person has
+    // allowed each of them. A plugin drawn without its grants is a plugin
+    // drawing the refusal rather than the thing, which is a picture of the
+    // permission dialog and not of the plugin.
+    if overrides.with_plugins {
+        for (plugin, keys) in Settings::for_user().plugin_grants() {
+            settings.set_granted(plugin, keys.clone());
+        }
+    }
     apply_startup_theme(&settings, &overrides);
     // A snapshot is always rendered as the dev channel: the only thing the
     // channel reaches is the About page's label, and a PNG that said "stable"
@@ -1037,7 +1079,10 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
             Opening {
                 settings,
                 channel: Channel::Dev,
-                plugins: crate::plugins::defaults(),
+                plugins: match overrides.with_plugins {
+                    true => everything_installed(),
+                    false => crate::plugins::defaults(),
+                },
             },
             quit,
             Rc::new(Detached),
@@ -1067,6 +1112,18 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
             presenter.build_scene(WINDOW_SIZE, SNAPSHOT_SCALE_FACTOR, ctx)
         })
     };
+
+    // The gather a real run starts and a snapshot does not, for the same
+    // reason the plugins are not loaded: it walks a directory tree and spawns
+    // `git`, and a picture that did either would be a different picture in
+    // every checkout. Started when the plugins are, because half of what they
+    // draw is what it finds — a chip that says which branch you are on has
+    // nothing to say until it has run.
+    if overrides.with_plugins {
+        app.update(|ctx| {
+            workspace.update(ctx, |workspace, ctx| workspace.start_git_poll(ctx));
+        });
+    }
 
     if overrides.wants_shells() {
         let pane = start_shells(&mut app, &workspace)?;
@@ -1119,6 +1176,27 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
         );
     }
 
+    // Last of everything, and after a frame: a plugin's action is usually
+    // about what the pane has just told it, and what it puts up is drawn on
+    // the frame after the one that ran it.
+    if !overrides.actions.is_empty() {
+        frame(&mut app, &mut presenter);
+        for name in &overrides.actions {
+            run_named_action(&mut app, &workspace, name);
+            // Whatever it asked the host for — a directory listed, a
+            // repository read — is done on the pool, so the foreground has
+            // nothing to run until it comes back. Waited for the way
+            // `await_shell` waits: a poll and a deadline, because there is no
+            // event loop here to be woken by.
+            let deadline = Instant::now() + ACTION_TIMEOUT;
+            while Instant::now() < deadline {
+                queue.run_until_parked();
+                std::thread::sleep(RUN_POLL);
+            }
+        }
+        frame(&mut app, &mut presenter);
+    }
+
     let scene = frame(&mut app, &mut presenter);
 
     let (pixels, width, height) = render_scene_to_rgba(&scene, WINDOW_SIZE, &font_db)
@@ -1137,6 +1215,50 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
 
     println!("wrote {} ({width}x{height})", path.display());
     Ok(())
+}
+
+/// How long a `--action` is given for whatever it asked the host for.
+///
+/// A snapshot is a still picture and this is the whole of the waiting in it.
+/// Long enough for two things rather than one: the request the action raised,
+/// which is answered off the pool in microseconds, and the *next turn of the
+/// plugin's own poll* — because what a chip draws is usually what it last
+/// asked for, and a plugin that refreshes every couple of seconds has nothing
+/// new to say for a couple of seconds. A plugin that asked for something over
+/// the network is still drawn mid-request, which is a picture of a plugin
+/// waiting and a perfectly good thing to look at.
+const ACTION_TIMEOUT: Duration = Duration::from_millis(2_500);
+
+/// Runs one action by name, or says why it could not.
+///
+/// By name because that is what an action *is*: the command line has no idea
+/// which plugins are installed, and a plugin's own name for its own action is
+/// the whole of the addressing this tier has.
+fn run_named_action(app: &mut App, workspace: &ViewHandle<Workspace>, given: &str) {
+    // A name, and then whatever the caller wants the action to be told —
+    // separated by a space, which no action name may hold. That second half is
+    // what a picker's row or a menu's entry says when a person presses it, and
+    // an action that takes one cannot be looked at without it.
+    let (name, argument) = given.split_once(char::is_whitespace).unwrap_or((given, ""));
+    let Ok(action) = crook_plugin::ActionName::parse(name.trim()) else {
+        log::warn!("{name:?} is not the name of an action");
+        return;
+    };
+    let argument = argument.trim().to_owned();
+    app.update(|ctx| {
+        workspace.update(ctx, |workspace, ctx| {
+            workspace.host().say(argument.clone());
+            match workspace.host().action(&action) {
+                Some(id) => workspace.run_action(id, ctx),
+                None => log::warn!("nothing here answers to {action}"),
+            }
+            // Whatever it did, the window has to be drawn again to show it. An
+            // action run from a chord arrives with a keystroke and a frame
+            // behind it; this one arrives from the command line and has
+            // neither.
+            ctx.notify();
+        });
+    });
 }
 
 /// Opens the shells and reports the pane the command line is aimed at.

@@ -32,7 +32,13 @@ use crookui_core::prelude::*;
 
 use crook_plugin_api::{Gap, Node, Size, Tone};
 
+use std::rc::Rc;
+
+use crate::clipboard::Clipboard;
 use crate::plugin::ActionId;
+use crate::workspace::Fonts;
+
+use super::picker::{self, Chrome};
 use crate::theme::theme;
 use crate::workspace::WorkspaceAction;
 
@@ -163,26 +169,80 @@ impl Hovers {
     }
 }
 
+/// Where a panel hangs off the thing it belongs to.
+///
+/// The host's decision and not the plugin's, for the reason the panel's ground
+/// and width are: a plugin naming a direction would be a plugin whose panel
+/// opens off the bottom of the window when somebody drops its chip somewhere
+/// it was not written for. What decides is the *slot* — a chip in the header
+/// has the window under it and a chip beside a prompt has the window above it
+/// — and the slot is something the contribution knows and the node does not.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(super) enum Placement {
+    /// Under it, right edges aligned: the header.
+    Below,
+    /// Over it, left edges aligned: a pane's own chips, which are at the foot
+    /// of the window with nothing under them.
+    Above,
+}
+
+impl Placement {
+    /// Where that puts a panel.
+    fn anchor(self) -> AnchorTo {
+        let (parent, child, offset) = match self {
+            Self::Below => (Corner::BottomRight, Corner::TopRight, PANEL_OFFSET),
+            Self::Above => (Corner::TopLeft, Corner::BottomLeft, -PANEL_OFFSET),
+        };
+        AnchorTo {
+            parent,
+            child,
+            offset: vec2f(0., offset),
+            keep_on_screen: true,
+            keep_clear_of_parent: false,
+        }
+    }
+}
+
+/// Everything a node is built against.
+///
+/// One value rather than six arguments, because two of the six arrived with
+/// [`Node::Picker`] and a seventh is one refactor away: what a translation of
+/// a closed vocabulary needs is a place to put the things that are true of the
+/// whole tree.
+pub(super) struct Surroundings<'a> {
+    /// The families this contribution draws in.
+    pub(super) fonts: Fonts,
+    /// Where a panel hangs.
+    pub(super) placement: Placement,
+    /// Resolves one of the plugin's action names to something the window can
+    /// dispatch.
+    pub(super) action: &'a dyn Fn(&str) -> Option<ActionId>,
+    /// What remembers which of this contribution's controls the pointer is
+    /// over.
+    pub(super) hovers: &'a Hovers,
+    /// What the host is holding on this plugin's behalf: the picker's field
+    /// and selection, the menu that is up, the argument of the next action.
+    pub(super) chrome: &'a Rc<Chrome>,
+    /// What a field pastes from.
+    pub(super) clipboard: &'a Clipboard,
+}
+
 /// Builds the element a node describes.
 ///
-/// `action` resolves one of the plugin's action names to something the window
-/// can dispatch; a button whose action answers to nothing is drawn inert
-/// rather than left out, because a control that vanishes is harder to explain
-/// than one that does not respond. Every other node that names an action —
-/// [`Node::Pressable`], [`Node::Anchored`] — follows the same rule.
-pub(super) fn element(
-    node: &Node,
-    ui: FamilyId,
-    action: &dyn Fn(&str) -> Option<ActionId>,
-    hovers: &Hovers,
-) -> Box<dyn Element> {
-    hovers.rewind();
+/// `Surroundings::action` resolves one of the plugin's action names to
+/// something the window can dispatch; a button whose action answers to nothing
+/// is drawn inert rather than left out, because a control that vanishes is
+/// harder to explain than one that does not respond. Every other node that
+/// names an action — [`Node::Pressable`], [`Node::Anchored`], [`Node::Picker`],
+/// [`Node::Menu`] — follows the same rule.
+pub(super) fn element(node: &Node, about: &Surroundings<'_>) -> Box<dyn Element> {
+    about.hovers.rewind();
     // A contribution is measured against whatever its slot offers, and a slot
     // offers no width: `header.right` hands its entry an infinite main axis,
     // because the row it sits in has already given its surplus to a filler.
     // So a contribution starts unbounded, and the one place that changes is a
     // panel — see [`BOUNDED`].
-    element_in(node, ui, action, hovers, UNBOUNDED)
+    element_in(node, about, UNBOUNDED)
 }
 
 /// Whether the subtree being built has a width to take a share of.
@@ -197,30 +257,46 @@ pub(super) fn element(
 /// The host bounds exactly one thing, and it is the thing that needs it: a
 /// panel is [`PANEL_WIDTH`] wide because the host made it so.
 const BOUNDED: bool = true;
+/// The mark in a chip, and the gap after it.
+const CHIP_ICON: f32 = 12.;
+const CHIP_GAP: f32 = 5.;
+
+/// A chip's corner. Smaller than a badge's, which is a capsule: a chip is a
+/// box with the corners taken off, which is what every terminal that draws one
+/// does.
+const CHIP_RADIUS: f32 = 5.;
+
 /// See [`BOUNDED`].
 const UNBOUNDED: bool = false;
 
 /// Builds the element a node describes, knowing whether it has room to divide.
-fn element_in(
-    node: &Node,
-    ui: FamilyId,
-    action: &dyn Fn(&str) -> Option<ActionId>,
-    hovers: &Hovers,
-    bounded: bool,
-) -> Box<dyn Element> {
+fn element_in(node: &Node, about: &Surroundings<'_>, bounded: bool) -> Box<dyn Element> {
+    // Unpacked once so that every arm below reads the way it did when these
+    // were arguments: what changed is how they arrive, not what they are.
+    let Surroundings {
+        fonts,
+        action,
+        hovers,
+        chrome,
+        clipboard,
+        ..
+    } = about;
+    let ui = fonts.ui;
+
     match node {
         Node::Empty => Empty::new().finish(),
         Node::Text { text, size, tone } => Text::new(text.clone(), ui, points(*size))
             .with_color(colour(*tone))
             .finish(),
         Node::Badge { text, tone } => badge(text, *tone, ui),
+        Node::Chip { icon, text, tone } => chip(icon, text, *tone, ui),
         Node::Icon { name, tone } => icon(name, *tone),
         Node::Row(children) => {
             let mut row = Flex::row()
                 .with_main_axis_size(main_axis_size(children, bounded))
                 .with_cross_axis_alignment(CrossAxisAlignment::Center);
             for child in children {
-                row.add_child(element_in(child, ui, action, hovers, bounded));
+                row.add_child(element_in(child, about, bounded));
             }
             row.finish()
         }
@@ -229,7 +305,7 @@ fn element_in(
                 .with_main_axis_size(main_axis_size(children, bounded))
                 .with_cross_axis_alignment(CrossAxisAlignment::Start);
             for child in children {
-                column.add_child(element_in(child, ui, action, hovers, bounded));
+                column.add_child(element_in(child, about, bounded));
             }
             column.finish()
         }
@@ -254,7 +330,7 @@ fn element_in(
             content,
             action: name,
         } => pressable(
-            element_in(content, ui, action, hovers, bounded),
+            element_in(content, about, bounded),
             action(name),
             hovers.take(),
         ),
@@ -262,14 +338,24 @@ fn element_in(
             content,
             panel,
             dismiss,
-        } => anchored(
-            content,
-            panel.as_deref(),
-            action(dismiss),
+        } => anchored(content, panel.as_deref(), action(dismiss), about, bounded),
+        // A picker is a column of rows in a field's width, so it wants a
+        // bounded axis for the reason a meter does — and it gets one wherever
+        // it is meant to be, which is inside a panel.
+        Node::Picker {
+            placeholder,
+            rows,
+            choose,
+        } if bounded => {
+            picker::picker(chrome, placeholder, rows, action(choose), *fonts, clipboard)
+        }
+        Node::Picker { .. } => unbounded_share(),
+        Node::Menu { content, items } => picker::menued(
+            element_in(content, about, bounded),
+            items,
+            chrome,
+            *action,
             ui,
-            action,
-            hovers,
-            bounded,
         ),
     }
 }
@@ -529,12 +615,16 @@ fn anchored(
     content: &Node,
     panel: Option<&Node>,
     dismiss: Option<ActionId>,
-    ui: FamilyId,
-    action: &dyn Fn(&str) -> Option<ActionId>,
-    hovers: &Hovers,
+    about: &Surroundings<'_>,
     bounded: bool,
 ) -> Box<dyn Element> {
-    let content = element_in(content, ui, action, hovers, bounded);
+    // Told before the panel is built, because what is *in* the panel may be a
+    // picker, and the Escape that takes a picker down is the Escape that takes
+    // this panel down: the host holds the keyboard, and the plugin holds the
+    // fact that the panel is open.
+    about.chrome.hangs_off(dismiss);
+
+    let content = element_in(content, about, bounded);
     let Some(panel) = panel else {
         return content;
     };
@@ -542,7 +632,7 @@ fn anchored(
     let mut stack = Stack::new().with_child(content);
     stack.add_anchored_overlay_child(
         // The panel, and only the panel, has a width: the host gave it one.
-        Dismiss::new(chrome(element_in(panel, ui, action, hovers, BOUNDED)))
+        Dismiss::new(chrome(element_in(panel, about, BOUNDED)))
             .modal()
             .on_dismiss(move |ctx, _| {
                 // A dismissal that answers to nothing takes nothing down: the
@@ -554,13 +644,7 @@ fn anchored(
                 }
             })
             .finish(),
-        AnchorTo {
-            parent: Corner::BottomRight,
-            child: Corner::TopRight,
-            offset: vec2f(0., PANEL_OFFSET),
-            keep_on_screen: true,
-            keep_clear_of_parent: false,
-        },
+        about.placement.anchor(),
     );
     stack.finish()
 }
@@ -694,8 +778,51 @@ fn rule() -> Box<dyn Element> {
     .finish()
 }
 
+/// A mark and a word in a quiet pill.
+///
+/// The ground and the hairline are the theme's rather than the tone's, which
+/// is the whole difference from a [`badge`]: this says where you are, and a
+/// row of filled pills across the foot of a pane is a status bar nobody reads.
+fn chip(icon: &str, text: &str, tone: Tone, ui: FamilyId) -> Box<dyn Element> {
+    let mut row = Flex::row()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center);
+    if let Some(mark) = mark(icon, tone, CHIP_ICON) {
+        row.add_child(Container::new(mark).with_margin_right(CHIP_GAP).finish());
+    }
+    row.add_child(
+        Text::new(text.to_owned(), ui, SMALL)
+            .with_color(colour(tone))
+            .finish(),
+    );
+
+    Container::new(row.finish())
+        .with_background_color(theme().surface_raised)
+        .with_border(Border::all(1.).with_border_color(theme().overlay_2))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CHIP_RADIUS)))
+        .with_padding(Padding {
+            top: 3.,
+            bottom: 3.,
+            left: 7.,
+            right: 8.,
+        })
+        .finish()
+}
+
+/// A mark for a row of a picker, or nothing at all when it named none.
+///
+/// The same two vocabularies [`icon`] looks in, at a size the caller chooses:
+/// a row's mark is smaller than a chip's, and a plugin names neither.
+pub(super) fn mark(name: &str, tone: Tone, size: f32) -> Option<Box<dyn Element>> {
+    if name.is_empty() {
+        return None;
+    }
+    let icon = Lucide::named(name)?;
+    Some(Icon::new(icon, size).with_color(colour(tone)).finish())
+}
+
 /// What a tone is, in the theme in force.
-fn colour(tone: Tone) -> Color {
+pub(super) fn colour(tone: Tone) -> Color {
     match tone {
         Tone::Primary => theme().text_primary,
         Tone::Muted => theme().text_muted,

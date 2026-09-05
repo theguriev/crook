@@ -25,6 +25,7 @@ mod about;
 mod appearance;
 pub mod header;
 mod palette;
+pub mod pane;
 mod plugins_page;
 pub mod settings;
 mod shell;
@@ -39,6 +40,7 @@ pub fn defaults() -> Vec<Box<dyn Plugin>> {
     vec![
         Box::new(window::Window),
         Box::new(header::Header),
+        Box::new(pane::PaneSlots),
         Box::new(settings::Settings),
         // The rail's order is these four, and it is the `order` each of them
         // asks for rather than this list — a plugin that adds a page cannot

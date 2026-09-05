@@ -49,6 +49,10 @@ ICONS = [
     ("Search", "search", "The settings page's search box, in the rail."),
     ("Settings", "settings", "The mark on a settings row, and on the button that shows one."),
     ("X", "x", "Close: a tab, a panel row, the Themes panel."),
+    ("Folder", "folder", "A directory: the chip that says where a pane is, and the rows under it."),
+    ("CornerLeftUp", "corner-left-up", "The way out of a directory, in a picker that walks one."),
+    ("Keyboard", "keyboard", "A chord: what one key would do, on the chip that says so."),
+    ("Diff", "diff", "How much has changed in a working tree, on the chip that counts it."),
 ]
 
 SVG_NS = "{http://www.w3.org/2000/svg}"

@@ -165,6 +165,69 @@ description of something that was never built.
     reads the file alone and can be behind. That is a real regression on one platform, and it
     is the price of the chip being something a stranger could have written.
 
+- **ABI 3 — a plugin that can *do* something: done.** (Not a phase of its own: the phases
+  below are the plan's, and the store is still the one numbered three.) Version 2 could
+  describe a chip and read a file, which is a plugin that reports. Everything below is what it took for one to
+  **act**, and every line of it was demanded by a real plugin — the chips at
+  [github.com/theguriev/crook-chips](https://github.com/theguriev/crook-chips), which draws the
+  row under the line you are typing and is the second thing in this document that lives outside
+  the binary.
+
+  - **A place that is not the header.** `pane.chips` is a `List` slot declared by `crook/pane`
+    and drawn by `workspace::body` in two places: under the line being composed, and — when a
+    program has taken the screen and there is no line — floating over the pane's bottom corner.
+    Which of the two a contribution lands in is not something it is told. It is drawn for the
+    **focused** pane only, which is the same pane `ReadWorkingDirectory` is about.
+  - **A contribution knows which of its own it is.** `crook_render` takes the entry as well as
+    the slot, because a plugin may put four things in one list slot and a render told only the
+    slot would have to draw all four in each of them.
+  - **An action may be told what it is about.** `crook_run` takes an argument, and `Host::voice`
+    is the same thing for a native one: an action is a name with no parameters, so what a
+    *thing* — this row, that command — is said into a place the handler takes it from. One
+    press, one thing said. The Keyboard Shortcuts page's Change buttons use it too.
+  - **Three more nodes**, and one of them changes what this tier is. `Chip` is the quiet pill a
+    fact sits in, as against `Badge`, which is a loud one for a reading. `Menu` is a secondary
+    click, drawn by the host. `Picker` is a field over a filtered list — and **the host drives
+    it**: the plugin supplies rows and is told which one was chosen, while the field, the
+    filtering, the arrows, Enter and Escape stay on Crook's side. That is not a convenience. It
+    is what lets a sandboxed plugin have a search box *without ever being handed a keystroke*,
+    and what keeps the per-keystroke work off a call into a guest on the thread that draws.
+  - **Six more requests**: `Where` (the focused pane's directory, branch and line counts),
+    `List` (the names in one directory, never a tree and never a byte of content),
+    `Repository` (a head and its branches, read by Crook's own git so a plugin need not be
+    handed a repository), `Commands` (what Crook can be asked to do and the chords that reach
+    it), `Type` (a line into the shell) and `Run` (one of Crook's own commands).
+  - **Four more capabilities**, each a list rather than a flag for the reason the network is:
+    `ListDirectories` names roots and grants *names* rather than contents, which is a weaker
+    thing to ask for than `ReadFiles` and is what a directory picker actually needs;
+    `TypeCommands` names exact templates with one `{}` in each — the shape of the command is
+    the person's and only the hole is the plugin's, and the host fills and **quotes** it, so a
+    branch called `; rm -rf ~` stays a branch name; `RunCommands` names exact commands; and
+    `ReadCommands` is the command list and its chords.
+  - **A request that changes something happens only because somebody pressed something.** The
+    four calls that can raise one are a build, a tick, a delivery and an action, and `Type` and
+    `Run` are taken from the last of those alone. It is not a refusal — nothing about the grant
+    failed — so it comes back as `Answer::Failed` saying exactly that.
+  - **Panels come down when the attention moves.** `Host::claim_panel` is `claim_surface` plus
+    that rule: a palette floats over the whole window and may go on owning its keys after a tab
+    switch, and a panel hung under a chip in a pane is drawn by that pane and may not.
+  - **Something only the host can do, done by the host.** "Change keybinding" is a menu entry
+    in a plugin and a *command in `crook/shortcuts`*: recording a chord means taking the whole
+    keyboard and writing somebody's file, and neither is a thing this tier will ever be given.
+    So the plugin asks for `crook/shortcuts/rebind` by name — one line in its manifest — and
+    Crook puts up the recorder. The page that used to say "read-only, unlike VSCode's" now has
+    a Change button on every row, which is the same flow with a different caller.
+  - **Two flags on the headless snapshot**, because a tier whose worked examples can only be
+    seen by launching a window is a tier nobody can screenshot: `--with-plugins` loads the
+    machine's installed plugins and their grants, and `--action <name [argument]>` runs a named
+    action before the picture is taken, which is how a plugin's own panel gets photographed.
+
+  **What it cost.** ABI 2 modules are refused by number, which is the mechanism working
+  rather than failing: `crook_render` and `crook_run` both changed shape, and a host that
+  guessed which one a module meant would be a host that decodes a shape meaning something
+  else. The plugins in the store are rebuilt against the new vocabulary — the API crate is
+  vendored into each of them, so "rebuilt" is a copy of one directory and a `cargo build`.
+
 ## 0. What was asked for, and what it means
 
 Four requirements, in the owner's words: plugins that ship in the box; a store like an app
@@ -404,11 +467,13 @@ also settles what "change practically everything" means for a stranger's plugin:
 §3, every event, every query, every command — but never the scene. The way to make more of
 the application changeable is to add slots and queries, not to widen the vocabulary.
 
-**As built, that tree is fourteen `Node` variants**, and the list above is close but is not
+**As built, that tree is seventeen `Node` variants**, and the list above is close but is not
 what landed: `Empty`, `Text`, `Badge`, `Icon`, `Row`, `Column`, `Gap`, `Button`, `Meter`,
-`Rule`, `Fill`, `Note`, `Pressable`, `Anchored`. There is no field and no switch, because
-nothing has needed one yet and a variant nobody uses is a variant that has to keep working for
-ever. Two of them are a *share of an axis* rather than a size — `Fill`, which takes whatever is
+`Rule`, `Fill`, `Note`, `Pressable`, `Anchored`, and — with ABI 3 — `Chip`, `Picker` and
+`Menu`. There is still no switch, and there is no *field* either: `Picker` carries one, and it
+is the host's rather than the plugin's, so what is typed into it never crosses the wire. A
+variant nobody uses is a variant that has to keep working for ever, which is why the three
+that arrived arrived with a plugin that needed them. Two of them are a *share of an axis* rather than a size — `Fill`, which takes whatever is
 left of a row, and `Meter`, which is a fraction of a bar the host decides the length of — and
 an axis nobody bounded cannot be shared. A contribution starts unbounded, because a slot offers
 no width: `header.right` hands its entry an infinite main axis, the row it sits in having
@@ -429,9 +494,12 @@ patterns), `fs` (paths), `clipboard`, `notify`, `tabs`, `settings.read`, `settin
 session budget). A plugin with no capabilities can contribute UI and react to lifecycle events
 and nothing else — which is most plugins.
 
-Seven are built, and they are the ones the first real plugin needed or could be given
+Eleven are built, and they are the ones the two real plugins needed or could be given
 honestly: `ReadSettings`, `ReadTabs`, `ReadWorkingDirectory`, `Clipboard`, `Storage`,
-`Network` as a list of hosts and `ReadFiles` as a list of exact paths. The last two are lists
+`Network` as a list of hosts, `ReadFiles` as a list of exact paths, and the four ABI 3 added —
+`ListDirectories` (roots, and names rather than contents), `TypeCommands` (exact command
+templates, with the host filling and quoting the hole), `RunCommands` (exact command names)
+and `ReadCommands`. The last two are lists
 rather than flags for the same reason: "this plugin talks to the internet" and "this plugin
 reads your files" are not things anybody can meaningfully agree to, and "api.anthropic.com" and
 "~/.claude/.credentials.json" are. A leading `~` is the person's home directory and is the only

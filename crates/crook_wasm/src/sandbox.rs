@@ -207,19 +207,39 @@ impl Sandbox {
         }
     }
 
-    /// Asks what it wants drawn in one slot.
-    pub fn render(&mut self, slot: &str) -> Result<Node, Problem> {
-        let (pointer, length) = self.write(slot.as_bytes(), self.fuel.render)?;
-        let packed =
-            self.call::<(i32, i32), i64>(exports::RENDER, (pointer, length), self.fuel.render)?;
+    /// Asks what it wants drawn for one of its contributions.
+    ///
+    /// Both names, because a plugin may contribute several things to one list
+    /// slot: the slot says where it is being drawn and the entry says which of
+    /// its own contributions this is.
+    pub fn render(&mut self, slot: &str, entry: &str) -> Result<Node, Problem> {
+        let (slot_at, slot_len) = self.write(slot.as_bytes(), self.fuel.render)?;
+        let (entry_at, entry_len) = self.write(entry.as_bytes(), self.fuel.render)?;
+        let packed = self.call::<(i32, i32, i32, i32), i64>(
+            exports::RENDER,
+            (slot_at, slot_len, entry_at, entry_len),
+            self.fuel.render,
+        )?;
         let bytes = self.read(packed)?;
         crook_plugin_api::from_bytes(&bytes).map_err(|why| Problem::Answer(why.to_string()))
     }
 
-    /// Runs one of its actions, by the name it registered.
-    pub fn run(&mut self, action: &str) -> Result<(), Problem> {
-        let (pointer, length) = self.write(action.as_bytes(), self.fuel.run)?;
-        match self.call::<(i32, i32), i32>(exports::RUN, (pointer, length), self.fuel.run)? {
+    /// Runs one of its actions, by the name it registered, with whatever the
+    /// thing that was pressed had to say.
+    ///
+    /// The argument is a string and is empty for every action reached by a
+    /// chord, by the palette or by another plugin. Both strings are written
+    /// through the guest's own allocator and both are charged to this call's
+    /// budget, so an action carrying a long argument is an action with less
+    /// fuel left rather than one the host paid for.
+    pub fn run(&mut self, action: &str, argument: &str) -> Result<(), Problem> {
+        let (name, name_len) = self.write(action.as_bytes(), self.fuel.run)?;
+        let (argument, argument_len) = self.write(argument.as_bytes(), self.fuel.run)?;
+        match self.call::<(i32, i32, i32, i32), i32>(
+            exports::RUN,
+            (name, name_len, argument, argument_len),
+            self.fuel.run,
+        )? {
             0 => Ok(()),
             other => Err(Problem::Ran(format!("the action answered {other}"))),
         }

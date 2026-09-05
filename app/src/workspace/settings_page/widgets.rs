@@ -40,6 +40,7 @@ use crookui_core::fonts::{FamilyId, Properties, Weight};
 use crookui_core::prelude::*;
 
 use super::search::{Query, Words};
+use crate::plugin::Voice;
 use crate::theme::theme;
 
 use super::super::action::WorkspaceAction;
@@ -112,6 +113,18 @@ pub(crate) struct Entry {
 }
 
 impl Entry {
+    /// The same entry, with what its right-hand side says written down where
+    /// the page's search can find it.
+    ///
+    /// [`fact`] fills this in itself, because a fact *is* its value. A row
+    /// built out of [`row`] carries a control rather than a string and cannot
+    /// know — unless the control is a string and a button, which is what a
+    /// keybinding is.
+    pub(crate) fn saying(mut self, value: impl Into<String>) -> Self {
+        self.value = Some(value.into());
+        self
+    }
+
     /// An entry nothing can search for.
     fn unsearchable(element: Box<dyn Element>) -> Self {
         Self {
@@ -518,6 +531,22 @@ pub(crate) fn text_button(
     state: MouseStateHandle,
     ui: FamilyId,
 ) -> Box<dyn Element> {
+    text_button_about(label, None, command, state, ui)
+}
+
+/// The same, with something to say to the action it runs.
+///
+/// An action takes no argument, so a button that stands for one *thing* — this
+/// command, that theme — leaves the thing behind for the handler to take. See
+/// [`Host::voice`](crate::plugin::Host::voice). `about` is the voice and what
+/// to say into it; `None` is an ordinary button.
+pub(crate) fn text_button_about(
+    label: &'static str,
+    about: Option<(Voice, String)>,
+    command: Command,
+    state: MouseStateHandle,
+    ui: FamilyId,
+) -> Box<dyn Element> {
     let enabled = command.is_some();
 
     let control = Hoverable::new(state, move |mouse| {
@@ -550,7 +579,7 @@ pub(crate) fn text_button(
         .finish()
     });
 
-    with_command(control, command)
+    with_command_about(control, about, command)
 }
 
 /// A stepper: a minus, the value, and a plus.
@@ -757,9 +786,28 @@ fn paragraph(text: &str, ui: FamilyId) -> Box<dyn Element> {
 /// all, so a press falls through to the page under it and nothing has to
 /// remember to check an `enabled` flag a second time.
 fn with_command(control: Hoverable, command: Command) -> Box<dyn Element> {
+    with_command_about(control, None, command)
+}
+
+/// The same, saying something to the action first.
+///
+/// Said before the dispatch and taken when the action runs, which is safe for
+/// the reason [`Host::say`](crate::plugin::Host::say) gives: an action is
+/// applied after the whole tree has seen the event, so one press says one
+/// thing.
+fn with_command_about(
+    control: Hoverable,
+    about: Option<(Voice, String)>,
+    command: Command,
+) -> Box<dyn Element> {
     match command {
         Some(action) => control
-            .on_click(move |_, ctx, _| ctx.dispatch_typed_action(action))
+            .on_click(move |_, ctx, _| {
+                if let Some((voice, what)) = about.as_ref() {
+                    voice.say(what.clone());
+                }
+                ctx.dispatch_typed_action(action);
+            })
             .finish(),
         None => control.finish(),
     }

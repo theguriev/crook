@@ -111,11 +111,11 @@ const WELL_BEHAVED: &str = r#"
         (global.get $action_at) (global.get $action_len)
         (global.get $title_at) (global.get $title_len))
       (i32.const 0))
-    (func (export "crook_render") (param i32 i32) (result i64)
+    (func (export "crook_render") (param i32 i32 i32 i32) (result i64)
       (i64.or
         (i64.shl (i64.extend_i32_u (global.get $tree_at)) (i64.const 32))
         (i64.extend_i32_u (global.get $tree_len))))
-    (func (export "crook_run") (param $name i32) (param $len i32) (result i32)
+    (func (export "crook_run") (param $name i32) (param $len i32) (param $arg i32) (param $arg_len i32) (result i32)
       ;; Answers with the first byte of the name it was handed, which is how
       ;; these tests see that the host wrote the string where the guest's own
       ;; allocator said to put it.
@@ -274,8 +274,8 @@ fn a_build_that_gives_up_registers_nothing() {
             (global.get $entry_at) (global.get $entry_len)
             (i32.const 0))
           (i32.const 1))
-        (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
-        (func (export "crook_run") (param i32 i32) (result i32) (i32.const 0))
+        (func (export "crook_render") (param i32 i32 i32 i32) (result i64) (i64.const 0))
+        (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
         "#,
     );
     let (mut sandbox, _) = open(&module(&body, ABI_VERSION)).expect("it should open");
@@ -302,8 +302,8 @@ fn a_build_that_traps_registers_nothing_either() {
             (global.get $entry_at) (global.get $entry_len)
             (i32.const 0))
           unreachable)
-        (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
-        (func (export "crook_run") (param i32 i32) (result i32) (i32.const 0))
+        (func (export "crook_render") (param i32 i32 i32 i32) (result i64) (i64.const 0))
+        (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
         "#,
     );
     let (mut sandbox, _) = open(&module(&body, ABI_VERSION)).expect("it should open");
@@ -320,8 +320,8 @@ fn a_plugin_that_never_stops_runs_out_of_fuel() {
     let body = with_strings(
         r#"
         (func (export "crook_build") (result i32) (loop br 0) (i32.const 0))
-        (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
-        (func (export "crook_run") (param i32 i32) (result i32) (i32.const 0))
+        (func (export "crook_render") (param i32 i32 i32 i32) (result i64) (i64.const 0))
+        (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
         "#,
     );
     // A small budget on purpose. What is being tested is that a loop is
@@ -348,7 +348,9 @@ fn a_render_comes_back_as_a_tree() {
     sandbox.build().expect("it should build");
 
     assert_eq!(
-        sandbox.render("header.right").expect("it should render"),
+        sandbox
+            .render("header.right", "chip")
+            .expect("it should render"),
         tree()
     );
 }
@@ -362,7 +364,9 @@ fn the_host_writes_a_string_where_the_guest_asked_for_it() {
     let (mut sandbox, _) = open(&well_behaved()).expect("it should open");
     sandbox.build().expect("it should build");
 
-    let problem = sandbox.run("Ping").expect_err("this module always answers");
+    let problem = sandbox
+        .run("Ping", "")
+        .expect_err("this module always answers");
 
     assert_eq!(
         problem,
@@ -378,15 +382,15 @@ fn an_answer_that_points_outside_its_own_memory_is_refused() {
     let body = with_strings(
         r#"
         (func (export "crook_build") (result i32) (i32.const 0))
-        (func (export "crook_render") (param i32 i32) (result i64)
+        (func (export "crook_render") (param i32 i32 i32 i32) (result i64)
           (i64.or (i64.shl (i64.const 4294901760) (i64.const 32)) (i64.const 64)))
-        (func (export "crook_run") (param i32 i32) (result i32) (i32.const 0))
+        (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
         "#,
     );
     let (mut sandbox, _) = open(&module(&body, ABI_VERSION)).expect("it should open");
 
     let problem = sandbox
-        .render("header.right")
+        .render("header.right", "chip")
         .expect_err("it should be refused");
 
     assert!(matches!(problem, Problem::Answer(_)), "{problem:?}");
@@ -399,15 +403,15 @@ fn an_answer_longer_than_any_answer_could_be_is_refused_before_it_is_allocated()
     let body = with_strings(
         r#"
         (func (export "crook_build") (result i32) (i32.const 0))
-        (func (export "crook_render") (param i32 i32) (result i64)
+        (func (export "crook_render") (param i32 i32 i32 i32) (result i64)
           (i64.or (i64.shl (i64.const 16) (i64.const 32)) (i64.const 4294967295)))
-        (func (export "crook_run") (param i32 i32) (result i32) (i32.const 0))
+        (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
         "#,
     );
     let (mut sandbox, _) = open(&module(&body, ABI_VERSION)).expect("it should open");
 
     let problem = sandbox
-        .render("header.right")
+        .render("header.right", "chip")
         .expect_err("it should be refused");
 
     assert!(matches!(problem, Problem::Answer(_)), "{problem:?}");
@@ -421,18 +425,18 @@ fn an_answer_that_is_not_what_it_should_be_is_refused() {
     let body = with_strings(
         r#"
         (func (export "crook_build") (result i32) (i32.const 0))
-        (func (export "crook_render") (param i32 i32) (result i64)
+        (func (export "crook_render") (param i32 i32 i32 i32) (result i64)
           ;; The manifest, offered where a tree was asked for.
           (i64.or
             (i64.shl (i64.extend_i32_u (global.get $manifest_at)) (i64.const 32))
             (i64.extend_i32_u (global.get $manifest_len))))
-        (func (export "crook_run") (param i32 i32) (result i32) (i32.const 0))
+        (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
         "#,
     );
     let (mut sandbox, _) = open(&module(&body, ABI_VERSION)).expect("it should open");
 
     let problem = sandbox
-        .render("header.right")
+        .render("header.right", "chip")
         .expect_err("it should be refused");
 
     assert!(matches!(problem, Problem::Answer(_)), "{problem:?}");
@@ -448,7 +452,9 @@ fn each_call_gets_its_own_budget() {
 
     for _ in 0..100 {
         assert_eq!(
-            sandbox.render("header.right").expect("it should render"),
+            sandbox
+                .render("header.right", "chip")
+                .expect("it should render"),
             tree()
         );
     }
@@ -477,8 +483,8 @@ fn a_plugin_may_do_real_work_without_taking_the_host_stack_with_it() {
             (local.set $i (i32.add (local.get $i) (i32.const 1)))
             (br_if $again (i32.lt_s (local.get $i) (i32.const 3000000))))
           (i32.const 0))
-        (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
-        (func (export "crook_run") (param i32 i32) (result i32) (i32.const 0))
+        (func (export "crook_render") (param i32 i32 i32 i32) (result i64) (i64.const 0))
+        (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
         "#,
     );
     let (mut sandbox, _) = open(&module(&body, ABI_VERSION)).expect("it should open");
@@ -498,11 +504,11 @@ const ASKING: &str = r#"
       (global.set $last (call $request (global.get $ask_at) (global.get $ask_len)))
       (drop (call $timer (i32.const 60000)))
       (i32.const 0))
-    (func (export "crook_render") (param i32 i32) (result i64)
+    (func (export "crook_render") (param i32 i32 i32 i32) (result i64)
       (i64.or
         (i64.shl (i64.extend_i32_u (global.get $tree_at)) (i64.const 32))
         (i64.extend_i32_u (global.get $tree_len))))
-    (func (export "crook_run") (param i32 i32) (result i32) (i32.const 0))
+    (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
     (func (export "crook_deliver") (param $ticket i32) (param $at i32) (param $len i32)
       (result i32)
       ;; The ticket it was given and the first byte of what it was given, in
@@ -529,7 +535,7 @@ const GREEDY: &str = r#"
           (local.set $count (i32.add (local.get $count) (i32.const 1)))
           (br $again)))
       (i32.const 0))
-    (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
+    (func (export "crook_render") (param i32 i32 i32 i32) (result i64) (i64.const 0))
 "#;
 
 /// A plugin that hands the request import something that is not a request.
@@ -537,7 +543,7 @@ const BABBLING: &str = r#"
     (func (export "crook_build") (result i32)
       (drop (call $request (global.get $slot_at) (global.get $slot_len)))
       (i32.const 0))
-    (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
+    (func (export "crook_render") (param i32 i32 i32 i32) (result i64) (i64.const 0))
 "#;
 
 /// A plugin that only wants to know what time it is.
@@ -549,7 +555,7 @@ const CLOCK_WATCHING: &str = r#"
       (drop (call $timer
         (i32.wrap_i64 (i64.div_u (call $now) (i64.const 1000000000)))))
       (i32.const 0))
-    (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
+    (func (export "crook_render") (param i32 i32 i32 i32) (result i64) (i64.const 0))
 "#;
 
 /// The request every asking module holds, ready encoded.

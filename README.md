@@ -71,6 +71,18 @@ Eight features, and the page that configures them:
   token budget is spent and when it resets. To do that it asks to read one file,
   `~/.claude/.credentials.json`, and to reach one host, `api.anthropic.com`. It can reach
   nothing else, and until somebody says yes it reaches neither.
+
+  **The second worked example is the chips**, and it is the one that proves a plugin may
+  *act*. It lives at [github.com/theguriev/crook-chips](https://github.com/theguriev/crook-chips)
+  and draws the row under the line you are typing: where the pane is, which branch it is on,
+  how much has changed, and what one chord would do. Pressing the first opens a directory
+  picker; pressing the second opens a branch picker; choosing a row in either **types the
+  command into your shell** — `cd …` or `git switch …`, quoted by the host, and only ever
+  those two, because those two strings are what it asked to be allowed. The third chip runs
+  the command it names, and its secondary click offers to change the chord — which opens
+  Crook's own recorder, not the plugin's. The field, the filtering, the arrow keys, Enter and
+  Escape all belong to Crook: the plugin says what can be chosen and is told which row a
+  person chose, so a chip with a search box in it is never handed a keystroke.
 - **A shell in every pane.** A real pseudo-terminal and a real xterm-compatible emulator:
   colour, bold and italic faces, underline and strikeout, the alternate screen, ten thousand
   lines of scrollback, `SIGWINCH` on resize, and titles and working directories the shell
@@ -220,7 +232,11 @@ Eight features, and the page that configures them:
   `ctrl-c` interrupts and `ctrl-d` ends an input, and a binding that could take one of those
   away would be one that breaks a terminal. The **Keyboard Shortcuts** page lists every
   command, the chord that reaches it and where that chord came from — none of it written down
-  by hand.
+  by hand. Every row has a **Change** button: it takes the whole keyboard, records the next
+  chord, and appends two lines to your own file — a removal of that command's chords and the
+  new one — so a file you keep comments in comes back with its comments. The same thing is
+  reachable by name, as `crook/shortcuts/rebind`, which is how a plugin's own chip can offer
+  "change this keybinding" without being able to write a file itself.
 
 Everything else is out of scope on purpose. There is no telemetry, and OSC 8 hyperlinks are
 not read — though a URL a program *printed* is clickable, because the scan that finds one

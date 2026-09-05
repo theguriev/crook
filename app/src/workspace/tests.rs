@@ -10346,6 +10346,30 @@ mod sandboxed {
     }
 
     #[test]
+    fn a_chip_a_plugin_pins_to_a_pane_is_drawn_with_the_pane_it_is_about() {
+        // The other place a plugin may put a chip, and the one that is not the
+        // header: `pane.chips` is drawn by the pane the keyboard is in —
+        // beside the line being composed while there is one, and over the
+        // pane's own corner while a program has the screen. This starts a real
+        // shell, because a pane with nothing running in it draws neither.
+        let scratch = Scratch::new("pane-chips");
+        install(scratch.path(), "probe", &wasm("eugen/probe", "pane.chips", 10));
+        let mut harness = harness(&scratch);
+        if !harness.start_terminals() {
+            return;
+        }
+        harness.frame();
+
+        let text = frame_text(&harness.frame());
+
+        assert!(text.contains("from a sandbox"), "{text}");
+        assert!(
+            icons_of(&harness.frame()).contains(&Lucide::GitBranch),
+            "the icon it asked for was not drawn"
+        );
+    }
+
+    #[test]
     fn a_sandboxed_plugin_is_on_the_plugins_page_beside_the_ones_in_the_box() {
         let scratch = Scratch::new("listed");
         install(

@@ -122,10 +122,26 @@ pub mod exports {
     /// registers by calling the imports above.
     pub const BUILD: &str = "crook_build";
 
-    /// `crook_render(slot_ptr, slot_len) -> i64`, packed like the manifest.
+    /// `crook_render(slot_ptr, slot_len, entry_ptr, entry_len) -> i64`, packed
+    /// like the manifest.
+    ///
+    /// The entry as well as the slot, because a plugin may contribute more
+    /// than one thing to a list slot and a render told only which slot it was
+    /// in would have to draw all of them in each of them. It is the name the
+    /// plugin chose in its own `contribute` call, so it needs no table to know
+    /// what it means.
     pub const RENDER: &str = "crook_render";
 
-    /// `crook_run(name_ptr, name_len) -> i32`, zero for "done".
+    /// `crook_run(name_ptr, name_len, arg_ptr, arg_len) -> i32`, zero for
+    /// "done".
+    ///
+    /// The argument is what the thing that was pressed had to say: the key of
+    /// the row a person chose out of a
+    /// [`Picker`](crook_plugin_api::Node::Picker), what they typed into it,
+    /// the entry of a [`Menu`](crook_plugin_api::Node::Menu). Empty for every
+    /// other way an action is reached — a chord, the palette, another plugin —
+    /// which is most of them, and is why it is an argument the guest may
+    /// ignore rather than a second export.
     pub const RUN: &str = "crook_run";
 
     /// `crook_deliver(ticket, ptr, len) -> i32`, zero for "taken", carrying the

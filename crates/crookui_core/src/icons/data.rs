@@ -216,6 +216,74 @@ pub(super) static X: &[Segment] = &[
     Line(18.0, 18.0),
 ];
 
+/// Lucide's `folder`.
+pub(super) static FOLDER: &[Segment] = &[
+    Move(20.0, 20.0),
+    Cubic(21.0972, 20.0, 22.0, 19.0972, 22.0, 18.0),
+    Line(22.0, 8.0),
+    Cubic(22.0, 6.9028, 21.0972, 6.0, 20.0, 6.0),
+    Line(12.1, 6.0),
+    Cubic(11.421, 6.0067, 10.7834, 5.6671, 10.41, 5.1),
+    Line(9.6, 3.9),
+    Cubic(9.2304, 3.3388, 8.6019, 3.0001, 7.93, 3.0),
+    Line(4.0, 3.0),
+    Cubic(2.9028, 3.0, 2.0, 3.9028, 2.0, 5.0),
+    Line(2.0, 18.0),
+    Cubic(2.0, 19.0972, 2.9028, 20.0, 4.0, 20.0),
+    Close,
+];
+
+/// Lucide's `corner-left-up`.
+pub(super) static CORNER_LEFT_UP: &[Segment] = &[
+    Move(14.0, 9.0),
+    Line(9.0, 4.0),
+    Line(4.0, 9.0),
+    Move(20.0, 20.0),
+    Line(13.0, 20.0),
+    Cubic(10.8057, 20.0, 9.0, 18.1943, 9.0, 16.0),
+    Line(9.0, 4.0),
+];
+
+/// Lucide's `keyboard`.
+pub(super) static KEYBOARD: &[Segment] = &[
+    Move(10.0, 8.0),
+    Line(10.01, 8.0),
+    Move(12.0, 12.0),
+    Line(12.01, 12.0),
+    Move(14.0, 8.0),
+    Line(14.01, 8.0),
+    Move(16.0, 12.0),
+    Line(16.01, 12.0),
+    Move(18.0, 8.0),
+    Line(18.01, 8.0),
+    Move(6.0, 8.0),
+    Line(6.01, 8.0),
+    Move(7.0, 16.0),
+    Line(17.0, 16.0),
+    Move(8.0, 12.0),
+    Line(8.01, 12.0),
+    Move(4.0, 4.0),
+    Line(20.0, 4.0),
+    Cubic(21.1046, 4.0, 22.0, 4.8954, 22.0, 6.0),
+    Line(22.0, 18.0),
+    Cubic(22.0, 19.1046, 21.1046, 20.0, 20.0, 20.0),
+    Line(4.0, 20.0),
+    Cubic(2.8954, 20.0, 2.0, 19.1046, 2.0, 18.0),
+    Line(2.0, 6.0),
+    Cubic(2.0, 4.8954, 2.8954, 4.0, 4.0, 4.0),
+    Close,
+];
+
+/// Lucide's `diff`.
+pub(super) static DIFF: &[Segment] = &[
+    Move(12.0, 3.0),
+    Line(12.0, 17.0),
+    Move(5.0, 10.0),
+    Line(19.0, 10.0),
+    Move(5.0, 21.0),
+    Line(19.0, 21.0),
+];
+
 /// Every icon, its Lucide name, and its geometry.
 ///
 /// One table rather than three `match`es, because the three answers are
@@ -234,10 +302,14 @@ pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [
     (Lucide::Search, "search", SEARCH),
     (Lucide::Settings, "settings", SETTINGS),
     (Lucide::X, "x", X),
+    (Lucide::Folder, "folder", FOLDER),
+    (Lucide::CornerLeftUp, "corner-left-up", CORNER_LEFT_UP),
+    (Lucide::Keyboard, "keyboard", KEYBOARD),
+    (Lucide::Diff, "diff", DIFF),
 ];
 
 /// How many there are.
-pub const ICONS: usize = 13;
+pub const ICONS: usize = 17;
 
 /// The icons Crook draws, from Lucide.
 ///
@@ -297,4 +369,20 @@ pub enum Lucide {
     ///
     /// Lucide's [`x`](https://lucide.dev/icons/x).
     X,
+    /// A directory: the chip that says where a pane is, and the rows under it.
+    ///
+    /// Lucide's [`folder`](https://lucide.dev/icons/folder).
+    Folder,
+    /// The way out of a directory, in a picker that walks one.
+    ///
+    /// Lucide's [`corner-left-up`](https://lucide.dev/icons/corner-left-up).
+    CornerLeftUp,
+    /// A chord: what one key would do, on the chip that says so.
+    ///
+    /// Lucide's [`keyboard`](https://lucide.dev/icons/keyboard).
+    Keyboard,
+    /// How much has changed in a working tree, on the chip that counts it.
+    ///
+    /// Lucide's [`diff`](https://lucide.dev/icons/diff).
+    Diff,
 }

@@ -1068,8 +1068,14 @@ impl Workspace {
     /// tidiness: a modal underlay covers only the layers painted *before* it,
     /// so the second one's popup would float above the first one's underlay
     /// while the first one's underlay swallowed the press meant to dismiss it.
+    ///
+    /// **A plugin's surface counts as one.** It is the same statement about
+    /// the same thing — something is up over the window and the keyboard
+    /// belongs to it — and leaving it out is how a picker with a field in it
+    /// ends up sharing the letters somebody types with the program on the
+    /// alternate screen underneath.
     pub(super) fn a_popup_is_open(&self) -> bool {
-        self.menu.open || self.tab_menu.is_open()
+        self.menu.open || self.tab_menu.is_open() || self.host.a_surface_is_up()
     }
 
     /// The Themes panel's state.
@@ -3204,6 +3210,47 @@ impl Workspace {
             .facts(session.working_directory.as_deref()?)
     }
 
+    /// Where the focused pane is and what git says about it, for a plugin
+    /// that was allowed to ask.
+    ///
+    /// The *focused* pane, which is the one a chip beside the prompt is about
+    /// and the one `Capability::ReadWorkingDirectory` names. Both halves are
+    /// map lookups — the directory is what the shell last reported with OSC 7
+    /// and the facts are what the background gather left behind — so this is
+    /// as cheap to answer as it is to draw.
+    pub(crate) fn focused_facts(&self, app: &AppContext) -> (Option<PathBuf>, Option<GitFacts>) {
+        let Some(tab) = self.tabs.active() else {
+            return (None, None);
+        };
+        let Some(pane) = tab.panes().focused() else {
+            return (None, None);
+        };
+        let directory = pane.session().working_directory.clone();
+        let facts = self.git_facts(pane.session(), app).cloned();
+        (directory, facts)
+    }
+
+    /// Types a line into the focused pane's shell and runs it.
+    ///
+    /// Exactly what pressing Enter on a composed line does — the same
+    /// [`TerminalModel::submit`](crate::terminal_model::TerminalHandle::submit)
+    /// — because it has to be: `cd` belongs to the shell, and a line that took
+    /// any other route would be a line the shell's own aliases, hooks and
+    /// history never saw.
+    ///
+    /// Answers whether it reached a pty. A pane with no shell in it is a
+    /// `false` rather than a panic, which is the state a pane whose shell has
+    /// exited is in.
+    pub(crate) fn type_into_focused_pane(&self, line: &str, app: &AppContext) -> bool {
+        let Some(pane) = self.tabs.focused_pane_id() else {
+            return false;
+        };
+        let Some((handle, _)) = self.terminal(pane, app) else {
+            return false;
+        };
+        handle.submit(line)
+    }
+
     /// The tab `offset` slots away from the active one, wrapping at both ends.
     fn neighbour(&self, offset: isize) -> Option<TabId> {
         let count = self.tabs.len() as isize;
@@ -4135,11 +4182,22 @@ impl TypedActionView for Workspace {
                 if self.panel_drag.carrying().is_none() {
                     self.stop_searching();
                 }
+                // And anything a plugin hung off a place in the interface. A
+                // panel under a chip in a pane is drawn by that pane; asking
+                // the strip for anything is the gesture that can stop it being
+                // drawn, and a panel nobody can see must not still own the
+                // keyboard. See `Host::claim_panel`.
+                if self.host.take_panels_down() {
+                    self.sync_input_keys();
+                }
                 if self.apply(action, ctx) == TabEffect::CloseWindow {
                     (self.quit)();
                 }
             }
             WorkspaceAction::ShowSection(section) => {
+                if self.host.take_panels_down() {
+                    self.sync_input_keys();
+                }
                 if section
                     .is_some_and(|id| self.host.sidebar_section_key(id) == Some(SETTINGS_SECTION))
                 {
