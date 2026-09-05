@@ -42,7 +42,7 @@ use crate::settings::{Density, Granularity, TabOptions};
 use crate::tab::{AgentStatus, PaneId, TabAction, TabId};
 use crate::theme::theme;
 
-use super::super::action::{WorkspaceAction, WorktreeAction};
+use super::super::action::{TabMenuAction, WorkspaceAction};
 use super::super::row_content::{
     Chips, DetailSection, PANEL_PATH_CHARS, RowFacts, detail_card, detail_panes, metadata_line,
 };
@@ -123,11 +123,13 @@ pub(super) fn render(
     let status = pane_data.status();
     let home = workspace.home();
 
-    // What the row's own right press does, and whether the menu it opens is
-    // up. About the tab rather than about the row that draws it.
-    let is_the_tabs_row = tab_data.panes().focused_id() == pane;
-    let menu_is_open = is_the_tabs_row && workspace.tab_menu().tab == Some(tab);
-    let opens_menu = is_the_tabs_row && git.is_some_and(|facts| facts.branch.is_some());
+    // Whether the menu this row's right press opens is up, and up on *this*
+    // row. Every row opens one — it used to be the focused pane's row alone,
+    // because the menu was about the tab and only that row stood for it, and
+    // the menu is now about the row: half its entries name the pane the row
+    // draws. A row with nothing to say is no longer possible either, so
+    // nothing here decides whether the gesture works.
+    let menu_is_open = workspace.tab_context_menu().pane == Some(pane);
 
     // A conjunction, and that is the whole of what `Panes` granularity is for:
     // the active tab's container is lifted while only its focused pane's row
@@ -200,13 +202,10 @@ pub(super) fn render(
     .on_middle_click(move |_, ctx, _| {
         ctx.dispatch_typed_action(WorkspaceAction::Tab(close_action));
     })
-    // The secondary button opens the menu. See the strip's own row, which is
-    // the same rule.
+    // The secondary button opens the menu, which is what the secondary button
+    // does on a row in every desktop there is.
     .on_right_click(move |_, ctx, _| {
-        if !opens_menu {
-            return;
-        }
-        ctx.dispatch_typed_action(WorkspaceAction::Worktree(WorktreeAction::OpenMenu(tab)));
+        ctx.dispatch_typed_action(super::super::tab_context_menu::open(tab, pane));
     })
     .on_hover(move |entered, _, ctx, _| {
         ctx.dispatch_typed_action(WorkspaceAction::HoverRow { pane, entered });
@@ -219,10 +218,10 @@ pub(super) fn render(
         // that right-aligns the list's own options menu in this column.
         let mut stack = Stack::new().with_child(element);
         stack.add_anchored_overlay_child(
-            Dismiss::new(super::super::tab_menu::render(workspace))
+            Dismiss::new(super::super::tab_context_menu::render(workspace, app))
                 .modal()
                 .on_dismiss(|ctx, _| {
-                    ctx.dispatch_typed_action(WorkspaceAction::Worktree(WorktreeAction::CloseMenu));
+                    ctx.dispatch_typed_action(WorkspaceAction::TabMenu(TabMenuAction::Close));
                 })
                 .finish(),
             AnchorTo::below(vec2f(0., 4.)),

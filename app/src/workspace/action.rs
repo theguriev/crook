@@ -27,7 +27,9 @@ pub enum WorkspaceAction {
     Theme(ThemeAction),
     /// The header was used as what it is: the window's title bar.
     Window(WindowAction),
-    /// Something happened in the menu a tab opens, which is about worktrees.
+    /// Something happened to the context menu a tab's secondary press opens.
+    TabMenu(TabMenuAction),
+    /// Something happened in the worktree menu, which is one entry of that one.
     Worktree(WorktreeAction),
     /// The pointer entered a row, or left it.
     ///
@@ -143,6 +145,37 @@ pub enum WindowAction {
 impl From<WindowAction> for WorkspaceAction {
     fn from(action: WindowAction) -> Self {
         Self::Window(action)
+    }
+}
+
+/// What the context menu a tab's secondary press opens does.
+///
+/// Two, and there is deliberately nothing else in here. Every *entry* of that
+/// menu is a named action belonging to whichever plugin contributed it, which
+/// is what stops this enum growing an arm every time somebody adds a row — the
+/// arrangement `WorkspaceAction::Run` exists for. What is left is the menu
+/// itself: it is up, or it is not.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TabMenuAction {
+    /// Open it on this tab, over this row. A secondary press on a row.
+    ///
+    /// The pane as well as the tab, because a row under `Panes` granularity
+    /// stands for a pane and half the entries are about that pane rather than
+    /// about its tab. Pressing on the row whose menu is already up closes it,
+    /// which is what anything opened by being pressed does.
+    Open {
+        /// The tab the row belongs to.
+        tab: TabId,
+        /// The pane the row draws.
+        pane: PaneId,
+    },
+    /// Take it down, and any submenu with it. What a press outside it sends.
+    Close,
+}
+
+impl From<TabMenuAction> for WorkspaceAction {
+    fn from(action: TabMenuAction) -> Self {
+        Self::TabMenu(action)
     }
 }
 

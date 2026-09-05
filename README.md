@@ -178,9 +178,16 @@ Eight features, and the page that configures them:
   of the one you are looking at — five candidate colours clustered out of its palette, one
   click to choose the background, and everything else decided so the result is legible. What
   it writes is a file in your themes folder, in the same format as any other.
-- **Git worktrees, one click away.** Right-click a tab and, if it is inside a
-  repository, its menu lists that repository's checkouts: the one this tab is in, the ones
-  other tabs are in, and the rest. Choosing one opens a tab there — or brings forward the tab
+- **A tab's own menu.** Right-click any row and it opens over that row: new group with tab,
+  copy pane title, copy working directory, close tab, and — inside a repository — the
+  worktrees below. Not one of those entries is written into the menu. It is a
+  [slot](docs/plugins.md), `tab.menu.entries`, and every row in it is a contribution: they
+  come from two plugins today, each entry is also a named command the palette lists and a
+  chord can reach, and a plugin outside the binary puts a row there the same way. Escape is
+  one step back — out of the submenu, then out of the menu.
+- **Git worktrees, one entry away.** Open that menu on a tab inside a
+  repository and `Worktrees` lists that repository's checkouts: the one this tab is in, the
+  ones other tabs are in, and the rest. Choosing one opens a tab there — or brings forward the tab
   already in it, because two agents editing one checkout is exactly what a worktree exists to
   prevent. `New worktree…` asks for a branch name, fills one in that nothing is using, shows
   where the checkout will go, and opens a tab in it — folded into a group with the tab that

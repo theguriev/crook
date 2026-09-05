@@ -33,6 +33,7 @@ mod pane_output;
 mod row_content;
 pub(crate) mod section;
 pub(crate) mod settings_page;
+pub(crate) mod tab_context_menu;
 mod tab_menu;
 mod tab_options_menu;
 mod tabs_panel;
@@ -51,8 +52,8 @@ use crookui_core::icons::Lucide;
 use crate::theme::theme;
 
 pub use action::{
-    OptionsAction, SearchAction, SettingsAction, ThemeAction, WindowAction, WorkspaceAction,
-    WorktreeAction,
+    OptionsAction, SearchAction, SettingsAction, TabMenuAction, ThemeAction, WindowAction,
+    WorkspaceAction, WorktreeAction,
 };
 pub use block_list::BlockList;
 pub use input_element::CommandInput;
