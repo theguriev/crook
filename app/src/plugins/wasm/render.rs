@@ -400,19 +400,23 @@ fn chomp_named(name: &str) -> Option<Chomp> {
 /// has one colour, so the yellow head and the black on it are drawn one over
 /// the other. Neither is meaningful alone.
 ///
-/// [`Tone::Muted`] greys **both** of them, and every other tone leaves the
-/// artwork the colours it was drawn in. That is the one thing a plugin gets to
-/// say about a mark, and it is the rule the native chip already followed: a
-/// reading that failed to refresh greys the percentage, and a picture that
-/// stayed bright beside a greyed-out number would be the loudest thing in the
-/// row saying the reading is current. A half-grey pirate — the face muted and
-/// the eyepatch still black — would read as a rendering fault rather than as a
-/// stale figure, which is why the tone reaches the ink as well.
+/// [`Tone::Muted`] greys the **face** and leaves the ink alone; every other
+/// tone leaves both the colours they were drawn in. That is the one thing a
+/// plugin gets to say about a mark, and greying the face is what says a
+/// reading is stale — a picture that stayed bright beside a greyed-out number
+/// would be the loudest thing in the row insisting it is current.
+///
+/// The ink stays dark, and the reason is what a two-layer mask is. The ink is
+/// the eyepatch, the strap and the grin, drawn *on* the face; painting both in
+/// one colour does not produce a grey pirate, it produces a plain disc with
+/// nothing on it, because there is nothing left to tell the layers apart. That
+/// shipped, and what it looked like on somebody's screen was a grey circle.
 fn pirate(chomp: Chomp, tone: Tone) -> Box<dyn Element> {
-    let (face, ink) = match tone {
-        Tone::Muted => (theme().text_muted, theme().text_muted),
-        _ => (PIRATE_FACE, PIRATE_INK),
+    let face = match tone {
+        Tone::Muted => theme().text_muted,
+        _ => PIRATE_FACE,
     };
+    let ink = PIRATE_INK;
 
     Stack::new()
         .with_child(

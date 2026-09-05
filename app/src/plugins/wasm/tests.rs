@@ -579,19 +579,21 @@ fn a_name_this_build_has_no_icon_for_draws_nothing() {
 }
 
 #[test]
-fn a_stale_reading_greys_the_whole_mark_and_not_half_of_it() {
+fn a_stale_reading_greys_the_face_and_leaves_the_face_a_face() {
     // `Muted` is what a plugin says when the figure beside the mark is not
-    // current. Both layers take it: a yellow face wearing a grey eyepatch
-    // would read as a rendering fault rather than as a stale reading.
+    // current, and greying the face is what says it. The ink — the eyepatch,
+    // the strap, the grin — stays dark, because it is drawn *on* the face:
+    // painting both in one colour does not make a grey pirate, it makes a
+    // plain disc with nothing on it. That shipped once, and what it looked
+    // like on somebody's screen was a grey circle.
     let mut stale = Frame::new(Node::Icon {
         name: "pirate".to_owned(),
         tone: Tone::Muted,
     });
 
-    assert_eq!(
-        mark_colors(&stale.scene()),
-        [theme().text_muted, theme().text_muted]
-    );
+    let colors = mark_colors(&stale.scene());
+    assert_eq!(colors, [theme().text_muted, Color::hex(0x151515)]);
+    assert_ne!(colors[0], colors[1], "the mark came out as one flat shape");
 
     // Every other tone leaves the artwork the colours it was drawn in, which
     // is the whole reason a mark is not an icon: a pirate that took the
