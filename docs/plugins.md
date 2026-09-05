@@ -481,19 +481,24 @@ also settles what "change practically everything" means for a stranger's plugin:
 §3, every event, every query, every command — but never the scene. The way to make more of
 the application changeable is to add slots and queries, not to widen the vocabulary.
 
-**As built, that tree is fourteen `Node` variants**, and the list above is close but is not
-what landed: `Empty`, `Text`, `Badge`, `Icon`, `Row`, `Column`, `Gap`, `Button`, `Meter`,
-`Rule`, `Fill`, `Note`, `Pressable`, `Anchored`. There is no field and no switch, because
+**As built, that tree is fifteen `Node` variants**, and the list above is close but is not what
+landed: `Empty`, `Text`, `Badge`, `Icon`, `Row`, `Column`, `Gap`, `Button`, `Meter`, `Rule`,
+`Fill`, `Note`, `Pressable`, `Anchored`, `Explained`. There is no field and no switch, because
 nothing has needed one yet and a variant nobody uses is a variant that has to keep working for
-ever. Two of them are a *share of an axis* rather than a size — `Fill`, which takes whatever is
-left of a row, and `Meter`, which is a fraction of a bar the host decides the length of — and
-an axis nobody bounded cannot be shared. A contribution starts unbounded, because a slot offers
-no width: `header.right` hands its entry an infinite main axis, the row it sits in having
-already given its surplus away. The one thing the host bounds is a panel, which it made a fixed
-width itself. So **a `Fill` or a `Meter` outside a panel draws nothing**, and says so once in
-the log for whoever wrote the plugin. The alternative is what `Flex` does when it is asked to
-divide infinity, which is to assert in a debug build and lay out something degenerate in a
-release one, and a plugin from a store does not get to do either to somebody's window.
+ever. The last two are the two ways something can be hung off a contribution, and they differ
+by who owns the fact that it is up: an `Anchored` panel is the plugin's state and needs an
+action to learn it was dismissed, while an `Explained` note is up exactly while the pointer is
+on the thing — so the host shows it without asking, and a plugin that has stopped answering
+cannot leave one on screen. Two of them are a *share of an axis* rather than a size — `Fill`,
+which takes whatever is left of a row, and `Meter`, which is a fraction of a bar the host
+decides the length of — and an axis nobody bounded cannot be shared. A contribution starts
+unbounded, because a slot offers no width: `header.right` hands its entry an infinite main
+axis, the row it sits in having already given its surplus away. The one thing the host bounds
+is a panel, which it made a fixed width itself. So **a `Fill` or a `Meter` outside a panel
+draws nothing**, and says so once in the log for whoever wrote the plugin. The alternative is
+what `Flex` does when it is asked to divide infinity, which is to assert in a debug build and
+lay out something degenerate in a release one, and a plugin from a store does not get to do
+either to somebody's window.
 
 **Capabilities.** Declared in the manifest, granted per plugin-and-version at install in a
 host-drawn dialog, stored in `settings.json`, re-prompted on escalation, enforced at the host

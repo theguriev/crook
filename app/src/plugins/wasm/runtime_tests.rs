@@ -531,3 +531,20 @@ fn a_week_of_this_machine_is_counted_where_it_is_read() {
     // And the walk is one a person waits through once, not one they notice.
     assert!(took < std::time::Duration::from_secs(20), "{took:?}");
 }
+
+#[test]
+fn a_sound_is_refused_to_a_plugin_nobody_has_answered_for() {
+    // The whole of the dead Play button, in one line. The press lands, the
+    // guest runs, it asks for its sound — and the asking stops here, because
+    // nobody ever answered the question its card is still asking.
+    let refusal = allowed(
+        &[],
+        &Request::PlaySound {
+            wav: Vec::new(),
+            volume: 70,
+        },
+    )
+    .expect_err("an ungranted plugin should be refused its sound");
+
+    assert_eq!(refusal, "Play a sound");
+}

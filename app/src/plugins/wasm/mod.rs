@@ -312,6 +312,19 @@ impl Plugin for WasmPlugin {
                         return;
                     }
                 }
+                // The guest may have changed what it draws, and nothing out
+                // here can tell whether it did: its state is inside the
+                // module and what came back is a `()`. So every action asks
+                // for the frame that will find out.
+                //
+                // Not belt and braces, because a press only *appears* to
+                // redraw on its own — what notifies is the hover bookkeeping
+                // under it, on the way past. An action that arrives without
+                // one did not redraw at all, and `Node::Anchored`'s dismissal
+                // is exactly that: the guest shut its panel, the frame went on
+                // drawing it, and its modal underlay then ate every press
+                // aimed at the controls beside it.
+                ctx.notify();
                 // Whatever pressing it made the plugin ask for. An action is
                 // one of the four calls that reach a context, which is what
                 // makes "the button refreshes the reading" work at all.

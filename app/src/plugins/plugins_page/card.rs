@@ -34,7 +34,8 @@ use crate::workspace::settings_page::{named, widgets};
 use crate::workspace::{Workspace, WorkspaceAction};
 
 use super::{
-    HOLDS_THE_PAGE, PLUGIN_CARD, Stance, action, covered, stance, tier_words, wanted,
+    HOLDS_THE_PAGE, PLUGIN_CARD, Stance, action, covered, elsewhere, only_by_name, stalled, stance,
+    tier_words, wanted,
 };
 
 /// The corner of the box a control sits in.
@@ -83,7 +84,12 @@ pub(super) fn render(
     // What the plugin says about itself right now, if it says anything. Above
     // the sections that merely describe it, because "Microwave, ringing" is
     // the line somebody opened this card to read and the rest is reference.
-    if let Some(status) = status(workspace, app, &manifest.id) {
+    //
+    // Kept, rather than only added, because whether the plugin drew its own
+    // controls is also what decides how the list at the foot is drawn.
+    let drawn = status(workspace, app, manifest, ui);
+    let drew_its_own = drawn.is_some();
+    if let Some(status) = drawn {
         column.add_child(status);
     }
 
@@ -126,46 +132,56 @@ pub(super) fn render(
 
     let (commands, unoffered) = offers(workspace, &manifest.id);
     if !commands.is_empty() || unoffered > 0 {
-        // A row with a button rather than a line of text. What this section
-        // used to be was nine action names a person could read and not reach:
-        // the only way to run one was the command palette, which the card
-        // never mentions. A command that is listed where it cannot be run is a
-        // command most people will never find.
-        let mut rows: Vec<widgets::Entry> = commands
-            .into_iter()
-            .map(|offered| {
-                let live = offered.command.is_some();
-                let control = widgets::text_button(
-                    "Run",
-                    offered.command,
-                    workspace
-                        .settings_page()
-                        .control(named(&format!("plugins.run.{}", offered.name))),
-                    ui,
-                );
-                widgets::row(
-                    Words::new(offered.title)
-                        .with_description(&offered.name)
-                        .with_keywords(&[&offered.name]),
-                    live,
-                    control,
-                    ui,
-                )
-            })
-            .collect();
-        if unoffered > 0 {
-            // Counted rather than listed. A plugin's own arrow keys are
-            // actions and not commands, and a page whose longest section is
-            // somebody's internal wiring is a page nobody reads. The Keyboard
-            // Shortcuts page lists every one of them.
-            rows.push(widgets::note(
-                &format!(
-                    "and {unoffered} more it does not offer, reachable by name \u{2014} the \
-                     Keyboard Shortcuts page lists them."
-                ),
-                ui,
-            ));
-        }
+        // A plugin that drew its own controls has already said what it can be
+        // asked to do, in the shape it chose to be asked in — so a column of
+        // Run buttons under it is the same commands a second time, in the
+        // shape the card invented, and on the card of a plugin whose whole
+        // surface is one row it is much the longest section on the page.
+        //
+        // Counted rather than hidden. A plugin that draws a chip has not
+        // thereby promised that the chip reaches everything it can do, and a
+        // card that answered "what can it be asked to do" with silence would
+        // be worse than one that answers at length. What the count keeps is
+        // the two facts a list of names is actually read for: how many there
+        // are, and where to go for them.
+        let rows: Vec<widgets::Entry> = if drew_its_own {
+            vec![widgets::note(&elsewhere(commands.len(), unoffered), ui)]
+        } else {
+            // A row with a button rather than a line of text. What this
+            // section used to be was nine action names a person could read and
+            // not reach: the only way to run one was the command palette,
+            // which the card never mentions. A command that is listed where it
+            // cannot be run is a command most people will never find.
+            let mut rows: Vec<widgets::Entry> = commands
+                .into_iter()
+                .map(|offered| {
+                    let live = offered.command.is_some();
+                    let control = widgets::text_button(
+                        "Run",
+                        offered.command,
+                        workspace
+                            .settings_page()
+                            .control(named(&format!("plugins.run.{}", offered.name))),
+                        ui,
+                    );
+                    widgets::row(
+                        Words::new(offered.title)
+                            .with_description(&offered.name)
+                            .with_keywords(&[&offered.name]),
+                        live,
+                        control,
+                        ui,
+                    )
+                })
+                .collect();
+            if unoffered > 0 {
+                // Counted rather than listed. A plugin's own arrow keys are
+                // actions and not commands, and a page whose longest section
+                // is somebody's internal wiring is a page nobody reads.
+                rows.push(widgets::note(&only_by_name(unoffered), ui));
+            }
+            rows
+        };
         column.add_child(section("What it can be asked to do", rows, ui));
     }
 
@@ -476,17 +492,38 @@ fn drawn_in<C: 'static>(slots: &Slots<C>, plugin: &PluginId) -> Vec<String> {
 /// Only its own: the slot is a list every plugin may put one entry on, and a
 /// card that drew the whole list would put every plugin's state on every one
 /// of their pages.
-fn status(workspace: &Workspace, app: &AppContext, plugin: &PluginId) -> Option<Box<dyn Element>> {
+fn status(
+    workspace: &Workspace,
+    app: &AppContext,
+    manifest: &Manifest,
+    ui: FamilyId,
+) -> Option<Box<dyn Element>> {
     let host = workspace.host();
     let slots = host.slots();
     let index = slots
         .contributors(PLUGIN_CARD)
         .into_iter()
-        .position(|(owner, _)| &owner == plugin)?;
+        .position(|(owner, _)| owner == manifest.id)?;
     let drawn = slots.at(PLUGIN_CARD, index, |build| build(workspace, app))?;
 
+    // Inside the box rather than under it, because what it is about is the
+    // controls in the box. A line of prose floating between two blocks belongs
+    // to whichever one the reader guesses.
+    let body = match stalled(
+        manifest,
+        workspace.settings().granted_to(manifest.id.as_str()),
+    ) {
+        None => drawn,
+        Some(why) => Flex::column()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_child(drawn)
+            .with_child(widgets::note(why, ui).element)
+            .finish(),
+    };
+
     Some(
-        Container::new(drawn)
+        Container::new(body)
             .with_padding(CONTROL_PADDING)
             .with_background_color(theme().overlay_1)
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CONTROL_RADIUS)))

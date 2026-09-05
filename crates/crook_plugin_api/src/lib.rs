@@ -521,6 +521,28 @@ pub enum Node {
         /// The action a dismissal runs, without the plugin's own prefix.
         dismiss: String,
     },
+    /// Something with a note that appears while the pointer is on it.
+    ///
+    /// The other half of [`Anchored`], and the difference is state. A panel is
+    /// up because the plugin says so and shut because a click somewhere else
+    /// told it; a note is up exactly while the pointer is on the thing, which
+    /// is not a fact anybody has to remember. So this names no action in
+    /// either direction: the host never asks whether to show it and never says
+    /// that it did, and a plugin that has stopped answering cannot leave one
+    /// on screen.
+    ///
+    /// Which is also why the note is described on every frame rather than
+    /// fetched on the one the pointer arrives. A note whose words arrived only
+    /// then would be a call into the guest at pointer speed, on the thread
+    /// that draws, to say something the plugin already knew.
+    ///
+    /// [`Anchored`]: Self::Anchored
+    Explained {
+        /// What is drawn.
+        content: Box<Node>,
+        /// What appears above it while the pointer is on it.
+        explanation: Box<Node>,
+    },
 }
 
 /// Something a plugin asks the host to do on its behalf.
