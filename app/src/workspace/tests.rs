@@ -25,6 +25,8 @@ use crookui_core::scene::{CornerRadius, Radius, Rect, Scene};
 use crookui_core::text_layout::{Glyph, Line, Run};
 use crookui_core::{App, Presenter, WindowId};
 
+use crook_plugin::ActionName;
+
 use crate::Channel;
 use crate::git::{DiffStats, GitFacts, Head};
 use crate::platform_insets::{ControlLayout, WindowChrome};
@@ -39,8 +41,8 @@ use crate::theme::theme;
 use crate::window_controls::{Recorder, Request, WindowState};
 
 use super::{
-    Fonts, Opening, OptionsAction, QuitRequest, SettingsAction, ThemeAction, Workspace,
-    WorkspaceAction, WorktreeAction, tab_options_menu, tabs_panel,
+    Fonts, Opening, OptionsAction, QuitRequest, SettingsAction, TabMenuAction, ThemeAction,
+    Workspace, WorkspaceAction, WorktreeAction, tab_options_menu, tabs_panel,
 };
 
 /// Big enough that two tabs both reach their maximum width, so the geometry
@@ -589,6 +591,42 @@ impl Harness {
     /// What one of the worktree menu's controls dispatches.
     fn dispatch_worktree(&mut self, action: WorktreeAction) {
         self.dispatch_workspace_action(WorkspaceAction::Worktree(action));
+    }
+
+    /// Opens a tab's context menu over one of its rows, the way a secondary
+    /// press on that row does.
+    fn open_tab_menu_on(&mut self, tab: TabId, pane: PaneId) {
+        self.dispatch_workspace_action(WorkspaceAction::TabMenu(TabMenuAction::Open { tab, pane }));
+    }
+
+    /// The row that menu is up on, if it is up.
+    fn tab_menu_row(&self) -> Option<PaneId> {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.tab_context_menu().pane)
+    }
+
+    /// Runs a plugin's named action — which is what a menu entry does, and a
+    /// palette row, and a chord.
+    fn run_command(&mut self, name: &str) {
+        let action = ActionName::parse(name).expect("a literal that parses");
+        let id = self
+            .workspace
+            .read(&self.app, |workspace, _| workspace.host().action(&action))
+            .unwrap_or_else(|| panic!("nothing is registered as {name}"));
+        self.dispatch_workspace_action(WorkspaceAction::Run(id));
+    }
+
+    /// Every entry in a tab's context menu, as `owner/entry`, in drawing order.
+    fn tab_menu_entries(&self) -> Vec<String> {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace
+                .host()
+                .slots()
+                .contributors(crate::plugins::tabs::TAB_MENU_ENTRIES)
+                .into_iter()
+                .map(|(owner, entry)| format!("{owner}/{entry}"))
+                .collect()
+        })
     }
 
     /// Shows the page whose rail row says `title`, the way a click on the rail
@@ -3039,8 +3077,59 @@ fn worktree_menu_box(scene: &Scene) -> Option<RectF> {
         .next()
 }
 
+/// The popup a tab's secondary press opens, by its box.
+///
+/// Told apart from the worktree list hanging off it by its width, which is the
+/// only thing about the two columns that differs: a worktree row carries a
+/// path and needs the extra 28px, and everything else — the radius, the
+/// ground, the inset — is deliberately shared so that the pair reads as one
+/// menu.
+fn tab_menu_box(scene: &Scene) -> Option<RectF> {
+    visible_rects(scene)
+        .filter(|(rect, _)| {
+            rect.corner_radius.get_top_left() == Radius::Pixels(6.)
+                && rect.background == Fill::Solid(theme().surface_raised)
+                && (rect.bounds.width() - super::tab_context_menu::MENU_WIDTH).abs() < 0.5
+        })
+        .map(|(_, bounds)| bounds)
+        .next()
+}
+
+/// The entry of that menu whose label begins with `prefix`, by its band.
+///
+/// `worktree_row_saying`'s shape, against the other menu: the entries are the
+/// popup's only full-width bands, so one is found by the glyphs on it.
+fn tab_menu_row_saying(scene: &Scene, prefix: &str) -> RectF {
+    let menu = tab_menu_box(scene).expect("no tab menu is up");
+    let baseline = scene
+        .layers()
+        .flat_map(|layer| layer.glyphs.iter())
+        .filter(|glyph| menu.contains_point(glyph.position))
+        .map(|glyph| glyph.position.y())
+        .find(|y| {
+            text_where(scene, |position| {
+                menu.contains_point(position) && (position.y() - y).abs() < 0.5
+            })
+            .contains(prefix)
+        })
+        .unwrap_or_else(|| panic!("no entry of the menu begins with {prefix:?}"));
+
+    RectF::new(
+        vec2f(menu.min_x() + 8., baseline - 3.),
+        vec2f(menu.width() - 16., 6.),
+    )
+}
+
+/// Whether that menu is offering an entry beginning with `prefix`.
+fn tab_menu_offers(scene: &Scene, prefix: &str) -> bool {
+    let Some(menu) = tab_menu_box(scene) else {
+        return false;
+    };
+    text_where(scene, |position| menu.contains_point(position)).contains(prefix)
+}
+
 #[test]
-fn right_clicking_a_tab_opens_its_worktree_menu() {
+fn right_clicking_a_tab_opens_its_menu() {
     // The gesture, and the whole of why it is this one: it is the button a
     // context menu opens on everywhere else. The left one used to do it — on
     // the row you were already in, where the click was otherwise free — and
@@ -3049,7 +3138,7 @@ fn right_clicking_a_tab_opens_its_worktree_menu() {
     let mut harness = Harness::seeded();
     let scene = harness.frame();
     assert!(
-        worktree_menu_box(&scene).is_none(),
+        tab_menu_box(&scene).is_none(),
         "the menu was up before anything was clicked"
     );
 
@@ -3057,8 +3146,41 @@ fn right_clicking_a_tab_opens_its_worktree_menu() {
     harness.click(center(tab), MouseButton::Right);
 
     assert!(
-        worktree_menu_box(&harness.frame()).is_some(),
+        tab_menu_box(&harness.frame()).is_some(),
         "a right press on a row did not open its menu"
+    );
+}
+
+#[test]
+fn the_worktrees_entry_opens_the_list_beside_the_menu() {
+    // The submenu, through the pointer: the entry that used to *be* this
+    // gesture is now one row of what it opens. Beside rather than below,
+    // because below a menu row is the next menu row.
+    let mut harness = Harness::seeded();
+    let pane = harness.pane_ids()[0];
+    harness.record_git(pane, BRANCH, None);
+
+    let tab = tab_boxes(&harness.frame())[0];
+    harness.click(center(tab), MouseButton::Right);
+
+    let scene = harness.frame();
+    let menu = tab_menu_box(&scene).expect("the menu did not open");
+    harness.click(
+        center(tab_menu_row_saying(&scene, "Worktrees")),
+        MouseButton::Left,
+    );
+
+    let scene = harness.frame();
+    let list = worktree_menu_box(&scene).expect("the entry opened no worktree list");
+    assert!(
+        tab_menu_box(&scene).is_some(),
+        "opening the submenu took the menu it hangs off down with it"
+    );
+    assert!(
+        list.min_x() >= menu.min_x(),
+        "the list opened at {} and the menu it hangs off starts at {}",
+        list.min_x(),
+        menu.min_x()
     );
 }
 
@@ -3072,8 +3194,8 @@ fn left_clicking_the_tab_you_are_already_in_opens_nothing() {
     harness.click(center(tab), MouseButton::Left);
 
     assert!(
-        worktree_menu_box(&harness.frame()).is_none(),
-        "a left click on the active row opened the worktree menu"
+        tab_menu_box(&harness.frame()).is_none(),
+        "a left click on the active row opened its menu"
     );
 }
 
@@ -3087,25 +3209,36 @@ fn right_clicking_it_again_takes_the_menu_down() {
     harness.click(center(tab), MouseButton::Right);
 
     assert!(
-        worktree_menu_box(&harness.frame()).is_none(),
+        tab_menu_box(&harness.frame()).is_none(),
         "a second right press on the same row left the menu up"
     );
 }
 
 #[test]
-fn a_tab_outside_a_repository_opens_no_menu() {
+fn a_tab_outside_a_repository_is_offered_no_worktrees() {
     // "If it is under git, there should be worktree options" — and if it is
-    // not, the press does nothing. A menu that opened everywhere and was empty
-    // half the time would teach people not to reach for it.
+    // not, that entry is not there. This used to cost the whole gesture: the
+    // menu *was* the worktrees, so a tab outside a repository opened nothing
+    // at all. Now the rule costs exactly the row it was ever about, and the
+    // other four entries are as true of this tab as of any.
     let mut harness = Harness::new(1);
     let scene = harness.frame();
     let tab = tab_boxes(&scene)[0];
 
     harness.click(center(tab), MouseButton::Right);
 
+    let scene = harness.frame();
     assert!(
-        worktree_menu_box(&harness.frame()).is_none(),
-        "a tab with no repository behind it opened a worktree menu"
+        tab_menu_box(&scene).is_some(),
+        "a tab with no repository behind it opened no menu at all"
+    );
+    assert!(
+        !tab_menu_offers(&scene, "Worktrees"),
+        "a tab with no repository behind it was offered its worktrees"
+    );
+    assert!(
+        tab_menu_offers(&scene, "Close tab"),
+        "the entries that are about any tab went with the one that is not"
     );
 }
 
@@ -3124,7 +3257,7 @@ fn clicking_a_tab_that_is_not_the_active_one_still_just_selects_it() {
     let scene = harness.frame();
 
     assert!(
-        worktree_menu_box(&scene).is_none(),
+        tab_menu_box(&scene).is_none(),
         "clicking away from the active tab opened a menu instead of selecting"
     );
     assert_eq!(
@@ -3150,7 +3283,7 @@ fn right_clicking_a_tab_that_is_not_the_active_one_opens_its_menu() {
     harness.click(center(first), MouseButton::Right);
 
     assert!(
-        worktree_menu_box(&harness.frame()).is_some(),
+        tab_menu_box(&harness.frame()).is_some(),
         "a right press on an inactive tab opened no menu"
     );
     assert_eq!(
@@ -3196,6 +3329,11 @@ fn the_menu_reads_the_repository_the_click_landed_on() {
 
     let tab = tab_boxes(&harness.frame())[0];
     harness.click(center(tab), MouseButton::Right);
+    let scene = harness.frame();
+    harness.click(
+        center(tab_menu_row_saying(&scene, "Worktrees")),
+        MouseButton::Left,
+    );
     harness.wait_for("the repository to be read", |harness| {
         harness.worktrees_listed().is_some()
     });
@@ -3204,6 +3342,249 @@ fn the_menu_reads_the_repository_the_click_landed_on() {
         harness.worktrees_listed(),
         Some(1),
         "a fresh repository has one checkout"
+    );
+}
+
+#[test]
+fn a_tabs_menu_is_the_entries_its_plugins_put_in_it() {
+    // The shell knows no entry by name, so this list is the whole of what a
+    // tab's menu is — and it comes from two plugins rather than one, which is
+    // the fact the slot exists to make true. `crook/worktrees` is last because
+    // it asked for the band after the one "Close tab" is alone in.
+    let harness = Harness::seeded();
+
+    assert_eq!(
+        harness.tab_menu_entries(),
+        [
+            "crook/tabs/new-group-with-tab",
+            "crook/tabs/copy-pane-title",
+            "crook/tabs/copy-working-directory",
+            "crook/tabs/close-tab",
+            "crook/worktrees/menu",
+        ],
+        "the menu is not the entries its plugins contributed, in band order"
+    );
+}
+
+#[test]
+fn a_secondary_press_opens_the_menu_on_the_row_it_was_made_on() {
+    // The menu used to be about the tab and opened on the focused pane's row
+    // alone. Half its entries now name a *pane*, so which row was pressed is a
+    // fact it has to keep — and a second press on the same row closes it,
+    // which is what anything opened by being pressed does.
+    let mut harness = Harness::seeded();
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    harness.frame();
+
+    let tab = harness.active_id();
+    let panes = harness.pane_ids();
+    let (first, second) = (panes[0], panes[1]);
+
+    harness.open_tab_menu_on(tab, second);
+    assert_eq!(harness.tab_menu_row(), Some(second));
+
+    harness.open_tab_menu_on(tab, first);
+    assert_eq!(
+        harness.tab_menu_row(),
+        Some(first),
+        "pressing another row moved the menu rather than opening a second one"
+    );
+
+    harness.open_tab_menu_on(tab, first);
+    assert_eq!(
+        harness.tab_menu_row(),
+        None,
+        "pressing the row whose menu is up did not close it"
+    );
+}
+
+#[test]
+fn the_menu_is_about_the_row_it_was_opened_on_rather_than_the_focused_one() {
+    // What "Copy pane title" copies. A split leaves the second pane focused,
+    // so a menu opened on the first row that answered with the focused pane
+    // would copy the wrong one — and the test would still pass with no menu
+    // open at all, which is why the fallback is checked here too.
+    let mut harness = Harness::seeded();
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    harness.frame();
+
+    let tab = harness.active_id();
+    let first = harness.pane_ids()[0];
+    let focused = harness.focused_pane_id().expect("a split tab has a focus");
+    assert_ne!(first, focused, "the split did not move the focus");
+
+    harness.open_tab_menu_on(tab, first);
+    assert_eq!(
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.menu_target().map(|(_, pane)| pane)
+        }),
+        Some(first)
+    );
+
+    harness.dispatch_workspace_action(WorkspaceAction::TabMenu(TabMenuAction::Close));
+    assert_eq!(
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.menu_target().map(|(_, pane)| pane)
+        }),
+        Some(focused),
+        "with no menu up a command means the tab a person is looking at"
+    );
+}
+
+#[test]
+fn close_tab_closes_the_tab_its_menu_is_on() {
+    // The entry is a named action, so it is reachable from the palette and
+    // from a chord as well as from the row — and all three have to mean the
+    // same tab. A handler that closed `active_id` would be right twice and
+    // wrong on the gesture the entry actually exists for.
+    let mut harness = Harness::seeded();
+    harness.dispatch_action(TabAction::New);
+    harness.frame();
+
+    let tabs = harness.tab_ids();
+    let (first, active) = (tabs[0], harness.active_id());
+    assert_ne!(first, active, "the new tab is the active one");
+
+    let pane = harness.workspace.read(&harness.app, |workspace, _| {
+        workspace
+            .tabs()
+            .get(first)
+            .map(|tab| tab.panes().focused_id())
+            .expect("the first tab is still open")
+    });
+    harness.open_tab_menu_on(first, pane);
+    harness.run_command("crook/tabs/close-tab");
+    harness.frame();
+
+    assert_eq!(
+        harness.tab_ids(),
+        [active],
+        "the entry closed the active tab rather than the one its menu was on"
+    );
+    assert!(
+        !harness.a_popup_is_open(),
+        "the menu outlived the tab it was open on"
+    );
+}
+
+#[test]
+fn escape_takes_the_submenu_down_before_the_menu() {
+    // One key, one step back, twice — the rule the worktree menu already
+    // followed inside itself, extended over the menu that now holds it. A
+    // first press that closed both would throw away a menu a person had only
+    // wanted to back out of one level of.
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the seeded tab has a pane");
+    harness.record_git(pane, BRANCH, None);
+    harness.frame();
+
+    harness.open_tab_menu_on(tab, pane);
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    assert!(
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.tab_menu().is_open()),
+        "the submenu did not open"
+    );
+
+    assert!(harness.press_key("escape", Modifiers::default()));
+    assert_eq!(
+        harness.tab_menu_row(),
+        Some(pane),
+        "the first Escape took the menu down as well as its submenu"
+    );
+
+    assert!(harness.press_key("escape", Modifiers::default()));
+    assert_eq!(
+        harness.tab_menu_row(),
+        None,
+        "the second Escape did nothing"
+    );
+    assert!(!harness.a_popup_is_open());
+}
+
+#[test]
+fn the_worktrees_row_stays_while_its_list_is_up() {
+    // What says a tab is in a repository is a model the background pool fills
+    // in, so the frame that opens the list can be a frame that has not been
+    // told about the repository yet. An entry that vanished under its own
+    // submenu would leave a column hanging off nothing — and the row a person
+    // pressed would be the one thing missing from the menu they pressed it in.
+    // A tab with a directory and no git facts, which is exactly the state the
+    // gather chain leaves behind between asking and answering.
+    let mut harness = Harness::new(1);
+    let tab = harness.active_id();
+    let pane = harness.focused_pane_id().expect("the tab has a pane");
+    let directory = std::env::current_dir().expect("a working directory");
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(directory);
+    });
+    harness.frame();
+
+    harness.open_tab_menu_on(tab, pane);
+    assert!(
+        !tab_menu_offers(&harness.frame(), "Worktrees"),
+        "a tab nothing has said is in a repository was offered its worktrees"
+    );
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    assert!(
+        tab_menu_offers(&harness.frame(), "Worktrees"),
+        "the row the list hangs off went missing under it"
+    );
+}
+
+#[test]
+fn closing_the_menu_takes_its_submenu_with_it() {
+    // The submenu is drawn *inside* this popup rather than as one of its own,
+    // so a worktree list left standing over a menu that has gone would hang
+    // off nothing — and nothing in the window could reach it to dismiss it.
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the seeded tab has a pane");
+    harness.record_git(pane, BRANCH, None);
+    harness.frame();
+
+    harness.open_tab_menu_on(tab, pane);
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.dispatch_workspace_action(WorkspaceAction::TabMenu(TabMenuAction::Close));
+
+    assert!(
+        !harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.tab_menu().is_open()),
+        "the worktree list outlived the menu that opened it"
+    );
+    assert!(!harness.a_popup_is_open());
+}
+
+#[test]
+fn opening_a_tabs_menu_closes_the_options_menu() {
+    // Two popups are never up at once, and the reason is not tidiness: a modal
+    // underlay covers only the layers painted before it, so the second one
+    // would float above the first one's underlay while that underlay ate the
+    // press meant to dismiss it. See `a_popup_is_open`.
+    let mut harness = Harness::seeded();
+    harness.dispatch_option(OptionsAction::TogglePopup);
+    assert!(harness.a_popup_is_open(), "the options menu did not open");
+
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the seeded tab has a pane");
+    harness.open_tab_menu_on(tab, pane);
+
+    assert_eq!(harness.tab_menu_row(), Some(pane));
+    assert!(
+        !harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.menu().open),
+        "the options menu is still up behind a tab's menu"
     );
 }
 
@@ -3536,10 +3917,21 @@ fn escape_takes_the_menu_down_and_enter_removes_the_checkout() {
         "backing out of the confirmation removed the checkout anyway"
     );
 
-    // And from the list itself, one more press puts the menu away.
+    // And from the list itself, one more press puts the list away — leaving
+    // the menu it hangs off standing, because that is one step back and not
+    // two. See `escape_takes_the_submenu_down_before_the_menu`.
     assert!(
         harness.press_key("escape", Modifiers::default()),
         "escape was not claimed by the list"
+    );
+    assert_eq!(
+        harness.tab_menu_row(),
+        Some(first),
+        "escape took the menu down as well as the list inside it"
+    );
+    assert!(
+        harness.press_key("escape", Modifiers::default()),
+        "escape was not claimed by the menu the list was in"
     );
     assert!(
         !harness.a_popup_is_open(),
@@ -5233,7 +5625,7 @@ fn the_heading_closes_every_tab_in_the_group() {
 }
 
 #[test]
-fn right_clicking_a_panel_row_opens_the_worktree_menu_too() {
+fn right_clicking_a_panel_row_opens_the_menu_too() {
     // The panel and the strip answer the same gesture, because the rule is
     // about the tab rather than about how the tab is drawn.
     let mut harness = Harness::seeded_panel();
@@ -5245,7 +5637,7 @@ fn right_clicking_a_panel_row_opens_the_worktree_menu_too() {
     );
 
     assert!(
-        worktree_menu_box(&harness.frame()).is_some(),
+        tab_menu_box(&harness.frame()).is_some(),
         "a right press on a panel row opened no menu"
     );
 }
@@ -5387,7 +5779,7 @@ fn a_secondary_press_on_a_row_opens_that_row_s_menu_and_not_the_list_s() {
     );
 
     assert!(
-        worktree_menu_box(&harness.frame()).is_some(),
+        tab_menu_box(&harness.frame()).is_some(),
         "the row's own menu did not open"
     );
     assert!(

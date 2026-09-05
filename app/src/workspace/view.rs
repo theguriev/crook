@@ -54,10 +54,11 @@ use crate::window_controls::WindowHandle;
 use crate::{Channel, WINDOW_CHROME};
 
 use super::action::{
-    OptionsAction, SearchAction, SettingsAction, ThemeAction, WindowAction, WorkspaceAction,
-    WorktreeAction,
+    OptionsAction, SearchAction, SettingsAction, TabMenuAction, ThemeAction, WindowAction,
+    WorkspaceAction, WorktreeAction,
 };
 use super::settings_page::SettingsState;
+use super::tab_context_menu::TabContextMenuState;
 use super::tab_menu::{Contents, Mode as WorktreeMode, TabMenuState};
 use super::tabs_panel::drag::{Carried, PanelDrag};
 use super::tabs_panel::geometry::RowGeometry;
@@ -510,7 +511,9 @@ pub struct Workspace {
     /// `&Workspace` rather than anything captured — so the registries can be
     /// filled without a workspace to fill them from.
     host: Host,
-    /// The menu a tab opens, which is about worktrees.
+    /// The context menu a tab's secondary press opens, and what it is on.
+    tab_context_menu: TabContextMenuState,
+    /// The worktree menu, which is one entry of that one.
     tab_menu: TabMenuState,
     /// The Themes panel, which is the other surface that lists themes.
     panel: ThemePanelState,
@@ -703,6 +706,7 @@ impl Workspace {
             menu: MenuState::default(),
             page: SettingsState::default(),
             host,
+            tab_context_menu: TabContextMenuState::default(),
             tab_menu: TabMenuState::default(),
             panel: ThemePanelState::default(),
             themes: crate::theme::available(),
@@ -1040,9 +1044,83 @@ impl Workspace {
         &self.host
     }
 
-    /// The menu a tab opens, which is about worktrees.
+    /// The worktree menu, which is one entry of a tab's context menu.
     pub(super) fn tab_menu(&self) -> &TabMenuState {
         &self.tab_menu
+    }
+
+    /// The context menu a tab's secondary press opens.
+    pub(crate) fn tab_context_menu(&self) -> &TabContextMenuState {
+        &self.tab_context_menu
+    }
+
+    /// Whether the worktree list is showing inside that menu.
+    ///
+    /// Asked by the plugin whose entry opens it, for two things it cannot see
+    /// from its own side of the boundary: whether to light its row, and
+    /// whether it has a row at all. The second matters more than it looks.
+    /// That entry is drawn only inside a repository, and what says so is a
+    /// model the background pool fills in — so a frame that has the list open
+    /// and has not yet been told about the repository would draw a submenu
+    /// hanging off nothing. A row whose submenu is up is a row, whatever git
+    /// has got round to saying.
+    pub(crate) fn worktree_menu_is_open(&self) -> bool {
+        self.tab_menu.is_open()
+    }
+
+    /// What a tab's menu is about: the tab, and the pane whose row was pressed.
+    ///
+    /// With no menu up it is the active tab and its focused pane, which is
+    /// what makes one handler serve both a menu entry and the palette row that
+    /// runs the same command — see [`crate::plugins::tabs`]. `None` only where
+    /// there is no tab at all, which is a window on its way out.
+    pub(crate) fn menu_target(&self) -> Option<(TabId, PaneId)> {
+        if let (Some(tab), Some(pane)) = (self.tab_context_menu.tab, self.tab_context_menu.pane) {
+            return Some((tab, pane));
+        }
+        let tab = self.tabs.active()?;
+        Some((tab.id(), tab.panes().focused_id()))
+    }
+
+    /// What the pane that menu is about calls itself.
+    pub(crate) fn menu_pane_title(&self) -> Option<String> {
+        let (tab, pane) = self.menu_target()?;
+        let title = self.tabs.get(tab)?.panes().get(pane)?.title();
+        (!title.is_empty()).then(|| title.to_owned())
+    }
+
+    /// Where that pane's shell last said it was working.
+    pub(crate) fn menu_pane_directory(&self) -> Option<PathBuf> {
+        let (tab, pane) = self.menu_target()?;
+        self.tabs
+            .get(tab)?
+            .panes()
+            .get(pane)?
+            .session()
+            .working_directory
+            .clone()
+    }
+
+    /// Whether that pane sits in a git repository with a branch checked out.
+    ///
+    /// The question `crook/worktrees` asks to decide whether it has a row to
+    /// contribute at all. It is a map lookup on a model the background pool
+    /// fills in — see [`git_facts`](Self::git_facts) — and is asked on the
+    /// render path for that reason.
+    pub(crate) fn menu_tab_is_in_a_repository(&self, app: &AppContext) -> bool {
+        let Some((tab, pane)) = self.menu_target() else {
+            return false;
+        };
+        let Some(session) = self
+            .tabs
+            .get(tab)
+            .and_then(|tab| tab.panes().get(pane))
+            .map(Pane::session)
+        else {
+            return false;
+        };
+        self.git_facts(session, app)
+            .is_some_and(|facts| facts.branch.is_some())
     }
 
     /// Every pane in the window, with the directory it is in.
@@ -1070,7 +1148,7 @@ impl Workspace {
     /// so the second one's popup would float above the first one's underlay
     /// while the first one's underlay swallowed the press meant to dismiss it.
     pub(super) fn a_popup_is_open(&self) -> bool {
-        self.menu.open || self.tab_menu.is_open()
+        self.menu.open || self.tab_menu.is_open() || self.tab_context_menu.is_open()
     }
 
     /// The Themes panel's state.
@@ -1555,6 +1633,81 @@ impl Workspace {
         ctx.notify();
     }
 
+    /// Opening and closing the context menu a tab's secondary press opens.
+    ///
+    /// Its *entries* land nowhere near here: each is a named action belonging
+    /// to the plugin that contributed it, and reaches
+    /// [`run_action`](Self::run_action) like a palette row or a chord.
+    fn apply_tab_menu(&mut self, action: TabMenuAction, ctx: &mut ViewContext<Self>) {
+        match action {
+            TabMenuAction::Open { tab, pane } => self.open_tab_context_menu(tab, pane, ctx),
+            TabMenuAction::Close => self.close_tab_context_menu(ctx),
+        }
+    }
+
+    /// Puts the menu up on a row, taking down whatever else was up.
+    ///
+    /// Pressing again on the row whose menu is already showing closes it. In
+    /// practice the modal underlay gets that press first and dismisses on it;
+    /// this is what makes the toggle right anyway, for the keyboard and for
+    /// anything else that dispatches the action.
+    fn open_tab_context_menu(&mut self, tab: TabId, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        // A menu with nothing in it is worse than no menu: it is a popup that
+        // takes the keyboard away from the pane under it to show a person an
+        // empty box. Every entry belongs to a plugin and every plugin can be
+        // switched off on the Plugins page, so this is reachable — and the
+        // answer is the one the worktree menu already gave for a tab with
+        // nothing to say, which is that the gesture does nothing.
+        if self
+            .host
+            .slots()
+            .is_empty(crate::plugins::tabs::TAB_MENU_ENTRIES)
+        {
+            return;
+        }
+        if self.tab_context_menu.pane == Some(pane) {
+            self.close_tab_context_menu(ctx);
+            return;
+        }
+        self.show_tab_context_menu(tab, pane, ctx);
+    }
+
+    /// Puts it up without the toggle.
+    ///
+    /// What [`open_tab_menu`](Self::open_tab_menu) calls, because a submenu
+    /// implies the menu it hangs off: the worktree list is drawn *inside* this
+    /// popup, so a worktree menu asked for on its own — by the entry, by the
+    /// keyboard, or by `--worktree-menu` on the command line — would otherwise
+    /// be state nothing paints.
+    fn show_tab_context_menu(&mut self, tab: TabId, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        // Two popups are never up at once. See `a_popup_is_open`.
+        self.close_menu();
+        self.close_tab_menu(ctx);
+
+        self.tab_context_menu.tab = Some(tab);
+        self.tab_context_menu.pane = Some(pane);
+        self.tab_context_menu.forget_hover_state();
+        self.sync_input_keys();
+        ctx.notify();
+    }
+
+    /// Takes it down, and the submenu with it.
+    ///
+    /// The submenu goes because it is *inside* this popup: a worktree list
+    /// left open over a menu that is no longer there would be a column hanging
+    /// off nothing, and there is no gesture that could reach it.
+    pub(crate) fn close_tab_context_menu(&mut self, ctx: &mut ViewContext<Self>) {
+        if !self.tab_context_menu.is_open() {
+            return;
+        }
+        self.close_tab_menu(ctx);
+        self.tab_context_menu.tab = None;
+        self.tab_context_menu.pane = None;
+        self.tab_context_menu.forget_hover_state();
+        self.sync_input_keys();
+        ctx.notify();
+    }
+
     /// Everything the menu on a tab does.
     ///
     /// Every arm that asks git anything does it on the background pool and
@@ -1681,8 +1834,14 @@ impl Workspace {
             return;
         };
 
-        // Two popups are never up at once. See `a_popup_is_open`.
-        self.close_menu();
+        // A submenu is drawn inside the menu it hangs off, so opening this one
+        // opens that one — on the row the tab speaks through, which is its
+        // focused pane. Nothing happens when it is already there.
+        if self.tab_context_menu.tab != Some(tab)
+            && let Some(row) = self.tabs.get(tab).map(|tab| tab.panes().focused_id())
+        {
+            self.show_tab_context_menu(tab, row, ctx);
+        }
 
         self.tab_menu.tab = Some(tab);
         self.tab_menu.pane_directory = Some(directory.clone());
@@ -1730,6 +1889,21 @@ impl Workspace {
             ctx.notify();
         })
         .detach();
+    }
+
+    /// Opens the active tab's context menu on its focused row, for a run that
+    /// was asked to start with it up.
+    ///
+    /// No toggle and no git: the entries decide for themselves what they can
+    /// say about the tab, and the one that has to ask git is the submenu's —
+    /// see [`open_tab_menu_for_snapshot`](Self::open_tab_menu_for_snapshot),
+    /// which is the flag that wants an answer in the frame it draws.
+    pub fn open_tab_context_menu_for_snapshot(&mut self, ctx: &mut ViewContext<Self>) {
+        let tab = self.tabs.active_id();
+        let Some(row) = self.tabs.get(tab).map(|tab| tab.panes().focused_id()) else {
+            return;
+        };
+        self.show_tab_context_menu(tab, row, ctx);
     }
 
     /// Opens the menu on the active tab and reads the repository *now*, for a
@@ -3107,8 +3281,20 @@ impl Workspace {
     /// and was answered with a warning would throw away the very work it warns
     /// about by repeating the press. That one stays a click.
     fn tab_menu_action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
-        if !self.tab_menu.is_open() || !keystroke.modifiers.is_empty() {
+        if !keystroke.modifiers.is_empty() {
             return None;
+        }
+
+        // Escape is one step back, and there are two steps to be at: the
+        // submenu takes it first and leaves the menu that opened it standing,
+        // which is the arrangement inside the worktree menu already — Escape
+        // walks Creating and Removing back to Listing before it closes
+        // anything. A person who opened a context menu, opened its submenu and
+        // changed their mind presses it twice, and each press undoes exactly
+        // the gesture that came before it.
+        if !self.tab_menu.is_open() {
+            return (self.tab_context_menu.is_open() && keystroke.key == "escape")
+                .then_some(TabMenuAction::Close.into());
         }
 
         let action = match (keystroke.key.as_str(), self.tab_menu.mode) {
@@ -3334,6 +3520,18 @@ impl Workspace {
             self.tab_menu.working = false;
             self.tab_menu.forget_hover_state();
         }
+        // And the same again for the menu that now holds that one. What it is
+        // open on is a *pane*, which can go without its tab going — a split
+        // closed under its own menu — so the pane is what is checked here.
+        if self
+            .tab_context_menu
+            .pane
+            .is_some_and(|pane| self.tabs.pane(pane).is_none())
+        {
+            self.tab_context_menu.tab = None;
+            self.tab_context_menu.pane = None;
+            self.tab_context_menu.forget_hover_state();
+        }
 
         self.sync_input_keys();
 
@@ -3387,6 +3585,13 @@ impl Workspace {
             input.set_has_keys(Some(*id) == listening);
         }
 
+        // The worktree menu's branch field, which is the other keyboard a
+        // popup can hold and the only one that is not a pane's or the settings
+        // page's.
+        self.tab_menu
+            .branch
+            .set_has_keys(self.tab_menu.mode == WorktreeMode::Creating);
+
         // The settings page's search box, which is the one field that is not a
         // pane's. It has the keyboard whenever the focused pane is the page it
         // is part of, which is Warp's rule — there the search field is what
@@ -3397,13 +3602,6 @@ impl Workspace {
         // Note which question this asks. `listening` is the *focused* pane,
         // and the settings page draws no field of its own through `inputs`, so
         // the two never both have the keyboard.
-        // The worktree menu's branch field, which is the other keyboard a
-        // popup can hold and the only one that is not a pane's or the settings
-        // page's.
-        self.tab_menu
-            .branch
-            .set_has_keys(self.tab_menu.mode == WorktreeMode::Creating);
-
         // The panel's own box, which is not one of the section fields below:
         // see `search_takes_keys` for why it is asked a different question.
         self.panel_search
@@ -4195,6 +4393,7 @@ impl TypedActionView for Workspace {
             WorkspaceAction::Search(action) => self.apply_search(action, ctx),
             WorkspaceAction::Theme(action) => self.apply_theme_action(action, ctx),
             WorkspaceAction::Window(action) => self.apply_window_action(action),
+            WorkspaceAction::TabMenu(action) => self.apply_tab_menu(action, ctx),
             WorkspaceAction::Worktree(action) => self.apply_worktree(action, ctx),
             WorkspaceAction::HoverRow { pane, entered } => self.hover_row(pane, entered, ctx),
             WorkspaceAction::ReleaseSelection(pane) => self.release_selection(pane, ctx),

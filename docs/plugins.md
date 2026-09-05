@@ -82,6 +82,18 @@ description of something that was never built.
     arithmetic against a list that is thousands long, and would need something this does not
     have.
   - Still to move: the worktree menu, the Themes panel, the Omarchy palettes.
+  - `crook/tabs` owns `tab.menu.entries`, and a tab's secondary press opens a *place*
+    rather than a feature. The menu it opens knows no entry by name: four of them are
+    `crook/tabs`'s own — new group with tab, the two copies, close tab — and the fifth is
+    `crook/worktrees`, which is the first half of moving that menu. The claim moved and the
+    code did not: the worktree popup is still `workspace::tab_menu`, because that column
+    holds a text field, a background git read and a two-step confirmation. What did move is
+    what matters for the API — the menu is a list a stranger's plugin can put a row in, and
+    switching `crook/worktrees` off leaves a tab's menu four entries long with nothing
+    anywhere saying a fifth is missing. Entries are grouped by dividing `order` by a hundred,
+    so a slot that hands its renderer a flat list still draws its bands, and no
+    plugin can draw a seam across somebody else's group.
+  - Still to move: the worktree menu's own popup, the Themes panel, the Omarchy palettes.
 - **Phase 2 — the sandbox: done, and dogfooded.** `crook_plugin_api` is the wire — a
   manifest, capabilities that each say what they are in a sentence, and a `Node` vocabulary
   that *describes* rather than paints: no colours, no pixels, tones and sizes the host
