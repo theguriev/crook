@@ -46,7 +46,7 @@ use crookui_core::prelude::*;
 
 use crate::plugins::tabs::TabRow;
 use crate::settings::{Density, Granularity, TabOptions};
-use crate::tab::{PaneId, TabAction, TabId};
+use crate::tab::{PaneId, TabAction, TabColor, TabId};
 use crate::theme::theme;
 
 use super::super::action::{TabMenuAction, WorkspaceAction};
@@ -168,6 +168,7 @@ pub(super) fn render(
 
     let close_state = interaction.close.clone();
     let guard = interaction.close.clone();
+    let color = tab_data.color();
 
     let element = Hoverable::new(interaction.chip.clone(), move |state| {
         let hovered = state.is_hovered();
@@ -196,6 +197,7 @@ pub(super) fn render(
                 .finish(),
             is_selected,
             hovered,
+            color,
         )
     })
     .on_click(move |_, ctx, _| {
@@ -380,13 +382,49 @@ fn expanded_column(facts: &RowFacts, chips: &Chips, options: TabOptions, ui: Fam
 /// make the selected row two pixels taller than its neighbours and move the
 /// whole list every time the selection changed. That costs the row 2px against
 /// Warp's arithmetic and costs it nothing against itself.
-fn row_shell(content: Box<dyn Element>, is_selected: bool, is_hovered: bool) -> Box<dyn Element> {
+fn row_shell(
+    content: Box<dyn Element>,
+    is_selected: bool,
+    is_hovered: bool,
+    color: Option<TabColor>,
+) -> Box<dyn Element> {
     let background = if is_selected {
         theme().overlay_2
     } else if is_hovered {
         theme().overlay_1
     } else {
         Color::TRANSPARENT
+    };
+
+    // The colour is a stripe down the leading edge and not the disc, because
+    // the disc is already saying what the agent is doing. It is *inside* the
+    // clip and before the padding, so it runs the row's full height and stops
+    // at its rounded corners like everything else the row draws.
+    let content: Box<dyn Element> = match color {
+        Some(color) => Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_child(
+                ConstrainedBox::new(
+                    Container::new(Empty::new().finish())
+                        .with_background_color(theme().terminal.bright[color.index()])
+                        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(STRIPE_RADIUS)))
+                        .finish(),
+                )
+                .with_width(STRIPE_WIDTH)
+                .finish(),
+            )
+            .with_child(
+                Expanded::new(
+                    1.,
+                    Container::new(content)
+                        .with_margin_left(STRIPE_GAP)
+                        .finish(),
+                )
+                .finish(),
+            )
+            .finish(),
+        None => content,
     };
 
     Container::new(
@@ -404,6 +442,18 @@ fn row_shell(content: Box<dyn Element>, is_selected: bool, is_hovered: bool) -> 
     .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_RADIUS)))
     .finish()
 }
+
+/// How wide the colour stripe on a coloured row is.
+///
+/// Three, which is a mark rather than a band: it has to be findable running a
+/// finger down a column of rows and must not read as a second column.
+const STRIPE_WIDTH: f32 = 3.;
+
+/// Its corner radius, so it reads as a lozenge rather than a cut edge.
+const STRIPE_RADIUS: f32 = 1.5;
+
+/// The gap between the stripe and what the row was already drawing.
+const STRIPE_GAP: f32 = 6.;
 
 /// A fixed square, holding the close button or holding nothing.
 ///

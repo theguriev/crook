@@ -479,3 +479,38 @@ fn test_a_group_naming_no_tab_that_came_back_is_not_created() {
     assert_eq!(restored.groups().count(), 0);
     assert_eq!(shape(&restored), vec![(None, vec!["alone".to_owned()])]);
 }
+
+#[test]
+fn test_a_pin_and_a_colour_come_back() {
+    // The order already comes back with the list; these two are what make a
+    // pinned tab *stay* at the front of its block afterwards and what draws
+    // the stripe on its rows. A colour is written by name rather than by an
+    // enum's discriminant, so a file survives the enum being reordered.
+    let mut strip = split(1);
+    strip.apply(TabAction::New);
+    let ids: Vec<crate::tab::TabId> = strip.iter().map(crate::tab::Tab::id).collect();
+
+    strip.apply(TabAction::TogglePin(ids[1]));
+    strip.apply(TabAction::SetColor {
+        tab: ids[1],
+        color: Some(crate::tab::TabColor::Magenta),
+    });
+
+    let restored = Session::of(&strip, None)
+        .restore()
+        .expect("there was something to restore");
+    let pinned: Vec<bool> = restored.iter().map(crate::tab::Tab::is_pinned).collect();
+    let colors: Vec<Option<crate::tab::TabColor>> =
+        restored.iter().map(crate::tab::Tab::color).collect();
+
+    assert_eq!(
+        pinned,
+        [true, false],
+        "the pin did not come back where it was"
+    );
+    assert_eq!(
+        colors,
+        [Some(crate::tab::TabColor::Magenta), None],
+        "the colour did not come back on the tab that had it"
+    );
+}

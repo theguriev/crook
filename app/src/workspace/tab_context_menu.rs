@@ -102,6 +102,15 @@ const LABEL_SIZE: f32 = 12.;
 /// The size of the chevron on the one row that has one.
 const CHEVRON_SIZE: f32 = 12.;
 
+/// The diameter of one colour swatch.
+const SWATCH_SIZE: f32 = 16.;
+
+/// The gap between the ring a chosen swatch wears and the swatch itself.
+const SWATCH_RING: f32 = 2.;
+
+/// The gap between two swatches, measured between their rings.
+const SWATCH_GAP: f32 = 4.;
+
 /// How many `order`s make one group.
 ///
 /// A hundred, so that "the fourth group, third entry" is `403` and reads as
@@ -343,6 +352,79 @@ pub(crate) fn field_entry(
     .with_horizontal_padding(ROW_INSET)
     .with_vertical_padding(2.)
     .finish()
+}
+
+/// A row of colour swatches, with the one in force ringed.
+///
+/// The only entry in the menu that is not a line of text, and the only one
+/// that is a row of controls rather than one — which is why the shell offers
+/// it rather than leaving a plugin to build it out of the primitives. Warp's
+/// menu ends the same way, and the first swatch is the one with a line through
+/// it: taking a colour off is a colour, not a separate entry.
+///
+/// `colors` is a run of `(key, fill, chosen, action)` — the shell resolves no
+/// colour of its own, because which six a tab may be is the tab model's
+/// business and not the popup's.
+pub(crate) fn swatch_entry(
+    workspace: &Workspace,
+    swatches: Vec<(String, Option<Color>, bool, WorkspaceAction)>,
+) -> Box<dyn Element> {
+    let mut row = Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_spacing(SWATCH_GAP);
+
+    for (key, fill, chosen, action) in swatches {
+        let state = workspace.tab_context_menu().control(&key);
+        row.add_child(
+            Hoverable::new(state, move |mouse| {
+                // Ringed when it is the one in force, and again under the
+                // pointer: the ring is what a swatch has instead of a hover
+                // background, because a background behind a disc reads as a
+                // second, squarer swatch.
+                let ring = if chosen {
+                    theme().text_primary
+                } else if mouse.is_hovered() {
+                    theme().text_muted
+                } else {
+                    Color::TRANSPARENT
+                };
+                Container::new(
+                    ConstrainedBox::new(
+                        Container::new(match fill {
+                            Some(_) => Empty::new().finish(),
+                            // The swatch that takes a colour off, drawn as the
+                            // absence it is rather than as a seventh colour.
+                            None => Icon::new(Lucide::X, SWATCH_SIZE * 0.6)
+                                .with_color(theme().text_muted)
+                                .finish(),
+                        })
+                        .with_background_color(fill.unwrap_or(Color::TRANSPARENT))
+                        .with_border(Border::all(1.).with_border_color(match fill {
+                            Some(_) => Color::TRANSPARENT,
+                            None => theme().overlay_3,
+                        }))
+                        .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
+                        .finish(),
+                    )
+                    .with_width(SWATCH_SIZE)
+                    .with_height(SWATCH_SIZE)
+                    .finish(),
+                )
+                .with_uniform_padding(SWATCH_RING)
+                .with_border(Border::all(1.).with_border_color(ring))
+                .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
+                .finish()
+            })
+            .on_click(move |_, ctx, _| ctx.dispatch_typed_action(action))
+            .finish(),
+        );
+    }
+
+    Container::new(row.finish())
+        .with_horizontal_padding(ROW_INSET)
+        .with_vertical_padding(4.)
+        .finish()
 }
 
 /// Every entry, live or not, with or without a chevron.

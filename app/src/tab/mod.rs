@@ -206,6 +206,80 @@ impl AgentSession {
 /// hands out, and two tabs sharing an id makes `index_of` resolve a close to
 /// somebody else's tab.
 ///
+/// A colour a person can put on a tab.
+///
+/// Six, which is Warp's count, and every one of them is *named* rather than
+/// written down: what it resolves to is the theme's own terminal palette, so a
+/// tab somebody made red in one theme is red in a theme written years later
+/// and is legible in both. Naming a hex here would be the one thing this
+/// application refuses to do anywhere else — see `crook_plugin_api`, where a
+/// sandboxed plugin cannot name a colour at all.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TabColor {
+    /// ANSI 1.
+    Red,
+    /// ANSI 2.
+    Green,
+    /// ANSI 3.
+    Yellow,
+    /// ANSI 4.
+    Blue,
+    /// ANSI 5.
+    Magenta,
+    /// ANSI 6.
+    Cyan,
+}
+
+impl TabColor {
+    /// Every colour a tab can be, in the order the menu offers them.
+    pub const ALL: [Self; 6] = [
+        Self::Red,
+        Self::Green,
+        Self::Yellow,
+        Self::Blue,
+        Self::Magenta,
+        Self::Cyan,
+    ];
+
+    /// Which of the theme's bright terminal colours this is.
+    ///
+    /// The bright half rather than the normal one: these are a mark on a
+    /// surface rather than text on a terminal background, and the normal half
+    /// of a dark theme's palette is dim enough that two of them are hard to
+    /// tell apart at the four pixels a stripe is.
+    pub fn index(self) -> usize {
+        match self {
+            Self::Red => 1,
+            Self::Green => 2,
+            Self::Yellow => 3,
+            Self::Blue => 4,
+            Self::Magenta => 5,
+            Self::Cyan => 6,
+        }
+    }
+
+    /// What it is called in a session file.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Red => "red",
+            Self::Green => "green",
+            Self::Yellow => "yellow",
+            Self::Blue => "blue",
+            Self::Magenta => "magenta",
+            Self::Cyan => "cyan",
+        }
+    }
+
+    /// The colour of that name, if it is one of them.
+    ///
+    /// A name nothing matches is a tab with no colour rather than a refusal:
+    /// the file is read at startup and nothing in it may cost a person their
+    /// window.
+    pub fn named(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|color| color.name() == name)
+    }
+}
+
 /// The name is the tab's own and does not move as focus moves inside it,
 /// because the panel's group header is what names a tab whose rows name its
 /// panes. Deriving that header from the focused pane would rewrite the heading
@@ -217,6 +291,23 @@ impl AgentSession {
 pub struct Tab {
     id: TabId,
     name: String,
+    /// Whether this tab is held at the front of the block it is in.
+    ///
+    /// A *block* is the run it belongs to — its group's, or the run of
+    /// ungrouped tabs around it — and not the whole list, which is the one
+    /// place Crook's pinning cannot be Warp's. Warp pins to the front of the
+    /// strip because it has no groups; a group here is a contiguous block that
+    /// says two checkouts are one piece of work, and pinning that emptied it
+    /// from the middle would be pinning that takes a group apart.
+    pinned: bool,
+    /// The colour a person gave it, if they gave it one.
+    ///
+    /// Drawn as a stripe down the leading edge of its rows rather than on the
+    /// status disc, which is already saying something: the disc is what the
+    /// agent is doing, and a disc that carried a colour as well would be two
+    /// meanings in one dot — a red tab and a failed agent telling the same
+    /// story with the same pixels.
+    color: Option<TabColor>,
     /// The name it was opened with, which is what a rename undone returns to.
     ///
     /// Kept rather than derived, because there is nothing to derive it from: a
@@ -245,6 +336,8 @@ impl Tab {
             id: TabId::next(),
             name: title.clone(),
             born_as: title.clone(),
+            pinned: false,
+            color: None,
             panes: PaneGroup::new(title),
             group: None,
         }
@@ -278,6 +371,27 @@ impl Tab {
     /// what the strip draws: the way in from outside is `TabStrip::apply`.
     pub(crate) fn set_name(&mut self, name: Option<String>) {
         self.name = name.unwrap_or_else(|| self.born_as.clone());
+    }
+
+    /// Whether it is held at the front of its block.
+    pub fn is_pinned(&self) -> bool {
+        self.pinned
+    }
+
+    /// The colour a person gave it.
+    pub fn color(&self) -> Option<TabColor> {
+        self.color
+    }
+
+    /// Puts back the pin and the colour a session file recorded.
+    ///
+    /// One method for both, and only for restoring: a tab's order in the
+    /// vector already came out of the file, so nothing here has to move
+    /// anything — which is exactly why this must not be the way pinning
+    /// happens at runtime. See [`TabStrip::toggle_pin`].
+    pub(crate) fn restore_marks(&mut self, pinned: bool, color: Option<TabColor>) {
+        self.pinned = pinned;
+        self.color = color;
     }
 
     /// The panes it holds, in render order. Never empty.
@@ -361,6 +475,20 @@ pub enum TabAction {
     ToggleGroup(GroupId),
     /// Close every tab of a group. When they are all of them, the window goes.
     CloseGroup(GroupId),
+    /// Hold a tab at the front of its block, or let it go.
+    ///
+    /// Pinning *moves* it there and unpinning moves it to just past whatever
+    /// is still pinned, so the list never has to be re-sorted and the boundary
+    /// [`slot_for`](TabStrip::slot_for) clamps against stays where it says it
+    /// is.
+    TogglePin(TabId),
+    /// Put a colour on a tab, or take it off.
+    SetColor {
+        /// The tab.
+        tab: TabId,
+        /// The colour, or `None` for the swatch with a line through it.
+        color: Option<TabColor>,
+    },
     /// Close a tab, whether or not it is the active one.
     Close(TabId),
     /// Make a tab the active one.
@@ -761,6 +889,47 @@ impl TabStrip {
         Some(first..last + 1)
     }
 
+    /// The half-open range of the vector the ungrouped run around `at`
+    /// occupies.
+    ///
+    /// A block, for a tab that is in no group: the tabs either side of `at`
+    /// that are in no group either, up to the first grouped one in each
+    /// direction. This is what "first in its block" means where there is no
+    /// group to be first in — and it is a *run* rather than "every ungrouped
+    /// tab", because ungrouped tabs on the far side of a group are not
+    /// somewhere a person would look for something they pinned here.
+    fn ungrouped_run_around(&self, at: usize) -> std::ops::Range<usize> {
+        let mut start = at.min(self.tabs.len());
+        while start > 0 && self.tabs[start - 1].group().is_none() {
+            start -= 1;
+        }
+        let mut end = at.min(self.tabs.len());
+        while end < self.tabs.len() && self.tabs[end].group().is_none() {
+            end += 1;
+        }
+        start..end
+    }
+
+    /// The block a slot belongs to: a group's run, or the ungrouped run.
+    fn block_around(&self, group: Option<GroupId>, at: usize) -> std::ops::Range<usize> {
+        match group.and_then(|group| self.run_of(group)) {
+            Some(run) => run,
+            None => self.ungrouped_run_around(at),
+        }
+    }
+
+    /// How many of a block's tabs are pinned.
+    ///
+    /// Sound as a *boundary* because the pinned ones are always at its front:
+    /// every path that can change the order goes through
+    /// [`slot_for`](Self::slot_for), which is what keeps that true.
+    fn pinned_in(&self, block: &std::ops::Range<usize>) -> usize {
+        self.tabs[block.clone()]
+            .iter()
+            .filter(|tab| tab.pinned)
+            .count()
+    }
+
     /// Where a tab joining `group` in front of `before` actually goes.
     ///
     /// The clamp the drop targets are trusted through. A pointer between two
@@ -775,11 +944,30 @@ impl TabStrip {
     ///
     /// Either way the result is a position no group's contiguity survives by
     /// luck.
-    fn slot_for(&self, group: Option<GroupId>, before: Option<TabId>) -> usize {
+    fn slot_for(&self, group: Option<GroupId>, before: Option<TabId>, pinned: bool) -> usize {
         let raw = before
             .and_then(|id| self.index_of(id))
             .unwrap_or(self.tabs.len());
 
+        let at = self.slot_in_block(group, raw);
+
+        // And then the second clamp, which is pinning's whole enforcement:
+        // inside the block this landed in, the pinned tabs are at the front
+        // and an unpinned one may not get in among them. A drop is a pointer
+        // position, and a pointer that stopped halfway up a block of pinned
+        // rows is not somebody asking to unpin anything.
+        let block = self.block_around(group, at);
+        let boundary = block.start + self.pinned_in(&block);
+        if pinned {
+            at.min(boundary)
+        } else {
+            at.max(boundary)
+        }
+    }
+
+    /// The first clamp: into the run its group owns, or out of somebody
+    /// else's.
+    fn slot_in_block(&self, group: Option<GroupId>, raw: usize) -> usize {
         match group {
             // Into a group that still has members: inside its run, wherever
             // in it the pointer got to. A group whose only member is the tab
@@ -808,6 +996,32 @@ impl TabStrip {
         }
     }
 
+    /// Pins a tab to the front of its block, or lets it go.
+    ///
+    /// The flag and the move are one step, because they are one fact: a tab
+    /// that said it was pinned and sat in the middle of its block would be a
+    /// list whose order disagrees with its own rows, and the boundary
+    /// [`slot_for`](Self::slot_for) clamps against would be a guess.
+    ///
+    /// Pinning lands it *after* whatever is already pinned rather than at the
+    /// very front, and unpinning lands it *first* among the unpinned. Both are
+    /// the shortest move that satisfies the rule, which is what keeps the rest
+    /// of a person's order where they put it.
+    fn toggle_pin(&mut self, id: TabId) -> TabEffect {
+        let Some(from) = self.index_of(id) else {
+            return TabEffect::Unchanged;
+        };
+        let group = self.tabs[from].group();
+
+        let mut moving = self.tabs.remove(from);
+        moving.pinned = !moving.pinned;
+
+        let block = self.block_around(group, from);
+        let at = block.start + self.pinned_in(&block);
+        self.tabs.insert(at, moving);
+        TabEffect::Changed
+    }
+
     /// Moves one tab, joining `group` and landing in front of `before`.
     fn move_tab(&mut self, tab: TabId, group: Option<GroupId>, before: Option<TabId>) -> TabEffect {
         let Some(from) = self.index_of(tab) else {
@@ -826,7 +1040,7 @@ impl TabStrip {
 
         let mut moving = self.tabs.remove(from);
         moving.group = group;
-        let at = self.slot_for(group, before);
+        let at = self.slot_for(group, before, moving.pinned);
         let unchanged = at == from && left == group;
         self.tabs.insert(at, moving);
 
@@ -1009,6 +1223,16 @@ impl TabStrip {
             }
 
             TabAction::CloseGroup(group) => self.close_group(group),
+
+            TabAction::TogglePin(id) => self.toggle_pin(id),
+
+            TabAction::SetColor { tab, color } => match self.get_mut(tab) {
+                Some(tab) if tab.color != color => {
+                    tab.color = color;
+                    TabEffect::Changed
+                }
+                _ => TabEffect::Unchanged,
+            },
 
             TabAction::Close(id) => self.close(id),
 

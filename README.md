@@ -191,9 +191,16 @@ Eight features, and the page that configures them:
   of the one you are looking at — five candidate colours clustered out of its palette, one
   click to choose the background, and everything else decided so the result is legible. What
   it writes is a file in your themes folder, in the same format as any other.
-- **A tab's own menu.** Right-click any row and it opens over that row: new group with tab,
-  copy pane title, copy working directory, rename tab, rename pane, close tab, and — inside a
-  repository — the worktrees below. Renaming turns the entry itself into a field, in the
+- **A tab's own menu.** Right-click any row and it opens over that row: pin, new group with
+  tab, copy pane title, copy working directory, rename tab, rename pane, close tab, a row of
+  colours, and — inside a repository — the worktrees. **Pinning** holds a tab at the front of
+  the block it is in rather than of the whole list, which is the one place this cannot be
+  Warp's: a group is a contiguous block that says two checkouts are one piece of work, and
+  pinning that lifted a member out of the middle would be pinning that takes a group apart. A
+  drop can no more land an unpinned tab among the pinned ones than it can split a group. A
+  **colour** is a stripe down the leading edge of a tab's rows, not a tinted status disc — the
+  disc says what the agent is doing, and one dot cannot carry both — and it is named rather
+  than written down, so a tab made red in one theme is red in a theme written years later. Renaming turns the entry itself into a field, in the
   column you pressed it in; Enter keeps the name, Escape drops it, and an emptied field puts
   back the name the tab was opened with. A name you typed beats the one the agent chose for
   its own work, which is the whole point of typing one, and it comes back with the window. Not one of those entries is written into the menu. It is a
