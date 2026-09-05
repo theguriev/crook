@@ -106,6 +106,18 @@ pub struct AgentSession {
     /// something. This is what makes a tab of agents rename itself with no
     /// rename plumbing at all.
     pub derived_title: Option<String>,
+    /// What a person called it, if they have said.
+    ///
+    /// Beats the agent's own name and never the other way round, which is the
+    /// whole of what renaming means: an agent that renames its work every few
+    /// turns would otherwise take the name back within the minute, and a
+    /// person who typed one would have no way to make it stick. Warp draws the
+    /// same line with `custom_title` over its own derived one.
+    ///
+    /// `None` is "nobody has said", and it is what a rename to nothing goes
+    /// back to — a person who empties the field is asking for the name they
+    /// had before they touched it, not for a row with no name.
+    pub custom_title: Option<String>,
     /// What the agent is doing right now.
     pub status: AgentStatus,
     /// Where the agent is working.
@@ -138,16 +150,20 @@ impl AgentSession {
         Self {
             title: title.into(),
             derived_title: None,
+            custom_title: None,
             status: AgentStatus::default(),
             working_directory: std::env::current_dir().ok(),
             pull_request: None,
         }
     }
 
-    /// What the tab bar should print: the agent's own name for its work, or
-    /// the name the session was created with until it has one.
+    /// What the tab bar should print: what a person called it, else the
+    /// agent's own name for its work, else the name it was created with.
     pub fn display_title(&self) -> &str {
-        self.derived_title.as_deref().unwrap_or(&self.title)
+        self.custom_title
+            .as_deref()
+            .or(self.derived_title.as_deref())
+            .unwrap_or(&self.title)
     }
 
     /// What a pull-request chip says: `PR #123`, or the raw URL when the number
@@ -190,16 +206,24 @@ impl AgentSession {
 /// hands out, and two tabs sharing an id makes `index_of` resolve a close to
 /// somebody else's tab.
 ///
-/// The name is the tab's own and is fixed at birth. Warp's `custom_title` is
-/// a rename a person performs, which Crook has no flow for; what a tab needs
-/// even without one is a name that does not move as focus moves inside it,
+/// The name is the tab's own and does not move as focus moves inside it,
 /// because the panel's group header is what names a tab whose rows name its
 /// panes. Deriving that header from the focused pane would rewrite the heading
-/// every time someone clicked a row underneath it.
+/// every time someone clicked a row underneath it. It is Warp's `custom_title`
+/// now that there is a rename flow — see [`Tab::set_name`] — and the name it
+/// was born with is kept beside it so that taking a rename back has something
+/// to go back to.
 #[derive(Debug)]
 pub struct Tab {
     id: TabId,
     name: String,
+    /// The name it was opened with, which is what a rename undone returns to.
+    ///
+    /// Kept rather than derived, because there is nothing to derive it from: a
+    /// tab's panes are renamed and split and closed independently of it, and
+    /// by the time somebody empties the rename field the session this was
+    /// taken from may not be in the tab any more.
+    born_as: String,
     panes: PaneGroup,
     /// The group this tab belongs to, if it is in one.
     ///
@@ -220,6 +244,7 @@ impl Tab {
         Self {
             id: TabId::next(),
             name: title.clone(),
+            born_as: title.clone(),
             panes: PaneGroup::new(title),
             group: None,
         }
@@ -244,6 +269,15 @@ impl Tab {
     /// more than one pane.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// Renames it, or takes a name back.
+    ///
+    /// `None` restores the name it was born with, which is where a rename to
+    /// an empty field lands. Crate-private like everything else that changes
+    /// what the strip draws: the way in from outside is `TabStrip::apply`.
+    pub(crate) fn set_name(&mut self, name: Option<String>) {
+        self.name = name.unwrap_or_else(|| self.born_as.clone());
     }
 
     /// The panes it holds, in render order. Never empty.

@@ -77,6 +77,7 @@ use crookui_core::prelude::*;
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 
 use crate::tab::{PaneId, TabId};
+use crate::text_input::TextInput;
 use crate::theme::theme;
 
 use super::action::{TabMenuAction, WorkspaceAction};
@@ -310,6 +311,38 @@ pub(crate) fn inert_entry(
     label: impl Into<String>,
 ) -> Box<dyn Element> {
     build_row(workspace, key, label.into(), Chevron::None, false, None)
+}
+
+/// An entry that is being typed into, in place of the row it replaces.
+///
+/// Warp renames a tab by turning its row into a field, and so does this: the
+/// entry a person pressed becomes the thing they type the new name into, in
+/// the column they pressed it in, rather than a dialog somewhere else that has
+/// to say which tab it is about.
+///
+/// The field belongs to the plugin that claimed it — see
+/// [`Host::claim_field`](crate::plugin::Host::claim_field) — and what decides
+/// whether the keyboard is in it is that claim rather than anything here. This
+/// only draws it.
+pub(crate) fn field_entry(
+    workspace: &Workspace,
+    key: &str,
+    field: &TextInput,
+    placeholder: &'static str,
+) -> Box<dyn Element> {
+    Container::new(
+        super::text_field::TextField::new(
+            field.clone(),
+            workspace.clipboard().clone(),
+            workspace.fonts(),
+            workspace.tab_context_menu().control(key),
+            placeholder,
+        )
+        .finish(),
+    )
+    .with_horizontal_padding(ROW_INSET)
+    .with_vertical_padding(2.)
+    .finish()
 }
 
 /// Every entry, live or not, with or without a chevron.

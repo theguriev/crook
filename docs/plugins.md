@@ -102,7 +102,9 @@ description of something that was never built.
     before the workspace exists and has nothing to take one from — asks each claim in
     registration order, and the first to want the keyboard gets it. The worktree menu's branch
     field has moved onto it, so it now goes out with `crook/worktrees` when that is switched
-    off, even though the popup that draws it has not moved yet.
+    off, even though the popup that draws it has not moved yet. `crook/tabs` renames a tab and
+    a pane through one of its own, and nothing about renaming is in the menu's shell — it
+    draws the field, and that is the whole of its involvement.
   - Still to move: the worktree menu's own popup, the Themes panel, the Omarchy palettes.
 - **Phase 2 — the sandbox: done, and dogfooded.** `crook_plugin_api` is the wire — a
   manifest, capabilities that each say what they are in a sentence, and a `Node` vocabulary
