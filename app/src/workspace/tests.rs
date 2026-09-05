@@ -1745,25 +1745,50 @@ fn a_platform_that_paints_nothing_over_the_panel_gets_no_strip_at_all() {
     );
 }
 
-/// The header row, by the one rule that runs across the top of the window.
+/// The header row, by the ground it puts across the top of the window.
 ///
 /// Found the way a person finds it rather than by what is in it: it starts at
-/// the very top of the window and it is closed off by the single bottom edge
-/// that divides it from the body, which is the only rule anything draws up
-/// there. What a release binary draws *inside* it is nothing at all — the one
-/// place it has is filled by a plugin installed from a file — so a helper that
-/// looked for a control would find the row only on the builds that had one.
+/// the very top and it runs the whole width, and nothing else does both. It
+/// used to be found by the rule under it, until the rule was taken out — which
+/// is why this looks for the ground instead. What a release binary draws
+/// *inside* the row is nothing at all — the one place it has is filled by a
+/// plugin installed from a file — so a helper that looked for a control would
+/// find the row only on the builds that had one.
 fn header_box(scene: &Scene) -> RectF {
+    let right = far_edge(scene);
     let boxes: Vec<RectF> = visible_rects(scene)
         .filter(|(rect, bounds)| {
-            rect.border == Border::bottom(1.).with_border_color(theme().border)
-                && bounds.min_y() < 0.5
+            rect.background == Fill::Solid(theme().surface) && is_the_header(bounds, right)
         })
         .map(|(_, bounds)| bounds)
         .collect();
 
     assert_eq!(boxes.len(), 1, "exactly one header per frame");
     boxes[0]
+}
+
+/// Whether a box is where the header is: against the top of the frame, and
+/// reaching its right edge.
+///
+/// Two rules, because either alone catches something else. The tabs panel is
+/// down the left side and starts at the top too, so "at the top" is not
+/// enough; the header starts where the panel ends and is therefore not the
+/// full width, so "as wide as the frame" is wrong. Touching the top *and* the
+/// far edge is the one shape nothing else has.
+///
+/// The far edge comes from the scene rather than from a constant: a frame is
+/// taken at whatever size a test wants one at, and a helper that compared
+/// against the usual size would quietly answer "no header" in the tests that
+/// take a small one.
+fn is_the_header(bounds: &RectF, right: f32) -> bool {
+    bounds.min_y() < 0.5 && bounds.max_x() >= right - 0.5
+}
+
+/// How far the frame reaches.
+fn far_edge(scene: &Scene) -> f32 {
+    visible_rects(scene)
+        .map(|(_, bounds)| bounds.max_x())
+        .fold(0., f32::max)
 }
 
 /// A point in the header where nothing is drawn.
@@ -1886,15 +1911,20 @@ fn glyph_count(scene: &Scene) -> usize {
 /// the pane it belongs to, so a rect contained in another is dropped. Without
 /// that a shell test would count every pane twice.
 fn panel_boxes(scene: &Scene) -> Vec<RectF> {
+    let right = far_edge(scene);
     let candidates: Vec<RectF> = visible_rects(scene)
-        .filter(|(rect, _)| {
+        .filter(|(rect, bounds)| {
             rect.background == Fill::Solid(theme().surface)
                 && rect.border == Border::default()
                 && rect.corner_radius == CornerRadius::default()
+                // The header is drawn on the same ground and, since the rule
+                // under it was taken out, in the same shape. It is told apart
+                // the way [`header_box`] tells it apart, so that the two
+                // helpers cannot disagree about which rect is which.
+                && !is_the_header(bounds, right)
         })
         .map(|(_, bounds)| bounds)
         .collect();
-
     candidates
         .iter()
         .filter(|bounds| {

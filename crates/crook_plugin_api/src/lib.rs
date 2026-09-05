@@ -47,13 +47,22 @@ use serde::{Deserialize, Serialize};
 /// counts: postcard encodes a variant by its index, so an older host reading a
 /// newer plugin's `Node` would read the wrong variant rather than fail.
 ///
+/// **3** added [`Request::Tally`] and the `/**` a granted path may end in: a
+/// plugin can have a directory of line-delimited JSON counted for it without
+/// any of it crossing the boundary. A hundred megabytes of transcripts is a
+/// hundred megabytes wherever it is read; what a sandbox cannot afford is
+/// carrying it *through*, or looking at it a line at a time. So it does
+/// neither, and every decision about what the counting *means* — which lines
+/// are one line, what to group by, what to add up — stays with the plugin,
+/// which supplies each of them as a field name.
+///
 /// **2** is the version a plugin can *do* something in. One added
 /// [`Capability`] ([`Capability::ReadFiles`]), the [`Request`]/[`Answer`] pair
 /// that lets a plugin ask the host to reach the network or read a file on its
 /// behalf, and the six [`Node`] variants a panel needs. Version 1 could
 /// describe a badge and register an action, which is a plugin that can say
 /// what it already knew.
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 
 /// What a sandboxed plugin says about itself, before any of it runs.
 ///
@@ -110,6 +119,12 @@ pub enum Capability {
     /// `~` is the person's home directory and is the only thing expanded; a
     /// path holding `..` is refused by the host rather than resolved, so a
     /// granted path cannot be walked out of.
+    ///
+    /// A path may end in `/**`, which is everything under a directory. That is
+    /// a weaker thing to agree to than a named file and the sentence says so,
+    /// but it is the only shape in which "the transcripts Claude Code writes"
+    /// can be asked for at all: they are a directory of files whose names
+    /// nobody knows in advance.
     ReadFiles(Vec<String>),
 }
 
@@ -138,7 +153,16 @@ impl Capability {
                     if index > 0 {
                         sentence.push_str(", ");
                     }
-                    sentence.push_str(path);
+                    match path.strip_suffix("/**") {
+                        // Said as what it is rather than as the pattern that
+                        // spells it: a person reading a permission dialog
+                        // should not have to know what two stars mean.
+                        Some(directory) => {
+                            sentence.push_str("everything under ");
+                            sentence.push_str(directory);
+                        }
+                        None => sentence.push_str(path),
+                    }
                 }
                 sentence
             }
@@ -283,6 +307,20 @@ pub enum Node {
     /// A hairline across whatever holds it: the honest place to put the seam
     /// between two things that are not the same measurement.
     Rule,
+    /// A row of columns, each as tall as its share of the tallest.
+    ///
+    /// Shares of one another rather than of anything absolute, which is what a
+    /// chart of "what happened on each of seven days" is: nobody reads the
+    /// height, they read which day was the busy one. The host decides how tall
+    /// the tallest is drawn, how wide a column is and what a column of nothing
+    /// looks like — a day with no work still has to be a column of no height
+    /// rather than a gap, or the chart says the week was shorter than it was.
+    Bars {
+        /// Between zero and one each; the host clamps rather than refuses.
+        values: Vec<f32>,
+        /// Which of the theme's tones they take.
+        tone: Tone,
+    },
     /// Space that takes whatever is left over.
     ///
     /// What puts a figure at the far end of a row from its label, which is the
@@ -366,14 +404,129 @@ pub enum Request {
     },
     /// Read a file. Needs [`Capability::ReadFiles`] naming exactly this path.
     ///
-    /// A leading `~` is the person's home directory. There is no listing and
-    /// no writing: a plugin reads the files it said it would read, and a
-    /// capability that could name a directory would be one nobody could
-    /// picture the contents of.
+    /// A leading `~` is the person's home directory. There is no writing: a
+    /// plugin reads the files it said it would read.
     ReadFile {
         /// The path, as it was written in the capability.
         path: String,
     },
+    /// Walk a directory of line-delimited JSON and hand back what it adds up
+    /// to. Needs [`Capability::ReadFiles`] granting a path this root is under.
+    ///
+    /// **The host reads and counts; the plugin decides what counting means.**
+    /// A directory like the transcripts Claude Code writes is hundreds of
+    /// megabytes across tens of thousands of lines, and the first shape this
+    /// took — hand the plugin the fields and let it add them up — was measured
+    /// at ninety thousand instructions a line, which for a week is forty
+    /// seconds of interpreter on the thread that draws. No page size makes
+    /// that affordable, because the cost is per line and there are too many
+    /// lines.
+    ///
+    /// So the lines are counted where they are read, and what crosses is the
+    /// answer: a few hundred rows instead of forty thousand. Every decision
+    /// stays with the plugin — which lines are the same event written twice,
+    /// what to group by, what to add up, and what any of it means — because
+    /// each of those is a *field name* it supplies. The host knows none of it.
+    Tally {
+        /// The directory to walk, which must be inside a granted path.
+        root: String,
+        /// Only files whose name ends in this.
+        extension: String,
+        /// Only files modified at or after this, in milliseconds since the
+        /// epoch — because a file nobody has touched cannot hold a line inside
+        /// a window that ends now. Zero reads them all.
+        touched_since: i64,
+        /// Only lines holding this. A line without it is never parsed, which
+        /// is what makes walking a hundred megabytes cheap.
+        containing: String,
+        /// Keep only lines whose field sorts at or after the value beside it.
+        ///
+        /// Compared as text, which is the whole of what the host knows about
+        /// a value. That is enough for the thing it is for: an RFC 3339 stamp
+        /// sorts the way time runs, so "at or after this instant" is a string
+        /// comparison and the host needs no idea what a date is.
+        ///
+        /// Necessary rather than convenient. `touched_since` skips *files*,
+        /// which is what makes the walk cheap, but a file touched an hour ago
+        /// can hold lines from a month ago — so without this a total would
+        /// quietly include them.
+        at_least: Vec<Bound>,
+        /// Lines agreeing on all of these are one line, counted once.
+        ///
+        /// Empty counts every line. A line missing any of them is counted
+        /// rather than dropped: an identity that is not there cannot say a
+        /// line is a repeat of anything.
+        distinct_by: Vec<String>,
+        /// The tables to build, each a way of looking at the same walk.
+        ///
+        /// Several rather than one because the walk is the expensive part: a
+        /// plugin wanting totals by day *and* by author would otherwise pay
+        /// for the hundred megabytes twice.
+        tables: Vec<Table>,
+    },
+}
+
+/// A floor under one field.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Bound {
+    /// The field, by dotted path.
+    pub field: String,
+    /// The value it must sort at or after. A line whose field is missing does
+    /// not clear it.
+    pub at_least: String,
+}
+
+/// One way of adding a walk up.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Table {
+    /// What makes a row: lines agreeing on all of these share one.
+    pub by: Vec<Key>,
+    /// The fields to add up, by dotted path. A line where one is missing or is
+    /// not a number contributes nothing to that sum and still counts as a row.
+    pub sum: Vec<String>,
+}
+
+/// One column of a table's key.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Key {
+    /// The field, by dotted path.
+    pub field: String,
+    /// How much of it to key on, in characters from the start.
+    ///
+    /// `None` is the whole value. A prefix is what makes "by the hour" or "by
+    /// the day" expressible without the host knowing what a date is: a
+    /// timestamp's first thirteen characters are its hour, and which hour
+    /// belongs to which day is a question about time zones that only the
+    /// plugin can answer.
+    pub prefix: Option<u32>,
+}
+
+/// One row of a table.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Tallied {
+    /// The values that make this row, in the order they were asked for.
+    pub key: Vec<Cell>,
+    /// What each of the summed fields came to, in the order they were asked
+    /// for.
+    pub sums: Vec<f64>,
+    /// How many lines it is made of.
+    pub lines: u64,
+}
+
+/// One field of one line, as it was found.
+///
+/// Three shapes and not one string, because a plugin that had to parse
+/// `"1284"` back into a number would be paying twice for something the host
+/// already knew — and a field a line does not carry has to be distinguishable
+/// from one that carries an empty string.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Cell {
+    /// The line does not carry this field.
+    Nothing,
+    /// A string, a boolean or anything else, as it reads.
+    Text(String),
+    /// A number.
+    Number(f64),
 }
 
 /// Which HTTP verb a [`Request::Fetch`] is.
@@ -392,10 +545,12 @@ pub enum Method {
 
 /// What became of a [`Request`].
 ///
-/// Four answers and not one of them is silence: a plugin that asked for
+/// Five answers and not one of them is silence: a plugin that asked for
 /// something always finds out what happened to it, because a plugin left
 /// waiting forever is a chip that says "reading…" until the window closes.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Not [`Eq`], because a [`Cell`] can be a number and a number is not.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Answer {
     /// The request was made and the server answered.
     ///
@@ -412,6 +567,15 @@ pub enum Answer {
     Read {
         /// What was in it.
         bytes: Vec<u8>,
+    },
+    /// What a [`Request::Tally`] came to.
+    Counted {
+        /// One per table asked for, in the order they were asked for. Each is
+        /// a row per distinct key, in no order worth relying on.
+        tables: Vec<Vec<Tallied>>,
+        /// How many lines were counted altogether, after `distinct_by` has had
+        /// its say.
+        lines: u64,
     },
     /// It was not granted. The sentence says what was asked for, in the same
     /// words the permission dialog used, so a plugin can tell a person what to

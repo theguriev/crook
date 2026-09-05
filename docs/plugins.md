@@ -117,13 +117,37 @@ description of something that was never built.
     what makes "re-prompted on escalation" a comparison rather than a judgement. A person
     answers on the Plugins page, the answer is kept in `settings.json` under `plugin_grants`,
     and answering rebuilds that plugin there and then rather than at the next launch.
-  - **Six more `Node` variants** — `Meter`, `Rule`, `Fill`, `Note`, `Pressable`, `Anchored` —
-    which is what a panel needs and nothing beyond it.
+  - **Seven more `Node` variants** — `Meter`, `Rule`, `Fill`, `Note`, `Pressable`, `Anchored`
+    and `Bars` — which is what a panel needs and nothing beyond it. A `Bars` is a row of
+    columns each as tall as its share of the tallest, because nobody reads the height of a
+    chart of days: they read which day was the busy one.
   - **The pirate, by icon name.** `pirate`, `pirate-open` and `pirate-wide` resolve to Crook's
     own two-layer artwork in `crookui_core::icons::art`. The plugin ships no picture and the
     host runs no timer for it: a plugin that wants a chomping pirate holds its own clock and
     names a different frame, which is animation done entirely on the plugin's side of a
     boundary that carries no pixels.
+  **ABI 3 is the version a plugin can *count* in**, and it exists because of one measurement.
+  The usage chip's week — a column per day, a breakdown per model, the busiest projects — is
+  read out of the transcripts Claude Code writes: three hundred megabytes across five hundred
+  files, of which a hundred are lines carrying a `usage` object. The obvious shape was to hand
+  the guest those lines a page at a time and let it add them up. Measured, that costs **ninety
+  thousand instructions a line**, which for a week is forty seconds of interpreter on the
+  thread that draws, and no page size fixes a cost that is per line.
+
+  So `Request::Tally` has the host count instead. The plugin says which files, which lines are
+  worth parsing, which of them are the same event written twice, what to group by and what to
+  add up — every one of those a *field name* it supplies, none of them anything the host
+  understands. What crosses is a couple of hundred rows of totals rather than forty thousand
+  lines: about a second on the pool, thirteen milliseconds inside the guest. A `Key` may take
+  a prefix of a field, which is how "by the hour" is expressible without the host knowing what
+  a date is — and which hour belongs to which day is a question about time zones that stays
+  with the plugin, answered by a `timezone` import beside the clock.
+
+  The rule it is an instance of: **the host does what a host is for, and the plugin keeps what
+  it means.** Reading a directory and touching a hundred megabytes is the first; deciding that
+  two lines are one turn is the second. A capability that had said "read the transcripts"
+  would have put the second one here.
+
   - **`crook --install-plugin <path>`**, which opens a module, checks its ABI, decodes its
     manifest and only then copies it into the plugins directory. There is no server and no
     index; installing is a file copy, and the flag exists because "copy this into a directory
@@ -142,21 +166,31 @@ description of something that was never built.
   one by accident; this one had nothing to lean on, which is the only way to find out whether
   the ABI is enough.
 
-  **What that cost.** Two things did not survive the move, and neither is a bug waiting to be
-  fixed:
+  **What that cost.** One thing did not survive the move. A second thing was said not to have
+  survived, and that turned out to be a wrong answer worth keeping the record of:
 
-  - **The week-history panel does not come across.** It read the Claude Code transcripts under
-    `~/.claude/projects/` — a couple of hundred megabytes in a busy week — skipping most lines
-    without parsing them, deduplicating the turns a resumed session copies forward, and
-    totting up what was spent per model and per day. That is native work: a walk over a
-    directory tree that is cheap only because it never leaves the reader's own thread. A
-    sandbox cannot do it. One request answers with at most a megabyte, deliberately, because a
-    guest that could be handed two hundred of those into its own linear memory is a guest that
-    can exhaust the machine by asking; and a capability wide enough to cover the walk would
-    have to say "read every transcript of everything you have ever asked an agent", which is
-    not a sentence a permission dialog can honestly put to somebody. So the chip says how much
-    of the limit is gone and when it resets, which is what the endpoint knows, and the
-    breakdown is not offered at all rather than offered badly.
+  - **The week-history panel did come across, on the second attempt.** It reads the Claude
+    Code transcripts under `~/.claude/projects/` — three hundred megabytes in a busy week —
+    and the first conclusion here was that a sandbox cannot do that, because one request
+    answers with at most a megabyte and a guest handed three hundred of those can exhaust the
+    machine by asking. Every fact in that sentence is true and the conclusion did not follow.
+    The megabytes are not what the panel draws: a week is twenty-two thousand turns and the
+    panel is a hundred and sixty-nine rows of totals. What was needed was not a bigger pipe
+    but the counting happening where the reading happens, which is what `Request::Tally` is.
+
+    The measurement that settled it is worth writing down, because the argument had been going
+    on estimates: handing the guest the *lines* costs ninety thousand instructions each — for
+    a week, forty seconds of interpreter on the thread that draws. Counting them in the host
+    costs about a second on the pool, and the answer lands inside the guest in thirteen
+    milliseconds.
+
+    What it does cost is the sentence a person has to agree to, and that objection was the
+    real one: the grant reads "Read everything under `~/.claude/projects`", which is every
+    transcript of everything they have ever asked an agent. There is no narrower way to ask —
+    the files are named after sessions nobody knows in advance — so the honest thing is to
+    show the sentence and let them refuse it. What the plugin receives is totals; what it is
+    *allowed* is the directory, and those are not the same size.
+
   - **The macOS Keychain path does not come across.** Claude Code refreshes the Keychain copy
     of its credentials and lets `~/.claude/.credentials.json` lag, sometimes by days, and the
     only way to read the Keychain is to shell out to `security`. A sandboxed plugin cannot

@@ -100,6 +100,15 @@ pub mod imports {
 
     /// `now() -> i64`: the wall clock, in milliseconds since the epoch.
     pub const NOW: &str = "now";
+
+    /// `timezone() -> i32`: how far this machine's own time is from UTC, in
+    /// minutes east of it.
+    ///
+    /// Granted to everybody for the reason the clock is, and needed for the
+    /// same kind of question: "which day was that" has a different answer
+    /// three hours either side of midnight, and a chart of days a person is
+    /// meant to recognise has to be drawn against the days they lived.
+    pub const TIMEZONE: &str = "timezone";
 }
 
 /// The names a guest must export, and what each is for.
