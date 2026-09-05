@@ -116,6 +116,18 @@ pub struct TabSnapshot {
     pub focused: usize,
     /// The panes, in render order.
     pub panes: Vec<PaneSnapshot>,
+    /// Whether it was held at the front of its block.
+    ///
+    /// The order in `tabs` already carries where it *was*; this is what makes
+    /// it stay there, and what draws the pin on its row.
+    pub pinned: bool,
+    /// The colour a person put on it, by name.
+    ///
+    /// A name rather than a number, because the numbers are an enum's
+    /// discriminants and those are ours to reorder; a name a person's file
+    /// carries is not. One nothing matches reads as no colour — see
+    /// [`TabColor::named`](crate::tab::TabColor::named).
+    pub color: Option<String>,
     /// The group this tab was in, as a position in
     /// [`Session::groups`](Session::groups).
     ///
@@ -208,6 +220,8 @@ impl Session {
                 horizontal: tab.panes().axis() == SplitAxis::Horizontal,
                 focused,
                 panes,
+                pinned: tab.is_pinned(),
+                color: tab.color().map(|color| color.name().to_owned()),
                 group: tab
                     .group()
                     .and_then(|id| groups.iter().position(|held| *held == id)),
@@ -328,6 +342,10 @@ impl TabSnapshot {
         if !self.name.is_empty() {
             tab.set_name(Some(self.name.clone()));
         }
+        tab.restore_marks(
+            self.pinned,
+            self.color.as_deref().and_then(crate::tab::TabColor::named),
+        );
         first.apply_to_first(tab.panes_mut());
 
         let direction = if self.horizontal {

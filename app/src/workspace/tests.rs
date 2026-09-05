@@ -3106,6 +3106,14 @@ fn worktree_menu_box(scene: &Scene) -> Option<RectF> {
         .next()
 }
 
+/// Every rect painted in `fill`, which for a tab colour is its stripe.
+fn stripes_of(scene: &Scene, fill: Color) -> Vec<RectF> {
+    visible_rects(scene)
+        .filter(|(rect, _)| rect.background == Fill::Solid(fill))
+        .map(|(_, bounds)| bounds)
+        .collect()
+}
+
 /// The popup a tab's secondary press opens, by its box.
 ///
 /// Told apart from the worktree list hanging off it by its width, which is the
@@ -3385,6 +3393,7 @@ fn a_tabs_menu_is_the_entries_its_plugins_put_in_it() {
     assert_eq!(
         harness.tab_menu_entries(),
         [
+            "crook/tabs/pin-tab",
             "crook/tabs/new-group-with-tab",
             "crook/tabs/copy-pane-title",
             "crook/tabs/copy-working-directory",
@@ -3392,6 +3401,7 @@ fn a_tabs_menu_is_the_entries_its_plugins_put_in_it() {
             "crook/tabs/rename-pane",
             "crook/tabs/close-tab",
             "crook/worktrees/menu",
+            "crook/tabs/color",
         ],
         "the menu is not the entries its plugins contributed, in band order"
     );
@@ -3661,6 +3671,69 @@ fn emptying_the_field_puts_back_the_name_it_started_with() {
         born_as,
         "an emptied field left the tab with no name of its own"
     );
+}
+
+#[test]
+fn a_colour_puts_a_stripe_on_the_rows_of_the_tab_that_has_one() {
+    // On the leading edge rather than on the status disc, which is already
+    // saying what the agent is doing: a disc that carried a colour as well
+    // would be a red tab and a failed agent telling the same story with the
+    // same pixels.
+    let mut harness = Harness::seeded_panel();
+    let tab = harness.active_id();
+    let stripe = theme().terminal.bright[crate::tab::TabColor::Magenta.index()];
+    assert!(
+        stripes_of(&harness.frame(), stripe).is_empty(),
+        "a row was already wearing the colour nothing has been given"
+    );
+
+    harness.dispatch_action(TabAction::SetColor {
+        tab,
+        color: Some(crate::tab::TabColor::Magenta),
+    });
+
+    let painted = stripes_of(&harness.frame(), stripe);
+    assert_eq!(
+        painted.len(),
+        1,
+        "the colour did not land on exactly one row"
+    );
+    assert!(
+        painted[0].height() > painted[0].width(),
+        "the mark is {}x{} — a stripe is taller than it is wide",
+        painted[0].width(),
+        painted[0].height()
+    );
+}
+
+#[test]
+fn a_tabs_menu_offers_to_unpin_a_tab_that_is_pinned() {
+    // One entry and one action for both directions, because they are one
+    // gesture. The label says what pressing it will do rather than what is
+    // true: "Pinned" would be a row a person has to work out the verb for.
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the seeded tab has a pane");
+
+    harness.open_tab_menu_on(tab, pane);
+    assert!(tab_menu_offers(&harness.frame(), "Pin tab"));
+
+    harness.run_command("crook/tabs/pin-tab");
+    harness.open_tab_menu_on(tab, pane);
+
+    let scene = harness.frame();
+    assert!(
+        tab_menu_offers(&scene, "Unpin tab"),
+        "a pinned tab was still being offered a pin"
+    );
+    assert!(harness.workspace.read(&harness.app, |workspace, _| {
+        workspace
+            .tabs()
+            .get(tab)
+            .is_some_and(crate::tab::Tab::is_pinned)
+    }));
 }
 
 #[test]

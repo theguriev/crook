@@ -93,11 +93,11 @@ use std::path::Path;
 use std::rc::Rc;
 
 use crate::git::GitFacts;
-use crate::plugin::{BuildError, Host, Plugin, Showing};
-use crate::tab::{AgentStatus, PaneId, TabAction, TabId};
+use crate::plugin::{ActionId, BuildError, Host, Plugin, Showing};
+use crate::tab::{AgentStatus, PaneId, TabAction, TabColor, TabId};
 use crate::text_input::TextInput;
 use crate::theme::theme;
-use crate::workspace::tab_context_menu::{entry, field_entry, inert_entry};
+use crate::workspace::tab_context_menu::{entry, field_entry, inert_entry, nothing, swatch_entry};
 use crate::workspace::{Workspace, WorkspaceAction, status_color};
 
 /// The mark at the head of a tab's row.
@@ -266,6 +266,34 @@ impl Plugin for Tabs {
         host.declare_row_slot(TAB_ROW_BADGE, Cardinality::Single);
         host.declare_slot(TAB_MENU_ENTRIES, Cardinality::List);
 
+        // "Pin tab" and "Unpin tab" are one action under one name, because
+        // they are one gesture: a person reaches for the row that says what
+        // will happen, and a palette that offered both would offer one that
+        // does nothing on whichever tab is in front of them.
+        host.register_command(action("pin-tab"), "Pin tab", |workspace, ctx| {
+            let Some((tab, _)) = workspace.menu_target() else {
+                return;
+            };
+            workspace.close_tab_context_menu(ctx);
+            workspace.handle_action(&WorkspaceAction::Tab(TabAction::TogglePin(tab)), ctx);
+        });
+
+        for color in TabColor::ALL.map(Some).into_iter().chain([None]) {
+            let name = color.map_or("no-color".to_owned(), |color| {
+                format!("color-{}", color.name())
+            });
+            host.register_action(action(&name), move |workspace, ctx| {
+                let Some((tab, _)) = workspace.menu_target() else {
+                    return;
+                };
+                workspace.close_tab_context_menu(ctx);
+                workspace.handle_action(
+                    &WorkspaceAction::Tab(TabAction::SetColor { tab, color }),
+                    ctx,
+                );
+            });
+        }
+
         host.register_command(
             action("new-group-with-tab"),
             "New group with tab",
@@ -399,32 +427,36 @@ impl Plugin for Tabs {
         });
         *self.rename.surface.borrow_mut() = Some(showing);
 
-        // Warp's grouping, band for band. Band 0: what this tab is *with*.
-        // Band 1: what it says, copied. Band 2: what it is called. Band 3: it
-        // goes away, alone — so the pointer on its way down the column has a
-        // hairline to stop at before the one entry here that cannot be undone.
-        // Band 4 is the worktree menu's, and the gap is deliberate.
-        contribute(host, "new-group-with-tab", 0, |workspace| {
+        // Warp's grouping, band for band. Band 0: whether it stays put.
+        // Band 1: what it is *with*. Band 2: what it says, copied. Band 3:
+        // what it is called. Band 4: it goes away, alone — so the pointer on
+        // its way down has a hairline to stop at before the one entry here
+        // that cannot be undone. Band 5 is the worktree menu's.
+        pin_entry(host, 0);
+        contribute(host, "new-group-with-tab", 100, |workspace| {
             workspace.menu_target().is_some()
         });
-        contribute(host, "copy-pane-title", 100, |workspace| {
+        contribute(host, "copy-pane-title", 200, |workspace| {
             workspace.menu_pane_title().is_some()
         });
-        contribute(host, "copy-working-directory", 101, |workspace| {
+        contribute(host, "copy-working-directory", 201, |workspace| {
             workspace.menu_pane_directory().is_some()
         });
-        rename_entry(host, "rename-tab", 200, Renaming::Tab, &self.rename, &field);
+        rename_entry(host, "rename-tab", 300, Renaming::Tab, &self.rename, &field);
         rename_entry(
             host,
             "rename-pane",
-            201,
+            301,
             Renaming::Pane,
             &self.rename,
             &field,
         );
-        contribute(host, "close-tab", 300, |workspace| {
+        contribute(host, "close-tab", 400, |workspace| {
             workspace.menu_target().is_some()
         });
+        // Band 6, under the worktree menu's 5: the swatches are the foot of
+        // Warp's menu, and they are the one entry that is not a sentence.
+        swatch_row(host, 600);
 
         Ok(())
     }
@@ -457,6 +489,82 @@ fn contribute(
             return inert_entry(workspace, &key, label.clone());
         };
         entry(workspace, &key, label.clone(), WorkspaceAction::Run(id))
+    });
+}
+
+/// Contributes the entry that pins, which is the one entry whose *label*
+/// changes.
+///
+/// It says what pressing it will do rather than what is true, which is the
+/// only way one row can serve both states: "Unpin tab" on a pinned tab is a
+/// promise, and "Pinned" would be a label a person has to work out the verb
+/// for.
+fn pin_entry(host: &mut Host, order: i32) {
+    let id = host.action(&action("pin-tab"));
+
+    host.contribute(TAB_MENU_ENTRIES, "pin-tab", order, move |workspace, _| {
+        let key = "crook/tabs/pin-tab";
+        let pinned = workspace
+            .menu_target()
+            .and_then(|(tab, _)| workspace.tabs().get(tab))
+            .map(crate::tab::Tab::is_pinned);
+        match (pinned, id) {
+            (Some(pinned), Some(id)) => entry(
+                workspace,
+                key,
+                if pinned { "Unpin tab" } else { "Pin tab" },
+                WorkspaceAction::Run(id),
+            ),
+            _ => inert_entry(workspace, key, "Pin tab"),
+        }
+    });
+}
+
+/// Contributes the row of colour swatches at the foot of the menu.
+fn swatch_row(host: &mut Host, order: i32) {
+    let none = host.action(&action("no-color"));
+    let colors: Vec<(TabColor, Option<ActionId>)> = TabColor::ALL
+        .into_iter()
+        .map(|color| {
+            (
+                color,
+                host.action(&action(&format!("color-{}", color.name()))),
+            )
+        })
+        .collect();
+
+    host.contribute(TAB_MENU_ENTRIES, "color", order, move |workspace, _| {
+        let Some(chosen) = workspace
+            .menu_target()
+            .and_then(|(tab, _)| workspace.tabs().get(tab))
+            .map(crate::tab::Tab::color)
+        else {
+            return nothing();
+        };
+
+        // The one that takes a colour off leads, which is Warp's order and the
+        // right one: it is the state a tab starts in.
+        let mut swatches = vec![(
+            "crook/tabs/no-color".to_owned(),
+            None,
+            chosen.is_none(),
+            match none {
+                Some(id) => WorkspaceAction::Run(id),
+                None => return nothing(),
+            },
+        )];
+        for (color, id) in &colors {
+            let Some(id) = id else {
+                continue;
+            };
+            swatches.push((
+                format!("crook/tabs/color-{}", color.name()),
+                Some(theme().terminal.bright[color.index()]),
+                chosen == Some(*color),
+                WorkspaceAction::Run(*id),
+            ));
+        }
+        swatch_entry(workspace, swatches)
     });
 }
 
