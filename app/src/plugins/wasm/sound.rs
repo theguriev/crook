@@ -23,7 +23,7 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
 
 use crook_plugin_api::Answer;
@@ -222,7 +222,10 @@ impl Player {
 
     /// Starts it on a file, detached from everything.
     fn start(&self, file: &Path, volume: u8) -> io::Result<Child> {
-        let mut command = Command::new(self.program);
+        // Through the workspace's own wrapper, which is what sets
+        // `CREATE_NO_WINDOW`: without it every sound this plays flashes a
+        // console window on Windows, once per finished command.
+        let mut command = crate::process::command(self.program);
         command.args(self.flags);
 
         match self.volume {
