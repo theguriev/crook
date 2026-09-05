@@ -131,7 +131,9 @@ pub mod exports {
     /// registers by calling the imports above.
     pub const BUILD: &str = "crook_build";
 
-    /// `crook_render(slot_ptr, slot_len) -> i64`, packed like the manifest.
+    /// `crook_render(ptr, len) -> i64`, packed like the manifest, and given a
+    /// [`Render`](crook_plugin_api::Render) rather than a bare slot name: the
+    /// slot, and what it is about when the slot is one drawn per row.
     pub const RENDER: &str = "crook_render";
 
     /// `crook_run(name_ptr, name_len) -> i32`, zero for "done".

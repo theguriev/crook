@@ -60,6 +60,27 @@ description of something that was never built.
     of the panel plus what the window shows while it is chosen — the sidebar's body and the
     main area, built together because they are two views of one answer. The settings stopped
     being a pane and the plugins left the settings rail entirely.
+  - The **tab row's leading mark is a slot**, and so is the badge on its corner:
+    `crook/tabs` declares `tab.row.mark` and `tab.row.badge`, and the status disc the panel has
+    always drawn is what the host puts there when nothing has taken them. These are the first
+    slots that are drawn **more than once** — once per row — which is a different kind of slot
+    and needed two things the others did not. A contribution is handed the *row*
+    (`plugin::RowContribution`, a second registry beside the one `header.right` lives in,
+    because a contribution that cannot be told which row it is on cannot answer differently for
+    two of them). And it may **decline** a row by answering `None`, which is what lets a plugin
+    mark the worktrees and leave everything else alone: declining means "as it was" rather than
+    "empty", which is also why the disc is the host's answer to an empty slot rather than a
+    contribution of its own competing at some order.
+
+    **What a slot per row costs**, because it is worth writing down before somebody declares one
+    per block: a sandboxed contribution to it is one guest call per row per frame, each with its
+    own fuel budget. Seven tabs is seven calls where the header's slot is one, and the budget is
+    per call rather than shared — so a plugin cannot be starved by the panel being long, and a
+    panel cannot be slowed to a crawl by a plugin that spends its whole budget, because spending
+    it is a trap and three traps in a row stop it being asked at all. The two plugins written
+    against it answer in a table lookup and a boolean; a slot per *block* would be the same
+    arithmetic against a list that is thousands long, and would need something this does not
+    have.
   - Still to move: the worktree menu, the Themes panel, the Omarchy palettes.
 - **Phase 2 — the sandbox: done, and dogfooded.** `crook_plugin_api` is the wire — a
   manifest, capabilities that each say what they are in a sentence, and a `Node` vocabulary
@@ -153,6 +174,27 @@ description of something that was never built.
     index; installing is a file copy, and the flag exists because "copy this into a directory
     whose path is different on three platforms" is a sentence a README should not have to say
     twice.
+
+  **ABI 4 is the version a plugin can be asked about something.** Every version up to it could
+  be asked what goes in a slot; that is a question with one answer, and a slot drawn once per
+  row of a list needs the answer to be different seven times. So a render carries a `Render` — the slot, and the
+  `Subject` it is about when the slot has one — and the first subject is a tab row.
+
+  What a subject carries is **redacted against the grant**, in `plugins::wasm`, one field at a
+  time: the title and the agent's status need `ReadTabs`, the directory and its branch and
+  whether it is a worktree need `ReadWorkingDirectory`, and a plugin that was granted neither
+  finds `None` where each would have been rather than a refusal it has to handle. What is left
+  for everybody is one number per row — a hash of where the tab is working, salted with the
+  asking plugin's own id, so a plugin can tell two rows apart and keep telling them apart
+  tomorrow, and two plugins cannot work out that two of their rows are one row. It is not
+  offered as a secret: a hash can be checked against a guess, which is exactly why it is *all*
+  that is ungated.
+
+  That is what makes a plugin that draws a picture on every tab a plugin nobody has to allow
+  anything, and the pair of them is the second dogfood:
+  [crook-emoji](https://github.com/theguriev/crook-emoji) takes `tab.row.mark` and asks for no
+  capability at all, and [crook-worktree](https://github.com/theguriev/crook-worktree) takes
+  `tab.row.badge`, asks for `ReadWorkingDirectory`, and draws nothing until somebody says yes.
 
   **And the usage chip is not in the binary any more.** It is a sandboxed plugin —
   `theguriev/pirate`, in a public repository of its own at github.com/theguriev/crook-pirate,
@@ -331,8 +373,9 @@ plugin any other way:
 **Registries (each `register` returns a guard):**
 
 - `host.slots` — declare a slot (owner) or contribute to one (contributor). Slot ids are
-  dotted strings owned by the declaring plugin: `header.right`, `tab.row.chips`,
-  `tab.row.status`, `tab.menu.entries`, `block.footer`, `pane.content`, `settings.section`,
+  dotted strings owned by the declaring plugin: `header.right`, `tab.row.mark`,
+  `tab.row.badge` (both built), `tab.row.chips`, `tab.menu.entries`, `block.footer`,
+  `pane.content`, `settings.section`,
   `settings.page`, `palette.commands`, `overlay.layers`, `theme.tokens`. Cardinality is
   declared once, by the owner: `single` (highest priority renders), `list` (ordered by
   `order`, then registration), `keyed` (owner dispatches on a key), `chain` (each contributor

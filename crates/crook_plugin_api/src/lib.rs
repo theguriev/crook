@@ -47,6 +47,15 @@ use serde::{Deserialize, Serialize};
 /// counts: postcard encodes a variant by its index, so an older host reading a
 /// newer plugin's `Node` would read the wrong variant rather than fail.
 ///
+/// **4** is the version a plugin can be asked the same question twice in. A
+/// render used to carry a slot name and nothing else, which is enough for a
+/// slot there is one of — the header has one right-hand end — and nothing at
+/// all for a slot that is drawn once per row of a list. So a render carries a
+/// [`Render`]: the slot, and the [`Subject`] it is about when the slot has
+/// one. What a subject *says* is [`redacted`](TabFacts) against what a person
+/// granted, which is why a plugin that marks every tab with a picture of its
+/// own can be a plugin allowed to know nothing about any of them.
+///
 /// **3** added [`Request::Tally`] and the `/**` a granted path may end in: a
 /// plugin can have a directory of line-delimited JSON counted for it without
 /// any of it crossing the boundary. A hundred megabytes of transcripts is a
@@ -62,7 +71,7 @@ use serde::{Deserialize, Serialize};
 /// behalf, and the six [`Node`] variants a panel needs. Version 1 could
 /// describe a badge and register an action, which is a plugin that can say
 /// what it already knew.
-pub const ABI_VERSION: u32 = 3;
+pub const ABI_VERSION: u32 = 4;
 
 /// What a sandboxed plugin says about itself, before any of it runs.
 ///
@@ -97,9 +106,10 @@ pub enum Capability {
     /// Read the settings — every option, not a subset.
     ReadSettings,
     /// Read what is in the tab strip: how many tabs, what they are called,
-    /// which is active. Not what is *in* a pane.
+    /// which is active, and what each agent is doing. Not what is *in* a pane.
     ReadTabs,
-    /// Read the working directory and git facts of the active pane.
+    /// Read the working directory and git facts of a pane — the active one,
+    /// and each of the rows a plugin is asked to draw a mark on.
     ReadWorkingDirectory,
     /// Reach the network, and only these hosts.
     ///
@@ -134,7 +144,7 @@ impl Capability {
         match self {
             Self::ReadSettings => "Read your settings".into(),
             Self::ReadTabs => "See what your tabs are called".into(),
-            Self::ReadWorkingDirectory => "See which project the active pane is in".into(),
+            Self::ReadWorkingDirectory => "See which project each tab is in".into(),
             Self::Network(hosts) => {
                 let mut sentence = String::from("Reach ");
                 for (index, host) in hosts.iter().enumerate() {
@@ -195,6 +205,116 @@ impl Capability {
             Self::ReadFiles(paths) => paths.iter().map(|path| format!("file:{path}")).collect(),
         }
     }
+}
+
+/// What the host is asking for, and what it is asking about.
+///
+/// A render used to be a slot name, which is enough for a slot there is one
+/// of: the header has one right-hand end, and a plugin asked what goes in it
+/// knows everything it needs from the question. It is nothing at all for a
+/// slot drawn once per row of a list — a plugin asked "what is this tab's
+/// mark" with no way to know *whose* mark can only answer the same thing for
+/// every tab there is.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Render {
+    /// The slot, by the name the plugin contributed to.
+    pub slot: String,
+    /// What this render is about, for a slot that is drawn per thing, and
+    /// `None` for a slot that is drawn once.
+    pub subject: Option<Subject>,
+}
+
+/// What one render is about.
+///
+/// An enum with one variant, because the second is a matter of time — a slot
+/// per pane, a slot per block — and a plugin that matches on a subject this
+/// build does not have draws nothing rather than guessing, which is the rule
+/// an unknown slot name already follows.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Subject {
+    /// One row of the tab panel.
+    Tab(TabFacts),
+}
+
+/// One row of the tab panel, as much of it as this plugin was allowed to see.
+///
+/// **Redacted rather than refused.** A plugin granted nothing still gets a
+/// [`key`](Self::key) and is still drawn, because a mark per tab is a thing
+/// somebody can want without wanting to know what the tabs are. Everything
+/// past that is a capability: what the tab is called is
+/// [`Capability::ReadTabs`], where it is working is
+/// [`Capability::ReadWorkingDirectory`], and a plugin that was not granted one
+/// finds `None` where the answer would have been rather than a refusal it has
+/// to handle.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TabFacts {
+    /// Which row this is, as a number that says nothing else.
+    ///
+    /// Two renders of one tab carry the same key, two tabs never carry one,
+    /// and a project opened again tomorrow carries the key it carried today —
+    /// which is the whole of what it takes to give a tab a mark of its own and
+    /// have it still be that tab's mark next week. It is a hash of where the
+    /// tab is working, salted with the asking plugin's own id, so two plugins
+    /// cannot compare notes about which of their rows are the same row.
+    ///
+    /// It is not a secret and is not offered as one: a hash can be checked
+    /// against a guess, so a plugin that already knew a path could find out
+    /// whether a tab is in it. That is exactly why the key is *all* that is
+    /// ungated — everything a person would actually mind being read is a
+    /// capability below, and none of it can be recovered from this number.
+    pub key: u64,
+    /// What the tab is, or `None` without [`Capability::ReadTabs`].
+    pub tab: Option<TabInfo>,
+    /// Where it is working, or `None` without
+    /// [`Capability::ReadWorkingDirectory`].
+    pub place: Option<Place>,
+}
+
+/// What a tab is, for a plugin granted [`Capability::ReadTabs`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TabInfo {
+    /// What the row's first line says.
+    pub title: String,
+    /// Whether this is the tab being looked at.
+    pub active: bool,
+    /// What the agent in it is doing.
+    pub status: Status,
+}
+
+/// Where a tab is working, for a plugin granted
+/// [`Capability::ReadWorkingDirectory`].
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Place {
+    /// The working directory, whole, as the host knows it.
+    pub directory: String,
+    /// The branch, or the short sha of a detached head, when the directory is
+    /// in a repository at all.
+    pub branch: Option<String>,
+    /// Whether it is a linked git worktree rather than the checkout the
+    /// repository was cloned into.
+    ///
+    /// A fact about the directory rather than about how the tab was opened: a
+    /// worktree somebody made at a shell years ago is one, and so is the one
+    /// Crook opened beside a tab this morning. There is no way to ask which,
+    /// and no plugin should have to care.
+    pub worktree: bool,
+}
+
+/// What the agent in a tab is doing.
+///
+/// The same four the panel draws as four colours of disc, said as words
+/// because a plugin may not name a colour.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Status {
+    /// Waiting for a prompt.
+    #[default]
+    Idle,
+    /// Working, with no attention needed.
+    Running,
+    /// Stopped, waiting on a person.
+    NeedsInput,
+    /// Stopped because something went wrong.
+    Failed,
 }
 
 /// How much a piece of text matters, rather than what colour it is.

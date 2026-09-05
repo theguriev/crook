@@ -314,6 +314,9 @@ impl TextLayoutSystem for StubShaper {
 struct Drawn {
     node: Node,
     answers: Option<ActionId>,
+    /// Where this contribution is being drawn, which is what decides the size
+    /// of everything in it.
+    scale: render::Scale,
     /// The mouse state a contribution keeps between frames. Held here for the
     /// reason the real one is held on the contribution: the tests draw the
     /// same node twice — once to find a control and once after pressing it —
@@ -342,7 +345,13 @@ impl View for Drawn {
 
     fn render(&self, _: &AppContext) -> Box<dyn Element> {
         let answers = self.answers;
-        render::element(&self.node, FamilyId(0), &move |_| answers, &self.hovers)
+        render::element(
+            &self.node,
+            FamilyId(0),
+            self.scale,
+            &move |_| answers,
+            &self.hovers,
+        )
     }
 }
 
@@ -362,12 +371,18 @@ impl Frame {
 
     /// The same, with every name in the node resolving to `answers`.
     fn answering(node: Node, answers: Option<ActionId>) -> Self {
+        Self::at(node, answers, render::Scale::ROW)
+    }
+
+    /// The same, drawn where a mark on a tab row is drawn.
+    fn at(node: Node, answers: Option<ActionId>, scale: render::Scale) -> Self {
         let queue = LocalQueue::new();
         // One worker: nothing drawn here waits on anything.
         let mut app = App::new(queue.foreground(), Arc::new(Background::new(1)));
         let (window_id, _) = app.add_window(|_| Drawn {
             node,
             answers,
+            scale,
             hovers: render::Hovers::default(),
         });
         let presenter = Presenter::new(window_id, Arc::new(StubShaper));
@@ -823,4 +838,116 @@ fn a_pressable_is_its_content_and_an_even_edge_and_nothing_else() {
 
     assert_eq!(ground.width(), alone.width() + 14., "seven a side, evenly");
     assert_eq!(ground.height(), alone.height() + 6.);
+}
+
+/// One row, for the redaction tests below.
+fn a_row(worktree: bool) -> crate::git::GitFacts {
+    crate::git::GitFacts {
+        branch: Some(crate::git::Head::Branch("side".to_owned())),
+        diff: None,
+        worktree,
+    }
+}
+
+/// The plugin the keys below are salted with.
+fn asker() -> PluginId {
+    PluginId::parse("eugen/marks").expect("a literal that parses")
+}
+
+/// A row a plugin might be asked about.
+fn row<'a>(title: &'a str, directory: &'a Path, git: &'a crate::git::GitFacts) -> TabRow<'a> {
+    TabRow {
+        tab: crate::tab::TabId::next(),
+        pane: crate::tab::PaneId::next(),
+        title,
+        active: true,
+        status: AgentStatus::Running,
+        directory: Some(directory),
+        git: Some(git),
+    }
+}
+
+#[test]
+fn a_plugin_granted_nothing_is_told_which_row_it_is_drawing_and_nothing_else() {
+    // The whole reason a mark per tab can be a plugin nobody has to allow
+    // anything: it is told these two rows are different rows, and not one word
+    // about either of them.
+    let git = a_row(true);
+    let facts = Sees::granted(&[]).facts(&row("crook", Path::new("/work/crook"), &git), &asker());
+
+    assert_eq!(facts.tab, None, "a name crossed without tabs.read");
+    assert_eq!(facts.place, None, "a directory crossed without cwd.read");
+    assert_ne!(facts.key, 0);
+}
+
+#[test]
+fn a_grant_shows_a_plugin_what_it_was_granted_and_no_more() {
+    let git = a_row(true);
+    let row = row("crook", Path::new("/work/crook"), &git);
+    let asker = asker();
+
+    let named = Sees::granted(&["tabs.read".to_owned()]).facts(&row, &asker);
+    let placed = Sees::granted(&["cwd.read".to_owned()]).facts(&row, &asker);
+
+    let tab = named.tab.expect("tabs.read was granted");
+    assert_eq!(tab.title, "crook");
+    assert_eq!(tab.status, crook_plugin_api::Status::Running);
+    assert!(tab.active);
+    assert_eq!(named.place, None, "a directory crossed on tabs.read alone");
+
+    let place = placed.place.expect("cwd.read was granted");
+    assert_eq!(place.directory, "/work/crook");
+    assert_eq!(place.branch.as_deref(), Some("side"));
+    assert!(
+        place.worktree,
+        "the one fact the worktree plugin exists for"
+    );
+    assert_eq!(placed.tab, None, "a title crossed on cwd.read alone");
+}
+
+#[test]
+fn a_rows_key_is_the_same_tomorrow_and_is_not_the_same_for_two_plugins() {
+    // Both halves of what the key promises, and the literal is the point of
+    // the first: this number is what a plugin's choice of mark is a remainder
+    // of, so it has to survive a rebuild of Crook, not merely a second call
+    // within one run.
+    let git = a_row(false);
+    let here = row("crook", Path::new("/work/crook"), &git);
+    let elsewhere = row("crook", Path::new("/work/crook-side"), &git);
+    let granted = Sees::granted(&[]);
+    let other = PluginId::parse("eugen/other").expect("a literal that parses");
+
+    assert_eq!(granted.facts(&here, &asker()).key, 0xf0c0_8c7a_349e_059d);
+    assert_ne!(
+        granted.facts(&here, &asker()).key,
+        granted.facts(&elsewhere, &asker()).key,
+        "two directories are one row"
+    );
+    assert_ne!(
+        granted.facts(&here, &asker()).key,
+        granted.facts(&here, &other).key,
+        "two plugins can compare notes about which row is which"
+    );
+}
+
+#[test]
+fn a_session_that_has_not_said_where_it_is_working_still_has_a_key() {
+    // The state every tab is in for a moment after it is opened. A key that
+    // was zero — or absent — there would be a panel whose marks all changed
+    // the instant the shell answered.
+    let git = a_row(false);
+    let mut nowhere = row("crook", Path::new("/work/crook"), &git);
+    nowhere.directory = None;
+    let granted = Sees::granted(&[]);
+
+    let key = granted.facts(&nowhere, &asker()).key;
+
+    assert_ne!(key, 0);
+    assert_ne!(
+        key,
+        granted
+            .facts(&row("crook", Path::new("/work/crook"), &git), &asker())
+            .key,
+        "a title and a path that happen to look alike are not the same row"
+    );
 }

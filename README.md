@@ -71,6 +71,19 @@ Eight features, and the page that configures them:
   token budget is spent and when it resets. To do that it asks to read one file,
   `~/.claude/.credentials.json`, and to reach one host, `api.anthropic.com`. It can reach
   nothing else, and until somebody says yes it reaches neither.
+
+  **A plugin can also be asked the same question once per row.** The mark at the head of every
+  tab in the panel is a slot, and the small badge on its corner is another one, so a plugin
+  can replace what a tab is drawn as or add one more thing to it. A contribution to those is
+  handed the row it is being drawn on, with everything a person did not allow it to see left
+  out — and a plugin allowed *nothing* still gets one number per row, the same number for one
+  tab every day and a different one for the tab beside it. That is enough to give every tab a
+  picture of its own, and it is what
+  [github.com/theguriev/crook-emoji](https://github.com/theguriev/crook-emoji) does: an emoji
+  where the status dot was, asking for no permission at all. Beside it,
+  [github.com/theguriev/crook-worktree](https://github.com/theguriev/crook-worktree) puts a
+  branch mark on the corner of every tab whose directory is a git worktree, which it can only
+  do because somebody allowed it to see which project each tab is in.
 - **A shell in every pane.** A real pseudo-terminal and a real xterm-compatible emulator:
   colour, bold and italic faces, underline and strikeout, the alternate screen, ten thousand
   lines of scrollback, `SIGWINCH` on resize, and titles and working directories the shell

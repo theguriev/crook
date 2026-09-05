@@ -27,6 +27,12 @@
 //! deleted out from under it does not, and letting the line disappear would
 //! make that row 14px shorter than its neighbours.
 //!
+//! **The mark at the head of the row is not this file's any more.** It is two
+//! slots — `tab.row.mark` and the badge on its corner — declared by
+//! `crook/tabs`, which draws the status disc when nothing has taken them. See
+//! [`crate::plugins::tabs`] for why the disc is what the host draws rather
+//! than a contribution competing with a plugin's.
+//!
 //! **There is a close button in the trailing edge**, in a slot reserved on
 //! every row in every state. Warp closes a tab from a floating action belt
 //! that overhangs the tab's top-right corner — an overlay — and a row already
@@ -38,8 +44,9 @@ use crookui_core::elements::MouseStateHandle;
 use crookui_core::fonts::{FamilyId, Weight};
 use crookui_core::prelude::*;
 
+use crate::plugins::tabs::TabRow;
 use crate::settings::{Density, Granularity, TabOptions};
-use crate::tab::{AgentStatus, PaneId, TabAction, TabId};
+use crate::tab::{PaneId, TabAction, TabId};
 use crate::theme::theme;
 
 use super::super::action::{WorkspaceAction, WorktreeAction};
@@ -47,22 +54,10 @@ use super::super::row_content::{
     Chips, DetailSection, PANEL_PATH_CHARS, RowFacts, detail_card, detail_panes, metadata_line,
 };
 use super::super::view::Workspace;
-use super::super::{CLOSE_BUTTON_SIZE, CLOSE_ICON_SIZE, GEAR_ICON, status_color};
-
-/// Warp's `VERTICAL_TABS_ICON_SIZE`. The same in both densities.
-const ICON_SIZE: f32 = 24.;
+use super::super::{CLOSE_BUTTON_SIZE, CLOSE_ICON_SIZE};
 
 /// Warp's `ICON_WITH_STATUS_GAP`, between the icon and the text column.
 const ICON_GAP: f32 = 8.;
-
-/// Warp's `CIRCLE_RATIO` from `ui_components/icon_with_status.rs`: the brand
-/// circle fills 76% of the 24px box, and the rest is breathing room.
-///
-/// Warp then draws a glyph inside the circle and a status ring past its
-/// bottom-right corner. Crook has no icon font and no way to overlay a ring
-/// inside a row, so the status is the disc's own colour — one mark instead of
-/// three, in the same reserved 24px, so rows line up with Warp's.
-const DISC_RATIO: f32 = 0.76;
 
 /// Warp's `ROW_CORNER_RADIUS`.
 const ROW_RADIUS: f32 = 4.;
@@ -156,6 +151,19 @@ pub(super) fn render(
         Density::Expanded => expanded_column(&facts, &chips, options, ui),
     };
 
+    // Made once and lent to whatever is drawing the row's mark, which is
+    // this build's `crook/tabs` unless a plugin has taken the slot. Every
+    // field of it is something this function already had.
+    let row = TabRow {
+        tab,
+        pane,
+        title: session.display_title(),
+        active: strip.is_active(tab),
+        status,
+        directory: session.working_directory.as_deref(),
+        git,
+    };
+
     let close_state = interaction.close.clone();
     let guard = interaction.close.clone();
 
@@ -180,7 +188,7 @@ pub(super) fn render(
                 } else {
                     CrossAxisAlignment::Center
                 })
-                .with_child(status_disc(Some(status)))
+                .with_child(crate::plugins::tabs::mark(workspace, &row, app))
                 .with_child(Expanded::new(1., body.column).finish())
                 .with_child(close_slot(close_action, close_state.clone(), show_close))
                 .finish(),
@@ -396,37 +404,6 @@ fn row_shell(content: Box<dyn Element>, is_selected: bool, is_hovered: bool) -> 
     }))
     .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ROW_RADIUS)))
     .finish()
-}
-
-/// The 24px leading mark: a status-coloured disc, centred in its reserved box.
-fn status_disc(status: Option<AgentStatus>) -> Box<dyn Element> {
-    let diameter = ICON_SIZE * DISC_RATIO;
-
-    let mark: Box<dyn Element> = match status {
-        Some(status) => ConstrainedBox::new(
-            Container::new(Empty::new().finish())
-                .with_background_color(status_color(status))
-                .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
-                .finish(),
-        )
-        .with_width(diameter)
-        .with_height(diameter)
-        .finish(),
-        // The settings row's mark: a gear where an agent's status disc goes,
-        // at the disc's own diameter so the row's text starts where every
-        // other row's does. See the strip's `status_dot` for why this is a
-        // different kind of mark rather than a fifth status colour.
-        None => Icon::new(GEAR_ICON, diameter)
-            .with_color(theme().text_muted)
-            .finish(),
-    };
-
-    ConstrainedBox::new(Align::new(mark).finish())
-        // Reserved whole, in both densities, so every row's text starts at the
-        // same x however tall the row is.
-        .with_width(ICON_SIZE)
-        .with_height(ICON_SIZE)
-        .finish()
 }
 
 /// A fixed square, holding the close button or holding nothing.

@@ -711,6 +711,17 @@ impl Harness {
     /// row has a branch or a diff count to print — and the only way the
     /// assertion does not depend on the repository the test runs in.
     fn record_git(&mut self, pane: PaneId, branch: &str, diff: Option<DiffStats>) {
+        self.record_git_facts(pane, branch, diff, false);
+    }
+
+    /// The same, for a pane whose directory is a linked worktree.
+    fn record_git_facts(
+        &mut self,
+        pane: PaneId,
+        branch: &str,
+        diff: Option<DiffStats>,
+        worktree: bool,
+    ) {
         let directory = self.workspace.read(&self.app, |workspace, _| {
             workspace
                 .tabs()
@@ -721,6 +732,7 @@ impl Harness {
         let facts = GitFacts {
             branch: Some(Head::Branch(branch.to_owned())),
             diff,
+            worktree,
         };
 
         let workspace = &self.workspace;
@@ -10964,4 +10976,174 @@ mod theme_panel_placement {
         assert!(!text.contains("Change your current theme."), "{text}");
         assert!((panel_boxes(&harness.frame())[0].width() - wide.width()).abs() < 1.);
     }
+}
+
+/// A plugin that takes both marks on a tab row, for the tests below.
+///
+/// Native, because what is being tested is the *slot* rather than the sandbox:
+/// a contribution from a `.wasm` file arrives at the same registry through
+/// `plugins::wasm`, and putting a wasm module in this file would test the
+/// interpreter and the panel at once.
+struct TestMarks;
+
+/// What the mark contribution draws, so the assertions can find it.
+const MARK_ICON: Lucide = Lucide::Check;
+
+/// And the badge, which it puts only on the rows that are worktrees.
+const BADGE_ICON: Lucide = Lucide::Info;
+
+/// The title of the one row this plugin declines to draw a mark on.
+const UNMARKED: &str = "left alone";
+
+impl crate::plugin::Plugin for TestMarks {
+    fn manifest(&self) -> &'static crate::plugin::Manifest {
+        static MANIFEST: std::sync::OnceLock<crate::plugin::Manifest> = std::sync::OnceLock::new();
+        MANIFEST.get_or_init(|| crate::plugin::Manifest {
+            schema: crate::plugin::Manifest::SCHEMA,
+            id: crate::plugin::PluginId::parse("eugen/marks").expect("a literal that parses"),
+            name: "Marks",
+            description: "Takes both marks on a tab row.",
+            version: "0.1.0",
+            tier: crate::plugin::Tier::Native,
+            capabilities: &[],
+        })
+    }
+
+    fn build(
+        &mut self,
+        host: &mut crate::plugin::Host,
+        _: &mut ViewContext<Workspace>,
+    ) -> Result<(), crate::plugin::BuildError> {
+        host.contribute_row(
+            crate::plugins::tabs::TAB_ROW_MARK,
+            "mark",
+            0,
+            |_, row, _| {
+                // One row declined, which is the case the disc has to survive:
+                // "nothing to say about this one" must leave the row as it was
+                // rather than empty it.
+                (row.title != UNMARKED).then(|| {
+                    Icon::new(MARK_ICON, 16.)
+                        .with_color(theme().accent)
+                        .finish()
+                })
+            },
+        );
+        host.contribute_row(
+            crate::plugins::tabs::TAB_ROW_BADGE,
+            "badge",
+            0,
+            |_, row, _| {
+                row.git.is_some_and(|facts| facts.worktree).then(|| {
+                    Icon::new(BADGE_ICON, 8.)
+                        .with_color(theme().accent)
+                        .finish()
+                })
+            },
+        );
+        Ok(())
+    }
+}
+
+impl Harness {
+    /// A window whose tab rows a plugin has taken the marks on.
+    fn with_marks(tabs: usize) -> Self {
+        let mut plugins = crate::plugins::defaults();
+        plugins.push(Box::new(TestMarks));
+        Self::with_plugins(tabs, Settings::ephemeral(), plugins)
+    }
+}
+
+/// The discs the panel is drawing: round, and the size `crook/tabs` draws its
+/// status disc at.
+fn status_discs(scene: &Scene) -> Vec<RectF> {
+    let panel = panel_box(scene);
+    let diameter = crate::plugins::tabs::MARK_SIZE * 0.76;
+    rects_rounded_by(scene, Radius::Percentage(50.))
+        .into_iter()
+        .filter(|bounds| panel.contains_point(center(*bounds)))
+        .filter(|bounds| (bounds.width() - diameter).abs() < 0.5)
+        .collect()
+}
+
+/// The rings round a badge: round, and smaller than half the mark's box.
+fn badge_rings(scene: &Scene) -> Vec<RectF> {
+    let panel = panel_box(scene);
+    let ring = crate::plugins::tabs::MARK_SIZE * 0.46;
+    rects_rounded_by(scene, Radius::Percentage(50.))
+        .into_iter()
+        .filter(|bounds| panel.contains_point(center(*bounds)))
+        .filter(|bounds| (bounds.width() - ring).abs() < 0.5)
+        .collect()
+}
+
+#[test]
+fn a_plugin_can_draw_the_mark_at_the_head_of_every_row() {
+    // The slot, end to end: what the panel paints where the status disc was is
+    // what a plugin said to paint there, on every row and not just the active
+    // one.
+    let mut harness = Harness::with_marks(3);
+
+    let scene = harness.frame();
+
+    assert_eq!(icons_in(&scene, panel_box(&scene), MARK_ICON).len(), 3);
+    assert!(
+        status_discs(&scene).is_empty(),
+        "the disc was drawn under the mark that replaced it"
+    );
+}
+
+#[test]
+fn a_row_the_plugin_declines_keeps_the_disc_it_had() {
+    // The reason the disc is the host's answer to an empty slot rather than a
+    // contribution of its own: a plugin marking *some* rows must leave the
+    // others looking exactly as they did, and `Slots::one` never asks the next
+    // contributor when the first declines.
+    let mut harness = Harness::with_marks(2);
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.derived_title = Some(UNMARKED.to_owned());
+    });
+
+    let scene = harness.frame();
+
+    let discs = status_discs(&scene);
+    assert_eq!(icons_in(&scene, panel_box(&scene), MARK_ICON).len(), 1);
+    assert_eq!(discs.len(), 1, "the declined row lost its disc");
+    assert!(
+        tab_boxes(&scene)[0].contains_point(center(discs[0])),
+        "the disc came back on the wrong row"
+    );
+}
+
+#[test]
+fn a_badge_is_drawn_on_the_corner_of_the_mark_it_belongs_to() {
+    // Warp hangs its status ring off the bottom-right of the same 24px box,
+    // and this is where the two plugins the panel was opened up for meet: one
+    // draws the mark, the other says one more thing about the same tab without
+    // taking the first one's place.
+    let mut harness = Harness::with_marks(2);
+    let panes = harness.pane_ids();
+    harness.seed(panes[1], None);
+    harness.record_git_facts(panes[1], "side", None, true);
+
+    let scene = harness.frame();
+
+    let rings = badge_rings(&scene);
+    assert_eq!(rings.len(), 1, "the badge went on more rows than one");
+    assert_eq!(icons_in(&scene, panel_box(&scene), BADGE_ICON).len(), 1);
+
+    let row = tab_boxes(&scene)[1];
+    let ring = rings[0];
+    assert!(
+        row.contains_point(center(ring)),
+        "{ring:?} is not on {row:?}"
+    );
+    // Down and to the right of the mark it sits on, which is the whole of what
+    // makes it a badge rather than a second mark beside the first.
+    let mark = icons_in(&scene, row, MARK_ICON)[0];
+    assert!(
+        center(ring).x() > center(mark).x() && center(ring).y() > center(mark).y(),
+        "the badge at {ring:?} is not on the corner of the mark at {mark:?}"
+    );
 }

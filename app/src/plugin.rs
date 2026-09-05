@@ -38,6 +38,7 @@ pub use crook_plugin::{
 };
 
 use crate::keybindings::{Rule, Source, rule_from};
+use crate::plugins::tabs::TabRow;
 use crate::workspace::{Category, Fonts, Workspace};
 
 /// A section of the sidebar: a button at its foot, and what the window shows
@@ -62,6 +63,22 @@ pub const SETTINGS_PAGE: SlotId = SlotId::new("settings.page");
 /// a contribution that captured what it wanted to draw would be drawing the
 /// state of the window at the moment the plugin loaded.
 pub type UiContribution = Box<dyn Fn(&Workspace, &AppContext) -> Box<dyn Element>>;
+
+/// What a plugin contributes to a slot that is drawn once per row.
+///
+/// Two differences from [`UiContribution`], and both are the row's doing.
+///
+/// It is handed the row it is being drawn on, because a slot drawn seven times
+/// asks the same plugin seven questions and "which one is this" is the whole
+/// of what distinguishes them.
+///
+/// And it may answer `None`, which [`UiContribution`] has no need for: the
+/// header's slot is empty or it is not, whereas a mark per tab is something a
+/// plugin may want on *some* rows — the worktrees, the failures — and nowhere
+/// else. `None` means "as it was": the host draws whatever it would have drawn
+/// with no plugin there at all, rather than a hole where a mark goes.
+pub(crate) type RowContribution =
+    Box<dyn Fn(&Workspace, &TabRow<'_>, &AppContext) -> Option<Box<dyn Element>>>;
 
 /// What answers to an [`ActionName`].
 ///
@@ -193,6 +210,10 @@ pub struct Host {
     /// short list of what has to arrive the other way.
     grants: BTreeMap<String, Vec<String>>,
     slots: Slots<UiContribution>,
+    /// The slots drawn once per row of the tab panel, which are their own
+    /// registry because what a contribution to them *is* is different: it is
+    /// asked about a row, and it may decline that row.
+    rows: Slots<RowContribution>,
     /// The settings pages, which are a slot of their own because what a
     /// contribution to them *is* is different: rows to be searched rather than
     /// an element to be drawn.
@@ -267,6 +288,7 @@ impl Host {
             fonts,
             grants,
             slots: Slots::new(),
+            rows: Slots::new(),
             pages: Slots::new(),
             page_keys: Vec::new(),
             sections: Slots::new(),
@@ -320,6 +342,38 @@ impl Host {
             EntryId::new(entry),
             order,
             Box::new(build) as UiContribution,
+        );
+        self.kept.push((who, registration));
+    }
+
+    /// Declares a slot that is drawn once per row of the tab panel.
+    ///
+    /// Separate from [`declare_slot`](Self::declare_slot) because the two
+    /// registries hold different things, and a plugin contributing to the
+    /// wrong one is told so by name rather than by drawing nothing: a row slot
+    /// is not somewhere an ordinary contribution can go, since an ordinary
+    /// contribution has no way to ask which row it is on.
+    pub fn declare_row_slot(&mut self, slot: SlotId, cardinality: Cardinality) {
+        let who = self.who();
+        let registration = self.rows.declare(&who, slot, cardinality);
+        self.kept.push((who, registration));
+    }
+
+    /// Contributes something drawn per row to a slot somebody declares.
+    pub fn contribute_row(
+        &mut self,
+        slot: SlotId,
+        entry: impl Into<String>,
+        order: i32,
+        build: impl Fn(&Workspace, &TabRow<'_>, &AppContext) -> Option<Box<dyn Element>> + 'static,
+    ) {
+        let who = self.who();
+        let registration = self.rows.contribute(
+            &who,
+            slot,
+            EntryId::new(entry),
+            order,
+            Box::new(build) as RowContribution,
         );
         self.kept.push((who, registration));
     }
@@ -698,6 +752,24 @@ impl Host {
         &self.slots
     }
 
+    /// The row slot of that name, if this build has one.
+    ///
+    /// Looked up separately from [`slot_named`](Self::slot_named), so that a
+    /// plugin contributing to `tab.row.mark` reaches the registry that can ask
+    /// it about a row and a plugin contributing to `header.right` reaches the
+    /// one that cannot.
+    pub fn row_slot_named(&self, name: &str) -> Option<SlotId> {
+        self.rows
+            .declared()
+            .into_iter()
+            .find(|slot| slot.as_str() == name)
+    }
+
+    /// The row slots, for the panel that draws them.
+    pub(crate) fn rows(&self) -> &Slots<RowContribution> {
+        &self.rows
+    }
+
     /// The actions, for whatever dispatches one.
     pub fn actions(&self) -> &Actions<ActionHandler> {
         &self.actions
@@ -716,6 +788,7 @@ impl Host {
     /// Everything the registries have to complain about.
     pub fn audit(&self) -> Vec<Complaint> {
         let mut complaints = self.slots.audit();
+        complaints.extend(self.rows.audit());
         complaints.extend(self.actions.audit());
         complaints
     }

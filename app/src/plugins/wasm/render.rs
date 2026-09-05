@@ -41,6 +41,76 @@ const SMALL: f32 = 10.5;
 const BODY: f32 = 12.;
 const LARGE: f32 = 16.;
 
+/// How big the words and the marks are in the place this contribution is
+/// drawn.
+///
+/// A plugin names three sizes and no numbers, and until there was a slot
+/// smaller than a row there was only one set of numbers to resolve them to.
+/// There is more than one now: a mark at the head of a tab row has 24 pixels
+/// to be seen in and the badge on its corner has eleven, and a plugin whose
+/// [`Size::Body`] came out at twelve in both would be illegible in one and
+/// overflowing the other. So the *place* carries the numbers, which is the
+/// same division of labour every other measurement here follows — the plugin
+/// says what a thing is and the host says how big that is here.
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub(super) struct Scale {
+    small: f32,
+    body: f32,
+    large: f32,
+    /// What an [`Icon`](Node::Icon) is drawn at, which is one number rather
+    /// than three: a mark has no size of its own to name.
+    icon: f32,
+    /// What Crook's own drawn artwork is drawn at, which is not the icon size.
+    /// See [`PIRATE_SIZE`].
+    art: f32,
+}
+
+impl Scale {
+    /// A contribution in a row of ordinary chrome — the header, a panel.
+    pub(super) const ROW: Self = Self {
+        small: SMALL,
+        body: BODY,
+        large: LARGE,
+        icon: BODY,
+        art: PIRATE_SIZE,
+    };
+
+    /// The 24px mark at the head of a tab row.
+    ///
+    /// Sixteen for a body, which is what makes a glyph in that box read as the
+    /// disc it replaced rather than as a caption where a mark should be: the
+    /// disc it stands in for is 18 pixels across, and a 12pt glyph in a 24pt
+    /// box looks like something that failed to load.
+    pub(super) const MARK: Self = Self {
+        small: 13.,
+        body: 16.,
+        large: 19.,
+        icon: 16.,
+        // The disc it stands in for, near enough: artwork fills its box edge
+        // to edge where an icon is a stroke inside a margin.
+        art: 20.,
+    };
+
+    /// The badge on the corner of that mark, which has about eight pixels
+    /// inside its ring and can hold one glyph.
+    pub(super) const BADGE: Self = Self {
+        small: 7.,
+        body: 8.,
+        large: 9.,
+        icon: 8.5,
+        art: 8.5,
+    };
+
+    /// What a size is here, in points.
+    fn points(self, size: Size) -> f32 {
+        match size {
+            Size::Small => self.small,
+            Size::Body => self.body,
+            Size::Large => self.large,
+        }
+    }
+}
+
 /// The corner on something a plugin made pressable.
 ///
 /// The same six pixels every other control in Crook takes, and deliberately
@@ -122,7 +192,9 @@ const PANEL_INSET: f32 = 14.;
 /// read as one box.
 const PANEL_OFFSET: f32 = 6.;
 
-/// How big the pirate is drawn, a little over the 12pt label beside it. The
+/// How big the pirate is drawn beside a row's own text, a little over the
+/// 12pt label beside him — [`Scale`] carries the number for everywhere else.
+/// The
 /// artwork is a disc that fills its box edge to edge, where an icon of the
 /// same nominal size is a stroke inside two units of margin, so matching the
 /// numbers would draw a pirate that towered over everything else in the row.
@@ -180,6 +252,19 @@ impl Hovers {
     }
 }
 
+/// The font and the sizes every node in one contribution is drawn with.
+///
+/// One value rather than two parameters because they travel together down the
+/// whole tree and always have: a node names neither, and both are answers to
+/// the same question — what does a plugin's description look like *here*.
+#[derive(Copy, Clone)]
+struct Chrome {
+    /// The interface's own family. Nothing in this tier chooses a font.
+    ui: FamilyId,
+    /// How big the words and the marks are in this place.
+    scale: Scale,
+}
+
 /// Builds the element a node describes.
 ///
 /// `action` resolves one of the plugin's action names to something the window
@@ -190,16 +275,18 @@ impl Hovers {
 pub(super) fn element(
     node: &Node,
     ui: FamilyId,
+    scale: Scale,
     action: &dyn Fn(&str) -> Option<ActionId>,
     hovers: &Hovers,
 ) -> Box<dyn Element> {
     hovers.rewind();
+    let chrome = Chrome { ui, scale };
     // A contribution is measured against whatever its slot offers, and a slot
     // offers no width: `header.right` hands its entry an infinite main axis,
     // because the row it sits in has already given its surplus to a filler.
     // So a contribution starts unbounded, and the one place that changes is a
     // panel — see [`BOUNDED`].
-    element_in(node, ui, action, hovers, UNBOUNDED)
+    element_in(node, chrome, action, hovers, UNBOUNDED)
 }
 
 /// Whether the subtree being built has a width to take a share of.
@@ -220,24 +307,26 @@ const UNBOUNDED: bool = false;
 /// Builds the element a node describes, knowing whether it has room to divide.
 fn element_in(
     node: &Node,
-    ui: FamilyId,
+    chrome: Chrome,
     action: &dyn Fn(&str) -> Option<ActionId>,
     hovers: &Hovers,
     bounded: bool,
 ) -> Box<dyn Element> {
     match node {
         Node::Empty => Empty::new().finish(),
-        Node::Text { text, size, tone } => Text::new(text.clone(), ui, points(*size))
-            .with_color(colour(*tone))
-            .finish(),
-        Node::Badge { text, tone } => badge(text, *tone, ui),
-        Node::Icon { name, tone } => icon(name, *tone),
+        Node::Text { text, size, tone } => {
+            Text::new(text.clone(), chrome.ui, chrome.scale.points(*size))
+                .with_color(colour(*tone))
+                .finish()
+        }
+        Node::Badge { text, tone } => badge(text, *tone, chrome.ui),
+        Node::Icon { name, tone } => icon(name, *tone, chrome.scale),
         Node::Row(children) => {
             let mut row = Flex::row()
                 .with_main_axis_size(main_axis_size(children, bounded))
                 .with_cross_axis_alignment(CrossAxisAlignment::Center);
             for child in children {
-                row.add_child(element_in(child, ui, action, hovers, bounded));
+                row.add_child(element_in(child, chrome, action, hovers, bounded));
             }
             row.finish()
         }
@@ -246,7 +335,7 @@ fn element_in(
                 .with_main_axis_size(main_axis_size(children, bounded))
                 .with_cross_axis_alignment(CrossAxisAlignment::Start);
             for child in children {
-                column.add_child(element_in(child, ui, action, hovers, bounded));
+                column.add_child(element_in(child, chrome, action, hovers, bounded));
             }
             column.finish()
         }
@@ -258,7 +347,7 @@ fn element_in(
             label,
             action: name,
             tone,
-        } => button(label, action(name), *tone, ui, hovers.take()),
+        } => button(label, action(name), *tone, chrome.ui, hovers.take()),
         Node::Meter { fraction, tone } if bounded => meter(*fraction, *tone),
         Node::Rule => rule(),
         Node::Bars { values, tone } if bounded => bars(values, *tone),
@@ -267,12 +356,12 @@ fn element_in(
         Node::Fill if bounded => Expanded::new(1., Empty::new().finish()).finish(),
         // A share of an axis nobody bounded. See [`BOUNDED`].
         Node::Fill | Node::Meter { .. } | Node::Bars { .. } => unbounded_share(),
-        Node::Note { text, tone } => note(text, *tone, ui),
+        Node::Note { text, tone } => note(text, *tone, chrome.ui),
         Node::Pressable {
             content,
             action: name,
         } => pressable(
-            element_in(content, ui, action, hovers, bounded),
+            element_in(content, chrome, action, hovers, bounded),
             action(name),
             hovers.take(),
         ),
@@ -284,7 +373,7 @@ fn element_in(
             content,
             panel.as_deref(),
             action(dismiss),
-            ui,
+            chrome,
             action,
             hovers,
             bounded,
@@ -361,13 +450,15 @@ fn badge(text: &str, tone: Tone, ui: FamilyId) -> Box<dyn Element> {
 /// Two vocabularies, looked up in this order because only one of them can
 /// grow: Crook's own drawn marks are a short list this file writes down, and
 /// everything else is Lucide, which is thousands of names nobody here chose.
-fn icon(name: &str, tone: Tone) -> Box<dyn Element> {
+fn icon(name: &str, tone: Tone, scale: Scale) -> Box<dyn Element> {
     if let Some(chomp) = chomp_named(name) {
-        return pirate(chomp, tone);
+        return pirate(chomp, tone, scale);
     }
 
     match Lucide::named(name) {
-        Some(icon) => Icon::new(icon, BODY).with_color(colour(tone)).finish(),
+        Some(icon) => Icon::new(icon, scale.icon)
+            .with_color(colour(tone))
+            .finish(),
         // A name this build has no icon for draws nothing. A plugin
         // written against a newer Crook should be missing a glyph, not
         // refused.
@@ -411,7 +502,7 @@ fn chomp_named(name: &str) -> Option<Chomp> {
 /// one colour does not produce a grey pirate, it produces a plain disc with
 /// nothing on it, because there is nothing left to tell the layers apart. That
 /// shipped, and what it looked like on somebody's screen was a grey circle.
-fn pirate(chomp: Chomp, tone: Tone) -> Box<dyn Element> {
+fn pirate(chomp: Chomp, tone: Tone, scale: Scale) -> Box<dyn Element> {
     let face = match tone {
         Tone::Muted => theme().text_muted,
         _ => PIRATE_FACE,
@@ -420,12 +511,12 @@ fn pirate(chomp: Chomp, tone: Tone) -> Box<dyn Element> {
 
     Stack::new()
         .with_child(
-            Icon::new(Art::PirateFace(chomp), PIRATE_SIZE)
+            Icon::new(Art::PirateFace(chomp), scale.art)
                 .with_color(face)
                 .finish(),
         )
         .with_child(
-            Icon::new(Art::PirateInk(chomp), PIRATE_SIZE)
+            Icon::new(Art::PirateInk(chomp), scale.art)
                 .with_color(ink)
                 .finish(),
         )
@@ -551,12 +642,12 @@ fn anchored(
     content: &Node,
     panel: Option<&Node>,
     dismiss: Option<ActionId>,
-    ui: FamilyId,
+    chrome: Chrome,
     action: &dyn Fn(&str) -> Option<ActionId>,
     hovers: &Hovers,
     bounded: bool,
 ) -> Box<dyn Element> {
-    let content = element_in(content, ui, action, hovers, bounded);
+    let content = element_in(content, chrome, action, hovers, bounded);
     let Some(panel) = panel else {
         return content;
     };
@@ -564,18 +655,31 @@ fn anchored(
     let mut stack = Stack::new().with_child(content);
     stack.add_anchored_overlay_child(
         // The panel, and only the panel, has a width: the host gave it one.
-        Dismiss::new(chrome(element_in(panel, ui, action, hovers, BOUNDED)))
-            .modal()
-            .on_dismiss(move |ctx, _| {
-                // A dismissal that answers to nothing takes nothing down: the
-                // panel is the plugin's state, so a plugin that named an
-                // action it never registered has hung a panel it cannot shut.
-                // Inert rather than absent, for the reason a button is.
-                if let Some(id) = dismiss {
-                    ctx.dispatch_typed_action(WorkspaceAction::Run(id));
-                }
-            })
-            .finish(),
+        // A panel hangs *below* whatever opened it and is a surface of its
+        // own, so it is drawn at the ordinary size whatever the thing it hangs
+        // off was drawn at: a panel under a mark on a tab row is a panel, not
+        // a mark.
+        Dismiss::new(panel_chrome(element_in(
+            panel,
+            Chrome {
+                scale: Scale::ROW,
+                ..chrome
+            },
+            action,
+            hovers,
+            BOUNDED,
+        )))
+        .modal()
+        .on_dismiss(move |ctx, _| {
+            // A dismissal that answers to nothing takes nothing down: the
+            // panel is the plugin's state, so a plugin that named an
+            // action it never registered has hung a panel it cannot shut.
+            // Inert rather than absent, for the reason a button is.
+            if let Some(id) = dismiss {
+                ctx.dispatch_typed_action(WorkspaceAction::Run(id));
+            }
+        })
+        .finish(),
         AnchorTo {
             parent: Corner::BottomRight,
             child: Corner::TopRight,
@@ -596,7 +700,7 @@ fn anchored(
 /// that had to know that would be a plugin that gets it wrong. What a plugin
 /// describes is the rows; what it cannot do is draw a panel that does not look
 /// like Crook's.
-fn chrome(content: Box<dyn Element>) -> Box<dyn Element> {
+fn panel_chrome(content: Box<dyn Element>) -> Box<dyn Element> {
     ConstrainedBox::new(
         Container::new(content)
             .with_padding(Padding {
@@ -772,15 +876,6 @@ fn colour(tone: Tone) -> Color {
         Tone::Warning => theme().usage_high,
         Tone::Danger => theme().usage_critical,
         Tone::Success => theme().usage_normal,
-    }
-}
-
-/// What a size is, in points.
-fn points(size: Size) -> f32 {
-    match size {
-        Size::Small => SMALL,
-        Size::Body => BODY,
-        Size::Large => LARGE,
     }
 }
 

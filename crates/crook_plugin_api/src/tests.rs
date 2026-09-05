@@ -251,3 +251,56 @@ fn a_shut_panel_costs_almost_nothing() {
 
     assert!(bytes.len() < 32, "{} bytes for a shut chip", bytes.len());
 }
+
+#[test]
+fn what_a_render_is_about_survives_the_wire() {
+    let render = Render {
+        slot: "tab.row.mark".into(),
+        subject: Some(Subject::Tab(TabFacts {
+            key: 0x9e37_79b9_7f4a_7c15,
+            tab: Some(TabInfo {
+                title: "crook".into(),
+                active: true,
+                status: Status::Running,
+            }),
+            place: Some(Place {
+                directory: "/home/somebody/work/crook".into(),
+                branch: Some("main".into()),
+                worktree: false,
+            }),
+        })),
+    };
+
+    let bytes = to_bytes(&render).expect("it should encode");
+
+    assert_eq!(
+        from_bytes::<Render>(&bytes).expect("and decode"),
+        render,
+        "a render does not survive its own wire"
+    );
+}
+
+#[test]
+fn a_plugin_granted_nothing_is_still_told_which_row_it_is_drawing() {
+    // The redaction, which is what makes a mark per tab something a plugin
+    // allowed to know nothing can draw: no title, no directory, and still two
+    // rows a plugin can tell apart and keep telling apart.
+    let first = TabFacts {
+        key: 1,
+        tab: None,
+        place: None,
+    };
+    let second = TabFacts {
+        key: 2,
+        ..first.clone()
+    };
+
+    let bytes = to_bytes(&Subject::Tab(first.clone())).expect("it should encode");
+
+    assert_ne!(first.key, second.key);
+    assert!(
+        bytes.len() < 8,
+        "{} bytes for a row a plugin may know nothing about",
+        bytes.len()
+    );
+}
