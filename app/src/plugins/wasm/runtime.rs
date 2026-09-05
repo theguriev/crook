@@ -257,7 +257,6 @@ impl Runtime {
         .detach();
     }
 
-
     /// Tells the guest something happened, and takes whatever that made it ask
     /// for.
     ///
