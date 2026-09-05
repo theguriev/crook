@@ -37,6 +37,13 @@ use crate::workspace::{Workspace, WorkspaceAction, WorktreeAction};
 
 use super::tabs::TAB_MENU_ENTRIES;
 
+/// Where the branch a new worktree is being named lives.
+///
+/// Named rather than handed over, because the thing that *draws* it is
+/// `workspace::tab_menu` — which this plugin does not own yet — and a field is
+/// found by name the way an action is.
+pub const BRANCH_FIELD: &str = "crook/worktrees/branch";
+
 /// The plugin that puts the worktree menu on a tab.
 pub struct Worktrees;
 
@@ -46,6 +53,14 @@ impl Plugin for Worktrees {
     }
 
     fn build(&mut self, host: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
+        // The branch field, which the worktree menu's creator is typed into.
+        // The *field* has moved here even though the popup that draws it has
+        // not: `Workspace::sync_input_keys` used to name it in source, which
+        // was the last field in the window that belonged to a feature rather
+        // than to the window. It now goes out with this plugin when it is
+        // switched off, like everything else it registers.
+        host.claim_field("branch", Workspace::worktree_menu_is_creating);
+
         // Not a command, and this is the one entry in the menu that is not.
         // The others *do* something and are worth a chord; this one opens a
         // submenu, which is a thing to look at rather than a thing to run, and

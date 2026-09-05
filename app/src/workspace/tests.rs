@@ -616,6 +616,24 @@ impl Harness {
         self.dispatch_workspace_action(WorkspaceAction::Run(id));
     }
 
+    /// Whether the keyboard is in a field some plugin owns.
+    fn a_plugin_field_has_keys(&self) -> bool {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.host().a_field_has_keys()
+        })
+    }
+
+    /// Whether it is in a pane's composer instead.
+    fn a_pane_field_has_keys(&self) -> bool {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.tabs().panes().any(|(_, pane)| {
+                workspace
+                    .input(pane.id())
+                    .is_some_and(|input| input.has_keys())
+            })
+        })
+    }
+
     /// Every entry in a tab's context menu, as `owner/entry`, in drawing order.
     fn tab_menu_entries(&self) -> Vec<String> {
         self.workspace.read(&self.app, |workspace, _| {
@@ -3847,6 +3865,58 @@ fn the_creator_answers_enter_with_its_button_and_escape_with_cancel() {
         .find(|directory| directory.starts_with(&store))
         .expect("enter did not check anything out");
     assert!(opened.is_dir(), "{} was not checked out", opened.display());
+}
+
+#[test]
+fn a_plugins_field_takes_the_keyboard_from_the_pane_under_it() {
+    // The whole of what the field registry buys. Nothing in the window's own
+    // source names this field any more: `sync_input_keys` asks the host, the
+    // host asks the plugin that claimed it, and the plugin answers from a
+    // state the workspace happens to hold today and will not always.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| {
+        workspace.set_worktrees_directory(scratch.path().join("store"));
+    });
+    let tab = harness.active_id();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    assert!(
+        !harness.a_plugin_field_has_keys(),
+        "a field nobody is typing into already had the keyboard"
+    );
+
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+
+    assert!(
+        harness.a_plugin_field_has_keys(),
+        "the creator opened and the plugin's field did not take the keyboard"
+    );
+    assert!(
+        !harness.a_pane_field_has_keys(),
+        "a pane was still listening while a field over it was being typed into"
+    );
+
+    harness.dispatch_worktree(WorktreeAction::Cancel);
+
+    assert!(
+        !harness.a_plugin_field_has_keys(),
+        "leaving the creator left the keyboard in a field nothing draws"
+    );
 }
 
 #[test]
