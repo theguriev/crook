@@ -906,9 +906,21 @@ impl Workspace {
         matches!(self.tab_menu.mode, WorktreeMode::Removing { refused, .. } if refused)
     }
 
-    /// Whether the menu is making a worktree. For a test.
+    /// Whether the menu is making a worktree.
+    ///
+    /// For a test, and for `crook/worktrees` — it is what that plugin's branch
+    /// field answers "is the keyboard mine" with.
     pub fn worktree_menu_is_creating(&self) -> bool {
         self.tab_menu.mode == WorktreeMode::Creating
+    }
+
+    /// The field a new worktree's branch is typed into.
+    ///
+    /// It belongs to `crook/worktrees` rather than to this struct, so it is
+    /// `None` when that plugin is switched off — which is also when nothing
+    /// can reach the popup that draws it.
+    pub(super) fn worktree_branch(&self) -> Option<&TextInput> {
+        self.host.field(crate::plugins::worktrees::BRANCH_FIELD)
     }
 
     /// The plugins, and the slots and actions they registered.
@@ -1786,10 +1798,12 @@ impl Workspace {
                     self.tab_menu.worktrees(),
                     &self.tab_menu.branches,
                 );
-                self.tab_menu.branch.edit(|editor| {
-                    editor.set_text(&branch);
-                    editor.select_all();
-                });
+                if let Some(field) = self.worktree_branch() {
+                    field.edit(|editor| {
+                        editor.set_text(&branch);
+                        editor.select_all();
+                    });
+                }
                 self.tab_menu.problem = None;
                 self.tab_menu.mode = WorktreeMode::Creating;
                 self.tab_menu.forget_hover_state();
@@ -1978,10 +1992,13 @@ impl Workspace {
             return;
         }
 
-        let branch = self.tab_menu.branch.editor().text().trim().to_owned();
+        let branch = self
+            .worktree_branch()
+            .map(|field| field.editor().text().trim().to_owned())
+            .unwrap_or_default();
         let (Some(repository), Some(path)) = (
             self.tab_menu.pane_directory.clone(),
-            super::tab_menu::checkout_for(&self.tab_menu),
+            super::tab_menu::checkout_for(self),
         ) else {
             // The one thing the creator can be missing is a name, and the
             // field says so more usefully than a sentence would.
@@ -2475,9 +2492,11 @@ impl Workspace {
     /// Whether any field on screen is drawing a caret.
     fn shows_a_caret(&self, app: &AppContext) -> bool {
         if self.a_popup_is_open() {
-            // Except the branch field inside the menu that is up, which is the
-            // one caret a popup can carry.
-            return self.tab_menu.branch.has_keys();
+            // Except a plugin's own field inside the menu that is up, which is
+            // the one caret a popup can carry. Asked of the host rather than
+            // named, because it is not this struct's — and because the moment
+            // there is a second one, nothing here has to be told.
+            return self.host.a_field_has_keys();
         }
         let Some(pane) = self.tabs.focused_pane_id() else {
             return false;
@@ -3535,22 +3554,24 @@ impl Workspace {
         // shell. It is the only one of these that is on screen *beside* a pane
         // rather than over it, which is why it is a wish that has to be
         // granted rather than a surface that is simply up.
+        //
+        // A plugin's own field counts the same way, and asking the host is
+        // what this line used to do by *naming* every field in the window that
+        // was not a pane's. There were two of them and neither was a
+        // plugin's — which was the last thing a plugin could not do that a
+        // built-in could: it could put a popup on screen, draw a box in it and
+        // claim Escape, and still have nowhere for a keystroke to land.
+        let a_field_has_keys = self.host.sync_fields(self);
         let listening = (!self.a_popup_is_open()
             && !self.panel.open
             && !self.host.a_surface_is_up()
-            && !self.search_takes_keys())
-        .then(|| self.tabs.focused_pane_id())
-        .flatten();
+            && !self.search_takes_keys()
+            && !a_field_has_keys)
+            .then(|| self.tabs.focused_pane_id())
+            .flatten();
         for (id, input) in &self.inputs {
             input.set_has_keys(Some(*id) == listening);
         }
-
-        // The worktree menu's branch field, which is the other keyboard a
-        // popup can hold and the only one that is not a pane's or the settings
-        // page's.
-        self.tab_menu
-            .branch
-            .set_has_keys(self.tab_menu.mode == WorktreeMode::Creating);
 
         // The settings page's search box, which is the one field that is not a
         // pane's. It has the keyboard whenever the focused pane is the page it

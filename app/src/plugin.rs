@@ -38,6 +38,7 @@ pub use crook_plugin::{
 };
 
 use crate::keybindings::{Rule, Source, rule_from};
+use crate::text_input::TextInput;
 use crate::workspace::{Category, Fonts, Workspace};
 
 /// A section of the sidebar: a button at its foot, and what the window shows
@@ -156,6 +157,14 @@ impl Showing {
 /// then to the pane.
 pub type KeyClaim = Box<dyn Fn(&Keystroke) -> Option<ActionName>>;
 
+/// What decides whether a plugin's field is the one the keyboard belongs to.
+///
+/// Asked every time anything could have changed the answer, and it must be
+/// cheap and must not look at anything but the workspace: it runs inside
+/// [`Workspace::sync_input_keys`](crate::workspace::Workspace::sync_input_keys),
+/// which is called from the middle of applying an action.
+pub type FieldClaim = Box<dyn Fn(&Workspace) -> bool>;
+
 /// A registered action, as something `Copy`.
 ///
 /// [`WorkspaceAction`](crate::workspace::WorkspaceAction) is compared by value
@@ -235,6 +244,16 @@ pub struct Host {
     /// The floating surfaces plugins own, and what each does with a keystroke
     /// while it is up.
     surfaces: Vec<(PluginId, Showing, KeyClaim)>,
+    /// The text fields plugins own, by `owner/name`, and when each of them is
+    /// the one the keyboard belongs to.
+    ///
+    /// A field is the one thing a surface could not do for itself. A plugin
+    /// could put a popup on screen, draw a box in it and claim Escape, and
+    /// still have nowhere for a keystroke to land — because which field is
+    /// listening is a fact the element tree cannot work out and the workspace
+    /// used to answer by naming, in source, every field there was. There were
+    /// two, and neither was a plugin's.
+    fields: Vec<(PluginId, String, TextInput, FieldClaim)>,
     /// Whose registrations are being made right now. Set around each plugin's
     /// `build` so a plugin cannot register in another's name by accident.
     building: Option<PluginId>,
@@ -276,6 +295,7 @@ impl Host {
             commands: Vec::new(),
             suggested: Vec::new(),
             surfaces: Vec::new(),
+            fields: Vec::new(),
             building: None,
             kept: Vec::new(),
             plugins: Vec::new(),
@@ -600,6 +620,73 @@ impl Host {
         self.surfaces.iter().any(|(_, showing, _)| showing.get())
     }
 
+    /// Registers a text field this plugin owns, and hands it back.
+    ///
+    /// The host makes the field rather than taking one, because a plugin
+    /// builds before the workspace exists and there is nothing to take one
+    /// from; what it gets is an [`Rc`](std::rc::Rc) it keeps and hands to an
+    /// element every frame, which is how every field in this application is
+    /// held.
+    ///
+    /// `wants_keys` is asked whenever anything could have changed the answer.
+    /// The first field to say yes gets the keyboard and the panes do not, in
+    /// registration order — two fields wanting it at once is a bug somewhere
+    /// else, and this only decides which of them hears the next letter.
+    ///
+    /// The name is the field's, under this plugin: `owner/name`, so something
+    /// that has to *draw* a field it does not own can find it the way it finds
+    /// an action.
+    pub fn claim_field(
+        &mut self,
+        name: &str,
+        wants_keys: impl Fn(&Workspace) -> bool + 'static,
+    ) -> TextInput {
+        let who = self.who();
+        let field = TextInput::new();
+        self.fields.push((
+            who.clone(),
+            format!("{who}/{name}"),
+            field.clone(),
+            Box::new(wants_keys) as FieldClaim,
+        ));
+        field
+    }
+
+    /// One plugin's field, by its `owner/name`.
+    pub fn field(&self, name: &str) -> Option<&TextInput> {
+        self.fields
+            .iter()
+            .find(|(_, known, _, _)| known == name)
+            .map(|(_, _, field, _)| field)
+    }
+
+    /// Whether one of them has the keyboard right now.
+    ///
+    /// The answer to "is there a caret on screen": a plugin's field blinks
+    /// exactly as the window's own do, and the window cannot know how many
+    /// there are to ask.
+    pub fn a_field_has_keys(&self) -> bool {
+        self.fields.iter().any(|(_, _, field, _)| field.has_keys())
+    }
+
+    /// Tells every plugin's field whether the keyboard is its, and says
+    /// whether one of them took it.
+    ///
+    /// The loop is here rather than in the workspace because the registry is
+    /// here, and because "the first claimant wins" is a rule about the
+    /// registry rather than about the window. A `true` answer is a pane that
+    /// must stop listening — see
+    /// [`Workspace::sync_input_keys`](crate::workspace::Workspace::sync_input_keys).
+    pub fn sync_fields(&self, workspace: &Workspace) -> bool {
+        let mut taken = false;
+        for (_, _, field, wants) in &self.fields {
+            let has_keys = !taken && wants(workspace);
+            field.set_has_keys(has_keys);
+            taken |= has_keys;
+        }
+        taken
+    }
+
     /// What a surface that is up makes of this keystroke.
     ///
     /// The first surface to claim it wins, in load order. Two modal surfaces
@@ -785,6 +872,16 @@ impl Host {
         self.commands.retain(|(by, _, _)| by != plugin);
         self.suggested.retain(|(by, _)| by != plugin);
         self.surfaces.retain(|(by, _, _)| by != plugin);
+        // A field goes out with its plugin, and it has to go out *emptied*:
+        // the registry is the only thing holding it, but the workspace may
+        // have asked it a moment ago whether it had the keyboard, and a field
+        // nothing can draw must not answer yes to that again.
+        for (by, _, field, _) in &self.fields {
+            if by == plugin {
+                field.set_has_keys(false);
+            }
+        }
+        self.fields.retain(|(by, _, _, _)| by != plugin);
         self.loaded.retain(|manifest| &manifest.id != plugin);
     }
 

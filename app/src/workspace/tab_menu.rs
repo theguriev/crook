@@ -89,7 +89,6 @@ use crookui_core::prelude::*;
 
 use crate::git::worktree::{Local, Worktree};
 use crate::tab::TabId;
-use crate::text_input::TextInput;
 use crate::theme::theme;
 
 use super::action::{WorkspaceAction, WorktreeAction};
@@ -206,8 +205,6 @@ pub(super) struct TabMenuState {
     pub(super) repository: Option<String>,
     /// Where Crook keeps checkouts it made.
     pub(super) store: Option<PathBuf>,
-    /// The branch name being typed, while one is.
-    pub(super) branch: TextInput,
     /// What git said about the last thing that was asked of it, if it refused.
     pub(super) problem: Option<String>,
     /// Whether a git command is running for this menu right now.
@@ -520,11 +517,17 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_child(header("New worktree", ui))
-        .with_child(
+        .with_child(header("New worktree", ui));
+
+    // The field belongs to `crook/worktrees` rather than to this menu — see
+    // that plugin — so it is looked up rather than held. `None` cannot happen
+    // while this face is on screen: the plugin that claimed the field is the
+    // one whose entry opens the menu this face is a mode of.
+    if let Some(branch) = workspace.worktree_branch() {
+        column.add_child(
             Container::new(
                 super::text_field::TextField::new(
-                    state.branch.clone(),
+                    branch.clone(),
                     workspace.clipboard().clone(),
                     workspace.fonts(),
                     state.control(Control::Branch),
@@ -535,11 +538,12 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
             .with_horizontal_padding(ROW_INSET)
             .finish(),
         );
+    }
 
     // The path is shown rather than asked for, and it is shown *live*: it is
     // the answer to "where will this end up", which is a question about the
     // name being typed.
-    if let Some(checkout) = checkout_for(state) {
+    if let Some(checkout) = checkout_for(workspace) {
         let path = crate::git::user_friendly_path(&checkout, workspace.home());
         column.add_child(
             Container::new(
@@ -733,10 +737,20 @@ pub(super) fn holding(worktrees: &[Worktree], directory: Option<&Path>) -> Optio
 }
 
 /// Where the worktree being typed would go, once there is a name for it.
-pub(super) fn checkout_for(state: &TabMenuState) -> Option<PathBuf> {
+///
+/// Takes the workspace rather than the menu's state, because the name is being
+/// typed into a field that belongs to `crook/worktrees` and the workspace is
+/// what can find it.
+pub(super) fn checkout_for(workspace: &Workspace) -> Option<PathBuf> {
+    let state = workspace.tab_menu();
     let store = state.store.as_deref()?;
     let repository = state.repository.as_deref()?;
-    let branch = state.branch.editor().text().trim().to_owned();
+    let branch = workspace
+        .worktree_branch()?
+        .editor()
+        .text()
+        .trim()
+        .to_owned();
 
     (!branch.is_empty()).then(|| crate::git::worktree::checkout_path(store, repository, &branch))
 }
