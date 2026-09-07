@@ -10758,7 +10758,13 @@ mod the_bell {
         let ringing = background_of(&harness);
 
         assert_eq!(status_of(&harness, ringing), Some(AgentStatus::Idle));
-        report(&mut harness, TerminalUpdate::Bell(ringing));
+        report(
+            &mut harness,
+            TerminalUpdate::Bell {
+                pane: ringing,
+                while_running: false,
+            },
+        );
 
         assert_eq!(
             status_of(&harness, ringing),
@@ -10774,7 +10780,13 @@ mod the_bell {
         let mut harness = Harness::new(1);
         let focused = harness.focused_pane_id().expect("the window has a pane");
 
-        report(&mut harness, TerminalUpdate::Bell(focused));
+        report(
+            &mut harness,
+            TerminalUpdate::Bell {
+                pane: focused,
+                while_running: false,
+            },
+        );
 
         assert_eq!(status_of(&harness, focused), Some(AgentStatus::Idle));
     }
@@ -10784,7 +10796,13 @@ mod the_bell {
         let mut harness = Harness::new(2);
         let ringing = background_of(&harness);
 
-        report(&mut harness, TerminalUpdate::Bell(ringing));
+        report(
+            &mut harness,
+            TerminalUpdate::Bell {
+                pane: ringing,
+                while_running: false,
+            },
+        );
         assert_eq!(status_of(&harness, ringing), Some(AgentStatus::NeedsInput));
 
         harness.dispatch_action(TabAction::FocusPane(ringing));

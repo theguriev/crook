@@ -35,7 +35,7 @@ use crate::pane_selection::PaneSelection;
 use crate::pane_split::{DividerDrag, PaneExtent};
 use crate::pane_surface;
 use crate::platform_insets::{ControlLayout, LayoutInsets, WindowChrome};
-use crate::plugin::{ActionId, ActionName, Host, PageId, PluginId, SectionId};
+use crate::plugin::{ActionId, ActionName, Host, PageId, PluginId, SectionId, Watch};
 use crate::plugins::settings::SETTINGS_SECTION;
 use crate::selection::{Blocks, Cells};
 use crate::settings::{
@@ -3265,7 +3265,17 @@ impl Workspace {
     /// row amber while somebody typed in it.
     ///
     /// It is cleared by looking: [`Self::attend`] runs on every focus change.
-    fn ring(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) -> bool {
+    ///
+    /// Plugins watching for a bell are told about *every* one, including the
+    /// focused pane's, because "focused" here means the pane the keyboard is
+    /// in and not a person's attention: an agent left running in the only
+    /// pane a window has is focused the whole time somebody is away from it,
+    /// and a bell suppressed on that ground would be the one bell that
+    /// mattered. What the strip does with a bell and what a plugin does with
+    /// one are different questions, and this is where they part.
+    fn ring(&mut self, pane: PaneId, while_running: bool, ctx: &mut ViewContext<Self>) -> bool {
+        self.bell_rang(pane, while_running, ctx);
+
         if self.tabs.focused_pane_id() == Some(pane) {
             // Not "nothing to write into" — the pane is there and the bell was
             // heard. Reporting `true` is what keeps this out of the log line
@@ -3366,7 +3376,10 @@ impl Workspace {
                 }
                 true
             }
-            TerminalUpdate::Bell(pane) => self.ring(*pane, ctx),
+            TerminalUpdate::Bell {
+                pane,
+                while_running,
+            } => self.ring(*pane, *while_running, ctx),
             TerminalUpdate::CommandFinished { pane, exit, took } => {
                 self.command_finished(*pane, *exit, *took, ctx);
                 true
@@ -3403,7 +3416,7 @@ impl Workspace {
         took: Option<Duration>,
         ctx: &mut ViewContext<Self>,
     ) {
-        let watchers = self.host.command_watchers();
+        let watchers = self.host.watchers(Watch::Commands);
         if watchers.is_empty() {
             return;
         }
@@ -3417,6 +3430,27 @@ impl Workspace {
             // anything else is better read as "it did not say".
             exit: exit.and_then(|status| u8::try_from(status).ok()),
             took_millis: took.map(|took| took.as_millis().min(u128::from(u64::MAX)) as u64),
+        };
+
+        for watch in watchers {
+            watch(self, &event, ctx);
+        }
+    }
+
+    /// Tells every plugin watching that a pane rang the bell.
+    ///
+    /// The same shape as [`Self::command_finished`] and for the same reason:
+    /// the handles come out of the host before any of them is called, because
+    /// a watcher is handed the whole workspace and the host is part of it.
+    fn bell_rang(&mut self, pane: PaneId, while_running: bool, ctx: &mut ViewContext<Self>) {
+        let watchers = self.host.watchers(Watch::Bells);
+        if watchers.is_empty() {
+            return;
+        }
+
+        let event = Event::Bell {
+            pane: pane.as_u64(),
+            while_running,
         };
 
         for watch in watchers {

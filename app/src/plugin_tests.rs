@@ -423,3 +423,25 @@ fn a_row_contribution_goes_back_out_with_the_plugin_that_made_it() {
         assert!(host.rows().is_empty(mark), "the contribution outlived it");
     });
 }
+
+#[test]
+fn a_watcher_hears_the_kind_it_asked_for_and_nothing_else() {
+    // The whole of why the registry is keyed by kind rather than filtered
+    // inside the watcher: a plugin granted the bell and refused the commands
+    // must not be *reached* by a command at all. "Reached and turned away" is
+    // a different promise, and not one a person reading the dispatch could
+    // check.
+    with_host(|host| {
+        let bells = host.watchers(Watch::Bells).len();
+        let commands = host.watchers(Watch::Commands).len();
+
+        host.watch(Watch::Bells, Rc::new(|_, _, _| {}));
+
+        assert_eq!(host.watchers(Watch::Bells).len(), bells + 1);
+        assert_eq!(
+            host.watchers(Watch::Commands).len(),
+            commands,
+            "a bell watcher is not a command watcher"
+        );
+    });
+}

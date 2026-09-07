@@ -188,7 +188,25 @@ pub type KeyClaim = Box<dyn Fn(&Keystroke) -> Option<ActionName>>;
 /// with. Behind an [`Rc`] so a dispatch can take a handle and let go of the
 /// host before it calls anything — a watcher that reached back into the host
 /// while the host was lending out its list would be a borrow inside a borrow.
-pub type CommandWatcher = Rc<dyn Fn(&mut Workspace, &Event, &mut ViewContext<Workspace>)>;
+pub type EventWatcher = Rc<dyn Fn(&mut Workspace, &Event, &mut ViewContext<Workspace>)>;
+
+/// Which kind of happening a watcher was registered for.
+///
+/// The registry is keyed by this rather than filtered by the watcher, so that
+/// a plugin refused a grant registers nothing for that kind and hears nothing
+/// at all — instead of being handed events it is not allowed and having them
+/// dropped somewhere further in, where nobody reading the dispatch could tell
+/// that a grant was what decided it.
+///
+/// One variant per [`Event`], and it stays that way: a watcher asks for the
+/// thing it wants to hear, never for "events".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Watch {
+    /// A command in a pane finished — [`Event::CommandFinished`].
+    Commands,
+    /// A program in a pane rang the bell — [`Event::Bell`].
+    Bells,
+}
 /// What decides whether a plugin's field is the one the keyboard belongs to.
 ///
 /// Asked every time anything could have changed the answer, and it must be
@@ -280,12 +298,13 @@ pub struct Host {
     /// The floating surfaces plugins own, and what each does with a keystroke
     /// while it is up.
     surfaces: Vec<(PluginId, Showing, KeyClaim)>,
-    /// Who asked to be told when a command finishes.
+    /// Who asked to be told when something happens, and what about.
     ///
-    /// A list rather than a slot: nobody *owns* the fact that a command ended,
-    /// every watcher hears it, and the order they hear it in is load order
-    /// because there is nothing better to sort it by.
-    watchers: Vec<(PluginId, CommandWatcher)>,
+    /// A list rather than a slot: nobody *owns* the fact that a command ended
+    /// or that a bell rang, every watcher of that kind hears it, and the order
+    /// they hear it in is load order because there is nothing better to sort
+    /// it by.
+    watchers: Vec<(PluginId, Watch, EventWatcher)>,
     /// The text fields plugins own, by `owner/name`, and when each of them is
     /// the one the keyboard belongs to.
     ///
@@ -777,23 +796,27 @@ impl Host {
         showing
     }
 
-    /// Asks to be told when a command in a pane finishes.
+    /// Asks to be told when something of `kind` happens in a pane.
     ///
     /// Whether the plugin is *allowed* to hear it is not checked here: this is
     /// the registration, and the grant is read where every other grant is —
     /// by the thing that registers, while it builds. A native plugin has no
     /// grant to read because a native plugin is the binary.
-    pub fn watch_commands(&mut self, watch: CommandWatcher) {
+    ///
+    /// A plugin that wants two kinds registers twice, which is what keeps a
+    /// grant it was refused from reaching a watcher at all.
+    pub fn watch(&mut self, kind: Watch, watch: EventWatcher) {
         let who = self.who();
-        self.watchers.push((who, watch));
+        self.watchers.push((who, kind, watch));
     }
 
-    /// Handles for every watcher, so a dispatch can call them with the host
-    /// no longer borrowed.
-    pub fn command_watchers(&self) -> Vec<CommandWatcher> {
+    /// Handles for every watcher of `kind`, so a dispatch can call them with
+    /// the host no longer borrowed.
+    pub fn watchers(&self, kind: Watch) -> Vec<EventWatcher> {
         self.watchers
             .iter()
-            .map(|(_, watch)| Rc::clone(watch))
+            .filter(|(_, registered, _)| *registered == kind)
+            .map(|(_, _, watch)| Rc::clone(watch))
             .collect()
     }
 
