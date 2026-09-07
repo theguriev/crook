@@ -87,6 +87,15 @@ impl Vector2F {
         Self::new(self.x / divisor, self.y / divisor)
     }
 
+    /// How long the vector is.
+    ///
+    /// Pathfinder's `length`, and here for the one caller that has to measure
+    /// a gesture rather than a box: a drag threshold is a distance from where
+    /// the hand started, in whichever direction it went.
+    pub fn length(self) -> f32 {
+        self.x.hypot(self.y)
+    }
+
     /// Whether both components are finite, i.e. neither infinite nor NaN.
     pub fn is_finite(self) -> bool {
         self.x.is_finite() && self.y.is_finite()

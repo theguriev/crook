@@ -543,16 +543,16 @@ fn a_plugins_chord_is_underneath_everything_else() {
 #[test]
 fn a_chord_can_be_bound_to_a_plugins_command() {
     // The whole point of a name. Nothing in this build knows what
-    // `crook/usage/refresh` is at the moment the file is read — the plugins
+    // `crook/palette/open` is at the moment the file is read — the plugins
     // have not been built — and the rule is kept anyway.
     let keybindings = written(
         "plugin-command",
-        r#"[{ "key": "shift+cmd+u", "command": "crook/usage/refresh" }]"#,
+        r#"[{ "key": "shift+cmd+u", "command": "crook/palette/open" }]"#,
     );
 
     assert_eq!(
         keybindings.resolve(&keys("shift+cmd+u"), &Context::new()),
-        Resolution::Command(command("crook/usage/refresh"))
+        Resolution::Command(command("crook/palette/open"))
     );
 }
 

@@ -14,7 +14,6 @@ crook_plugin = { path = "crates/crook_plugin" }
 crook_plugin_api = { path = "crates/crook_plugin_api" }
 crook_wasm = { path = "crates/crook_wasm" }
 crook_terminal = { path = "crates/crook_terminal" }
-crook_usage = { path = "crates/crook_usage" }
 crookui = { path = "crates/crookui" }
 crookui_core = { path = "crates/crookui_core" }
 
@@ -34,7 +33,11 @@ async-executor = "1.14"
 async-task = "4.7"
 blocking = "1.7"
 bytemuck = { version = "1.25", features = ["derive"] }
-chrono = { version = "0.4", features = ["serde"] }
+# A time zone is a table that ships with an operating system, and the standard
+# library does not read it. One call — how far this machine is from UTC —
+# which a plugin needs before it can say which day something happened on.
+chrono = "0.4"
+
 cosmic-text = "0.19"
 dirs = "6.0"
 env_logger = "0.11"

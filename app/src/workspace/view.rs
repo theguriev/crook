@@ -15,11 +15,12 @@ use std::time::Duration;
 /// all while the panel is closed — see [`Workspace::watch_themes`].
 pub(super) const THEMES_POLL: Duration = Duration::from_millis(750);
 
+use crook_plugin_api::Event;
 use crook_terminal::{Rows, Snapshot};
 use crookui_core::elements::MouseStateHandle;
 use crookui_core::event::Keystroke;
 use crookui_core::fonts::FamilyId;
-use crookui_core::geometry::RectF;
+use crookui_core::geometry::{RectF, vec2f};
 use crookui_core::prelude::*;
 
 use crate::clipboard::Clipboard;
@@ -41,27 +42,39 @@ use crate::settings::{
     DEFAULT_FONT_SIZE, Density, FONT_SIZE_STEP, GeneralOptions, Granularity, Settings, TabOptions,
 };
 use crate::tab::{
-    AgentSession, AgentStatus, Direction, Pane, PaneId, Tab, TabAction, TabEffect, TabId, TabStrip,
+    AgentSession, AgentStatus, Direction, GroupId, Pane, PaneId, Tab, TabAction, TabEffect,
+    TabGroup, TabId, TabStrip,
 };
 use crate::terminal_font::CellFont;
 use crate::terminal_model::{BlockHistory, TerminalHandle, TerminalModel, TerminalUpdate};
 use crate::text_input::{CARET_PHASE, TextInput};
 use crate::theme::creator::Draft;
 use crate::theme::{Available, theme};
-use crate::usage_model::UsageModel;
 use crate::window_controls::WindowHandle;
 use crate::{Channel, WINDOW_CHROME};
 
 use super::action::{
-    OptionsAction, SearchAction, SettingsAction, ThemeAction, WindowAction, WorkspaceAction,
-    WorktreeAction,
+    OptionsAction, SearchAction, SettingsAction, TabMenuAction, ThemeAction, WindowAction,
+    WorkspaceAction, WorktreeAction,
 };
 use super::settings_page::SettingsState;
+use super::tab_context_menu::TabContextMenuState;
 use super::tab_menu::{Contents, Mode as WorktreeMode, TabMenuState};
+use super::tabs_panel::drag::{Carried, PanelDrag};
 use super::tabs_panel::geometry::RowGeometry;
 use super::tabs_panel::search::SearchState;
 use super::theme_panel::{Mode, ThemePanelState};
 use super::{body, header_toolbar, tabs_panel};
+
+/// How far into a panel row `--carry` presses.
+///
+/// Left of centre: inside the row whatever the density, and clear of the close
+/// button reserved at its trailing edge, which would answer the press itself.
+const PANEL_GRIP_X: f32 = 40.;
+
+/// And how far into a block, measured from its top edge — a point inside the
+/// heading, which is the part of a block that is not one of its rows.
+const PANEL_HEADING_GRIP: f32 = 8.;
 
 /// The two font families the interface is set in, resolved once at startup.
 ///
@@ -124,6 +137,23 @@ pub(super) struct TabInteraction {
     pub(super) header: MouseStateHandle,
 }
 
+/// What the mouse is doing to one group's chrome in the panel.
+///
+/// Keyed by [`GroupId`] and separate from [`TabInteraction`] for the reason
+/// that one is separate from a row's: a group's heading lifts, and its close
+/// button lights, while the pointer is over the *group* — which is one piece
+/// of state for however many tabs are folded under it.
+#[derive(Default)]
+pub(super) struct GroupInteraction {
+    /// The box around the heading and its members.
+    pub(super) container: MouseStateHandle,
+    /// The heading itself, which folds the group away and is what a drag
+    /// picks the whole block up by.
+    pub(super) heading: MouseStateHandle,
+    /// The cross at its right, which closes every tab in the group.
+    pub(super) close: MouseStateHandle,
+}
+
 /// The options menu: whether it is up, and what the mouse is doing to each of
 /// its controls.
 ///
@@ -137,8 +167,6 @@ pub(super) struct TabInteraction {
 pub(super) struct MenuState {
     /// Whether the popup is up.
     pub(super) open: bool,
-    /// The gear that opens it.
-    pub(super) gear: MouseStateHandle,
     /// "View as: Panes".
     pub(super) panes: MouseStateHandle,
     /// "View as: Tabs".
@@ -172,8 +200,8 @@ pub(super) struct MenuState {
 impl MenuState {
     /// Drops every hover and press the popup was holding.
     ///
-    /// Called when something other than a click on the gear takes the menu
-    /// down — today, the settings page opening over it. Every row is about to
+    /// Called when something other than a press on the list's own ground takes
+    /// the menu down — today, the settings page opening over it. Every row is about to
     /// stop existing without seeing a hover-out, and the next time the menu
     /// opens the row the pointer happened to be on would come back lit.
     ///
@@ -183,7 +211,6 @@ impl MenuState {
     /// not to be.
     fn forget_hover_state(&self) {
         for state in [
-            &self.gear,
             &self.panes,
             &self.tabs,
             &self.compact,
@@ -384,7 +411,6 @@ pub struct Workspace {
     /// The faces and the cell every pane's grid is drawn with, resolved once at
     /// startup because measuring one is a search through the font database.
     cell_font: CellFont,
-    usage: ModelHandle<UsageModel>,
     git: ModelHandle<GitModel>,
     /// The shells behind the panes.
     terminals: ModelHandle<TerminalModel>,
@@ -467,6 +493,15 @@ pub struct Workspace {
     /// while the pointer is over *any* of the tab's rows, which is one piece
     /// of state for several rows rather than one per row.
     tab_chrome: HashMap<TabId, TabInteraction>,
+    /// The same, for each group's heading and the box around its members.
+    group_chrome: HashMap<GroupId, GroupInteraction>,
+    /// The row or heading being dragged in the panel, and where every row was
+    /// drawn on the last frame. See [`PanelDrag`](super::tabs_panel::drag).
+    ///
+    /// On the workspace rather than in the element tree for the reason every
+    /// mouse state is: a press is half a gesture, and the tree that saw it is
+    /// thrown away before the pointer has moved.
+    panel_drag: PanelDrag,
     settings: Settings,
     /// Which build this is, for the settings page's About section. Carried
     /// rather than looked up: nothing else in the view layer knows which
@@ -489,7 +524,9 @@ pub struct Workspace {
     /// `&Workspace` rather than anything captured — so the registries can be
     /// filled without a workspace to fill them from.
     host: Host,
-    /// The menu a tab opens, which is about worktrees.
+    /// The context menu a tab's secondary press opens, and what it is on.
+    tab_context_menu: TabContextMenuState,
+    /// The worktree menu, which is one entry of that one.
     tab_menu: TabMenuState,
     /// The Themes panel, which is the other surface that lists themes.
     panel: ThemePanelState,
@@ -560,6 +597,13 @@ pub struct Workspace {
     /// render path. It does not change while the process runs.
     home: Option<PathBuf>,
     new_tab: MouseStateHandle,
+    /// The room the tab list leaves under itself, whose secondary press opens
+    /// the options menu.
+    ///
+    /// A handle of its own rather than the `+`'s, for the reason
+    /// [`MenuState`] is written out one field at a time: two controls sharing
+    /// one state is how a press on either of them starts being dropped.
+    panel_ground: MouseStateHandle,
     quit: QuitRequest,
     /// The window this is drawn in, for the header to move and maximise.
     window: WindowHandle,
@@ -589,7 +633,6 @@ impl Workspace {
             channel,
             plugins,
         } = opening;
-        let usage = UsageModel::handle(ctx);
 
         let git = ctx.add_model(GitModel::new);
         // A branch that arrives, or a diff count that changes, repaints the
@@ -624,7 +667,13 @@ impl Workspace {
         // and the ones a person installed are a directory somebody has to have
         // gone and looked in. A window that read a directory would be a window
         // no test could give a plugin to.
-        let host = crate::plugin::load(plugins, settings.disabled_plugins(), fonts, ctx);
+        let host = crate::plugin::load(
+            plugins,
+            settings.disabled_plugins(),
+            settings.plugin_grants().clone(),
+            fonts,
+            ctx,
+        );
 
         let options = settings.tab_options();
         let settings_path = settings.path().map(Path::to_owned);
@@ -652,7 +701,6 @@ impl Workspace {
             focused_field: std::cell::RefCell::new(HashMap::new()),
             fonts,
             cell_font,
-            usage,
             git,
             terminals,
             inputs: HashMap::new(),
@@ -666,6 +714,8 @@ impl Workspace {
             system_is_dark: true,
             interactions: HashMap::new(),
             tab_chrome: HashMap::new(),
+            group_chrome: HashMap::new(),
+            panel_drag: PanelDrag::new(),
             settings,
             channel,
             options,
@@ -673,6 +723,7 @@ impl Workspace {
             menu: MenuState::default(),
             page: SettingsState::default(),
             host,
+            tab_context_menu: TabContextMenuState::default(),
             tab_menu: TabMenuState::default(),
             panel: ThemePanelState::default(),
             themes: crate::theme::available(),
@@ -687,6 +738,7 @@ impl Workspace {
             hovered_row: None,
             home: std::env::home_dir(),
             new_tab: MouseStateHandle::default(),
+            panel_ground: MouseStateHandle::default(),
             quit,
             window,
             control_layout: ControlLayout::host(),
@@ -844,17 +896,6 @@ impl Workspace {
         self.channel.name()
     }
 
-    /// The usage model, for the settings page's live reading.
-    /// The usage model, whose poll this workspace starts and stops.
-    ///
-    /// Public for the tests, which is the honest reason: what the workspace
-    /// still owns of the usage feature is the poll's switch — `crook/usage`
-    /// owns the chip and the page — and a test asserting that a hidden chip
-    /// stops polling has to be able to ask.
-    pub fn usage(&self) -> &ModelHandle<UsageModel> {
-        &self.usage
-    }
-
     /// The settings page's state.
     pub(crate) fn settings_page(&self) -> &SettingsState {
         &self.page
@@ -878,9 +919,27 @@ impl Workspace {
         matches!(self.tab_menu.mode, WorktreeMode::Removing { .. })
     }
 
-    /// Whether the menu is making a worktree. For a test.
+    /// Whether the confirmation has already been refused once, which is what
+    /// arms its "Remove anyway". For a test.
+    pub fn worktree_menu_was_refused(&self) -> bool {
+        matches!(self.tab_menu.mode, WorktreeMode::Removing { refused, .. } if refused)
+    }
+
+    /// Whether the menu is making a worktree.
+    ///
+    /// For a test, and for `crook/worktrees` — it is what that plugin's branch
+    /// field answers "is the keyboard mine" with.
     pub fn worktree_menu_is_creating(&self) -> bool {
         self.tab_menu.mode == WorktreeMode::Creating
+    }
+
+    /// The field a new worktree's branch is typed into.
+    ///
+    /// It belongs to `crook/worktrees` rather than to this struct, so it is
+    /// `None` when that plugin is switched off — which is also when nothing
+    /// can reach the popup that draws it.
+    pub(super) fn worktree_branch(&self) -> Option<&TextInput> {
+        self.host.field(crate::plugins::worktrees::BRANCH_FIELD)
     }
 
     /// The plugins, and the slots and actions they registered.
@@ -914,6 +973,44 @@ impl Workspace {
         }
         // A plugin's surface may have been what was holding the keyboard.
         self.sync_input_keys();
+        ctx.notify();
+    }
+
+    /// Records what one plugin is allowed to do, and remembers the answer.
+    ///
+    /// The whole list every time, because that is what was answered: allowing
+    /// a plugin that now wants a second host is allowing both, and revoking is
+    /// this with nothing in it. What is written down is one key per host and
+    /// per path rather than a yes, which is what lets the Plugins page tell a
+    /// person that a new version is asking for more than they agreed to.
+    ///
+    /// Unlike the switch above it, nothing here reaches the host: a plugin
+    /// reads its grant once, as it is built, so that no request is answered
+    /// against one answer while the frame around it was drawn against another.
+    /// The card says so under the list rather than leaving somebody to work
+    /// out why nothing happened.
+    pub fn set_plugin_granted(
+        &mut self,
+        plugin: &PluginId,
+        keys: Vec<String>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.settings.set_granted(plugin.as_str(), keys.clone());
+        self.save_settings(ctx);
+
+        // Told to the host as well as written down, and then the plugin is
+        // built again — because a plugin reads its grant once, while building,
+        // and a permission that only took effect on the next launch would be a
+        // permission a person presses and watches do nothing. Off and on again
+        // is what the switch beside it already does, and it is correct for the
+        // same reason: a plugin that was off saw nothing happen while it was
+        // off, so there is no state it could have been holding.
+        self.host.set_granted(plugin, keys);
+        if self.host.is_loaded(plugin) {
+            self.host.unload(plugin);
+            self.host.enable(plugin, ctx);
+            self.sync_input_keys();
+        }
         ctx.notify();
     }
 
@@ -977,19 +1074,93 @@ impl Workspace {
         &self.host
     }
 
-    /// The menu a tab opens, which is about worktrees.
+    /// The worktree menu, which is one entry of a tab's context menu.
     pub(super) fn tab_menu(&self) -> &TabMenuState {
         &self.tab_menu
+    }
+
+    /// The context menu a tab's secondary press opens.
+    pub(crate) fn tab_context_menu(&self) -> &TabContextMenuState {
+        &self.tab_context_menu
+    }
+
+    /// Whether the worktree list is showing inside that menu.
+    ///
+    /// Asked by the plugin whose entry opens it, for two things it cannot see
+    /// from its own side of the boundary: whether to light its row, and
+    /// whether it has a row at all. The second matters more than it looks.
+    /// That entry is drawn only inside a repository, and what says so is a
+    /// model the background pool fills in — so a frame that has the list open
+    /// and has not yet been told about the repository would draw a submenu
+    /// hanging off nothing. A row whose submenu is up is a row, whatever git
+    /// has got round to saying.
+    pub(crate) fn worktree_menu_is_open(&self) -> bool {
+        self.tab_menu.is_open()
+    }
+
+    /// What a tab's menu is about: the tab, and the pane whose row was pressed.
+    ///
+    /// With no menu up it is the active tab and its focused pane, which is
+    /// what makes one handler serve both a menu entry and the palette row that
+    /// runs the same command — see [`crate::plugins::tabs`]. `None` only where
+    /// there is no tab at all, which is a window on its way out.
+    pub(crate) fn menu_target(&self) -> Option<(TabId, PaneId)> {
+        if let (Some(tab), Some(pane)) = (self.tab_context_menu.tab, self.tab_context_menu.pane) {
+            return Some((tab, pane));
+        }
+        let tab = self.tabs.active()?;
+        Some((tab.id(), tab.panes().focused_id()))
+    }
+
+    /// What the pane that menu is about calls itself.
+    pub(crate) fn menu_pane_title(&self) -> Option<String> {
+        let (tab, pane) = self.menu_target()?;
+        let title = self.tabs.get(tab)?.panes().get(pane)?.title();
+        (!title.is_empty()).then(|| title.to_owned())
+    }
+
+    /// Where that pane's shell last said it was working.
+    pub(crate) fn menu_pane_directory(&self) -> Option<PathBuf> {
+        let (tab, pane) = self.menu_target()?;
+        self.tabs
+            .get(tab)?
+            .panes()
+            .get(pane)?
+            .session()
+            .working_directory
+            .clone()
+    }
+
+    /// Whether that pane sits in a git repository with a branch checked out.
+    ///
+    /// The question `crook/worktrees` asks to decide whether it has a row to
+    /// contribute at all. It is a map lookup on a model the background pool
+    /// fills in — see [`git_facts`](Self::git_facts) — and is asked on the
+    /// render path for that reason.
+    pub(crate) fn menu_tab_is_in_a_repository(&self, app: &AppContext) -> bool {
+        let Some((tab, pane)) = self.menu_target() else {
+            return false;
+        };
+        let Some(session) = self
+            .tabs
+            .get(tab)
+            .and_then(|tab| tab.panes().get(pane))
+            .map(Pane::session)
+        else {
+            return false;
+        };
+        self.git_facts(session, app)
+            .is_some_and(|facts| facts.branch.is_some())
     }
 
     /// Every pane in the window, with the directory it is in.
     ///
     /// Every pane rather than every tab's focused one, and that is what makes
     /// "this checkout is already open" a true answer: a worktree opened from a
-    /// tab now lands in a pane *beside* the one that asked for it, so the tab
-    /// whose row a person is looking at is very often not the pane the branch
-    /// is in. Asking the focused pane only would offer to remove a checkout an
-    /// agent is working in, and would open a second pane on it a moment later.
+    /// tab lands in a tab *beside* the one that asked for it, folded under the
+    /// same heading, and a tab of its own can be split like any other. Asking
+    /// the focused panes only would offer to remove a checkout an agent is
+    /// working in, and would open a second agent on it a moment later.
     pub(super) fn pane_directories(&self) -> Vec<(PaneId, PathBuf)> {
         self.tabs
             .panes()
@@ -1006,8 +1177,17 @@ impl Workspace {
     /// tidiness: a modal underlay covers only the layers painted *before* it,
     /// so the second one's popup would float above the first one's underlay
     /// while the first one's underlay swallowed the press meant to dismiss it.
+    ///
+    /// **A plugin's surface counts as one.** It is the same statement about
+    /// the same thing — something is up over the window and the keyboard
+    /// belongs to it — and leaving it out is how a picker with a field in it
+    /// ends up sharing the letters somebody types with the program on the
+    /// alternate screen underneath.
     pub(super) fn a_popup_is_open(&self) -> bool {
-        self.menu.open || self.tab_menu.is_open()
+        self.menu.open
+            || self.tab_menu.is_open()
+            || self.tab_context_menu.is_open()
+            || self.host.a_surface_is_up()
     }
 
     /// The Themes panel's state.
@@ -1341,6 +1521,15 @@ impl Workspace {
     /// the first selection of a session, before any frame — scrolls nowhere,
     /// and the next selection finds it.
     fn scroll_row_into_view(&self) {
+        // Never under a hand that is carrying a row. Every step of a drag is a
+        // strip action, so this would run on every one of them — and the row
+        // it scrolls to is the row being carried, whose slot is wherever the
+        // last step put it. The list would chase the hand down the panel at
+        // whatever rate the mouse reports, which is a list that scrolls to its
+        // own end because somebody dragged a tab a little too far.
+        if self.panel_drag.carrying().is_some() {
+            return;
+        }
         let Some(pane) = self.tabs.focused_pane_id() else {
             return;
         };
@@ -1394,6 +1583,11 @@ impl Workspace {
             return;
         }
         self.section = key;
+        // The menu is a popup about the tab list and it is drawn *inside* the
+        // tab list, so a section covering the list takes it off screen. Left
+        // open it would be a menu nobody can see and nobody can dismiss —
+        // which is what `--menu --section` used to leave behind.
+        self.close_menu();
         // Whatever was being recorded was being recorded on a page that is
         // about to stop being drawn. See [`Self::record`].
         self.recording.borrow_mut().take();
@@ -1481,6 +1675,81 @@ impl Workspace {
         ctx.notify();
     }
 
+    /// Opening and closing the context menu a tab's secondary press opens.
+    ///
+    /// Its *entries* land nowhere near here: each is a named action belonging
+    /// to the plugin that contributed it, and reaches
+    /// [`run_action`](Self::run_action) like a palette row or a chord.
+    fn apply_tab_menu(&mut self, action: TabMenuAction, ctx: &mut ViewContext<Self>) {
+        match action {
+            TabMenuAction::Open { tab, pane } => self.open_tab_context_menu(tab, pane, ctx),
+            TabMenuAction::Close => self.close_tab_context_menu(ctx),
+        }
+    }
+
+    /// Puts the menu up on a row, taking down whatever else was up.
+    ///
+    /// Pressing again on the row whose menu is already showing closes it. In
+    /// practice the modal underlay gets that press first and dismisses on it;
+    /// this is what makes the toggle right anyway, for the keyboard and for
+    /// anything else that dispatches the action.
+    fn open_tab_context_menu(&mut self, tab: TabId, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        // A menu with nothing in it is worse than no menu: it is a popup that
+        // takes the keyboard away from the pane under it to show a person an
+        // empty box. Every entry belongs to a plugin and every plugin can be
+        // switched off on the Plugins page, so this is reachable — and the
+        // answer is the one the worktree menu already gave for a tab with
+        // nothing to say, which is that the gesture does nothing.
+        if self
+            .host
+            .slots()
+            .is_empty(crate::plugins::tabs::TAB_MENU_ENTRIES)
+        {
+            return;
+        }
+        if self.tab_context_menu.pane == Some(pane) {
+            self.close_tab_context_menu(ctx);
+            return;
+        }
+        self.show_tab_context_menu(tab, pane, ctx);
+    }
+
+    /// Puts it up without the toggle.
+    ///
+    /// What [`open_tab_menu`](Self::open_tab_menu) calls, because a submenu
+    /// implies the menu it hangs off: the worktree list is drawn *inside* this
+    /// popup, so a worktree menu asked for on its own — by the entry, by the
+    /// keyboard, or by `--worktree-menu` on the command line — would otherwise
+    /// be state nothing paints.
+    fn show_tab_context_menu(&mut self, tab: TabId, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        // Two popups are never up at once. See `a_popup_is_open`.
+        self.close_menu();
+        self.close_tab_menu(ctx);
+
+        self.tab_context_menu.tab = Some(tab);
+        self.tab_context_menu.pane = Some(pane);
+        self.tab_context_menu.forget_hover_state();
+        self.sync_input_keys();
+        ctx.notify();
+    }
+
+    /// Takes it down, and the submenu with it.
+    ///
+    /// The submenu goes because it is *inside* this popup: a worktree list
+    /// left open over a menu that is no longer there would be a column hanging
+    /// off nothing, and there is no gesture that could reach it.
+    pub(crate) fn close_tab_context_menu(&mut self, ctx: &mut ViewContext<Self>) {
+        if !self.tab_context_menu.is_open() {
+            return;
+        }
+        self.close_tab_menu(ctx);
+        self.tab_context_menu.tab = None;
+        self.tab_context_menu.pane = None;
+        self.tab_context_menu.forget_hover_state();
+        self.sync_input_keys();
+        ctx.notify();
+    }
+
     /// Everything the menu on a tab does.
     ///
     /// Every arm that asks git anything does it on the background pool and
@@ -1527,7 +1796,7 @@ impl Workspace {
                     // company of the checkout it came from.
                     None => match opened_on {
                         Some(tab) => {
-                            self.open_pane_in(tab, path, ctx);
+                            self.open_tab_in_group_of(tab, path, ctx);
                         }
                         None => {
                             self.open_tab_in(path, ctx);
@@ -1560,10 +1829,12 @@ impl Workspace {
                     self.tab_menu.worktrees(),
                     &self.tab_menu.branches,
                 );
-                self.tab_menu.branch.edit(|editor| {
-                    editor.set_text(&branch);
-                    editor.select_all();
-                });
+                if let Some(field) = self.worktree_branch() {
+                    field.edit(|editor| {
+                        editor.set_text(&branch);
+                        editor.select_all();
+                    });
+                }
                 self.tab_menu.problem = None;
                 self.tab_menu.mode = WorktreeMode::Creating;
                 self.tab_menu.forget_hover_state();
@@ -1588,8 +1859,8 @@ impl Workspace {
     /// Opens the menu on a tab, and reads the repository behind it.
     ///
     /// Pressing again on the tab whose menu is already up closes it, which is
-    /// the gear's rule and the one a person expects of anything that opens by
-    /// being clicked. In practice the modal underlay gets that press first and
+    /// the options menu's rule and the one a person expects of anything that
+    /// opens by being pressed. In practice the modal underlay gets that press first and
     /// dismisses on it; this is what makes the toggle right anyway, for the
     /// keyboard and for anything else that dispatches the action.
     fn open_tab_menu(&mut self, tab: TabId, ctx: &mut ViewContext<Self>) {
@@ -1607,8 +1878,14 @@ impl Workspace {
             return;
         };
 
-        // Two popups are never up at once. See `a_popup_is_open`.
-        self.close_menu();
+        // A submenu is drawn inside the menu it hangs off, so opening this one
+        // opens that one — on the row the tab speaks through, which is its
+        // focused pane. Nothing happens when it is already there.
+        if self.tab_context_menu.tab != Some(tab)
+            && let Some(row) = self.tabs.get(tab).map(|tab| tab.panes().focused_id())
+        {
+            self.show_tab_context_menu(tab, row, ctx);
+        }
 
         self.tab_menu.tab = Some(tab);
         self.tab_menu.pane_directory = Some(directory.clone());
@@ -1656,6 +1933,21 @@ impl Workspace {
             ctx.notify();
         })
         .detach();
+    }
+
+    /// Opens the active tab's context menu on its focused row, for a run that
+    /// was asked to start with it up.
+    ///
+    /// No toggle and no git: the entries decide for themselves what they can
+    /// say about the tab, and the one that has to ask git is the submenu's —
+    /// see [`open_tab_menu_for_snapshot`](Self::open_tab_menu_for_snapshot),
+    /// which is the flag that wants an answer in the frame it draws.
+    pub fn open_tab_context_menu_for_snapshot(&mut self, ctx: &mut ViewContext<Self>) {
+        let tab = self.tabs.active_id();
+        let Some(row) = self.tabs.get(tab).map(|tab| tab.panes().focused_id()) else {
+            return;
+        };
+        self.show_tab_context_menu(tab, row, ctx);
     }
 
     /// Opens the menu on the active tab and reads the repository *now*, for a
@@ -1731,10 +2023,13 @@ impl Workspace {
             return;
         }
 
-        let branch = self.tab_menu.branch.editor().text().trim().to_owned();
+        let branch = self
+            .worktree_branch()
+            .map(|field| field.editor().text().trim().to_owned())
+            .unwrap_or_default();
         let (Some(repository), Some(path)) = (
             self.tab_menu.pane_directory.clone(),
-            super::tab_menu::checkout_for(&self.tab_menu),
+            super::tab_menu::checkout_for(self),
         ) else {
             // The one thing the creator can be missing is a name, and the
             // field says so more usefully than a sentence would.
@@ -1771,11 +2066,11 @@ impl Workspace {
                     if answering {
                         workspace.close_tab_menu(ctx);
                     }
-                    // Beside the tab it was asked for, which is what
-                    // `open_pane_in` falls back out of if that tab has closed
-                    // in the meantime.
+                    // In the group of the tab it was asked for, which is what
+                    // `open_tab_in_group_of` falls back out of if that tab has
+                    // closed in the meantime.
                     match opened_on {
-                        Some(tab) => workspace.open_pane_in(tab, path, ctx),
+                        Some(tab) => workspace.open_tab_in_group_of(tab, path, ctx),
                         None => workspace.open_tab_in(path, ctx),
                     };
                 }
@@ -1958,9 +2253,9 @@ impl Workspace {
     /// starts or stops whatever they gate.
     ///
     /// The mirror of [`Self::set_options`] for the other group, and it has one
-    /// job that one does not: two of these switches are also models', so the
-    /// models are told before the file is written. A person who turns the chip
-    /// off has said they do not want Crook talking to the network, and waiting
+    /// job that one does not: one of these switches is also a model's, so the
+    /// model is told before the file is written. A person who changed what the
+    /// next shell is started as has said so about the next shell, and waiting
     /// for a background save to land before acting on that would be the wrong
     /// order to do two things in.
     fn set_general(&mut self, general: GeneralOptions, ctx: &mut ViewContext<Self>) {
@@ -1969,9 +2264,6 @@ impl Workspace {
         }
 
         self.settings.set_general(general);
-        self.usage.update(ctx, |model, ctx| {
-            model.set_wanted(general.show_usage_chip, ctx);
-        });
         // The shells already running keep the startup they were given; there is
         // no way to read a file into a shell that has drawn its prompt. This
         // decides the next one opened.
@@ -2140,6 +2432,24 @@ impl Workspace {
         ctx.notify();
     }
 
+    /// Where to press to pick the `index`th row of the panel up, and where to
+    /// press to pick the `index`th group's whole block up.
+    ///
+    /// For `--carry`, which is how a picture is taken of a gesture nobody can
+    /// hold still in an unattended run. Left of centre, which is inside every
+    /// row and clear of the close button at its trailing edge; a block is
+    /// gripped by its heading, which is the top of its box.
+    pub fn panel_row_grip(&self, index: usize) -> Option<Vector2F> {
+        let row = self.panel_drag.row(index)?;
+        Some(vec2f(PANEL_GRIP_X, (row.start + row.end) / 2.))
+    }
+
+    /// See [`Self::panel_row_grip`].
+    pub fn panel_block_grip(&self, index: usize) -> Option<Vector2F> {
+        let block = self.panel_drag.block(index)?;
+        Some(vec2f(PANEL_GRIP_X, block.start + PANEL_HEADING_GRIP))
+    }
+
     /// Arms the detail card on the first row, for a run that was asked to start
     /// with it up.
     ///
@@ -2151,19 +2461,6 @@ impl Workspace {
             return;
         };
         self.hover_row(pane, true, ctx);
-    }
-
-    /// Starts the usage poll chain, if anything is going to show what it
-    /// reads. Call once, after the window exists.
-    ///
-    /// Gated on the same switch the chip is, and gated *here* rather than at
-    /// the call site: "nothing displays the reading" and "do not fetch the
-    /// reading" have to be one statement, or a build that hides the chip goes
-    /// on polling forever because somebody added a second entry point.
-    pub fn start_usage_poll(&self, ctx: &mut ViewContext<Self>) {
-        let wanted = self.general().show_usage_chip;
-        self.usage
-            .update(ctx, |model, ctx| model.set_wanted(wanted, ctx));
     }
 
     /// Opens a shell in every pane, and in every pane opened from now on.
@@ -2254,9 +2551,11 @@ impl Workspace {
     /// Whether any field on screen is drawing a caret.
     fn shows_a_caret(&self, app: &AppContext) -> bool {
         if self.a_popup_is_open() {
-            // Except the branch field inside the menu that is up, which is the
-            // one caret a popup can carry.
-            return self.tab_menu.branch.has_keys();
+            // Except a plugin's own field inside the menu that is up, which is
+            // the one caret a popup can carry. Asked of the host rather than
+            // named, because there are two of them now — a branch being
+            // invented and a tab being renamed — and neither is this struct's.
+            return self.host.a_field_has_keys();
         }
         let Some(pane) = self.tabs.focused_pane_id() else {
             return false;
@@ -2516,9 +2815,9 @@ impl Workspace {
 
     /// Starts the git gather chain. Call once, after the window exists.
     ///
-    /// Separate from [`Self::new`] for the reason the usage poll is: a
-    /// headless snapshot and a test render the real view tree without ever
-    /// spawning a subprocess or parking a worker thread.
+    /// Separate from [`Self::new`] for the reason the shells are: a headless
+    /// snapshot and a test render the real view tree without ever spawning a
+    /// subprocess or parking a worker thread.
     pub fn start_git_poll(&self, ctx: &mut ViewContext<Self>) {
         let wants_diff = wants_diff_stats(self.options);
         self.git.update(ctx, |model, ctx| {
@@ -2540,6 +2839,25 @@ impl Workspace {
     /// [`TabId`] would mean writing into whichever pane of that tab happens to
     /// be focused when the agent reports — a race between a person clicking
     /// and a background task finishing.
+    /// Renames a tab, or takes the rename back.
+    ///
+    /// `None` puts back the name the tab was opened with, which is where a
+    /// rename to an empty field lands: somebody who clears the box is asking
+    /// for the name they had before they touched it, not for a row with no
+    /// name.
+    ///
+    /// One of the tab services a plugin has and the strip's own `Copy` action
+    /// vocabulary cannot carry — a `TabAction` holds no `String` — so it is a
+    /// call rather than an action, the way `update_session` is for the other
+    /// half of the same gesture.
+    pub fn rename_tab(&mut self, id: TabId, name: Option<String>, ctx: &mut ViewContext<Self>) {
+        let Some(tab) = self.tabs.get_mut(id) else {
+            return;
+        };
+        tab.set_name(name);
+        ctx.notify();
+    }
+
     pub fn update_session(
         &mut self,
         id: PaneId,
@@ -2670,6 +2988,10 @@ impl Workspace {
                 true
             }
             TerminalUpdate::Bell(pane) => self.ring(*pane, ctx),
+            TerminalUpdate::CommandFinished { pane, exit, took } => {
+                self.command_finished(*pane, *exit, *took, ctx);
+                true
+            }
             TerminalUpdate::Completions(pane, serial, answer) => {
                 let Some(input) = self.inputs.get(pane) else {
                     return;
@@ -2685,6 +3007,41 @@ impl Workspace {
             // The pane closed between the shell saying something and the main
             // thread hearing it. Nothing to write it into, and nothing wrong.
             log::debug!("a terminal reported {update:?} for a pane that has gone");
+        }
+    }
+
+    /// Tells every plugin watching that a command ended.
+    ///
+    /// The handles come out of the host first and the host is let go of before
+    /// any of them is called, because a watcher is handed the whole workspace
+    /// and the host is part of it: calling one while the list was still
+    /// borrowed would be a borrow of `self` inside a borrow of `self`. Same
+    /// reason [`Self::apply_action`] takes the actions by handle.
+    fn command_finished(
+        &mut self,
+        pane: PaneId,
+        exit: Option<i32>,
+        took: Option<Duration>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let watchers = self.host.command_watchers();
+        if watchers.is_empty() {
+            return;
+        }
+
+        let event = Event::CommandFinished {
+            // The plugin gets a number it can key on and nothing it could use
+            // to reach the pane; what a `PaneId` *is* is the host's business.
+            pane: pane.as_u64(),
+            // A status that does not fit a byte is one no shell reports: the
+            // wire says `u8` because 0-255 is what a process exits with, and
+            // anything else is better read as "it did not say".
+            exit: exit.and_then(|status| u8::try_from(status).ok()),
+            took_millis: took.map(|took| took.as_millis().min(u128::from(u64::MAX)) as u64),
+        };
+
+        for watch in watchers {
+            watch(self, &event, ctx);
         }
     }
 
@@ -2722,25 +3079,27 @@ impl Workspace {
         self.settle(effect, ctx)
     }
 
-    /// Opens a pane whose shell starts in `directory`, inside `tab`.
+    /// Opens a tab whose shell starts in `directory`, in `tab`'s group.
     ///
-    /// What the worktree menu opens into. A worktree opened from a tab belongs
-    /// *with* that tab: it is the same repository, one checkout over, and the
-    /// panel says so by drawing the two under one group header — which is a
-    /// header that appears the moment the second pane arrives, so there is no
-    /// group to make first and none to tidy away when one of them closes. The
-    /// alternative, a tab of its own, puts the branch somewhere else in the
-    /// list with nothing left to say where it came from.
+    /// What the worktree menu opens into, and **it is a tab and not a pane**.
+    /// A worktree opened from a tab belongs *with* that tab: it is the same
+    /// repository, one checkout over, and the panel says so by folding the two
+    /// under one heading. It used to say so by splitting the tab, and that was
+    /// the wrong claim: a split puts two agents in one rectangle, half a
+    /// window each, sharing a keyboard — which is a thing a person asks for
+    /// when they want to watch two things at once, not what "give this branch
+    /// a checkout of its own" means. Belonging together and being on screen
+    /// together are two different statements and only the first one was ever
+    /// true here.
     ///
-    /// [`TabAction::Split`] is about the active tab, so the tab named here
-    /// becomes the active one first. That is not a workaround: a person who
-    /// asked a tab for a worktree is about to be looking at it, and the split
-    /// focuses what it made.
+    /// The group is made the moment the second checkout arrives and pruned
+    /// when its last member closes, so there is no group to make first and
+    /// none to tidy away.
     ///
-    /// A tab that closed while git was checking the worktree out gets the tab
-    /// this used to open every time. The checkout happened and it is still
-    /// what was asked for; only the place to put it has gone.
-    pub fn open_pane_in(
+    /// A tab that closed while git was checking the worktree out gets a tab of
+    /// its own, as it always did. The checkout happened and it is still what
+    /// was asked for; only the place to put it has gone.
+    pub fn open_tab_in_group_of(
         &mut self,
         tab: TabId,
         directory: PathBuf,
@@ -2750,8 +3109,7 @@ impl Workspace {
             return self.open_tab_in(directory, ctx);
         }
 
-        self.tabs.apply(TabAction::Select(tab));
-        let effect = self.tabs.apply(TabAction::Split(Direction::Right));
+        let effect = self.tabs.apply(TabAction::NewInGroupOf(tab));
 
         // The directory before the shells are synced, for the reason
         // `open_tab_in` writes it there: syncing is the moment a pty's
@@ -2760,6 +3118,18 @@ impl Workspace {
             && let Some(pane) = self.tabs.pane_mut(pane)
         {
             pane.session_mut().working_directory = Some(directory);
+        }
+
+        // The repository is a better heading than the tab the group was made
+        // around: what the checkouts under it have in common is the repository,
+        // and the tab's own name is already on its row. Only when the menu
+        // read one — it is the menu's own answer, and a group named after the
+        // tab is what the strip already fell back to.
+        if let (Some(group), Some(repository)) = (
+            self.tabs.get(tab).and_then(Tab::group),
+            self.tab_menu.repository.clone(),
+        ) {
+            self.tabs.rename_group(group, repository);
         }
 
         self.settle(effect, ctx)
@@ -2842,6 +3212,17 @@ impl Workspace {
         // opens a tab over an open palette.
         if let Some(action) = self.host.keys_for(keystroke) {
             return Some(WorkspaceAction::Run(action));
+        }
+
+        // **The menu a tab opens owns the same two keys while it is up**, and
+        // for the reason the search box's are claimed here rather than left to
+        // the field: [`TextField`](super::text_field::TextField) answers
+        // Escape by emptying itself and Enter by doing nothing, so a popup
+        // whose branch field has the keyboard has no way out that is not a
+        // pointer. Before the bindings, because a modal popup's Escape is not
+        // a chord anything else in the window may take.
+        if let Some(action) = self.tab_menu_action_for(keystroke) {
+            return Some(action);
         }
 
         // **The search box owns its two ways out while it is being typed
@@ -3043,6 +3424,48 @@ impl Workspace {
         Some(action.into())
     }
 
+    /// What a keystroke means to the menu a tab opens, if it means anything.
+    ///
+    /// The two keys its buttons are: Escape is Cancel — back to the list from
+    /// either face that left it, and out of the menu from the list itself, so
+    /// one key always undoes one step — and Enter is whichever button that
+    /// face leads with: Create in the creator, Remove in the confirmation.
+    /// Unmodified only, like the panel's, because a chord is a window command
+    /// wherever the pointer is.
+    ///
+    /// Enter stops at the *second* question. Once git has refused over local
+    /// work the button becomes "Remove anyway", and a person who pressed Enter
+    /// and was answered with a warning would throw away the very work it warns
+    /// about by repeating the press. That one stays a click.
+    fn tab_menu_action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
+        if !keystroke.modifiers.is_empty() {
+            return None;
+        }
+
+        // Escape is one step back, and there are two steps to be at: the
+        // submenu takes it first and leaves the menu that opened it standing,
+        // which is the arrangement inside the worktree menu already — Escape
+        // walks Creating and Removing back to Listing before it closes
+        // anything. A person who opened a context menu, opened its submenu and
+        // changed their mind presses it twice, and each press undoes exactly
+        // the gesture that came before it.
+        if !self.tab_menu.is_open() {
+            return (self.tab_context_menu.is_open() && keystroke.key == "escape")
+                .then_some(TabMenuAction::Close.into());
+        }
+
+        let action = match (keystroke.key.as_str(), self.tab_menu.mode) {
+            ("escape", WorktreeMode::Listing) => WorktreeAction::CloseMenu,
+            ("escape", _) => WorktreeAction::Cancel,
+            ("enter", WorktreeMode::Creating) => WorktreeAction::Create,
+            ("enter", WorktreeMode::Removing { refused: false, .. }) => {
+                WorktreeAction::Remove { force: false }
+            }
+            _ => return None,
+        };
+        Some(action.into())
+    }
+
     /// What a keystroke means to the Themes panel, if it means anything.
     ///
     /// Only unmodified keys, and only the four the panel actually uses: a
@@ -3075,6 +3498,10 @@ impl Workspace {
         self.new_tab.clone()
     }
 
+    pub(super) fn panel_ground_state(&self) -> MouseStateHandle {
+        self.panel_ground.clone()
+    }
+
     pub(super) fn interaction(&self, id: PaneId) -> Option<&PaneInteraction> {
         self.interactions.get(&id)
     }
@@ -3084,18 +3511,36 @@ impl Workspace {
         self.tab_chrome.get(&id)
     }
 
+    /// The same, for one group's heading and the box around its members.
+    pub(super) fn group_chrome(&self, id: GroupId) -> Option<&GroupInteraction> {
+        self.group_chrome.get(&id)
+    }
+
+    /// The panel's drag: what is being carried, and where the rows are.
+    pub(super) fn panel_drag(&self) -> PanelDrag {
+        self.panel_drag.clone()
+    }
+
     /// Whether this row should be showing its detail card.
     ///
     /// Never while the options menu is up. Warp tears its sidecar down when
     /// the row's tab opens a menu, and here it also keeps an invariant the
-    /// overlay layers depend on: the menu is anchored inside the control bar,
-    /// which paints *before* the list, so a card opened from a row afterwards
-    /// would land in a later overlay layer and cover the menu's own modal
-    /// underlay — the press that should dismiss the menu would be swallowed by
-    /// the card instead.
+    /// overlay layers depend on: the menu and a row's card are both anchored
+    /// overlays, so whichever is added last covers the other. The menu is
+    /// added to the ground *under* the list, after the list itself, so it
+    /// wins — but only for a card the same frame builds. Leaving a card armed
+    /// and letting it come back on some later frame would put it over the
+    /// menu's own modal underlay, and the press that should dismiss the menu
+    /// would be swallowed by the card instead.
     pub(super) fn shows_details_for(&self, pane: PaneId) -> bool {
         self.options.show_details_on_hover
             && !self.a_popup_is_open()
+            // Never while a row is being carried. The carried row is under the
+            // pointer for the whole gesture, so its own card would be up for
+            // all of it — a 320px panel travelling beside the hand, over the
+            // rows the drag is aiming at. Warp hides a row's action buttons
+            // for the duration for the same reason.
+            && self.panel_drag.carrying().is_none()
             && self.hovered_row == Some(pane)
     }
 
@@ -3142,6 +3587,47 @@ impl Workspace {
             .facts(session.working_directory.as_deref()?)
     }
 
+    /// Where the focused pane is and what git says about it, for a plugin
+    /// that was allowed to ask.
+    ///
+    /// The *focused* pane, which is the one a chip beside the prompt is about
+    /// and the one `Capability::ReadWorkingDirectory` names. Both halves are
+    /// map lookups — the directory is what the shell last reported with OSC 7
+    /// and the facts are what the background gather left behind — so this is
+    /// as cheap to answer as it is to draw.
+    pub(crate) fn focused_facts(&self, app: &AppContext) -> (Option<PathBuf>, Option<GitFacts>) {
+        let Some(tab) = self.tabs.active() else {
+            return (None, None);
+        };
+        let Some(pane) = tab.panes().focused() else {
+            return (None, None);
+        };
+        let directory = pane.session().working_directory.clone();
+        let facts = self.git_facts(pane.session(), app).cloned();
+        (directory, facts)
+    }
+
+    /// Types a line into the focused pane's shell and runs it.
+    ///
+    /// Exactly what pressing Enter on a composed line does — the same
+    /// [`TerminalModel::submit`](crate::terminal_model::TerminalHandle::submit)
+    /// — because it has to be: `cd` belongs to the shell, and a line that took
+    /// any other route would be a line the shell's own aliases, hooks and
+    /// history never saw.
+    ///
+    /// Answers whether it reached a pty. A pane with no shell in it is a
+    /// `false` rather than a panic, which is the state a pane whose shell has
+    /// exited is in.
+    pub(crate) fn type_into_focused_pane(&self, line: &str, app: &AppContext) -> bool {
+        let Some(pane) = self.tabs.focused_pane_id() else {
+            return false;
+        };
+        let Some((handle, _)) = self.terminal(pane, app) else {
+            return false;
+        };
+        handle.submit(line)
+    }
+
     /// The tab `offset` slots away from the active one, wrapping at both ends.
     fn neighbour(&self, offset: isize) -> Option<TabId> {
         let count = self.tabs.len() as isize;
@@ -3159,6 +3645,26 @@ impl Workspace {
         // reuse nothing at all would still be paying for the map.
         self.tab_chrome.retain(|id, _| tabs.contains(id));
 
+        let groups: Vec<GroupId> = self.tabs.groups().map(TabGroup::id).collect();
+        for id in &groups {
+            self.group_chrome.entry(*id).or_default();
+        }
+        self.group_chrome.retain(|id, _| groups.contains(id));
+
+        // A drag whose subject has gone is a drag with nothing to drop. It
+        // happens for one reason and it is a real one: an agent's tab can
+        // close while somebody is holding it, and a gesture left running would
+        // draw a line for a row nobody can see and then dispatch a move that
+        // resolves to nothing.
+        let carried_is_gone = match self.panel_drag.carrying() {
+            Some(Carried::Tab(tab)) => !tabs.contains(&tab),
+            Some(Carried::Group(group)) => !groups.contains(&group),
+            None => false,
+        };
+        if carried_is_gone {
+            self.panel_drag.cancel();
+        }
+
         let open: Vec<PaneId> = self.tabs.panes().map(|(_, pane)| pane.id()).collect();
 
         for id in &open {
@@ -3173,7 +3679,10 @@ impl Workspace {
                     extent: PaneExtent::new(),
                     blocks: PaneBlocks::new(),
                 });
-            self.inputs.entry(*id).or_default();
+            // Not `or_default`: a pane's field opens with this person's own
+            // shell history behind it, which is what the Up key reaches and
+            // what the suggestion after the caret is made of.
+            self.inputs.entry(*id).or_insert_with(TextInput::for_pane);
         }
         self.interactions.retain(|id, _| open.contains(id));
         // A closed pane's half-written command line goes with it. Keeping it
@@ -3208,6 +3717,18 @@ impl Workspace {
             self.tab_menu.problem = None;
             self.tab_menu.working = false;
             self.tab_menu.forget_hover_state();
+        }
+        // And the same again for the menu that now holds that one. What it is
+        // open on is a *pane*, which can go without its tab going — a split
+        // closed under its own menu — so the pane is what is checked here.
+        if self
+            .tab_context_menu
+            .pane
+            .is_some_and(|pane| self.tabs.pane(pane).is_none())
+        {
+            self.tab_context_menu.tab = None;
+            self.tab_context_menu.pane = None;
+            self.tab_context_menu.forget_hover_state();
         }
 
         self.sync_input_keys();
@@ -3252,12 +3773,21 @@ impl Workspace {
         // shell. It is the only one of these that is on screen *beside* a pane
         // rather than over it, which is why it is a wish that has to be
         // granted rather than a surface that is simply up.
+        //
+        // A plugin's own field counts the same way, and asking the host is
+        // what this line used to do by *naming* every field in the window that
+        // was not a pane's. There were two of them and neither was a
+        // plugin's — which was the last thing a plugin could not do that a
+        // built-in could: it could put a popup on screen, draw a box in it and
+        // claim Escape, and still have nowhere for a keystroke to land.
+        let a_field_has_keys = self.host.sync_fields(self);
         let listening = (!self.a_popup_is_open()
             && !self.panel.open
             && !self.host.a_surface_is_up()
-            && !self.search_takes_keys())
-        .then(|| self.tabs.focused_pane_id())
-        .flatten();
+            && !self.search_takes_keys()
+            && !a_field_has_keys)
+            .then(|| self.tabs.focused_pane_id())
+            .flatten();
         for (id, input) in &self.inputs {
             input.set_has_keys(Some(*id) == listening);
         }
@@ -3272,13 +3802,6 @@ impl Workspace {
         // Note which question this asks. `listening` is the *focused* pane,
         // and the settings page draws no field of its own through `inputs`, so
         // the two never both have the keyboard.
-        // The worktree menu's branch field, which is the other keyboard a
-        // popup can hold and the only one that is not a pane's or the settings
-        // page's.
-        self.tab_menu
-            .branch
-            .set_has_keys(self.tab_menu.mode == WorktreeMode::Creating);
-
         // The panel's own box, which is not one of the section fields below:
         // see `search_takes_keys` for why it is asked a different question.
         self.panel_search
@@ -3446,14 +3969,15 @@ impl Workspace {
         ctx.notify();
     }
 
-    /// Switches the page the rail has selected, or does one of the two things
+    /// Switches the page the rail has selected, or does one of the few things
     /// only the settings page can do.
     ///
-    /// Opening and closing are not here: those are [`TabAction::OpenSettings`]
-    /// and the ordinary close of a pane, because the page is a pane. Every
-    /// other control on it dispatches an [`OptionsAction`] and lands in
-    /// [`Self::apply_option`] beside the gear menu's clicks, which is why this
-    /// handles three actions rather than fifteen.
+    /// Showing and leaving are not here: those are
+    /// [`WorkspaceAction::ShowSection`], because the settings are a section of
+    /// the sidebar. Every other control on the page dispatches an
+    /// [`OptionsAction`] and lands in [`Self::apply_option`] beside the options
+    /// menu's clicks, which is why this handles a handful of actions rather
+    /// than all fifteen.
     fn apply_settings(&mut self, action: SettingsAction, ctx: &mut ViewContext<Self>) {
         match action {
             SettingsAction::Select(page) => {
@@ -3484,11 +4008,6 @@ impl Workspace {
                 self.focus_field(index);
                 self.sync_input_keys();
                 ctx.notify();
-            }
-            SettingsAction::ToggleUsageChip => {
-                let mut general = self.general();
-                general.show_usage_chip = !general.show_usage_chip;
-                self.set_general(general, ctx);
             }
             SettingsAction::ResetTabOptions => {
                 // Through `set_options` like every other write, so the reset
@@ -3798,9 +4317,9 @@ impl Workspace {
     /// Takes the options menu down, and forgets what the mouse was doing to
     /// it.
     ///
-    /// Called when something other than the gear closes it — today, its own
-    /// "Settings…" entry, which navigates away from the strip the menu is
-    /// about. Every row is about to stop existing without seeing a hover-out,
+    /// Called when something other than a press on the list's own ground closes
+    /// it — today, its own "Settings…" entry, which navigates away from the
+    /// list the menu is about. Every row is about to stop existing without seeing a hover-out,
     /// and the next time the menu opens the row the pointer happened to be on
     /// would come back lit.
     fn close_menu(&mut self) {
@@ -3969,10 +4488,10 @@ impl View for Workspace {
 
     fn render(&self, app: &AppContext) -> Box<dyn Element> {
         // The panel is the full height of the window and the header starts
-        // beside it, not above it. That is what puts the panel's control bar
-        // in the window's top-left corner — where a client-decorated macOS
-        // window draws its traffic lights — and it is why `window_insets` has
-        // a `panel_left` at all.
+        // beside it, not above it. That is what puts the panel's first row in
+        // the window's top-left corner — where a client-decorated macOS window
+        // draws its traffic lights — and it is why `window_insets` has a
+        // `panel_left` at all.
         //
         // What the sidebar holds and what the window holds are one answer,
         // asked once: a section builds both halves together, because its list
@@ -4086,15 +4605,33 @@ impl TypedActionView for Workspace {
                 // half that has to happen: a box that kept it after a row was
                 // clicked would collect the first command typed into the tab it
                 // opened, which is the trap this whole box is arranged around.
-                self.stop_searching();
+                //
+                // Except while a row is being carried. A drag asks the strip
+                // for something on every event it produces, and clearing the
+                // query on the first of them would put every filtered-out tab
+                // back into the list *under the hand* — the rows the gesture is
+                // being measured against would all be different ones, halfway
+                // through. The query is a thing about the list, and this
+                // gesture is a thing about one row of it.
+                if self.panel_drag.carrying().is_none() {
+                    self.stop_searching();
+                }
+                // And anything a plugin hung off a place in the interface. A
+                // panel under a chip in a pane is drawn by that pane; asking
+                // the strip for anything is the gesture that can stop it being
+                // drawn, and a panel nobody can see must not still own the
+                // keyboard. See `Host::claim_panel`.
+                if self.host.take_panels_down() {
+                    self.sync_input_keys();
+                }
                 if self.apply(action, ctx) == TabEffect::CloseWindow {
                     (self.quit)();
                 }
             }
             WorkspaceAction::ShowSection(section) => {
-                // The menu is a popup about the tab list, and its job is done
-                // the moment its own entry puts something else in the sidebar.
-                self.close_menu();
+                if self.host.take_panels_down() {
+                    self.sync_input_keys();
+                }
                 if section
                     .is_some_and(|id| self.host.sidebar_section_key(id) == Some(SETTINGS_SECTION))
                 {
@@ -4110,6 +4647,7 @@ impl TypedActionView for Workspace {
             WorkspaceAction::Search(action) => self.apply_search(action, ctx),
             WorkspaceAction::Theme(action) => self.apply_theme_action(action, ctx),
             WorkspaceAction::Window(action) => self.apply_window_action(action),
+            WorkspaceAction::TabMenu(action) => self.apply_tab_menu(action, ctx),
             WorkspaceAction::Worktree(action) => self.apply_worktree(action, ctx),
             WorkspaceAction::HoverRow { pane, entered } => self.hover_row(pane, entered, ctx),
             WorkspaceAction::ReleaseSelection(pane) => self.release_selection(pane, ctx),

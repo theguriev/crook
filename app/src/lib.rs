@@ -1,17 +1,17 @@
 //! Crook: a terminal whose unit of work is an agent.
 //!
 //! This is the application. Everything below it is general — [`crookui_core`]
-//! is a UI framework, [`crookui`] is a renderer and a window, [`crook_usage`]
-//! is a client for one endpoint — and everything here is Crook: a strip of
-//! agent sessions, a header that shows how much Claude is left, and the wiring
-//! that turns one into pixels and the other into a number.
+//! is a UI framework, [`crookui`] is a renderer and a window, [`crook_wasm`]
+//! is a sandbox for one guest — and everything here is Crook: a strip of
+//! agent sessions, a header a plugin pins things to, and the wiring that turns
+//! one into pixels and the other into a place to put them.
 //!
 //! # What a run looks like
 //!
 //! 1. Resolve the fonts, because a family id is needed before any view exists.
 //! 2. Open the event loop, which hands back the main-thread executor.
-//! 3. Build the [`App`], register the [`UsageModel`] singleton, add the window
-//!    with a [`Workspace`] root, and start the poll chain.
+//! 3. Build the [`App`], add the window with a [`Workspace`] root, and start
+//!    the poll chains.
 //! 4. Point the app's invalidation callback at the window's redraw request,
 //!    which is the only thing that makes a frame happen.
 //!
@@ -62,6 +62,7 @@ pub mod process;
 pub mod selection;
 pub mod session;
 pub mod settings;
+pub mod shell_history;
 pub mod shell_integration;
 pub mod tab;
 pub mod terminal_font;
@@ -69,7 +70,6 @@ pub mod terminal_keys;
 pub mod terminal_model;
 pub mod text_input;
 pub mod theme;
-pub mod usage_model;
 pub mod window_controls;
 pub mod workspace;
 
@@ -81,24 +81,23 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use crook_plugin::ActionName;
 use crookui::{
     CosmicFontDb, Platform, Proxy, WindowControls as PlatformWindow, WindowDelegate, WindowOptions,
     render_scene_to_rgba,
 };
-use crookui_core::event::{Event, Keystroke, Modifiers};
+use crookui_core::event::{Event, Keystroke, Modifiers, MouseButton};
 use crookui_core::executor::{Background, LocalQueue};
 use crookui_core::geometry::{Vector2F, vec2f};
 use crookui_core::platform::TextLayoutSystem;
 use crookui_core::prelude::*;
 use crookui_core::scene::Scene;
-use crookui_core::{AddSingletonModel as _, App, Presenter, WindowId};
+use crookui_core::{App, Presenter, WindowId};
 
 use crate::platform_insets::{ControlLayout, WindowChrome};
-use crate::plugin::ActionName;
 use crate::settings::{Density, Granularity, Settings};
 use crate::tab::{AgentStatus, Direction, PaneId, Tab, TabAction};
 use crate::terminal_font::{CELL_FONT_SIZE, CellFont};
-use crate::usage_model::UsageModel;
 use crate::window_controls::{Detached, WindowHandle, WindowState};
 use crate::workspace::{Fonts, Opening, QuitRequest, Workspace};
 
@@ -132,9 +131,15 @@ const RUN_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long the grid has to stop changing before a `--run` calls it finished.
 const RUN_QUIET: Duration = Duration::from_millis(400);
 
-/// The named command `--usage-panel` dispatches. The panel belongs to a
-/// plugin, so this is the only handle anything outside it has on the panel.
-const USAGE_PANEL_ACTION: &str = "crook/usage/panel";
+/// How far `--carry` carries a row when the command line did not say.
+///
+/// Three ordinary rows in the default density, which is far enough to be
+/// unmistakably a drag and short enough to leave the row it came out of on
+/// screen beside it.
+const CARRY_DISTANCE: f32 = 120.;
+
+/// In how many moves, because the list moves between them.
+const CARRY_STEPS: u32 = 12;
 
 /// How long the headless `--run` sleeps between pumps while it waits.
 const RUN_POLL: Duration = Duration::from_millis(10);
@@ -206,6 +211,24 @@ struct Overrides {
     menu: bool,
     /// Start with the first row's hover detail card up.
     hover: bool,
+    /// Run these named actions before the picture is taken, in order.
+    ///
+    /// A way to look at a frame, like `--menu` and `--themes`, and the only
+    /// one that reaches a *plugin's* surface: what a plugin puts up is put up
+    /// by one of its own actions, and a picture of a panel nobody can open
+    /// from the command line is a picture nobody can take. Run last, after the
+    /// shells have settled, because what a plugin draws usually depends on
+    /// what the pane has told it.
+    actions: Vec<String>,
+    /// Load the plugins this machine has installed, as a real run does.
+    ///
+    /// Off by default and opt-in for one reason: a snapshot is a picture of
+    /// *the application*, and one that quietly included whatever a person had
+    /// installed would be a different picture on every machine and in CI. It
+    /// is on the list all the same, because the only way to look at what a
+    /// plugin draws is to draw it — and a tier whose one worked example can
+    /// only be seen by launching a window is a tier nobody can screenshot.
+    with_plugins: bool,
     /// Start with the Themes panel open, and — with `creating` — on its
     /// creator.
     ///
@@ -214,8 +237,17 @@ struct Overrides {
     themes: bool,
     /// Start with the Themes panel making a theme.
     creating: bool,
+    /// Start with the active tab's own context menu open.
+    ///
+    /// A way to look at a frame, like `--menu`: the surface a secondary press
+    /// on a row opens, with whatever its plugins put in it.
+    tab_menu: bool,
     /// Start with the active tab's worktree menu open, and its creator with
     /// it when `creating_worktree`.
+    ///
+    /// Implies `tab_menu`, because the worktree list is drawn inside the menu
+    /// it is an entry of — asking for the submenu and not the menu is not a
+    /// frame this window can draw.
     worktrees: bool,
     /// Start with that menu making a worktree.
     creating_worktree: bool,
@@ -278,22 +310,6 @@ struct Overrides {
     granularity: Option<Granularity>,
     /// Start in this density rather than the saved one.
     density: Option<Density>,
-    /// Start with the usage panel open under the chip.
-    ///
-    /// The panel is a popover, which is the one kind of surface no unattended
-    /// run can hold up on its own — and it is also the one that reads the
-    /// local transcripts, so `--snapshot` waits for that read before drawing
-    /// the frame.
-    usage_panel: bool,
-    /// Show this percentage in the usage chip rather than reading one.
-    ///
-    /// The chip's own override, and the only way to take a picture of it: what
-    /// it draws comes from a session on the machine taking the picture, so a
-    /// run on a machine that has never opened Claude Code draws a dash, and a
-    /// run on one that has draws whatever that person happens to have spent.
-    /// Whole percent rather than a fraction, because the chip rounds to one
-    /// anyway.
-    usage: Option<u8>,
     /// Type these into the first pane's shell at startup, in order, waiting
     /// for what each one prints. See the module docs for why a frame budget
     /// alone is not enough.
@@ -306,6 +322,20 @@ struct Overrides {
     /// A hover is a state that only exists while a pointer is over something,
     /// which is the other thing no unattended run can hold still.
     hover_block: Option<usize>,
+    /// Pick this row of the tabs panel up and carry it, without letting go.
+    ///
+    /// The third state no unattended run can hold still, after a hovered row
+    /// and a selection dragged through a shell's output: a drag lasts exactly
+    /// as long as a button is held down. The frame is drawn mid-gesture — the
+    /// row in the air under the pointer, the hole it came out of, and the list
+    /// already in the order it is going to be in, because the panel reorders
+    /// itself while the hand is still moving rather than when it lets go.
+    carry: Option<usize>,
+    /// The same for a whole group's block, which is gripped by its heading.
+    carry_group: Option<usize>,
+    /// How far down the column to carry it, in whole pixels. Negative carries
+    /// it up.
+    carry_by: Option<i32>,
     /// Scroll the first pane's block list up by this many lines.
     ///
     /// What puts output under the composer, which is the only thing that draws
@@ -339,6 +369,11 @@ struct Overrides {
 }
 
 impl Overrides {
+    /// Whether this run was asked to pick something up.
+    fn carries(&self) -> bool {
+        self.carry.is_some() || self.carry_group.is_some()
+    }
+
     /// Whether this run needs shells opened for it.
     ///
     /// Neither the field nor the grid is worth a picture without one: a pane
@@ -419,6 +454,24 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 println!("{}", shell_integration_text(shell.as_deref())?);
                 return Ok(Startup::Answered);
             }
+            // Answered like `--version` rather than started like `--theme`: a
+            // person installing a plugin is not opening a window, and doing
+            // both would be a window that opened before the plugin it was
+            // asked to carry was in place.
+            "--install-plugin" => {
+                let path = args
+                    .next()
+                    .context("`--install-plugin` needs a path to a plugin.wasm")?;
+                // The path and then the reason, with nothing between them: the
+                // reason already says what is wrong with it, and a line that
+                // said "not a plugin this build can install: not a plugin this
+                // build can run" would be saying it twice.
+                let installed = crate::plugins::wasm::install(std::path::Path::new(&path))
+                    .map_err(anyhow::Error::msg)
+                    .with_context(|| path.clone())?;
+                println!("installed {}", installed.display());
+                return Ok(Startup::Answered);
+            }
             "--snapshot" => {
                 let path = args.next().context("`--snapshot` needs a path")?;
                 snapshot = Some(PathBuf::from(path));
@@ -428,6 +481,7 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 frames = Some(count.parse().context("`--frames` takes a number")?);
             }
             "--menu" => overrides.menu = true,
+            "--tab-menu" => overrides.tab_menu = true,
             "--themes" => overrides.themes = true,
             "--worktrees" => overrides.worktrees = true,
             "--new-worktree" => {
@@ -496,20 +550,28 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                     .context("`--section` needs the name on a section's button")?;
                 overrides.section = Some(name);
             }
-            "--usage-panel" => overrides.usage_panel = true,
-            "--usage" => {
-                let percent = args.next().context("`--usage` needs a percentage")?;
-                let percent: u8 = percent.parse().context("`--usage` takes 0 to 100")?;
-                // Refused rather than clamped: a run that asked for 140 asked
-                // for something the chip cannot draw, and a picture that came
-                // back saying 100% would look like it had worked.
-                anyhow::ensure!(percent <= 100, "`--usage` takes 0 to 100");
-                overrides.usage = Some(percent);
-            }
             "--hover" => overrides.hover = true,
+            "--with-plugins" => overrides.with_plugins = true,
+            "--action" => {
+                let name = args.next().context("`--action` needs a command name")?;
+                overrides.actions.push(name);
+            }
             "--run" => {
                 let command = args.next().context("`--run` needs a command")?;
                 overrides.run.push(command);
+            }
+            "--carry" => {
+                let index = args.next().context("`--carry` needs a row")?;
+                overrides.carry = Some(index.parse().context("`--carry` takes a number")?);
+            }
+            "--carry-group" => {
+                let index = args.next().context("`--carry-group` needs a group")?;
+                overrides.carry_group =
+                    Some(index.parse().context("`--carry-group` takes a number")?);
+            }
+            "--carry-by" => {
+                let pixels = args.next().context("`--carry-by` needs a distance")?;
+                overrides.carry_by = Some(pixels.parse().context("`--carry-by` takes a number")?);
             }
             "--hover-block" => {
                 let index = args.next().context("`--hover-block` needs an index")?;
@@ -606,6 +668,10 @@ USAGE:
     crook [OPTIONS]
 
 OPTIONS:
+    --install-plugin <PATH>
+                       Copy a plugin's `.wasm` into the plugins directory and exit,
+                       after checking it is one. What it may then do is nothing
+                       until it is allowed it on the Plugins page
     --snapshot <PATH>  Render one frame of the real view tree to a PNG and exit
     --frames <N>       Draw N frames, then exit; for running unattended
     --run <COMMAND>    Type COMMAND into the first pane's input field at startup,
@@ -622,8 +688,9 @@ OPTIONS:
                        Carry that selection on to TEXT, which may be in a later
                        block: what a drag across several commands takes
     --menu             Start with the tab options menu open
+    --tab-menu         Start with the active tab's own context menu open
     --settings [PAGE]  Start with a settings tab open, on `appearance`,
-                       `shell`, `usage`, `keys` or `about`
+                       `shell`, `keys` or `about`
     --find <TEXT>      Type TEXT into the tabs panel\'s search box, filtering the list
     --search <TEXT>    Type TEXT into the settings page\'s search box, opening it
     --record <COMMAND> Start with the Keyboard Shortcuts page recording a chord for
@@ -633,9 +700,20 @@ OPTIONS:
     --new-worktree     Start with that menu making a worktree
     --themes           Start with the Themes panel open
     --new-theme        Start with the Themes panel making a theme
-    --usage <PERCENT>  Show PERCENT in the usage chip rather than reading a session
-    --usage-panel      Start with the usage panel open under the chip
     --hover            Start with the first row's detail card up
+    --action <name [argument]>
+                       Run this named action before the picture is taken, so a
+                       plugin's own panel can be looked at. Anything after the
+                       name is what the action is told — what a picker's row or
+                       a menu's entry would have said. Repeatable
+    --with-plugins     Load the plugins this machine has installed, so that a
+                       snapshot shows what they draw. Off by default: a picture
+                       of the application is the same everywhere and one of a
+                       plugin is not
+    --carry <N>        Pick the Nth row of the tabs panel up and hold it there,
+                       for a picture of a drag in flight
+    --carry-group <N>  The same for the Nth group's whole block, by its heading
+    --carry-by <PX>    How far down the column to carry it; negative carries up
     --section <NAME>   Start showing a sidebar section by the name on its button
     --granularity <M>  Start with rows standing for `panes` or `tabs` rather than as saved
     --density <MODE>   Start in `compact` or `expanded` density rather than the saved one
@@ -747,14 +825,25 @@ THE INPUT FIELD:
 
 /// How many workers are parked on a timer at any moment.
 ///
-/// Five: the usage poll between readings, the git gather between cycles, the
-/// caret blink between halves of its phase, the one that asks the shells
-/// whether they are still alive, and the themes folder being re-read while the
-/// Themes panel is open. Each is one background task for the whole cycle — the
-/// wait *and* the work — so each holds its worker across the wait rather than
-/// yielding it, and none is ever counted as idle. All five can be parked at
-/// once: a window with shells in it, the usage chip on and the panel open is
-/// an ordinary afternoon. Raise this when a sixth such chain appears.
+/// Five: a sandboxed plugin's timer between ticks, the git gather between
+/// cycles, the caret blink between halves of its phase, the one that asks the
+/// shells whether they are still alive, and the themes folder being re-read
+/// while the Themes panel is open. Each is one background task for the whole
+/// cycle — the wait *and* the work — so each holds its worker across the wait
+/// rather than yielding it, and none is ever counted as idle. All five can be
+/// parked at once: a window with shells in it, a chip polling in the header
+/// and the Themes panel open is an ordinary afternoon. Raise this when a sixth
+/// such chain appears.
+///
+/// The plugin chain is counted once and not per plugin, which is the one
+/// approximation here. Each sandboxed plugin gets a runtime of its own and
+/// each runtime parks its own worker between ticks — see
+/// [`plugins::wasm`](crate::plugins::wasm) — so a person with three installed
+/// has three of these chains rather than one. One is what a machine with the
+/// chip installed actually has, and the spare below is what keeps the second
+/// from costing anybody a save; a fleet of polling plugins would want this
+/// number raised, and there is nothing here that can count them at startup
+/// because a plugin is installed by dropping a file in a directory.
 ///
 /// The number is a count of *chains*, never of panes. That is why the child
 /// check is one task for the whole terminal model rather than one per session:
@@ -766,7 +855,7 @@ THE INPUT FIELD:
 /// draw the frame in which that command takes the pane. It is bounded by
 /// `pane_surface::LONG_RUNNING` — fifty milliseconds — rather than by a poll
 /// interval, so what it can cost a save queued behind it is a fiftieth of a
-/// second rather than the fifteen the usage poll could. Sizing the pool for a
+/// second rather than the fifteen a plugin's poll could. Sizing the pool for a
 /// pane count is not possible; keeping the wait short is.
 ///
 /// **The test at the bottom of this file cannot check this number.** It builds
@@ -906,18 +995,10 @@ fn apply_overrides(
     if let Some(layout) = overrides.controls {
         workspace.override_control_layout(layout, ctx);
     }
-    if let Some(percent) = overrides.usage {
-        UsageModel::handle(ctx).update(ctx, |model, ctx| model.show_reading(percent, ctx));
-    }
-    // By name rather than through a method on the workspace, because the panel
-    // is a plugin's and the workspace does not know it exists. This is what a
-    // named command buys beyond a keymap line.
-    if overrides.usage_panel {
-        let name = ActionName::parse(USAGE_PANEL_ACTION).expect("a literal that parses");
-        match workspace.host().action(&name) {
-            Some(action) => workspace.run_action(action, ctx),
-            None => log::warn!("nothing answers to {USAGE_PANEL_ACTION}; is the plugin off?"),
-        }
+    // Before `--worktrees`, which opens this menu itself and then opens the
+    // list inside it: asking for both must not toggle the menu shut again.
+    if overrides.tab_menu && !overrides.worktrees {
+        workspace.open_tab_context_menu_for_snapshot(ctx);
     }
     if overrides.worktrees {
         workspace.open_tab_menu_for_snapshot(ctx);
@@ -1019,17 +1100,26 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
     let text_layout: Arc<dyn TextLayoutSystem> = Arc::new(font_db.text_layout());
 
     // A local queue stands in for the event loop. Nothing is spawned onto it
-    // unless `--run` asked for it: neither the usage poll nor the git gather is
-    // started, so the frame is the same on a build machine with no Claude Code
-    // session, no network and no repository — and it uses ephemeral settings,
-    // so it is also the same whatever options the person running it happens to
+    // unless `--run` asked for it: neither the git gather nor a sandboxed
+    // plugin's poll is started, so the frame is the same on a build machine
+    // with no network and no repository — and it uses ephemeral settings, so
+    // it is also the same whatever options the person running it happens to
     // have.
     let queue = LocalQueue::new();
     let mut app = App::new(queue.foreground(), background_pool());
-    app.update(|ctx| ctx.add_singleton_model(UsageModel::new));
 
     let quit: QuitRequest = Rc::new(|| {});
-    let settings = Settings::ephemeral();
+    let mut settings = Settings::ephemeral();
+    // The one thing a snapshot takes from the machine it runs on, and only
+    // when it was asked to load that machine's plugins: what a person has
+    // allowed each of them. A plugin drawn without its grants is a plugin
+    // drawing the refusal rather than the thing, which is a picture of the
+    // permission dialog and not of the plugin.
+    if overrides.with_plugins {
+        for (plugin, keys) in Settings::for_user().plugin_grants() {
+            settings.set_granted(plugin, keys.clone());
+        }
+    }
     apply_startup_theme(&settings, &overrides);
     // A snapshot is always rendered as the dev channel: the only thing the
     // channel reaches is the About page's label, and a PNG that said "stable"
@@ -1042,7 +1132,10 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
             Opening {
                 settings,
                 channel: Channel::Dev,
-                plugins: crate::plugins::defaults(),
+                plugins: match overrides.with_plugins {
+                    true => everything_installed(),
+                    false => crate::plugins::defaults(),
+                },
             },
             quit,
             Rc::new(Detached),
@@ -1072,6 +1165,18 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
             presenter.build_scene(WINDOW_SIZE, SNAPSHOT_SCALE_FACTOR, ctx)
         })
     };
+
+    // The gather a real run starts and a snapshot does not, for the same
+    // reason the plugins are not loaded: it walks a directory tree and spawns
+    // `git`, and a picture that did either would be a different picture in
+    // every checkout. Started when the plugins are, because half of what they
+    // draw is what it finds — a chip that says which branch you are on has
+    // nothing to say until it has run.
+    if overrides.with_plugins {
+        app.update(|ctx| {
+            workspace.update(ctx, |workspace, ctx| workspace.start_git_poll(ctx));
+        });
+    }
 
     if overrides.wants_shells() {
         let pane = start_shells(&mut app, &workspace)?;
@@ -1108,11 +1213,41 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
         aim_at_blocks(&mut app, &workspace, pane, &overrides);
     }
 
-    // The panel's week comes off the disk on a background thread, so a frame
-    // drawn the instant it opened would be a picture of "Reading this
-    // machine's transcripts…" rather than of the panel.
-    if overrides.usage_panel {
-        await_usage_history(&queue, &mut app);
+    // A frame first, and then the gesture: a press has to land on a row, and
+    // where the rows are is a thing only a paint pass knows.
+    if overrides.carries() {
+        frame(&mut app, &mut presenter);
+        carry_panel_row(
+            &mut app,
+            &mut presenter,
+            window_id,
+            &workspace,
+            &overrides,
+            |app, presenter| {
+                frame(app, presenter);
+            },
+        );
+    }
+
+    // Last of everything, and after a frame: a plugin's action is usually
+    // about what the pane has just told it, and what it puts up is drawn on
+    // the frame after the one that ran it.
+    if !overrides.actions.is_empty() {
+        frame(&mut app, &mut presenter);
+        for name in &overrides.actions {
+            run_named_action(&mut app, &workspace, name);
+            // Whatever it asked the host for — a directory listed, a
+            // repository read — is done on the pool, so the foreground has
+            // nothing to run until it comes back. Waited for the way
+            // `await_shell` waits: a poll and a deadline, because there is no
+            // event loop here to be woken by.
+            let deadline = Instant::now() + ACTION_TIMEOUT;
+            while Instant::now() < deadline {
+                queue.run_until_parked();
+                std::thread::sleep(RUN_POLL);
+            }
+        }
+        frame(&mut app, &mut presenter);
     }
 
     let scene = frame(&mut app, &mut presenter);
@@ -1135,27 +1270,48 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
     Ok(())
 }
 
-/// Pumps the queue until the usage panel has a week to draw.
+/// How long a `--action` is given for whatever it asked the host for.
 ///
-/// The read is one pass over the transcripts written inside the window, which
-/// is a tenth of a second on a busy machine — but it is on another thread, and
-/// a snapshot is one frame with nothing after it to redraw. Times out rather
-/// than hanging: a machine with no transcripts has nothing to wait for, and
-/// the panel says so itself.
-fn await_usage_history(queue: &LocalQueue, app: &mut App) {
-    let deadline = Instant::now() + RUN_TIMEOUT;
-    while Instant::now() < deadline {
-        queue.run_until_parked();
-        let read = app.update(|ctx| {
-            let usage = ctx.get_singleton_model_handle::<UsageModel>();
-            !usage.as_ref(ctx).is_reading_history() && usage.as_ref(ctx).history().is_some()
+/// A snapshot is a still picture and this is the whole of the waiting in it.
+/// Long enough for two things rather than one: the request the action raised,
+/// which is answered off the pool in microseconds, and the *next turn of the
+/// plugin's own poll* — because what a chip draws is usually what it last
+/// asked for, and a plugin that refreshes every couple of seconds has nothing
+/// new to say for a couple of seconds. A plugin that asked for something over
+/// the network is still drawn mid-request, which is a picture of a plugin
+/// waiting and a perfectly good thing to look at.
+const ACTION_TIMEOUT: Duration = Duration::from_millis(2_500);
+
+/// Runs one action by name, or says why it could not.
+///
+/// By name because that is what an action *is*: the command line has no idea
+/// which plugins are installed, and a plugin's own name for its own action is
+/// the whole of the addressing this tier has.
+fn run_named_action(app: &mut App, workspace: &ViewHandle<Workspace>, given: &str) {
+    // A name, and then whatever the caller wants the action to be told —
+    // separated by a space, which no action name may hold. That second half is
+    // what a picker's row or a menu's entry says when a person presses it, and
+    // an action that takes one cannot be looked at without it.
+    let (name, argument) = given.split_once(char::is_whitespace).unwrap_or((given, ""));
+    let Ok(action) = crook_plugin::ActionName::parse(name.trim()) else {
+        log::warn!("{name:?} is not the name of an action");
+        return;
+    };
+    let argument = argument.trim().to_owned();
+    app.update(|ctx| {
+        workspace.update(ctx, |workspace, ctx| {
+            workspace.host().say(argument.clone());
+            match workspace.host().action(&action) {
+                Some(id) => workspace.run_action(id, ctx),
+                None => log::warn!("nothing here answers to {action}"),
+            }
+            // Whatever it did, the window has to be drawn again to show it. An
+            // action run from a chord arrives with a keystroke and a frame
+            // behind it; this one arrives from the command line and has
+            // neither.
+            ctx.notify();
         });
-        if read {
-            return;
-        }
-        std::thread::sleep(RUN_POLL);
-    }
-    log::warn!("the transcripts were still being read after {RUN_TIMEOUT:?}");
+    });
 }
 
 /// Opens the shells and reports the pane the command line is aimed at.
@@ -1289,6 +1445,97 @@ fn aim_at_blocks(
     });
 }
 
+/// Presses on a row of the panel and carries it, and never lets go.
+///
+/// Through the window's own event dispatch, for the reason `--run` types its
+/// command as keystrokes rather than writing to the pty: a drag is a press,
+/// some travel and no release, and a state poked into the workspace instead
+/// would make the picture a picture of a second code path. Everything a real
+/// gesture goes through — the press's hit test, the threshold, the band, the
+/// strip — is on this path too.
+///
+/// In steps rather than in one leap, because the list reorders itself under
+/// the hand and every position is answered against the frame the last one
+/// produced. One leap is not a thing a hand does.
+fn carry_panel_row(
+    app: &mut App,
+    presenter: &mut Presenter,
+    window_id: WindowId,
+    workspace: &ViewHandle<Workspace>,
+    overrides: &Overrides,
+    mut frame: impl FnMut(&mut App, &mut Presenter),
+) {
+    let grip = workspace.read(&*app, |workspace, _| match overrides.carry {
+        Some(index) => workspace.panel_row_grip(index),
+        None => overrides
+            .carry_group
+            .and_then(|index| workspace.panel_block_grip(index)),
+    });
+    let Some(from) = grip else {
+        log::warn!("`--carry` found nothing at that index to pick up");
+        return;
+    };
+    let by = overrides
+        .carry_by
+        .map_or(CARRY_DISTANCE, |pixels| pixels as f32);
+
+    // The pointer arrives before it presses, which is not decoration: a row
+    // the pointer has reached is a row with its detail card up, and a press is
+    // hit-tested against the layer that card put the row into.
+    mouse(
+        app,
+        presenter,
+        window_id,
+        |position| Event::MouseMoved {
+            position,
+            modifiers: Modifiers::default(),
+            is_synthetic: false,
+        },
+        from,
+    );
+    frame(app, presenter);
+    mouse(
+        app,
+        presenter,
+        window_id,
+        |position| Event::MouseDown {
+            button: MouseButton::Left,
+            position,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        },
+        from,
+    );
+    frame(app, presenter);
+
+    for step in 1..=CARRY_STEPS {
+        let at = from + vec2f(0., by * step as f32 / CARRY_STEPS as f32);
+        mouse(
+            app,
+            presenter,
+            window_id,
+            |position| Event::MouseDragged {
+                button: MouseButton::Left,
+                position,
+                modifiers: Modifiers::default(),
+            },
+            at,
+        );
+        frame(app, presenter);
+    }
+}
+
+/// Dispatches one mouse event at `position` through the window.
+fn mouse(
+    app: &mut App,
+    presenter: &mut Presenter,
+    window_id: WindowId,
+    event: impl FnOnce(Vector2F) -> Event,
+    position: Vector2F,
+) {
+    app.update(|ctx| ctx.dispatch_window_event(window_id, event(position), presenter));
+}
+
 /// Types a `--run` command into the focused pane's field and sends it.
 ///
 /// As keystrokes, through the window's own event dispatch, because that is the
@@ -1395,9 +1642,9 @@ fn seed_snapshot_tabs(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace
             diff: Some((6, 214, 37)),
         },
         Seeded {
-            title: "write the usage chip",
+            title: "sandbox the plugin host",
             status: AgentStatus::NeedsInput,
-            directory: "crates/crook_usage/src",
+            directory: "crates/crook_wasm/src",
             branch: "main",
             diff: Some((1, 12, 0)),
         },
@@ -1416,6 +1663,16 @@ fn seed_snapshot_tabs(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace
             diff: None,
         },
     ];
+
+    /// The checkout that joins the second tab's group: what a worktree opened
+    /// from a tab looks like once it is one.
+    const WORKTREE: Seeded = Seeded {
+        title: "try the atlas rewrite",
+        status: AgentStatus::Running,
+        directory: "docs",
+        branch: "eugen/atlas-rewrite",
+        diff: Some((3, 88, 12)),
+    };
 
     workspace.apply(TabAction::New, ctx);
     workspace.apply(TabAction::New, ctx);
@@ -1448,6 +1705,7 @@ fn seed_snapshot_tabs(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace
                     lines_removed,
                 },
             ),
+            worktree: false,
         };
 
         workspace.update_session(*id, ctx, |session| {
@@ -1458,6 +1716,46 @@ fn seed_snapshot_tabs(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace
         workspace
             .git()
             .update(ctx, |model, ctx| model.record(directory, facts, ctx));
+    }
+
+    // And a worktree opened from the last tab, which is the gesture groups
+    // exist for: a second checkout of the same work, folded under one heading
+    // beside the tab it came from. After the sessions above, so the group
+    // takes its heading from what that tab's agent has called its work rather
+    // than from the name nobody chose.
+    if let Some(last) = workspace.tabs().iter().map(Tab::id).last() {
+        workspace.apply(TabAction::NewInGroupOf(last), ctx);
+        if let Some(pane) = workspace.tabs().focused_pane_id() {
+            // A checkout of its own, beside the one it was cut from, because
+            // that is what a worktree *is*: git facts are recorded per
+            // directory, so two rows sharing a path would show one row's
+            // branch on both — and, now that a row's mark can be a plugin's,
+            // one row's mark on both.
+            let directory = root.with_file_name("crook-atlas").join(WORKTREE.directory);
+            workspace.update_session(pane, ctx, |session| {
+                session.derived_title = Some(WORKTREE.title.to_owned());
+                session.status = WORKTREE.status;
+                session.working_directory = Some(directory.clone());
+            });
+            let facts = git::GitFacts {
+                branch: Some(git::Head::Branch(WORKTREE.branch.to_owned())),
+                diff: WORKTREE
+                    .diff
+                    .map(
+                        |(files_changed, lines_added, lines_removed)| git::DiffStats {
+                            files_changed,
+                            lines_added,
+                            lines_removed,
+                        },
+                    ),
+                // The one seeded row that is one, which is what makes a
+                // plugin that marks worktrees visible in a demo window.
+                worktree: true,
+            };
+            workspace
+                .git()
+                .update(ctx, |model, ctx| model.record(directory, facts, ctx));
+        }
     }
 
     // The split tab's first pane: the body then shows two panels, one of them
@@ -1516,7 +1814,7 @@ struct Shell {
 ///
 /// The whole of the seam: four verbs forwarded to the windowing layer, which
 /// is the only crate in the workspace that knows what a window is. Everything
-/// above it — the header, the panel's control bar, the window plugin's
+/// above it — the header, the panel's title strip, the window plugin's
 /// commands — is written against [`window_controls::WindowControls`] and runs
 /// unchanged with nothing behind it.
 struct RealWindow(PlatformWindow);
@@ -1597,7 +1895,6 @@ impl Shell {
         session: crate::session::Session,
     ) -> Self {
         let mut app = App::new(platform.foreground.clone(), background_pool());
-        app.update(|ctx| ctx.add_singleton_model(UsageModel::new));
 
         let proxy = platform.proxy.clone();
         let window: WindowHandle = Rc::new(RealWindow(platform.window.clone()));
@@ -1641,7 +1938,6 @@ impl Shell {
                 // a density the command line asked for has to be in place by
                 // then or the first cycle gathers the wrong half.
                 apply_overrides(workspace, &launch.overrides, ctx);
-                workspace.start_usage_poll(ctx);
                 workspace.start_git_poll(ctx);
                 workspace.start_caret_blink(ctx);
                 // Last, because it opens a shell in every pane there is and the
@@ -1976,36 +2272,6 @@ mod tests {
                 overrides: Overrides::default()
             }
         );
-    }
-
-    #[test]
-    fn a_usage_percentage_is_a_number_or_it_is_an_error() {
-        assert_eq!(
-            parse(&["--usage", "82"]).expect("valid"),
-            Startup::Window {
-                frames: None,
-                overrides: Overrides {
-                    usage: Some(82),
-                    ..Overrides::default()
-                }
-            }
-        );
-        // A percentage is 0 to 100. Refusing 140 is the same answer as
-        // refusing "eighty": a picture of a chip reading 140% would be a
-        // picture of a bug rather than of the chip.
-        assert_eq!(
-            parse(&["--usage-panel"]).expect("valid"),
-            Startup::Window {
-                frames: None,
-                overrides: Overrides {
-                    usage_panel: true,
-                    ..Overrides::default()
-                }
-            }
-        );
-        assert!(parse(&["--usage", "140"]).is_err());
-        assert!(parse(&["--usage", "eighty"]).is_err());
-        assert!(parse(&["--usage"]).is_err());
     }
 
     #[test]

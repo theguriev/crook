@@ -36,6 +36,22 @@ pub struct RepoLayout {
     pub common_dir: PathBuf,
 }
 
+impl RepoLayout {
+    /// Whether this is a linked worktree — one `git worktree add` made —
+    /// rather than the checkout the repository was cloned into.
+    ///
+    /// The two git directories are the whole of the answer: a linked worktree
+    /// keeps its own `HEAD` under `<main>/.git/worktrees/<name>` and shares
+    /// everything else, so its `git_dir` is not its `common_dir`. A submodule
+    /// has a `git_dir` somewhere unexpected too, and is *not* a worktree: its
+    /// `common_dir` is that same directory, because nothing is shared with a
+    /// checkout elsewhere. See [`common_dir_of`], which is where both of those
+    /// answers come from.
+    pub fn is_linked_worktree(&self) -> bool {
+        self.git_dir != self.common_dir
+    }
+}
+
 /// What `HEAD` points at.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Head {
@@ -270,4 +286,103 @@ fn normalize(path: &Path) -> PathBuf {
         }
     }
     normalized
+}
+
+/// How deep the walk under `refs/heads` goes.
+///
+/// A branch name may hold slashes — `eugen/claude-code-usage-indicator` is one
+/// name — and each of them is a directory on disk. Eight is far past any
+/// naming scheme anybody uses and shallow enough that a `refs` directory
+/// somebody has done something strange to cannot be a walk with no end.
+const REF_DEPTH: usize = 8;
+
+/// How many branches are read before the walk stops.
+///
+/// A bound rather than a judgement about repositories: this list is handed to
+/// a picker and, for a sandboxed plugin, copied into its memory. A repository
+/// with forty thousand refs in it should cost a long list rather than a
+/// megabyte in somebody else's linear memory.
+const REF_LIMIT: usize = 4096;
+
+/// Every branch the repository has, in name order.
+///
+/// Read out of the files, like [`read_head`], and for the same reason: this is
+/// asked for whenever a menu opens, and `git branch --list` is a subprocess.
+/// Both places git keeps a ref are read, because a repository that has been
+/// packed keeps most of its branches in one file and a freshly made one keeps
+/// them all as loose files — a reader that knew about only one of the two
+/// would work perfectly until the day `git gc` ran.
+pub fn branches(layout: &RepoLayout) -> Vec<String> {
+    let mut found: Vec<String> = Vec::new();
+    loose_branches(
+        &layout.common_dir.join("refs").join("heads"),
+        &mut String::new(),
+        0,
+        &mut found,
+    );
+    packed_branches(&layout.common_dir.join("packed-refs"), &mut found);
+
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// Walks `refs/heads`, appending every name under it.
+///
+/// `prefix` is what has been walked past, which is what makes a branch in a
+/// directory come back as `eugen/thing` rather than as `thing`.
+fn loose_branches(directory: &Path, prefix: &mut String, depth: usize, found: &mut Vec<String>) {
+    if depth > REF_DEPTH || found.len() >= REF_LIMIT {
+        return;
+    }
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        // No loose refs is an ordinary state — a packed repository has none —
+        // and so is no repository at all here.
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            // A ref whose name is not UTF-8 is not a ref git made.
+            continue;
+        };
+        let length = prefix.len();
+        prefix.push_str(&name);
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => {
+                prefix.push('/');
+                loose_branches(&entry.path(), prefix, depth + 1, found);
+            }
+            Ok(_) => found.push(prefix.clone()),
+            Err(_) => {}
+        }
+        prefix.truncate(length);
+    }
+}
+
+/// Reads the branches out of `packed-refs`.
+///
+/// One line per ref, `<object id> <ref>`, with `#` for the header and `^` for
+/// the commit a tag points at — neither of which is a branch.
+fn packed_branches(file: &Path, found: &mut Vec<String>) {
+    let Ok(contents) = std::fs::read_to_string(file) else {
+        return;
+    };
+
+    for line in contents.lines() {
+        if found.len() >= REF_LIMIT {
+            return;
+        }
+        if line.starts_with('#') || line.starts_with('^') {
+            continue;
+        }
+        let Some((_, reference)) = line.split_once(' ') else {
+            continue;
+        };
+        if let Some(name) = reference.trim().strip_prefix("refs/heads/")
+            && !name.is_empty()
+        {
+            found.push(name.to_owned());
+        }
+    }
 }

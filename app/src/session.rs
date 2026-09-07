@@ -47,7 +47,7 @@ use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
 use crate::settings::{atomic_write, config_directory};
-use crate::tab::{Pane, PaneGroup, SplitAxis, Tab, TabStrip};
+use crate::tab::{Pane, PaneGroup, SplitAxis, Tab, TabGroup, TabId, TabStrip};
 
 /// The file the last session is remembered in.
 const SESSION_FILE: &str = "session.json";
@@ -82,6 +82,25 @@ pub struct Session {
     /// which is what a `--snapshot` run leaves — and for a file that predates
     /// this key.
     pub window: Option<[f32; 2]>,
+    /// The groups those tabs were folded under, in the order they first
+    /// appeared in the list.
+    ///
+    /// Membership is written on the tab, as a position in here, for the same
+    /// reason it lives on the live [`Tab`]: the tabs are already an ordered
+    /// list, and a second list of the same tabs written into the same file is
+    /// a second answer nothing stops from disagreeing with the first — and
+    /// this one is a file a person can edit.
+    pub groups: Vec<GroupSnapshot>,
+}
+
+/// One group: what its heading said, and whether it was folded away.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GroupSnapshot {
+    /// What the heading said.
+    pub name: String,
+    /// Whether its members were folded away behind it.
+    pub collapsed: bool,
 }
 
 /// One tab: what it was called, and the panes it held.
@@ -97,6 +116,25 @@ pub struct TabSnapshot {
     pub focused: usize,
     /// The panes, in render order.
     pub panes: Vec<PaneSnapshot>,
+    /// Whether it was held at the front of its block.
+    ///
+    /// The order in `tabs` already carries where it *was*; this is what makes
+    /// it stay there, and what draws the pin on its row.
+    pub pinned: bool,
+    /// The colour a person put on it, by name.
+    ///
+    /// A name rather than a number, because the numbers are an enum's
+    /// discriminants and those are ours to reorder; a name a person's file
+    /// carries is not. One nothing matches reads as no colour — see
+    /// [`TabColor::named`](crate::tab::TabColor::named).
+    pub color: Option<String>,
+    /// The group this tab was in, as a position in
+    /// [`Session::groups`](Session::groups).
+    ///
+    /// `None` for an ungrouped tab and for a file that predates this key. A
+    /// position out of range is read as `None` rather than refused: a tab in
+    /// no group is a better answer than no window.
+    pub group: Option<usize>,
 }
 
 /// One pane: where its shell was, and how much of the split it took.
@@ -105,6 +143,14 @@ pub struct TabSnapshot {
 pub struct PaneSnapshot {
     /// The name the session was created with.
     pub title: String,
+    /// What a person renamed it to, if they did.
+    ///
+    /// Kept and the agent's own derived title is not, which is the same
+    /// judgement [`AgentSession::display_title`](crate::tab::AgentSession)
+    /// makes every frame: a name somebody typed is a fact about what they are
+    /// doing, and a name an agent chose belongs to a process that is not
+    /// running any more.
+    pub custom_title: Option<String>,
     /// Where the shell was working, as the shell last reported it.
     ///
     /// This is the whole point of the file: a window that comes back with its
@@ -143,6 +189,16 @@ impl Session {
     pub fn of(strip: &TabStrip, window: Option<[f32; 2]>) -> Self {
         let mut tabs = Vec::with_capacity(strip.len());
         let mut active = 0;
+        // In first-appearance order, which for a contiguous run is list order.
+        // The tabs below name one by its position here.
+        let groups: Vec<crate::tab::GroupId> = strip.groups().map(TabGroup::id).collect();
+        let group_snapshots: Vec<GroupSnapshot> = strip
+            .groups()
+            .map(|group| GroupSnapshot {
+                name: group.name().to_owned(),
+                collapsed: group.is_collapsed(),
+            })
+            .collect();
 
         for tab in strip.iter() {
             let panes: Vec<_> = tab.panes().iter().map(PaneSnapshot::of).collect();
@@ -164,6 +220,11 @@ impl Session {
                 horizontal: tab.panes().axis() == SplitAxis::Horizontal,
                 focused,
                 panes,
+                pinned: tab.is_pinned(),
+                color: tab.color().map(|color| color.name().to_owned()),
+                group: tab
+                    .group()
+                    .and_then(|id| groups.iter().position(|held| *held == id)),
             });
         }
 
@@ -171,6 +232,7 @@ impl Session {
             tabs,
             active,
             window,
+            groups: group_snapshots,
         }
     }
 
@@ -183,16 +245,33 @@ impl Session {
     pub fn restore(&self) -> Option<TabStrip> {
         let mut strip = TabStrip::empty();
         let mut opened: usize = 0;
+        // Which tabs each group named, gathered as they come back so that a
+        // group can be made once out of the tabs that actually restored.
+        let mut members: Vec<Vec<TabId>> = vec![Vec::new(); self.groups.len()];
 
         for snapshot in self.tabs.iter().take(MAX_TABS) {
             let Some(tab) = snapshot.restore() else {
                 continue;
             };
+            let id = tab.id();
             strip.adopt(tab);
             opened += 1;
+
+            if let Some(group) = snapshot.group
+                && let Some(members) = members.get_mut(group)
+            {
+                members.push(id);
+            }
         }
         if opened == 0 {
             return None;
+        }
+
+        // After every tab, because a group is made out of tabs that are
+        // already in the strip — and in file order, so the groups come back in
+        // the order the panel drew them.
+        for (group, members) in self.groups.iter().zip(members) {
+            strip.adopt_group(group.name.clone(), group.collapsed, &members);
         }
 
         // Clamped rather than refused: the index names the tab that would have
@@ -250,11 +329,23 @@ impl TabSnapshot {
         let mut panes = self.panes.iter().take(MAX_PANES);
         let first = panes.next()?;
 
-        let mut tab = Tab::new(if self.name.is_empty() {
-            first.title.clone()
-        } else {
+        // Born as the session's own name and *then* renamed, rather than born
+        // as the name it was carrying: a tab that comes back renamed must
+        // still have somewhere to go when the rename is taken back, and the
+        // name it was opened with is the only thing that is.
+        let born_as = if first.title.is_empty() {
             self.name.clone()
-        });
+        } else {
+            first.title.clone()
+        };
+        let mut tab = Tab::new(born_as);
+        if !self.name.is_empty() {
+            tab.set_name(Some(self.name.clone()));
+        }
+        tab.restore_marks(
+            self.pinned,
+            self.color.as_deref().and_then(crate::tab::TabColor::named),
+        );
         first.apply_to_first(tab.panes_mut());
 
         let direction = if self.horizontal {
@@ -285,6 +376,7 @@ impl PaneSnapshot {
         let session = pane.session();
         Self {
             title: session.title.clone(),
+            custom_title: session.custom_title.clone(),
             working_directory: session.working_directory.clone(),
             flex: pane.flex(),
         }
@@ -307,6 +399,7 @@ impl PaneSnapshot {
     fn apply(&self, group: &mut PaneGroup, id: crate::tab::PaneId) {
         if let Some(pane) = group.get_mut(id) {
             pane.set_flex(self.flex);
+            pane.session_mut().custom_title = self.custom_title.clone();
             // Only a directory that still exists. A repository moved or
             // deleted between two launches would otherwise start a shell in a
             // directory that is not there, which most shells answer by

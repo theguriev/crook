@@ -5,7 +5,7 @@ A terminal whose unit of work is an agent, not a tab.
 Every terminal ever written treats a shell session as the thing you open, arrange and close.
 Crook treats an *agent* as that thing. A tab is one agent's workspace: its transcript, its
 working directory, its state, its budget. The tab strip is therefore a list of what is
-currently being worked on, and the header tells you what that work is costing.
+currently being worked on, and the header carries whatever says what that work is costing.
 
 Crook copies the architecture of [Warp](https://www.warp.dev) — an Entity/Handle application
 core, immutable `View::render`, constraint-based layout, a `Scene` display list handed to a
@@ -15,15 +15,26 @@ dropped, and why.
 
 ## v1 scope
 
-Seven features, and the page that configures them:
+Eight features, and the page that configures them:
 
 - **Tabs.** Open, close, switch, reorder. One agent session per tab, with a derived title.
-  They live in a panel down the left edge or in a strip across the header, and the gear menu
-  says what a row of them shows. Above the list is a **search box**, Telegram's way round: it
+  They live in a panel down the left edge, and a **View options** menu — the panel's own
+  secondary click, on the empty space the list leaves — says what a row of them shows. Under
+  that space is a `+`, which is where Warp's browser puts the one that opens another tab.
+  Above the list is a **search box**, Telegram's way round: it
   filters the rows by what a tab is running, where it is working and the branch it is on, and
   filters nothing else — the active tab stays active and a filtered-out tab goes on printing.
   `cmd-k` (`ctrl-shift-k` off macOS) puts the keyboard in it from anywhere in the window,
   Enter opens the top match, and Escape gives the keyboard back to the shell.
+
+  Tabs that belong together are folded into a **group**: a heading with a chevron, a count and
+  a close button, and its tabs indented under it. A worktree opened from a tab makes one out of
+  the two of them, which is what says the two checkouts are one piece of work. Drag a row into a
+  group to add it, past the group's edge to take it out, and a heading to move the whole block.
+  The row leaves the list and follows the pointer, the list reorders itself under it as it goes
+  and shows the slot it will drop into, and a group whose last tab leaves it goes away by
+  itself. A group is not a split screen — the tabs in it are still one at a time, and splitting
+  a tab is still `cmd-d` (`ctrl-shift-d` off macOS), asked for on purpose.
 - **The window's own title bar.** There is no strip of system chrome above Crook. The window is
   opened with the application's frame, so the header *is* the title bar: dragging its empty
   space moves the window and a double click maximises it. On macOS that surface carries
@@ -35,9 +46,56 @@ Seven features, and the page that configures them:
   desktop's own shortcuts and the window plugin's commands. Crook still finds its own resize
   edges there. **That half has never been run** — see
   [`docs/architecture.md`](docs/architecture.md) §3 for exactly what was checked instead.
-- **A Claude Code usage chip** in the header, showing how much of the current session's token
-  budget is spent and when it resets. It reads the session Claude Code already stores locally
-  (`~/.claude/.credentials.json`, plus the macOS Keychain) and polls the usage endpoint.
+- **Plugins, in two tiers, and the second one is not in the binary.** Everything Crook itself
+  does is a plugin on the registries a stranger's plugin uses — the header, the window's
+  thirteen commands, the command palette, every settings page — which is the only way to know
+  the API is enough. Beside that native tier is a **sandboxed** one: a `.wasm` module in the
+  plugins directory, run in an interpreter with no imports but a handful, with no filesystem,
+  no network and no clock of its own. It *describes* what it wants drawn — text, a badge, a
+  meter, a hairline, something pressable, a panel hung under it, one of Crook's own icons by
+  name — and the host paints it, so a plugin names no colour and no pixel and comes out right
+  in a theme written years after it. Anything it wants from the machine it has to **ask** for,
+  and every request is checked against what a person granted on the Plugins page and kept in
+  `settings.json`. A request outside that grant is refused rather than failed, and the refusal
+  carries the sentence the permission dialog says, so a plugin can tell you what to allow
+  instead of that something went wrong.
+
+  **The Claude Code usage chip is the worked example**, and it is the proof, because it used to
+  be one of the features on this list and is now a file. It lives at
+  [github.com/theguriev/crook-pirate](https://github.com/theguriev/crook-pirate) and ships as
+  one 122KB `plugin.wasm`. `crook --install-plugin <path>` checks the module, reads its
+  manifest and puts it where Crook looks; copying it to
+  `<data>/crook/plugins/theguriev.pirate/plugin.wasm` does the same thing by hand. It draws
+  Crook's own pirate — the artwork is the host's, asked for by icon name, and the plugin
+  animates the bite itself by naming a different frame — and it says how much of the session's
+  token budget is spent and when it resets. To do that it asks to read one file,
+  `~/.claude/.credentials.json`, and to reach one host, `api.anthropic.com`. It can reach
+  nothing else, and until somebody says yes it reaches neither.
+
+  **A plugin can also be asked the same question once per row.** The mark at the head of every
+  tab in the panel is a slot, and the small badge on its corner is another one, so a plugin
+  can replace what a tab is drawn as or add one more thing to it. A contribution to those is
+  handed the row it is being drawn on, with everything a person did not allow it to see left
+  out — and a plugin allowed *nothing* still gets one number per row, the same number for one
+  tab every day and a different one for the tab beside it. That is enough to give every tab a
+  picture of its own, and it is what
+  [github.com/theguriev/crook-emoji](https://github.com/theguriev/crook-emoji) does: an emoji
+  where the status dot was, asking for no permission at all. Beside it,
+  [github.com/theguriev/crook-worktree](https://github.com/theguriev/crook-worktree) puts a
+  branch mark on the corner of every tab whose directory is a git worktree, which it can only
+  do because somebody allowed it to see which project each tab is in.
+
+  **The second worked example is the chips**, and it is the one that proves a plugin may
+  *act*. It lives at [github.com/theguriev/crook-chips](https://github.com/theguriev/crook-chips)
+  and draws the row under the line you are typing: where the pane is, which branch it is on,
+  how much has changed, and what one chord would do. Pressing the first opens a directory
+  picker; pressing the second opens a branch picker; choosing a row in either **types the
+  command into your shell** — `cd …` or `git switch …`, quoted by the host, and only ever
+  those two, because those two strings are what it asked to be allowed. The third chip runs
+  the command it names, and its secondary click offers to change the chord — which opens
+  Crook's own Keyboard Shortcuts page with that row recording, not a recorder of the plugin's. The field, the filtering, the arrow keys, Enter and
+  Escape all belong to Crook: the plugin says what can be chosen and is told which row a
+  person chose, so a chip with a search box in it is never handed a keystroke.
 - **A shell in every pane.** A real pseudo-terminal and a real xterm-compatible emulator:
   colour, bold and italic faces, underline and strikeout, the alternate screen, ten thousand
   lines of scrollback, `SIGWINCH` on resize, and titles and working directories the shell
@@ -111,12 +169,24 @@ Seven features, and the page that configures them:
   into the pane's own scratch, sends a key the snippet bound, and the snippet writes the
   answer back and says so with an escape sequence carrying only the request's number. fish
   answers with `complete -C`, which is its real completion; bash with `compgen`; zsh with its
-  own hashes and globs. One candidate is inserted whole, several insert as much as they agree
-  on, and an ambiguous answer is listed under the line — which is what every shell does.
+  own hashes and globs. One candidate is typed whole and several type as much as they agree
+  on, which is what every shell's Tab does — and what is still ambiguous after that is
+  **offered rather than listed**: the first candidate stands after the caret in dim ink, Tab
+  steps to the next and Shift-Tab back, the right arrow takes it, and typing on rules out the
+  candidates that no longer match without asking the shell anything. There is no menu and no
+  panel. A list under the composer is a surface that appears and disappears under whatever a
+  person is reading, and it takes the output with it every time.
   **Without it Crook is a plain terminal**: one continuous stream of output drawn as a grid,
   scrolled through the emulator's own scrollback, with every key going straight to the shell.
   No blocks, no per-command copy, and no composer — everything else, including selection and
   copying, works exactly as it does with it.
+- **The rest of the command, before you type it.** A pane opens with your shell's own history
+  behind it — zsh's, bash's or fish's file, read once and never written — so the up arrow in a
+  fresh tab reaches yesterday's commands, and the newest one that starts with what you have
+  typed stands after the caret in the same dim ink a completion does. The right arrow takes
+  it, the word arrow takes one word of it, and typing anything else leaves it behind. It is
+  drawn rather than typed: nothing is in the line until you take it, and it never makes the
+  composer grow a row.
 - **Themes**, in a panel of their own. Thirteen built in — Crook Dark, Crook Light, Midnight,
   and ten of the palettes Omarchy dresses a desktop in (Catppuccin, Everforest, Gruvbox,
   Kanagawa, Nord, Rosé Pine, Tokyo Night and three more, each its own project's, read from
@@ -133,24 +203,43 @@ Seven features, and the page that configures them:
   of the one you are looking at — five candidate colours clustered out of its palette, one
   click to choose the background, and everything else decided so the result is legible. What
   it writes is a file in your themes folder, in the same format as any other.
-- **Git worktrees, one click away.** Right-click a tab and, if it is inside a
-  repository, its menu lists that repository's checkouts: the one this tab is in, the ones
-  other tabs are in, and the rest. Choosing one opens a tab there — or brings forward the tab
+- **A tab's own menu.** Right-click any row and it opens over that row: pin, new group with
+  tab, copy pane title, copy working directory, rename tab, rename pane, close tab, a row of
+  colours, and — inside a repository — the worktrees. **Pinning** holds a tab at the front of
+  the block it is in rather than of the whole list, which is the one place this cannot be
+  Warp's: a group is a contiguous block that says two checkouts are one piece of work, and
+  pinning that lifted a member out of the middle would be pinning that takes a group apart. A
+  drop can no more land an unpinned tab among the pinned ones than it can split a group. A
+  **colour** is a stripe down the leading edge of a tab's rows, not a tinted status disc — the
+  disc says what the agent is doing, and one dot cannot carry both — and it is named rather
+  than written down, so a tab made red in one theme is red in a theme written years later. Renaming turns the entry itself into a field, in the
+  column you pressed it in; Enter keeps the name, Escape drops it, and an emptied field puts
+  back the name the tab was opened with. A name you typed beats the one the agent chose for
+  its own work, which is the whole point of typing one, and it comes back with the window. Not one of those entries is written into the menu. It is a
+  [slot](docs/plugins.md), `tab.menu.entries`, and every row in it is a contribution: they
+  come from two plugins today, each entry is also a named command the palette lists and a
+  chord can reach, and a plugin outside the binary puts a row there the same way. Escape is
+  one step back — out of the submenu, then out of the menu.
+- **Git worktrees, one entry away.** Open that menu on a tab inside a
+  repository and `Worktrees` lists that repository's checkouts: the one this tab is in, the
+  ones other tabs are in, and the rest. Choosing one opens a tab there — or brings forward the tab
   already in it, because two agents editing one checkout is exactly what a worktree exists to
   prevent. `New worktree…` asks for a branch name, fills one in that nothing is using, shows
-  where the checkout will go, and opens a tab in it. Removal is offered only for a checkout
+  where the checkout will go, and opens a tab in it — folded into a group with the tab that
+  asked for it. Removal is offered only for a checkout
   that is not locked, not the main one, and not one a tab is working in; it says what it will
   delete first, and it never deletes the branch. Checkouts go in a store of Crook's own —
   neither inside the repository, where git will happily let you put one and every build and
   every search then trips over it, nor beside it in a directory somebody else laid out.
 
-- **A settings page**, which opens the way a shell does: `cmd/ctrl-,` — or the gear menu's
-  last entry — puts it in a **tab of its own**, listed in the strip beside the work it
+- **A settings page**, which opens the way a shell does: `cmd/ctrl-,` — or the View options
+  menu's last entry — puts it in a **tab of its own**, listed beside the work it
   configures, splittable next to that work, and closed by the same × and the same close chord
-  (`cmd-w`, `ctrl-shift-w` off macOS) as any other pane. Five pages: Appearance, Shell, Usage,
-  Keyboard Shortcuts and About. Every option on it is one the application actually reads;
-  there is nothing there that does not do something. Changes apply on the click and are
-  written to `<config>/crook/settings.json`, which is the same eight keys the gear menu writes plus the
+  (`cmd-w`, `ctrl-shift-w` off macOS) as any other pane. Four pages: Appearance, Shell,
+  Keyboard Shortcuts and About — and a plugin's page arrives on the same rail beside them.
+  Every option on it is one the application actually reads; there is nothing there that does
+  not do something. Changes apply on the click and are
+  written to `<config>/crook/settings.json`, which is the same eight keys that menu writes plus the
   theme, the light and dark pair it follows the desktop between, the terminal's type size,
   whether the tabs come back, and — set in the file rather than on the page — its font family.
   The type size is also on `cmd/ctrl-plus`, `-minus` and `-0`, and every pane resizes with it:
@@ -177,7 +266,9 @@ Seven features, and the page that configures them:
   them and Escape to leave it alone. Keeping one writes VSCode's own two lines into the file
   — the command taken off the chords it had, then the chord you pressed — and touches nothing
   else in it, comments included. Beside each chord is whichever of "Reset" and "Unbind" that
-  row can still be asked for.
+  row can still be asked for. The same recording is reachable by name, as
+  `crook/shortcuts/rebind`, which is how a plugin's own chip can offer "change this
+  keybinding" without being able to write a file itself.
 
 Everything else is out of scope on purpose. There is no telemetry, and OSC 8 hyperlinks are
 not read — though a URL a program *printed* is clickable, because the scan that finds one
@@ -347,10 +438,13 @@ release-only feature combination does not compile — cheaply, and without produ
 app/                     the `crook` library, plus two ~20-line channel binaries
 crates/crookui_core/     entities, handles, contexts, elements, layout, Scene   (MIT)
 crates/crookui/          winit windowing, wgpu renderer, cosmic-text font stack (MIT)
-crates/crook_usage/      Claude Code credentials and usage polling              (MIT)
+crates/crook_plugin/     identities, manifests, slots and registration guards   (MIT)
+crates/crook_plugin_api/ the wire a sandboxed plugin and its host share         (MIT)
+crates/crook_wasm/       the wasmi sandbox: fuel, memory, and checked bytes     (MIT)
 crates/crook_terminal/   pty, emulator, and the snapshot the renderer draws     (MIT)
 docs/architecture.md     the design, and the reasoning behind each divergence
 docs/blocks.md           the block surface: what draws it, and what it does not do yet
+docs/plugins.md          the two plugin tiers, and what each of them may do
 script/                  bootstrap, run, bundle
 ```
 
@@ -379,9 +473,13 @@ that repository is AGPL-3.0. Crook stays clear of the AGPL half:
 - `crookui` and `crookui_core` port real code and shaders from Warp's two MIT crates. MIT
   permits that and asks one thing in return — that the copyright notice travel with the code.
   `LICENSE-MIT` therefore carries Denver Technologies' notice alongside this project's.
-- `crook_usage` descends from a Claude Code usage indicator written for a personal fork of
-  Warp and never contributed upstream. It is its author's own work, licensed here by that
-  author, and it borrows nothing from Warp beyond the shape of the surrounding app.
+- The **pirate** — the artwork in `crates/crookui_core/src/icons/art.rs`, and the four
+  `usage_*` theme roles beside it — descends from a Claude Code usage indicator written for a
+  personal fork of Warp and never contributed upstream. It is its author's own work, licensed
+  here by that author, and it borrows nothing from Warp beyond the shape of the surrounding
+  app. The chip that used to draw it is a plugin in a repository of its own now; what stayed
+  behind is the picture, which the host draws on any plugin's behalf when one asks for it by
+  name.
 - `app/` was written against a description of how Warp's tab strip and header behave, not by
   copying either. Where its comments mention Warp they are recording a divergence — an
   index-versus-identity bug not inherited, a public field not repeated.

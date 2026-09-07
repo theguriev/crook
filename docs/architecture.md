@@ -21,9 +21,9 @@ It assumes a competent Rust engineer who has never read a line of Warp.
 
 ### The problem it solves
 
-A UI is a graph. A tab strip holds tabs; a tab holds an agent session; a header holds a usage
-chip that must repaint when a background poller returns. Expressed directly in Rust — parent
-and child holding references to each other — this is either impossible or it is
+A UI is a graph. A tab strip holds tabs; a tab holds an agent session; a header holds a chip a
+plugin drew, which must repaint when that plugin's background poll returns. Expressed directly
+in Rust — parent and child holding references to each other — this is either impossible or it is
 `Rc<RefCell<T>>` on every node, which gives you reference cycles, runtime borrow panics from
 callbacks that reenter, and a lifetime on every function that touches two nodes at once.
 
@@ -85,7 +85,7 @@ entity is **not** removed immediately — its id is pushed onto a dropped-set, a
 later, when the effect queue is flushed.
 
 That split is not an optimization; it is the thing that makes callbacks safe. Dropping the
-last `ModelHandle<UsageModel>` from inside an event callback must make every surviving
+last `ModelHandle<GitModel>` from inside an event callback must make every surviving
 `WeakModelHandle::upgrade()` return `None` *right then*, even though the entity is still
 physically in the map (you may be standing on its stack frame). Consulting the dropped-set
 rather than the map gives you exactly that.
@@ -486,9 +486,14 @@ the stroke width; there is no subpixel bucket, because an icon is snapped to the
 both axes where a glyph is snapped only vertically. Nothing is rasterized twice, and the whole
 set at the three sizes the chrome uses is a few dozen kilobytes of atlas.
 
-The one place the stroke rule does not reach is the usage chip, whose mark is a *picture*: a
-Pac-Man pirate in an eyepatch, three frames of him, drawn in the same 24-unit grid as
-`crookui_core::icons::art`. Three things follow from that, and each is smaller than it sounds.
+The one place the stroke rule does not reach is `crookui_core::icons::art`, whose marks are
+*pictures*: a Pac-Man pirate in an eyepatch, three frames of him, drawn in the same 24-unit
+grid as the stroked set. Nothing in the binary draws him for itself — the feature that used to
+is a plugin now, outside the binary, and it asks for a frame by name (`pirate`, `pirate-open`,
+`pirate-wide`) through the second tier's `Node::Icon`. The artwork stays here because the
+*host* is what paints it: a sandboxed plugin ships no pictures, and a picture it could ship
+would be the wrong weight beside everything else on the row. Three things follow from a
+picture, and each is smaller than it sounds.
 A picture needs a **fill**, which is `raster::fill` — signed area accumulated per edge and run
 along each row, no sorted crossing list and no winding rule to configure, in about forty lines
 beside the distance field rather than in place of it. A picture has **more than one colour**,
@@ -769,11 +774,12 @@ yet, which is a change to how panes are laid out rather than to how shells are s
 
 ### Who drives it
 
-`app/src/terminal_model.rs`, in the shape `usage_model` and `git_model` established: work off
-the UI thread, delivered on it, `ctx.notify` only when something a viewer could see actually
-changed. Each terminal gets an OS thread of its own rather than a background-pool worker,
-because a pty read blocks for as long as the shell is quiet and the pool is sized for exactly
-the two poll chains that park on timers.
+`app/src/terminal_model.rs`, in the shape `git_model` established and `usage_model` shared
+before it left for a plugin: work off the UI thread, delivered on it, `ctx.notify` only when
+something a viewer could see actually changed. Each terminal gets an OS thread of its own
+rather than a background-pool worker, because a pty read blocks for as long as the shell is
+quiet and the pool is sized for exactly the chains that park on timers — five of them, counted
+one by one in `PARKED_WORKERS`, and a pane is not one.
 
 **Reading and drawing are throttled separately, and conflating them costs three orders of
 magnitude.** A pty master hands out about a kilobyte per `read` however large a buffer it is
@@ -903,13 +909,19 @@ a person a menu they did not ask for every time they reached for the tab they we
 The model is [herdr](https://herdr.dev)'s, which is the tool this borrows from rather than
 Warp: there a worktree is not a thing you administer but a workspace with a git checkout
 behind it, and creating one *opens* it. So the menu lists the repository's checkouts and
-opens a pane in whichever one is chosen — or brings forward the pane already there, because
-two agents in one worktree is the thing the feature exists to prevent. The pane opens *in the
-tab the menu was opened on*, which is what keeps one repository's branches together: the
-panel draws a tab holding more than one pane under a group header, so the second checkout
-makes the group and the last one to close takes it away again. Its `--base` is
+opens a **tab** in whichever one is chosen — or brings forward the pane already there, because
+two agents in one worktree is the thing the feature exists to prevent. The tab opens in the
+*group* the tab the menu was opened on belongs to, making the group out of the two of them if
+there is not one yet, which is what keeps one repository's branches together. Its `--base` is
 deliberately not taken: a worktree made from anything other than the head you are looking at
 is a question a menu cannot ask well.
+
+It opened a *pane* first, splitting the tab, and that was the wrong claim made in the right
+place. Belonging together and being on screen together are two different statements: a split
+puts two agents in one rectangle, half a window each, which is what a person asks for when
+they want to watch two things at once — not what "give this branch a checkout of its own"
+means. A group says the first without saying the second, so that is what a worktree opens
+into now, and splitting a tab went back to being a thing a person asks for on purpose.
 
 Three things about it are load-bearing.
 
@@ -1308,13 +1320,32 @@ cell-grid element trait, a measure/arrange/paint presenter over a character buff
 continuation handling — call it 2,000 lines. Crucially it means **no change to the core**,
 which is the entire reason for the `crookui_core` / `crookui` split.
 
-**Tab groups, pinning, tear-off.** Each of these converts index arithmetic into
-range arithmetic. Groups add a "cannot cross the group boundary" branch to every move and a
-"prune the empty group" branch to every close. Pinning splits the tab vector into two implicit
-regions that every insertion has to clamp against. Cross-window drag — ghost slots, detached placeholders, collapsed source slots, a drag-preview
-window — is the single largest source of complexity in Warp's tab code. Crook v1 has a `Vec`
-of tabs, an active index, and an MRU list; the close and hop index fixups are ported verbatim
+**Pinning and tear-off.** Both convert index arithmetic into range arithmetic. Pinning splits
+the tab vector into two implicit regions that every insertion has to clamp against.
+Cross-window drag — ghost slots, detached placeholders, collapsed source slots, a drag-preview
+window — is the single largest source of complexity in Warp's tab code. Crook has a `Vec` of
+tabs, an active id, and an MRU list; the close and hop index fixups are ported verbatim
 because that is where tab bugs actually live, and they are unit-tested with no window.
+
+**Tab groups shipped**, and they were the cheapest of the three because the estimate above
+named the right two branches and there turned out to be only one more. Membership is one
+`Option<GroupId>` on the tab — Warp's shape — and the group holds a name and a fold and no
+membership at all, so there is no second ordering to disagree with the vector's. Everything
+that could break a group's contiguity is one function, `slot_for`: a target names a group and
+a neighbour, and the two are clamped against each other rather than trusted, which is what
+lets a drop be computed from a pointer position by a pure function that is allowed to be
+approximately right. The drag itself needed no new element in `crookui_core` — a press is
+noted, moves past a threshold become a gesture, and the row that was picked up is the one that
+reads the boxes every row wrote down during paint. It is Warp's gesture and not a line drawn
+in a gap: the row is painted on an overlay layer at the pointer, its slot stays open behind
+it, and the strip reorders itself one step per event while the hand is still moving, so
+letting go resolves nothing because everything has already happened. Which group a row is in
+is answered by the group's own box rather than by the row under the pointer, which is the only
+way the gap under a group's last member can mean "out of this group" — the question a list
+whose groups are decided row by row cannot answer at all.
+
+Groups exist because worktrees needed them: a checkout opened from a tab has to land somewhere
+that says it belongs with that tab, and the answer that was there before was a split.
 
 Vertical tabs turned out to be the cheapest of the four and shipped as the default: they are a
 second renderer over the same `TabStrip::rows`, not a second model, so `app/src/workspace/`

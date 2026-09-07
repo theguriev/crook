@@ -396,6 +396,31 @@ impl<C: 'static> Slots<C> {
             .collect()
     }
 
+    /// What each entry in a slot asked for as its `order`, in drawing order.
+    ///
+    /// For a surface whose entries are not merely a sequence but a sequence
+    /// with *seams* in it. A menu is the example: Warp's tab menu is nine
+    /// entries and five groups, and the horizontal rules between them are the
+    /// only thing saying that renaming a tab and closing it are not the same
+    /// kind of act. A renderer that can see the orders can put a rule wherever
+    /// two neighbours are far enough apart to have meant a new group, which is
+    /// a rule every contributor can obey without the slot growing a second
+    /// vocabulary for it and without one plugin being able to draw a seam
+    /// across somebody else's entries.
+    ///
+    /// Paired with [`map`](Self::map) and [`contributors`](Self::contributors),
+    /// which answer in this same order.
+    pub fn orders(&self, slot: SlotId) -> Vec<i32> {
+        let table = self.0.borrow();
+        let mut entries: Vec<&Entry<C>> = table
+            .entries
+            .iter()
+            .filter(|entry| entry.slot == slot)
+            .collect();
+        entries.sort_by_key(|entry| (entry.order, entry.seq));
+        entries.iter().map(|entry| entry.order).collect()
+    }
+
     /// Everything wrong with what is registered.
     ///
     /// A question, not a drain: asking twice gives the same answer, and asking

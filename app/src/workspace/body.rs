@@ -82,17 +82,16 @@ use crook_terminal::{Snapshot, TerminalSize};
 use crookui_core::element::SizeConstraint;
 use crookui_core::elements::Padding;
 use crookui_core::event::{DispatchedEvent, Event, MouseButton};
-use crookui_core::fonts::{FamilyId, Properties, Weight};
+use crookui_core::fonts::{Properties, Weight};
 use crookui_core::geometry::{Point, Vector2F, vec2f};
 use crookui_core::prelude::*;
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 
-use crate::completion::Completions;
 use crate::pane_blocks::PaneBlocks;
 use crate::pane_split::{DividerDrag, Drag, PaneExtent};
 use crate::pane_surface::{self, Surface};
 use crate::tab::{Pane, PaneId, SplitAxis, TabAction};
-use crate::terminal_font::{CellFont, CellMetrics};
+use crate::terminal_font::CellFont;
 use crate::terminal_model::TerminalHandle;
 use crate::theme::theme;
 
@@ -157,6 +156,19 @@ const COMPOSER_PADDING_TOP: f32 = 1.1;
 /// Warp's `editor_bottom_padding`, and the pane's own bottom inset: nothing
 /// else pads the bottom of a pane.
 pub(super) const COMPOSER_PADDING_BOTTOM: f32 = 20.;
+
+/// The gap between two chips in the row above the composer.
+const CHIP_GAP: f32 = 6.;
+
+/// The gap between the line being composed and the row of chips under it.
+const CHIPS_PADDING_TOP: f32 = 8.;
+
+/// How far the floating row is held off the corner it sits in.
+///
+/// The row is over a screen a program has taken rather than beside a prompt,
+/// so it is inset from both edges: a chip flush against the corner reads as
+/// part of whatever the program drew there.
+const CHIPS_INSET: f32 = 12.;
 
 pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
     let Some(tab) = workspace.tabs().active() else {
@@ -277,7 +289,7 @@ fn panel(
         (true, true) => Keys::Signals,
         (true, false) => Keys::All,
     };
-    let content = contents(workspace, pane, terminal, keys, app);
+    let content = contents(workspace, pane, terminal, keys, is_focused, app);
 
     // The `Hoverable` is here for its click handler alone — nothing about a
     // pane changes under the pointer any more — and it is what records the hit
@@ -339,6 +351,7 @@ fn contents(
     pane: &Pane,
     terminal: Option<(TerminalHandle, Arc<Snapshot>)>,
     keys: Keys,
+    is_focused: bool,
     app: &AppContext,
 ) -> Box<dyn Element> {
     let font = workspace.cell_font().clone();
@@ -368,10 +381,23 @@ fn contents(
         Surface::Grid => grid(workspace, id, &handle, snapshot, font.clone(), keys),
     };
 
+    // What a plugin pinned to this pane, or nothing at all — which is what a
+    // release binary carries. Built once and spent in exactly one of the two
+    // places below: beside the prompt while there is one, over the corner
+    // while a program has the screen.
+    let chips = is_focused.then(|| chips(workspace, app)).flatten();
+
     // The pty is told the *pane's* size, so it is measured here — outside the
     // column, where the composer appearing and hiding cannot move the box the
     // measurement comes from.
     if !surface.composer {
+        // The chips float rather than take a row. A program that has the
+        // screen was given the whole pane and counts on having it: a row of
+        // chrome above `top` would be a row `top` does not know it lost.
+        let output = match chips {
+            Some(chips) => over_the_corner(output, chips),
+            None => output,
+        };
         return PaneSizer::new(handle, font, output).finish();
     }
 
@@ -393,6 +419,7 @@ fn contents(
             id,
             handle.clone(),
             font.clone(),
+            chips,
             ComposerState {
                 focused: keys == Keys::All,
                 alt_screen,
@@ -519,6 +546,7 @@ fn composer(
     pane: PaneId,
     handle: TerminalHandle,
     font: CellFont,
+    chips: Option<Box<dyn Element>>,
     state: ComposerState,
 ) -> Box<dyn Element> {
     let Some(input) = workspace.input(pane) else {
@@ -546,23 +574,34 @@ fn composer(
         composing = composing.with_selection(interaction.selection.clone());
     }
 
-    // The candidates go *under* the field, which is where every shell puts
-    // them: the line being typed stays where it was and the list appears below
-    // it, so nothing a person is reading moves.
-    let composing: Box<dyn Element> = match input.showing_completions() {
-        Some(answer) => Flex::column()
+    // **Nothing is drawn under the field.** What the shell offered stands
+    // after the caret, in the line itself — see
+    // [`TextInput::suggestion`](crate::text_input::TextInput::suggestion) —
+    // because a list under the composer is a surface that appears and
+    // disappears under whatever a person is reading, and it took the output
+    // with it every time.
+    let mut composing: Box<dyn Element> = composing.finish();
+
+    // **Under the line, not over it.** Warp puts its chips on the row above
+    // the one being typed, and that is the one detail of this row that cannot
+    // be copied: Warp's input is a box of its own, and Crook's *is the
+    // terminal's next row* — drawn in the cell grid, at column zero, on the
+    // prompt row the shell itself printed. A row of chips above it would push
+    // the line off that prompt, which is the seam this whole arrangement
+    // exists to remove. So they go under it, where they read as what they are:
+    // facts about the pane, beneath the line they are facts about.
+    if let Some(chips) = chips {
+        composing = Flex::column()
             .with_main_axis_size(MainAxisSize::Min)
-            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_child(composing.finish())
-            .with_child(candidates(
-                &answer,
-                workspace.fonts().monospace,
-                font.metrics(),
-                state.ink,
-            ))
-            .finish(),
-        None => composing.finish(),
-    };
+            .with_cross_axis_alignment(CrossAxisAlignment::Start)
+            .with_child(composing)
+            .with_child(
+                Container::new(chips)
+                    .with_margin_top(CHIPS_PADDING_TOP)
+                    .finish(),
+            )
+            .finish();
+    }
 
     let rule = if state.cut_off { RULE } else { 0. };
     Container::new(composing)
@@ -588,46 +627,52 @@ fn composer(
         .finish()
 }
 
-/// What a line could become, listed under the field.
+/// Whatever a plugin pinned to this pane, in a row, or `None` when nothing did.
 ///
-/// **A list rather than a menu**, which is what bash, zsh and fish all print
-/// when Tab is ambiguous: the candidates appear, the line stays where it was,
-/// and the next keystroke narrows them. A menu with a selection in it would
-/// need the arrow keys, which this field spends on its history, and a state
-/// machine for a gesture nobody asked for yet.
-///
-/// It is drawn in the terminal's own font and ink, because it is about the
-/// line above it and that line is set in the terminal's type.
-fn candidates(
-    answer: &Completions,
-    family: FamilyId,
-    metrics: CellMetrics,
-    ink: Ink,
-) -> Box<dyn Element> {
-    let mut text = answer.candidates.join("  ");
-    if answer.truncated {
-        // A `compgen -c` on a full PATH is thousands of entries. Saying so is
-        // more use than printing the first two hundred and stopping.
-        text.push_str("  …");
+/// The slot is a list and this row does not know what is in it — the same
+/// bargain the header's right-hand side made, and the reason an empty one has
+/// to be as ordinary here as a full one: nothing a release binary carries
+/// fills it, and a plugin installed from a file does.
+fn chips(workspace: &Workspace, app: &AppContext) -> Option<Box<dyn Element>> {
+    let built = workspace
+        .host()
+        .slots()
+        .map(crate::plugins::pane::PANE_CHIPS, |build| {
+            build(workspace, app)
+        });
+    if built.is_empty() {
+        return None;
     }
 
-    Container::new(
-        Text::new(text, family, metrics.font_size)
-            .with_color(ink.text.with_alpha(CANDIDATE_ALPHA))
-            .finish(),
-    )
-    .with_margin_top(metrics.height * CANDIDATE_GAP)
-    .finish()
+    let mut row = Flex::row()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_spacing(CHIP_GAP);
+    row.extend(built);
+    Some(row.finish())
 }
 
-/// How much of the terminal's foreground the candidate list is drawn in.
+/// Floats `chips` over the bottom-right corner of `content`.
 ///
-/// De-emphasised, because it is not part of the line: a person is reading what
-/// they typed, and the list is a hint under it.
-const CANDIDATE_ALPHA: u8 = 160;
-
-/// The gap between the line and the list, in rows.
-const CANDIDATE_GAP: f32 = 0.4;
+/// An overlay rather than a row, because the pane below it belongs to a
+/// program that was told how many rows it has. Anchored corner-to-corner and
+/// pulled back inside by [`CHIPS_INSET`], so the row sits *in* the corner
+/// rather than hanging off it — and `keep_on_screen` is left on, which is what
+/// keeps a wide chip inside a narrow pane.
+fn over_the_corner(content: Box<dyn Element>, chips: Box<dyn Element>) -> Box<dyn Element> {
+    let mut stack = Stack::new().with_child(content);
+    stack.add_anchored_overlay_child(
+        chips,
+        AnchorTo {
+            parent: Corner::BottomRight,
+            child: Corner::BottomRight,
+            offset: vec2f(-CHIPS_INSET, -CHIPS_INSET),
+            keep_on_screen: true,
+            keep_clear_of_parent: false,
+        },
+    );
+    stack.finish()
+}
 
 /// Resizes a pane's pty from the pane's own rectangle, and draws its child
 /// inside it.

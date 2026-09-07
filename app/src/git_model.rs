@@ -7,8 +7,9 @@
 //! renderer and pay for it at frame rate — so nothing here is reachable from a
 //! view except [`GitModel::facts`], which is a map lookup.
 //!
-//! The shape is [`crate::usage_model`]'s, for the same reason: one cycle runs
-//! on the background pool, delivers on the foreground one, and starts the next.
+//! The shape is the one every polling model in Crook has, and this is where it
+//! is written down: one cycle runs on the background pool, delivers on the
+//! foreground one, and starts the next.
 //!
 //! # Why a second poll chain cannot start here
 //!
@@ -83,8 +84,8 @@ pub struct GitModel {
     /// "show it now" silently becomes "show it in fifteen seconds", in exactly
     /// the window a person is most likely to be in: the cycle a new tab or a
     /// switched-on toggle just started. This flag outlives the channel, and
-    /// `finish` reads it. [`crate::usage_model`] guards its click the same way
-    /// and for the same reason.
+    /// `finish` reads it — which is the whole reason a poke is a flag rather
+    /// than a message on the channel the cycle owns.
     poked: Arc<AtomicBool>,
 
     /// The ticket, while no cycle owns it. `Some` only before [`Self::start`].
@@ -314,10 +315,7 @@ fn gather(dir: &Path, with_diff: bool) -> GitFacts {
     if with_diff {
         git::gather(dir)
     } else {
-        GitFacts {
-            branch: git::current_branch(dir),
-            diff: None,
-        }
+        git::facts_without_diff(dir)
     }
 }
 
@@ -339,6 +337,7 @@ mod tests {
         GitFacts {
             branch: Some(Head::Branch(branch.to_owned())),
             diff: Some(DiffStats::default()),
+            worktree: false,
         }
     }
 

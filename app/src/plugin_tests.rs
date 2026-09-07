@@ -1,18 +1,18 @@
 //! What the plugins a release binary carries promise each other.
 
 use std::cell::Cell;
+use std::collections::BTreeMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use crookui_core::App;
 use crookui_core::executor::{Background, LocalQueue};
 use crookui_core::fonts::FamilyId;
-use crookui_core::{AddSingletonModel as _, App};
 
 use crate::Channel;
 use crate::plugins;
 use crate::settings::Settings;
 use crate::terminal_font::{CELL_FONT_SIZE, CellFont};
-use crate::usage_model::UsageModel;
 use crate::window_controls::Recorder;
 use crate::workspace::{Fonts, Opening, Workspace};
 
@@ -47,7 +47,6 @@ fn with_host_and_context(test: impl FnOnce(&mut Host, &mut ViewContext<Workspace
 fn with_context(disabled: &[String], test: impl FnOnce(&mut Host, &mut ViewContext<Workspace>)) {
     let queue = LocalQueue::new();
     let mut app = App::new(queue.foreground(), Arc::new(Background::new(2)));
-    app.update(|ctx| ctx.add_singleton_model(UsageModel::new));
 
     let quits = Rc::new(Cell::new(0));
     let quit: crate::workspace::QuitRequest = Rc::new(move || quits.set(quits.get() + 1));
@@ -72,7 +71,7 @@ fn with_context(disabled: &[String], test: impl FnOnce(&mut Host, &mut ViewConte
     });
 
     workspace.update(&mut app, |_, ctx| {
-        let mut host = load(plugins::defaults(), disabled, fonts, ctx);
+        let mut host = load(plugins::defaults(), disabled, BTreeMap::new(), fonts, ctx);
         test(&mut host, ctx);
     });
 }
@@ -89,6 +88,33 @@ fn every_plugin_in_the_box_loads() {
             host.refused()
         );
         assert_eq!(host.loaded().len(), plugins::defaults().len());
+    });
+}
+
+#[test]
+fn a_plugin_s_field_is_found_by_name_and_goes_out_with_it() {
+    // A field is addressed the way an action is, because the thing that draws
+    // this one — `workspace::tab_menu` — is not the plugin that owns it. And
+    // it goes out with that plugin: a field nothing can draw must not be left
+    // in the registry answering "the keyboard is mine".
+    with_host(|host| {
+        let worktrees = PluginId::parse("crook/worktrees").expect("a literal that parses");
+        let field = plugins::worktrees::BRANCH_FIELD;
+
+        let claimed = host.field(field).expect("the plugin registered no field");
+        claimed.set_has_keys(true);
+        assert!(host.a_field_has_keys());
+
+        host.unload(&worktrees);
+
+        assert!(
+            host.field(field).is_none(),
+            "a disabled plugin's field is still in the registry"
+        );
+        assert!(
+            !host.a_field_has_keys(),
+            "a field that went out with its plugin still says it has the keyboard"
+        );
     });
 }
 
@@ -143,21 +169,37 @@ fn two_plugins_cannot_have_one_name() {
     });
 }
 
+/// Whether `plugin` has anything in the window's overlay slot.
+///
+/// Asked of the *contributors* rather than of the slot's emptiness: the
+/// overlay is a list and the palette is no longer the only thing in it —
+/// `crook/shortcuts` hangs its chord recorder there too — so "empty" stopped
+/// being the same question as "the palette's is gone".
+fn overlays(host: &Host, plugin: &PluginId) -> bool {
+    host.slots()
+        .contributors(crate::plugins::window::WINDOW_OVERLAY)
+        .iter()
+        .any(|(owner, _)| owner == plugin)
+}
+
 #[test]
-fn unloading_a_plugin_takes_its_contribution_off_the_header() {
+fn unloading_a_plugin_takes_its_contribution_out_of_the_slot_it_filled() {
     // What disabling one will do, and the whole reason a registration is a
     // guard: the slot goes back to being what it was before the plugin loaded.
+    // Asked of the palette and the window's overlay because that is the one
+    // pair a release binary still has — `header.right` is declared by a plugin
+    // in the box and filled only by one installed from a file.
     with_host(|host| {
-        let usage = PluginId::parse("crook/usage").expect("a literal that parses");
-        assert!(!host.slots().is_empty(crate::plugins::header::HEADER_RIGHT));
+        let palette = PluginId::parse("crook/palette").expect("a literal that parses");
+        assert!(overlays(host, &palette));
 
-        host.unload(&usage);
+        host.unload(&palette);
 
         assert!(
-            host.slots().is_empty(crate::plugins::header::HEADER_RIGHT),
-            "the chip outlived the plugin that contributed it"
+            !overlays(host, &palette),
+            "the palette outlived the plugin that contributed it"
         );
-        assert!(!host.loaded().iter().any(|manifest| manifest.id == usage));
+        assert!(!host.loaded().iter().any(|manifest| manifest.id == palette));
     });
 }
 
@@ -244,13 +286,7 @@ fn the_settings_rail_is_what_the_plugins_put_in_it() {
 
         assert_eq!(
             titles,
-            [
-                "Appearance",
-                "Shell",
-                "Usage",
-                "Keyboard Shortcuts",
-                "About"
-            ]
+            ["Appearance", "Shell", "Keyboard Shortcuts", "About"]
         );
     });
 }
@@ -258,14 +294,14 @@ fn the_settings_rail_is_what_the_plugins_put_in_it() {
 #[test]
 fn disabling_a_plugin_takes_its_settings_page_off_the_rail() {
     // The whole point of the page belonging to the feature: somebody who turns
-    // the usage plugin off loses the chip *and* the page that configures it,
-    // rather than being left with a page whose switch controls nothing.
+    // the shell plugin off loses the page that configures it, rather than
+    // being left with a page whose switches control nothing.
     with_host(|host| {
-        let usage = PluginId::parse("crook/usage").expect("a literal that parses");
-        let key = "crook/usage/page";
+        let shell = PluginId::parse("crook/shell").expect("a literal that parses");
+        let key = "crook/shell/page";
         assert!(host.settings_page_id(key).is_some());
 
-        host.unload(&usage);
+        host.unload(&shell);
 
         assert!(
             host.settings_page_id(key).is_none(),
@@ -276,10 +312,7 @@ fn disabling_a_plugin_takes_its_settings_page_off_the_rail() {
             .into_iter()
             .map(|(_, title)| title)
             .collect();
-        assert_eq!(
-            titles,
-            ["Appearance", "Shell", "Keyboard Shortcuts", "About"]
-        );
+        assert_eq!(titles, ["Appearance", "Keyboard Shortcuts", "About"]);
     });
 }
 
@@ -290,21 +323,22 @@ fn a_plugin_switched_off_can_be_switched_back_on() {
     // life survives, which is correct — a plugin that was off saw nothing
     // happen while it was off.
     with_host_and_context(|host, ctx| {
-        let usage = PluginId::parse("crook/usage").expect("a literal that parses");
-        assert!(host.is_loaded(&usage));
+        let palette = PluginId::parse("crook/palette").expect("a literal that parses");
+        let open = ActionName::parse("crook/palette/open").expect("a literal");
+        assert!(host.is_loaded(&palette));
 
-        host.unload(&usage);
-        assert!(!host.is_loaded(&usage));
-        assert!(host.slots().is_empty(crate::plugins::header::HEADER_RIGHT));
+        host.unload(&palette);
+        assert!(!host.is_loaded(&palette));
+        assert!(!overlays(host, &palette));
 
-        host.enable(&usage, ctx);
+        host.enable(&palette, ctx);
 
-        assert!(host.is_loaded(&usage));
+        assert!(host.is_loaded(&palette));
+        assert!(overlays(host, &palette), "the palette did not come back");
         assert!(
-            !host.slots().is_empty(crate::plugins::header::HEADER_RIGHT),
-            "the chip did not come back"
+            host.action(&open).is_some(),
+            "the action did not come back with it"
         );
-        assert!(host.settings_page_id("crook/usage/page").is_some());
         assert!(host.audit().is_empty(), "{:?}", host.audit());
     });
 }
@@ -314,17 +348,20 @@ fn a_plugin_the_settings_switched_off_is_carried_and_not_built() {
     // What "off" means: `build` never runs, so the plugin registers nothing
     // and makes nothing — but it is still in the list, because a switch you
     // cannot see is a switch you cannot turn back on.
-    let disabled = vec!["crook/usage".to_owned()];
+    let disabled = vec!["crook/palette".to_owned()];
     with_disabled(&disabled, |host| {
-        let usage = PluginId::parse("crook/usage").expect("a literal that parses");
+        let palette = PluginId::parse("crook/palette").expect("a literal that parses");
+        let open = ActionName::parse("crook/palette/open").expect("a literal");
 
-        assert!(!host.is_loaded(&usage));
+        assert!(!host.is_loaded(&palette));
         assert!(
-            host.available().iter().any(|manifest| manifest.id == usage),
+            host.available()
+                .iter()
+                .any(|manifest| manifest.id == palette),
             "a switched-off plugin has to stay visible"
         );
-        assert!(host.slots().is_empty(crate::plugins::header::HEADER_RIGHT));
-        assert!(host.settings_page_id("crook/usage/page").is_none());
+        assert!(!overlays(host, &palette));
+        assert!(host.action(&open).is_none());
         // And nothing else noticed: a plugin that is off is not a plugin that
         // failed.
         assert!(host.refused().is_empty());
@@ -341,5 +378,48 @@ fn a_name_in_the_disabled_list_that_answers_to_nothing_costs_nothing() {
     with_disabled(&disabled, |host| {
         assert_eq!(host.loaded().len(), host.available().len());
         assert!(host.refused().is_empty());
+    });
+}
+
+#[test]
+fn the_marks_on_a_tab_row_are_slots_and_a_release_binary_leaves_them_empty() {
+    // Declared by `crook/tabs` and filled by nobody in the box, which is the
+    // shape `header.right` has: the disc a row draws is the *host's* answer to
+    // an empty slot rather than a contribution competing with a plugin's. See
+    // `plugins::tabs` for why that difference matters.
+    with_host(|host| {
+        let mark = crate::plugins::tabs::TAB_ROW_MARK;
+        let badge = crate::plugins::tabs::TAB_ROW_BADGE;
+
+        assert_eq!(host.row_slot_named("tab.row.mark"), Some(mark));
+        assert_eq!(host.row_slot_named("tab.row.badge"), Some(badge));
+        assert!(host.rows().is_empty(mark));
+        assert!(host.rows().is_empty(badge));
+        // And they are not in the other registry, so a plugin that contributed
+        // an ordinary element to one is told the slot does not exist there
+        // rather than drawing something with no way to ask which row it is on.
+        assert_eq!(host.slot_named("tab.row.mark"), None);
+        assert!(host.audit().is_empty(), "{:?}", host.audit());
+    });
+}
+
+#[test]
+fn a_row_contribution_goes_back_out_with_the_plugin_that_made_it() {
+    // The guard, for the registry the tab rows use. Every other registration
+    // in this file is proven the same way, and a second registry is a second
+    // place for one to be left behind.
+    with_host(|host| {
+        let mark = crate::plugins::tabs::TAB_ROW_MARK;
+        let who = PluginId::parse("crook/host").expect("a literal that parses");
+
+        host.contribute_row(mark, "mark", 0, |_, _, _| None);
+        assert_eq!(
+            host.rows().contributors(mark),
+            vec![(who.clone(), EntryId::new("mark"))]
+        );
+
+        host.unload(&who);
+
+        assert!(host.rows().is_empty(mark), "the contribution outlived it");
     });
 }

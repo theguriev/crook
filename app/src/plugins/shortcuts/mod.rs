@@ -42,9 +42,7 @@
 
 use crookui_core::prelude::*;
 
-use crook_plugin::{Manifest, PluginId, Tier};
-
-use crook_plugin::ActionName;
+use crook_plugin::{ActionName, Manifest, PluginId, Tier};
 
 use crate::keybindings::{self, Recording, Resolution, Source};
 use crate::plugin::{BuildError, Host, Plugin};
@@ -66,8 +64,43 @@ impl Plugin for Shortcuts {
 
     fn build(&mut self, host: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
         host.add_settings_page("page", PAGE_TITLE, 30, |workspace, _| shortcuts(workspace));
+
+        // The same recording the page's own chord button starts, reachable by
+        // name. It is here because the thing that most wants it is not this
+        // page: a chip that says which chord starts an agent is the natural
+        // place to offer "change that", and that chip may well be a plugin
+        // outside the binary — which can hold `Capability::RunCommands` naming
+        // this one command and nothing else. Which command it is about arrives
+        // through `Host::said`, an action having no argument of its own.
+        //
+        // An action rather than a command: offered in the palette with nothing
+        // said it would record a chord for a name nobody gave, which is worse
+        // than not being offered there at all.
+        host.register_action(action("rebind"), |workspace, ctx| {
+            let said = workspace.host().said();
+            let Ok(command) = ActionName::parse(said.trim()) else {
+                log::warn!("crook/shortcuts/rebind was asked to rebind {said:?}");
+                return;
+            };
+            if workspace.host().action(&command).is_none() {
+                log::warn!("crook/shortcuts/rebind was asked about {command}, which is nothing");
+                return;
+            }
+            // The recorder is a *row* of this page, so the page has to be the
+            // thing on screen: a recording nobody can see is a keyboard that
+            // has quietly stopped reaching the shell.
+            let page = workspace.settings_page_named(PAGE_TITLE);
+            workspace.open_settings_page(page, ctx);
+            workspace.start_recording(command, ctx);
+        });
+
         Ok(())
     }
+}
+
+/// `crook/shortcuts/<name>`.
+fn action(name: &str) -> ActionName {
+    ActionName::parse(&format!("crook/shortcuts/{name}")).expect("a name built from a literal")
 }
 
 /// Built once and leaked; see `header::manifest`.
@@ -80,6 +113,7 @@ fn manifest() -> &'static Manifest {
         description: "Every command the window answers to, and the chord that reaches it.",
         version: env!("CARGO_PKG_VERSION"),
         tier: Tier::Native,
+        capabilities: &[],
     })
 }
 
@@ -412,6 +446,19 @@ fn in_a_pane(workspace: &Workspace) -> Category {
                 "Walk this pane's history",
                 &["previous", "recall", "arrow"],
                 "up / down",
+            ),
+            key(
+                "Complete the word, and step through what the shell offered",
+                &["completion", "complete", "tab", "suggest"],
+                "tab / shift+tab",
+            ),
+            key(
+                "Take the suggestion standing after the caret",
+                &["autosuggest", "ghost", "history", "completion", "accept"],
+                match crate::input_keys::Platform::current() {
+                    crate::input_keys::Platform::Mac => "right / alt+right for one word",
+                    crate::input_keys::Platform::Other => "right / ctrl+right for one word",
+                },
             ),
             key(
                 "Interrupt, suspend, end the input",

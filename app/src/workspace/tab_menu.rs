@@ -27,24 +27,51 @@
 //!
 //! So this menu is not a worktree *manager*. It is a way to open one:
 //!
-//! * the repository's worktrees, each of which opens a pane in it *inside the
-//!   tab the menu was opened on* — or brings forward the pane already there;
+//! * the repository's worktrees, each of which opens a tab in it *in the group
+//!   the tab the menu was opened on belongs to* — or brings forward the pane
+//!   already there;
 //! * a way to make one, which asks for a branch name and nothing else;
 //! * a way to remove one, offered only for a checkout nothing is working in.
 //!
 //! The branches of one repository stay together because of that second half.
-//! A tab is the repository and its panes are its checkouts: the panel draws
-//! them under one group header — which appears by itself the moment a tab
-//! holds a second pane, so there is no group to make first and none to tidy
-//! away when one of them closes — and the body shows them side by side. A tab
-//! of its own for each checkout would file the branch away from the work it
-//! came out of, with nothing left in the list to say the two were related.
+//! A [group](crate::tab::TabGroup) is the repository and its tabs are its
+//! checkouts: the panel folds them under one heading — which is made the
+//! moment the second checkout arrives and pruned when its last member closes,
+//! so there is no group to make first and none to tidy away. A loose tab for
+//! each checkout would file the branch away from the work it came out of, with
+//! nothing left in the list to say the two were related.
+//!
+//! It used to open a *pane* instead, splitting the tab, and that was a
+//! different and wrong claim: two agents sharing a rectangle and a keyboard is
+//! something a person asks for when they want to watch two things at once, not
+//! what "give this branch a checkout of its own" means.
 //!
 //! herdr's shape, which is the tool this was modelled on: there a worktree is
 //! not a thing you administer but a workspace with a git checkout behind it,
 //! and creating one *opens* it. What is deliberately not taken is its
 //! `--base`: a worktree made from anything other than the head you are looking
 //! at is a question a menu cannot ask well.
+//!
+//! # The two keys
+//!
+//! Escape and Enter, claimed by
+//! [`Workspace::action_for`](super::view::Workspace::action_for) before the
+//! element tree sees them — the search box's arrangement, for the search box's
+//! reason: [`TextField`](super::text_field::TextField) answers Escape by
+//! emptying itself and Enter by doing nothing, so a creator whose branch field
+//! holds the keyboard would have no way out that is not a pointer.
+//!
+//! * **Escape** is Cancel: back to the list from the creator and from the
+//!   confirmation, and down from the list itself. One key, one step back.
+//! * **Enter** is the button that face leads with: Create in the creator,
+//!   where the name is selected the moment it opens so making a worktree is a
+//!   name and a press, and Remove in the confirmation, which is a question
+//!   already asked once and answered with the pointer that opened it.
+//!
+//! Enter stops at the second question. When git refuses over local work the
+//! button becomes "Remove anyway", and that one stays a click: a person who
+//! pressed Enter and got a warning back should not be able to delete the work
+//! it warns about by pressing the same key again.
 //!
 //! # Reading git off the frame
 //!
@@ -62,7 +89,6 @@ use crookui_core::prelude::*;
 
 use crate::git::worktree::{Local, Worktree};
 use crate::tab::TabId;
-use crate::text_input::TextInput;
 use crate::theme::theme;
 
 use super::action::{WorkspaceAction, WorktreeAction};
@@ -179,8 +205,6 @@ pub(super) struct TabMenuState {
     pub(super) repository: Option<String>,
     /// Where Crook keeps checkouts it made.
     pub(super) store: Option<PathBuf>,
-    /// The branch name being typed, while one is.
-    pub(super) branch: TextInput,
     /// What git said about the last thing that was asked of it, if it refused.
     pub(super) problem: Option<String>,
     /// Whether a git command is running for this menu right now.
@@ -493,11 +517,17 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_child(header("New worktree", ui))
-        .with_child(
+        .with_child(header("New worktree", ui));
+
+    // The field belongs to `crook/worktrees` rather than to this menu — see
+    // that plugin — so it is looked up rather than held. `None` cannot happen
+    // while this face is on screen: the plugin that claimed the field is the
+    // one whose entry opens the menu this face is a mode of.
+    if let Some(branch) = workspace.worktree_branch() {
+        column.add_child(
             Container::new(
                 super::text_field::TextField::new(
-                    state.branch.clone(),
+                    branch.clone(),
                     workspace.clipboard().clone(),
                     workspace.fonts(),
                     state.control(Control::Branch),
@@ -508,11 +538,12 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
             .with_horizontal_padding(ROW_INSET)
             .finish(),
         );
+    }
 
     // The path is shown rather than asked for, and it is shown *live*: it is
     // the answer to "where will this end up", which is a question about the
     // name being typed.
-    if let Some(checkout) = checkout_for(state) {
+    if let Some(checkout) = checkout_for(workspace) {
         let path = crate::git::user_friendly_path(&checkout, workspace.home());
         column.add_child(
             Container::new(
@@ -706,10 +737,20 @@ pub(super) fn holding(worktrees: &[Worktree], directory: Option<&Path>) -> Optio
 }
 
 /// Where the worktree being typed would go, once there is a name for it.
-pub(super) fn checkout_for(state: &TabMenuState) -> Option<PathBuf> {
+///
+/// Takes the workspace rather than the menu's state, because the name is being
+/// typed into a field that belongs to `crook/worktrees` and the workspace is
+/// what can find it.
+pub(super) fn checkout_for(workspace: &Workspace) -> Option<PathBuf> {
+    let state = workspace.tab_menu();
     let store = state.store.as_deref()?;
     let repository = state.repository.as_deref()?;
-    let branch = state.branch.editor().text().trim().to_owned();
+    let branch = workspace
+        .worktree_branch()?
+        .editor()
+        .text()
+        .trim()
+        .to_owned();
 
     (!branch.is_empty()).then(|| crate::git::worktree::checkout_path(store, repository, &branch))
 }

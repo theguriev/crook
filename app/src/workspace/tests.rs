@@ -18,12 +18,14 @@ use crookui_core::event::{Event, Keystroke, Modifiers, MouseButton, ScrollDelta}
 use crookui_core::executor::{Background, LocalQueue};
 use crookui_core::fonts::{FamilyId, FontId, LineStyle, StyleAndFont};
 use crookui_core::geometry::{RectF, Vector2F, vec2f};
-use crookui_core::icons::{Art, Mark};
+use crookui_core::icons::Mark;
 use crookui_core::platform::TextLayoutSystem;
 use crookui_core::prelude::*;
 use crookui_core::scene::{CornerRadius, Radius, Rect, Scene};
 use crookui_core::text_layout::{Glyph, Line, Run};
-use crookui_core::{AddSingletonModel as _, App, Presenter, WindowId};
+use crookui_core::{App, Presenter, WindowId};
+
+use crook_plugin::ActionName;
 
 use crate::Channel;
 use crate::git::{DiffStats, GitFacts, Head};
@@ -32,15 +34,16 @@ use crate::platform_insets::{ControlLayout, WindowChrome};
 use crate::settings::{
     Density, GeneralOptions, Granularity, PrimaryInfo, Settings, Subtitle, TabOptions,
 };
-use crate::tab::{AgentSession, AgentStatus, Direction, Pane, PaneId, Tab, TabAction, TabId};
+use crate::tab::{
+    AgentSession, AgentStatus, Direction, GroupId, Pane, PaneId, Tab, TabAction, TabId,
+};
 use crate::terminal_font::{CELL_FONT_SIZE, CellFont};
 use crate::theme::theme;
-use crate::usage_model::UsageModel;
 use crate::window_controls::{Recorder, Request, WindowState};
 
 use super::{
-    Fonts, Opening, OptionsAction, QuitRequest, SettingsAction, ThemeAction, Workspace,
-    WorkspaceAction, WorktreeAction, controls, tab_options_menu, tabs_panel,
+    Fonts, Opening, OptionsAction, QuitRequest, SettingsAction, TabMenuAction, ThemeAction,
+    Workspace, WorkspaceAction, WorktreeAction, tab_options_menu, tabs_panel,
 };
 
 /// Big enough that two tabs both reach their maximum width, so the geometry
@@ -153,7 +156,6 @@ impl Harness {
         // starts at most the model's own chain, and a pool of five per harness
         // is five OS threads per test for workers nothing ever schedules onto.
         let mut app = App::new(queue.foreground(), Arc::new(Background::new(2)));
-        app.update(|ctx| ctx.add_singleton_model(UsageModel::new));
 
         let quit_requests = Rc::new(Cell::new(0));
         let quit: QuitRequest = {
@@ -592,6 +594,71 @@ impl Harness {
         self.dispatch_workspace_action(WorkspaceAction::Worktree(action));
     }
 
+    /// Opens a tab's context menu over one of its rows, the way a secondary
+    /// press on that row does.
+    fn open_tab_menu_on(&mut self, tab: TabId, pane: PaneId) {
+        self.dispatch_workspace_action(WorkspaceAction::TabMenu(TabMenuAction::Open { tab, pane }));
+    }
+
+    /// The row that menu is up on, if it is up.
+    fn tab_menu_row(&self) -> Option<PaneId> {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.tab_context_menu().pane)
+    }
+
+    /// Runs a plugin's named action — which is what a menu entry does, and a
+    /// palette row, and a chord.
+    fn run_command(&mut self, name: &str) {
+        let action = ActionName::parse(name).expect("a literal that parses");
+        let id = self
+            .workspace
+            .read(&self.app, |workspace, _| workspace.host().action(&action))
+            .unwrap_or_else(|| panic!("nothing is registered as {name}"));
+        self.dispatch_workspace_action(WorkspaceAction::Run(id));
+    }
+
+    /// What a tab is called, whatever its panes are called.
+    fn tab_name(&self, tab: TabId) -> String {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace
+                .tabs()
+                .get(tab)
+                .map(|tab| tab.name().to_owned())
+                .unwrap_or_default()
+        })
+    }
+
+    /// Whether the keyboard is in a field some plugin owns.
+    fn a_plugin_field_has_keys(&self) -> bool {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.host().a_field_has_keys()
+        })
+    }
+
+    /// Whether it is in a pane's composer instead.
+    fn a_pane_field_has_keys(&self) -> bool {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.tabs().panes().any(|(_, pane)| {
+                workspace
+                    .input(pane.id())
+                    .is_some_and(|input| input.has_keys())
+            })
+        })
+    }
+
+    /// Every entry in a tab's context menu, as `owner/entry`, in drawing order.
+    fn tab_menu_entries(&self) -> Vec<String> {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace
+                .host()
+                .slots()
+                .contributors(crate::plugins::tabs::TAB_MENU_ENTRIES)
+                .into_iter()
+                .map(|(owner, entry)| format!("{owner}/{entry}"))
+                .collect()
+        })
+    }
+
     /// Shows the page whose rail row says `title`, the way a click on the rail
     /// does.
     fn select_settings_section(&mut self, title: &str) {
@@ -661,13 +728,6 @@ impl Harness {
         self.frame();
     }
 
-    /// Whether somebody clicked the chip and is still waiting.
-    fn usage_is_busy_for_user(&self) -> bool {
-        self.workspace.read(&self.app, |workspace, ctx| {
-            workspace.usage().as_ref(ctx).is_busy_for_user()
-        })
-    }
-
     /// The binding being recorded on the Keyboard Shortcuts page, if one is.
     fn recording(&self) -> Option<Recording> {
         self.workspace
@@ -683,13 +743,6 @@ impl Harness {
         assert!(!keybindings.is_empty(), "nothing in {text:?} was a binding");
 
         self.workspace_update(|workspace, _| workspace.set_keybindings(keybindings));
-    }
-
-    /// Whether the usage poll chain is meant to be running.
-    fn usage_is_wanted(&self) -> bool {
-        self.workspace.read(&self.app, |workspace, ctx| {
-            workspace.usage().as_ref(ctx).is_wanted()
-        })
     }
 
     /// Turns the wheel over the middle of the settings card.
@@ -732,6 +785,17 @@ impl Harness {
     /// row has a branch or a diff count to print — and the only way the
     /// assertion does not depend on the repository the test runs in.
     fn record_git(&mut self, pane: PaneId, branch: &str, diff: Option<DiffStats>) {
+        self.record_git_facts(pane, branch, diff, false);
+    }
+
+    /// The same, for a pane whose directory is a linked worktree.
+    fn record_git_facts(
+        &mut self,
+        pane: PaneId,
+        branch: &str,
+        diff: Option<DiffStats>,
+        worktree: bool,
+    ) {
         let directory = self.workspace.read(&self.app, |workspace, _| {
             workspace
                 .tabs()
@@ -742,6 +806,7 @@ impl Harness {
         let facts = GitFacts {
             branch: Some(Head::Branch(branch.to_owned())),
             diff,
+            worktree,
         };
 
         let workspace = &self.workspace;
@@ -766,6 +831,20 @@ impl Harness {
     fn active_id(&self) -> TabId {
         self.workspace
             .read(&self.app, |workspace, _| workspace.tabs().active_id())
+    }
+
+    /// The group a tab is folded into, if it is in one.
+    fn group_of(&self, tab: TabId) -> Option<GroupId> {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.tabs().get(tab).and_then(Tab::group)
+        })
+    }
+
+    /// The tabs of a group, in strip order.
+    fn members_of(&self, group: GroupId) -> Vec<TabId> {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.tabs().members(group).map(Tab::id).collect()
+        })
     }
 
     /// Where the menu lists the checkout under `root`, if it lists one.
@@ -1149,9 +1228,9 @@ fn tab_boxes(scene: &Scene) -> Vec<RectF> {
 
 /// The close buttons that are currently drawn, by their rounded boxes.
 ///
-/// Bounded by size as well as by radius: the options gear, its menu's info
-/// note and the hover detail card are all 4px-rounded too, and only a close
-/// button is a 16px square. A clipped one is narrower, never wider.
+/// Bounded by size as well as by radius: a row, the options menu's info note
+/// and the hover detail card are all 4px-rounded too, and only a close button
+/// is a 16px square. A clipped one is narrower, never wider.
 fn close_boxes(scene: &Scene) -> Vec<RectF> {
     rects_rounded_by(scene, Radius::Pixels(4.))
         .into_iter()
@@ -1360,10 +1439,9 @@ fn info_dot_box(scene: &Scene) -> RectF {
 /// The note the info dot opens.
 ///
 /// Every `surface_raised` panel with a 4px radius, which while the menu is up
-/// is the note and nothing else: the popup itself is 6px-rounded, the gear's
-/// tooltip is suppressed while its menu is open, and opening the menu takes
-/// down any hover card. Deliberately not filtered by width — the width is what
-/// the test is about.
+/// is the note and nothing else: the popup itself is 6px-rounded, and opening
+/// the menu takes down any hover card. Deliberately not filtered by width —
+/// the width is what the test is about.
 fn info_notes(scene: &Scene) -> Vec<RectF> {
     detail_cards(scene)
 }
@@ -1380,9 +1458,9 @@ fn checked_rows(scene: &Scene) -> Vec<usize> {
 
 /// Every Lucide icon the frame draws, in paint order.
 ///
-/// Marks that are drawings rather than icons — the usage chip's pirate — are
-/// not in here: they are two layers apiece and nothing that counts icons means
-/// to count them.
+/// Marks that are drawings rather than icons — a sandboxed plugin's pirate —
+/// are not in here: they are two layers apiece and nothing that counts icons
+/// means to count them.
 fn icons_of(scene: &Scene) -> Vec<Lucide> {
     scene
         .layers()
@@ -1392,24 +1470,6 @@ fn icons_of(scene: &Scene) -> Vec<Lucide> {
             Mark::Art(_) => None,
         })
         .collect()
-}
-
-/// Whether the usage chip's pirate is on screen.
-///
-/// The chip has no word on it to look for — it is a picture and a percentage —
-/// so what says it is drawn is its own mark being in the frame.
-fn pirate_is_drawn(scene: &Scene) -> bool {
-    pirate_box(scene).is_some()
-}
-
-/// Where the pirate is, which is the only way to click the chip: everything
-/// else in the pill is a percentage that changes with the reading.
-fn pirate_box(scene: &Scene) -> Option<RectF> {
-    scene
-        .layers()
-        .flat_map(|layer| layer.icons.iter())
-        .find(|drawn| matches!(drawn.icon_key.mark, Mark::Art(Art::PirateFace(_))))
-        .map(|drawn| drawn.bounds)
 }
 
 /// Every icon of one kind painted inside `bounds`.
@@ -1436,19 +1496,27 @@ fn row_label_x(scene: &Scene, row: RectF) -> f32 {
         .fold(f32::INFINITY, f32::min)
 }
 
-/// The gear that opens the popup, by its 16x16 icon slot's box.
-fn gear_box(scene: &Scene) -> RectF {
-    let boxes: Vec<RectF> = visible_rects(scene)
-        .filter(|(rect, _)| {
-            rect.corner_radius.get_top_left() == Radius::Pixels(4.)
-                && (rect.bounds.width() - 20.).abs() < 0.5
-                && (rect.bounds.height() - 20.).abs() < 0.5
-        })
-        .map(|(_, bounds)| bounds)
-        .collect();
+/// A point in the room the list leaves under the `+`, which is what the
+/// options menu's secondary press is aimed at.
+///
+/// Below the band rather than on it. The band answers the same press, but it
+/// paints a box of its own and so covers the ground exactly there — pressing
+/// it would prove the band's handler works and say nothing about the room.
+/// Ninety pixels off the foot of the panel clears the row of section buttons,
+/// and it is far enough down to be outside the menu this opens: that menu
+/// hangs from the *top* of the list area, so a point just under a short list
+/// would be under the popup as well and the second press of a toggle would
+/// land on the popup instead of on the ground.
+fn empty_list_space(scene: &Scene) -> Vector2F {
+    let panel = panel_box(scene);
+    let plus = plus_box(scene);
+    let point = vec2f(center(panel).x(), panel.max_y() - 90.);
 
-    assert_eq!(boxes.len(), 1, "exactly one options gear per frame");
-    boxes[0]
+    assert!(
+        point.y() > plus.max_y(),
+        "the list leaves no room under the {plus:?} to press"
+    );
+    point
 }
 
 /// The chips a row draws, by their pill boxes.
@@ -1567,16 +1635,20 @@ fn the_first_tab_clears_the_window_controls_this_platform_draws() {
 }
 
 #[test]
-fn the_header_reserves_the_corner_this_platform_puts_its_controls_in_and_no_other() {
+fn the_header_reserves_the_left_corner_this_platform_puts_its_controls_in_and_no_more() {
     // Crook's header *is* the title bar, so something is over it — and only at
     // one end. Reserving at both would leave a hole at whichever end this
     // platform's controls are not, which is the failure nobody sees because it
     // is always the end they are not looking at.
+    //
+    // Only the left end is measurable from a release binary: nothing in the
+    // box is pinned to the right of this row, so the reservation at that end
+    // is checked against what a plugin pins there — see
+    // `sandboxed::what_a_plugin_pins_to_the_header_clears_the_right_corner`.
     let mut harness = Harness::new(1);
     let insets = harness.window_insets();
     let scene = harness.frame();
     let first = tab_boxes(&scene)[0];
-    let chip = pill_box(&scene);
 
     assert!(
         first.min_x() >= insets.header_left,
@@ -1590,16 +1662,6 @@ fn the_header_reserves_the_corner_this_platform_puts_its_controls_in_and_no_othe
         "the first tab starts at {}, further in than the reservation of {}",
         first.min_x(),
         insets.header_left
-    );
-    assert!(
-        WINDOW.x() - chip.max_x() >= insets.header_right,
-        "the chip runs into the {} reserved on the right",
-        insets.header_right
-    );
-    assert!(
-        WINDOW.x() - chip.max_x() < insets.header_right + 24.,
-        "the chip stops {} short of the right edge",
-        WINDOW.x() - chip.max_x()
     );
 }
 
@@ -1639,7 +1701,7 @@ fn pressing_the_header_where_nothing_is_picks_the_window_up() {
     // so waiting for the release would mean waiting for one that never comes.
     let mut harness = Harness::new(1);
     let scene = harness.frame();
-    let empty = vec2f(pill_box(&scene).min_x() - 30., center(pill_box(&scene)).y());
+    let empty = empty_header_point(&scene);
 
     harness.dispatch(Event::MouseDown {
         button: MouseButton::Left,
@@ -1652,18 +1714,22 @@ fn pressing_the_header_where_nothing_is_picks_the_window_up() {
 }
 
 #[test]
-fn pressing_something_in_the_header_does_not_pick_the_window_up() {
+fn pressing_something_in_the_title_bar_does_not_pick_the_window_up() {
     // "Empty" is whatever the row's children did not claim, and this is the
-    // half of that which fails silently: a header that dragged the window from
-    // its own controls would make every tab unclickable, and the tab would
-    // still be highlighted while the window moved.
+    // half of that which fails silently: a title bar that dragged the window
+    // from its own controls would make every tab unclickable, and the tab
+    // would still be highlighted while the window moved.
+    //
+    // The controls are the panel's — the header row itself holds only what a
+    // plugin pinned to it, which on a release build is nothing — and the
+    // panel's own bar is title bar too, so they are what this rule is about.
     let mut harness = Harness::new(2);
     let scene = harness.frame();
     let tab = center(tab_boxes(&scene)[0]);
-    let chip = center(pill_box(&scene));
+    let plus = center(plus_box(&scene));
 
     harness.click(tab, MouseButton::Left);
-    harness.click(chip, MouseButton::Left);
+    harness.click(plus, MouseButton::Left);
 
     assert!(
         harness.window_requests().is_empty(),
@@ -1681,10 +1747,7 @@ fn a_press_that_dismisses_the_options_menu_does_not_pick_the_window_up() {
     let mut harness = Harness::new(1);
     harness.dispatch_option(OptionsAction::TogglePopup);
     let scene = harness.frame();
-    let empty = vec2f(
-        pill_box(&scene).min_x() - 30.,
-        center(tab_boxes(&scene)[0]).y(),
-    );
+    let empty = empty_header_point(&scene);
 
     harness.click_times(empty, 1);
 
@@ -1702,7 +1765,7 @@ fn a_press_that_dismisses_the_options_menu_does_not_pick_the_window_up() {
 fn double_clicking_the_header_maximises_the_window() {
     let mut harness = Harness::new(1);
     let scene = harness.frame();
-    let empty = vec2f(pill_box(&scene).min_x() - 30., center(pill_box(&scene)).y());
+    let empty = empty_header_point(&scene);
 
     harness.click_times(empty, 1);
     harness.click_times(empty, 2);
@@ -1718,10 +1781,12 @@ fn double_clicking_the_header_maximises_the_window() {
 
 #[test]
 fn the_panel_owns_the_top_left_corner_of_the_window_in_the_vertical_layout() {
-    // The layout Crook opens in. The panel's control bar is the window's
-    // top-left corner, so it is what the traffic lights are painted over and
-    // what that end of the window is dragged by — and the header, which is no
-    // longer in that corner, owes neither.
+    // The layout Crook opens in. The panel's top row is the window's top-left
+    // corner, so it is what the traffic lights are painted over and what that
+    // end of the window is dragged by — and the header, which is no longer in
+    // that corner, owes neither. The control bar that used to be that row is
+    // gone; what is left is the reservation itself, which exists only where
+    // something is painted over it.
     let mut harness = Harness::panel(1);
     harness.override_controls(ControlLayout::MacOs);
     let insets = harness.window_insets();
@@ -1729,19 +1794,19 @@ fn the_panel_owns_the_top_left_corner_of_the_window_in_the_vertical_layout() {
     assert!(insets.panel_left > 0., "the panel took no reservation");
 
     let scene = harness.frame();
-    let gear = gear_box(&scene);
+    let field = panel_search_box(&scene);
     assert!(
-        gear.min_x() >= insets.panel_left,
-        "the panel's gear is at {} under a {} reservation",
-        gear.min_x(),
-        insets.panel_left
+        field.min_y() >= tabs_panel::TITLE_STRIP_HEIGHT,
+        "the search box starts at {} and the traffic lights reach {}",
+        field.min_y(),
+        tabs_panel::TITLE_STRIP_HEIGHT
     );
 
-    // The empty half of the control bar: left of the gear, right of the room
-    // the traffic lights are painted in.
+    // The strip itself: above the search box, inside the room the lights are
+    // painted in.
     harness.dispatch(Event::MouseDown {
         button: MouseButton::Left,
-        position: vec2f((insets.panel_left + gear.min_x()) / 2., center(gear).y()),
+        position: vec2f(insets.panel_left / 2., tabs_panel::TITLE_STRIP_HEIGHT / 2.),
         modifiers: Modifiers::default(),
         click_count: 1,
     });
@@ -1749,17 +1814,79 @@ fn the_panel_owns_the_top_left_corner_of_the_window_in_the_vertical_layout() {
     assert_eq!(harness.window_requests(), vec![Request::Drag]);
 }
 
-/// The usage chip's pill, by its fully-rounded box.
-fn pill_box(scene: &Scene) -> RectF {
+#[test]
+fn a_platform_that_paints_nothing_over_the_panel_gets_no_strip_at_all() {
+    // The other half, and the one the person asking for the control bar to go
+    // was looking at: with nothing over the corner there is nothing to reserve,
+    // so the panel starts with its search box and the row is not drawn at all.
+    let mut harness = Harness::panel(1);
+    harness.override_controls(ControlLayout::Freedesktop);
+    assert_eq!(harness.window_insets().panel_left, 0.);
+
+    let field = panel_search_box(&harness.frame());
+    assert!(
+        field.min_y() < tabs_panel::TITLE_STRIP_HEIGHT,
+        "the search box starts at {}, which is a strip's worth down a panel        that reserved nothing",
+        field.min_y()
+    );
+}
+
+/// The header row, by the ground it puts across the top of the window.
+///
+/// Found the way a person finds it rather than by what is in it: it starts at
+/// the very top and it runs the whole width, and nothing else does both. It
+/// used to be found by the rule under it, until the rule was taken out — which
+/// is why this looks for the ground instead. What a release binary draws
+/// *inside* the row is nothing at all — the one place it has is filled by a
+/// plugin installed from a file — so a helper that looked for a control would
+/// find the row only on the builds that had one.
+fn header_box(scene: &Scene) -> RectF {
+    let right = far_edge(scene);
     let boxes: Vec<RectF> = visible_rects(scene)
-        .filter(|(rect, _)| rect.corner_radius.get_top_left() == Radius::Percentage(50.))
+        .filter(|(rect, bounds)| {
+            rect.background == Fill::Solid(theme().surface) && is_the_header(bounds, right)
+        })
         .map(|(_, bounds)| bounds)
-        // The status dots are round too, and much smaller.
-        .filter(|bounds| bounds.width() > 40.)
         .collect();
 
-    assert_eq!(boxes.len(), 1, "exactly one usage chip per frame");
+    assert_eq!(boxes.len(), 1, "exactly one header per frame");
     boxes[0]
+}
+
+/// Whether a box is where the header is: against the top of the frame, and
+/// reaching its right edge.
+///
+/// Two rules, because either alone catches something else. The tabs panel is
+/// down the left side and starts at the top too, so "at the top" is not
+/// enough; the header starts where the panel ends and is therefore not the
+/// full width, so "as wide as the frame" is wrong. Touching the top *and* the
+/// far edge is the one shape nothing else has.
+///
+/// The far edge comes from the scene rather than from a constant: a frame is
+/// taken at whatever size a test wants one at, and a helper that compared
+/// against the usual size would quietly answer "no header" in the tests that
+/// take a small one.
+fn is_the_header(bounds: &RectF, right: f32) -> bool {
+    bounds.min_y() < 0.5 && bounds.max_x() >= right - 0.5
+}
+
+/// How far the frame reaches.
+fn far_edge(scene: &Scene) -> f32 {
+    visible_rects(scene)
+        .map(|(_, bounds)| bounds.max_x())
+        .fold(0., f32::max)
+}
+
+/// A point in the header where nothing is drawn.
+///
+/// The row holds one item at most — whatever a plugin pinned to the right of
+/// it — and a release binary pins nothing, so its middle is empty space by
+/// construction. Derived from the row's own bounds rather than measured off
+/// something drawn in it, because what is drawn in it is not this build's
+/// decision to make: a test about picking the window up must not start
+/// failing the day somebody installs a plugin.
+fn empty_header_point(scene: &Scene) -> Vector2F {
+    center(header_box(scene))
 }
 
 /// Enough tabs that each one is far narrower than its own contents.
@@ -1786,16 +1913,15 @@ fn clicking_a_crowded_tab_selects_it_and_closes_nothing() {
 
 #[test]
 fn the_new_tab_button_opens_a_tab_without_closing_the_active_one() {
+    // Crowded on purpose: the `+` sits under a list long enough to scroll, and
+    // it is outside the scroll area for exactly that reason — a `+` that went
+    // with the content would be unreachable at the tab count a person most
+    // wants another tab at.
     let mut harness = Harness::new(CROWDED);
     let ids = harness.tab_ids();
     let button = new_tab_box(&harness.frame());
 
-    // Its left edge: the first place the active tab's close button reaches
-    // once the strip is crowded enough for it to escape.
-    harness.click(
-        button.origin() + vec2f(2., button.height() / 2.),
-        MouseButton::Left,
-    );
+    harness.click(center(button), MouseButton::Left);
 
     let after = harness.tab_ids();
     assert_eq!(after.len(), ids.len() + 1, "the new tab replaced one");
@@ -1864,22 +1990,27 @@ fn glyph_count(scene: &Scene) -> usize {
 /// has not been told otherwise is the same `surface` the header and the tabs
 /// panel are painted in. So it is found by what it is *not*: filled like a
 /// terminal, and neither bordered (the header's underline, the panel's right
-/// edge) nor rounded (the usage chip, and the well a pane composes its next
-/// command in — see [`composer_boxes`] for that one).
+/// edge) nor rounded (the well a pane composes its next command in — see
+/// [`composer_boxes`] for that one).
 ///
 /// The one other thing that matches is the grid's own ground, painted inside
 /// the pane it belongs to, so a rect contained in another is dropped. Without
 /// that a shell test would count every pane twice.
 fn panel_boxes(scene: &Scene) -> Vec<RectF> {
+    let right = far_edge(scene);
     let candidates: Vec<RectF> = visible_rects(scene)
-        .filter(|(rect, _)| {
+        .filter(|(rect, bounds)| {
             rect.background == Fill::Solid(theme().surface)
                 && rect.border == Border::default()
                 && rect.corner_radius == CornerRadius::default()
+                // The header is drawn on the same ground and, since the rule
+                // under it was taken out, in the same shape. It is told apart
+                // the way [`header_box`] tells it apart, so that the two
+                // helpers cannot disagree about which rect is which.
+                && !is_the_header(bounds, right)
         })
         .map(|(_, bounds)| bounds)
         .collect();
-
     candidates
         .iter()
         .filter(|bounds| {
@@ -2138,13 +2269,16 @@ impl Harness {
 }
 
 #[test]
-fn the_gear_opens_the_menu_and_a_click_outside_closes_it() {
-    let mut harness = Harness::seeded();
+fn the_empty_space_under_the_list_opens_the_menu_and_a_click_outside_closes_it() {
+    let mut harness = Harness::seeded_panel();
     assert!(!harness.is_menu_open());
 
-    let gear = gear_box(&harness.frame());
-    harness.click(center(gear), MouseButton::Left);
-    assert!(harness.is_menu_open(), "the gear did not open the menu");
+    let ground = empty_list_space(&harness.frame());
+    harness.click(ground, MouseButton::Right);
+    assert!(
+        harness.is_menu_open(),
+        "a secondary press on the empty space under the list opened nothing"
+    );
 
     let popup = menu_box(&harness.frame());
     // Well clear of the popup, and over the body — which must not react.
@@ -2156,22 +2290,23 @@ fn the_gear_opens_the_menu_and_a_click_outside_closes_it() {
 }
 
 #[test]
-fn re_clicking_the_gear_closes_the_menu_once_rather_than_twice() {
-    // The gear is under the modal underlay while the menu is up, so its own
-    // handler never fires and the press goes through the dismiss path. Letting
-    // both run would toggle twice in one click and leave the menu looking
-    // frozen open.
-    let mut harness = Harness::seeded();
-    let gear = gear_box(&harness.frame());
+fn pressing_the_empty_space_again_closes_the_menu_once_rather_than_twice() {
+    // The ground is under the modal underlay while the menu is up, so its own
+    // handler never fires and the press goes through the dismiss path — which
+    // takes the secondary button as well as the primary one, for exactly this
+    // gesture. Letting both run would toggle twice in one press and leave the
+    // menu looking frozen open.
+    let mut harness = Harness::seeded_panel();
+    let ground = empty_list_space(&harness.frame());
 
-    harness.click(center(gear), MouseButton::Left);
+    harness.click(ground, MouseButton::Right);
     assert!(harness.is_menu_open());
     harness.frame();
 
-    harness.click(center(gear), MouseButton::Left);
+    harness.click(ground, MouseButton::Right);
     assert!(
         !harness.is_menu_open(),
-        "re-clicking the gear toggled twice"
+        "pressing the empty space again toggled twice"
     );
 }
 
@@ -2552,33 +2687,6 @@ fn clicking_a_density_segment_changes_how_much_of_a_row_there_is() {
 }
 
 #[test]
-fn the_gear_says_what_it_does_while_the_pointer_is_on_it_and_the_menu_is_down() {
-    let mut harness = Harness::seeded();
-    let gear = gear_box(&harness.frame());
-    assert!(!frame_text(&harness.frame()).contains(controls::GEAR_TOOLTIP));
-
-    harness.move_to(center(gear));
-    let hovered = harness.frame();
-    assert!(
-        frame_text(&hovered).contains(controls::GEAR_TOOLTIP),
-        "hovering the gear named nothing; the only way to find out what it \
-         does is to click it"
-    );
-    // The tooltip is an anchored overlay, which contributes nothing to the
-    // size of the stack it hangs off — a button that grew or moved when it was
-    // named would slide out from under the pointer that named it.
-    assert_eq!(gear, gear_box(&hovered), "the tooltip moved the gear");
-
-    // Suppressed while the menu is up: the popup hangs off this button, and a
-    // tooltip left there would sit between the gear and its own menu.
-    harness.dispatch_option(OptionsAction::TogglePopup);
-    assert!(
-        !frame_text(&harness.frame()).contains(controls::GEAR_TOOLTIP),
-        "the tooltip stayed up under the menu it opened"
-    );
-}
-
-#[test]
 fn the_info_note_fits_inside_the_menu_it_belongs_to() {
     // `Text` never wraps and `Stack` lays an anchored child out against the
     // whole window, so the unbroken sentence measured about twice the popup's
@@ -2891,7 +2999,7 @@ fn every_mark_in_the_chrome_is_an_icon_rather_than_a_codepoint() {
     // character it hopes the machine has a font for. The codepoints below are
     // the ones that used to be drawn here, and a `Text` carrying any of them
     // is a mark that will be a different shape on somebody else's machine —
-    // or, for the gear, a colour emoji.
+    // or, for the settings mark, a colour emoji.
     let mut harness = Harness::seeded();
 
     // The tab list first: the branch mark is a row's, and rows are only drawn
@@ -2909,7 +3017,7 @@ fn every_mark_in_the_chrome_is_an_icon_rather_than_a_codepoint() {
     let drawn = icons_of(&scene);
     assert!(
         drawn.contains(&Lucide::Settings),
-        "the settings draw no gear, only {drawn:?}"
+        "the settings draw no settings mark, only {drawn:?}"
     );
 
     let text = frame_text(&scene);
@@ -2992,7 +3100,7 @@ fn worktree_remove_cross(scene: &Scene) -> RectF {
 /// The worktree menu the active tab opens, by its popup box.
 ///
 /// Found the way the options menu is: the one surface-raised, 6px-rounded box
-/// that is wide enough to be it. The gear's menu is 200 wide and this is 260,
+/// that is wide enough to be it. The options menu is 200 wide and this is 260,
 /// which is what tells the two apart in a frame that could hold either.
 fn worktree_menu_box(scene: &Scene) -> Option<RectF> {
     visible_rects(scene)
@@ -3005,8 +3113,67 @@ fn worktree_menu_box(scene: &Scene) -> Option<RectF> {
         .next()
 }
 
+/// Every rect painted in `fill`, which for a tab colour is its stripe.
+fn stripes_of(scene: &Scene, fill: Color) -> Vec<RectF> {
+    visible_rects(scene)
+        .filter(|(rect, _)| rect.background == Fill::Solid(fill))
+        .map(|(_, bounds)| bounds)
+        .collect()
+}
+
+/// The popup a tab's secondary press opens, by its box.
+///
+/// Told apart from the worktree list hanging off it by its width, which is the
+/// only thing about the two columns that differs: a worktree row carries a
+/// path and needs the extra 28px, and everything else — the radius, the
+/// ground, the inset — is deliberately shared so that the pair reads as one
+/// menu.
+fn tab_menu_box(scene: &Scene) -> Option<RectF> {
+    visible_rects(scene)
+        .filter(|(rect, _)| {
+            rect.corner_radius.get_top_left() == Radius::Pixels(6.)
+                && rect.background == Fill::Solid(theme().surface_raised)
+                && (rect.bounds.width() - super::tab_context_menu::MENU_WIDTH).abs() < 0.5
+        })
+        .map(|(_, bounds)| bounds)
+        .next()
+}
+
+/// The entry of that menu whose label begins with `prefix`, by its band.
+///
+/// `worktree_row_saying`'s shape, against the other menu: the entries are the
+/// popup's only full-width bands, so one is found by the glyphs on it.
+fn tab_menu_row_saying(scene: &Scene, prefix: &str) -> RectF {
+    let menu = tab_menu_box(scene).expect("no tab menu is up");
+    let baseline = scene
+        .layers()
+        .flat_map(|layer| layer.glyphs.iter())
+        .filter(|glyph| menu.contains_point(glyph.position))
+        .map(|glyph| glyph.position.y())
+        .find(|y| {
+            text_where(scene, |position| {
+                menu.contains_point(position) && (position.y() - y).abs() < 0.5
+            })
+            .contains(prefix)
+        })
+        .unwrap_or_else(|| panic!("no entry of the menu begins with {prefix:?}"));
+
+    RectF::new(
+        vec2f(menu.min_x() + 8., baseline - 3.),
+        vec2f(menu.width() - 16., 6.),
+    )
+}
+
+/// Whether that menu is offering an entry beginning with `prefix`.
+fn tab_menu_offers(scene: &Scene, prefix: &str) -> bool {
+    let Some(menu) = tab_menu_box(scene) else {
+        return false;
+    };
+    text_where(scene, |position| menu.contains_point(position)).contains(prefix)
+}
+
 #[test]
-fn right_clicking_a_tab_opens_its_worktree_menu() {
+fn right_clicking_a_tab_opens_its_menu() {
     // The gesture, and the whole of why it is this one: it is the button a
     // context menu opens on everywhere else. The left one used to do it — on
     // the row you were already in, where the click was otherwise free — and
@@ -3015,7 +3182,7 @@ fn right_clicking_a_tab_opens_its_worktree_menu() {
     let mut harness = Harness::seeded();
     let scene = harness.frame();
     assert!(
-        worktree_menu_box(&scene).is_none(),
+        tab_menu_box(&scene).is_none(),
         "the menu was up before anything was clicked"
     );
 
@@ -3023,8 +3190,41 @@ fn right_clicking_a_tab_opens_its_worktree_menu() {
     harness.click(center(tab), MouseButton::Right);
 
     assert!(
-        worktree_menu_box(&harness.frame()).is_some(),
+        tab_menu_box(&harness.frame()).is_some(),
         "a right press on a row did not open its menu"
+    );
+}
+
+#[test]
+fn the_worktrees_entry_opens_the_list_beside_the_menu() {
+    // The submenu, through the pointer: the entry that used to *be* this
+    // gesture is now one row of what it opens. Beside rather than below,
+    // because below a menu row is the next menu row.
+    let mut harness = Harness::seeded();
+    let pane = harness.pane_ids()[0];
+    harness.record_git(pane, BRANCH, None);
+
+    let tab = tab_boxes(&harness.frame())[0];
+    harness.click(center(tab), MouseButton::Right);
+
+    let scene = harness.frame();
+    let menu = tab_menu_box(&scene).expect("the menu did not open");
+    harness.click(
+        center(tab_menu_row_saying(&scene, "Worktrees")),
+        MouseButton::Left,
+    );
+
+    let scene = harness.frame();
+    let list = worktree_menu_box(&scene).expect("the entry opened no worktree list");
+    assert!(
+        tab_menu_box(&scene).is_some(),
+        "opening the submenu took the menu it hangs off down with it"
+    );
+    assert!(
+        list.min_x() >= menu.min_x(),
+        "the list opened at {} and the menu it hangs off starts at {}",
+        list.min_x(),
+        menu.min_x()
     );
 }
 
@@ -3038,8 +3238,8 @@ fn left_clicking_the_tab_you_are_already_in_opens_nothing() {
     harness.click(center(tab), MouseButton::Left);
 
     assert!(
-        worktree_menu_box(&harness.frame()).is_none(),
-        "a left click on the active row opened the worktree menu"
+        tab_menu_box(&harness.frame()).is_none(),
+        "a left click on the active row opened its menu"
     );
 }
 
@@ -3053,25 +3253,36 @@ fn right_clicking_it_again_takes_the_menu_down() {
     harness.click(center(tab), MouseButton::Right);
 
     assert!(
-        worktree_menu_box(&harness.frame()).is_none(),
+        tab_menu_box(&harness.frame()).is_none(),
         "a second right press on the same row left the menu up"
     );
 }
 
 #[test]
-fn a_tab_outside_a_repository_opens_no_menu() {
+fn a_tab_outside_a_repository_is_offered_no_worktrees() {
     // "If it is under git, there should be worktree options" — and if it is
-    // not, the press does nothing. A menu that opened everywhere and was empty
-    // half the time would teach people not to reach for it.
+    // not, that entry is not there. This used to cost the whole gesture: the
+    // menu *was* the worktrees, so a tab outside a repository opened nothing
+    // at all. Now the rule costs exactly the row it was ever about, and the
+    // other four entries are as true of this tab as of any.
     let mut harness = Harness::new(1);
     let scene = harness.frame();
     let tab = tab_boxes(&scene)[0];
 
     harness.click(center(tab), MouseButton::Right);
 
+    let scene = harness.frame();
     assert!(
-        worktree_menu_box(&harness.frame()).is_none(),
-        "a tab with no repository behind it opened a worktree menu"
+        tab_menu_box(&scene).is_some(),
+        "a tab with no repository behind it opened no menu at all"
+    );
+    assert!(
+        !tab_menu_offers(&scene, "Worktrees"),
+        "a tab with no repository behind it was offered its worktrees"
+    );
+    assert!(
+        tab_menu_offers(&scene, "Close tab"),
+        "the entries that are about any tab went with the one that is not"
     );
 }
 
@@ -3090,7 +3301,7 @@ fn clicking_a_tab_that_is_not_the_active_one_still_just_selects_it() {
     let scene = harness.frame();
 
     assert!(
-        worktree_menu_box(&scene).is_none(),
+        tab_menu_box(&scene).is_none(),
         "clicking away from the active tab opened a menu instead of selecting"
     );
     assert_eq!(
@@ -3116,7 +3327,7 @@ fn right_clicking_a_tab_that_is_not_the_active_one_opens_its_menu() {
     harness.click(center(first), MouseButton::Right);
 
     assert!(
-        worktree_menu_box(&harness.frame()).is_some(),
+        tab_menu_box(&harness.frame()).is_some(),
         "a right press on an inactive tab opened no menu"
     );
     assert_eq!(
@@ -3162,6 +3373,11 @@ fn the_menu_reads_the_repository_the_click_landed_on() {
 
     let tab = tab_boxes(&harness.frame())[0];
     harness.click(center(tab), MouseButton::Right);
+    let scene = harness.frame();
+    harness.click(
+        center(tab_menu_row_saying(&scene, "Worktrees")),
+        MouseButton::Left,
+    );
     harness.wait_for("the repository to be read", |harness| {
         harness.worktrees_listed().is_some()
     });
@@ -3170,6 +3386,442 @@ fn the_menu_reads_the_repository_the_click_landed_on() {
         harness.worktrees_listed(),
         Some(1),
         "a fresh repository has one checkout"
+    );
+}
+
+#[test]
+fn a_tabs_menu_is_the_entries_its_plugins_put_in_it() {
+    // The shell knows no entry by name, so this list is the whole of what a
+    // tab's menu is — and it comes from two plugins rather than one, which is
+    // the fact the slot exists to make true. `crook/worktrees` is last because
+    // it asked for the band after the one "Close tab" is alone in.
+    let harness = Harness::seeded();
+
+    assert_eq!(
+        harness.tab_menu_entries(),
+        [
+            "crook/tabs/pin-tab",
+            "crook/tabs/new-group-with-tab",
+            "crook/tabs/copy-pane-title",
+            "crook/tabs/copy-working-directory",
+            "crook/tabs/rename-tab",
+            "crook/tabs/rename-pane",
+            "crook/tabs/close-tab",
+            "crook/worktrees/menu",
+            "crook/tabs/color",
+        ],
+        "the menu is not the entries its plugins contributed, in band order"
+    );
+}
+
+#[test]
+fn a_secondary_press_opens_the_menu_on_the_row_it_was_made_on() {
+    // The menu used to be about the tab and opened on the focused pane's row
+    // alone. Half its entries now name a *pane*, so which row was pressed is a
+    // fact it has to keep — and a second press on the same row closes it,
+    // which is what anything opened by being pressed does.
+    let mut harness = Harness::seeded();
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    harness.frame();
+
+    let tab = harness.active_id();
+    let panes = harness.pane_ids();
+    let (first, second) = (panes[0], panes[1]);
+
+    harness.open_tab_menu_on(tab, second);
+    assert_eq!(harness.tab_menu_row(), Some(second));
+
+    harness.open_tab_menu_on(tab, first);
+    assert_eq!(
+        harness.tab_menu_row(),
+        Some(first),
+        "pressing another row moved the menu rather than opening a second one"
+    );
+
+    harness.open_tab_menu_on(tab, first);
+    assert_eq!(
+        harness.tab_menu_row(),
+        None,
+        "pressing the row whose menu is up did not close it"
+    );
+}
+
+#[test]
+fn the_menu_is_about_the_row_it_was_opened_on_rather_than_the_focused_one() {
+    // What "Copy pane title" copies. A split leaves the second pane focused,
+    // so a menu opened on the first row that answered with the focused pane
+    // would copy the wrong one — and the test would still pass with no menu
+    // open at all, which is why the fallback is checked here too.
+    let mut harness = Harness::seeded();
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    harness.frame();
+
+    let tab = harness.active_id();
+    let first = harness.pane_ids()[0];
+    let focused = harness.focused_pane_id().expect("a split tab has a focus");
+    assert_ne!(first, focused, "the split did not move the focus");
+
+    harness.open_tab_menu_on(tab, first);
+    assert_eq!(
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.menu_target().map(|(_, pane)| pane)
+        }),
+        Some(first)
+    );
+
+    harness.dispatch_workspace_action(WorkspaceAction::TabMenu(TabMenuAction::Close));
+    assert_eq!(
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.menu_target().map(|(_, pane)| pane)
+        }),
+        Some(focused),
+        "with no menu up a command means the tab a person is looking at"
+    );
+}
+
+#[test]
+fn close_tab_closes_the_tab_its_menu_is_on() {
+    // The entry is a named action, so it is reachable from the palette and
+    // from a chord as well as from the row — and all three have to mean the
+    // same tab. A handler that closed `active_id` would be right twice and
+    // wrong on the gesture the entry actually exists for.
+    let mut harness = Harness::seeded();
+    harness.dispatch_action(TabAction::New);
+    harness.frame();
+
+    let tabs = harness.tab_ids();
+    let (first, active) = (tabs[0], harness.active_id());
+    assert_ne!(first, active, "the new tab is the active one");
+
+    let pane = harness.workspace.read(&harness.app, |workspace, _| {
+        workspace
+            .tabs()
+            .get(first)
+            .map(|tab| tab.panes().focused_id())
+            .expect("the first tab is still open")
+    });
+    harness.open_tab_menu_on(first, pane);
+    harness.run_command("crook/tabs/close-tab");
+    harness.frame();
+
+    assert_eq!(
+        harness.tab_ids(),
+        [active],
+        "the entry closed the active tab rather than the one its menu was on"
+    );
+    assert!(
+        !harness.a_popup_is_open(),
+        "the menu outlived the tab it was open on"
+    );
+}
+
+#[test]
+fn escape_takes_the_submenu_down_before_the_menu() {
+    // One key, one step back, twice — the rule the worktree menu already
+    // followed inside itself, extended over the menu that now holds it. A
+    // first press that closed both would throw away a menu a person had only
+    // wanted to back out of one level of.
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the seeded tab has a pane");
+    harness.record_git(pane, BRANCH, None);
+    harness.frame();
+
+    harness.open_tab_menu_on(tab, pane);
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    assert!(
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.tab_menu().is_open()),
+        "the submenu did not open"
+    );
+
+    assert!(harness.press_key("escape", Modifiers::default()));
+    assert_eq!(
+        harness.tab_menu_row(),
+        Some(pane),
+        "the first Escape took the menu down as well as its submenu"
+    );
+
+    assert!(harness.press_key("escape", Modifiers::default()));
+    assert_eq!(
+        harness.tab_menu_row(),
+        None,
+        "the second Escape did nothing"
+    );
+    assert!(!harness.a_popup_is_open());
+}
+
+#[test]
+fn a_rename_takes_the_keyboard_and_gives_it_back() {
+    // The whole of why the host has a field registry. Nothing in the window's
+    // own source names this field: `sync_input_keys` asks the host, the host
+    // asks the plugin that claimed it, and the plugin answers from state the
+    // workspace has never heard of.
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the seeded tab has a pane");
+    let was = harness.tab_name(tab);
+
+    harness.open_tab_menu_on(tab, pane);
+    harness.run_command("crook/tabs/rename-tab");
+    // The field is only in the tree once the menu has been drawn with it, and
+    // a keystroke lands in an element rather than in a state.
+    harness.frame();
+
+    harness.type_text("release work");
+    assert!(
+        harness.press_key("enter", Modifiers::default()),
+        "enter was not claimed by the field being typed into"
+    );
+
+    assert_eq!(harness.tab_name(tab), "release work");
+    assert_ne!(was, "release work", "the tab was already called that");
+    assert!(
+        !harness.a_popup_is_open(),
+        "committing a rename left the menu up"
+    );
+}
+
+#[test]
+fn escape_abandons_a_rename_and_leaves_the_menu_standing() {
+    // One step back, which is the rule everywhere else in this menu: the first
+    // Escape undoes the gesture that opened the field, not the one that opened
+    // the menu the field is in.
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the seeded tab has a pane");
+    let was = harness.tab_name(tab);
+
+    harness.open_tab_menu_on(tab, pane);
+    harness.run_command("crook/tabs/rename-tab");
+    // The field is only in the tree once the menu has been drawn with it, and
+    // a keystroke lands in an element rather than in a state.
+    harness.frame();
+    harness.type_text("nope");
+    assert!(harness.press_key("escape", Modifiers::default()));
+
+    assert_eq!(harness.tab_name(tab), was, "escape renamed it anyway");
+    assert_eq!(
+        harness.tab_menu_row(),
+        Some(pane),
+        "escape took the menu down as well as the field"
+    );
+}
+
+#[test]
+fn a_person_s_name_for_a_pane_beats_the_one_its_agent_chose() {
+    // The precedence, through the gesture. An agent that renames its work
+    // every few turns would otherwise take the name back within the minute,
+    // and somebody who typed one would have no way to make it stick.
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the seeded tab has a pane");
+
+    harness.open_tab_menu_on(tab, pane);
+    harness.run_command("crook/tabs/rename-pane");
+    harness.frame();
+    harness.type_text("the long build");
+    assert!(harness.press_key("enter", Modifiers::default()));
+    assert_eq!(harness.pane_title(pane), "the long build");
+
+    harness.update_session(pane, |session| {
+        session.derived_title = Some("summarising the diff".to_owned());
+    });
+    assert_eq!(
+        harness.pane_title(pane),
+        "the long build",
+        "the agent took the name back"
+    );
+}
+
+#[test]
+fn emptying_the_field_puts_back_the_name_it_started_with() {
+    // A person who clears the box is asking for the name they had before they
+    // touched it, not for a row with no name — which is what a tab whose name
+    // is the empty string would be.
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the seeded tab has a pane");
+    let born_as = harness.tab_name(tab);
+
+    harness.open_tab_menu_on(tab, pane);
+    harness.run_command("crook/tabs/rename-tab");
+    // The field is only in the tree once the menu has been drawn with it, and
+    // a keystroke lands in an element rather than in a state.
+    harness.frame();
+    harness.type_text("something else");
+    assert!(harness.press_key("enter", Modifiers::default()));
+    assert_eq!(harness.tab_name(tab), "something else");
+
+    harness.open_tab_menu_on(tab, pane);
+    harness.run_command("crook/tabs/rename-tab");
+    harness.frame();
+    // The name is selected when the field opens, so one Backspace empties it.
+    // Through `press` rather than `press_key`: a key the field takes is one
+    // nothing in the window claimed, which is what `press_key` reports on.
+    harness.press("backspace", Modifiers::default(), "");
+    assert!(harness.press_key("enter", Modifiers::default()));
+
+    assert_eq!(
+        harness.tab_name(tab),
+        born_as,
+        "an emptied field left the tab with no name of its own"
+    );
+}
+
+#[test]
+fn a_colour_puts_a_stripe_on_the_rows_of_the_tab_that_has_one() {
+    // On the leading edge rather than on the status disc, which is already
+    // saying what the agent is doing: a disc that carried a colour as well
+    // would be a red tab and a failed agent telling the same story with the
+    // same pixels.
+    let mut harness = Harness::seeded_panel();
+    let tab = harness.active_id();
+    let stripe = theme().terminal.bright[crate::tab::TabColor::Magenta.index()];
+    assert!(
+        stripes_of(&harness.frame(), stripe).is_empty(),
+        "a row was already wearing the colour nothing has been given"
+    );
+
+    harness.dispatch_action(TabAction::SetColor {
+        tab,
+        color: Some(crate::tab::TabColor::Magenta),
+    });
+
+    let painted = stripes_of(&harness.frame(), stripe);
+    assert_eq!(
+        painted.len(),
+        1,
+        "the colour did not land on exactly one row"
+    );
+    assert!(
+        painted[0].height() > painted[0].width(),
+        "the mark is {}x{} — a stripe is taller than it is wide",
+        painted[0].width(),
+        painted[0].height()
+    );
+}
+
+#[test]
+fn a_tabs_menu_offers_to_unpin_a_tab_that_is_pinned() {
+    // One entry and one action for both directions, because they are one
+    // gesture. The label says what pressing it will do rather than what is
+    // true: "Pinned" would be a row a person has to work out the verb for.
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the seeded tab has a pane");
+
+    harness.open_tab_menu_on(tab, pane);
+    assert!(tab_menu_offers(&harness.frame(), "Pin tab"));
+
+    harness.run_command("crook/tabs/pin-tab");
+    harness.open_tab_menu_on(tab, pane);
+
+    let scene = harness.frame();
+    assert!(
+        tab_menu_offers(&scene, "Unpin tab"),
+        "a pinned tab was still being offered a pin"
+    );
+    assert!(harness.workspace.read(&harness.app, |workspace, _| {
+        workspace
+            .tabs()
+            .get(tab)
+            .is_some_and(crate::tab::Tab::is_pinned)
+    }));
+}
+
+#[test]
+fn the_worktrees_row_stays_while_its_list_is_up() {
+    // What says a tab is in a repository is a model the background pool fills
+    // in, so the frame that opens the list can be a frame that has not been
+    // told about the repository yet. An entry that vanished under its own
+    // submenu would leave a column hanging off nothing — and the row a person
+    // pressed would be the one thing missing from the menu they pressed it in.
+    // A tab with a directory and no git facts, which is exactly the state the
+    // gather chain leaves behind between asking and answering.
+    let mut harness = Harness::new(1);
+    let tab = harness.active_id();
+    let pane = harness.focused_pane_id().expect("the tab has a pane");
+    let directory = std::env::current_dir().expect("a working directory");
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(directory);
+    });
+    harness.frame();
+
+    harness.open_tab_menu_on(tab, pane);
+    assert!(
+        !tab_menu_offers(&harness.frame(), "Worktrees"),
+        "a tab nothing has said is in a repository was offered its worktrees"
+    );
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    assert!(
+        tab_menu_offers(&harness.frame(), "Worktrees"),
+        "the row the list hangs off went missing under it"
+    );
+}
+
+#[test]
+fn closing_the_menu_takes_its_submenu_with_it() {
+    // The submenu is drawn *inside* this popup rather than as one of its own,
+    // so a worktree list left standing over a menu that has gone would hang
+    // off nothing — and nothing in the window could reach it to dismiss it.
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the seeded tab has a pane");
+    harness.record_git(pane, BRANCH, None);
+    harness.frame();
+
+    harness.open_tab_menu_on(tab, pane);
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.dispatch_workspace_action(WorkspaceAction::TabMenu(TabMenuAction::Close));
+
+    assert!(
+        !harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.tab_menu().is_open()),
+        "the worktree list outlived the menu that opened it"
+    );
+    assert!(!harness.a_popup_is_open());
+}
+
+#[test]
+fn opening_a_tabs_menu_closes_the_options_menu() {
+    // Two popups are never up at once, and the reason is not tidiness: a modal
+    // underlay covers only the layers painted before it, so the second one
+    // would float above the first one's underlay while that underlay ate the
+    // press meant to dismiss it. See `a_popup_is_open`.
+    let mut harness = Harness::seeded();
+    harness.dispatch_option(OptionsAction::TogglePopup);
+    assert!(harness.a_popup_is_open(), "the options menu did not open");
+
+    let tab = harness.active_id();
+    let pane = harness
+        .focused_pane_id()
+        .expect("the seeded tab has a pane");
+    harness.open_tab_menu_on(tab, pane);
+
+    assert_eq!(harness.tab_menu_row(), Some(pane));
+    assert!(
+        !harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.menu().open),
+        "the options menu is still up behind a tab's menu"
     );
 }
 
@@ -3278,12 +3930,14 @@ fn the_cross_on_a_row_asks_about_removing_it_rather_than_opening_it() {
 }
 
 #[test]
-fn making_a_worktree_checks_it_out_and_opens_a_pane_beside_the_tab() {
+fn making_a_worktree_checks_it_out_and_opens_a_tab_in_the_group() {
     // The whole feature with a real repository and a real `git worktree add`
     // at the end of it: the menu reads the repository, the creator names a
-    // branch nothing is using, git checks it out, and a pane opens whose shell
-    // would start there — *inside the tab the menu was opened on*, which is
-    // what puts the two checkouts under one group header in the panel.
+    // branch nothing is using, git checks it out, and a *tab* opens whose
+    // shell would start there — folded under one heading with the tab the menu
+    // was opened on, and never a second pane inside it. Belonging together and
+    // sharing a rectangle are two different claims and only the first is
+    // true.
     //
     // Asserted against the workspace's own state rather than against pixels.
     // A glyph under a popup is still in the scene — the tab behind this menu
@@ -3332,17 +3986,25 @@ fn making_a_worktree_checks_it_out_and_opens_a_pane_beside_the_tab() {
 
     assert_eq!(
         harness.tab_ids().len(),
-        tabs,
-        "the checkout opened a tab of its own instead of joining the one that asked"
+        tabs + 1,
+        "the checkout did not open a tab"
     );
     assert_eq!(
         harness.panes_of(tab).len(),
-        2,
-        "the tab the menu was opened on did not become the group holding both checkouts"
+        1,
+        "the tab the menu was opened on was split instead of grouped"
+    );
+    let group = harness
+        .group_of(tab)
+        .expect("the tab the menu was opened on was not put in a group");
+    assert_eq!(
+        harness.members_of(group),
+        harness.tab_ids(),
+        "both checkouts are folded under one heading, in strip order"
     );
 
-    // A pane, in a directory that is really there, which git really knows is a
-    // worktree of the repository the menu was opened on.
+    // A pane of the new tab, in a directory that is really there, which git
+    // really knows is a worktree of the repository the menu was opened on.
     let opened = harness
         .workspace
         .read(&harness.app, |workspace, _| workspace.pane_directories())
@@ -3360,14 +4022,327 @@ fn making_a_worktree_checks_it_out_and_opens_a_pane_beside_the_tab() {
 }
 
 #[test]
-fn showing_a_checkout_opens_it_beside_the_tab_and_never_twice() {
+fn the_creator_answers_enter_with_its_button_and_escape_with_cancel() {
+    // The popup's two keys, on the face a person types into. The branch field
+    // eats both by itself — Escape empties it, Enter does nothing — so this is
+    // the test that says `Workspace::action_for` gets them first: without that
+    // claim the dialog can only be finished with a pointer.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(harness.active_id()));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+
+    // Escape backs out of the creator without taking the menu with it, which
+    // is what the Cancel button beside it does.
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    assert!(
+        harness.press_key("escape", Modifiers::default()),
+        "escape was not claimed by the creator"
+    );
+    assert!(
+        !harness.worktree_menu_is_creating(),
+        "escape did not leave the creator"
+    );
+    assert!(
+        harness.a_popup_is_open(),
+        "escape closed the whole menu instead of stepping back one face"
+    );
+
+    // And Enter is the Create button: a name is already in the field, so this
+    // is the whole of making a worktree from the keyboard.
+    let before = harness.pane_ids().len();
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    assert!(
+        harness.press_key("enter", Modifiers::default()),
+        "enter was not claimed by the creator"
+    );
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.pane_ids().len() > before
+    });
+
+    let opened = harness
+        .workspace
+        .read(&harness.app, |workspace, _| workspace.pane_directories())
+        .into_iter()
+        .map(|(_, directory)| directory)
+        .find(|directory| directory.starts_with(&store))
+        .expect("enter did not check anything out");
+    assert!(opened.is_dir(), "{} was not checked out", opened.display());
+}
+
+#[test]
+fn a_plugins_field_takes_the_keyboard_from_the_pane_under_it() {
+    // The whole of what the field registry buys. Nothing in the window's own
+    // source names this field any more: `sync_input_keys` asks the host, the
+    // host asks the plugin that claimed it, and the plugin answers from a
+    // state the workspace happens to hold today and will not always.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| {
+        workspace.set_worktrees_directory(scratch.path().join("store"));
+    });
+    let tab = harness.active_id();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    assert!(
+        !harness.a_plugin_field_has_keys(),
+        "a field nobody is typing into already had the keyboard"
+    );
+
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+
+    assert!(
+        harness.a_plugin_field_has_keys(),
+        "the creator opened and the plugin's field did not take the keyboard"
+    );
+    assert!(
+        !harness.a_pane_field_has_keys(),
+        "a pane was still listening while a field over it was being typed into"
+    );
+
+    harness.dispatch_worktree(WorktreeAction::Cancel);
+
+    assert!(
+        !harness.a_plugin_field_has_keys(),
+        "leaving the creator left the keyboard in a field nothing draws"
+    );
+}
+
+#[test]
+fn escape_takes_the_menu_down_and_enter_removes_the_checkout() {
+    // The other two answers. Escape on the list is the press outside it, and
+    // Enter on the confirmation is its Remove — the face a person got to by
+    // pressing an × and reading a question has a keyboard as well as a
+    // pointer.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let tab = harness.active_id();
+    let first = harness.pane_ids()[0];
+    harness.update_session(first, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(first, "main", None);
+    harness.frame();
+
+    // A second checkout, so there is a row with an × behind it — the main one
+    // is never removable.
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    harness.dispatch_worktree(WorktreeAction::Create);
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.pane_ids().len() > 1
+    });
+    let made = harness
+        .focused_pane_id()
+        .expect("the split focused its pane");
+    harness.dispatch_action(TabAction::ClosePane(made));
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("both checkouts to be read", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    let index = harness
+        .worktree_index_under(&store)
+        .expect("the checkout that was made is not in the menu");
+    harness.dispatch_worktree(WorktreeAction::AskRemove(index));
+    assert!(
+        harness.worktree_menu_is_confirming(),
+        "the confirmation did not open"
+    );
+
+    assert!(
+        harness.press_key("escape", Modifiers::default()),
+        "escape was not claimed by the confirmation"
+    );
+    assert!(
+        !harness.worktree_menu_is_confirming(),
+        "escape did not leave the confirmation"
+    );
+    assert!(
+        crate::git::worktree::list(&repository)
+            .expect("the repository still lists")
+            .len()
+            == 2,
+        "backing out of the confirmation removed the checkout anyway"
+    );
+
+    // And from the list itself, one more press puts the list away — leaving
+    // the menu it hangs off standing, because that is one step back and not
+    // two. See `escape_takes_the_submenu_down_before_the_menu`.
+    assert!(
+        harness.press_key("escape", Modifiers::default()),
+        "escape was not claimed by the list"
+    );
+    assert_eq!(
+        harness.tab_menu_row(),
+        Some(first),
+        "escape took the menu down as well as the list inside it"
+    );
+    assert!(
+        harness.press_key("escape", Modifiers::default()),
+        "escape was not claimed by the menu the list was in"
+    );
+    assert!(
+        !harness.a_popup_is_open(),
+        "escape did not take the menu down"
+    );
+
+    // Then the same question again, answered with the other key. A clean
+    // checkout is one git removes without a second question, so this press is
+    // the whole of it.
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("both checkouts to be read", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    let index = harness
+        .worktree_index_under(&store)
+        .expect("the checkout that was made is not in the menu");
+    harness.dispatch_worktree(WorktreeAction::AskRemove(index));
+    assert!(
+        harness.press_key("enter", Modifiers::default()),
+        "enter was not claimed by the confirmation"
+    );
+    harness.wait_for("the checkout to go", |_| {
+        crate::git::worktree::list(&repository)
+            .map(|worktrees| worktrees.len() == 1)
+            .unwrap_or(false)
+    });
+}
+
+#[test]
+fn enter_does_not_remove_a_checkout_git_has_already_refused() {
+    // The second question, which the keyboard does not answer. git declines to
+    // throw away work nobody asked it to throw away, and the button that then
+    // says "Remove anyway" is the one destructive thing in this menu that
+    // stays a click: a person who pressed Enter and was answered with a
+    // warning must not be able to delete what it warns about by pressing the
+    // same key again.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let tab = harness.active_id();
+    let first = harness.pane_ids()[0];
+    harness.update_session(first, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(first, "main", None);
+    harness.frame();
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    harness.dispatch_worktree(WorktreeAction::Create);
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.pane_ids().len() > 1
+    });
+    let made = harness
+        .focused_pane_id()
+        .expect("the split focused its pane");
+    harness.dispatch_action(TabAction::ClosePane(made));
+
+    // The work git will refuse over: one file that is in the checkout and in
+    // nothing else.
+    let checkout = crate::git::worktree::list(&repository)
+        .expect("the repository lists")
+        .into_iter()
+        .map(|worktree| worktree.path)
+        .find(|path| path.starts_with(&store))
+        .expect("nothing was checked out under the store");
+    std::fs::write(checkout.join("unsaved.txt"), "work").expect("the checkout is writable");
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("both checkouts to be read", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    let index = harness
+        .worktree_index_under(&store)
+        .expect("the checkout that was made is not in the menu");
+    harness.dispatch_worktree(WorktreeAction::AskRemove(index));
+    assert!(
+        harness.press_key("enter", Modifiers::default()),
+        "enter was not claimed by the confirmation"
+    );
+    harness.wait_for("git to refuse over the work in there", |harness| {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.worktree_menu_was_refused()
+        })
+    });
+
+    assert_eq!(
+        harness.action_for("enter", Modifiers::default()),
+        None,
+        "enter is bound to the button that deletes work git refused to delete"
+    );
+    assert_eq!(
+        crate::git::worktree::list(&repository)
+            .expect("the repository still lists")
+            .len(),
+        2,
+        "the checkout went with a second press of the same key"
+    );
+    assert!(
+        checkout.join("unsaved.txt").exists(),
+        "the work in the checkout went with it"
+    );
+}
+
+#[test]
+fn showing_a_checkout_opens_it_in_the_group_and_never_twice() {
     // The other half of the same rule, on the path that opens a checkout that
     // already exists. Two things it has to get right, and the second is what
-    // the first one costs: a checkout opens as a pane *in the tab that asked*,
-    // so "is this one already open" can no longer be asked of the tabs'''
-    // focused panes — the branch is very often in the pane beside the row
-    // somebody is looking at, and a menu that missed it would put a second
-    // agent in the same checkout.
+    // the first one costs: a checkout opens as a tab in the *group* the tab
+    // that asked belongs to, so "is this one already open" is asked of every
+    // pane in the window rather than of the tabs' focused ones — the branch is
+    // very often in a tab beside the row somebody is looking at, and a menu
+    // that missed it would put a second agent in the same checkout.
     let scratch = Scratch::new();
     let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
         eprintln!("skipped: no git here to make a repository with");
@@ -3400,9 +4375,9 @@ fn showing_a_checkout_opens_it_beside_the_tab_and_never_twice() {
     // Away again, so the row has a checkout nothing is working in to show.
     let made = harness
         .focused_pane_id()
-        .expect("the split focused its pane");
+        .expect("the new tab focused its pane");
     harness.dispatch_action(TabAction::ClosePane(made));
-    assert_eq!(harness.panes_of(tab).len(), 1, "the pane did not close");
+    assert_eq!(harness.tab_ids().len(), 1, "the tab did not close");
 
     harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
     harness.wait_for("both checkouts to be read", |harness| {
@@ -3416,15 +4391,19 @@ fn showing_a_checkout_opens_it_beside_the_tab_and_never_twice() {
     harness.dispatch_worktree(WorktreeAction::Show(index));
 
     assert_eq!(
-        harness.panes_of(tab).len(),
-        2,
-        "the checkout did not open beside the tab its menu was opened on"
+        harness.tab_ids().len(),
+        tabs + 1,
+        "the checkout did not open a tab"
     );
     assert_eq!(
-        harness.tab_ids().len(),
-        tabs,
-        "the checkout opened a tab of its own"
+        harness.panes_of(tab).len(),
+        1,
+        "the tab its menu was opened on was split instead of grouped"
     );
+    let group = harness
+        .group_of(tab)
+        .expect("the checkout did not join the tab that asked for it");
+    assert_eq!(harness.members_of(group).len(), 2);
     let opened = harness.focused_pane_id().expect("a tab has a focused pane");
     assert_ne!(opened, first, "the pane it opened is not the focused one");
 
@@ -3438,8 +4417,8 @@ fn showing_a_checkout_opens_it_beside_the_tab_and_never_twice() {
     harness.dispatch_worktree(WorktreeAction::Show(index));
 
     assert_eq!(
-        harness.panes_of(tab).len(),
-        2,
+        harness.tab_ids().len(),
+        tabs + 1,
         "a second agent was opened in a checkout that was already open"
     );
     assert_eq!(
@@ -3590,9 +4569,9 @@ fn panel_search_box(scene: &Scene) -> RectF {
 
 /// Every row the panel painted, as (what it drew, what the clip left).
 ///
-/// A row is the only 4px-rounded box inside the panel wider than a button: the
-/// gear is 20 across, a close button 16, and the hover card hangs outside the
-/// panel entirely.
+/// A row is the only 4px-rounded box inside the panel wider than a button: a
+/// close button is 16 across, the `+` is rounded by five, and the hover card
+/// hangs outside the panel entirely.
 fn panel_row_rects(scene: &Scene) -> Vec<(RectF, RectF)> {
     let panel = panel_box(scene);
     let mut rows: Vec<(RectF, RectF)> = visible_rects(scene)
@@ -3670,12 +4649,12 @@ fn a_fresh_workspace_opens_with_the_tabs_in_a_panel() {
 }
 
 #[test]
-fn the_panel_carries_a_search_box_between_the_control_bar_and_the_list() {
-    // Telegram's arrangement, which is what the box is drawn in: the title row
-    // with its buttons, then the field across the whole column, then the list.
-    // Asserted as an order rather than as coordinates — what matters is that
-    // the box is under the `+` and above the first row, not what any of the
-    // three happen to measure.
+fn the_panel_carries_a_search_box_above_the_list_and_the_plus_below_it() {
+    // Telegram's arrangement with Warp's browser at the other end of it: the
+    // field across the whole column, then the list, then the `+` in the space
+    // the list leaves. Asserted as an order rather than as coordinates — what
+    // matters is that the field is over every row and the `+` under every row,
+    // not what any of the three happen to measure.
     let mut harness = Harness::panel(2);
     let scene = harness.frame();
 
@@ -3683,15 +4662,19 @@ fn the_panel_carries_a_search_box_between_the_control_bar_and_the_list() {
     let rows = panel_rows(&scene);
 
     assert!(
-        field.min_y() > plus_box(&scene).min_y(),
-        "the box is above the control bar it belongs under"
+        field.max_y() <= plus_box(&scene).min_y(),
+        "the box is under the `+` it belongs above"
+    );
+    assert!(
+        plus_box(&scene).min_y() >= rows[rows.len() - 1].max_y(),
+        "the `+` is not under the last row of the list"
     );
     assert!(
         field.max_y() <= rows[0].min_y(),
         "the box overlaps the first row of the list"
     );
     assert!(
-        field.width() > tabs_panel::PANEL_WIDTH - 20.,
+        field.width() > tabs_panel::PANEL_WIDTH - 26.,
         "the box does not take the width of the column: {field:?}"
     );
 }
@@ -4358,8 +5341,580 @@ fn clicking_a_panel_row_focuses_the_pane_it_stands_for() {
     assert_eq!(harness.tab_ids(), ids, "selecting closed something");
 }
 
+/// The panel's tabs, as a group of the first two and every other tab loose.
+///
+/// Made the way the only thing that makes a group makes one: a worktree opened
+/// from a tab. `NewInGroupOf` is what that dispatches once git has finished.
+impl Harness {
+    fn grouped_panel(tabs: usize) -> (Self, GroupId) {
+        let mut harness = Self::panel(tabs);
+        let first = harness.tab_ids()[0];
+        harness.dispatch_action(TabAction::NewInGroupOf(first));
+        let group = harness
+            .group_of(first)
+            .expect("the tab was not put in a group");
+        harness.frame();
+        (harness, group)
+    }
+}
+
+/// Where a group's heading is: the chevron that folds it away is the only
+/// thing on it that is neither text nor another row.
+fn panel_heading(scene: &Scene) -> RectF {
+    let panel = panel_box(scene);
+    let chevrons: Vec<RectF> = [Lucide::ChevronDown, Lucide::ChevronRight]
+        .into_iter()
+        .flat_map(|icon| icons_in(scene, panel, icon))
+        .collect();
+
+    assert_eq!(chevrons.len(), 1, "expected one heading, got {chevrons:?}");
+    chevrons[0]
+}
+
+/// How many moves a test gesture is made of. See [`Harness::drag`].
+const STEPS: usize = 24;
+
+/// The row a drag is carrying, if the panel is drawing one: the one row whose
+/// middle is at the pointer rather than in the list's own flow.
+fn carried_row(scene: &Scene, pointer: Vector2F) -> Option<RectF> {
+    panel_rows(scene)
+        .into_iter()
+        .find(|row| (center(*row).y() - pointer.y()).abs() < 1.)
+}
+
+impl Harness {
+    /// Picks a point up and puts it down at another, the way a hand does:
+    /// press, travel, release.
+    ///
+    /// A frame after every event, because the window draws one after every
+    /// event — and a drag *changes what the next event will be answered
+    /// against*, since the line it draws moves the rows under it. A gesture
+    /// tested against the frame it started on is a gesture no hand ever makes.
+    fn drag(&mut self, from: Vector2F, to: Vector2F) {
+        // The pointer arrives before it presses. That is not decoration: a
+        // hovered row puts its detail card up, which makes the row a `Stack`,
+        // which changes the layer it paints into — and a press hit-tested
+        // against the wrong layer is a press the panel refuses. See
+        // [`drag::Handle::takes`].
+        self.move_to(from);
+        self.frame();
+        self.hold(from, 1);
+        self.frame();
+        // A hand does not arrive in one jump, and this list reorders itself
+        // under it: every position is answered against the frame the last one
+        // produced, and a change of group ends a frame before a change of
+        // place begins. A gesture made in two leaps would skip the states a
+        // real one passes through, which is where the interesting failures
+        // are — and it is not a thing a hand can do.
+        for step in 1..=STEPS {
+            self.drag_to(from + (to - from) * (step as f32 / STEPS as f32));
+            self.frame();
+        }
+        self.let_go(to);
+        self.frame();
+    }
+}
+
+/// A point inside a row, clear of its close button.
+fn inside(row: RectF) -> Vector2F {
+    row.origin() + vec2f(40., row.height() / 2.)
+}
+
 #[test]
-fn right_clicking_a_panel_row_opens_the_worktree_menu_too() {
+fn a_row_can_be_picked_up_with_its_hover_card_up() {
+    // Every row a person drags is a row they have just hovered, so this is
+    // not an edge: it is the only way the gesture is ever made.
+    let (mut harness, group) = Harness::grouped_panel(3);
+    let loose = *harness.tab_ids().last().expect("three tabs and a worktree");
+    let rows = panel_rows(&harness.frame());
+    assert!(
+        harness.options().show_details_on_hover,
+        "the card is on by default, which is what makes this the ordinary case"
+    );
+
+    let onto = rows[0].origin() + vec2f(40., rows[0].height() * 0.75);
+    harness.drag(inside(rows[3]), onto);
+
+    assert_eq!(harness.group_of(loose), Some(group));
+}
+
+#[test]
+fn a_row_carried_to_the_bottom_of_a_group_joins_it_at_its_end() {
+    // The gap under a group's last member is also the gap above the block
+    // beneath it, so a list that decides the group from the nearest row puts a
+    // tab aimed there outside the group it was aimed into. The group's own box
+    // is what settles it: that gap is inside the box, so it is inside the
+    // group, and the row it names is the group's end.
+    let (mut harness, group) = Harness::grouped_panel(2);
+    let members = harness.members_of(group);
+    let loose = *harness.tab_ids().last().expect("three tabs and a worktree");
+    let rows = panel_rows(&harness.frame());
+    let last_member = rows[1];
+
+    harness.drag(
+        inside(*rows.last().expect("three rows")),
+        last_member.origin() + vec2f(40., last_member.height() - 1.),
+    );
+
+    assert_eq!(harness.members_of(group).len(), members.len() + 1);
+    assert_eq!(
+        harness.members_of(group).last(),
+        Some(&loose),
+        "it joined the group somewhere other than its end"
+    );
+}
+
+#[test]
+fn a_pointer_held_still_leaves_the_list_where_it_is() {
+    // The list moves under the hand now, so it has to be able to stop. Every
+    // step is decided against the frame the last one produced, and a pair of
+    // steps that each undo the other is a list that runs at the frame rate
+    // under a hand that is holding perfectly still — which is exactly what a
+    // hand does while it aims at a boundary.
+    //
+    // A step towards the pointer is allowed; a second one after the list has
+    // settled is not.
+    let (mut harness, _) = Harness::grouped_panel(3);
+    let rows = panel_rows(&harness.frame());
+    let from = inside(rows[3]);
+    harness.move_to(from);
+    harness.frame();
+    harness.hold(from, 1);
+    harness.frame();
+
+    // Every boundary in the list, and every pixel of both margins of the
+    // group's band — the two four- and eight-pixel strips are exactly where a
+    // pair of steps that undid each other would hide.
+    for step in 0..120 {
+        let at = vec2f(from.x(), rows[0].min_y() + step as f32);
+        for _ in 0..5 {
+            harness.drag_to(at);
+            harness.frame();
+        }
+        let settled = harness.tab_ids();
+        harness.drag_to(at);
+        harness.frame();
+        assert_eq!(
+            harness.tab_ids(),
+            settled,
+            "the list moved under a pointer that did not, at y {}",
+            at.y()
+        );
+    }
+}
+
+#[test]
+fn dragging_a_row_onto_a_group_folds_it_into_it() {
+    // What the panel is for, end to end: a tab picked up with the pointer and
+    // dropped on a group belongs to that group afterwards.
+    let (mut harness, group) = Harness::grouped_panel(3);
+    let loose = *harness.tab_ids().last().expect("three tabs and a worktree");
+    let rows = panel_rows(&harness.frame());
+    let members = harness.members_of(group).len();
+
+    // From the last row onto the lower half of the group's first member,
+    // which is the gap between the two members.
+    let onto = rows[0].origin() + vec2f(40., rows[0].height() * 0.75);
+    harness.drag(inside(rows[3]), onto);
+
+    assert_eq!(harness.group_of(loose), Some(group));
+    assert_eq!(harness.members_of(group).len(), members + 1);
+    assert_eq!(
+        harness.tab_ids().len(),
+        4,
+        "a drag closed or opened something"
+    );
+}
+
+#[test]
+fn dragging_a_member_out_of_a_group_leaves_it() {
+    let (mut harness, group) = Harness::grouped_panel(2);
+    let member = harness.members_of(group)[1];
+    let rows = panel_rows(&harness.frame());
+
+    // Onto the top of the last row, which is below the group entirely.
+    let last = *rows.last().expect("three rows");
+    harness.drag(inside(rows[1]), last.origin() + vec2f(40., 2.));
+
+    assert_eq!(harness.group_of(member), None);
+    assert_eq!(harness.members_of(group).len(), 1);
+}
+
+#[test]
+fn carrying_a_member_past_the_bottom_of_its_group_takes_it_out() {
+    // The gesture a person actually makes, and the one the panel used to
+    // refuse: pull the row down until it is below the last row of the group.
+    // The strip of padding under that row belongs to the block and to nothing
+    // else, so it is the one place that can mean "out of here" without
+    // meaning "into whatever is next".
+    let (mut harness, group) = Harness::grouped_panel(3);
+    let member = harness.members_of(group)[1];
+    let rows = panel_rows(&harness.frame());
+    let last_member = rows[1];
+
+    // Past the bottom of the last member, into the strip of padding the block
+    // keeps under it.
+    harness.drag(
+        inside(last_member),
+        last_member.origin() + vec2f(40., last_member.height() + 12.),
+    );
+
+    assert_eq!(harness.group_of(member), None);
+    assert_eq!(harness.members_of(group).len(), 1);
+    assert_eq!(
+        harness.tab_ids().len(),
+        4,
+        "a drag closed or opened something"
+    );
+}
+
+#[test]
+fn a_member_of_the_last_group_can_still_be_carried_out_of_it() {
+    // The case a panel whose groups are decided by the row under the pointer
+    // cannot do at all: with nothing drawn below the block there is no row to
+    // aim at that could mean "out of this group". The group's own box is what
+    // says it instead, so the empty column under the last block says it.
+    let (mut harness, group) = Harness::grouped_panel(1);
+    let member = harness.members_of(group)[1];
+    let rows = panel_rows(&harness.frame());
+    let last = *rows.last().expect("a group of two");
+
+    harness.drag(inside(last), last.origin() + vec2f(40., last.height() * 2.));
+
+    assert_eq!(harness.group_of(member), None);
+    assert_eq!(harness.members_of(group).len(), 1);
+    assert_eq!(
+        harness.tab_ids().len(),
+        2,
+        "a drag closed or opened something"
+    );
+}
+
+#[test]
+fn a_row_carried_past_the_bottom_of_the_list_lands_last() {
+    // The end of the list is a place with no row under it, so it is the one
+    // position a rule written in terms of neighbours has to be told about.
+    let mut harness = Harness::panel(3);
+    let first = harness.tab_ids()[0];
+    let rows = panel_rows(&harness.frame());
+    let last = *rows.last().expect("three rows");
+
+    harness.drag(inside(rows[0]), last.origin() + vec2f(40., last.height()));
+
+    assert_eq!(
+        harness.tab_ids().last(),
+        Some(&first),
+        "the row did not land at the end: {:?}",
+        harness.tab_ids()
+    );
+}
+
+#[test]
+fn a_row_flicked_the_length_of_the_list_arrives_with_the_hand() {
+    // One event, where the gesture helper sends twenty-four. A hand reports
+    // its position far more often than the display draws, and every one of
+    // those positions is answered against the same painted list — so a rule
+    // that moved the row one place per answer would move it one place per
+    // *frame*, and a flick down a long list would put the row down three rows
+    // short of where it was let go.
+    let mut harness = Harness::panel(6);
+    let first = harness.tab_ids()[0];
+    let rows = panel_rows(&harness.frame());
+    let last = *rows.last().expect("six rows");
+    let from = inside(rows[0]);
+
+    harness.move_to(from);
+    harness.frame();
+    harness.hold(from, 1);
+    harness.frame();
+    let to = last.origin() + vec2f(40., last.height());
+    harness.drag_to(to);
+    harness.frame();
+    harness.let_go(to);
+    harness.frame();
+
+    assert_eq!(
+        harness.tab_ids().last(),
+        Some(&first),
+        "the row was left behind by the hand: {:?}",
+        harness.tab_ids()
+    );
+}
+
+#[test]
+fn the_wheel_still_reaches_the_list_under_a_carried_row() {
+    // The carried row is painted at the pointer, on a layer above everything,
+    // and every element under a point asks whether a layer above it covers
+    // that point. A drag image that answered "yes" would take the wheel away
+    // for the whole gesture — from the one list a person dragging a row
+    // through forty tabs has to be able to scroll.
+    let mut harness = Harness::panel(OVERFLOWING);
+    let rows = panel_rows(&harness.frame());
+    let from = inside(rows[1]);
+
+    harness.move_to(from);
+    harness.frame();
+    harness.hold(from, 1);
+    harness.drag_to(from + vec2f(0., 8.));
+    let carried = panel_rows(&harness.frame());
+
+    harness.dispatch(Event::ScrollWheel {
+        position: from,
+        delta: ScrollDelta::Lines(vec2f(0., -3.)),
+        modifiers: Modifiers::default(),
+    });
+
+    let scrolled = panel_rows(&harness.frame());
+    assert_ne!(
+        scrolled.first().map(|row| row.min_y()),
+        carried.first().map(|row| row.min_y()),
+        "the list did not scroll under the row being carried"
+    );
+}
+
+#[test]
+fn a_filtered_list_keeps_its_filter_while_a_row_is_being_carried() {
+    // Every step of a drag asks the strip to move a row, and the strip ending
+    // the search is what every other way of asking it for something means.
+    // Here it would put the filtered-out tabs back into the list *under the
+    // hand*, halfway through the one gesture whose whole meaning is which rows
+    // it is passing.
+    let mut harness = Harness::panel(3);
+    for (index, pane) in harness.pane_ids().into_iter().enumerate() {
+        harness.update_session(pane, |session| {
+            session.derived_title = Some(format!("kettle {index}"));
+        });
+    }
+    let odd = harness.pane_ids()[1];
+    harness.update_session(odd, |session| {
+        session.derived_title = Some("teapot".to_owned());
+    });
+
+    harness.click_panel_search();
+    harness.type_text("kettle");
+    let rows = panel_rows(&harness.frame());
+    assert_eq!(rows.len(), 2, "the filter kept the wrong rows");
+
+    harness.drag(inside(rows[1]), inside(rows[0]) - vec2f(0., 4.));
+
+    let scene = harness.frame();
+    assert_eq!(
+        panel_rows(&scene).len(),
+        2,
+        "the filter was dropped mid-gesture: {:?}",
+        panel_text(&scene)
+    );
+    assert!(
+        panel_text(&scene).contains("kettle 2"),
+        "the list is not the filtered one any more"
+    );
+}
+
+#[test]
+fn dragging_a_heading_moves_the_whole_group() {
+    let (mut harness, group) = Harness::grouped_panel(3);
+    let members = harness.members_of(group);
+    let scene = harness.frame();
+    let rows = panel_rows(&scene);
+    let heading = panel_heading(&scene);
+
+    // Past the last row, which is the one gap under everything.
+    let last = *rows.last().expect("four rows");
+    harness.drag(center(heading), last.origin() + vec2f(40., last.height()));
+
+    let order = harness.tab_ids();
+    assert_eq!(
+        &order[order.len() - members.len()..],
+        members.as_slice(),
+        "the group did not land at the end, in one piece: {order:?}"
+    );
+    assert_eq!(
+        harness.members_of(group),
+        members,
+        "the block lost or gained a member on the way"
+    );
+}
+
+#[test]
+fn a_carried_row_follows_the_pointer_and_leaves_its_slot_behind() {
+    // What a drag draws, and all of it: the row is taken out of the list and
+    // painted under the hand, and the room it was taking stays taken so that
+    // the list shows the slot it will drop into.
+    let mut harness = Harness::panel(3);
+    let order = harness.tab_ids();
+    let rows = panel_rows(&harness.frame());
+    let from = inside(rows[2]);
+
+    harness.move_to(from);
+    harness.frame();
+    harness.hold(from, 1);
+    assert_eq!(
+        panel_rows(&harness.frame()).len(),
+        rows.len(),
+        "a press that has not travelled has picked nothing up"
+    );
+
+    // Up by more than the threshold and by less than half a row: far enough to
+    // be a drag, not far enough to have reached a neighbour's middle.
+    let at = from - vec2f(0., 8.);
+    harness.drag_to(at);
+    let scene = harness.frame();
+
+    carried_row(&scene, at).expect("no row was drawn at the pointer");
+    // Two boxes more than there are rows: the hole the row came out of, left
+    // open at its old place, and the ground the row is carried on, which is
+    // what stops the words on it landing on the words underneath.
+    assert_eq!(
+        panel_rows(&scene).len(),
+        rows.len() + 2,
+        "the slot the row came from was closed up instead of left where it was"
+    );
+    assert_eq!(
+        harness.tab_ids(),
+        order,
+        "the list reordered itself for a gesture that had not passed a row"
+    );
+
+    harness.let_go(at);
+    let scene = harness.frame();
+    assert!(
+        carried_row(&scene, at).is_none(),
+        "the carried row outlived the gesture"
+    );
+    assert_eq!(
+        panel_rows(&scene).len(),
+        rows.len(),
+        "the list did not go back to being a list of rows"
+    );
+}
+
+#[test]
+fn a_row_carried_out_over_the_body_still_only_moves_in_its_column() {
+    // The panel is one tab wide and there is nowhere else in the window to put
+    // a tab, so the row is locked to the column and the hand's height is all
+    // of the gesture that means anything. Warp says the same thing with
+    // `DragAxis::VerticalOnly`, and says it for the same reason whenever a tab
+    // cannot be dragged out into a window of its own.
+    let (mut harness, group) = Harness::grouped_panel(2);
+    let member = harness.members_of(group)[1];
+    let rows = panel_rows(&harness.frame());
+    let panel = panel_box(&harness.frame());
+
+    // Level with the top of the first row, but out over the terminal.
+    let outside = vec2f(WINDOW.x() - 40., rows[0].min_y() + 2.);
+    harness.drag(inside(rows[1]), outside);
+
+    let carried = harness.frame();
+    assert!(
+        panel_rows(&carried)
+            .iter()
+            .all(|row| row.max_x() <= panel.max_x()),
+        "a row was drawn outside the panel"
+    );
+    assert_eq!(
+        harness.tab_ids().first(),
+        Some(&member),
+        "the row did not follow the pointer's height"
+    );
+}
+
+#[test]
+fn a_press_that_does_not_travel_still_selects_the_row() {
+    // The whole risk of putting a drag on a row: the click has to survive it.
+    let (mut harness, _) = Harness::grouped_panel(2);
+    let rows = panel_rows(&harness.frame());
+    let panes = harness.pane_ids();
+
+    harness.hold(inside(rows[2]), 1);
+    // A pixel of wobble, which every hand has — and a slide across the row,
+    // which a thumb on a trackpad has. Sideways is not a direction a row in a
+    // one-tab-wide column can go, so a gesture that only went that way asked
+    // for nothing and is still the click it started as.
+    harness.drag_to(inside(rows[2]) + vec2f(0., 1.));
+    harness.drag_to(inside(rows[2]) + vec2f(30., 2.));
+    harness.let_go(inside(rows[2]) + vec2f(30., 2.));
+
+    assert_eq!(harness.focused_pane_id(), Some(panes[2]));
+}
+
+#[test]
+fn clicking_a_heading_folds_the_group_away_and_back() {
+    let (mut harness, _) = Harness::grouped_panel(2);
+    let scene = harness.frame();
+    let heading = panel_heading(&scene);
+    let rows = panel_rows(&scene).len();
+
+    harness.click(center(heading), MouseButton::Left);
+
+    let folded = panel_rows(&harness.frame());
+    assert_eq!(
+        folded.len(),
+        rows - 2,
+        "the group's members did not fold away"
+    );
+    assert_eq!(
+        harness.pane_ids().len(),
+        rows,
+        "folding a group away closed something"
+    );
+
+    let folded_heading = panel_heading(&harness.frame());
+    harness.click(center(folded_heading), MouseButton::Left);
+    assert_eq!(panel_rows(&harness.frame()).len(), rows);
+}
+
+#[test]
+fn dragging_a_heading_does_not_also_fold_the_group() {
+    // A press on a heading is a click and half a drag, and only the pointer's
+    // next move says which. One gesture must not be both.
+    let (mut harness, group) = Harness::grouped_panel(3);
+    let scene = harness.frame();
+    let heading = panel_heading(&scene);
+    let last = *panel_rows(&scene).last().expect("four rows");
+
+    harness.drag(center(heading), last.origin() + vec2f(40., last.height()));
+
+    assert!(
+        !harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .group(group)
+                .is_some_and(crate::tab::TabGroup::is_collapsed)
+        }),
+        "the drag folded the group away as well as moving it"
+    );
+}
+
+#[test]
+fn the_heading_closes_every_tab_in_the_group() {
+    let (mut harness, group) = Harness::grouped_panel(3);
+    let members = harness.members_of(group);
+    let survivors: Vec<TabId> = harness
+        .tab_ids()
+        .into_iter()
+        .filter(|tab| !members.contains(tab))
+        .collect();
+
+    // The cross only draws while the pointer is on the heading, exactly as a
+    // row's does.
+    let heading = panel_heading(&harness.frame());
+    harness.move_to(center(heading));
+    let scene = harness.frame();
+    let crosses = icons_in(&scene, panel_box(&scene), Lucide::X);
+    let cross = crosses
+        .iter()
+        .find(|bounds| bounds.min_y() < heading.max_y() && bounds.max_y() > heading.min_y())
+        .copied()
+        .expect("the heading drew no close button while it was hovered");
+
+    harness.click(center(cross), MouseButton::Left);
+
+    assert_eq!(harness.tab_ids(), survivors);
+    assert!(harness.group_of(survivors[0]).is_none());
+}
+
+#[test]
+fn right_clicking_a_panel_row_opens_the_menu_too() {
     // The panel and the strip answer the same gesture, because the rule is
     // about the tab rather than about how the tab is drawn.
     let mut harness = Harness::seeded_panel();
@@ -4371,7 +5926,7 @@ fn right_clicking_a_panel_row_opens_the_worktree_menu_too() {
     );
 
     assert!(
-        worktree_menu_box(&harness.frame()).is_some(),
+        tab_menu_box(&harness.frame()).is_some(),
         "a right press on a panel row opened no menu"
     );
 }
@@ -4393,18 +5948,15 @@ fn a_panel_rows_close_button_closes_the_pane_it_names() {
 
 #[test]
 fn the_options_menu_opens_from_the_panel_and_stays_inside_it() {
-    // The whole of why the anchor is a parameter: the strip's gear hangs its
-    // menu from the left edge, and the same rule in a 248px column would open
-    // a 200px menu across the body.
+    // The whole of why the anchor names a corner: right edges aligned, because
+    // a 200px menu hung leftwards off a 248px column opens across the body,
+    // and `keep_on_screen` would not pull it back — the window has plenty of
+    // room to its right.
     let mut harness = Harness::seeded_panel();
     let panel = panel_box(&harness.frame());
 
-    let gear = gear_box(&harness.frame());
-    assert!(
-        panel.contains_point(center(gear)),
-        "the gear is not in the panel"
-    );
-    harness.click(center(gear), MouseButton::Left);
+    let ground = empty_list_space(&harness.frame());
+    harness.click(ground, MouseButton::Right);
     assert!(harness.is_menu_open());
 
     let menu = menu_box(&harness.frame());
@@ -4417,8 +5969,111 @@ fn the_options_menu_opens_from_the_panel_and_stays_inside_it() {
         panel.max_x()
     );
     assert!(
-        menu.min_y() >= gear.max_y(),
-        "the menu opened over its own gear"
+        panel.contains_point(center(menu)),
+        "the menu at {menu:?} is not inside the panel at {panel:?}"
+    );
+}
+
+#[test]
+fn the_band_under_the_list_lights_up_whole_rather_than_around_its_mark() {
+    // The `+` is the end of the list, so it is as wide as a row and it lights
+    // like one. A highlight the size of the glyph would be a smaller target
+    // than the one in the bar this replaced, and it would read as a mark
+    // somebody left there rather than as somewhere to press.
+    let mut harness = Harness::seeded_panel();
+    let scene = harness.frame();
+    let plus = plus_box(&scene);
+    let last = *panel_rows(&scene).last().expect("a row");
+
+    assert!(
+        (plus.width() - last.width()).abs() < 0.5,
+        "the `+` is {plus:?} and a row is {last:?}; the two do not line up"
+    );
+
+    // Its left edge, as far from the glyph in the middle as the band allows.
+    harness.move_to(vec2f(plus.min_x() + 4., center(plus).y()));
+    let scene = harness.frame();
+
+    let lit: Vec<RectF> = visible_rects(&scene)
+        .filter(|(rect, _)| {
+            rect.corner_radius.get_top_left() == Radius::Pixels(5.)
+                && rect.background == Fill::Solid(theme().overlay_1)
+        })
+        .map(|(_, bounds)| bounds)
+        .collect();
+
+    assert_eq!(
+        lit,
+        vec![plus],
+        "hovering the edge of the band lit {lit:?} rather than the whole of it"
+    );
+}
+
+#[test]
+fn the_panel_and_the_settings_rail_put_their_search_box_in_the_same_place() {
+    // Two sidebars in one column, so one box. Copied rather than chosen: a
+    // field a few pixels wider or higher in one section than in the other is
+    // the kind of difference nobody can name and everybody can see when the
+    // buttons at the foot of the panel switch between them.
+    let mut harness = Harness::seeded_panel();
+    let tabs = panel_search_box(&harness.frame());
+
+    harness.open_settings_page();
+    let rail = panel_search_box(&harness.frame());
+
+    assert_eq!(
+        tabs, rail,
+        "the tab list puts its search box at {tabs:?} and the settings rail       puts the same box at {rail:?}"
+    );
+}
+
+#[test]
+fn a_sidebar_section_gets_neither_the_plus_nor_the_menu_the_list_carries() {
+    // Both belong to the tab list, and the tab list is one section of the
+    // sidebar. `tabs_panel::render` draws the chrome for every section, so a
+    // `+` added there rather than to the list itself would offer a new agent
+    // tab from the middle of the settings rail.
+    let mut harness = Harness::seeded_panel();
+    harness.open_settings_page();
+    let scene = harness.frame();
+
+    assert!(
+        rects_rounded_by(&scene, Radius::Pixels(5.)).is_empty(),
+        "the settings rail is showing and the tab list's `+` is still drawn"
+    );
+
+    let panel = panel_box(&scene);
+    harness.click(
+        vec2f(center(panel).x(), panel.max_y() - 90.),
+        MouseButton::Right,
+    );
+    assert!(
+        !harness.is_menu_open(),
+        "a press on the settings rail opened the tab list's options menu"
+    );
+}
+
+#[test]
+fn a_secondary_press_on_a_row_opens_that_row_s_menu_and_not_the_list_s() {
+    // Both menus answer the same button, one layer apart. The row wins because
+    // the ground is a sibling *under* the list rather than a wrapper around it:
+    // a stack asks its topmost child first and stops at the one that claims the
+    // press, and the ground is covered by every rect a row painted.
+    let mut harness = Harness::seeded_panel();
+    let row = panel_rows(&harness.frame())[0];
+
+    harness.click(
+        row.origin() + vec2f(40., row.height() / 2.),
+        MouseButton::Right,
+    );
+
+    assert!(
+        tab_menu_box(&harness.frame()).is_some(),
+        "the row's own menu did not open"
+    );
+    assert!(
+        !harness.is_menu_open(),
+        "a press on a row opened the list's options menu as well"
     );
 }
 
@@ -4459,49 +6114,6 @@ fn card_dividers(scene: &Scene, card: RectF) -> Vec<RectF> {
         })
         .map(|(_, bounds)| bounds)
         .collect()
-}
-
-#[test]
-fn the_gear_tooltip_is_a_label_beside_the_gear_and_not_a_bar_down_the_window() {
-    // An anchored overlay child is laid out against the whole window, and
-    // `Align` returns `constraint.max` on every finite axis — so an `Align`
-    // inside the tooltip measured 88 by the window's *height*: an 88px bar
-    // from the top of the window to the bottom, straight down the tab list,
-    // with the label stranded in the middle of it and every element under it
-    // reporting itself covered.
-    let mut harness = Harness::seeded_panel();
-    let scene = harness.frame();
-    let gear = gear_box(&scene);
-    let plus = new_tab_box(&scene);
-    let row = panel_rows(&scene)[0];
-
-    harness.move_to(center(gear));
-    let scene = harness.frame();
-    let tooltips = detail_cards(&scene);
-    assert_eq!(tooltips.len(), 1, "hovering the gear named nothing");
-    let tooltip = tooltips[0];
-
-    assert!(
-        tooltip.height() < 2. * gear.height(),
-        "the tooltip is {tooltip:?}, which is a bar rather than a label"
-    );
-    assert!(
-        tooltip.min_y() >= gear.max_y(),
-        "the tooltip at {tooltip:?} is not below the gear at {gear:?}"
-    );
-    // It floats over the top of the list while it is up, which is what a
-    // tooltip does. What it must not do is run past it: the bar reached the
-    // bottom of the window and covered every row on the way.
-    assert!(
-        tooltip.max_y() < row.max_y(),
-        "the tooltip at {tooltip:?} outlasts the row at {row:?} it is drawn          over"
-    );
-    assert!(
-        tooltip
-            .intersection(plus)
-            .is_none_or(|overlap| overlap.is_empty()),
-        "the tooltip at {tooltip:?} covers the new-tab button at {plus:?}"
-    );
 }
 
 #[test]
@@ -4625,10 +6237,12 @@ fn clicking_a_split_tabs_heading_selects_it_without_moving_the_focus_inside_it()
 
 #[test]
 fn a_row_armed_before_the_menu_opened_puts_no_card_over_the_menus_underlay() {
-    // The gear moved into the control bar, which paints *before* the list, so
-    // a card opened from a row afterwards lands in a later overlay layer than
-    // the menu — and covers the modal underlay whose whole job is to catch the
-    // press that dismisses. `--menu --hover` applies the two in that order.
+    // A card and the menu are both anchored overlays, and the later of the two
+    // covers the earlier. The menu is added last on the ground under the list,
+    // so it wins for any card the same frame builds — but a card armed before
+    // and left armed would come back on a later frame, land in a later overlay
+    // layer, and cover the modal underlay whose whole job is to catch the press
+    // that dismisses. `--menu --hover` applies the two in that order.
     let mut harness = Harness::seeded_panel();
     let row = panel_rows(&harness.frame())[0];
 
@@ -4709,14 +6323,21 @@ fn settings_switch_boxes(scene: &Scene) -> Vec<RectF> {
     switches
 }
 
-/// The text fields on the settings pane, left to right.
+/// The text fields anywhere in the frame, left to right.
 ///
-/// Found by the field's own ground, which nothing else on the page paints:
-/// a rounded box in `overlay_1` exactly [`text_field::HEIGHT`] tall.
+/// Found by the field's own ground: a rounded box in `overlay_1` exactly
+/// [`text_field::HEIGHT`] tall, **with a border**.
+///
+/// The border is what tells a field from a row of the sidebar, and it is not
+/// decoration in this filter. A hovered row is drawn in `overlay_1` too, and a
+/// row of a section's list is 26.4 tall against the field's 26 — inside the
+/// half-pixel slack this has to allow. Only the field is stroked, in every one
+/// of its three states, so only the field is counted.
 fn settings_field_boxes(scene: &Scene) -> Vec<RectF> {
     let mut fields: Vec<RectF> = visible_rects(scene)
         .filter(|(rect, bounds)| {
             rect.background == Fill::Solid(theme().overlay_1)
+                && rect.border != Border::default()
                 && (bounds.height() - crate::workspace::text_field::HEIGHT).abs() < 0.5
         })
         .map(|(_, bounds)| bounds)
@@ -4735,8 +6356,9 @@ fn overlaps(left: RectF, right: RectF) -> bool {
 
 /// The `+` button's box, by the only 5px-rounded rect in the frame.
 ///
-/// It lives in the panel's control bar, which is the window's top-left corner
-/// — so it is also what moves when the traffic lights come and go.
+/// Five is what keeps it out of every other helper here: a row, a card and a
+/// close button are all rounded by four, and the `+` has been the one thing in
+/// the frame rounded by five since it was in the control bar.
 fn plus_box(scene: &Scene) -> RectF {
     let boxes: Vec<RectF> = visible_rects(scene)
         .filter(|(rect, _)| rect.corner_radius.get_top_left() == Radius::Pixels(5.))
@@ -4861,8 +6483,13 @@ fn creator_buttons(scene: &Scene) -> Vec<RectF> {
 }
 
 /// The five swatches the creator offers, left to right.
+///
+/// Filled as well as 40 tall. A swatch *is* a colour, so it always has a fill,
+/// and height on its own caught an unpainted container in the tabs panel
+/// behind this the day that container changed height.
 fn creator_swatches(scene: &Scene) -> Vec<RectF> {
     let mut swatches: Vec<RectF> = visible_rects(scene)
+        .filter(|(rect, _)| rect.background != Fill::None)
         .map(|(_, bounds)| bounds)
         .filter(|bounds| (bounds.height() - 40.).abs() < 0.5)
         .collect();
@@ -5269,7 +6896,7 @@ fn the_settings_chord_shows_the_settings_section_and_a_second_press_keeps_it() {
 }
 
 #[test]
-fn opening_the_settings_page_from_the_gear_menu_takes_the_menu_down() {
+fn opening_the_settings_page_from_the_options_menu_takes_the_menu_down() {
     // The popup is a menu about the strip. It stays up through every option
     // click on purpose, but this entry navigates away from what it is about.
     let mut harness = Harness::seeded();
@@ -5434,10 +7061,10 @@ fn the_rail_switches_pages_and_the_pane_shows_the_one_it_names() {
     harness.open_settings_page();
 
     let rail = settings_rail_boxes(&harness.frame());
-    assert_eq!(rail.len(), 5, "five pages in the rail");
+    assert_eq!(rail.len(), 4, "four pages in the rail");
 
-    // The fourth: Keyboard Shortcuts.
-    harness.click(center(rail[3]), MouseButton::Left);
+    // The third: Keyboard Shortcuts.
+    harness.click(center(rail[2]), MouseButton::Left);
     assert_eq!("Keyboard Shortcuts", harness.settings_section());
 
     let text = frame_text(&harness.frame());
@@ -5472,7 +7099,7 @@ fn the_page_and_the_scroll_position_outlive_leaving_the_section() {
 }
 
 #[test]
-fn a_switch_on_the_page_writes_the_option_the_gear_menu_writes() {
+fn a_switch_on_the_page_writes_the_option_the_options_menu_writes() {
     let mut harness = Harness::new(1);
     harness.open_settings_page();
 
@@ -5503,7 +7130,7 @@ fn a_switch_on_the_page_writes_the_option_the_gear_menu_writes() {
 #[test]
 fn a_switch_the_density_has_made_inert_is_drawn_and_does_nothing() {
     // Warp's third way with an irrelevant setting, and the one the page takes:
-    // the row stays, greyed, with no handler. The gear menu takes the other —
+    // the row stays, greyed, with no handler. The options menu takes the other —
     // it drops the two rows entirely — and both are right for their surface.
     let mut harness = Harness::new(1);
     assert_eq!(Density::Compact, harness.options().density);
@@ -5554,63 +7181,6 @@ fn the_reset_button_puts_every_tab_option_back_and_then_goes_quiet() {
     assert!(
         settings_button_box(&harness.frame()).is_none(),
         "the reset button kept its outline with nothing left to reset"
-    );
-}
-
-#[test]
-fn clicking_the_chip_opens_the_panel_under_it_and_clicking_again_takes_it_down() {
-    let mut harness = Harness::new(1);
-    assert!(
-        !frame_text(&harness.frame()).contains("Last 7 days"),
-        "the panel should start closed"
-    );
-
-    let pirate = pirate_box(&harness.frame()).expect("the chip is in the header");
-    harness.click(center(pirate), MouseButton::Left);
-
-    let text = frame_text(&harness.frame());
-    assert!(
-        text.contains("Last 7 days"),
-        "the panel did not open on the chip's own mark: {text}"
-    );
-    assert!(
-        pirate_is_drawn(&harness.frame()),
-        "the panel covered the chip that opened it"
-    );
-
-    // The panel is modal, so the second click reaches the dismiss underlay
-    // rather than the chip — which is what makes re-clicking one toggle.
-    harness.click(center(pirate), MouseButton::Left);
-    assert!(
-        !frame_text(&harness.frame()).contains("Last 7 days"),
-        "the panel stayed up when the chip was clicked again"
-    );
-}
-
-#[test]
-fn turning_the_usage_chip_off_takes_the_pill_out_of_the_header_and_stops_the_poll() {
-    let mut harness = Harness::new(1);
-    assert!(harness.general().show_usage_chip);
-    assert!(
-        pirate_is_drawn(&harness.frame()),
-        "the chip should be in the header to start with"
-    );
-
-    harness.open_settings_page();
-    harness.select_settings_section("Usage");
-
-    let switches = settings_switch_boxes(&harness.frame());
-    assert_eq!(switches.len(), 1, "one switch on the usage page");
-    harness.click(center(switches[0]), MouseButton::Left);
-
-    assert!(!harness.general().show_usage_chip);
-    assert!(
-        !harness.usage_is_wanted(),
-        "a hidden chip must not go on polling"
-    );
-    assert!(
-        !pirate_is_drawn(&harness.frame()),
-        "the chip is still in the header"
     );
 }
 
@@ -8884,10 +10454,13 @@ mod title_bar_hit_testing {
     fn every_control_in_the_header_still_answers_a_click() {
         let mut harness = Harness::new(2);
 
-        // The gear opens its menu.
+        // The empty space under the list opens the options menu.
         let scene = harness.frame();
-        harness.click(center(gear_box(&scene)), MouseButton::Left);
-        assert!(harness.is_menu_open(), "the gear stopped opening the menu");
+        harness.click(empty_list_space(&scene), MouseButton::Right);
+        assert!(
+            harness.is_menu_open(),
+            "the empty space stopped opening the menu"
+        );
         harness.dispatch_option(OptionsAction::TogglePopup);
 
         // The `+` opens a tab.
@@ -8913,23 +10486,21 @@ mod title_bar_hit_testing {
             "the first tab moved when it was clicked"
         );
 
-        // And none of the four dragged the window.
+        // And none of the three dragged the window.
         assert!(
             harness.window_requests().is_empty(),
-            "a control in the header dragged the window: {:?}",
+            "a control in the panel dragged the window: {:?}",
             harness.window_requests()
         );
     }
 
     #[test]
-    fn the_chip_and_the_tabs_swallow_a_double_click_rather_than_maximising() {
-        for target in ["tab", "chip", "gear", "plus"] {
+    fn the_controls_and_the_tabs_swallow_a_double_click_rather_than_maximising() {
+        for target in ["tab", "plus"] {
             let mut harness = Harness::new(2);
             let scene = harness.frame();
             let at = match target {
                 "tab" => center(tab_boxes(&scene)[0]),
-                "chip" => center(pill_box(&scene)),
-                "gear" => center(gear_box(&scene)),
                 _ => center(plus_box(&scene)),
             };
 
@@ -8946,18 +10517,20 @@ mod title_bar_hit_testing {
 
     #[test]
     fn every_gap_between_the_header_controls_still_picks_the_window_up() {
-        // The `+` and the gear are the panel's; what is left in this row is
-        // whatever a plugin pinned to the right of it, and nothing else.
+        // The `+` is the panel's; what is left in this row is whatever a
+        // plugin pinned to the right of it, and nothing else — so on a build
+        // with no such plugin the whole row is gap, and the points below are
+        // read off the row rather than off anything drawn in it.
         let scene = Harness::new(2).frame();
         let panel = panel_box(&scene);
-        let chip = pill_box(&scene);
-        let row = center(chip).y();
+        let header = header_box(&scene);
+        let row = center(header).y();
 
-        // Between the panel and the chip, just left of the chip, and above it.
+        // Just right of the panel, the middle of the row, and its top edge.
         let gaps = [
-            vec2f((panel.max_x() + chip.min_x()) / 2., row),
-            vec2f(chip.min_x() - 8., row),
-            vec2f(center(chip).x(), 2.),
+            vec2f(panel.max_x() + 8., row),
+            vec2f(center(header).x(), row),
+            vec2f(center(header).x(), header.min_y() + 2.),
         ];
 
         for gap in gaps {
@@ -9009,7 +10582,7 @@ mod title_bar_hit_testing {
         // is instead of following the pointer.
         let mut harness = Harness::new(1);
         let scene = harness.frame();
-        let empty = vec2f(pill_box(&scene).min_x() - 30., center(pill_box(&scene)).y());
+        let empty = empty_header_point(&scene);
 
         harness.click_times(empty, 1);
         harness.click_times(empty, 2);
@@ -9026,13 +10599,13 @@ mod title_bar_hit_testing {
 #[test]
 fn a_chord_bound_to_a_plugins_action_reaches_the_plugin() {
     // The end-to-end of a named action, and the thing that was impossible
-    // before there was one: `crook/usage/refresh` is registered by a plugin,
+    // before there was one: `crook/window/new-tab` is registered by a plugin,
     // named in a file the application does not compile, and reached by a chord
-    // this build has no arm for.
+    // this build has no arm for — `shift+cmd+u` is nobody's.
     let mut harness = Harness::new(1);
-    assert!(!harness.usage_is_busy_for_user());
+    assert_eq!(harness.tab_ids().len(), 1);
 
-    harness.bind(r#"[{ "key": "shift+cmd+u", "command": "crook/usage/refresh" }]"#);
+    harness.bind(r#"[{ "key": "shift+cmd+u", "command": "crook/window/new-tab" }]"#);
     harness.press(
         "u",
         Modifiers {
@@ -9043,8 +10616,9 @@ fn a_chord_bound_to_a_plugins_action_reaches_the_plugin() {
         "",
     );
 
-    assert!(
-        harness.usage_is_busy_for_user(),
+    assert_eq!(
+        harness.tab_ids().len(),
+        2,
         "the chord did not reach the plugin's action"
     );
 }
@@ -9069,7 +10643,20 @@ fn a_chord_bound_to_an_action_nothing_answers_to_does_nothing() {
         ),
         None
     );
-    assert!(!harness.usage_is_busy_for_user());
+    harness.press(
+        "u",
+        Modifiers {
+            cmd: true,
+            shift: true,
+            ..Modifiers::default()
+        },
+        "",
+    );
+    assert_eq!(
+        harness.tab_ids().len(),
+        1,
+        "a chord nothing answers to did something anyway"
+    );
 }
 
 #[test]
@@ -9078,16 +10665,16 @@ fn the_shortcuts_page_lists_what_a_plugin_registered_and_the_chord_that_reaches_
     // can bind it. The page cannot have been written with this row in it: the
     // name belongs to a plugin, and so does the chord.
     let mut harness = Harness::new(1);
-    harness.bind(r#"[{ "key": "shift+cmd+u", "command": "crook/usage/refresh" }]"#);
+    harness.bind(r#"[{ "key": "shift+cmd+u", "command": "crook/window/new-tab" }]"#);
     harness.open_settings_page();
     let rail = settings_rail_boxes(&harness.frame());
-    harness.click(center(rail[3]), MouseButton::Left);
+    harness.click(center(rail[2]), MouseButton::Left);
     assert_eq!("Keyboard Shortcuts", harness.settings_section());
 
     let text = frame_text(&harness.frame());
 
     assert!(
-        text.contains("crook/usage/refresh"),
+        text.contains("crook/window/new-tab"),
         "the page does not name the command: {text}"
     );
     assert!(
@@ -9726,32 +11313,32 @@ fn the_settings_rail_lists_the_pages_the_plugins_contributed() {
     let scene = harness.frame();
 
     let rail = settings_rail_boxes(&scene);
-    assert_eq!(rail.len(), 5, "five pages in the rail");
+    assert_eq!(rail.len(), 4, "four pages in the rail");
     // Top to bottom, which is the `order` each plugin asked for.
     assert_eq!(harness.settings_section(), "Appearance");
 
-    harness.click(center(rail[2]), MouseButton::Left);
-    assert_eq!(harness.settings_section(), "Usage");
+    harness.click(center(rail[1]), MouseButton::Left);
+    assert_eq!(harness.settings_section(), "Shell");
     assert!(
-        frame_text(&harness.frame()).contains("Show the usage chip"),
-        "the Usage page did not come up"
+        frame_text(&harness.frame()).contains("Start a login shell"),
+        "the Shell page did not come up"
     );
 }
 
 #[test]
 fn a_settings_page_can_be_reached_by_the_name_on_its_rail_row() {
-    // What `--settings usage` resolves through, and the only name a person
+    // What `--settings shell` resolves through, and the only name a person
     // ever sees: the key is `owner/entry` and nobody types that.
     let harness = Harness::new(1);
 
     let (found, missing) = harness.workspace.read(&harness.app, |workspace, _| {
         (
-            workspace.settings_page_named("usage"),
+            workspace.settings_page_named("shell"),
             workspace.settings_page_named("nonesuch"),
         )
     });
 
-    assert!(found.is_some(), "the Usage page is not reachable by name");
+    assert!(found.is_some(), "the Shell page is not reachable by name");
     assert!(missing.is_none());
 }
 
@@ -9774,10 +11361,9 @@ mod sandboxed {
         // — and the window draws it in the theme in force, in Crook's own
         // fonts, with Crook's own icons.
         //
-        // At order -1 so it wins `header.right`, which is a `Single` slot the
-        // usage chip is already in. That is the whole of what "change
-        // practically everything" has to mean for a store plugin: it can
-        // *replace* something Crook ships.
+        // At order -1, which is the front of `header.right`: the slot is
+        // `Single`, nothing a release binary carries fills it, and a plugin
+        // installed from a file is the whole of what that row shows.
         let scratch = Scratch::new("draws");
         install(
             scratch.path(),
@@ -9791,11 +11377,35 @@ mod sandboxed {
         assert!(text.contains("from a sandbox"), "{text}");
         assert!(text.contains("probed"), "the badge is missing: {text}");
         assert!(text.contains("Poke"), "the button is missing: {text}");
-        assert!(
-            !text.contains("claude"),
-            "the plugin did not win the slot: {text}"
-        );
         // And the icon it named by string is drawn as one of Crook's own.
+        assert!(
+            icons_of(&harness.frame()).contains(&Lucide::GitBranch),
+            "the icon it asked for was not drawn"
+        );
+    }
+
+    #[test]
+    fn a_chip_a_plugin_pins_to_a_pane_is_drawn_with_the_pane_it_is_about() {
+        // The other place a plugin may put a chip, and the one that is not the
+        // header: `pane.chips` is drawn by the pane the keyboard is in —
+        // beside the line being composed while there is one, and over the
+        // pane's own corner while a program has the screen. This starts a real
+        // shell, because a pane with nothing running in it draws neither.
+        let scratch = Scratch::new("pane-chips");
+        install(
+            scratch.path(),
+            "probe",
+            &wasm("eugen/probe", "pane.chips", 10),
+        );
+        let mut harness = harness(&scratch);
+        if !harness.start_terminals() {
+            return;
+        }
+        harness.frame();
+
+        let text = frame_text(&harness.frame());
+
+        assert!(text.contains("from a sandbox"), "{text}");
         assert!(
             icons_of(&harness.frame()).contains(&Lucide::GitBranch),
             "the icon it asked for was not drawn"
@@ -9828,6 +11438,142 @@ mod sandboxed {
         assert!(text.contains("eugen/probe"), "{text}");
     }
 
+    /// Whether the frame says `phrase`, wherever the paragraph wrapped.
+    ///
+    /// [`frame_text`] joins the lines it found with nothing between them, so a
+    /// sentence that wrapped comes back with two of its words run together.
+    /// Comparing both sides with their spaces taken out is what lets a test
+    /// name a phrase without also knowing the width the card came out at.
+    fn says(scene: &Scene, phrase: &str) -> bool {
+        let bare = |text: &str| text.split_whitespace().collect::<String>();
+        bare(&frame_text(scene)).contains(&bare(phrase))
+    }
+
+    #[test]
+    fn a_plugin_nobody_answered_for_says_so_under_its_own_controls() {
+        // The dead Play button, end to end. The probe draws its own controls
+        // on its own card and asks for a capability nobody has granted, so
+        // every request those controls make is refused before it reaches
+        // anything — and the card used to draw them live and say nothing,
+        // which is what makes a working button read as a broken one.
+        let scratch = Scratch::new("stalled");
+        install(
+            scratch.path(),
+            "probe",
+            &wasm("eugen/probe", "plugins.card.status", 10),
+        );
+        let mut harness = harness(&scratch);
+        harness.show_plugins();
+        harness.click_plugin("Probe");
+        let scene = harness.frame();
+
+        assert!(
+            says(&scene, "refused rather than broken"),
+            "the card drew the plugin's own controls without saying they cannot work: {}",
+            frame_text(&scene)
+        );
+    }
+
+    #[test]
+    fn a_plugin_that_drew_its_own_controls_is_not_listed_twice() {
+        // Its own row says what it can be asked to do, in the shape it chose.
+        // The card counting the same commands underneath is the longest
+        // section on the page saying what the row above it already said.
+        let scratch = Scratch::new("counted");
+        install(
+            scratch.path(),
+            "probe",
+            &wasm("eugen/probe", "plugins.card.status", 10),
+        );
+        let mut harness = harness(&scratch);
+        harness.show_plugins();
+        harness.click_plugin("Probe");
+        let scene = harness.frame();
+
+        assert!(
+            says(&scene, "1 command, which the command palette lists."),
+            "the list was not counted: {}",
+            frame_text(&scene)
+        );
+        assert!(
+            !says(&scene, "Poke the probe"),
+            "the command is listed under the controls that already offer it: {}",
+            frame_text(&scene)
+        );
+    }
+
+    #[test]
+    fn a_plugin_that_drew_nothing_of_its_own_still_gets_the_whole_list() {
+        // The same plugin and the same command, contributed somewhere else.
+        // Nothing on this card offers it, so the card does — which is what
+        // keeps the section from being hidden by a rule about chips.
+        let scratch = Scratch::new("listed-in-full");
+        install(
+            scratch.path(),
+            "probe",
+            &wasm("eugen/probe", "header.right", 10),
+        );
+        let mut harness = harness(&scratch);
+        harness.show_plugins();
+        harness.click_plugin("Probe");
+        let scene = harness.frame();
+
+        assert!(says(&scene, "Poke the probe"), "{}", frame_text(&scene));
+        assert!(
+            !says(&scene, "which the command palette lists"),
+            "{}",
+            frame_text(&scene)
+        );
+    }
+
+    #[test]
+    fn a_panel_the_plugin_has_already_shut_leaves_the_screen() {
+        // The one thing a press does that a dismissal does not: notify. A
+        // guest's state is inside the module, so nothing out here can tell
+        // that running an action changed what it draws — and a plugin's panel
+        // is exactly that state. The dismissal ran, the guest shut the panel,
+        // and the frame went on drawing it, modal underlay and all, over the
+        // plugin's own controls. Every press after that was eaten by a menu
+        // that was not there.
+        let scratch = Scratch::new("dismissed");
+        install(
+            scratch.path(),
+            "probe",
+            &crate::plugins::wasm::tests::wasm_with_a_panel(
+                "eugen/probe",
+                "plugins.card.status",
+                10,
+            ),
+        );
+        let mut harness = harness(&scratch);
+        harness.show_plugins();
+        harness.click_plugin("Probe");
+
+        let scene = harness.frame();
+        let chip = scene
+            .layers()
+            .flat_map(|layer| layer.icons.iter())
+            .find(|drawn| drawn.icon_key.mark == Mark::Icon(Lucide::ChevronDown))
+            .expect("the plugin's own chip should have been drawn")
+            .bounds;
+        harness.click(chip.origin() + chip.size() / 2., MouseButton::Left);
+        assert!(
+            says(&harness.frame(), "the panel is up"),
+            "the chip did not open the panel, so this proves nothing"
+        );
+
+        // A press in the corner, which is what shuts a menu. The guest hears
+        // it — the dismissal names an action and the action ran — so what is
+        // being asked here is only whether anybody drew the answer.
+        harness.click(vec2f(1000., 100.), MouseButton::Left);
+        let scene = harness.frame();
+        assert!(
+            !says(&scene, "the panel is up"),
+            "a panel the plugin shut is still on screen: {}",
+            frame_text(&scene)
+        );
+    }
+
     #[test]
     fn a_sandboxed_plugins_action_is_reachable_by_name_like_any_other() {
         // Prefixed by the host with the plugin's own id, so a guest cannot
@@ -9847,6 +11593,53 @@ mod sandboxed {
 
         assert!(text.contains("Poke the probe"), "{text}");
         assert!(text.contains("eugen/probe/poke"), "{text}");
+    }
+
+    #[test]
+    fn what_a_plugin_pins_to_the_header_clears_the_right_corner_this_platform_reserves() {
+        // The other end of
+        // `the_header_reserves_the_left_corner_this_platform_puts_its_controls_in_and_no_more`.
+        // Nothing a release binary carries goes in this slot, so the only way
+        // to see the reservation honoured is to put something there — which is
+        // also the honest statement of the rule: the room is kept for whatever
+        // fills the slot, whoever wrote it.
+        let scratch = Scratch::new("corner");
+        install(
+            scratch.path(),
+            "probe",
+            &wasm("eugen/probe", "header.right", 0),
+        );
+        let mut harness = harness(&scratch);
+        let insets = harness.window_insets();
+        let scene = harness.frame();
+        let edge = pinned_right_edge(&scene);
+
+        assert!(
+            WINDOW.x() - edge >= insets.header_right,
+            "what the plugin pinned runs into the {} reserved on the right",
+            insets.header_right
+        );
+        // The reservation and the header's own 10px padding, and nothing else.
+        assert!(
+            WINDOW.x() - edge < insets.header_right + 24.,
+            "what the plugin pinned stops {} short of the right edge",
+            WINDOW.x() - edge
+        );
+    }
+
+    /// The right edge of the last thing a plugin drew in the header row.
+    ///
+    /// The row paints its own ground and its own rule, and both run the whole
+    /// width of it; anything narrower is content, and the right edge of the
+    /// content is what a reservation at that end has to clear.
+    fn pinned_right_edge(scene: &Scene) -> f32 {
+        let header = header_box(scene);
+        visible_rects(scene)
+            .map(|(_, drawn)| drawn)
+            .filter(|drawn| contains(header, *drawn) && drawn.width() < header.width())
+            .map(|drawn| drawn.max_x())
+            .max_by(f32::total_cmp)
+            .expect("the plugin drew something in the header")
     }
 
     #[test]
@@ -9898,7 +11691,7 @@ mod plugins_page {
         for name in [
             "Window commands",
             "Header",
-            "Usage chip",
+            "Shell settings",
             "Command palette",
             "About",
         ] {
@@ -9917,17 +11710,17 @@ mod plugins_page {
     fn clicking_a_row_shows_that_plugin() {
         let mut harness = harness();
 
-        harness.click_plugin("Usage chip");
+        harness.click_plugin("Command palette");
         let text = frame_text(&harness.frame());
 
-        assert!(text.contains("crook/usage"), "{text}");
+        assert!(text.contains("crook/palette"), "{text}");
         assert!(
-            text.contains("How much of the Claude Code"),
+            text.contains("Everything the window and its plugins can be asked to do"),
             "the card does not describe it: {text}"
         );
         // What it puts on screen, asked of the host rather than of the plugin.
-        assert!(text.contains("header.right"), "{text}");
-        assert!(text.contains("crook/usage/refresh"), "{text}");
+        assert!(text.contains("window.overlay"), "{text}");
+        assert!(text.contains("crook/palette/open"), "{text}");
     }
 
     #[test]
@@ -9990,10 +11783,12 @@ mod plugins_page {
 
     #[test]
     fn the_switch_on_the_card_takes_the_plugin_out_of_the_window() {
+        // The switch is not a preference: throwing it takes the plugin's
+        // registrations back out, so what it contributed stops being in the
+        // window at all rather than being drawn disabled.
         let mut harness = Harness::new(1);
-        assert!(pirate_is_drawn(&harness.frame()));
         harness.show_plugins();
-        harness.click_plugin("Usage chip");
+        harness.click_plugin("Shell settings");
 
         let switches = settings_switch_boxes(&harness.frame());
         assert_eq!(switches.len(), 1, "one switch, on the card");
@@ -10001,23 +11796,20 @@ mod plugins_page {
 
         let text = frame_text(&harness.frame());
         assert!(
-            !pirate_is_drawn(&harness.frame()),
-            "the chip outlived the plugin"
-        );
-        assert!(
             text.contains("switched off"),
             "the card does not say it is off: {text}"
         );
-        // And the Usage page went with it, because that page was the
-        // plugin's too. Asked of the host: the sidebar is showing the plugin
-        // list rather than the settings rail.
+        // And the Shell page went with it, because that page was the plugin's
+        // too. Asked of the host: the sidebar is showing the plugin list
+        // rather than the settings rail.
         assert!(
             harness
                 .workspace
                 .read(&harness.app, |workspace, _| workspace
                     .host()
-                    .settings_page_id("crook/usage/page"))
-                .is_none()
+                    .settings_page_id("crook/shell/page"))
+                .is_none(),
+            "the page outlived the plugin that added it"
         );
     }
 
@@ -10034,6 +11826,186 @@ mod plugins_page {
             text.contains("It is what draws the page"),
             "the card does not say why its switch is inert: {text}"
         );
+    }
+}
+
+/// The one shape both sidebar sections are drawn in.
+///
+/// The Settings section and the Plugins section each wrote their own two
+/// halves once, and drifted: see `workspace::section`, which is now the only
+/// place either shape is written down. These pin the parts of it that a
+/// screenshot would otherwise be the only record of.
+mod section_layout {
+    use super::*;
+
+    #[test]
+    fn a_page_with_less_room_than_the_measure_shrinks_to_it() {
+        // The bug: the measure was applied by a flex row of two spacers, and a
+        // flex measures an inflexible child *free along the main axis* — so
+        // the column came back 560 wide however little room it had been given.
+        // Docking the Themes panel leaves the body 528, and every control down
+        // the right of a settings row was laid out past the edge of the window
+        // and clipped away by the scroll.
+        let mut harness = Harness::new(1);
+        harness.open_settings_page();
+        assert!(
+            !settings_switch_boxes(&harness.frame()).is_empty(),
+            "the Appearance page should draw switches to begin with"
+        );
+
+        harness.open_theme_panel();
+        let scene = harness.frame();
+        let pane = settings_pane_box(&scene);
+        let switch = *settings_switch_boxes(&scene)
+            .first()
+            .expect("the page's switches went off the window with the panel up");
+
+        // Clear of the page's own inset, not merely inside the window: a rect
+        // that ran past the edge would have been *clipped* to it by the
+        // scroll, and so would have read as fitting.
+        assert!(
+            switch.max_x() <= pane.max_x() - 20.,
+            "a switch reaches {} in a body that ends at {}, which leaves less \
+             than the page's own padding",
+            switch.max_x(),
+            pane.max_x()
+        );
+    }
+
+    #[test]
+    fn both_sections_draw_their_lists_the_same_way() {
+        // Rows inset by ten pixels and rows inset by eight, one list that
+        // scrolled and one that could not. They are one row now, and this is
+        // what says so without a picture.
+        let mut harness = Harness::new(1);
+        harness.open_settings_page();
+        let rail = settings_rail_boxes(&harness.frame());
+        harness.show_plugins();
+        let list = settings_rail_boxes(&harness.frame());
+
+        let rail = *rail.first().expect("the settings rail has rows");
+        let list = *list.first().expect("the plugins list has rows");
+
+        assert!(
+            (rail.height() - list.height()).abs() < 0.5,
+            "a rail row is {} tall and a list row {}",
+            rail.height(),
+            list.height()
+        );
+        assert!(
+            (rail.min_x() - list.min_x()).abs() < 0.5,
+            "a rail row starts at {} and a list row at {}",
+            rail.min_x(),
+            list.min_x()
+        );
+        assert!(
+            (rail.min_y() - list.min_y()).abs() < 0.5,
+            "the first rail row is at {} and the first list row at {}",
+            rail.min_y(),
+            list.min_y()
+        );
+    }
+
+    #[test]
+    fn a_pages_title_stays_put_while_the_page_scrolls() {
+        // The settings page pinned its heading and the plugins card scrolled
+        // its own away. The frame pins both: a body a hundred pixels tall
+        // should not have to be scrolled to find out what it is a page of.
+        //
+        // Both sections, because the point is that there is one answer — and
+        // each is checked against a line further down the same page, so a page
+        // that simply refused to scroll could not pass.
+        for section in ["Settings", "Plugins"] {
+            let mut harness = Harness::new(1);
+            let (title, below) = match section {
+                "Settings" => {
+                    harness.open_settings_page();
+                    ("Appearance", "Follow the desktop")
+                }
+                _ => {
+                    harness.show_plugins();
+                    // The command's *name*, which is the row's description
+                    // and has a line to itself. Not its title: that is the
+                    // label, and a label shares a baseline with the Run
+                    // button beside it, so the line holds both.
+                    ("Window commands", "crook/window/close-pane")
+                }
+            };
+
+            let scene = harness.frame();
+            let title_before = title_line(&scene, title);
+            let below_before = title_line(&scene, below);
+
+            harness.scroll_settings_page(-20.);
+            let scene = harness.frame();
+            let title_after = title_line(&scene, title);
+            let below_after = title_line(&scene, below);
+
+            assert!(
+                below_before.y() - below_after.y() > 1.,
+                "{section}: the page did not scroll, so this proves nothing"
+            );
+            assert!(
+                (title_before.y() - title_after.y()).abs() < 0.5,
+                "{section}: the title moved from {} to {} when the page scrolled",
+                title_before.y(),
+                title_after.y()
+            );
+        }
+    }
+
+    #[test]
+    fn a_plugin_that_is_running_says_so_with_the_pointer_elsewhere() {
+        // The regression this test exists for: the two lists were given one
+        // colour rule, and it was the rail's — lit while selected or hovered,
+        // muted otherwise. That is right for a rail of pages and wrong for a
+        // list of plugins, which is read for what is *running* by somebody
+        // whose pointer is nowhere near it. Every unselected row went muted,
+        // and the only thing left saying a plugin was on was a six-pixel dot.
+        let mut harness = Harness::new(1);
+        harness.show_plugins();
+        let scene = harness.frame();
+        let panel = panel_box(&scene);
+
+        // "Header" is the second row and is loaded, so it is neither the
+        // selected row nor under a pointer this test never moves.
+        let color = label_color(&scene, &panel, "Header");
+        assert_eq!(
+            color,
+            theme().text_primary,
+            "a running plugin's name is drawn in {color:?} with nothing \
+             pointing at it, which is how a switched-off one is drawn"
+        );
+    }
+
+    /// The colour the glyphs of one line in the sidebar are tinted.
+    fn label_color(scene: &Scene, panel: &RectF, label: &str) -> Color {
+        let line = text_lines(scene, |position| position.x() < panel.max_x())
+            .into_iter()
+            .find(|(_, line)| line.trim() == label)
+            .unwrap_or_else(|| panic!("no row in the sidebar reading {label:?}"))
+            .0;
+
+        scene
+            .layers()
+            .flat_map(|layer| layer.glyphs.iter())
+            .find(|glyph| {
+                (glyph.position.y() - line.y()).abs() < 0.5
+                    && (glyph.position.x() - line.x()).abs() < 0.5
+            })
+            .map(|glyph| glyph.color)
+            .expect("the line the text came from has glyphs")
+    }
+
+    /// Where the page's own heading is drawn, which is the copy beside the
+    /// list rather than the one in it.
+    fn title_line(scene: &Scene, title: &str) -> Vector2F {
+        let pane = settings_pane_box(scene);
+        text_lines(scene, |position| position.x() > pane.min_x())
+            .into_iter()
+            .find(|(_, line)| line.trim() == title)
+            .unwrap_or_else(|| panic!("no line on the page reading {title:?}"))
+            .0
     }
 }
 
@@ -10166,4 +12138,174 @@ mod theme_panel_placement {
         assert!(!text.contains("Change your current theme."), "{text}");
         assert!((panel_boxes(&harness.frame())[0].width() - wide.width()).abs() < 1.);
     }
+}
+
+/// A plugin that takes both marks on a tab row, for the tests below.
+///
+/// Native, because what is being tested is the *slot* rather than the sandbox:
+/// a contribution from a `.wasm` file arrives at the same registry through
+/// `plugins::wasm`, and putting a wasm module in this file would test the
+/// interpreter and the panel at once.
+struct TestMarks;
+
+/// What the mark contribution draws, so the assertions can find it.
+const MARK_ICON: Lucide = Lucide::Check;
+
+/// And the badge, which it puts only on the rows that are worktrees.
+const BADGE_ICON: Lucide = Lucide::Info;
+
+/// The title of the one row this plugin declines to draw a mark on.
+const UNMARKED: &str = "left alone";
+
+impl crate::plugin::Plugin for TestMarks {
+    fn manifest(&self) -> &'static crate::plugin::Manifest {
+        static MANIFEST: std::sync::OnceLock<crate::plugin::Manifest> = std::sync::OnceLock::new();
+        MANIFEST.get_or_init(|| crate::plugin::Manifest {
+            schema: crate::plugin::Manifest::SCHEMA,
+            id: crate::plugin::PluginId::parse("eugen/marks").expect("a literal that parses"),
+            name: "Marks",
+            description: "Takes both marks on a tab row.",
+            version: "0.1.0",
+            tier: crate::plugin::Tier::Native,
+            capabilities: &[],
+        })
+    }
+
+    fn build(
+        &mut self,
+        host: &mut crate::plugin::Host,
+        _: &mut ViewContext<Workspace>,
+    ) -> Result<(), crate::plugin::BuildError> {
+        host.contribute_row(
+            crate::plugins::tabs::TAB_ROW_MARK,
+            "mark",
+            0,
+            |_, row, _| {
+                // One row declined, which is the case the disc has to survive:
+                // "nothing to say about this one" must leave the row as it was
+                // rather than empty it.
+                (row.title != UNMARKED).then(|| {
+                    Icon::new(MARK_ICON, 16.)
+                        .with_color(theme().accent)
+                        .finish()
+                })
+            },
+        );
+        host.contribute_row(
+            crate::plugins::tabs::TAB_ROW_BADGE,
+            "badge",
+            0,
+            |_, row, _| {
+                row.git.is_some_and(|facts| facts.worktree).then(|| {
+                    Icon::new(BADGE_ICON, 8.)
+                        .with_color(theme().accent)
+                        .finish()
+                })
+            },
+        );
+        Ok(())
+    }
+}
+
+impl Harness {
+    /// A window whose tab rows a plugin has taken the marks on.
+    fn with_marks(tabs: usize) -> Self {
+        let mut plugins = crate::plugins::defaults();
+        plugins.push(Box::new(TestMarks));
+        Self::with_plugins(tabs, Settings::ephemeral(), plugins)
+    }
+}
+
+/// The discs the panel is drawing: round, and the size `crook/tabs` draws its
+/// status disc at.
+fn status_discs(scene: &Scene) -> Vec<RectF> {
+    let panel = panel_box(scene);
+    let diameter = crate::plugins::tabs::MARK_SIZE * 0.76;
+    rects_rounded_by(scene, Radius::Percentage(50.))
+        .into_iter()
+        .filter(|bounds| panel.contains_point(center(*bounds)))
+        .filter(|bounds| (bounds.width() - diameter).abs() < 0.5)
+        .collect()
+}
+
+/// The rings round a badge: round, and smaller than half the mark's box.
+fn badge_rings(scene: &Scene) -> Vec<RectF> {
+    let panel = panel_box(scene);
+    let ring = crate::plugins::tabs::MARK_SIZE * 0.46;
+    rects_rounded_by(scene, Radius::Percentage(50.))
+        .into_iter()
+        .filter(|bounds| panel.contains_point(center(*bounds)))
+        .filter(|bounds| (bounds.width() - ring).abs() < 0.5)
+        .collect()
+}
+
+#[test]
+fn a_plugin_can_draw_the_mark_at_the_head_of_every_row() {
+    // The slot, end to end: what the panel paints where the status disc was is
+    // what a plugin said to paint there, on every row and not just the active
+    // one.
+    let mut harness = Harness::with_marks(3);
+
+    let scene = harness.frame();
+
+    assert_eq!(icons_in(&scene, panel_box(&scene), MARK_ICON).len(), 3);
+    assert!(
+        status_discs(&scene).is_empty(),
+        "the disc was drawn under the mark that replaced it"
+    );
+}
+
+#[test]
+fn a_row_the_plugin_declines_keeps_the_disc_it_had() {
+    // The reason the disc is the host's answer to an empty slot rather than a
+    // contribution of its own: a plugin marking *some* rows must leave the
+    // others looking exactly as they did, and `Slots::one` never asks the next
+    // contributor when the first declines.
+    let mut harness = Harness::with_marks(2);
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.derived_title = Some(UNMARKED.to_owned());
+    });
+
+    let scene = harness.frame();
+
+    let discs = status_discs(&scene);
+    assert_eq!(icons_in(&scene, panel_box(&scene), MARK_ICON).len(), 1);
+    assert_eq!(discs.len(), 1, "the declined row lost its disc");
+    assert!(
+        tab_boxes(&scene)[0].contains_point(center(discs[0])),
+        "the disc came back on the wrong row"
+    );
+}
+
+#[test]
+fn a_badge_is_drawn_on_the_corner_of_the_mark_it_belongs_to() {
+    // Warp hangs its status ring off the bottom-right of the same 24px box,
+    // and this is where the two plugins the panel was opened up for meet: one
+    // draws the mark, the other says one more thing about the same tab without
+    // taking the first one's place.
+    let mut harness = Harness::with_marks(2);
+    let panes = harness.pane_ids();
+    harness.seed(panes[1], None);
+    harness.record_git_facts(panes[1], "side", None, true);
+
+    let scene = harness.frame();
+
+    let rings = badge_rings(&scene);
+    assert_eq!(rings.len(), 1, "the badge went on more rows than one");
+    assert_eq!(icons_in(&scene, panel_box(&scene), BADGE_ICON).len(), 1);
+
+    let row = tab_boxes(&scene)[1];
+    let ring = rings[0];
+    assert!(
+        row.contains_point(center(ring)),
+        "{ring:?} is not on {row:?}"
+    );
+    // Down and to the right of the mark it sits on, which is the whole of what
+    // makes it a badge rather than a second mark beside the first.
+    let mark = icons_in(&scene, row, MARK_ICON)[0];
+    assert!(
+        center(ring).x() > center(mark).x() && center(ring).y() > center(mark).y(),
+        "the badge at {ring:?} is not on the corner of the mark at {mark:?}"
+    );
 }

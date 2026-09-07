@@ -318,6 +318,26 @@ pub enum IgnoreReason {
     Terminated,
 }
 
+/// A command that has just ended, for somebody outside the block model.
+///
+/// The block itself keeps all of this and more, but a listener that only wants
+/// to know something ended should not have to go looking through the finished
+/// list to find out whether the thing it was told about is the last entry in
+/// it. So the boundary hands over the two facts that are about the *command*
+/// rather than about the block: how it went, and how long it took.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct Finished {
+    /// The status the shell reported, or `None` when it reported none.
+    pub exit: Option<i32>,
+    /// How long it ran, measured from the submit rather than from OSC 133 `C`,
+    /// for the reason [`Blocks::apply`] times it that way: what a person waited
+    /// for started when they pressed Enter.
+    ///
+    /// `None` when the block was already open when Crook started watching, so
+    /// there is no beginning to measure from.
+    pub took: Option<Duration>,
+}
+
 /// What the block model is being told. The columns of [`TABLE`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum Signal {
@@ -643,7 +663,7 @@ impl BlockTracker {
         term: &mut Term<T>,
         palette: &Palette,
         working_directory: Option<&Path>,
-    ) {
+    ) -> Option<Finished> {
         let signal = match mark {
             ShellMark::PromptStart(PromptKind::Initial) => Signal::PromptStart,
             ShellMark::PromptStart(_) => Signal::SecondaryPrompt,
@@ -655,7 +675,7 @@ impl BlockTracker {
             ShellMark::CommandFinished(status) => status,
             _ => None,
         };
-        self.apply(signal, exit, None, term, palette, working_directory);
+        self.apply(signal, exit, None, term, palette, working_directory)
     }
 
     /// Records that a command line has been handed to the shell.
@@ -669,7 +689,9 @@ impl BlockTracker {
         palette: &Palette,
         working_directory: Option<&Path>,
     ) {
-        self.apply(
+        // A submit opens a block; only the shell reporting `D` closes one with
+        // a status, so there is never anything here to announce.
+        let _ = self.apply(
             Signal::Submit,
             None,
             Some(command),
@@ -686,7 +708,9 @@ impl BlockTracker {
         palette: &Palette,
         working_directory: Option<&Path>,
     ) {
-        self.apply(Signal::Exit, None, None, term, palette, working_directory);
+        // A session ending closes the open block without the shell reporting
+        // on it, which is not a command finishing.
+        let _ = self.apply(Signal::Exit, None, None, term, palette, working_directory);
     }
 
     /// Re-finds the open block's first row, because a column change has
@@ -730,7 +754,7 @@ impl BlockTracker {
         term: &mut Term<T>,
         palette: &Palette,
         working_directory: Option<&Path>,
-    ) {
+    ) -> Option<Finished> {
         // Block tracking is suspended on the alternate screen outright: the
         // marks a TUI emits belong to whatever it is displaying, not to the
         // shell that launched it, and a log viewer showing a file that contains
@@ -739,13 +763,19 @@ impl BlockTracker {
         // has to close its block wherever it ended.
         if signal != Signal::Exit && term.mode().contains(TermMode::ALT_SCREEN) {
             self.last_ignored = Some(IgnoreReason::AltScreen);
-            return;
+            return None;
         }
+
+        // Read before the close takes it: `close` moves `started_at` into the
+        // block it files, so a duration read afterwards would always be
+        // `None`.
+        let started_at = self.open.started_at;
+        let mut finished = None;
 
         match TABLE[self.open.state.row()][signal.column()] {
             Transition::Ignore(reason) => {
                 self.last_ignored = Some(reason);
-                return;
+                return None;
             }
             // The only signal the table records without moving is the prompt
             // end, and what it records is where the echoed command line
@@ -776,6 +806,16 @@ impl BlockTracker {
             Transition::Close(state) => {
                 self.close(BlockState::Done, exit, term, palette);
                 self.reopen(state, term, working_directory);
+                // Only the shell saying so. A block also closes when the next
+                // prompt arrives or the session ends, and neither of those is
+                // a command reporting how it went — announcing them as one
+                // would ring a bell for a person opening a tab.
+                if signal == Signal::CommandFinished {
+                    finished = Some(Finished {
+                        exit,
+                        took: started_at.map(|at| at.elapsed()),
+                    });
+                }
             }
             Transition::Terminate => {
                 self.close(BlockState::Terminated, exit, term, palette);
@@ -783,6 +823,7 @@ impl BlockTracker {
             }
         }
         self.last_ignored = None;
+        finished
     }
 
     /// Harvests the open block's rows and files it, unless there is nothing in

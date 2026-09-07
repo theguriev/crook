@@ -3,9 +3,10 @@
 //!
 //! What is pinned to the right is whatever a plugin put in
 //! [`HEADER_RIGHT`](crate::plugins::header::HEADER_RIGHT), and this row does
-//! not know what that is. It used to name the usage chip; that chip is now
-//! contributed by the plugin that owns it, and this is the first surface in
-//! Crook that draws something it was given rather than something it imports.
+//! not know what that is — nothing a release binary carries fills it, and a
+//! plugin installed from a file does. This is the first surface in Crook that
+//! draws something it was given rather than something it imports, which is why
+//! an empty slot has to be as ordinary here as a full one.
 //!
 //! One item, not a list, and that is a judgement about the surface: this row is
 //! also the window's title bar, and a line of competing chips across it is how
@@ -41,10 +42,18 @@ use super::title_bar;
 use super::view::Workspace;
 
 /// The header's own padding, before anything the window asked for.
+///
+/// Even top and bottom. It was not: the bottom was nothing, and the tabs that
+/// used to live here sat flush against the seam on purpose, with the one item
+/// on the right lifting itself off it by a margin of its own. The tabs went to
+/// the panel and the item on the right became a plugin's, and a plugin names
+/// no pixels — so the air under it has to be the row's own, or whatever is
+/// pinned there rests on the bottom edge with six pixels above it and none
+/// below.
 const PADDING: Padding = Padding {
     top: 6.,
     left: 8.,
-    bottom: 0.,
+    bottom: 6.,
     right: 10.,
 };
 
@@ -90,12 +99,13 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
     title_bar::draggable(
         workspace,
         Container::new(items)
+            // No line under it. There was one, drawn when this row held the
+            // tabs and needed to say where they ended; what it divides now is
+            // a surface from a surface, and a rule across the whole window to
+            // separate two things that already look different is a rule that
+            // is only ever noticed for being there. The ground it sits on is
+            // the seam.
             .with_background_color(theme().surface)
-            // The seam between the header and the body, and the only line
-            // across the top of the window: what used to be above this row was
-            // the window manager's title bar, and there is no longer one to
-            // divide anything from.
-            .with_border(Border::bottom(1.).with_border_color(theme().border))
             .finish(),
     )
 }

@@ -73,6 +73,7 @@ fn painted_inline(input: &TextInput, columns: usize, inline: Option<usize>) -> S
             let editor = input.editor();
             rows_inline(editor.text(), editor.caret(), columns, inline)
         },
+        columns,
         true,
         Ink::default(),
     )
@@ -83,11 +84,11 @@ fn painted_in(input: &TextInput, columns: usize, focused: bool, ink: Ink) -> Sce
     let editor = input.editor();
     let rows = rows_of(editor.text(), editor.caret(), columns);
     drop(editor);
-    painted_rows(input, &rows, focused, ink)
+    painted_rows(input, &rows, columns, focused, ink)
 }
 
 /// Paints a field into a scene from rows somebody else wrapped.
-fn painted_rows(input: &TextInput, rows: &Rows, focused: bool, ink: Ink) -> Scene {
+fn painted_rows(input: &TextInput, rows: &Rows, columns: usize, focused: bool, ink: Ink) -> Scene {
     let mut scene = Scene::new(1.);
     scene.start_layer(ClipBounds::None);
     paint_input(
@@ -95,6 +96,7 @@ fn painted_rows(input: &TextInput, rows: &Rows, focused: bool, ink: Ink) -> Scen
         &font(),
         Vector2F::zero(),
         rows,
+        columns as f32 * font().metrics().width,
         focused,
         ink,
         &mut scene,
@@ -143,6 +145,52 @@ fn there_is_no_prompt_glyph_and_the_text_starts_at_column_zero() {
     );
     assert_eq!(painted[0].color, theme().terminal.foreground);
     assert_eq!(painted[1].position, vec2f(metrics.width, metrics.baseline));
+}
+
+#[test]
+fn a_suggestion_is_drawn_after_the_caret_in_ink_nobody_could_mistake_for_typing() {
+    // The half of Warp's composer that makes a terminal feel like it knows
+    // this person: the rest of a command they have run before, standing where
+    // the next character would go, and visibly not theirs.
+    let input = holding("git ");
+    input.edit(|editor| editor.seed_history(vec!["git status".to_owned()]));
+
+    let metrics = font().metrics();
+    let painted = glyphs(&painted(&input, 20, true));
+
+    assert_eq!(painted.len(), 10, "`git ` and the `status` it would add");
+    assert_eq!(painted[4].glyph_key.glyph_id, u32::from('s'));
+    assert_eq!(
+        painted[4].position,
+        vec2f(metrics.width * 4., metrics.baseline),
+        "in the cell the caret is in"
+    );
+    assert_eq!(
+        painted[4].color,
+        theme().terminal.foreground.with_alpha(SUGGESTION_ALPHA)
+    );
+    assert!(
+        painted[..4]
+            .iter()
+            .all(|glyph| glyph.color == theme().terminal.foreground),
+        "and what was actually typed is not dimmed with it"
+    );
+}
+
+#[test]
+fn a_suggestion_stops_at_the_edge_of_the_row_rather_than_growing_the_field() {
+    // It is not text: nothing was laid out for it, and a field that grew a row
+    // for text nobody typed would move the output above it on every keystroke.
+    let input = holding("git ");
+    input.edit(|editor| editor.seed_history(vec!["git status --short".to_owned()]));
+
+    let painted = glyphs(&painted(&input, 8, true));
+
+    assert_eq!(
+        painted.len(),
+        8,
+        "four typed characters and the four cells that were left"
+    );
 }
 
 #[test]
@@ -664,7 +712,7 @@ mod composition {
         drop(text);
         drop(preedit);
         drop(editor);
-        painted_rows(input, &rows, true, Ink::default())
+        painted_rows(input, &rows, columns, true, Ink::default())
     }
 
     #[test]

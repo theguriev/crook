@@ -12,7 +12,7 @@
 //!
 //! A **switch**, because it is the control Warp reaches for twice as often as
 //! everything else combined. A **segmented control**, because Crook already
-//! has one in the gear menu and a two-value choice reads better as two halves
+//! has one in the options menu and a two-value choice reads better as two halves
 //! than as a dropdown Crook cannot draw. A **choice row**, which is Warp's
 //! radio group with the check mark on the right, for the three-value options.
 //! A **text button**, for the one action a page can take. And a **fact row**,
@@ -28,7 +28,7 @@
 //!
 //! An option that another option has made inert is drawn, greyed, and given no
 //! click handler — Warp's third way of handling an irrelevant setting, and the
-//! one it picks when the dependency is worth showing. The gear menu takes the
+//! one it picks when the dependency is worth showing. The options menu takes the
 //! other route for the same two options: it drops "PR link" and "Diff stats"
 //! from the popup entirely while the density is `Compact`. Both are right for
 //! their surface. A 200px popup that grew and shrank as you used it would be
@@ -446,7 +446,7 @@ pub(crate) fn segmented(segments: Vec<Segment>, ui: FamilyId) -> Box<dyn Element
 /// A full-width row that names one value of a several-valued option, with a
 /// check mark when it is the chosen one.
 ///
-/// Warp draws these as a dropdown. This is the gear menu's check row at the
+/// Warp draws these as a dropdown. This is the options menu's check row at the
 /// page's size, and it is what a three-value option looks like when there is
 /// no popup to put a list in.
 pub(crate) fn choice(

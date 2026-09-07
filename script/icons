@@ -36,17 +36,24 @@ OUTPUT = Path(__file__).resolve().parent.parent / "crates/crookui_core/src/icons
 # becomes the variant's doc line, so it is the one place a reader finds out
 # where an icon is used without grepping.
 ICONS = [
-    ("Check", "check", "The mark on a chosen row of the gear menu and of the settings page."),
+    ("Check", "check", "The mark on a chosen row of the tab options menu and of the settings page."),
+    ("ChevronDown", "chevron-down", "An open group's heading in the tabs panel: click to fold it away."),
+    ("ChevronRight", "chevron-right", "A folded group's heading, in the same place."),
     ("Copy", "copy", "The control that takes a block's text, on the block the pointer is on."),
     ("GitBranch", "git-branch", "The mark that says a line is a branch and not a path."),
     ("Info", "info", "The dot beside a setting that has a note attached."),
-    ("LayoutGrid", "layout-grid", "The Expanded density, in the gear menu's segmented control."),
+    ("LayoutGrid", "layout-grid", "The Expanded density, in the tab options menu's segmented control."),
     ("Menu", "menu", "The Compact density, in the same control. Warp draws `Menu01` here."),
+    ("Play", "play", "The mark on a control that plays a sound."),
     ("Plus", "plus", "New tab, and new theme."),
     ("Blocks", "blocks", "The Plugins section, at the foot of the sidebar."),
     ("Search", "search", "The settings page's search box, in the rail."),
-    ("Settings", "settings", "The gear that opens the options menu."),
+    ("Settings", "settings", "The mark on a settings row, and on the button that shows one."),
     ("X", "x", "Close: a tab, a panel row, the Themes panel."),
+    ("Folder", "folder", "A directory: the chip that says where a pane is, and the rows under it."),
+    ("CornerLeftUp", "corner-left-up", "The way out of a directory, in a picker that walks one."),
+    ("Keyboard", "keyboard", "A chord: what one key would do, on the chip that says so."),
+    ("Diff", "diff", "How much has changed in a working tree, on the chip that counts it."),
 ]
 
 SVG_NS = "{http://www.w3.org/2000/svg}"

@@ -1,40 +1,24 @@
 //! The settings page: the rail of pages, and the page it has selected.
 //!
-//! # A pane, like Warp's
+//! # A section of the sidebar
 //!
-//! Settings are not a modal here. They are a **pane** — the same thing an
-//! agent session lives in — which means they open in a tab of their own, sit
-//! in the strip beside the work they configure, can be split next to it, and
-//! close with the same close button, the same middle click and the same close
-//! chord — `cmd-w`, and `ctrl-shift-w` off macOS — as anything else. That is
-//! Warp's design
-//! (`app/src/pane_group/pane/settings_pane.rs`, plus the per-window manager
-//! that keeps at most one of them), and it is the best idea in that part of
-//! Warp: the thing you are configuring stays on screen while you configure it.
+//! Settings are not a modal and are not a tab. They are one of the buttons at
+//! the foot of the panel: pressing it puts the rail of pages where the tab
+//! list was and the page itself where the panes were, and pressing `Sessions`
+//! puts the work back. They were a pane once — Warp's design, and the right
+//! one for Warp, where the thing you are configuring stays on screen while you
+//! configure it — and `crook/settings` says what replaced it and why.
 //!
-//! What it cost is written down where it is paid: [`PaneContent`] is now an
-//! enum, [`Pane::session`] and [`Pane::status`] return `Option`s, and the two
-//! row renderers each carry one branch for a row that stands for something
-//! other than an agent. That is the whole bill.
-//!
-//! [`PaneContent`]: crate::tab::PaneContent
-//! [`Pane::session`]: crate::tab::Pane::session
-//! [`Pane::status`]: crate::tab::Pane::status
-//!
-//! # What the pane draws
-//!
-//! A rail down the left edge and a page beside it, which is Warp's layout: the
-//! rail is a fixed column with a right border, and the content is top-centred
-//! against a maximum width so a wide pane does not stretch a row of settings
-//! across a metre of screen. The page's own chrome is the panel's — the fill,
-//! the border that says which pane is focused, the corner radius — so this
-//! file paints no background of its own and the rail is a border rather than a
-//! second surface.
+//! What this file owns is therefore only half a window each way: the rail is
+//! the panel's body while the settings are showing, and the page is the
+//! window's. Neither draws a width, a border or a fill, because the panel and
+//! the window already have them — and neither draws its own frame either, for
+//! the reason [`section`](super::section) exists: the Plugins section is the
+//! same two halves, and it was drawing them differently.
 //!
 //! There is no close button in the corner and no Escape binding. Both would be
-//! a second way to do what the row's close button and the close chord already
-//! do to every pane, and a settings pane is not special enough to have its
-//! own.
+//! a second way to do what the section buttons already do, and the settings
+//! are not special enough among the sections to have their own.
 //!
 //! # Search
 //!
@@ -57,12 +41,12 @@
 //!
 //! # Every page comes from a plugin
 //!
-//! This module owns the *pane* — the rail, the search field, the scrolling
+//! This module owns the *section* — the rail, the search field, the scrolling
 //! column, and the rule about which page is showing — and none of the pages.
 //! They are contributed to `settings.page`, which `crook/settings` declares,
-//! and each of the five Crook ships belongs to the plugin whose feature it
-//! configures: the Usage page is `crook/usage`'s, so somebody who disables
-//! that plugin loses the page along with the chip.
+//! and each of the four Crook ships belongs to the plugin whose feature it
+//! configures: the Appearance page is `crook/appearance`'s, so somebody who
+//! disables that plugin loses the page along with the themes.
 //!
 //! What that costs is written down where it is paid. A page is named by a key
 //! (`owner/entry`) rather than by a variant of an enum, so the rail's order is
@@ -95,33 +79,20 @@ use search::Query;
 use widgets::Category;
 
 use super::action::{SettingsAction, WorkspaceAction};
+use super::section;
 use super::view::Workspace;
 use crate::plugin::{Host, PageId};
 use crate::plugins::settings::SETTINGS_SECTION;
-
-/// The widest the content column is allowed to get, before it is centred in
-/// whatever is left.
-///
-/// Warp's is 800 against a 12px body; this is that, scaled to a pane that also
-/// has a 160px rail in front of it. Past it a row's label and its control end
-/// up so far apart that the eye loses which control belongs to which row.
-const CONTENT_MAX_WIDTH: f32 = 560.;
 
 /// What the rail's search box says while nothing has been typed. Warp's word,
 /// and there is only one word this box can say.
 const SEARCH_PLACEHOLDER: &str = "Search";
 
-/// The inset around the content column. Warp's is 28, against a page that may
-/// be 800 wide; this card's content column is 560.
-const CONTENT_PADDING: f32 = 20.;
-
-/// The space kept clear down the right of the scrolling column, so the
-/// scrollbar's thumb has somewhere to be that is not on top of a switch.
+/// Where the rail has been scrolled to.
 ///
-/// The thumb rides the inside edge of the scrollable, which is inside the
-/// content's padding; without this the two share the same twenty pixels and
-/// the thumb crosses every segmented control on the page.
-const SCROLLBAR_GUTTER: f32 = 12.;
+/// A name rather than a field of its own, because it is the same kind of thing
+/// as the scroll a page brings with it: see [`SettingsState::scroll_named`].
+const RAIL_SCROLL: &str = "settings.rail";
 
 /// One clickable thing on the page, by a name of its own.
 ///
@@ -159,15 +130,15 @@ pub(crate) fn keyed(group: &str, value: impl fmt::Debug) -> Control {
     format!("{group}.{value:?}")
 }
 
-/// Which page the rail has selected/// Which page the rail has selected, and what the mouse is doing to each of
+/// Which page the rail has selected, and what the mouse is doing to each of
 /// its controls.
 ///
-/// Whether the page is *open* is not here: the settings pane's existence is
-/// that answer, and a flag beside it would be a second copy of it to keep
-/// true. What is here outlives the pane on purpose — closing the tab and
-/// opening it again comes back to the page you were on, scrolled where you
-/// left it, which is what Warp's per-window pane manager buys by holding its
-/// view handle across a close.
+/// Whether the settings are *showing* is not here: which section the sidebar
+/// has chosen is that answer, and a flag beside it would be a second copy of
+/// it to keep true. What is here outlives the section on purpose — going to
+/// the sessions and coming back lands on the page you were on, scrolled where
+/// you left it, which is what Warp's per-window pane manager buys by holding
+/// its view handle across a close.
 #[derive(Default)]
 pub(crate) struct SettingsState {
     /// Which page the rail has selected, by its `owner/entry` key, or `None`
@@ -175,9 +146,9 @@ pub(crate) struct SettingsState {
     ///
     /// A key rather than a variant, because the pages come from a slot and the
     /// set of them depends on which plugins are loaded. A key whose page has
-    /// gone — the plugin was disabled while the pane was closed — reads as
-    /// `None` and the rail lands on the first page, which is the same thing it
-    /// does before anything has been chosen.
+    /// gone — the plugin was disabled while another section was showing —
+    /// reads as `None` and the rail lands on the first page, which is the same
+    /// thing it does before anything has been chosen.
     ///
     /// Not persisted to disk: where somebody was last time they changed a
     /// setting is not a preference, and a settings file that recorded it would
@@ -354,10 +325,8 @@ fn showing(selected: PageId, counts: &[(PageId, usize)], query: &Query) -> PageI
 
 /// The rail: every page there is, and what this build is.
 ///
-/// No background of its own — the panel behind it already painted one — and a
-/// right border instead, which is what Warp's rail is too. A filled rail
-/// inside a rounded panel would also have to know the panel's corner radius to
-/// avoid painting square into it.
+/// The frame is [`section::sidebar`]'s, which is the same frame the Plugins
+/// list is drawn in; what is here is only what goes in it.
 fn rail(
     workspace: &Workspace,
     pages: &[(PageId, String)],
@@ -369,28 +338,9 @@ fn rail(
     let state = workspace.settings_page();
     let (field, search) = workspace.field(SETTINGS_SECTION, "search");
 
-    let mut column = Flex::column()
-        .with_main_axis_size(MainAxisSize::Max)
+    let mut rows = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
-
-    column.add_child(
-        Container::new(
-            super::text_field::TextField::new(
-                search.clone(),
-                workspace.clipboard().clone(),
-                workspace.fonts(),
-                state.control(named("search")),
-                SEARCH_PLACEHOLDER,
-            )
-            .with_icon(Lucide::Search)
-            .with_focus(WorkspaceAction::Settings(SettingsAction::FocusField(Some(
-                field,
-            ))))
-            .finish(),
-        )
-        .with_margin_bottom(10.)
-        .finish(),
-    );
 
     for (id, title) in pages {
         let found = counts
@@ -404,7 +354,7 @@ fn rail(
         if !query.is_empty() && found.unwrap_or(0) == 0 {
             continue;
         }
-        column.add_child(rail_row(
+        rows.add_child(rail_row(
             workspace,
             *id,
             title,
@@ -414,37 +364,52 @@ fn rail(
         ));
     }
 
-    // Warp's rail ends in a button that opens the settings file. Crook's ends
-    // in the one fact somebody looking at a rail wants: which build this is.
-    column.add_child(Expanded::new(1., Empty::new().finish()).finish());
-    column.add_child(
-        Container::new(
-            Text::new(
-                format!(
-                    "crook {} \u{b7} {}",
-                    env!("CARGO_PKG_VERSION"),
-                    workspace.channel()
-                ),
-                ui,
-                10.,
-            )
-            .with_color(theme().text_muted)
-            .finish(),
-        )
-        .with_padding(Padding {
-            top: 8.,
-            bottom: 4.,
-            left: 10.,
-            right: 10.,
-        })
-        .finish(),
-    );
+    let field = super::text_field::TextField::new(
+        search.clone(),
+        workspace.clipboard().clone(),
+        workspace.fonts(),
+        state.control(named("search")),
+        SEARCH_PLACEHOLDER,
+    )
+    .with_icon(Lucide::Search)
+    .with_focus(WorkspaceAction::Settings(SettingsAction::FocusField(Some(
+        field,
+    ))))
+    .finish();
 
-    // No width and no border of its own: the rail *is* the sidebar's body
-    // while the settings are showing, and the panel around it has both.
-    Container::new(column.finish())
-        .with_uniform_padding(12.)
-        .finish()
+    section::sidebar(
+        field,
+        rows.finish(),
+        state.scroll_named(RAIL_SCROLL),
+        Some(build_line(workspace, ui)),
+    )
+}
+
+/// What the rail ends in.
+///
+/// Warp's rail ends in a button that opens the settings file. Crook's ends in
+/// the one fact somebody looking at a rail wants: which build this is.
+fn build_line(workspace: &Workspace, ui: crookui_core::fonts::FamilyId) -> Box<dyn Element> {
+    Container::new(
+        Text::new(
+            format!(
+                "crook {} \u{b7} {}",
+                env!("CARGO_PKG_VERSION"),
+                workspace.channel()
+            ),
+            ui,
+            10.,
+        )
+        .with_color(theme().text_muted)
+        .finish(),
+    )
+    .with_padding(Padding {
+        top: 8.,
+        bottom: 4.,
+        left: 8.,
+        right: 8.,
+    })
+    .finish()
 }
 
 fn rail_row(
@@ -464,42 +429,28 @@ fn rail_row(
         None => title.to_owned(),
     };
 
-    Hoverable::new(state, move |mouse| {
-        let (background, color) = if selected {
-            (theme().overlay_3, theme().text_primary)
-        } else if mouse.is_hovered() {
-            (theme().overlay_1, theme().text_primary)
-        } else {
-            (Color::TRANSPARENT, theme().text_muted)
-        };
-
-        Container::new(
-            Text::new(label.clone(), ui, widgets::LABEL_SIZE)
-                .with_color(color)
-                .finish(),
-        )
-        .with_padding(Padding {
-            top: 6.,
-            bottom: 6.,
-            left: 10.,
-            right: 10.,
-        })
-        .with_background_color(background)
-        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
-        .with_margin_bottom(2.)
-        .finish()
-    })
-    .on_click(move |_, ctx, _| {
-        ctx.dispatch_typed_action(WorkspaceAction::Settings(SettingsAction::Select(id)));
-    })
-    .finish()
+    section::row(
+        section::Row {
+            label,
+            // No mark: every page in the rail is a page, so there is nothing
+            // for one to say. The plugins list has one because a plugin can be
+            // switched off.
+            leading: None,
+            selected,
+            // Every page in the rail is a page there is; none of them is
+            // running or switched off.
+            emphasis: section::Emphasis::Quiet,
+            state,
+            command: Some(WorkspaceAction::Settings(SettingsAction::Select(id))),
+        },
+        ui,
+    )
 }
 
-/// The right-hand column: a fixed heading, then the page itself, scrolling.
+/// The page beside the rail.
 ///
-/// Warp keeps the page title inside the scroll area. Here it is above it and
-/// stays put, because a pane that can be a hundred pixels tall should not have
-/// to scroll to find out which page it is on.
+/// The frame is [`section::content`]'s, which is the same frame the Plugins
+/// card is drawn in; what is here is only the rows that go in it.
 fn content(
     workspace: &Workspace,
     categories: Option<Vec<Category>>,
@@ -511,32 +462,7 @@ fn content(
     let rows = page(categories.unwrap_or_default(), title, query, ui)
         .unwrap_or_else(|| nothing_found(query, ui));
 
-    let column = Flex::column()
-        .with_main_axis_size(MainAxisSize::Max)
-        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_child(centred(widgets::page_title(title, ui)))
-        .with_child(
-            Expanded::new(
-                1.,
-                Scrollable::new(settings.scroll.clone(), centred(rows))
-                    .with_scrollbar(theme().overlay_3)
-                    .finish(),
-            )
-            .finish(),
-        )
-        .finish();
-
-    Container::new(column)
-        .with_padding(Padding {
-            top: CONTENT_PADDING,
-            bottom: CONTENT_PADDING,
-            left: CONTENT_PADDING,
-            // The gutter makes up the rest of it: the content still stops
-            // `CONTENT_PADDING` from the panel's edge, and the thumb lives in the
-            // difference.
-            right: CONTENT_PADDING - SCROLLBAR_GUTTER,
-        })
-        .finish()
+    section::content(title, rows, settings.scroll.clone(), ui)
 }
 
 /// One page's categories, filtered, or `None` when the query emptied it.
@@ -623,35 +549,4 @@ fn nothing_found(query: &Query, ui: crookui_core::fonts::FamilyId) -> Box<dyn El
     .with_corner_radius(CornerRadius::with_all(Radius::Pixels(6.)))
     .with_uniform_padding(16.)
     .finish()
-}
-
-/// `child`, capped at [`CONTENT_MAX_WIDTH`] and centred in whatever is left.
-///
-/// A row of two flexible spacers rather than an [`Align`], because this goes
-/// inside a [`Scrollable`] — which measures its child against an unbounded
-/// height — and `Align` takes every finite axis it is offered, so it would
-/// report a height of infinity and there would be nothing to scroll. A flex
-/// row hugs its children's height, which is the half of `Align` this wanted.
-fn centred(child: Box<dyn Element>) -> Box<dyn Element> {
-    Flex::row()
-        .with_main_axis_size(MainAxisSize::Max)
-        .with_cross_axis_alignment(CrossAxisAlignment::Start)
-        .with_child(Expanded::new(1., Empty::new().finish()).finish())
-        .with_child(
-            ConstrainedBox::new(
-                // A stretching column around the child, so that what is
-                // centred is the *column* and not the child's own text: a
-                // heading handed straight to the row above would measure to
-                // its word and end up centred over the settings it names.
-                Flex::column()
-                    .with_main_axis_size(MainAxisSize::Min)
-                    .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-                    .with_child(child)
-                    .finish(),
-            )
-            .with_max_width(CONTENT_MAX_WIDTH)
-            .finish(),
-        )
-        .with_child(Expanded::new(1., Empty::new().finish()).finish())
-        .finish()
 }

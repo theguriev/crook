@@ -27,7 +27,9 @@ pub enum WorkspaceAction {
     Theme(ThemeAction),
     /// The header was used as what it is: the window's title bar.
     Window(WindowAction),
-    /// Something happened in the menu a tab opens, which is about worktrees.
+    /// Something happened to the context menu a tab's secondary press opens.
+    TabMenu(TabMenuAction),
+    /// Something happened in the worktree menu, which is one entry of that one.
     Worktree(WorktreeAction),
     /// The pointer entered a row, or left it.
     ///
@@ -146,6 +148,37 @@ impl From<WindowAction> for WorkspaceAction {
     }
 }
 
+/// What the context menu a tab's secondary press opens does.
+///
+/// Two, and there is deliberately nothing else in here. Every *entry* of that
+/// menu is a named action belonging to whichever plugin contributed it, which
+/// is what stops this enum growing an arm every time somebody adds a row — the
+/// arrangement `WorkspaceAction::Run` exists for. What is left is the menu
+/// itself: it is up, or it is not.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum TabMenuAction {
+    /// Open it on this tab, over this row. A secondary press on a row.
+    ///
+    /// The pane as well as the tab, because a row under `Panes` granularity
+    /// stands for a pane and half the entries are about that pane rather than
+    /// about its tab. Pressing on the row whose menu is already up closes it,
+    /// which is what anything opened by being pressed does.
+    Open {
+        /// The tab the row belongs to.
+        tab: TabId,
+        /// The pane the row draws.
+        pane: PaneId,
+    },
+    /// Take it down, and any submenu with it. What a press outside it sends.
+    Close,
+}
+
+impl From<TabMenuAction> for WorkspaceAction {
+    fn from(action: TabMenuAction) -> Self {
+        Self::TabMenu(action)
+    }
+}
+
 /// What the menu on a tab does.
 ///
 /// A worktree is named by **its index in the list the menu is showing** rather
@@ -244,26 +277,22 @@ pub enum ThemeAction {
 /// What the settings page does that is not writing an option.
 ///
 /// The split is deliberate and it is the page's whole design: every control
-/// that changes a tab option dispatches the [`OptionsAction`] the gear menu
-/// already dispatches, so the two surfaces cannot drift apart. What is left is
-/// this — three actions, none of which is "open" or "close": the page is a
-/// pane, so opening it is [`TabAction::OpenSettings`] and closing it is
-/// closing a pane, through the same close button, middle click and close
-/// chord — `cmd-w`, `ctrl-shift-w` off macOS — as every other pane in the
-/// window.
+/// that changes a tab option dispatches the [`OptionsAction`] the tab options
+/// menu already dispatches, so the two surfaces cannot drift apart. What is
+/// left is this — and none of it is "open" or "close": the settings are a
+/// section of the sidebar, so showing them is [`WorkspaceAction::ShowSection`]
+/// and leaving them is showing another one.
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum SettingsAction {
-    /// Show a different page of the settings in the pane already holding
+    /// Show a different page of the settings in the section already holding
     /// them.
     Select(PageId),
     /// Move the keyboard to one of the fields on the page, or back to the
     /// rail's search box.
     ///
     /// By index rather than by name, because this enum is `Copy`; see
-    /// [`SettingsState::field`](crate::workspace::settings_page::SettingsState::field).
+    /// [`Workspace::field`](crate::workspace::Workspace::field).
     FocusField(Option<usize>),
-    /// "Show the usage chip", which is also what starts and stops the poll.
-    ToggleUsageChip,
     /// Put every tab option back to the value a fresh install opens with.
     ResetTabOptions,
     /// Set the terminal's type size, in logical pixels.
@@ -320,8 +349,9 @@ pub enum SettingsAction {
 /// because each closes over a different enum.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum OptionsAction {
-    /// Open the menu, or close it. The gear button and the dismiss underlay
-    /// both send this, and only one of them can be reached at a time.
+    /// Open the menu, or close it. A secondary press on the empty space around
+    /// the tab list sends this, and so does the dismiss underlay; only one of
+    /// the two can be reached at a time.
     TogglePopup,
     /// "View as".
     SetGranularity(Granularity),

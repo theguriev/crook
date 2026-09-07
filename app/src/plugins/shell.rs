@@ -38,6 +38,7 @@ fn manifest() -> &'static Manifest {
         description: "How a pane's shell is started, and which of your files it reads.",
         version: env!("CARGO_PKG_VERSION"),
         tier: Tier::Native,
+        capabilities: &[],
     })
 }
 

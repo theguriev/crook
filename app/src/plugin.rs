@@ -24,7 +24,8 @@
 //! that fails to build is skipped by name, with one line in the log, and the
 //! window opens without whatever it was contributing.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use crookui_core::event::Keystroke;
@@ -36,7 +37,11 @@ pub use crook_plugin::{
     Slots, Tier,
 };
 
+use crook_plugin_api::Event;
+
 use crate::keybindings::{Rule, Source, rule_from};
+use crate::plugins::tabs::TabRow;
+use crate::text_input::TextInput;
 use crate::workspace::{Category, Fonts, Workspace};
 
 /// A section of the sidebar: a button at its foot, and what the window shows
@@ -61,6 +66,22 @@ pub const SETTINGS_PAGE: SlotId = SlotId::new("settings.page");
 /// a contribution that captured what it wanted to draw would be drawing the
 /// state of the window at the moment the plugin loaded.
 pub type UiContribution = Box<dyn Fn(&Workspace, &AppContext) -> Box<dyn Element>>;
+
+/// What a plugin contributes to a slot that is drawn once per row.
+///
+/// Two differences from [`UiContribution`], and both are the row's doing.
+///
+/// It is handed the row it is being drawn on, because a slot drawn seven times
+/// asks the same plugin seven questions and "which one is this" is the whole
+/// of what distinguishes them.
+///
+/// And it may answer `None`, which [`UiContribution`] has no need for: the
+/// header's slot is empty or it is not, whereas a mark per tab is something a
+/// plugin may want on *some* rows — the worktrees, the failures — and nowhere
+/// else. `None` means "as it was": the host draws whatever it would have drawn
+/// with no plugin there at all, rather than a hole where a mark goes.
+pub(crate) type RowContribution =
+    Box<dyn Fn(&Workspace, &TabRow<'_>, &AppContext) -> Option<Box<dyn Element>>>;
 
 /// What answers to an [`ActionName`].
 ///
@@ -146,6 +167,10 @@ impl Showing {
     }
 }
 
+/// One surface that hangs off a place in the interface: whose it is, whether
+/// it is up, and how to take it down. See [`Host::claim_panel`].
+type Panel = (PluginId, Showing, Rc<dyn Fn()>);
+
 /// What a surface does with a keystroke while it is up.
 ///
 /// It names an action rather than doing anything, which is what keeps one
@@ -154,6 +179,23 @@ impl Showing {
 /// A surface that returns `None` lets the keystroke go on to the bindings and
 /// then to the pane.
 pub type KeyClaim = Box<dyn Fn(&Keystroke) -> Option<ActionName>>;
+
+/// What a plugin does when something it is watching happens.
+///
+/// Shaped like [`ActionHandler`] and dispatched like one, because it is the
+/// same thing arriving for a different reason: something outside the plugin
+/// happened, and the plugin gets the workspace and a context to answer it
+/// with. Behind an [`Rc`] so a dispatch can take a handle and let go of the
+/// host before it calls anything — a watcher that reached back into the host
+/// while the host was lending out its list would be a borrow inside a borrow.
+pub type CommandWatcher = Rc<dyn Fn(&mut Workspace, &Event, &mut ViewContext<Workspace>)>;
+/// What decides whether a plugin's field is the one the keyboard belongs to.
+///
+/// Asked every time anything could have changed the answer, and it must be
+/// cheap and must not look at anything but the workspace: it runs inside
+/// [`Workspace::sync_input_keys`](crate::workspace::Workspace::sync_input_keys),
+/// which is called from the middle of applying an action.
+pub type FieldClaim = Box<dyn Fn(&Workspace) -> bool>;
 
 /// A registered action, as something `Copy`.
 ///
@@ -184,7 +226,18 @@ pub struct Host {
     /// every plugin has built. This is the short list of what has to arrive
     /// the other way, and it is short on purpose.
     fonts: Fonts,
+    /// What each plugin has been allowed to do, by `owner/name`.
+    ///
+    /// Here for the reason [`Host::fonts`] is: a plugin that asks for
+    /// something while it is *building* cannot ask the workspace, because the
+    /// workspace does not exist until every plugin has built. This is the
+    /// short list of what has to arrive the other way.
+    grants: BTreeMap<String, Vec<String>>,
     slots: Slots<UiContribution>,
+    /// The slots drawn once per row of the tab panel, which are their own
+    /// registry because what a contribution to them *is* is different: it is
+    /// asked about a row, and it may decline that row.
+    rows: Slots<RowContribution>,
     /// The settings pages, which are a slot of their own because what a
     /// contribution to them *is* is different: rows to be searched rather than
     /// an element to be drawn.
@@ -227,6 +280,25 @@ pub struct Host {
     /// The floating surfaces plugins own, and what each does with a keystroke
     /// while it is up.
     surfaces: Vec<(PluginId, Showing, KeyClaim)>,
+    /// Who asked to be told when a command finishes.
+    ///
+    /// A list rather than a slot: nobody *owns* the fact that a command ended,
+    /// every watcher hears it, and the order they hear it in is load order
+    /// because there is nothing better to sort it by.
+    watchers: Vec<(PluginId, CommandWatcher)>,
+    /// The text fields plugins own, by `owner/name`, and when each of them is
+    /// the one the keyboard belongs to.
+    ///
+    /// A field is the one thing a surface could not do for itself. A plugin
+    /// could put a popup on screen, draw a box in it and claim Escape, and
+    /// still have nowhere for a keystroke to land — because which field is
+    /// listening is a fact the element tree cannot work out and the workspace
+    /// used to answer by naming, in source, every field there was. There were
+    /// two, and neither was a plugin's.
+    fields: Vec<(PluginId, String, TextInput, FieldClaim)>,
+    /// The surfaces among those that hang off a *place* rather than over the
+    /// window, and how to take each one down. See [`Host::claim_panel`].
+    panels: Vec<Panel>,
     /// Whose registrations are being made right now. Set around each plugin's
     /// `build` so a plugin cannot register in another's name by accident.
     building: Option<PluginId>,
@@ -250,14 +322,47 @@ pub struct Host {
     loaded: Vec<&'static Manifest>,
     /// The ones that did not, and what went wrong.
     refused: Vec<(PluginId, String)>,
+    /// What the thing that invoked the next action had to say to it.
+    ///
+    /// An action is a `Fn(&mut Workspace, &mut ViewContext)` and takes no
+    /// argument, because a chord and a palette row have nothing to say. Some
+    /// callers do — a row chosen out of a picker is a row with a key, a menu
+    /// entry is an entry about something — and this is where that is left for
+    /// the handler to take. Set immediately before the action is dispatched
+    /// and taken when it runs, which is safe because a dispatched action is
+    /// applied after the whole tree has seen the event: one press, one thing
+    /// said, one action.
+    said: Voice,
+}
+
+/// A place to leave something for the next action that runs to take.
+///
+/// A handle rather than a field, because the thing that says something is
+/// usually an element's click handler: it holds no workspace and no host, only
+/// what it captured when it was built. So it captures one of these.
+#[derive(Clone, Default)]
+pub struct Voice(Rc<RefCell<String>>);
+
+impl Voice {
+    /// Leaves something for the next action.
+    pub fn say(&self, what: impl Into<String>) {
+        *self.0.borrow_mut() = what.into();
+    }
+
+    /// Takes it, leaving nothing behind.
+    pub fn taken(&self) -> String {
+        std::mem::take(&mut self.0.borrow_mut())
+    }
 }
 
 impl Host {
     /// A host with nothing registered.
-    pub fn new(fonts: Fonts) -> Self {
+    pub fn new(fonts: Fonts, grants: BTreeMap<String, Vec<String>>) -> Self {
         Self {
             fonts,
+            grants,
             slots: Slots::new(),
+            rows: Slots::new(),
             pages: Slots::new(),
             page_keys: Vec::new(),
             sections: Slots::new(),
@@ -267,13 +372,38 @@ impl Host {
             commands: Vec::new(),
             suggested: Vec::new(),
             surfaces: Vec::new(),
+            watchers: Vec::new(),
+            fields: Vec::new(),
+            panels: Vec::new(),
             building: None,
             kept: Vec::new(),
             plugins: Vec::new(),
             carried: Vec::new(),
             loaded: Vec::new(),
             refused: Vec::new(),
+            said: Voice::default(),
         }
+    }
+
+    /// Leaves something for the next action to be run to take.
+    ///
+    /// See the field. `&self` rather than `&mut self` because the thing that
+    /// says it is usually an element handler, which holds neither.
+    pub fn say(&self, what: impl Into<String>) {
+        self.said.say(what);
+    }
+
+    /// The handle an element holds to be able to say something.
+    pub fn voice(&self) -> Voice {
+        self.said.clone()
+    }
+
+    /// Takes it, leaving nothing behind.
+    ///
+    /// Taken rather than read, so an action reached by a chord a moment later
+    /// is not handed what somebody clicked before it.
+    pub fn said(&self) -> String {
+        self.said.taken()
     }
 
     /// The plugin whose registrations are being made.
@@ -311,6 +441,38 @@ impl Host {
             EntryId::new(entry),
             order,
             Box::new(build) as UiContribution,
+        );
+        self.kept.push((who, registration));
+    }
+
+    /// Declares a slot that is drawn once per row of the tab panel.
+    ///
+    /// Separate from [`declare_slot`](Self::declare_slot) because the two
+    /// registries hold different things, and a plugin contributing to the
+    /// wrong one is told so by name rather than by drawing nothing: a row slot
+    /// is not somewhere an ordinary contribution can go, since an ordinary
+    /// contribution has no way to ask which row it is on.
+    pub fn declare_row_slot(&mut self, slot: SlotId, cardinality: Cardinality) {
+        let who = self.who();
+        let registration = self.rows.declare(&who, slot, cardinality);
+        self.kept.push((who, registration));
+    }
+
+    /// Contributes something drawn per row to a slot somebody declares.
+    pub fn contribute_row(
+        &mut self,
+        slot: SlotId,
+        entry: impl Into<String>,
+        order: i32,
+        build: impl Fn(&Workspace, &TabRow<'_>, &AppContext) -> Option<Box<dyn Element>> + 'static,
+    ) {
+        let who = self.who();
+        let registration = self.rows.contribute(
+            &who,
+            slot,
+            EntryId::new(entry),
+            order,
+            Box::new(build) as RowContribution,
         );
         self.kept.push((who, registration));
     }
@@ -583,12 +745,138 @@ impl Host {
         showing
     }
 
+    /// Asks to be told when a command in a pane finishes.
+    ///
+    /// Whether the plugin is *allowed* to hear it is not checked here: this is
+    /// the registration, and the grant is read where every other grant is —
+    /// by the thing that registers, while it builds. A native plugin has no
+    /// grant to read because a native plugin is the binary.
+    pub fn watch_commands(&mut self, watch: CommandWatcher) {
+        let who = self.who();
+        self.watchers.push((who, watch));
+    }
+
+    /// Handles for every watcher, so a dispatch can call them with the host
+    /// no longer borrowed.
+    pub fn command_watchers(&self) -> Vec<CommandWatcher> {
+        self.watchers
+            .iter()
+            .map(|(_, watch)| Rc::clone(watch))
+            .collect()
+    }
+
+    /// Registers a surface that hangs off a *place* in the interface rather
+    /// than floating over the window, and how to take it down.
+    ///
+    /// The same keyboard bargain [`Host::claim_surface`] makes, and one rule
+    /// more. A palette floats over everything: it is still on screen after a
+    /// tab switch and may go on owning its arrow keys. A panel hung under a
+    /// chip in a pane is drawn by that pane and stops being drawn when the
+    /// window's attention moves — and a key claim left standing then is a
+    /// keyboard whose owner is nowhere on screen. So the workspace takes these
+    /// down at every point it moves the attention, and `close` is how the
+    /// plugin holding one finds out.
+    pub fn claim_panel(
+        &mut self,
+        keys: impl Fn(&Keystroke) -> Option<ActionName> + 'static,
+        close: impl Fn() + 'static,
+    ) -> Showing {
+        let showing = self.claim_surface(keys);
+        let who = self.who();
+        self.panels
+            .push((who, showing.clone(), Rc::new(close) as Rc<dyn Fn()>));
+        showing
+    }
+
+    /// Takes down every panel that is up, and says whether any was.
+    ///
+    /// The answer is what tells the caller a re-sync is owed: taking a panel
+    /// down gives the keyboard back to a pane, and nothing else would say so.
+    pub fn take_panels_down(&self) -> bool {
+        let mut any = false;
+        for (_, showing, close) in &self.panels {
+            if showing.get() {
+                close();
+                showing.set(false);
+                any = true;
+            }
+        }
+        any
+    }
+
     /// Whether any plugin's surface is up.
     ///
     /// What takes the keyboard away from the focused pane, the same way an
     /// open menu or the Themes panel does.
     pub fn a_surface_is_up(&self) -> bool {
         self.surfaces.iter().any(|(_, showing, _)| showing.get())
+    }
+
+    /// Registers a text field this plugin owns, and hands it back.
+    ///
+    /// The host makes the field rather than taking one, because a plugin
+    /// builds before the workspace exists and there is nothing to take one
+    /// from; what it gets is an [`Rc`](std::rc::Rc) it keeps and hands to an
+    /// element every frame, which is how every field in this application is
+    /// held.
+    ///
+    /// `wants_keys` is asked whenever anything could have changed the answer.
+    /// The first field to say yes gets the keyboard and the panes do not, in
+    /// registration order — two fields wanting it at once is a bug somewhere
+    /// else, and this only decides which of them hears the next letter.
+    ///
+    /// The name is the field's, under this plugin: `owner/name`, so something
+    /// that has to *draw* a field it does not own can find it the way it finds
+    /// an action.
+    pub fn claim_field(
+        &mut self,
+        name: &str,
+        wants_keys: impl Fn(&Workspace) -> bool + 'static,
+    ) -> TextInput {
+        let who = self.who();
+        let field = TextInput::new();
+        self.fields.push((
+            who.clone(),
+            format!("{who}/{name}"),
+            field.clone(),
+            Box::new(wants_keys) as FieldClaim,
+        ));
+        field
+    }
+
+    /// One plugin's field, by its `owner/name`.
+    pub fn field(&self, name: &str) -> Option<&TextInput> {
+        self.fields
+            .iter()
+            .find(|(_, known, _, _)| known == name)
+            .map(|(_, _, field, _)| field)
+    }
+
+    /// Whether one of them has the keyboard right now.
+    ///
+    /// The answer to "is there a caret on screen": a plugin's field blinks
+    /// exactly as the window's own do, and the window cannot know how many
+    /// there are to ask.
+    pub fn a_field_has_keys(&self) -> bool {
+        self.fields.iter().any(|(_, _, field, _)| field.has_keys())
+    }
+
+    /// Tells every plugin's field whether the keyboard is its, and says
+    /// whether one of them took it.
+    ///
+    /// The loop is here rather than in the workspace because the registry is
+    /// here, and because "the first claimant wins" is a rule about the
+    /// registry rather than about the window. A `true` answer is a pane that
+    /// must stop listening — see
+    /// [`Workspace::sync_input_keys`](crate::workspace::Workspace::sync_input_keys).
+    pub fn sync_fields(&self, workspace: &Workspace) -> bool {
+        let mut taken = false;
+        for (_, _, field, wants) in &self.fields {
+            let has_keys = !taken && wants(workspace);
+            field.set_has_keys(has_keys);
+            taken |= has_keys;
+        }
+        taken
     }
 
     /// What a surface that is up makes of this keystroke.
@@ -657,6 +945,19 @@ impl Host {
         self.fonts
     }
 
+    /// What this plugin has been allowed to do.
+    ///
+    /// Empty for one nobody has answered for, which is what every plugin
+    /// installs as: a manifest asking for something is not a person allowing
+    /// it. What the keys mean is
+    /// [`Capability::keys`](crook_plugin_api::Capability::keys).
+    pub fn granted(&self, plugin: &PluginId) -> &[String] {
+        self.grants
+            .get(plugin.as_str())
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
     /// The slot of that name, if one has been declared.
     ///
     /// For a plugin that names a slot with a *string* — which every plugin
@@ -674,6 +975,24 @@ impl Host {
     /// The slots, for the renderers that draw them.
     pub fn slots(&self) -> &Slots<UiContribution> {
         &self.slots
+    }
+
+    /// The row slot of that name, if this build has one.
+    ///
+    /// Looked up separately from [`slot_named`](Self::slot_named), so that a
+    /// plugin contributing to `tab.row.mark` reaches the registry that can ask
+    /// it about a row and a plugin contributing to `header.right` reaches the
+    /// one that cannot.
+    pub fn row_slot_named(&self, name: &str) -> Option<SlotId> {
+        self.rows
+            .declared()
+            .into_iter()
+            .find(|slot| slot.as_str() == name)
+    }
+
+    /// The row slots, for the panel that draws them.
+    pub(crate) fn rows(&self) -> &Slots<RowContribution> {
+        &self.rows
     }
 
     /// The actions, for whatever dispatches one.
@@ -694,6 +1013,7 @@ impl Host {
     /// Everything the registries have to complain about.
     pub fn audit(&self) -> Vec<Complaint> {
         let mut complaints = self.slots.audit();
+        complaints.extend(self.rows.audit());
         complaints.extend(self.actions.audit());
         complaints
     }
@@ -709,6 +1029,23 @@ impl Host {
     /// Whether this plugin is loaded right now.
     pub fn is_loaded(&self, plugin: &PluginId) -> bool {
         self.loaded.iter().any(|manifest| manifest.id == *plugin)
+    }
+
+    /// Records what a plugin is allowed to do, for the next time it builds.
+    ///
+    /// Only for the next time: a plugin reads its grant once, while building,
+    /// and holds what it read. So this is half of the answer and
+    /// [`Self::unload`] followed by [`Self::enable`] is the other half — which
+    /// is exactly what switching a plugin off and on again does, and is why a
+    /// new permission needs no restart. Nothing of the plugin's previous life
+    /// survives that, which is what makes it correct rather than merely
+    /// convenient.
+    pub fn set_granted(&mut self, plugin: &PluginId, keys: Vec<String>) {
+        if keys.is_empty() {
+            self.grants.remove(plugin.as_str());
+        } else {
+            self.grants.insert(plugin.as_str().to_owned(), keys);
+        }
     }
 
     /// Builds a plugin that is not loaded, and does nothing to one that is.
@@ -746,6 +1083,17 @@ impl Host {
         self.commands.retain(|(by, _, _)| by != plugin);
         self.suggested.retain(|(by, _)| by != plugin);
         self.surfaces.retain(|(by, _, _)| by != plugin);
+        // A field goes out with its plugin, and it has to go out *emptied*:
+        // the registry is the only thing holding it, but the workspace may
+        // have asked it a moment ago whether it had the keyboard, and a field
+        // nothing can draw must not answer yes to that again.
+        for (by, _, field, _) in &self.fields {
+            if by == plugin {
+                field.set_has_keys(false);
+            }
+        }
+        self.fields.retain(|(by, _, _, _)| by != plugin);
+        self.panels.retain(|(by, _, _)| by != plugin);
         self.loaded.retain(|manifest| &manifest.id != plugin);
     }
 
@@ -858,10 +1206,11 @@ mod tests;
 pub fn load(
     plugins: Vec<Box<dyn Plugin>>,
     disabled: &[String],
+    grants: BTreeMap<String, Vec<String>>,
     fonts: Fonts,
     ctx: &mut ViewContext<Workspace>,
 ) -> Host {
-    let mut host = Host::new(fonts);
+    let mut host = Host::new(fonts, grants);
     let mut plugins = plugins;
     host.carried = plugins.iter().map(|plugin| plugin.manifest()).collect();
     for plugin in &mut plugins {

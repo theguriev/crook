@@ -133,3 +133,34 @@ fn test_an_answer_on_disk_comes_back() {
     assert_eq!(answer.candidates.len(), 2);
     assert_eq!(answer.insertion("").as_deref(), None, "`s` is not shared");
 }
+
+#[test]
+fn test_what_is_offered_narrows_as_the_typing_goes_on() {
+    // The shell is asked once. Typing on rules candidates out without a second
+    // key press reaching the pane.
+    let answer = completions(&["cargo", "cargo-nextest", "cat"]);
+
+    assert_eq!(answer.matching("car"), vec!["cargo", "cargo-nextest"]);
+    assert_eq!(answer.matching("cargo-"), vec!["cargo-nextest"]);
+    assert!(answer.matching("z").is_empty());
+    assert_eq!(
+        answer.matching("").len(),
+        3,
+        "an empty word rules nothing out"
+    );
+}
+
+#[test]
+fn test_a_case_difference_is_still_the_start_of_a_name() {
+    let answer = completions(&["Cargo.toml", "Cargo.lock"]);
+
+    assert_eq!(answer.matching("car"), vec!["Cargo.toml", "Cargo.lock"]);
+}
+
+#[test]
+fn test_a_candidate_the_shell_repeats_is_offered_once() {
+    // `compgen -c` lists a command once per directory of PATH that holds it.
+    let answer = completions(&["python3", "python3", "python3-config"]);
+
+    assert_eq!(answer.matching("py"), vec!["python3", "python3-config"]);
+}

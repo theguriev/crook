@@ -36,6 +36,7 @@ fn manifest() -> &'static Manifest {
         description: "The version, the channel, where the settings live and the licence.",
         version: env!("CARGO_PKG_VERSION"),
         tier: Tier::Native,
+        capabilities: &[],
     })
 }
 

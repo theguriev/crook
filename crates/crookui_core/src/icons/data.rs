@@ -14,6 +14,12 @@ use super::Segment::{self, Close, Cubic, Line, Move};
 /// Lucide's `check`.
 pub(super) static CHECK: &[Segment] = &[Move(20.0, 6.0), Line(9.0, 17.0), Line(4.0, 12.0)];
 
+/// Lucide's `chevron-down`.
+pub(super) static CHEVRON_DOWN: &[Segment] = &[Move(6.0, 9.0), Line(12.0, 15.0), Line(18.0, 9.0)];
+
+/// Lucide's `chevron-right`.
+pub(super) static CHEVRON_RIGHT: &[Segment] = &[Move(9.0, 18.0), Line(15.0, 12.0), Line(9.0, 6.0)];
+
 /// Lucide's `copy`.
 pub(super) static COPY: &[Segment] = &[
     Move(10.0, 8.0),
@@ -121,6 +127,20 @@ pub(super) static MENU: &[Segment] = &[
     Line(20.0, 19.0),
 ];
 
+/// Lucide's `play`.
+pub(super) static PLAY: &[Segment] = &[
+    Move(5.0, 5.0),
+    Cubic(4.9998, 4.2846, 5.3834, 3.6216, 6.0038, 3.2652),
+    Cubic(6.6241, 2.9088, 7.3901, 2.9114, 8.008, 3.272),
+    Line(20.005, 10.27),
+    Cubic(20.6204, 10.6271, 21.0006, 11.2867, 21.0012, 11.9981),
+    Cubic(21.0019, 12.7096, 20.6228, 13.3699, 20.008, 13.728),
+    Line(8.008, 20.728),
+    Cubic(7.3901, 21.0886, 6.6241, 21.0912, 6.0038, 20.7348),
+    Cubic(5.3834, 20.3784, 4.9998, 19.7154, 5.0, 19.0),
+    Close,
+];
+
 /// Lucide's `plus`.
 pub(super) static PLUS: &[Segment] = &[
     Move(5.0, 12.0),
@@ -210,26 +230,101 @@ pub(super) static X: &[Segment] = &[
     Line(18.0, 18.0),
 ];
 
+/// Lucide's `folder`.
+pub(super) static FOLDER: &[Segment] = &[
+    Move(20.0, 20.0),
+    Cubic(21.0972, 20.0, 22.0, 19.0972, 22.0, 18.0),
+    Line(22.0, 8.0),
+    Cubic(22.0, 6.9028, 21.0972, 6.0, 20.0, 6.0),
+    Line(12.1, 6.0),
+    Cubic(11.421, 6.0067, 10.7834, 5.6671, 10.41, 5.1),
+    Line(9.6, 3.9),
+    Cubic(9.2304, 3.3388, 8.6019, 3.0001, 7.93, 3.0),
+    Line(4.0, 3.0),
+    Cubic(2.9028, 3.0, 2.0, 3.9028, 2.0, 5.0),
+    Line(2.0, 18.0),
+    Cubic(2.0, 19.0972, 2.9028, 20.0, 4.0, 20.0),
+    Close,
+];
+
+/// Lucide's `corner-left-up`.
+pub(super) static CORNER_LEFT_UP: &[Segment] = &[
+    Move(14.0, 9.0),
+    Line(9.0, 4.0),
+    Line(4.0, 9.0),
+    Move(20.0, 20.0),
+    Line(13.0, 20.0),
+    Cubic(10.8057, 20.0, 9.0, 18.1943, 9.0, 16.0),
+    Line(9.0, 4.0),
+];
+
+/// Lucide's `keyboard`.
+pub(super) static KEYBOARD: &[Segment] = &[
+    Move(10.0, 8.0),
+    Line(10.01, 8.0),
+    Move(12.0, 12.0),
+    Line(12.01, 12.0),
+    Move(14.0, 8.0),
+    Line(14.01, 8.0),
+    Move(16.0, 12.0),
+    Line(16.01, 12.0),
+    Move(18.0, 8.0),
+    Line(18.01, 8.0),
+    Move(6.0, 8.0),
+    Line(6.01, 8.0),
+    Move(7.0, 16.0),
+    Line(17.0, 16.0),
+    Move(8.0, 12.0),
+    Line(8.01, 12.0),
+    Move(4.0, 4.0),
+    Line(20.0, 4.0),
+    Cubic(21.1046, 4.0, 22.0, 4.8954, 22.0, 6.0),
+    Line(22.0, 18.0),
+    Cubic(22.0, 19.1046, 21.1046, 20.0, 20.0, 20.0),
+    Line(4.0, 20.0),
+    Cubic(2.8954, 20.0, 2.0, 19.1046, 2.0, 18.0),
+    Line(2.0, 6.0),
+    Cubic(2.0, 4.8954, 2.8954, 4.0, 4.0, 4.0),
+    Close,
+];
+
+/// Lucide's `diff`.
+pub(super) static DIFF: &[Segment] = &[
+    Move(12.0, 3.0),
+    Line(12.0, 17.0),
+    Move(5.0, 10.0),
+    Line(19.0, 10.0),
+    Move(5.0, 21.0),
+    Line(19.0, 21.0),
+];
+
 /// Every icon, its Lucide name, and its geometry.
 ///
 /// One table rather than three `match`es, because the three answers are
 /// three columns of the same row and a test walks it end to end.
 pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [
     (Lucide::Check, "check", CHECK),
+    (Lucide::ChevronDown, "chevron-down", CHEVRON_DOWN),
+    (Lucide::ChevronRight, "chevron-right", CHEVRON_RIGHT),
     (Lucide::Copy, "copy", COPY),
     (Lucide::GitBranch, "git-branch", GIT_BRANCH),
     (Lucide::Info, "info", INFO),
     (Lucide::LayoutGrid, "layout-grid", LAYOUT_GRID),
     (Lucide::Menu, "menu", MENU),
+    (Lucide::Play, "play", PLAY),
     (Lucide::Plus, "plus", PLUS),
     (Lucide::Blocks, "blocks", BLOCKS),
     (Lucide::Search, "search", SEARCH),
     (Lucide::Settings, "settings", SETTINGS),
     (Lucide::X, "x", X),
+    (Lucide::Folder, "folder", FOLDER),
+    (Lucide::CornerLeftUp, "corner-left-up", CORNER_LEFT_UP),
+    (Lucide::Keyboard, "keyboard", KEYBOARD),
+    (Lucide::Diff, "diff", DIFF),
 ];
 
 /// How many there are.
-pub const ICONS: usize = 11;
+pub const ICONS: usize = 18;
 
 /// The icons Crook draws, from Lucide.
 ///
@@ -237,10 +332,18 @@ pub const ICONS: usize = 11;
 /// an icon cannot be named without being drawable.
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub enum Lucide {
-    /// The mark on a chosen row of the gear menu and of the settings page.
+    /// The mark on a chosen row of the tab options menu and of the settings page.
     ///
     /// Lucide's [`check`](https://lucide.dev/icons/check).
     Check,
+    /// An open group's heading in the tabs panel: click to fold it away.
+    ///
+    /// Lucide's [`chevron-down`](https://lucide.dev/icons/chevron-down).
+    ChevronDown,
+    /// A folded group's heading, in the same place.
+    ///
+    /// Lucide's [`chevron-right`](https://lucide.dev/icons/chevron-right).
+    ChevronRight,
     /// The control that takes a block's text, on the block the pointer is on.
     ///
     /// Lucide's [`copy`](https://lucide.dev/icons/copy).
@@ -253,7 +356,7 @@ pub enum Lucide {
     ///
     /// Lucide's [`info`](https://lucide.dev/icons/info).
     Info,
-    /// The Expanded density, in the gear menu's segmented control.
+    /// The Expanded density, in the tab options menu's segmented control.
     ///
     /// Lucide's [`layout-grid`](https://lucide.dev/icons/layout-grid).
     LayoutGrid,
@@ -261,6 +364,10 @@ pub enum Lucide {
     ///
     /// Lucide's [`menu`](https://lucide.dev/icons/menu).
     Menu,
+    /// The mark on a control that plays a sound.
+    ///
+    /// Lucide's [`play`](https://lucide.dev/icons/play).
+    Play,
     /// New tab, and new theme.
     ///
     /// Lucide's [`plus`](https://lucide.dev/icons/plus).
@@ -273,7 +380,7 @@ pub enum Lucide {
     ///
     /// Lucide's [`search`](https://lucide.dev/icons/search).
     Search,
-    /// The gear that opens the options menu.
+    /// The mark on a settings row, and on the button that shows one.
     ///
     /// Lucide's [`settings`](https://lucide.dev/icons/settings).
     Settings,
@@ -281,4 +388,20 @@ pub enum Lucide {
     ///
     /// Lucide's [`x`](https://lucide.dev/icons/x).
     X,
+    /// A directory: the chip that says where a pane is, and the rows under it.
+    ///
+    /// Lucide's [`folder`](https://lucide.dev/icons/folder).
+    Folder,
+    /// The way out of a directory, in a picker that walks one.
+    ///
+    /// Lucide's [`corner-left-up`](https://lucide.dev/icons/corner-left-up).
+    CornerLeftUp,
+    /// A chord: what one key would do, on the chip that says so.
+    ///
+    /// Lucide's [`keyboard`](https://lucide.dev/icons/keyboard).
+    Keyboard,
+    /// How much has changed in a working tree, on the chip that counts it.
+    ///
+    /// Lucide's [`diff`](https://lucide.dev/icons/diff).
+    Diff,
 }

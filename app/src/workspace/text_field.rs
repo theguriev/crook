@@ -77,7 +77,11 @@ pub struct TextField {
     fonts: Fonts,
     hover: MouseStateHandle,
     /// What it says while nothing has been typed.
-    placeholder: &'static str,
+    ///
+    /// Owned rather than borrowed for the sake of one caller: a sandboxed
+    /// plugin's picker names its own placeholder, and a string that arrived
+    /// over a wire cannot be `'static` without being leaked once a frame.
+    placeholder: String,
     /// The mark at its left edge, where it has one. A search box says what it
     /// is with a magnifier; a field whose label is written above it says it
     /// with the label.
@@ -105,14 +109,14 @@ impl TextField {
         clipboard: Clipboard,
         fonts: Fonts,
         hover: MouseStateHandle,
-        placeholder: &'static str,
+        placeholder: impl Into<String>,
     ) -> Self {
         Self {
             input,
             clipboard,
             fonts,
             hover,
-            placeholder,
+            placeholder: placeholder.into(),
             icon: None,
             focus: None,
             line: None,

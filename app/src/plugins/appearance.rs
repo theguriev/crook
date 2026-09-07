@@ -49,6 +49,7 @@ fn manifest() -> &'static Manifest {
         description: "Where the tabs live, what a row says, the text size and the theme.",
         version: env!("CARGO_PKG_VERSION"),
         tier: Tier::Native,
+        capabilities: &[],
     })
 }
 

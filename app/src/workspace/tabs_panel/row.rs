@@ -27,6 +27,12 @@
 //! deleted out from under it does not, and letting the line disappear would
 //! make that row 14px shorter than its neighbours.
 //!
+//! **The mark at the head of the row is not this file's any more.** It is two
+//! slots — `tab.row.mark` and the badge on its corner — declared by
+//! `crook/tabs`, which draws the status disc when nothing has taken them. See
+//! [`crate::plugins::tabs`] for why the disc is what the host draws rather
+//! than a contribution competing with a plugin's.
+//!
 //! **There is a close button in the trailing edge**, in a slot reserved on
 //! every row in every state. Warp closes a tab from a floating action belt
 //! that overhangs the tab's top-right corner — an overlay — and a row already
@@ -38,31 +44,20 @@ use crookui_core::elements::MouseStateHandle;
 use crookui_core::fonts::{FamilyId, Weight};
 use crookui_core::prelude::*;
 
+use crate::plugins::tabs::TabRow;
 use crate::settings::{Density, Granularity, TabOptions};
-use crate::tab::{AgentStatus, PaneId, TabAction, TabId};
+use crate::tab::{PaneId, TabAction, TabColor, TabId};
 use crate::theme::theme;
 
-use super::super::action::{WorkspaceAction, WorktreeAction};
+use super::super::action::{TabMenuAction, WorkspaceAction};
 use super::super::row_content::{
     Chips, DetailSection, PANEL_PATH_CHARS, RowFacts, detail_card, detail_panes, metadata_line,
 };
 use super::super::view::Workspace;
-use super::super::{CLOSE_BUTTON_SIZE, CLOSE_ICON_SIZE, GEAR_ICON, status_color};
-
-/// Warp's `VERTICAL_TABS_ICON_SIZE`. The same in both densities.
-const ICON_SIZE: f32 = 24.;
+use super::super::{CLOSE_BUTTON_SIZE, CLOSE_ICON_SIZE};
 
 /// Warp's `ICON_WITH_STATUS_GAP`, between the icon and the text column.
 const ICON_GAP: f32 = 8.;
-
-/// Warp's `CIRCLE_RATIO` from `ui_components/icon_with_status.rs`: the brand
-/// circle fills 76% of the 24px box, and the rest is breathing room.
-///
-/// Warp then draws a glyph inside the circle and a status ring past its
-/// bottom-right corner. Crook has no icon font and no way to overlay a ring
-/// inside a row, so the status is the disc's own colour — one mark instead of
-/// three, in the same reserved 24px, so rows line up with Warp's.
-const DISC_RATIO: f32 = 0.76;
 
 /// Warp's `ROW_CORNER_RADIUS`.
 const ROW_RADIUS: f32 = 4.;
@@ -123,11 +118,13 @@ pub(super) fn render(
     let status = pane_data.status();
     let home = workspace.home();
 
-    // What the row's own right press does, and whether the menu it opens is
-    // up. About the tab rather than about the row that draws it.
-    let is_the_tabs_row = tab_data.panes().focused_id() == pane;
-    let menu_is_open = is_the_tabs_row && workspace.tab_menu().tab == Some(tab);
-    let opens_menu = is_the_tabs_row && git.is_some_and(|facts| facts.branch.is_some());
+    // Whether the menu this row's right press opens is up, and up on *this*
+    // row. Every row opens one — it used to be the focused pane's row alone,
+    // because the menu was about the tab and only that row stood for it, and
+    // the menu is now about the row: half its entries name the pane the row
+    // draws. A row with nothing to say is no longer possible either, so
+    // nothing here decides whether the gesture works.
+    let menu_is_open = workspace.tab_context_menu().pane == Some(pane);
 
     // A conjunction, and that is the whole of what `Panes` granularity is for:
     // the active tab's container is lifted while only its focused pane's row
@@ -156,8 +153,22 @@ pub(super) fn render(
         Density::Expanded => expanded_column(&facts, &chips, options, ui),
     };
 
+    // Made once and lent to whatever is drawing the row's mark, which is
+    // this build's `crook/tabs` unless a plugin has taken the slot. Every
+    // field of it is something this function already had.
+    let row = TabRow {
+        tab,
+        pane,
+        title: session.display_title(),
+        active: strip.is_active(tab),
+        status,
+        directory: session.working_directory.as_deref(),
+        git,
+    };
+
     let close_state = interaction.close.clone();
     let guard = interaction.close.clone();
+    let color = tab_data.color();
 
     let element = Hoverable::new(interaction.chip.clone(), move |state| {
         let hovered = state.is_hovered();
@@ -180,12 +191,13 @@ pub(super) fn render(
                 } else {
                     CrossAxisAlignment::Center
                 })
-                .with_child(status_disc(Some(status)))
+                .with_child(crate::plugins::tabs::mark(workspace, &row, app))
                 .with_child(Expanded::new(1., body.column).finish())
                 .with_child(close_slot(close_action, close_state.clone(), show_close))
                 .finish(),
             is_selected,
             hovered,
+            color,
         )
     })
     .on_click(move |_, ctx, _| {
@@ -200,13 +212,10 @@ pub(super) fn render(
     .on_middle_click(move |_, ctx, _| {
         ctx.dispatch_typed_action(WorkspaceAction::Tab(close_action));
     })
-    // The secondary button opens the menu. See the strip's own row, which is
-    // the same rule.
+    // The secondary button opens the menu, which is what the secondary button
+    // does on a row in every desktop there is.
     .on_right_click(move |_, ctx, _| {
-        if !opens_menu {
-            return;
-        }
-        ctx.dispatch_typed_action(WorkspaceAction::Worktree(WorktreeAction::OpenMenu(tab)));
+        ctx.dispatch_typed_action(super::super::tab_context_menu::open(tab, pane));
     })
     .on_hover(move |entered, _, ctx, _| {
         ctx.dispatch_typed_action(WorkspaceAction::HoverRow { pane, entered });
@@ -216,13 +225,13 @@ pub(super) fn render(
     if menu_is_open {
         // Below the row and inside the panel. Beside it — where the card goes
         // — would put a 260px menu over the body, which is the same argument
-        // that right-aligns the gear's menu in this column.
+        // that right-aligns the list's own options menu in this column.
         let mut stack = Stack::new().with_child(element);
         stack.add_anchored_overlay_child(
-            Dismiss::new(super::super::tab_menu::render(workspace))
+            Dismiss::new(super::super::tab_context_menu::render(workspace, app))
                 .modal()
                 .on_dismiss(|ctx, _| {
-                    ctx.dispatch_typed_action(WorkspaceAction::Worktree(WorktreeAction::CloseMenu));
+                    ctx.dispatch_typed_action(WorkspaceAction::TabMenu(TabMenuAction::Close));
                 })
                 .finish(),
             AnchorTo::below(vec2f(0., 4.)),
@@ -373,13 +382,49 @@ fn expanded_column(facts: &RowFacts, chips: &Chips, options: TabOptions, ui: Fam
 /// make the selected row two pixels taller than its neighbours and move the
 /// whole list every time the selection changed. That costs the row 2px against
 /// Warp's arithmetic and costs it nothing against itself.
-fn row_shell(content: Box<dyn Element>, is_selected: bool, is_hovered: bool) -> Box<dyn Element> {
+fn row_shell(
+    content: Box<dyn Element>,
+    is_selected: bool,
+    is_hovered: bool,
+    color: Option<TabColor>,
+) -> Box<dyn Element> {
     let background = if is_selected {
         theme().overlay_2
     } else if is_hovered {
         theme().overlay_1
     } else {
         Color::TRANSPARENT
+    };
+
+    // The colour is a stripe down the leading edge and not the disc, because
+    // the disc is already saying what the agent is doing. It is *inside* the
+    // clip and before the padding, so it runs the row's full height and stops
+    // at its rounded corners like everything else the row draws.
+    let content: Box<dyn Element> = match color {
+        Some(color) => Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_child(
+                ConstrainedBox::new(
+                    Container::new(Empty::new().finish())
+                        .with_background_color(theme().terminal.bright[color.index()])
+                        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(STRIPE_RADIUS)))
+                        .finish(),
+                )
+                .with_width(STRIPE_WIDTH)
+                .finish(),
+            )
+            .with_child(
+                Expanded::new(
+                    1.,
+                    Container::new(content)
+                        .with_margin_left(STRIPE_GAP)
+                        .finish(),
+                )
+                .finish(),
+            )
+            .finish(),
+        None => content,
     };
 
     Container::new(
@@ -398,39 +443,28 @@ fn row_shell(content: Box<dyn Element>, is_selected: bool, is_hovered: bool) -> 
     .finish()
 }
 
-/// The 24px leading mark: a status-coloured disc, centred in its reserved box.
-fn status_disc(status: Option<AgentStatus>) -> Box<dyn Element> {
-    let diameter = ICON_SIZE * DISC_RATIO;
+/// How wide the colour stripe on a coloured row is.
+///
+/// Three, which is a mark rather than a band: it has to be findable running a
+/// finger down a column of rows and must not read as a second column.
+const STRIPE_WIDTH: f32 = 3.;
 
-    let mark: Box<dyn Element> = match status {
-        Some(status) => ConstrainedBox::new(
-            Container::new(Empty::new().finish())
-                .with_background_color(status_color(status))
-                .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
-                .finish(),
-        )
-        .with_width(diameter)
-        .with_height(diameter)
-        .finish(),
-        // The settings row's mark: a gear where an agent's status disc goes,
-        // at the disc's own diameter so the row's text starts where every
-        // other row's does. See the strip's `status_dot` for why this is a
-        // different kind of mark rather than a fifth status colour.
-        None => Icon::new(GEAR_ICON, diameter)
-            .with_color(theme().text_muted)
-            .finish(),
-    };
+/// Its corner radius, so it reads as a lozenge rather than a cut edge.
+const STRIPE_RADIUS: f32 = 1.5;
 
-    ConstrainedBox::new(Align::new(mark).finish())
-        // Reserved whole, in both densities, so every row's text starts at the
-        // same x however tall the row is.
-        .with_width(ICON_SIZE)
-        .with_height(ICON_SIZE)
-        .finish()
-}
+/// The gap between the stripe and what the row was already drawing.
+const STRIPE_GAP: f32 = 6.;
 
 /// A fixed square, holding the close button or holding nothing.
-fn close_slot(action: TabAction, state: MouseStateHandle, visible: bool) -> Box<dyn Element> {
+///
+/// A group's heading takes the same one: it is the same gesture on the same
+/// kind of thing, and a second close button drawn a second way is how the two
+/// end up different sizes.
+pub(super) fn close_slot(
+    action: TabAction,
+    state: MouseStateHandle,
+    visible: bool,
+) -> Box<dyn Element> {
     let inner: Box<dyn Element> = if visible {
         Hoverable::new(state, move |state| {
             let hovered = state.is_hovered();

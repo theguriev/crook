@@ -34,14 +34,12 @@ crook_plugin.workspace = true
 crook_plugin_api.workspace = true
 crook_terminal.workspace = true
 crook_wasm.workspace = true
-crook_usage.workspace = true
 crookui.workspace = true
 crookui_core.workspace = true
 
 anyhow.workspace = true
 arboard.workspace = true
-# The usage panel is dated: countdowns to a reset, and a bar per day of the
-# week the transcripts describe.
+# What tells a sandboxed plugin which day is which. See the workspace manifest.
 chrono.workspace = true
 # The settings file lives in the platform's configuration directory.
 dirs.workspace = true
@@ -53,6 +51,9 @@ unicode-width.workspace = true
 png.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# The network a sandboxed plugin reaches through the host: a plugin never
+# opens a socket, it asks, and this is what does the asking on its behalf.
+ureq.workspace = true
 
 [dev-dependencies]
 # Test plugins are written in wasm's text format and assembled in the test, so

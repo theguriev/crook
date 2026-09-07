@@ -386,7 +386,6 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
- "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -564,7 +563,6 @@ dependencies = [
  "crook_plugin",
  "crook_plugin_api",
  "crook_terminal",
- "crook_usage",
  "crook_wasm",
  "crookui",
  "crookui_core",
@@ -576,12 +574,16 @@ dependencies = [
  "serde_json",
  "unicode-segmentation",
  "unicode-width",
+ "ureq",
  "wat",
 ]
 
 [[package]]
 name = "crook_plugin"
 version = "0.1.0"
+dependencies = [
+ "crook_plugin_api",
+]
 
 [[package]]
 name = "crook_plugin_api"
@@ -600,20 +602,6 @@ dependencies = [
  "log",
  "parking_lot",
  "portable-pty",
-]
-
-[[package]]
-name = "crook_usage"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "chrono",
- "dirs",
- "log",
- "serde",
- "serde_json",
- "thiserror 2.0.20",
- "ureq",
 ]
 
 [[package]]

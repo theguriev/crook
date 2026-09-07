@@ -1,7 +1,7 @@
 //! Everything Crook remembers between launches, and the file it remembers it
 //! in.
 //!
-//! Two groups. [`TabOptions`] is what the tab strip's gear menu writes — what
+//! Two groups. [`TabOptions`] is what the tab list's options menu writes — what
 //! a row stands for, how tall it is, what its title says, what its second line
 //! says, which chips it carries, and whether hovering it opens a detail card.
 //! Its defaults are Warp's, value for value, because the menu is Warp's: a
@@ -10,7 +10,7 @@
 //! has had its say, and today that is one switch.
 //!
 //! Both are written by the settings page, and [`TabOptions`] is also written
-//! by the gear menu. Neither knows which of the two changed it: a settings
+//! by that menu. Neither knows which of the two changed it: a settings
 //! page that had its own copy of an option would be a second source of truth
 //! for the same key, and the menu and the page would disagree about what the
 //! file says the moment both were open.
@@ -21,7 +21,7 @@
 //! reached through a settings-schema system that gives every key a type, a
 //! default, a migration path and a cloud-sync policy. Crook has none of that,
 //! and seven keys do not earn it. JSON is what `serde_json` — already in the
-//! workspace for the usage client — reads and writes with no further
+//! workspace for a plugin's manifest — reads and writes with no further
 //! dependency and no schema, and it is the format in which "keep the keys this
 //! build did not recognise" is a [`Map`] rather than a parser. The leaf key
 //! names are Warp's, so the two files say the same thing about the same
@@ -35,6 +35,7 @@
 //! be read, logs one line, and carries on. A truncated config file is a
 //! nuisance, not a startup failure.
 
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Write as _;
@@ -60,6 +61,9 @@ const FONT_FAMILY_KEY: &str = "font_family";
 
 /// The key the list of switched-off plugins is stored under.
 const DISABLED_PLUGINS_KEY: &str = "disabled_plugins";
+
+/// The key the things a person has allowed a plugin to do are stored under.
+const PLUGIN_GRANTS_KEY: &str = "plugin_grants";
 
 /// The keys the two halves of the desktop-following pair are stored under.
 const LIGHT_THEME_KEY: &str = "light_theme";
@@ -222,11 +226,12 @@ pub fn subtitle_options_for(primary: PrimaryInfo) -> [Subtitle; 2] {
 
 /// Everything the settings page writes that is not about the tab strip.
 ///
-/// One switch, and that is not an accident of scheduling. Crook has a window,
-/// a tab strip and a usage chip; every option that could be offered about the
-/// first two is already in [`TabOptions`], and the chip has exactly one
-/// question worth asking about it. Warp's settings hold roughly eight hundred
-/// keys behind a schema system, a migration path and a cloud-sync policy —
+/// Four switches, and that is not an accident of scheduling. Crook has a
+/// window and a tab strip; every option that could be offered about the strip
+/// is already in [`TabOptions`], and what a plugin wants asked about itself
+/// belongs to that plugin rather than here. Warp's settings hold roughly eight
+/// hundred keys behind a schema system, a migration path and a cloud-sync
+/// policy —
 /// `docs/architecture.md` is explicit that a `serde` struct in a file is the
 /// right answer until there are ten of them, and this is the second struct,
 /// not the beginning of a schema.
@@ -261,16 +266,6 @@ pub struct GeneralOptions {
     /// tabs, splits and the directories their shells were in. No output is
     /// restored and no process is: see [`crate::session`].
     pub restore_session: bool,
-    /// Whether the header carries the Claude Code usage chip.
-    ///
-    /// Off is not merely a hidden pill: the chip is the only thing that reads
-    /// the usage endpoint, so turning it off is also what stops Crook talking
-    /// to the network at all. That is why this is a setting rather than a
-    /// matter of taste about a header, and why [`Workspace`] gates the poll on
-    /// it rather than rendering nothing and polling anyway.
-    ///
-    /// [`Workspace`]: crate::workspace::Workspace
-    pub show_usage_chip: bool,
     /// Whether a pane's shell is started as a *login* shell.
     ///
     /// A login shell reads `/etc/zprofile`, `~/.zprofile` and `~/.zlogin` on
@@ -300,14 +295,14 @@ pub struct GeneralOptions {
 }
 
 impl Default for GeneralOptions {
-    /// The chip on, because it is half of what Crook v1 is for, and the type
-    /// size the body panel already printed its one monospace line at.
+    /// The tabs coming back, because that is what makes a terminal a place,
+    /// and the type size the body panel already printed its one monospace line
+    /// at.
     fn default() -> Self {
         Self {
             font_size: DEFAULT_FONT_SIZE,
             use_system_theme: false,
             restore_session: true,
-            show_usage_chip: true,
             login_shell: crate::shell_integration::login_by_default(),
         }
     }
@@ -443,6 +438,22 @@ pub struct Settings {
     /// dropping it would silently switch the feature back on for somebody who
     /// reinstalls it.
     disabled_plugins: Vec<String>,
+    /// What each plugin has been allowed to do, by `owner/name`, as
+    /// [`Capability::keys`](crook_plugin_api::Capability::keys) writes it
+    /// down.
+    ///
+    /// Only what was *allowed*, and one entry per host and per path rather
+    /// than one per capability. That is what makes an escalation visible: a
+    /// plugin whose next version wants a second host asks for a key that is
+    /// not in this list, so it is refused and the Plugins page can say which
+    /// line is new — where a stored "yes" would have covered whatever the
+    /// plugin asked for next.
+    ///
+    /// Keys for plugins this build has never heard of are kept and ignored,
+    /// for the reason [`Settings::disabled_plugins`] keeps names it does not
+    /// know: it is a plugin that has been uninstalled, and forgetting the
+    /// grant would mean asking again for something already answered.
+    plugin_grants: BTreeMap<String, Vec<String>>,
     /// The name of the theme to open in.
     ///
     /// A name rather than the palette itself, and that is the whole design: a
@@ -486,6 +497,7 @@ impl Settings {
                 tab_options: TabOptions::default(),
                 general: GeneralOptions::default(),
                 disabled_plugins: Vec::new(),
+                plugin_grants: BTreeMap::new(),
                 theme: crate::theme::DEFAULT_NAME.to_owned(),
                 light_theme: crate::theme::DEFAULT_LIGHT_NAME.to_owned(),
                 dark_theme: crate::theme::DEFAULT_NAME.to_owned(),
@@ -508,6 +520,7 @@ impl Settings {
             tab_options: TabOptions::default(),
             general: GeneralOptions::default(),
             disabled_plugins: Vec::new(),
+            plugin_grants: BTreeMap::new(),
             theme: crate::theme::DEFAULT_NAME.to_owned(),
             light_theme: crate::theme::DEFAULT_LIGHT_NAME.to_owned(),
             dark_theme: crate::theme::DEFAULT_NAME.to_owned(),
@@ -528,7 +541,7 @@ impl Settings {
         // Two independent parses of the same object rather than one parse of a
         // struct holding both, because the two groups fail independently: a
         // hand-edited `display_granularity` that names nothing must not take
-        // the usage chip down with it.
+        // the type size down with it.
         let tab_options = parse_group(&document, &path, "tab options");
         let general = parse_group(&document, &path, "general options");
         // Not through `parse_group`: a theme name is one string rather than a
@@ -570,6 +583,29 @@ impl Settings {
             })
             .unwrap_or_default();
 
+        // Read the way the list above is: one unusable entry costs that
+        // plugin's grant and not everybody's.
+        let plugin_grants = document
+            .get(PLUGIN_GRANTS_KEY)
+            .and_then(Value::as_object)
+            .map(|plugins| {
+                plugins
+                    .iter()
+                    .filter_map(|(plugin, keys)| {
+                        let keys: Vec<String> = keys
+                            .as_array()?
+                            .iter()
+                            .filter_map(Value::as_str)
+                            .map(str::trim)
+                            .filter(|key| !key.is_empty())
+                            .map(str::to_owned)
+                            .collect();
+                        (!keys.is_empty()).then(|| (plugin.clone(), keys))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let light_theme = named_theme(&document, LIGHT_THEME_KEY, crate::theme::DEFAULT_LIGHT_NAME);
         let dark_theme = named_theme(&document, DARK_THEME_KEY, crate::theme::DEFAULT_NAME);
 
@@ -579,6 +615,7 @@ impl Settings {
             tab_options,
             general,
             disabled_plugins,
+            plugin_grants,
             theme,
             light_theme,
             dark_theme,
@@ -675,6 +712,36 @@ impl Settings {
         self.disabled_plugins.sort();
     }
 
+    /// What a plugin has been allowed to do.
+    ///
+    /// Empty for a plugin nobody has answered for, which is the state every
+    /// plugin installs in: asking is not being granted.
+    pub fn granted_to(&self, plugin: &str) -> &[String] {
+        self.plugin_grants
+            .get(plugin)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+    }
+
+    /// Everything allowed, for handing to the plugins as they build.
+    pub fn plugin_grants(&self) -> &BTreeMap<String, Vec<String>> {
+        &self.plugin_grants
+    }
+
+    /// Records what a plugin may do, replacing whatever it could before.
+    ///
+    /// Replacing rather than adding, because this is the answer to a dialog
+    /// that showed a whole list: allowing a plugin that now wants two hosts is
+    /// allowing both, and revoking is the same call with nothing in it.
+    /// Touches no file.
+    pub fn set_granted(&mut self, plugin: &str, keys: Vec<String>) {
+        if keys.is_empty() {
+            self.plugin_grants.remove(plugin);
+        } else {
+            self.plugin_grants.insert(plugin.to_owned(), keys);
+        }
+    }
+
     /// The options that are not the tab strip's.
     pub fn general(&self) -> GeneralOptions {
         self.general
@@ -731,7 +798,7 @@ impl Settings {
     /// overwritten by their current values.
     ///
     /// Both groups are flat in the same object, which is what lets a person
-    /// find `show_usage_chip` beside `font_size` in a file they opened in an
+    /// find `start_login_shell` beside `font_size` in a file they opened in an
     /// editor. It also means the two structs may not name the same key twice —
     /// the later `extend` would silently win — and that is a thing to check
     /// when a third group appears rather than a thing to defend against here.
@@ -752,6 +819,29 @@ impl Settings {
                     self.disabled_plugins
                         .iter()
                         .map(|name| Value::String(name.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        // Written back only when something has been allowed, for the reason
+        // the list above is: a person who has installed no plugin should not
+        // find an empty object in a file they opened to read.
+        if self.plugin_grants.is_empty() {
+            document.remove(PLUGIN_GRANTS_KEY);
+        } else {
+            document.insert(
+                PLUGIN_GRANTS_KEY.to_owned(),
+                Value::Object(
+                    self.plugin_grants
+                        .iter()
+                        .map(|(plugin, keys)| {
+                            (
+                                plugin.clone(),
+                                Value::Array(
+                                    keys.iter().map(|key| Value::String(key.clone())).collect(),
+                                ),
+                            )
+                        })
                         .collect(),
                 ),
             );
@@ -1206,9 +1296,6 @@ mod tests {
                 "show_details_on_hover",
                 "show_diff_stats",
                 "show_pr_link",
-                // Crook's own, and the one key in the file with no Warp
-                // spelling to match: Warp has no usage chip.
-                "show_usage_chip",
                 // The chosen theme's name, which is a string rather than an
                 // option with a type: see `Settings::theme`.
                 "theme",
@@ -1359,11 +1446,11 @@ mod tests {
         let written: Map<String, Value> =
             serde_json::from_str(&contents).expect("the file should be a JSON object");
 
-        // Seven tab options, five general ones and three theme names, and
+        // Seven tab options, four general ones and three theme names, and
         // nothing else: the 8KB key the file started with is gone. The font
         // family is not among them — an absent key is what "no preference"
         // is, so a save writes no `font_family` unless one was chosen.
-        assert_eq!(15, written.len());
+        assert_eq!(14, written.len());
         assert!(!contents.contains("padding"));
         assert_eq!(
             everything_flipped(),
@@ -1477,6 +1564,11 @@ mod tests {
         // The half of the switch that is not on screen. A list that only held
         // the plugins that are *on* would go stale the day the build gains
         // one, which is why the file records the exceptions.
+        //
+        // The name is one this build no longer carries, and deliberately so:
+        // this module knows nothing about which plugins exist, and a fixture
+        // that named a real one would let a lookup creep in without any test
+        // noticing.
         let scratch = ScratchDirectory::new("disabled-plugins");
         let mut settings = Settings::load(scratch.settings_file());
         assert!(settings.disabled_plugins().is_empty());

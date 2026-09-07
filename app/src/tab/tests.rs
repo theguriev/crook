@@ -709,3 +709,442 @@ mod resizing {
         assert!((flexes[1] - 0.5).abs() < 1e-5);
     }
 }
+
+/// The strip's groups, as the panel would draw them: one entry per block,
+/// naming its group's tabs.
+mod groups {
+    use super::*;
+
+    /// A strip of `count` tabs where the first two are one group, with the
+    /// group's id.
+    fn grouped(count: usize) -> (TabStrip, Vec<TabId>, GroupId) {
+        let (mut strip, ids) = strip(count);
+        strip.apply(TabAction::NewInGroupOf(ids[0]));
+        let group = strip
+            .get(ids[0])
+            .expect("the anchor is open")
+            .group()
+            .expect("the anchor was put in a group");
+        let ids = order(&strip);
+        (strip, ids, group)
+    }
+
+    /// Every block, as its group's name (or `-`) and the positions of its tabs.
+    fn shape(strip: &TabStrip) -> Vec<(Option<GroupId>, usize)> {
+        strip
+            .blocks()
+            .into_iter()
+            .map(|block| (block.group, block.tabs.len()))
+            .collect()
+    }
+
+    #[test]
+    fn a_worktree_opens_a_tab_in_the_group_rather_than_a_pane_in_the_tab() {
+        // The whole feature in one case: the second checkout is a tab beside
+        // the first, under one heading — not a second pane inside it.
+        let (mut strip, ids) = strip(1);
+
+        assert_eq!(
+            TabEffect::Changed,
+            strip.apply(TabAction::NewInGroupOf(ids[0]))
+        );
+
+        assert_eq!(strip.len(), 2, "a tab, not a split");
+        assert_eq!(
+            strip.get(ids[0]).expect("open").panes().len(),
+            1,
+            "the tab it was opened from was not split"
+        );
+        let group = strip.get(ids[0]).expect("open").group().expect("grouped");
+        assert_eq!(
+            strip.members(group).map(Tab::id).collect::<Vec<_>>(),
+            order(&strip),
+            "both tabs are in it, in strip order"
+        );
+        assert_eq!(strip.active_id(), order(&strip)[1], "and it is selected");
+    }
+
+    #[test]
+    fn the_group_is_named_after_the_tab_it_was_made_around() {
+        let (strip, ids, group) = grouped(1);
+
+        assert_eq!(
+            strip.group(group).map(TabGroup::name),
+            strip.get(ids[0]).map(Tab::name)
+        );
+    }
+
+    #[test]
+    fn a_second_worktree_joins_the_group_that_is_already_there() {
+        let (mut strip, ids, group) = grouped(1);
+
+        strip.apply(TabAction::NewInGroupOf(ids[0]));
+
+        assert_eq!(strip.groups().count(), 1, "one group, not two");
+        assert_eq!(strip.members(group).count(), 3);
+        assert_eq!(shape(&strip), vec![(Some(group), 3)]);
+    }
+
+    #[test]
+    fn a_new_tab_lands_past_the_group_rather_than_inside_it() {
+        // `New` inserts after the active tab, and the active tab is the
+        // group's newest member. Landing there would put an ungrouped tab
+        // between two members, which is the one arrangement the panel cannot
+        // draw.
+        let (mut strip, _, group) = grouped(1);
+
+        strip.apply(TabAction::New);
+
+        assert_eq!(shape(&strip), vec![(Some(group), 2), (None, 1)]);
+        assert_eq!(strip.get(strip.active_id()).and_then(Tab::group), None);
+    }
+
+    #[test]
+    fn a_tab_dragged_onto_a_group_joins_it() {
+        let (mut strip, ids, group) = grouped(3);
+        let outsider = *ids.last().expect("three tabs");
+
+        strip.apply(TabAction::MoveTab {
+            tab: outsider,
+            group: Some(group),
+            before: None,
+        });
+
+        assert_eq!(shape(&strip), vec![(Some(group), 3), (None, 1)]);
+        assert_eq!(
+            strip.members(group).map(Tab::id).last(),
+            Some(outsider),
+            "at the end of the group, which is where it was dropped"
+        );
+    }
+
+    #[test]
+    fn a_tab_dragged_out_of_a_group_leaves_it() {
+        let (mut strip, ids, group) = grouped(2);
+        let member = ids[1];
+
+        strip.apply(TabAction::MoveTab {
+            tab: member,
+            group: None,
+            before: None,
+        });
+
+        assert_eq!(strip.get(member).and_then(Tab::group), None);
+        assert_eq!(strip.members(group).count(), 1);
+        assert_eq!(order(&strip).last(), Some(&member));
+    }
+
+    #[test]
+    fn a_group_that_loses_its_last_member_is_gone() {
+        let (mut strip, ids, group) = grouped(1);
+
+        for member in [ids[0], ids[1]] {
+            strip.apply(TabAction::MoveTab {
+                tab: member,
+                group: None,
+                before: None,
+            });
+        }
+
+        assert!(strip.group(group).is_none());
+        assert_eq!(strip.groups().count(), 0);
+    }
+
+    #[test]
+    fn closing_the_last_member_takes_the_group_with_it() {
+        let (mut strip, ids, group) = grouped(2);
+        let members: Vec<TabId> = strip.members(group).map(Tab::id).collect();
+
+        for member in members {
+            strip.apply(TabAction::Close(member));
+        }
+
+        assert_eq!(strip.groups().count(), 0);
+        assert_eq!(order(&strip), vec![ids[2]]);
+    }
+
+    #[test]
+    fn a_drop_between_two_members_of_a_group_it_is_not_joining_lands_outside_it() {
+        // The clamp: a pointer in the gap between two members says two things
+        // that disagree, and the group wins. Anything else splits the run.
+        let (mut strip, ids, group) = grouped(3);
+        let outsider = *ids.last().expect("three tabs");
+        let second_member = strip.members(group).map(Tab::id).nth(1).expect("two");
+
+        strip.apply(TabAction::MoveTab {
+            tab: outsider,
+            group: None,
+            before: Some(second_member),
+        });
+
+        assert_eq!(
+            shape(&strip),
+            vec![(None, 1), (Some(group), 2), (None, 1)],
+            "above the group, not inside it"
+        );
+    }
+
+    #[test]
+    fn a_drop_into_a_group_lands_inside_it_however_far_the_pointer_got() {
+        // The other half of the clamp: the group is believed and the gap is
+        // moved, so a target computed from coarse geometry cannot break a run.
+        let (mut strip, ids, group) = grouped(3);
+        let outsider = *ids.last().expect("three tabs");
+
+        strip.apply(TabAction::MoveTab {
+            tab: outsider,
+            group: Some(group),
+            before: Some(ids[2]),
+        });
+
+        assert_eq!(shape(&strip), vec![(Some(group), 3), (None, 1)]);
+    }
+
+    #[test]
+    fn a_group_is_dragged_as_one_block() {
+        let (mut strip, ids, group) = grouped(3);
+        let last = *ids.last().expect("three tabs");
+        let members: Vec<TabId> = strip.members(group).map(Tab::id).collect();
+
+        assert_eq!(
+            TabEffect::Changed,
+            strip.apply(TabAction::MoveGroup {
+                group,
+                before: None
+            })
+        );
+
+        assert_eq!(shape(&strip), vec![(None, 1), (None, 1), (Some(group), 2)]);
+        assert_eq!(
+            order(&strip)[0],
+            ids[2],
+            "the tabs it passed kept their order"
+        );
+        assert_eq!(order(&strip)[1], last);
+        assert_eq!(
+            strip.members(group).map(Tab::id).collect::<Vec<_>>(),
+            members,
+            "and the block kept its own"
+        );
+    }
+
+    #[test]
+    fn a_group_dropped_where_it_already_is_has_not_moved() {
+        let (mut strip, ids, group) = grouped(3);
+
+        assert_eq!(
+            TabEffect::Unchanged,
+            strip.apply(TabAction::MoveGroup {
+                group,
+                before: Some(ids[2])
+            })
+        );
+    }
+
+    #[test]
+    fn a_group_dropped_on_another_group_lands_above_the_whole_of_it() {
+        let (mut strip, ids, first) = grouped(2);
+        let last = *ids.last().expect("two tabs");
+        strip.apply(TabAction::NewInGroupOf(last));
+        let second = strip.get(last).and_then(Tab::group).expect("grouped");
+        let second_member = strip.members(second).map(Tab::id).nth(1).expect("two");
+
+        strip.apply(TabAction::MoveGroup {
+            group: first,
+            before: Some(second_member),
+        });
+
+        assert_eq!(shape(&strip), vec![(Some(first), 2), (Some(second), 2)]);
+    }
+
+    #[test]
+    fn folding_a_group_away_leaves_its_members_in_the_strip() {
+        let (mut strip, _, group) = grouped(1);
+
+        assert_eq!(
+            TabEffect::Changed,
+            strip.apply(TabAction::ToggleGroup(group))
+        );
+
+        assert!(strip.group(group).expect("open").is_collapsed());
+        assert_eq!(strip.len(), 2, "folded away is not closed");
+
+        strip.apply(TabAction::ToggleGroup(group));
+        assert!(!strip.group(group).expect("open").is_collapsed());
+    }
+
+    #[test]
+    fn closing_a_group_closes_its_tabs() {
+        let (mut strip, ids, group) = grouped(2);
+        let survivor = *ids.last().expect("two tabs");
+
+        assert_eq!(
+            TabEffect::Changed,
+            strip.apply(TabAction::CloseGroup(group))
+        );
+
+        assert_eq!(order(&strip), vec![survivor]);
+        assert_eq!(strip.groups().count(), 0);
+    }
+
+    #[test]
+    fn closing_the_only_group_there_is_closes_the_window() {
+        // The strip refuses to empty itself, and it says so once rather than
+        // closing tabs until `close` refuses and leaves half a group behind.
+        let (mut strip, _, group) = grouped(1);
+
+        assert_eq!(
+            TabEffect::CloseWindow,
+            strip.apply(TabAction::CloseGroup(group))
+        );
+        assert_eq!(strip.len(), 2, "nothing was closed on the way out");
+    }
+
+    #[test]
+    fn moving_the_active_tab_past_the_end_of_its_group_takes_it_out() {
+        let (mut strip, ids, group) = grouped(2);
+        let member = strip.members(group).map(Tab::id).nth(1).expect("two");
+        strip.apply(TabAction::Select(member));
+
+        strip.apply(TabAction::MoveRight);
+
+        assert_eq!(strip.get(member).and_then(Tab::group), None);
+        assert_eq!(shape(&strip), vec![(Some(group), 1), (None, 1), (None, 1)]);
+        let _ = ids;
+    }
+
+    #[test]
+    fn an_action_naming_a_group_that_is_gone_changes_nothing() {
+        let (mut strip, ids, group) = grouped(1);
+        for member in strip.members(group).map(Tab::id).collect::<Vec<_>>() {
+            strip.apply(TabAction::MoveTab {
+                tab: member,
+                group: None,
+                before: None,
+            });
+        }
+
+        assert_eq!(
+            TabEffect::Unchanged,
+            strip.apply(TabAction::MoveTab {
+                tab: ids[0],
+                group: Some(group),
+                before: None
+            })
+        );
+        assert_eq!(
+            TabEffect::Unchanged,
+            strip.apply(TabAction::ToggleGroup(group))
+        );
+        assert_eq!(
+            TabEffect::Unchanged,
+            strip.apply(TabAction::CloseGroup(group))
+        );
+        assert_eq!(
+            TabEffect::Unchanged,
+            strip.apply(TabAction::MoveGroup {
+                group,
+                before: None
+            })
+        );
+    }
+}
+
+#[test]
+fn pinning_moves_a_tab_to_the_front_of_its_own_block() {
+    // Not to the front of the *list*, which is Warp's rule and the one Crook
+    // cannot have: a group is a contiguous block that says two checkouts are
+    // one piece of work, and pinning that lifted a member out of the middle
+    // would be pinning that takes a group apart.
+    let mut strip = TabStrip::new();
+    strip.apply(TabAction::New);
+    strip.apply(TabAction::New);
+    let ids: Vec<TabId> = strip.iter().map(Tab::id).collect();
+    strip.apply(TabAction::NewInGroupOf(ids[1]));
+    let group = strip
+        .get(ids[1])
+        .and_then(Tab::group)
+        .expect("the two of them made a group");
+    let members: Vec<TabId> = strip.members(group).map(Tab::id).collect();
+    assert_eq!(members.len(), 2);
+
+    strip.apply(TabAction::TogglePin(members[1]));
+
+    assert_eq!(
+        strip.members(group).map(Tab::id).collect::<Vec<_>>(),
+        [members[1], members[0]],
+        "the pinned member did not come to the front of its group"
+    );
+    assert!(
+        strip.get(members[1]).is_some_and(Tab::is_pinned),
+        "it did not come back pinned"
+    );
+    assert_eq!(strip.len(), 4, "pinning lost or gained a tab");
+}
+
+#[test]
+fn an_unpinned_tab_cannot_be_dropped_above_a_pinned_one() {
+    // The clamp, which is pinning's whole enforcement: a drop is a pointer
+    // position, and a pointer that stopped halfway up a block of pinned rows
+    // is not somebody asking to unpin anything.
+    let mut strip = TabStrip::new();
+    strip.apply(TabAction::New);
+    strip.apply(TabAction::New);
+    let ids: Vec<TabId> = strip.iter().map(Tab::id).collect();
+
+    strip.apply(TabAction::TogglePin(ids[0]));
+    let pinned = ids[0];
+    let last = ids[2];
+
+    strip.apply(TabAction::MoveTab {
+        tab: last,
+        group: None,
+        before: Some(pinned),
+    });
+
+    assert_eq!(
+        strip.iter().next().map(Tab::id),
+        Some(pinned),
+        "an unpinned tab was dropped above the pinned one"
+    );
+}
+
+#[test]
+fn unpinning_leaves_a_tab_first_among_the_ones_that_are_not_pinned() {
+    // The shortest move that satisfies the rule, rather than back where it
+    // came from: nothing remembers where it came from, and a tab that jumped
+    // to the bottom of the list on being unpinned would be a gesture nobody
+    // would use twice.
+    let mut strip = TabStrip::new();
+    strip.apply(TabAction::New);
+    strip.apply(TabAction::New);
+    let ids: Vec<TabId> = strip.iter().map(Tab::id).collect();
+
+    strip.apply(TabAction::TogglePin(ids[0]));
+    strip.apply(TabAction::TogglePin(ids[1]));
+    assert_eq!(
+        strip.iter().map(Tab::id).collect::<Vec<_>>(),
+        [ids[0], ids[1], ids[2]],
+        "two pins did not leave the two of them at the front, in order"
+    );
+
+    strip.apply(TabAction::TogglePin(ids[0]));
+
+    assert_eq!(
+        strip.iter().map(Tab::id).collect::<Vec<_>>(),
+        [ids[1], ids[0], ids[2]],
+        "the unpinned tab did not land first among the unpinned"
+    );
+    assert!(!strip.get(ids[0]).is_some_and(Tab::is_pinned));
+}
+
+#[test]
+fn a_colour_is_a_name_a_theme_resolves_rather_than_a_number() {
+    // Both directions, because the file carries the name: a colour written by
+    // one build and read by another has to survive the enum being reordered,
+    // and a name nothing matches is a tab with no colour rather than a refusal.
+    for color in TabColor::ALL {
+        assert_eq!(TabColor::named(color.name()), Some(color));
+    }
+    assert_eq!(TabColor::named("chartreuse"), None);
+}

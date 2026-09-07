@@ -9,9 +9,9 @@
 //! Nothing else is here but the *section*: the button at the foot of the
 //! sidebar and what the window shows while it is chosen. A plugin that owns a
 //! place in the interface is the one that declares it, and the settings rail
-//! is a place with no page of its own — every one of the five Crook ships
-//! belongs to the plugin whose feature it configures, which is why the Usage
-//! page is `crook/usage`'s and not this one's.
+//! is a place with no page of its own — every one of the four Crook ships
+//! belongs to the plugin whose feature it configures, which is why the
+//! Appearance page is `crook/appearance`'s and not this one's.
 
 use crookui_core::prelude::*;
 
@@ -61,5 +61,6 @@ fn manifest() -> &'static Manifest {
         description: "The settings rail, and the slot every page of it comes from.",
         version: env!("CARGO_PKG_VERSION"),
         tier: Tier::Native,
+        capabilities: &[],
     })
 }

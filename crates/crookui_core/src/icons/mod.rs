@@ -8,8 +8,8 @@
 //! one machine and a colour emoji on the next, and why a check mark is a
 //! different weight from the label beside it. Everything a font would not
 //! draw was built out of `Container`s instead: the two density marks in the
-//! gear menu were seven rectangles, and the git branch beside a tab title was
-//! three, which is as close to a branch as three rectangles get.
+//! tab options menu were seven rectangles, and the git branch beside a tab
+//! title was three, which is as close to a branch as three rectangles get.
 //!
 //! So: one set, with its own geometry, drawn by this crate. [Lucide] is that
 //! set — ISC-licensed, and every icon in it is a 24 x 24 box with a 2-unit
