@@ -201,6 +201,47 @@ fn a_plugin_says_what_it_is_before_any_of_it_runs() {
 }
 
 #[test]
+fn a_module_asking_for_more_memory_than_the_ceiling_never_gets_it() {
+    // Refused *before* the allocation. The ceiling used to be checked after
+    // `instantiate_and_start`, which is after wasmi has asked the operating
+    // system for whatever minimum the module declared and zeroed it — so two
+    // kilobytes of wasm saying `(memory 65536)` was four gigabytes the host
+    // went and got before anything looked at it, and no amount of fuel catches
+    // an allocation.
+    let wasm = wat::parse_str("(module (memory (export \"memory\") 20000))")
+        .expect("the test module should assemble");
+
+    let problem = refused(&wasm);
+
+    assert!(
+        matches!(problem, Problem::Shape(_)),
+        "{problem:?} should be a refusal to run at all"
+    );
+}
+
+#[test]
+fn a_plugin_that_grows_past_the_ceiling_is_told_no_rather_than_given_it() {
+    // The other end of the same number, and the one that is not caught by any
+    // check after the fact: a module declaring one page and growing to a
+    // thousand is inside every limit at instantiation. `memory.grow` answers
+    // `-1`, which is a failure the guest's own allocator deals with.
+    let body = r#"
+        (func (export "crook_build") (result i32)
+          (if (result i32)
+            (i32.eq (memory.grow (i32.const 1000)) (i32.const -1))
+            (then (i32.const 0))
+            (else (i32.const 1))))
+        (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
+        (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
+    "#;
+    let (mut sandbox, _) = open(&module(&with_strings(body), ABI_VERSION)).expect("it should open");
+
+    sandbox.build().expect(
+        "a build that was refused the memory answers 0, and one that was given it does not",
+    );
+}
+
+#[test]
 fn a_plugin_that_disagrees_with_itself_about_the_version_is_refused() {
     // The number is in a module twice: the export the host enforces, and the
     // field everything that *describes* the plugin reads — a Plugins page, and
@@ -850,4 +891,24 @@ fn a_fetch_survives_being_asked_for() {
     sandbox.build().expect("it should build");
 
     assert_eq!(sandbox.asked(), vec![(1, fetch)]);
+}
+
+#[test]
+fn the_crate_version_names_the_abi_it_reads() {
+    // `cargo install crook_wasm --version 0.8` has to be the reader for ABI 8,
+    // because that is the sentence the README and the registry's CI both
+    // depend on. Two numbers that must move together are a rule nobody
+    // remembers; `crook_plugin_api` holds the same one the same way.
+    let minor = env!("CARGO_PKG_VERSION")
+        .split('.')
+        .nth(1)
+        .and_then(|minor| minor.parse::<u32>().ok())
+        .expect("the crate version is major.minor.patch");
+
+    assert_eq!(env!("CARGO_PKG_VERSION_MAJOR"), "0");
+    assert_eq!(
+        minor, ABI_VERSION,
+        "the sandbox is at 0.{minor} and reads ABI {ABI_VERSION}: bump the version in \
+         crates/crook_wasm/Cargo.toml with the constant"
+    );
 }

@@ -19,12 +19,16 @@ readme = "README.md"
 homepage = "https://github.com/theguriev/crook-plugins"
 keywords = ["crook", "plugin", "wasm", "sandbox", "wasmi"]
 categories = ["wasm", "development-tools"]
-rust-version = "1.85"
+# Not edition 2024's floor of 1.85: `wasmi` 2.0 and its three companion crates
+# each declare 1.86, so a `cargo install crook_wasm` on 1.85 fails on a
+# dependency after this crate said it would work.
+rust-version = "1.86"
 
 [dependencies]
 crook_plugin_api.workspace = true
 log.workspace = true
 wasmi.workspace = true
+wasmi_core.workspace = true
 
 [dev-dependencies]
 # Tests are written in WebAssembly's text format and assembled here, so the

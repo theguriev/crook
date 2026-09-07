@@ -54,22 +54,55 @@ fn main() -> ExitCode {
         }
     };
 
-    match Sandbox::open(&bytes, Fuel::default()) {
-        Ok((_, manifest)) => {
-            println!("{}", described(&manifest));
-            ExitCode::SUCCESS
-        }
-        // Not an error the way the two below are: the artifact is fine and
-        // this reader is the wrong one for it. Say which one it wants.
-        Err(Problem::Abi { theirs, ours }) => {
-            eprintln!("{path}: built for plugin API {theirs}, and this reader is {ours}");
-            println!("{{\"abi\":{theirs}}}");
-            ExitCode::from(2)
-        }
-        Err(why) => {
-            eprintln!("{path}: {why}");
-            ExitCode::from(1)
-        }
+    let answered = read(&bytes);
+    if let Some(line) = answered.line {
+        println!("{line}");
+    }
+    if let Some(problem) = answered.problem {
+        eprintln!("{path}: {problem}");
+    }
+    ExitCode::from(answered.code)
+}
+
+/// What the reader says about one module: the line, the complaint, the code.
+///
+/// Split out from [`main`] so that the three of them can be *tested*. They are
+/// the interface a registry consumes — a job reads the exit code, parses
+/// stdout and logs stderr — and an interface with no test is an interface that
+/// changes by accident.
+struct Answered {
+    /// What goes on stdout, which is always JSON when there is any.
+    line: Option<String>,
+    /// What goes on stderr, for a person reading a CI log.
+    problem: Option<String>,
+    /// What the shell is told.
+    code: u8,
+}
+
+/// Reads one module.
+fn read(bytes: &[u8]) -> Answered {
+    match Sandbox::open(bytes, Fuel::default()) {
+        Ok((_, manifest)) => Answered {
+            line: Some(described(&manifest)),
+            problem: None,
+            code: 0,
+        },
+        // Not an error the way the one below is: the artifact is fine and this
+        // reader is the wrong one for it. Say which one it wants, on stdout,
+        // so that an index built by the reader of one ABI can notice an
+        // artifact for another rather than treating it as broken.
+        Err(Problem::Abi { theirs, ours }) => Answered {
+            line: Some(format!("{{\"abi\":{theirs}}}")),
+            problem: Some(format!(
+                "built for plugin API {theirs}, and this reader is {ours}"
+            )),
+            code: 2,
+        },
+        Err(why) => Answered {
+            line: None,
+            problem: Some(why.to_string()),
+            code: 1,
+        },
     }
 }
 

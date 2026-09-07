@@ -79,6 +79,63 @@ impl Default for Fuel {
 /// allocator has to deal with rather than the host's problem.
 const MEMORY_PAGES: u32 = 256;
 
+/// The same ceiling in bytes, which is the unit a [`ResourceLimiter`] speaks.
+const MEMORY_BYTES: usize = MEMORY_PAGES as usize * 64 * 1024;
+
+/// How many entries a plugin's tables may hold, all together.
+///
+/// A table is a list of functions a module can call indirectly, and a plugin
+/// has as many as it has closures. Ten thousand is far past anything a chip in
+/// a header needs and small enough that a module declaring a table of four
+/// billion is refused rather than allocated.
+const TABLE_ENTRIES: usize = 10_000;
+
+/// What a plugin may allocate, asked before the allocation happens.
+///
+/// The ceiling above used to be checked *after* `instantiate_and_start`, which
+/// is after wasmi has allocated and zeroed whatever minimum the module
+/// declared: a two-kilobyte module saying `(memory 65536)` is four gigabytes
+/// the host asks the operating system for before anything is checked, and no
+/// amount of fuel catches an allocation. Growth was bounded and the *first*
+/// allocation was not.
+///
+/// A limiter is asked first, and about every growth after it, so both ends are
+/// the same number. It is stateless — the ceiling is a constant and the
+/// counting is wasmi's — which is why it can be the store's own data type
+/// rather than something else to carry around.
+impl wasmi::ResourceLimiter for Registry {
+    fn memory_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> Result<bool, wasmi_core::LimiterError> {
+        Ok(desired <= MEMORY_BYTES)
+    }
+
+    fn table_growing(
+        &mut self,
+        _current: usize,
+        desired: usize,
+        _maximum: Option<usize>,
+    ) -> Result<bool, wasmi_core::LimiterError> {
+        Ok(desired <= TABLE_ENTRIES)
+    }
+
+    fn instances(&self) -> usize {
+        // One module per sandbox, which is the whole shape of this crate.
+        1
+    }
+
+    fn tables(&self) -> usize {
+        1
+    }
+
+    fn memories(&self) -> usize {
+        1
+    }
+}
+
 /// The longest string a guest may hand back in one call.
 ///
 /// Not a guess at what is reasonable: it is a bound on what one bad `i64` can
@@ -152,6 +209,10 @@ impl Sandbox {
             .set_fuel(fuel.build)
             .map_err(|why| Problem::Ran(why.to_string()))?;
 
+        // Before instantiation, because instantiation is where a module's
+        // declared minimum memory is allocated and zeroed.
+        store.limiter(|registry| registry as &mut dyn wasmi::ResourceLimiter);
+
         let mut linker = Linker::new(&engine);
         install(&mut linker).map_err(|why| Problem::Shape(why.to_string()))?;
 
@@ -162,6 +223,9 @@ impl Sandbox {
         let memory = instance
             .get_memory(&store, exports::MEMORY)
             .ok_or_else(|| Problem::Shape(format!("it exports no {:?}", exports::MEMORY)))?;
+        // The limiter above has already refused anything past the ceiling, so
+        // this is the second line rather than the first — kept because it
+        // costs a comparison and it is the one that names the number.
         if memory.size(&store) > u64::from(MEMORY_PAGES) {
             return Err(Problem::Shape(format!(
                 "it wants {} pages of memory and the limit is {MEMORY_PAGES}",
