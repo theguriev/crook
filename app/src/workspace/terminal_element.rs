@@ -345,7 +345,7 @@ impl TerminalElement {
     /// The typed keystroke, if this pane is the one that should have it and
     /// the shell is the half of the pane it belongs to.
     fn type_key(&self, event: &Event, ctx: &mut EventContext) -> bool {
-        self.output.type_key(event, self.snapshot.alt_screen, ctx) != Typed::Ignored
+        self.output.type_key(event, ctx) != Typed::Ignored
     }
 
     /// Starts a selection where a press landed, or hands the press to a

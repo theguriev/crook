@@ -1135,13 +1135,16 @@ disagree, because they are the same range.
    the element's; the shell printing is deliberately not one of them. The half-written command
    line in the field is *not* one of them either: a copy is not an interrupt, and the field
    only hears about it because it routes the same keystroke a moment later.
-2. **The alt screen belongs to the program.** vim, `top` and `less` drive every cell and read
-   every key themselves, so on the alt screen every key goes raw to the pty — and the field is
-   not drawn at all. `Snapshot::alt_screen` is the whole test. This is the honest line between
-   "a shell reading a line" and "a program driving the screen": it needs no shell integration,
-   no prompt marks and no heuristics, and it is a fact the emulator already knows.
-   Rule 1 sits above this one: what vim has drawn is still text somebody dragged a pointer
-   across, and every other key on that screen is still the program's.
+2. **A pane with no composer belongs to the program.** vim, `top` and `less` drive every cell
+   and read every key themselves — and so does an agent or a REPL that never leaves the
+   primary screen and is read by the very same keys. What those panes have in common is not a
+   screen buffer, it is that there is no field on them: `pane_surface::of` takes the composer
+   away on the alt screen, on an overflowing block, and once a command has been running longer
+   than `LONG_RUNNING`, and every one of those is "the program is reading the keyboard now".
+   So the test is whether a composer was attached, which is the same question asked once and
+   the reason `Down` reaches a menu inside a long-running program instead of walking the
+   field's history. Rule 1 sits above this one: what vim has drawn is still text somebody
+   dragged a pointer across, and every other key on that screen is still the program's.
 3. **The signal keys reach the shell.** `ctrl-c` interrupts — and throws the half-written line
    away with it, because that is what the gesture means — `ctrl-z` suspends, and `ctrl-d` ends
    the input, but only when the field is empty. The field now holds the line the shell's own

@@ -366,7 +366,6 @@ fn contents(
     };
 
     let id = pane.id();
-    let alt_screen = snapshot.alt_screen;
     // Read before the snapshot is handed to whichever surface draws it: the
     // composer is painted in the colours the *shell* resolved, not the
     // theme's, so that a shell which changed them takes the field with it.
@@ -378,7 +377,18 @@ fn contents(
     let cut_off = is_cut_off(workspace, id);
     let inline = block_list::inline_start(&snapshot, surface, cut_off);
     let output = match surface.surface {
-        Surface::Blocks => blocks(workspace, id, &handle, snapshot, font.clone(), keys, app),
+        Surface::Blocks => blocks(
+            workspace,
+            id,
+            &handle,
+            snapshot,
+            font.clone(),
+            Keyboard {
+                keys,
+                composer: surface.composer,
+            },
+            app,
+        ),
         Surface::Grid => grid(workspace, id, &handle, snapshot, font.clone(), keys),
     };
 
@@ -423,7 +433,6 @@ fn contents(
             chips,
             ComposerState {
                 focused: keys == Keys::All,
-                alt_screen,
                 cut_off,
                 inline,
                 ink,
@@ -462,7 +471,7 @@ fn blocks(
     handle: &TerminalHandle,
     snapshot: Arc<Snapshot>,
     font: CellFont,
-    keys: Keys,
+    keyboard: Keyboard,
     app: &AppContext,
 ) -> Box<dyn Element> {
     let history = workspace.terminal_blocks(pane, app).unwrap_or_default();
@@ -473,11 +482,13 @@ fn blocks(
     let available = workspace.block_menu_is_available();
     let menu = workspace.block_menu().block_in(pane).filter(|_| available);
     let mut list = BlockList::new(history, snapshot, font, view.clone())
-        .with_terminal(handle.clone(), keys)
+        .with_terminal(handle.clone(), keyboard.keys)
         .with_menu(available, menu);
-    // The list reads the composer's line to tell an end of input from a
-    // delete, so it is given it here for the same reason the grid is.
-    if let Some(input) = workspace.input(pane) {
+    // The list is given the composer only while one is drawn under it, and
+    // that is what decides who the keyboard belongs to: with no field the
+    // block is a running program and every key is its own. It reads the line
+    // itself to tell an end of input from a delete.
+    if let Some(input) = keyboard.composer.then(|| workspace.input(pane)).flatten() {
         list = list.with_input(input.clone());
     }
     // The gesture outlives this element by design: a press and the drag that
@@ -527,10 +538,11 @@ fn grid(
     font: CellFont,
     keys: Keys,
 ) -> Box<dyn Element> {
+    // No composer is attached, because the grid never has one under it — see
+    // [`pane_surface::of`] — and a field attached here would be a field the
+    // keyboard policy believes in and nobody can see. Every key on this
+    // surface is the program's.
     let mut grid = TerminalElement::new(snapshot, font).with_terminal(handle.clone(), keys);
-    if let Some(input) = workspace.input(pane) {
-        grid = grid.with_input(input.clone());
-    }
     if let Some(interaction) = workspace.interaction(pane) {
         grid = grid
             .with_selection(
@@ -548,12 +560,23 @@ fn grid(
         .finish()
 }
 
-/// What the composer is drawn as: whether it has the keys, which screen the
-/// pane is on, and whether anything is cut off above it.
+/// How much of the keyboard a pane's block list takes, and whether there is a
+/// composer under it to take the rest.
+///
+/// The two halves of rule 2 of [`crate::input_keys::route`], carried together
+/// because the list is where they meet: with a field under it a keystroke is
+/// the field's, and without one it is the running program's.
+#[derive(Copy, Clone)]
+struct Keyboard {
+    keys: Keys,
+    composer: bool,
+}
+
+/// What the composer is drawn as: whether it has the keys, and whether
+/// anything is cut off above it.
 #[derive(Copy, Clone)]
 struct ComposerState {
     focused: bool,
-    alt_screen: bool,
     cut_off: bool,
     /// The column its first row starts at when it continues the shell's own
     /// prompt line rather than taking a row of its own.
@@ -589,7 +612,7 @@ fn composer(
     let mut composing =
         CommandInput::new(input.clone(), font.clone(), workspace.clipboard().clone())
             .for_pane(pane)
-            .with_terminal(handle, state.focused, state.alt_screen)
+            .with_terminal(handle, state.focused)
             .with_inline(state.inline)
             .with_ink(state.ink);
     // So that Enter brings the list back to the block the command is about to

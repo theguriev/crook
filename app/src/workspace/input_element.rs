@@ -203,11 +203,6 @@ pub struct CommandInput {
     /// [`TextInput::has_keys`] instead, because by then this is a frame old.
     focused: bool,
 
-    /// Whether the program on the far end owns the screen. Passed to
-    /// [`input_keys::route`] rather than assumed, so the whole keyboard policy
-    /// stays in the one function that states it.
-    alt_screen: bool,
-
     /// The column the first row starts at when it continues the shell's own
     /// prompt line, or `None` when the field takes a row of its own.
     ///
@@ -238,7 +233,6 @@ impl CommandInput {
             selection: None,
             blocks: None,
             focused: false,
-            alt_screen: false,
             inline: None,
             size: None,
             origin: None,
@@ -286,15 +280,9 @@ impl CommandInput {
 
     /// Attaches the shell a submitted line goes to, and says whether this pane
     /// is the one whose composer has the keys.
-    pub fn with_terminal(
-        mut self,
-        handle: TerminalHandle,
-        focused: bool,
-        alt_screen: bool,
-    ) -> Self {
+    pub fn with_terminal(mut self, handle: TerminalHandle, focused: bool) -> Self {
         self.terminal = Some(handle);
         self.focused = focused;
-        self.alt_screen = alt_screen;
         self
     }
 
@@ -320,7 +308,10 @@ impl CommandInput {
         }
 
         let pane = input_keys::Pane {
-            alt_screen: self.alt_screen,
+            // There is one, and it is this element: nothing draws a composer
+            // where `pane_surface` said there is none, which is the whole of
+            // rule 2 seen from the field's side.
+            composer: true,
             line_is_empty: self.input.editor().is_empty(),
             // Asked even though the answer only ever takes a key *away* from
             // this element: routing the same keystroke against a different
