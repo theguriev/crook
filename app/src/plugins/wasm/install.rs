@@ -41,7 +41,7 @@ use crook_plugin::PluginId;
 use crate::plugin::Plugin as _;
 use crate::settings::atomic_write;
 
-use super::{MODULE_FILE, directory, newest_module, open};
+use super::{MODULE_FILE, directory, newest_module, opened};
 
 /// Installs the module at `path`, and answers where it went.
 pub fn install(path: &Path) -> Result<PathBuf, String> {
@@ -52,8 +52,13 @@ pub fn install(path: &Path) -> Result<PathBuf, String> {
 
 /// The same, into a named plugins directory.
 pub(super) fn into(root: &Path, path: &Path) -> Result<PathBuf, String> {
+    // Read once, and checked as the bytes that will be *written* rather than
+    // as a second read of the same name: a module still being written into
+    // place — a `curl -o`, an `scp`, a sync — passes the check as the whole of
+    // itself and lands as the half that was there when the first read
+    // happened, which is the outcome reading before writing exists to prevent.
     let bytes = fs::read(path).map_err(|why| format!("could not be read: {why}"))?;
-    let plugin = open(path)?;
+    let plugin = opened(&bytes)?;
     let manifest = plugin.manifest();
     let version = version_folder(manifest.version)?;
 
@@ -69,28 +74,70 @@ pub(super) fn into(root: &Path, path: &Path) -> Result<PathBuf, String> {
     atomic_write(&installed, &bytes)
         .map_err(|why| format!("{} could not be written: {why}", installed.display()))?;
 
-    // Everything this replaces, after the new one is safely down. A failure
-    // here leaves an older version beside a newer one, which `newest_module`
-    // resolves the same way it resolves everything else — so it is worth a
-    // line in the log and not worth failing an install that has succeeded.
-    for stale in fs::read_dir(&home).into_iter().flatten().flatten() {
+    sweep(&home, &at);
+
+    // What is on disk now is what decides what runs, and it is not always what
+    // was just written: a sweep that could not remove the version above this
+    // one leaves that one the newest, so a *downgrade* — which is how rolling
+    // back works here — would report success and go on running the version
+    // somebody was rolling back from.
+    match newest_module(&home) {
+        Some(newest) if same_file(&newest, &installed) => Ok(installed),
+        Some(other) => Err(format!(
+            "{} was written, and {} is still there and is what would run",
+            installed.display(),
+            other.display()
+        )),
+        None => Err(format!(
+            "{} is not there after writing it",
+            installed.display()
+        )),
+    }
+}
+
+/// Removes every version of a plugin except the one at `keep`.
+///
+/// Only one is kept, so this is where an upgrade throws the old one away and
+/// where the layout before versions is migrated — a flat module left beside a
+/// versioned one is the same plugin found twice, contributing to its slot
+/// twice and having its second set of actions refused as already taken.
+///
+/// A failure is a line in the log rather than a failed install, because the
+/// module is already down and the caller checks afterwards whether what is on
+/// disk is what will run.
+fn sweep(home: &Path, keep: &Path) {
+    for stale in fs::read_dir(home).into_iter().flatten().flatten() {
         let path = stale.path();
-        if path == at {
+        // Compared as *places* rather than as strings. `keep` is the name the
+        // manifest spelled and this is the name the filesystem stored, and the
+        // two differ whenever a filesystem does not keep names the way it was
+        // given them: a case-insensitive volume resolving `1.0.0-Beta` onto an
+        // existing `1.0.0-beta`, or Windows dropping a trailing dot. Comparing
+        // the strings there deletes the directory that was just written into.
+        if same_file(&path, keep) {
             continue;
         }
         let outcome = match path.is_dir() {
             true => fs::remove_dir_all(&path),
-            // The layout before versions, and the one moment it is migrated:
-            // a flat module left beside the versioned ones is the same plugin
-            // twice, contributing to a slot twice.
             false => fs::remove_file(&path),
         };
         if let Err(why) = outcome {
             log::warn!("{} was left behind: {why}", path.display());
         }
     }
+}
 
-    Ok(installed)
+/// Whether two paths are the same place on disk.
+///
+/// `canonicalize` is what answers that, and it needs both of them to exist —
+/// which they do everywhere this is used. Where one does not, the answer falls
+/// back to comparing the paths, which is right whenever the filesystem kept
+/// the name it was given.
+fn same_file(left: &Path, right: &Path) -> bool {
+    match (fs::canonicalize(left), fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => left == right,
+    }
 }
 
 /// Takes a plugin off this machine, and answers what was removed.
