@@ -118,7 +118,20 @@ fn escaped(bytes: &[u8]) -> String {
 /// A module that contributes `tree()` to `slot` at `order`, and offers one
 /// action.
 pub(crate) fn wasm(id: &str, slot: &str, order: i32) -> Vec<u8> {
-    let manifest = to_bytes(&manifest(id)).expect("a manifest should encode");
+    wasm_saying(&manifest(id), slot, order)
+}
+
+/// The same, at a version of its own — for the tests about which of the
+/// versions in a plugin's directory is the one that runs.
+pub(crate) fn wasm_at(id: &str, version: &str) -> Vec<u8> {
+    let mut manifest = manifest(id);
+    manifest.version = version.to_owned();
+    wasm_saying(&manifest, "header.right", 0)
+}
+
+/// The same, saying whatever `manifest` says.
+pub(crate) fn wasm_saying(manifest: &Manifest, slot: &str, order: i32) -> Vec<u8> {
+    let manifest = to_bytes(manifest).expect("a manifest should encode");
     let tree = to_bytes(&tree()).expect("a tree should encode");
     let tree_at = 16 + manifest.len() as u32;
     let strings_at = 4096;
@@ -366,8 +379,22 @@ pub(crate) fn wasm_with_a_panel(id: &str, slot: &str, order: i32) -> Vec<u8> {
     wat::parse_str(&text).expect("the test module should assemble")
 }
 
-/// Installs one into `directory` under its own folder.
+/// Installs one into `directory` under its own folder, at `0.1.0` — which is
+/// the version the test manifest carries and the layout an install writes.
 pub(crate) fn install(directory: &Path, folder: &str, wasm: &[u8]) {
+    install_version(directory, folder, "0.1.0", wasm);
+}
+
+/// The same, under a named version.
+pub(crate) fn install_version(directory: &Path, folder: &str, version: &str, wasm: &[u8]) {
+    let home = directory.join(folder).join(version);
+    fs::create_dir_all(&home).expect("the plugin directory should be creatable");
+    fs::write(home.join(MODULE_FILE), wasm).expect("the module should be writable");
+}
+
+/// The layout before versions: the module straight in the plugin's own
+/// directory, which is what every Crook installed one as until this release.
+pub(crate) fn install_flat(directory: &Path, folder: &str, wasm: &[u8]) {
     let home = directory.join(folder);
     fs::create_dir_all(&home).expect("the plugin directory should be creatable");
     fs::write(home.join(MODULE_FILE), wasm).expect("the module should be writable");
@@ -435,6 +462,72 @@ fn plugins_are_loaded_in_a_order_that_is_the_same_on_every_machine() {
         .collect();
 
     assert_eq!(ids, ["eugen/alpha", "eugen/zeta"]);
+}
+
+#[test]
+fn the_newest_version_in_a_plugins_directory_is_the_one_that_runs() {
+    // Ten is newer than nine, which sorting the directory names as text gets
+    // backwards — and getting it backwards means an upgrade that installs
+    // 0.10.0 goes on running 0.9.0 with nothing anywhere saying so.
+    let scratch = Scratch::new("newest");
+    install_version(
+        scratch.path(),
+        "eugen.probe",
+        "0.9.0",
+        &wasm_at("eugen/probe", "0.9.0"),
+    );
+    install_version(
+        scratch.path(),
+        "eugen.probe",
+        "0.10.0",
+        &wasm_at("eugen/probe", "0.10.0"),
+    );
+
+    let found = installed(scratch.path());
+
+    assert_eq!(found.len(), 1, "one plugin, not one per version");
+    assert_eq!(found[0].manifest().version, "0.10.0");
+}
+
+#[test]
+fn a_plugin_installed_before_versions_existed_still_runs() {
+    // An upgrade of Crook that silently stopped running somebody's plugins
+    // would be indistinguishable, from where they are sitting, from losing
+    // them.
+    let scratch = Scratch::new("flat");
+    install_flat(
+        scratch.path(),
+        "eugen.probe",
+        &wasm("eugen/probe", "header.right", 0),
+    );
+
+    let found = installed(scratch.path());
+
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].manifest().id.to_string(), "eugen/probe");
+}
+
+#[test]
+fn a_versioned_module_wins_against_the_flat_one_beside_it() {
+    // Both at once is one plugin found twice: two contributions to its slot,
+    // and a second set of actions refused as already taken.
+    let scratch = Scratch::new("both");
+    install_flat(
+        scratch.path(),
+        "eugen.probe",
+        &wasm_at("eugen/probe", "0.1.0"),
+    );
+    install_version(
+        scratch.path(),
+        "eugen.probe",
+        "0.2.0",
+        &wasm_at("eugen/probe", "0.2.0"),
+    );
+
+    let found = installed(scratch.path());
+
+    assert_eq!(found.len(), 1);
+    assert_eq!(found[0].manifest().version, "0.2.0");
 }
 
 #[test]

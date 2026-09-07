@@ -483,6 +483,28 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 println!("installed {}", installed.display());
                 return Ok(Startup::Answered);
             }
+            // The other half of `--install-plugin`, and answered the same way.
+            // What it takes is the plugin's name rather than a path, because
+            // by the time somebody wants a plugin gone the file they installed
+            // it from is a download they deleted a month ago.
+            "--uninstall-plugin" => {
+                let name = args
+                    .next()
+                    .context("`--uninstall-plugin` needs a plugin's `owner/name`")?;
+                let id = crook_plugin::PluginId::parse(&name)
+                    .map_err(anyhow::Error::msg)
+                    .with_context(|| name.clone())?;
+                let removed = crate::plugins::wasm::uninstall(&id)
+                    .map_err(anyhow::Error::msg)
+                    .with_context(|| name.clone())?;
+                forget_plugin(&id)?;
+                println!("removed {}", removed.display());
+                return Ok(Startup::Answered);
+            }
+            "--plugins" => {
+                println!("{}", installed_plugins_text());
+                return Ok(Startup::Answered);
+            }
             "--snapshot" => {
                 let path = args.next().context("`--snapshot` needs a path")?;
                 snapshot = Some(PathBuf::from(path));
@@ -688,6 +710,11 @@ OPTIONS:
                        Copy a plugin's `.wasm` into the plugins directory and exit,
                        after checking it is one. What it may then do is nothing
                        until it is allowed it on the Plugins page
+    --uninstall-plugin <ID>
+                       Remove an installed plugin by `owner/name`, with whatever
+                       it was allowed to do, and exit
+    --plugins          List the plugins installed as files: name, version and
+                       which file each is running from
     --snapshot <PATH>  Render one frame of the real view tree to a PNG and exit
     --frames <N>       Draw N frames, then exit; for running unattended
     --run <COMMAND>    Type COMMAND into the first pane's input field at startup,
@@ -1904,6 +1931,55 @@ struct Launch {
     frames: Option<u32>,
     /// What the command line asked to start differently.
     overrides: Overrides,
+}
+
+/// Forgets what a plugin was allowed to do, and that it was switched off.
+///
+/// Uninstalling is the one moment either of those is thrown away. `settings`
+/// deliberately keeps both for a plugin it does not recognise — a plugin can
+/// be missing because it failed to load this morning, and a person who
+/// switched one off does not want that answer forgotten when it comes back.
+/// Being *removed* is different: it is a person saying they are done with it,
+/// and a reinstall a year later must ask again rather than quietly running
+/// under a grant nobody remembers giving.
+fn forget_plugin(id: &crook_plugin::PluginId) -> Result<()> {
+    let mut settings = Settings::for_user();
+    settings.set_granted(id.as_str(), Vec::new());
+    settings.set_plugin_disabled(id.as_str(), false);
+    settings.save_blocking()
+}
+
+/// What `--plugins` prints: every plugin installed as a file, and where.
+///
+/// The ones in the binary are not on this list. It answers the two questions a
+/// person has before they uninstall or report something — which version am I
+/// running, and which file is it — and both of those are only questions for a
+/// plugin that came from outside.
+fn installed_plugins_text() -> String {
+    let Some(directory) = crate::plugins::wasm::directory() else {
+        return String::from("this machine has no data directory to install plugins into");
+    };
+
+    let settings = Settings::for_user();
+    let installed = crate::plugins::wasm::installed(&directory);
+    if installed.is_empty() {
+        return format!("no plugins installed in {}", directory.display());
+    }
+
+    let mut lines = Vec::with_capacity(installed.len());
+    for plugin in &installed {
+        let manifest = crate::plugin::Plugin::manifest(plugin.as_ref());
+        let id = manifest.id.as_str();
+        let off = match settings.disabled_plugins().iter().any(|name| name == id) {
+            true => "  (switched off)",
+            false => "",
+        };
+        let module = crate::plugins::wasm::module(&manifest.id)
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
+        lines.push(format!("{id}  {}  {module}{off}", manifest.version));
+    }
+    lines.join("\n")
 }
 
 /// Every plugin this window carries: the ones in the box, then the ones a
