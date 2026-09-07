@@ -47,6 +47,15 @@ use serde::{Deserialize, Serialize};
 /// counts: postcard encodes a variant by its index, so an older host reading a
 /// newer plugin's `Node` would read the wrong variant rather than fail.
 ///
+/// **8** is the version a plugin can hear a **bell** in. A shell marks where a
+/// command ended and Crook cuts a block at the mark, but a program that holds
+/// the terminal for an hour — an agent, a REPL, anything a person talks to —
+/// ends nothing the shell can see, and rings BEL instead when it wants them
+/// back. [`Event::Bell`] is that ring and [`Capability::WatchBells`] is what a
+/// person grants to hear it, which together are the difference between "ring
+/// when my build finishes" and "ring when the thing I am talking to has
+/// stopped talking".
+///
 /// **7** is the version a plugin can act on **one command** in.
 /// [`Subject::Block`], which is what a render of a slot in a block's menu is
 /// about — the command line, how it ended and where it ran, each redacted
@@ -94,7 +103,7 @@ use serde::{Deserialize, Serialize};
 /// behalf, and the six [`Node`] variants a panel needs. Version 1 could
 /// describe a badge and register an action, which is a plugin that can say
 /// what it already knew.
-pub const ABI_VERSION: u32 = 7;
+pub const ABI_VERSION: u32 = 8;
 
 /// What a sandboxed plugin says about itself, before any of it runs.
 ///
@@ -222,6 +231,18 @@ pub enum Capability {
     /// wherever it is read, so that stays [`Capability::ReadWorkingDirectory`]
     /// and a plugin that wants both asks for both.
     ReadBlock,
+    /// Be told when a program in a pane rings the bell.
+    ///
+    /// Separate from [`WatchCommands`] rather than folded into it, because it
+    /// is a weaker thing to agree to and a different one: a bell carries no
+    /// exit status and no sight of what ran, only that something in a pane
+    /// asked for attention. It is still a capability, because how often
+    /// somebody is asked for their attention is a picture of their day the
+    /// same way a list of finished commands is, and a plugin that could watch
+    /// that unasked would be one nobody had the chance to refuse.
+    ///
+    /// [`WatchCommands`]: Self::WatchCommands
+    WatchBells,
 }
 
 impl Capability {
@@ -275,6 +296,7 @@ impl Capability {
             Self::RunCommands(names) => list_sentence("Use Crook's own ", names),
             Self::ReadCommands => "See what Crook can be asked to do, and the keys for it".into(),
             Self::ReadBlock => "Read the command you run it on, and what it printed".into(),
+            Self::WatchBells => "Know when a program asks for your attention".into(),
         }
     }
 
@@ -314,6 +336,7 @@ impl Capability {
             Self::RunCommands(names) => names.iter().map(|name| format!("run:{name}")).collect(),
             Self::ReadCommands => vec![String::from("commands.read")],
             Self::ReadBlock => vec![String::from("block.read")],
+            Self::WatchBells => vec![String::from("bells.watch")],
         }
     }
 }
@@ -1187,6 +1210,44 @@ pub enum Event {
         /// anybody wants from this and the host is the only side that can
         /// measure it.
         took_millis: Option<u64>,
+    },
+    /// A program in a pane rang the bell. Needs [`Capability::WatchBells`].
+    ///
+    /// BEL, which is what a program that has been holding the terminal rings
+    /// when it wants somebody back — and the only end an agent or a REPL has
+    /// that a shell can see nothing of, because from the shell's side that
+    /// program is one command which has not finished. So this is not a
+    /// smaller [`Event::CommandFinished`]: it is the one that arrives for the
+    /// long thing a person walked away from, where the other cannot.
+    ///
+    /// What rang is not here for the reason a finished command's line is not:
+    /// a plugin that wanted to ring does not need it.
+    ///
+    /// Every bell, including one in the pane a person is already looking at.
+    /// Whether that is worth making a noise about is the plugin's to decide,
+    /// and the host declines to hold the opinion on its behalf — which is why
+    /// [`Self::Bell::while_running`] is here rather than a rule applied
+    /// before the event was sent.
+    ///
+    /// [`Self::Bell::while_running`]: Event::Bell::while_running
+    Bell {
+        /// Which pane, on the same terms [`Event::CommandFinished`] says it:
+        /// stable while the pane is open, and meaningless across runs.
+        pane: u64,
+        /// Whether a command was executing in the pane when it rang.
+        ///
+        /// The one thing that tells the two kinds of bell apart, and a plugin
+        /// that ignores it will be unbearable within a minute. A shell rings
+        /// at the prompt for its own reasons — an ambiguous completion is the
+        /// common one — and that is a bell with nothing running behind it.
+        /// The bell worth hearing comes from a program that has held the
+        /// terminal long enough for somebody to look away, and from the
+        /// shell's side that program is one command still running.
+        ///
+        /// It is the shell's `OSC 133;C` that decides it, so a shell with no
+        /// integration reports `false` for every bell it rings, exactly as it
+        /// sends no [`Event::CommandFinished`] at all.
+        while_running: bool,
     },
 }
 

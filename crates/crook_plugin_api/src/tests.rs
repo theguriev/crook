@@ -61,6 +61,8 @@ fn every_capability_says_what_it_is_in_a_sentence() {
         Capability::Clipboard,
         Capability::Storage,
         Capability::ReadFiles(vec!["~/.claude/.credentials.json".into()]),
+        Capability::WatchCommands,
+        Capability::WatchBells,
     ] {
         let sentence = capability.sentence();
         assert!(!sentence.is_empty(), "{capability:?} says nothing");
@@ -374,4 +376,34 @@ fn a_note_is_described_on_every_frame_and_that_is_what_it_costs() {
         cost < 128,
         "{cost} bytes a frame for one sentence of explanation"
     );
+}
+
+#[test]
+fn an_event_survives_the_wire() {
+    // The only two things the host ever says to a plugin unprompted. A bell
+    // is the smaller of them and the one with a flag in it, and a flag that
+    // came back wrong would be a plugin ringing at every ambiguous Tab
+    // completion somebody's shell answers.
+    for event in [
+        Event::CommandFinished {
+            pane: 7,
+            exit: Some(1),
+            took_millis: Some(4_200),
+        },
+        Event::Bell {
+            pane: 7,
+            while_running: true,
+        },
+        Event::Bell {
+            pane: 7,
+            while_running: false,
+        },
+    ] {
+        let bytes = to_bytes(&event).expect("an event encodes");
+        assert_eq!(
+            from_bytes::<Event>(&bytes).expect("and decodes"),
+            event,
+            "{event:?} did not survive the wire"
+        );
+    }
 }

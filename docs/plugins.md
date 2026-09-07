@@ -284,6 +284,36 @@ description of something that was never built.
     reads the file alone and can be behind. That is a real regression on one platform, and it
     is the price of the chip being something a stranger could have written.
 
+- **ABI 8 — a plugin that can hear the thing a shell cannot see: done.** Every event before
+  this one came from a shell mark, which means every event before this one was about a command
+  that *ended*. A program that holds the terminal for an hour — an agent, a REPL, a `less`
+  somebody walked away from — ends nothing until it exits, so a plugin watching commands hears
+  from it exactly once, when it is already over. That is the gap this closes, and it is the
+  gap [crook-dziling](https://github.com/theguriev/crook-dziling) fell into: it rang when you
+  quit Claude and never once when Claude finished a turn.
+
+  - **`Event::Bell`, and `Capability::WatchBells` to hear it.** BEL is what such a program
+    rings when it wants somebody back, and Crook already listened for it — `TerminalUpdate::Bell`
+    is what paints a background tab amber. A second capability rather than a widening of
+    `WatchCommands`, because it is a weaker thing to agree to and a different one: a bell
+    carries no exit status and no sight of what ran.
+
+  - **`while_running`, which is what makes it usable.** A shell rings BEL at its own prompt
+    too — an ambiguous Tab completion is the common one — and a plugin that ignored the
+    difference would ding at somebody typing. The flag is `OSC 133;C`: whether the shell had
+    said a command was running when the bell rang. It is read in `terminal_model` where the
+    snapshot is, because by the time the workspace hears about the bell the command may be
+    over. What to *do* with it stays the plugin's decision; the host declines to hold that
+    opinion, which is the same reason a bell in the focused pane is dispatched at all. Focused
+    here means the pane with the keyboard, not a person's attention, and an agent left running
+    in a window's only pane is focused the whole time nobody is there.
+
+  - **The watcher registry is keyed by kind.** `Host::watch(Watch, …)` and
+    `Host::watchers(Watch)` replace the single command list, so a plugin granted one kind and
+    refused the other registers nothing for the one it was refused — rather than being handed
+    events it is not allowed and having them dropped further in, where nobody reading the
+    dispatch could tell that a grant was what decided it.
+
 - **ABI 7 — a plugin that can act on *one command*: done.** Everything before it was about the
   window: a chip in the header, a row under the line you are typing, a mark on a tab. This is
   the first version in which a plugin is handed the thing a person is actually looking at.

@@ -43,7 +43,7 @@ use crook_plugin_api::{
 };
 use crook_wasm::{Fuel, Sandbox};
 
-use crate::plugin::{BuildError, Host, Plugin};
+use crate::plugin::{BuildError, Host, Plugin, Watch};
 use crate::plugins::tabs::{TAB_ROW_BADGE, TabRow};
 use crate::tab::AgentStatus;
 use crate::workspace::{BlockMenuState, Workspace, WorkspaceAction, block_menu};
@@ -223,16 +223,26 @@ impl Plugin for WasmPlugin {
         // is not allowed and having them dropped further in. A plugin that
         // asked and was allowed but exports no `crook_event` registers a watch
         // that does nothing, which is its own affair.
-        if host
-            .granted(&self.manifest.id)
-            .iter()
-            .any(|key| Capability::WatchCommands.keys().contains(key))
-        {
+        //
+        // One registration per kind, for the same reason: a plugin granted the
+        // bell and refused the commands is one the command dispatch never
+        // reaches, rather than one it reaches and is turned away from.
+        let granted = host.granted(&self.manifest.id).to_vec();
+        for (capability, kind) in [
+            (Capability::WatchCommands, Watch::Commands),
+            (Capability::WatchBells, Watch::Bells),
+        ] {
+            if !granted.iter().any(|key| capability.keys().contains(key)) {
+                continue;
+            }
             let watching = runtime.clone();
-            host.watch_commands(Rc::new(move |_workspace, event: &Event, ctx| {
-                let event = event.clone();
-                watching.update(ctx, |runtime, ctx| runtime.notify(&event, ctx));
-            }));
+            host.watch(
+                kind,
+                Rc::new(move |_workspace, event: &Event, ctx| {
+                    let event = event.clone();
+                    watching.update(ctx, |runtime, ctx| runtime.notify(&event, ctx));
+                }),
+            );
         }
 
         for contribution in registered.contributions {

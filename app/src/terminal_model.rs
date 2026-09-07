@@ -172,8 +172,19 @@ pub enum TerminalUpdate {
     ///
     /// What to do with it is the workspace's to decide, because the answer is
     /// about the tab strip rather than about the grid: a bell in a pane nobody
-    /// is looking at is the only interesting kind.
-    Bell(PaneId),
+    /// is looking at is the only interesting kind of bell to *the strip*, and
+    /// plugins watching for one have their own opinion about the rest.
+    Bell {
+        /// Which pane rang.
+        pane: PaneId,
+        /// Whether the shell had said a command was running when it did.
+        ///
+        /// Read here rather than worked out later because this is where the
+        /// snapshot is: by the time the workspace hears about the bell the
+        /// command may have ended, and a bell is told apart from a shell's own
+        /// prompt-time ringing by what was running at the moment it rang.
+        while_running: bool,
+    },
     /// A command in a pane finished, because the shell said so with OSC 133
     /// `D`.
     ///
@@ -785,7 +796,10 @@ impl TerminalModel {
                 // The child asked the terminal to close. It is about to stop
                 // being readable anyway, so this is only ever early notice.
                 TerminalEvent::Exit => log::debug!("the shell in pane {pane:?} asked to close"),
-                TerminalEvent::Bell => updates.push(TerminalUpdate::Bell(pane)),
+                TerminalEvent::Bell => updates.push(TerminalUpdate::Bell {
+                    pane,
+                    while_running: session.snapshot.live_block.state.is_running(),
+                }),
                 TerminalEvent::CommandFinished { exit, took } => {
                     updates.push(TerminalUpdate::CommandFinished { pane, exit, took });
                 }
