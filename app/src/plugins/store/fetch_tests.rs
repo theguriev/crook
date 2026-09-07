@@ -72,3 +72,39 @@ fn a_version_with_no_size_in_the_index_is_checked_by_its_hash_alone() {
 
     checked(b"crook".to_vec(), &release).expect("the hash is enough");
 }
+
+#[test]
+#[ignore = "reaches the real registry over the network"]
+fn the_registry_answers_with_a_list_this_build_can_read() {
+    // Run with `cargo test -p crook -- --ignored the_registry`. Not part of
+    // the suite for the reason the transcript test is not: a test that fails
+    // on an aeroplane is a test people learn to ignore. What it is for is the
+    // question no offline test can answer — whether the URL in this file, the
+    // shape the registry publishes and the reader here still agree.
+    let agent = agent();
+    let Fetched::New { bytes, etag } =
+        index(&agent, INDEX_URL, None).expect("the registry should answer")
+    else {
+        panic!("nothing was sent and no tag was sent either");
+    };
+
+    let listed = crate::plugins::store::index::parse(&bytes).expect("and it should be an index");
+    assert!(!listed.plugins.is_empty(), "with something in it");
+
+    // And the tag it gave back is the tag that makes the next look cost
+    // nothing, which is the half of this that is easy to publish wrongly.
+    assert!(matches!(
+        index(&agent, INDEX_URL, etag.as_deref()),
+        Ok(Fetched::Unchanged)
+    ));
+
+    // Then one artifact, hash and all: the store's whole promise is that what
+    // arrives is what the list named.
+    let offered = crate::plugins::store::index::offers(&listed);
+    let release = offered
+        .iter()
+        .find_map(|offer| offer.release.clone())
+        .expect("something built for this build");
+    let module = module(&agent, &release).expect("the artifact should arrive intact");
+    assert_eq!(module.len() as u64, release.bytes);
+}

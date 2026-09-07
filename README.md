@@ -88,6 +88,17 @@ Eight features, and the page that configures them:
   branch mark on the corner of every tab whose directory is a git worktree, which it can only
   do because somebody allowed it to see which project each tab is in.
 
+  **And there is a place to get one from.** The **Store** at the foot of the sidebar is the
+  registry's list — [github.com/theguriev/crook-plugins](https://github.com/theguriev/crook-plugins),
+  which builds every plugin from source and publishes one static `index.json`. Nothing is
+  fetched until you press *Look for plugins*: no account, no machine id, no list of what you
+  have, and a machine that is offline shows the last list it read with its age under it.
+  Pressing **Install** downloads one file, checks it hashes to what the list said, checks the
+  module's own manifest against what the list promised — an index is a mirror and never the
+  authority — and then *runs it*, in the window that is already open. Installing is still not
+  allowing: a plugin that has just arrived may do nothing at all until its card in **Plugins**
+  is answered, and **Remove** takes it and its permissions back off.
+
   **The second worked example is the chips**, and it is the one that proves a plugin may
   *act*. It lives at [github.com/theguriev/crook-chips](https://github.com/theguriev/crook-chips)
   and draws the row under the line you are typing: where the pane is, which branch it is on,

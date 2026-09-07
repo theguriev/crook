@@ -994,7 +994,37 @@ the ABI answer for itself. The rule above still stands for a *feature a terminal
 terminal without*, and the usage chip turned out not to be one of those. Which built-ins there
 should be is a question for whenever something is.
 
-**In the app.** A `Plugins` page in the settings rail — searchable, since the rail searches —
+**In the app, as built.** The store is `crook/store`, a Tier-1 plugin like every other
+feature, and it is a **section of the sidebar** beside Plugins rather than a page of the
+settings — the same shape and the same frames, because a plugin that has not been installed yet
+is not a different kind of thing from one that has.
+
+- The list is the registry's, filtered by the section's own field, one row per plugin with one
+  word about where it stands: installed, the version an update would bring, or that this build
+  cannot run it. Everything else is on the card, because the card is what somebody should have
+  read before pressing anything.
+- **Nothing is fetched by opening it.** The section draws the copy on disk and the button at
+  the foot is the request; the line above the button says how old the answer on screen is.
+- **Install** is one press and four steps: download, check the hash and the size against the
+  index, open the module and check *its* manifest against what the row promised, and only then
+  write it. A row and a module that disagree is the one thing a store must not install, and it
+  is also the only check anybody has on the index being what it says it is.
+- Then it **runs**, in the window that is open. `Host::carry` is the half that was missing:
+  everything else about a plugin — the switch, the grant, the card — worked on one the host was
+  built with, and "restart Crook" is a thing to say about a terminal the way it is not about a
+  browser. Installing the same id again replaces it, which is what an upgrade is.
+- **Installing is not allowing.** A plugin that has just arrived may do nothing at all; what it
+  asks for is answered on its card in Plugins, where an escalation is already compared against
+  what was allowed last time. The store says so on every card rather than putting a second
+  permission dialog in front of the first.
+- **Remove** deletes the plugin's directory, forgets its grant and takes it out of the window
+  without a restart.
+
+What is not built: `--dev-plugin`, and updates that check themselves. Auto-update stays off —
+the architecture doc lists autoupdate as absent by design, and a terminal that changes under you
+is worse than a stale one.
+
+**The plan's own sketch, for the record.** A `Plugins` page in the settings rail — searchable, since the rail searches —
 listing installed, available and built-in plugins with state, granted capabilities, version,
 last error, and per-plugin log. Install shows the capability dialog first. Updates are checked on
 demand and applied on click; auto-update is off by default (the architecture doc lists

@@ -97,19 +97,19 @@ pub(super) const FIELD_GAP: f32 = 10.;
 /// Eight rather than the settings rail's ten, which is the number the tab
 /// rows and the plugin rows already used and the number a row of the panel is
 /// therefore expected to have.
-const ROW_PADDING: Padding = Padding {
+pub(crate) const ROW_PADDING: Padding = Padding {
     top: 6.,
     bottom: 6.,
     left: 8.,
     right: 8.,
 };
 /// See [`ROW_PADDING`].
-const ROW_RADIUS: f32 = 6.;
+pub(crate) const ROW_RADIUS: f32 = 6.;
 /// See [`ROW_PADDING`].
-const ROW_GAP: f32 = 2.;
+pub(crate) const ROW_GAP: f32 = 2.;
 
 /// The gap between a row's leading mark and its label.
-const LEADING_GAP: f32 = 8.;
+pub(crate) const LEADING_GAP: f32 = 8.;
 
 /// How a row's label is lit.
 ///

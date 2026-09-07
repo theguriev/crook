@@ -889,6 +889,15 @@ THE INPUT FIELD:
 /// number raised, and there is nothing here that can count them at startup
 /// because a plugin is installed by dropping a file in a directory.
 ///
+/// The store is deliberately not on that list, and it is worth saying why
+/// since it is the newest thing that reaches the network. It parks nothing: a
+/// look at the registry and a download are one task each, started by somebody
+/// pressing something and ended by an answer, and both are bounded by the
+/// twenty-second timeout the request carries. What that costs a save queued
+/// behind it is that timeout at the very worst, which is the same argument the
+/// long-running timer below makes with a smaller number — not a worker held
+/// for as long as a window is open.
+///
 /// The number is a count of *chains*, never of panes. That is why the child
 /// check is one task for the whole terminal model rather than one per session:
 /// a chain per pane would park a worker per pane, and a window with more panes
