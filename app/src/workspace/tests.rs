@@ -144,6 +144,18 @@ impl Harness {
         settings: Settings,
         plugins: Vec<Box<dyn crate::plugin::Plugin>>,
     ) -> Self {
+        Self::with_withdrawn(tabs, settings, plugins, Default::default())
+    }
+
+    /// The same, with some of them withdrawn by the registry — which the
+    /// window is told about rather than reading, so that a test can say it
+    /// without a store, a network or a file.
+    fn with_withdrawn(
+        tabs: usize,
+        settings: Settings,
+        plugins: Vec<Box<dyn crate::plugin::Plugin>>,
+        withdrawn: std::collections::BTreeMap<String, String>,
+    ) -> Self {
         let queue = LocalQueue::new();
         // Two, not one, and for the reason `crate::PARKED_WORKERS` exists: a
         // task that waits on a timer holds its worker for the whole cycle, so
@@ -180,6 +192,7 @@ impl Harness {
                     settings,
                     channel: Channel::Dev,
                     plugins,
+                    withdrawn,
                 },
                 quit,
                 window.clone(),
@@ -11809,6 +11822,45 @@ mod sandboxed {
             icons_of(&harness.frame()).contains(&Lucide::GitBranch),
             "the icon it asked for was not drawn"
         );
+    }
+
+    #[test]
+    fn a_version_the_registry_took_back_is_carried_and_not_run() {
+        // A yank is honoured on the launch after it is published and on a
+        // machine that is offline, because it is read off the copy of the
+        // index this machine already has. What it must not be is silent: the
+        // row stays, the switch is dead, and the card says the sentence
+        // whoever withdrew it wrote.
+        let scratch = Scratch::new("withdrawn");
+        install(
+            scratch.path(),
+            "probe",
+            &wasm("eugen/probe", "header.right", 10),
+        );
+        let mut plugins = crate::plugins::defaults();
+        plugins.extend(crate::plugins::wasm::installed(scratch.path()));
+        let withdrawn = std::collections::BTreeMap::from([(
+            String::from("eugen/probe"),
+            String::from("it read a file it had no business reading"),
+        )]);
+        let mut harness = Harness::with_withdrawn(1, Settings::ephemeral(), plugins, withdrawn);
+
+        // Not running: what it contributes to the header is not on screen.
+        assert!(
+            !frame_text(&harness.frame()).contains("from a sandbox"),
+            "a withdrawn plugin should not be drawing anything"
+        );
+
+        harness.show_plugins();
+        harness.click_plugin("Probe");
+        let text = frame_text(&harness.frame());
+
+        assert!(text.contains("Withdrawn from the registry"), "{text}");
+        assert!(
+            text.contains("it read a file it had no business reading"),
+            "the registry's own sentence is missing: {text}"
+        );
+        assert!(text.contains("switched off"), "{text}");
     }
 
     #[test]

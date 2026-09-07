@@ -1189,6 +1189,15 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
                     true => everything_installed(),
                     false => crate::plugins::defaults(),
                 },
+                // With the plugins and not otherwise, which is the same rule
+                // the plugins themselves follow: a picture of the application
+                // is the same everywhere, and one that includes this machine's
+                // plugins already includes whatever this machine knows about
+                // them — a withdrawn one among them.
+                withdrawn: match overrides.with_plugins {
+                    true => withdrawn_plugins(),
+                    false => std::collections::BTreeMap::new(),
+                },
             },
             quit,
             Rc::new(Detached),
@@ -2014,6 +2023,42 @@ fn everything_installed() -> Vec<Box<dyn crate::plugin::Plugin>> {
     plugins
 }
 
+/// Which installed plugins the registry has withdrawn, and why.
+///
+/// Read off the store's copy of the index — the file the Store section keeps
+/// beside the plugins — rather than over the network, because a yank has to be
+/// honoured on a machine that is offline and on the launch after the registry
+/// said so. Nothing here fetches anything, and an index that is missing or
+/// unreadable withdraws nothing: a list that cannot be read is never a reason
+/// to stop running something somebody installed.
+///
+/// A version is what is withdrawn rather than a plugin, so the answer is about
+/// the version on this machine: somebody running the one before the bad one
+/// keeps running it.
+fn withdrawn_plugins() -> std::collections::BTreeMap<String, String> {
+    let Some(index) = crate::plugins::store::cache::Cache::user()
+        .and_then(|cache| cache.read())
+        .map(|cached| cached.index)
+    else {
+        return std::collections::BTreeMap::new();
+    };
+
+    let Some(directory) = crate::plugins::wasm::directory() else {
+        return std::collections::BTreeMap::new();
+    };
+
+    let mut withdrawn = std::collections::BTreeMap::new();
+    for plugin in crate::plugins::wasm::installed(&directory) {
+        let manifest = crate::plugin::Plugin::manifest(plugin.as_ref());
+        if let Some(why) =
+            crate::plugins::store::index::withdrawn(&index, &manifest.id, manifest.version)
+        {
+            withdrawn.insert(manifest.id.to_string(), why);
+        }
+    }
+    withdrawn
+}
+
 impl Shell {
     fn new(
         platform: &Platform,
@@ -2043,6 +2088,7 @@ impl Shell {
                     settings,
                     channel: launch.channel,
                     plugins: everything_installed(),
+                    withdrawn: withdrawn_plugins(),
                 },
                 quit,
                 window.clone(),

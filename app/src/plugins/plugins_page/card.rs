@@ -93,6 +93,24 @@ pub(super) fn render(
         column.add_child(status);
     }
 
+    // Above everything else that could be wrong with a plugin, because this
+    // is the one that is somebody else's news rather than this machine's
+    // trouble.
+    if let Some(why) = workspace.withdrawn(&manifest.id) {
+        column.add_child(section(
+            "Withdrawn from the registry",
+            vec![
+                widgets::note(why, ui),
+                widgets::note(
+                    "This version is not being offered any more, so it is not running. The Store \
+                     has whatever replaced it, and Remove takes this one off.",
+                    ui,
+                ),
+            ],
+            ui,
+        ));
+    }
+
     if let Some(problem) = host
         .refused()
         .iter()
@@ -231,11 +249,16 @@ fn description(manifest: &Manifest, ui: FamilyId) -> Box<dyn Element> {
 /// The switch, with the word beside it rather than a bare toggle.
 fn switch(workspace: &Workspace, manifest: &Manifest, on: bool, ui: FamilyId) -> Box<dyn Element> {
     let holds_the_page = HOLDS_THE_PAGE.contains(&manifest.id.as_str());
+    // A version the registry withdrew is not a version to offer a switch for:
+    // the plugin is off because somebody published a sentence about it, and a
+    // switch that turned it back on would be a control that undoes a warning.
+    // Updating or removing it is what the Store is for.
+    let withdrawn = workspace.withdrawn(&manifest.id).is_some();
     let command = workspace
         .host()
         .action(&action("toggle", &manifest.id))
         .map(WorkspaceAction::Run)
-        .filter(|_| !holds_the_page);
+        .filter(|_| !holds_the_page && !withdrawn);
     let live = command.is_some();
 
     answer(

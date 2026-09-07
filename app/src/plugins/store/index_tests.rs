@@ -122,3 +122,49 @@ fn an_index_that_is_not_json_says_so_rather_than_answering_with_nothing() {
     // can act on.
     assert!(parse(b"<html>404</html>").is_err());
 }
+
+#[test]
+fn a_module_that_is_not_what_the_list_promised_is_refused() {
+    // The one check anybody has on the index being what it says it is: it was
+    // read out of the artifact by the registry's copy of this host's reader,
+    // so a row and a module that disagree is a registry with a mistake in it
+    // or a URL that now serves something else.
+    let release = Release {
+        version: "1.0.0".into(),
+        abi: 8,
+        url: "https://x.invalid/p.wasm".into(),
+        sha256: "aa".into(),
+        bytes: 0,
+        capabilities: vec![String::from("cwd.read")],
+        asks: Vec::new(),
+        yanked: None,
+    };
+    let manifest = crook_plugin::Manifest {
+        schema: crook_plugin::Manifest::SCHEMA,
+        id: PluginId::parse("eugen/probe").expect("a literal that parses"),
+        name: "Probe",
+        description: "d",
+        version: "1.0.0",
+        tier: crook_plugin::Tier::Wasm,
+        capabilities: &[crook_plugin_api::Capability::ReadWorkingDirectory],
+    };
+
+    promised(&release, &manifest).expect("the module the list described");
+
+    // A version that is not the version offered: what somebody read the
+    // capability list *of* is that version, and this is another one.
+    let mut newer = release.clone();
+    newer.version = String::from("1.1.0");
+    let refusal = promised(&newer, &manifest).expect_err("a different version");
+    assert!(
+        refusal.contains("1.1.0") && refusal.contains("1.0.0"),
+        "{refusal}"
+    );
+
+    // And a module that wants something the row did not say it wanted.
+    let mut quieter = release.clone();
+    quieter.capabilities = Vec::new();
+    let refusal = promised(&quieter, &manifest).expect_err("more than was offered");
+    assert!(refusal.contains("cwd.read"), "{refusal}");
+    assert!(refusal.contains("nothing"), "{refusal}");
+}
