@@ -73,8 +73,15 @@ impl Platform {
 /// at all.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Pane {
-    /// Whether the program on the far end has taken the whole screen.
-    pub alt_screen: bool,
+    /// Whether there is a composer under the output to type into.
+    ///
+    /// The whole of "who owns the screen", because it is the same question
+    /// asked once: [`crate::pane_surface`] takes the field away on the
+    /// alternate screen, on an overflowing block and once a command has been
+    /// running for longer than `pane_surface::LONG_RUNNING`, and each of
+    /// those is a pane whose keyboard belongs to the program rather than to a
+    /// field nobody can see. See rule 2 of [`route`].
+    pub composer: bool,
     /// Whether the field is empty. What makes Ctrl-D an end of input rather
     /// than a delete — see [`route`].
     pub line_is_empty: bool,
@@ -235,13 +242,20 @@ pub enum Binding {
 ///    A modal menu is the one thing that suspends this: while one is up the
 ///    pane reports no selection at all, so the three keys a running command
 ///    has to keep hearing still mean what they always mean.
-/// 2. **The alt screen belongs to the program.** vim, `top` and `less` drive
-///    every cell of the screen and read every key themselves, so on the alt
-///    screen everything goes raw to the pty — and the input field is not even
-///    drawn. See [`crate::pane_surface`], which is where the visible half of
-///    this rule lives. Rule 1 is deliberately above this one: text
-///    on a full-screen program's screen is still text somebody selected with
-///    the mouse, and there is no reason they cannot copy it.
+/// 2. **A pane with no composer belongs to the program.** vim, `top` and
+///    `less` drive every cell of the screen and read every key themselves —
+///    and so does an agent or a REPL that never leaves the primary screen,
+///    which is read by exactly the same keys and is the case the alternate
+///    screen alone missed. What those panes have in common is not a screen
+///    buffer, it is that there is no field to type into:
+///    [`crate::pane_surface`] takes the composer away on the alt screen, on
+///    an overflowing block and once a command has been running longer than
+///    `LONG_RUNNING`, saying in its own words that every key then goes to the
+///    program. This is that sentence, asked as one question — and a keystroke
+///    on a pane with no composer goes raw to the pty rather than into a field
+///    that is not drawn. Rule 1 is deliberately above this one: text on a
+///    full-screen program's screen is still text somebody selected with the
+///    mouse, and there is no reason they cannot copy it.
 /// 3. **The signal keys always reach the shell.** Ctrl-C interrupts and
 ///    abandons the line with it, Ctrl-Z suspends, and Ctrl-D ends the input —
 ///    but only on an empty line, exactly as it does in a shell. The field
@@ -255,7 +269,7 @@ pub fn route(keystroke: &Keystroke, chars: &str, pane: Pane, platform: Platform)
     if pane.grid_has_selection && copies_the_output(keystroke, platform) {
         return Route::CopyOutput;
     }
-    if pane.alt_screen {
+    if !pane.composer {
         return Route::Raw;
     }
     match signal(keystroke) {
@@ -644,7 +658,7 @@ mod tests {
     /// A pane on the normal screen with a line half written in its field.
     fn composing() -> Pane {
         Pane {
-            alt_screen: false,
+            composer: true,
             line_is_empty: false,
             grid_has_selection: false,
         }
@@ -653,7 +667,7 @@ mod tests {
     /// A pane on the normal screen whose field is empty.
     fn empty() -> Pane {
         Pane {
-            alt_screen: false,
+            composer: true,
             line_is_empty: true,
             grid_has_selection: false,
         }
@@ -676,11 +690,11 @@ mod tests {
     }
 
     #[test]
-    fn the_alt_screen_takes_every_key_before_the_editor_sees_one() {
+    fn a_pane_with_no_composer_takes_every_key_before_the_editor_sees_one() {
         // vim is reading the arrows, and a field that swallowed them would
         // leave the cursor stuck in the corner.
         let vim = Pane {
-            alt_screen: true,
+            composer: false,
             line_is_empty: true,
             grid_has_selection: false,
         };
@@ -690,6 +704,29 @@ mod tests {
                     route(&keystroke(key, modifiers), "a", vim, platform),
                     Route::Raw,
                     "{key} was taken from a full-screen program"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_agent_on_the_primary_screen_gets_the_arrows() {
+        // The case the alternate screen missed, and the one this rule exists
+        // for: Claude Code, a REPL, anything a person talks to on the primary
+        // screen while `pane_surface` has taken the composer away. It reads
+        // Down to move a selection, and a field taking that key for its
+        // history would be a menu nobody can move in.
+        let agent = Pane {
+            composer: false,
+            line_is_empty: true,
+            grid_has_selection: false,
+        };
+        for platform in [Platform::Mac, Platform::Other] {
+            for key in ["down", "up", "enter", "y", "escape"] {
+                assert_eq!(
+                    route(&keystroke(key, none()), "y", agent, platform),
+                    Route::Raw,
+                    "{key} was taken from a program that is reading it"
                 );
             }
         }
@@ -813,7 +850,7 @@ mod tests {
         // screen is still vim's, including `ctrl-c` once the selection is
         // gone.
         let vim = Pane {
-            alt_screen: true,
+            composer: false,
             line_is_empty: true,
             grid_has_selection: true,
         };

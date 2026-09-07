@@ -87,9 +87,16 @@ pub struct Output {
 
     /// The line being composed under this output, when there is a composer.
     ///
-    /// Read at the moment a key arrives rather than baked in when the frame
-    /// was built, because it decides what Ctrl-D means: an end of input on an
-    /// empty line, and a delete over a written one.
+    /// **`None` is a fact about the keyboard, not only about Ctrl-D.** A pane
+    /// with no field is a pane whose keys are the program's — see rule 2 of
+    /// [`input_keys::route`] — so this is attached exactly when
+    /// [`crate::pane_surface`] said a composer is drawn, and never on an alt
+    /// screen, an overflowing block or a command that has been running long
+    /// enough to take the field away.
+    ///
+    /// The line itself is read at the moment a key arrives rather than baked
+    /// in when the frame was built, because it decides what Ctrl-D means: an
+    /// end of input on an empty line, and a delete over a written one.
     input: Option<TextInput>,
 
     /// The pointer gesture that selects text out of this output, and where a
@@ -117,8 +124,10 @@ impl Output {
         self
     }
 
-    /// Attaches the composer under this output, whose line decides what Ctrl-D
-    /// means.
+    /// Attaches the composer under this output: the field a key that is not
+    /// the program's goes into, whose line decides what Ctrl-D means.
+    ///
+    /// Called only where one is drawn. See [`Output::input`].
     pub fn with_input(mut self, input: TextInput) -> Self {
         self.input = Some(input);
         self
@@ -188,9 +197,9 @@ impl Output {
     /// the shell is the half of the pane it belongs to.
     ///
     /// The whole policy is [`input_keys::route`]: a selection in the output
-    /// owns the copy chord, on the alt screen the program has every key, on
-    /// the normal screen the shell has only the ones that interrupt, end and
-    /// suspend, and the composer below has the rest.
+    /// owns the copy chord, a pane with no composer gives the program every
+    /// key, and under a composer the shell has only the ones that interrupt,
+    /// end and suspend while the field has the rest.
     ///
     /// A modal menu suspends the selection's claim rather than the menu's own
     /// filter below: while one is up, the three keys a running command has to
@@ -198,7 +207,7 @@ impl Output {
     /// on the clipboard by a selection nobody can see the pointer on any more.
     /// An output with nowhere to copy *to* reports the same, so the interrupt
     /// is never taken by a chord that could not have answered it.
-    pub fn type_key(&self, event: &Event, alt_screen: bool, ctx: &mut EventContext) -> Typed {
+    pub fn type_key(&self, event: &Event, ctx: &mut EventContext) -> Typed {
         let Event::KeyDown { keystroke, chars } = event else {
             return Typed::Ignored;
         };
@@ -212,7 +221,10 @@ impl Output {
         let modal = self.keys == Keys::Signals;
         let can_copy = !modal && self.mouse.is_some();
         let pane = input_keys::Pane {
-            alt_screen,
+            // Which screen this is was answered when the frame was built, by
+            // the one function that answers it: a composer was attached, or
+            // there is none to attach.
+            composer: self.input.is_some(),
             line_is_empty: self
                 .input
                 .as_ref()

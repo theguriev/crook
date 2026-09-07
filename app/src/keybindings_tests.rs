@@ -229,7 +229,7 @@ fn no_shipped_binding_takes_a_chord_the_input_field_needs() {
     // the window delegate never reaches `route`, so a chord in both tables is
     // a chord the field can never have — silently.
     let composing = Pane {
-        alt_screen: false,
+        composer: true,
         line_is_empty: false,
         grid_has_selection: false,
     };

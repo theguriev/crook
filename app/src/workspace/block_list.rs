@@ -1484,7 +1484,7 @@ impl Element for BlockList {
             return false;
         };
 
-        match self.output.type_key(event, self.snapshot.alt_screen, ctx) {
+        match self.output.type_key(event, ctx) {
             // Typing returns to the live block, whatever it was reading.
             Typed::SentToPty => {
                 self.view.apply(ScrollCause::KeyToPty);
