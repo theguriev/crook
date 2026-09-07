@@ -63,6 +63,7 @@ fn with_context(disabled: &[String], test: impl FnOnce(&mut Host, &mut ViewConte
                 settings: Settings::ephemeral(),
                 channel: Channel::Dev,
                 plugins: plugins::defaults(),
+                withdrawn: BTreeMap::new(),
             },
             quit,
             Rc::new(Recorder::default()),

@@ -1019,6 +1019,14 @@ is not a different kind of thing from one that has.
   permission dialog in front of the first.
 - **Remove** deletes the plugin's directory, forgets its grant and takes it out of the window
   without a restart.
+- **A withdrawn version is carried and not run.** `yanked` is read off the copy of the index
+  this machine already has, at startup, so a yank is honoured on the launch after it is
+  published and on a machine that has been offline for a week — and an index that is missing or
+  unreadable withdraws nothing, which is the safe direction. It is not written into
+  `disabled_plugins`: that list is a person's own answer and this is the registry's, and a
+  person who reads "switched off" should be able to tell which of the two said so. The row
+  stays on the Plugins page with the registry's sentence on its card, the switch is drawn dead,
+  and what to do about it — update, or remove — is in the Store.
 
 What is not built: `--dev-plugin`, and updates that check themselves. Auto-update stays off —
 the architecture doc lists autoupdate as absent by design, and a terminal that changes under you
