@@ -34,6 +34,17 @@
 //!   `"ctrl+k ctrl+s"`. The first chord of a sequence puts the window in chord
 //!   mode, where the next keystroke completes the sequence or cancels it.
 //!
+//! # Where the file comes from
+//!
+//! A person writes it, or the Keyboard Shortcuts page does. Clicking a chord
+//! on that page records one from the keyboard and [`Keybindings::bind`] writes
+//! VSCode's own two lines for it — the command taken off every chord it had,
+//! then the chord that was pressed — through [`document`], which edits the
+//! *text* of the file rather than replacing it. That is what keeps somebody's
+//! comments, their ordering and their line about a plugin they have not
+//! installed yet: an edit made by clicking a button must not cost anything
+//! that was written by hand.
+//!
 //! # What a command is
 //!
 //! An [`ActionName`] — `owner/plugin/action` — and there is no second kind.
@@ -73,8 +84,10 @@ use serde_json::Value;
 use crate::input_keys::Platform;
 use crate::settings::config_directory;
 
+pub mod document;
 pub mod when;
 
+pub use document::Document;
 pub use when::{Context, When};
 
 /// The file a person writes their bindings in.
@@ -169,6 +182,15 @@ pub struct Keybindings {
     default: Vec<Rule>,
     /// What the person wrote down.
     user: Vec<Rule>,
+    /// The person's file as it is written, which is what an edit made from
+    /// the settings page edits. [`Self::user`] is what that text *means*, and
+    /// it is derived from this every time it changes — one direction, so the
+    /// rules in force and the file on disk cannot come apart.
+    document: Document,
+    /// Where that file is, or `None` for a run with nowhere to write: a test,
+    /// the headless snapshot, a machine with no configuration directory.
+    /// Nothing can be edited without one, and the page says so.
+    path: Option<PathBuf>,
 }
 
 impl Default for Keybindings {
@@ -212,6 +234,8 @@ impl Keybindings {
             plugin: Vec::new(),
             default,
             user: Vec::new(),
+            document: Document::default(),
+            path: None,
         }
     }
 
@@ -226,14 +250,20 @@ impl Keybindings {
     /// Reads the file at `path` over the shipped bindings.
     ///
     /// Tests point this at a scratch directory; nothing else should need to.
+    ///
+    /// A file that is not there is not an error and not a line in the log: it
+    /// is what every install starts as, and the path is remembered all the
+    /// same so that the first binding changed from the settings page has
+    /// somewhere to be written.
     pub fn load(path: impl AsRef<Path>) -> Self {
         let path = path.as_ref();
         let mut keybindings = Self::new();
+        keybindings.path = Some(path.to_owned());
         let Ok(text) = fs::read_to_string(path) else {
-            // No file is the ordinary state, and not worth a line.
             return keybindings;
         };
-        keybindings.user = read_rules(&text, path, Source::User);
+        keybindings.document = Document::new(text);
+        keybindings.reread();
         keybindings
     }
 
@@ -324,16 +354,34 @@ impl Keybindings {
     /// clause does not hold *while the settings page is open* would hide most
     /// of them.
     pub fn chords_for(&self, command: &ActionName) -> Vec<String> {
+        let effective = self.effective();
         let mut chords: Vec<String> = Vec::new();
-        for rule in self.effective() {
+
+        for (at, rule) in effective.iter().enumerate() {
+            if &rule.command != command {
+                continue;
+            }
+            // A chord a later rule takes unconditionally is a chord this
+            // command does not answer to any more, whatever the rule that
+            // wanted it says. Somebody who has just put `ctrl+shift+d` on
+            // another command would otherwise find it printed on two rows, one
+            // of which is a lie — and it is the page's job to say which.
+            //
+            // Unconditionally, because a rule with a `when` takes the chord
+            // only sometimes, and a row that went blank because of a clause
+            // that does not hold right now would be a different lie.
+            let taken = effective[at + 1..].iter().any(|later| {
+                later.keys == rule.keys && later.when.is_none() && later.command != rule.command
+            });
             let chord = rule.chord();
             // Two rules can reach the same command by the same chord — a
             // default and the person's own line restating it — and a row that
             // printed it twice would look like two ways to do one thing.
-            if &rule.command == command && !chords.contains(&chord) {
+            if !taken && !chords.contains(&chord) {
                 chords.push(chord);
             }
         }
+
         chords
     }
 
@@ -347,6 +395,280 @@ impl Keybindings {
             .map(|rule| rule.source)
             .next_back()
     }
+
+    /// Whether there is a file to write, which is what makes a binding
+    /// changeable from the settings page at all.
+    ///
+    /// False for a run with no configuration directory — a test, the headless
+    /// snapshot, a machine that has none — where the page draws its controls
+    /// dead rather than pretending an edit was kept.
+    pub fn is_editable(&self) -> bool {
+        self.path.is_some()
+    }
+
+    /// Whether the person's own file says anything about `command`.
+    ///
+    /// What the settings page offers "Reset" for: a command nobody has
+    /// written a line about has nothing to put back.
+    pub fn is_yours(&self, command: &ActionName) -> bool {
+        self.user.iter().any(|rule| &rule.command == command)
+    }
+
+    /// Binds `command` to `keys`, and to nothing else.
+    ///
+    /// VSCode's own edit, in VSCode's own two lines: a removal that takes the
+    /// command off every chord it had, and then the chord it is being given.
+    /// The removal is what makes this "instead of" rather than "as well as" —
+    /// without it, changing `ctrl+shift+t` to `ctrl+alt+n` would leave a
+    /// window that opens a tab on both.
+    ///
+    /// The person's earlier lines about this command go first, so that
+    /// changing one binding four times leaves two lines in the file rather
+    /// than eight.
+    ///
+    /// `None` when there is nothing to write to, or when the file is one no
+    /// edit may guess at — see [`Document::append`].
+    pub fn bind(&mut self, command: &ActionName, keys: &[Keystroke]) -> Option<PendingSave> {
+        if keys.is_empty() {
+            return None;
+        }
+
+        self.forget(command);
+        // Asked *after* the person's own lines have gone, so that what is
+        // being removed is what the rest of the layers say — the shipped
+        // chord, or a plugin's — rather than a line this edit is replacing.
+        if self.is_bound(command) {
+            self.document.append(&removal_entry(command));
+        }
+        if !self.document.append(&binding_entry(command, keys)) {
+            log::warn!(
+                "{} is not a list of bindings, so it was left alone",
+                self.where_()
+            );
+            return None;
+        }
+
+        self.reread();
+        self.pending()
+    }
+
+    /// Takes every chord away from `command`, and gives the keys back.
+    ///
+    /// The `-` line on its own. A command with nothing bound to it is not an
+    /// error: it is how a chord is handed back to a shell or to an editor
+    /// running in a pane.
+    pub fn unbind(&mut self, command: &ActionName) -> Option<PendingSave> {
+        self.forget(command);
+        if self.is_bound(command) && !self.document.append(&removal_entry(command)) {
+            log::warn!(
+                "{} is not a list of bindings, so it was left alone",
+                self.where_()
+            );
+            return None;
+        }
+
+        self.reread();
+        self.pending()
+    }
+
+    /// Puts `command` back to what this build ships with.
+    ///
+    /// Every line the person wrote about it goes, and nothing replaces them,
+    /// which is the whole of what "reset" can mean in a file where the
+    /// defaults are not written down.
+    pub fn reset(&mut self, command: &ActionName) -> Option<PendingSave> {
+        self.forget(command);
+        self.reread();
+        self.pending()
+    }
+
+    /// Whether anything reaches `command` right now, under any condition.
+    fn is_bound(&self, command: &ActionName) -> bool {
+        self.effective().iter().any(|rule| &rule.command == command)
+    }
+
+    /// Takes every line the person wrote about `command` out of the document.
+    ///
+    /// Both kinds: the ones that bind it and the ones that remove it. What is
+    /// left is a file that says nothing about the command at all, which is
+    /// where each of the three edits starts.
+    fn forget(&mut self, command: &ActionName) {
+        let wanted = command.to_string();
+        self.document.remove(|entry| {
+            let named = entry.get("command").and_then(Value::as_str).unwrap_or("");
+            named.strip_prefix('-').unwrap_or(named).trim() == wanted
+        });
+    }
+
+    /// Reads the rules back out of the document.
+    ///
+    /// The one place [`Self::user`] is written after the file is loaded, so
+    /// that a binding changed from the page means exactly what the same file
+    /// would mean if Crook were started again on it — including a line that
+    /// turns out not to parse, which is dropped here rather than believed.
+    fn reread(&mut self) {
+        let path = self.path.clone().unwrap_or_default();
+        self.user = read_rules(self.document.text(), &path, Source::User);
+    }
+
+    /// The write this edit is asking for, for whoever has a thread to do it on.
+    fn pending(&self) -> Option<PendingSave> {
+        Some(PendingSave {
+            path: self.path.clone()?,
+            text: self.document.text().to_owned(),
+        })
+    }
+
+    /// The file's path, for a line in the log.
+    fn where_(&self) -> String {
+        match &self.path {
+            Some(path) => path.display().to_string(),
+            None => KEYBINDINGS_FILE.to_owned(),
+        }
+    }
+}
+
+/// A chord being recorded on the Keyboard Shortcuts page.
+///
+/// VSCode's recorder, which is a small state machine and nothing else: it
+/// holds the command whose chord is being spelled and the chords spelled so
+/// far, and the page draws it. What it does *not* hold is the keyboard —
+/// that is [`Workspace::action_for`](crate::workspace::Workspace::action_for),
+/// which hands every keystroke here while a recording is up so that a chord a
+/// pane would otherwise eat can still be recorded.
+///
+/// A recording is not a binding. Nothing is written until it is kept, so a
+/// person who reaches for a chord, sees it is the wrong one and presses Escape
+/// has changed nothing.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Recording {
+    /// The command the chords are being recorded for.
+    command: ActionName,
+    /// The chords pressed so far, in order.
+    keys: Vec<Keystroke>,
+}
+
+impl Recording {
+    /// The most chords one binding may be spelled over here.
+    ///
+    /// VSCode's limit, for VSCode's reason: a recorder that went on
+    /// accumulating would turn one fumbled keystroke into a binding nobody can
+    /// press again, and there is no third chord in any editor's keymap. The
+    /// *file* has no such limit — [`parse_keys`] reads as many as are written
+    /// — because a file is read rather than fumbled.
+    const MOST_CHORDS: usize = 2;
+
+    /// A recording of nothing yet, for `command`.
+    pub fn new(command: ActionName) -> Self {
+        Self {
+            command,
+            keys: Vec::new(),
+        }
+    }
+
+    /// Which command is being recorded for.
+    pub fn command(&self) -> &ActionName {
+        &self.command
+    }
+
+    /// The chords so far.
+    pub fn keys(&self) -> &[Keystroke] {
+        &self.keys
+    }
+
+    /// Whether anything has been pressed yet.
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    /// The chords so far, as a person would write them.
+    pub fn chord(&self) -> String {
+        format_keys(&self.keys)
+    }
+
+    /// Writes one keystroke down.
+    ///
+    /// Past [`Self::MOST_CHORDS`] the next press starts again rather than
+    /// being dropped, which is VSCode's behaviour and the only one that lets
+    /// somebody who has spelled the wrong sequence fix it without reaching for
+    /// the mouse.
+    pub fn press(&mut self, keystroke: &Keystroke) {
+        if self.keys.len() >= Self::MOST_CHORDS {
+            self.keys.clear();
+        }
+        self.keys.push(keystroke.clone());
+    }
+
+    /// Whether this keystroke is a modifier being held rather than a key being
+    /// pressed.
+    ///
+    /// The platform reports a press for Shift itself on the way to
+    /// `shift+cmd+k`, and a recorder that wrote those down would record
+    /// "shift" every time somebody reached for a chord.
+    pub fn is_a_modifier(keystroke: &Keystroke) -> bool {
+        matches!(
+            keystroke.key.as_str(),
+            "shift" | "control" | "ctrl" | "alt" | "option" | "super" | "meta" | "cmd" | "command"
+        )
+    }
+}
+
+/// A keybindings file that has been changed and not yet written.
+///
+/// The edit lands in memory the moment it is made — the next keystroke is
+/// resolved against it — and the file follows on a background thread, for the
+/// reason [`Settings::save_blocking`](crate::settings::Settings::save_blocking)
+/// does: writing one is a directory created, a file written, a flush waited
+/// for and a rename, which is milliseconds on a good day and a stalled frame
+/// on a bad one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingSave {
+    /// Where it goes.
+    path: PathBuf,
+    /// What goes there: the whole file, as the edit left it.
+    text: String,
+}
+
+impl PendingSave {
+    /// Writes it, atomically. Blocking; this belongs on the background pool.
+    ///
+    /// Atomically for the reason the settings are written that way: the bytes
+    /// go to a temporary beside the target and a rename puts them in place, so
+    /// a crash half-way through leaves the bindings that were working there
+    /// rather than half a file that parses as nothing.
+    pub fn write_blocking(&self) -> anyhow::Result<()> {
+        if let Some(directory) = self.path.parent() {
+            fs::create_dir_all(directory)?;
+        }
+        crate::settings::atomic_write(&self.path, self.text.as_bytes())
+    }
+
+    /// Where it would be written.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// The line that binds a command to a chord sequence.
+///
+/// Written the way the documentation writes one and the way a person would:
+/// one line, key first, which is the order VSCode's file uses.
+fn binding_entry(command: &ActionName, keys: &[Keystroke]) -> String {
+    format!(
+        "{{ \"key\": {}, \"command\": {} }}",
+        quoted(&format_keys(keys)),
+        quoted(&command.to_string())
+    )
+}
+
+/// The line that takes a command off every chord it has.
+fn removal_entry(command: &ActionName) -> String {
+    format!("{{ \"command\": {} }}", quoted(&format!("-{command}")))
+}
+
+/// `text` as a JSON string, escapes and all.
+fn quoted(text: &str) -> String {
+    Value::String(text.to_owned()).to_string()
 }
 
 /// Where the per-user keybindings live.

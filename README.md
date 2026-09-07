@@ -93,7 +93,7 @@ Eight features, and the page that configures them:
   command into your shell** — `cd …` or `git switch …`, quoted by the host, and only ever
   those two, because those two strings are what it asked to be allowed. The third chip runs
   the command it names, and its secondary click offers to change the chord — which opens
-  Crook's own recorder, not the plugin's. The field, the filtering, the arrow keys, Enter and
+  Crook's own Keyboard Shortcuts page with that row recording, not a recorder of the plugin's. The field, the filtering, the arrow keys, Enter and
   Escape all belong to Crook: the plugin says what can be chosen and is told which row a
   person chose, so a chip with a search box in it is never handed a keystroke.
 - **A shell in every pane.** A real pseudo-terminal and a real xterm-compatible emulator:
@@ -262,11 +262,13 @@ Eight features, and the page that configures them:
   `ctrl-c` interrupts and `ctrl-d` ends an input, and a binding that could take one of those
   away would be one that breaks a terminal. The **Keyboard Shortcuts** page lists every
   command, the chord that reaches it and where that chord came from — none of it written down
-  by hand. Every row has a **Change** button: it takes the whole keyboard, records the next
-  chord, and appends two lines to your own file — a removal of that command's chords and the
-  new one — so a file you keep comments in comes back with its comments. The same thing is
-  reachable by name, as `crook/shortcuts/rebind`, which is how a plugin's own chip can offer
-  "change this keybinding" without being able to write a file itself.
+  by hand — and it **records new ones**: click a chord, press the keys you want, Enter to keep
+  them and Escape to leave it alone. Keeping one writes VSCode's own two lines into the file
+  — the command taken off the chords it had, then the chord you pressed — and touches nothing
+  else in it, comments included. Beside each chord is whichever of "Reset" and "Unbind" that
+  row can still be asked for. The same recording is reachable by name, as
+  `crook/shortcuts/rebind`, which is how a plugin's own chip can offer "change this
+  keybinding" without being able to write a file itself.
 
 Everything else is out of scope on purpose. There is no telemetry, and OSC 8 hyperlinks are
 not read — though a URL a program *printed* is clickable, because the scan that finds one

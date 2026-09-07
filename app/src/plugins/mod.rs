@@ -29,7 +29,7 @@ pub mod pane;
 mod plugins_page;
 pub mod settings;
 mod shell;
-mod shortcuts;
+pub mod shortcuts;
 pub mod tabs;
 pub mod wasm;
 pub mod window;

@@ -1160,6 +1160,17 @@ an action name — the window's own thirteen are `crook/window/*`, registered by
 anything else — so nothing enumerates the bindable set and the settings page lists commands it
 has never heard of.
 
+**A chord is recorded rather than typed into a file.** The Keyboard Shortcuts page is VSCode's
+editor: clicking a row's chord starts a recording, and `Workspace::action_for` hands every
+keystroke to it before anything else in the window can want it — which is what makes a chord a
+pane, a panel or another binding would otherwise take recordable at all. Enter keeps it,
+Escape leaves the binding alone, and keeping it writes VSCode's two lines into
+`keybindings.json`: the command taken off every chord it had, then the chord that was pressed.
+The write is a *text* edit — `keybindings::document` finds the span of each entry and inserts
+or cuts one — so a comment somebody wrote survives a button being clicked in a settings page.
+The recorder ends with the page: leaving the settings section or changing page cancels it, and
+`--record <command>` opens the page with a row already recording, for a picture of it.
+
 The danger of keeping that table away from `route` is real: a binding consumed in the delegate
 never reaches `route`, so two tables in two modules can silently take the same key away from
 each other. What answers it is a test rather than proximity —
@@ -1491,7 +1502,8 @@ nearly matched is precisely the bug that took two commits to remove from the pan
 **Keymaps.** Warp has editable bindings, fixed bindings, context predicates, and a
 user-remappable keymap. Crook has that layer now, and it is VSCode's rather than Warp's —
 `app/src/keybindings.rs`, `keybindings.json`, `when` clauses over a small set of context keys,
-chord sequences, removal by name. It cost nothing at the handlers because the half worth
+chord sequences, removal by name — and VSCode's editor with it: the Keyboard Shortcuts page
+records a chord from the keyboard and writes the file. It cost nothing at the handlers because the half worth
 keeping was already kept: keyboard and mouse produce the *same* action values, so the layer
 sits above every handler and touches none of them.
 

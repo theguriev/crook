@@ -28,14 +28,14 @@ use crate::editor::Selection;
 use crate::git::GitFacts;
 use crate::git_model::GitModel;
 use crate::input_keys::{Binding, Platform};
-use crate::keybindings::{Context, Keybindings, Resolution};
+use crate::keybindings::{Context, Keybindings, PendingSave, Recording, Resolution};
 use crate::pane_blocks::PaneBlocks;
 use crate::pane_link::PaneLink;
 use crate::pane_selection::PaneSelection;
 use crate::pane_split::{DividerDrag, PaneExtent};
 use crate::pane_surface;
 use crate::platform_insets::{ControlLayout, LayoutInsets, WindowChrome};
-use crate::plugin::{ActionId, Host, PageId, PluginId, SectionId};
+use crate::plugin::{ActionId, ActionName, Host, PageId, PluginId, SectionId};
 use crate::plugins::settings::SETTINGS_SECTION;
 use crate::selection::{Blocks, Cells};
 use crate::settings::{
@@ -462,6 +462,19 @@ pub struct Workspace {
     /// press can find it. See [`Self::action_for`], which is the only writer.
     pending_keys: std::cell::RefCell<Vec<Keystroke>>,
 
+    /// The binding being recorded on the Keyboard Shortcuts page, while one is.
+    ///
+    /// `Some` only while the page is showing and somebody has clicked a chord
+    /// to change it. While it is, **every keystroke in the window belongs to
+    /// it** — see [`Self::action_for`] — which is the whole point: a chord
+    /// that a pane, a panel or a binding would otherwise take is a chord that
+    /// could not be recorded, and "any key on any action" means any key.
+    ///
+    /// Behind a `RefCell` for the reason [`Self::pending_keys`] is: the window
+    /// delegate asks what a keystroke means through a *read* of the workspace,
+    /// and the chord being spelled is the keyboard's own state.
+    recording: std::cell::RefCell<Option<Recording>>,
+
     /// Whether the desktop is set to dark, as of the last thing the window
     /// said about it.
     ///
@@ -552,6 +565,9 @@ pub struct Workspace {
     /// An `Arc<SaveOrder>` rather than a `Cell`, because the deciding and the
     /// writing both happen on the worker. See [`SaveOrder`].
     saves: Arc<SaveOrder>,
+    /// The same, for the keybindings file, which is written by the same rule
+    /// and by a different set of clicks.
+    keybinding_saves: Arc<SaveOrder>,
     /// How far the tabs panel's list has been scrolled.
     ///
     /// On the workspace rather than inside the panel module for the reason
@@ -693,6 +709,7 @@ impl Workspace {
             session_saves: Arc::default(),
             keybindings,
             pending_keys: std::cell::RefCell::new(Vec::new()),
+            recording: std::cell::RefCell::new(None),
             window_size: Rc::new(std::cell::Cell::new(Vector2F::zero())),
             system_is_dark: true,
             interactions: HashMap::new(),
@@ -714,6 +731,7 @@ impl Workspace {
             themes_directory: crate::theme::user_themes_directory(),
             worktrees_directory: worktree_store(),
             saves: Arc::default(),
+            keybinding_saves: Arc::default(),
             panel_scroll: ScrollStateHandle::default(),
             panel_rows: RowGeometry::new(),
             panel_search: SearchState::default(),
@@ -1570,6 +1588,9 @@ impl Workspace {
         // open it would be a menu nobody can see and nobody can dismiss —
         // which is what `--menu --section` used to leave behind.
         self.close_menu();
+        // Whatever was being recorded was being recorded on a page that is
+        // about to stop being drawn. See [`Self::record`].
+        self.recording.borrow_mut().take();
         // The sidebar and the window are both about to be replaced, so every
         // control the pointer was on is about to stop existing without ever
         // seeing a hover-out — and a field on the section being left must not
@@ -2250,6 +2271,34 @@ impl Workspace {
             .update(ctx, |model, _| model.set_shell_login(general.login_shell));
         self.save_settings(ctx);
         ctx.notify();
+    }
+
+    /// Writes the keybindings file an edit asked for, on the background pool.
+    ///
+    /// The same arrangement the settings are saved by, for the same two
+    /// reasons: writing a file is milliseconds that must not be spent on the
+    /// frame, and two edits made in quick succession are two tasks racing to
+    /// the same file, of which only the last one asked for may land.
+    ///
+    /// `None` is an edit that had nothing to write — a run with no
+    /// configuration directory, or a file no edit may guess at — and both were
+    /// reported where they were found.
+    fn save_keybindings(&self, save: Option<PendingSave>, ctx: &mut ViewContext<Self>) {
+        let Some(save) = save else {
+            return;
+        };
+
+        let asked_at = self.keybinding_saves.ask();
+        let saves = self.keybinding_saves.clone();
+        ctx.background()
+            .spawn(async move {
+                saves.write_if_last(asked_at, || {
+                    if let Err(error) = save.write_blocking() {
+                        log::warn!("could not save the keybindings: {error:#}");
+                    }
+                });
+            })
+            .detach();
     }
 
     /// Starts in a density the command line asked for, without adopting it.
@@ -3124,6 +3173,16 @@ impl Workspace {
     /// the sequence is concerned. The window delegate asks once, which is what
     /// this is for.
     pub fn action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
+        // **A binding being recorded owns the keyboard, before everything
+        // else.** Every key pressed while the recorder is up is being spelled
+        // rather than pressed: it must not reach a pane, a panel, the search
+        // box or the bindings, because a chord one of those took is a chord
+        // nobody could ever record. That is what makes "any key on any action"
+        // true rather than "any key nothing else wanted".
+        if self.recording.borrow().is_some() {
+            return self.record(keystroke);
+        }
+
         // **A sequence that has been started owns the next keystroke**, before
         // anything else in the window can want it. That is what chord mode is:
         // a person who has pressed the first half of `ctrl+k ctrl+s` is
@@ -3179,6 +3238,57 @@ impl Workspace {
         }
 
         self.bound(keystroke)
+    }
+
+    /// What a keystroke does to a recording, which is one of four things.
+    ///
+    /// VSCode's recorder, and its keys: Escape puts the binding back the way
+    /// it was, Enter keeps what has been spelled, a modifier held on its own is
+    /// somebody reaching for a chord rather than pressing one, and everything
+    /// else is written down. Escape and Enter are therefore the two keys this
+    /// page cannot record — VSCode's file can bind them and so can Crook's,
+    /// which is what the path to the file on the page is for.
+    fn record(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
+        // A recording with nothing drawing it would be a window that has
+        // quietly stopped answering the keyboard. It cannot arise from the
+        // page — every way out of the settings ends the recording — and if it
+        // ever does, the recording ends here and the keystroke goes on to
+        // whatever would have had it.
+        if !self.is_settings_page_open() {
+            self.recording.borrow_mut().take();
+            return None;
+        }
+
+        if keystroke.is_bare("escape") {
+            return Some(SettingsAction::StopRecording.into());
+        }
+        if keystroke.is_bare("enter") {
+            return Some(SettingsAction::KeepBinding.into());
+        }
+        // Swallowed rather than written down, and nothing is repainted for it:
+        // the row says the same thing before and after Shift goes down.
+        if Recording::is_a_modifier(keystroke) {
+            return Some(WorkspaceAction::Chord);
+        }
+
+        self.recording.borrow_mut().as_mut()?.press(keystroke);
+        Some(SettingsAction::RecordedKey.into())
+    }
+
+    /// Starts recording a chord for `command`, as the page's own button does.
+    ///
+    /// Public for the run that is taking a picture of the recorder — see
+    /// `--record` — which is the same reason the theme panel can be opened
+    /// from outside. Nothing is recorded by starting: the keys still have to
+    /// be pressed, and nothing is written until they are kept.
+    pub fn start_recording(&mut self, command: ActionName, ctx: &mut ViewContext<Self>) {
+        *self.recording.borrow_mut() = Some(Recording::new(command));
+        ctx.notify();
+    }
+
+    /// The binding being recorded, for the page that draws it.
+    pub fn recording(&self) -> Option<Recording> {
+        self.recording.borrow().clone()
     }
 
     /// What the keybindings make of a keystroke.
@@ -3875,6 +3985,10 @@ impl Workspace {
                 if self.page.page == key {
                     return;
                 }
+                // The row being recorded for is on the page being left, and a
+                // recorder that outlived it would go on holding the keyboard
+                // with nothing on screen to say so.
+                self.recording.borrow_mut().take();
                 self.page.page = key;
                 // The fields belong to the page that drew them, and the next
                 // page may have none at all.
@@ -3910,6 +4024,45 @@ impl Workspace {
                 let mut general = self.general();
                 general.login_shell = !general.login_shell;
                 self.set_general(general, ctx);
+            }
+            SettingsAction::RecordBinding(id) => {
+                let Some(command) = self.host.action_name(id).cloned() else {
+                    return;
+                };
+                self.start_recording(command, ctx);
+            }
+            // The keystroke was written down where it was seen; what is left
+            // is the frame that shows it.
+            SettingsAction::RecordedKey => ctx.notify(),
+            SettingsAction::StopRecording => {
+                self.recording.borrow_mut().take();
+                ctx.notify();
+            }
+            SettingsAction::KeepBinding => {
+                let Some(recording) = self.recording.borrow_mut().take() else {
+                    return;
+                };
+                // Enter with nothing pressed keeps nothing: the recorder
+                // closes and the binding is the one it was.
+                let save = self.keybindings.bind(recording.command(), recording.keys());
+                self.save_keybindings(save, ctx);
+                ctx.notify();
+            }
+            SettingsAction::UnbindCommand(id) => {
+                let Some(command) = self.host.action_name(id).cloned() else {
+                    return;
+                };
+                let save = self.keybindings.unbind(&command);
+                self.save_keybindings(save, ctx);
+                ctx.notify();
+            }
+            SettingsAction::ResetBinding(id) => {
+                let Some(command) = self.host.action_name(id).cloned() else {
+                    return;
+                };
+                let save = self.keybindings.reset(&command);
+                self.save_keybindings(save, ctx);
+                ctx.notify();
             }
             SettingsAction::ToggleRestoreSession => {
                 let mut general = self.general();
@@ -4503,7 +4656,9 @@ impl TypedActionView for Workspace {
             // The keystroke has already been written down by `action_for`, and
             // there is nothing on screen that says a chord is half typed —
             // there is no status bar to say it in. What this arm does is what
-            // the action exists for: swallow the key.
+            // the action exists for: swallow the key. A modifier pressed on
+            // its own while a chord is being recorded arrives here for the
+            // same reason and is swallowed the same way.
             WorkspaceAction::Chord => {}
         }
     }

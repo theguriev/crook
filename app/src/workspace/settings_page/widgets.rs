@@ -40,7 +40,6 @@ use crookui_core::fonts::{FamilyId, Properties, Weight};
 use crookui_core::prelude::*;
 
 use super::search::{Query, Words};
-use crate::plugin::Voice;
 use crate::theme::theme;
 
 use super::super::action::WorkspaceAction;
@@ -113,18 +112,6 @@ pub(crate) struct Entry {
 }
 
 impl Entry {
-    /// The same entry, with what its right-hand side says written down where
-    /// the page's search can find it.
-    ///
-    /// [`fact`] fills this in itself, because a fact *is* its value. A row
-    /// built out of [`row`] carries a control rather than a string and cannot
-    /// know — unless the control is a string and a button, which is what a
-    /// keybinding is.
-    pub(crate) fn saying(mut self, value: impl Into<String>) -> Self {
-        self.value = Some(value.into());
-        self
-    }
-
     /// An entry nothing can search for.
     fn unsearchable(element: Box<dyn Element>) -> Self {
         Self {
@@ -526,28 +513,16 @@ pub(crate) fn choice(
 /// de-emphasised and does nothing while there is nothing to reset, so the
 /// control that undoes a change is also the one that says a change was made.
 pub(crate) fn text_button(
-    label: &'static str,
-    command: Command,
-    state: MouseStateHandle,
-    ui: FamilyId,
-) -> Box<dyn Element> {
-    text_button_about(label, None, command, state, ui)
-}
-
-/// The same, with something to say to the action it runs.
-///
-/// An action takes no argument, so a button that stands for one *thing* — this
-/// command, that theme — leaves the thing behind for the handler to take. See
-/// [`Host::voice`](crate::plugin::Host::voice). `about` is the voice and what
-/// to say into it; `None` is an ordinary button.
-pub(crate) fn text_button_about(
-    label: &'static str,
-    about: Option<(Voice, String)>,
+    label: impl Into<String>,
     command: Command,
     state: MouseStateHandle,
     ui: FamilyId,
 ) -> Box<dyn Element> {
     let enabled = command.is_some();
+    // Owned rather than `&'static str`, for the reason a row's words are: the
+    // Keyboard Shortcuts page puts a chord on a button, and a chord is
+    // computed.
+    let label = label.into();
 
     let control = Hoverable::new(state, move |mouse| {
         let (background, color) = if !enabled {
@@ -559,7 +534,7 @@ pub(crate) fn text_button_about(
         };
 
         Container::new(
-            Text::new(label, ui, DESCRIPTION_SIZE)
+            Text::new(label.clone(), ui, DESCRIPTION_SIZE)
                 .with_color(color)
                 .finish(),
         )
@@ -579,7 +554,75 @@ pub(crate) fn text_button_about(
         .finish()
     });
 
-    with_command_about(control, about, command)
+    with_command(control, command)
+}
+
+/// The chord on a Keyboard Shortcuts row, and the button that changes it.
+///
+/// A [`text_button`] in the terminal's own family, because a chord is
+/// something a person also reads in a file, plus the one state no other
+/// control on the page has: while it is recording it is lit with the accent
+/// and it is the only thing in the window the keyboard is reaching.
+///
+/// `bound` is false for a command nothing reaches, which is drawn the way a
+/// disabled control is drawn everywhere else on this page — the row still
+/// works, it just has nothing to say yet.
+pub(crate) fn chord_button(
+    chord: impl Into<String>,
+    recording: bool,
+    bound: bool,
+    command: Command,
+    state: MouseStateHandle,
+    fonts: super::super::view::Fonts,
+) -> Box<dyn Element> {
+    let enabled = command.is_some();
+    let chord = chord.into();
+
+    let control = Hoverable::new(state, move |mouse| {
+        let (background, border, color) = if recording {
+            (theme().overlay_2, theme().accent, theme().text_primary)
+        } else if !enabled {
+            (Color::TRANSPARENT, theme().border, theme().text_muted)
+        } else if mouse.is_hovered() {
+            (theme().overlay_2, theme().border, theme().text_primary)
+        } else {
+            (Color::TRANSPARENT, theme().border, theme().text_primary)
+        };
+
+        Container::new(
+            Text::new(chord.clone(), fonts.monospace, DESCRIPTION_SIZE)
+                .with_color(match bound || recording {
+                    true => color,
+                    false => theme().text_muted,
+                })
+                .finish(),
+        )
+        .with_padding(Padding {
+            top: 4.,
+            bottom: 4.,
+            left: 10.,
+            right: 10.,
+        })
+        .with_background_color(background)
+        .with_border(Border::all(1.).with_border_color(border))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CONTROL_RADIUS)))
+        .finish()
+    });
+
+    with_command(control, command)
+}
+
+/// Two controls side by side on the right of a row.
+///
+/// The Keyboard Shortcuts page is the only page with a row that has more than
+/// one: a chord and the button that puts it back.
+pub(crate) fn pair(first: Box<dyn Element>, second: Box<dyn Element>) -> Box<dyn Element> {
+    Flex::row()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_child(first)
+        .with_child(Container::new(second).with_margin_left(6.).finish())
+        .finish()
 }
 
 /// A stepper: a minus, the value, and a plus.
@@ -786,28 +829,9 @@ fn paragraph(text: &str, ui: FamilyId) -> Box<dyn Element> {
 /// all, so a press falls through to the page under it and nothing has to
 /// remember to check an `enabled` flag a second time.
 fn with_command(control: Hoverable, command: Command) -> Box<dyn Element> {
-    with_command_about(control, None, command)
-}
-
-/// The same, saying something to the action first.
-///
-/// Said before the dispatch and taken when the action runs, which is safe for
-/// the reason [`Host::say`](crate::plugin::Host::say) gives: an action is
-/// applied after the whole tree has seen the event, so one press says one
-/// thing.
-fn with_command_about(
-    control: Hoverable,
-    about: Option<(Voice, String)>,
-    command: Command,
-) -> Box<dyn Element> {
     match command {
         Some(action) => control
-            .on_click(move |_, ctx, _| {
-                if let Some((voice, what)) = about.as_ref() {
-                    voice.say(what.clone());
-                }
-                ctx.dispatch_typed_action(action);
-            })
+            .on_click(move |_, ctx, _| ctx.dispatch_typed_action(action))
             .finish(),
         None => control.finish(),
     }

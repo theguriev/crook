@@ -320,8 +320,8 @@ description of something that was never built.
     in a plugin and a *command in `crook/shortcuts`*: recording a chord means taking the whole
     keyboard and writing somebody's file, and neither is a thing this tier will ever be given.
     So the plugin asks for `crook/shortcuts/rebind` by name — one line in its manifest — and
-    Crook puts up the recorder. The page that used to say "read-only, unlike VSCode's" now has
-    a Change button on every row, which is the same flow with a different caller.
+    Crook opens its Keyboard Shortcuts page with that row already recording. It is the same
+    recording the row's own chord button starts, from a different caller.
   - **Two flags on the headless snapshot**, because a tier whose worked examples can only be
     seen by launching a window is a tier nobody can screenshot: `--with-plugins` loads the
     machine's installed plugins and their grants, and `--action <name [argument]>` runs a named
@@ -420,10 +420,6 @@ What that costs a plugin today, concretely:
   subscriber is `Workspace` through a private handle.
 - **No notification primitive, no command palette, no general tooltip.** The bell becomes an
   amber dot, and that is the whole attention model.
-- **Keybindings cannot be edited from the interface.** The file is VSCode's — rules, `when`
-  clauses, chord sequences, removal by name — and the Keyboard Shortcuts page prints what is
-  in force without being able to record a chord into it. That needs a control the settings
-  page does not have.
 - **`AgentStatus::Running` and `Failed` are never set at runtime.** There is no agent runtime
   behind the product's noun. This is the largest empty seam in the tree, and the first thing a
   real plugin ecosystem will want to fill.
