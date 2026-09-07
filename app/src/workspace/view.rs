@@ -1,6 +1,6 @@
 //! [`Workspace`]: the state behind the window, and the one place it changes.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -473,6 +473,15 @@ pub struct Opening {
     /// gone and looked in — and a window that read a directory would be a
     /// window no test could give a plugin to.
     pub plugins: Vec<Box<dyn crate::plugin::Plugin>>,
+    /// The installed plugins the registry has **withdrawn**, and why, by
+    /// `owner/name`.
+    ///
+    /// Read off the store's copy of the index rather than over the network,
+    /// because a yank has to be honoured on a machine that is offline and on
+    /// the launch after the registry said so. An index nobody has fetched
+    /// withdraws nothing, which is the safe direction: a list that cannot be
+    /// read is never a reason to stop running something somebody installed.
+    pub withdrawn: BTreeMap<String, String>,
 }
 
 /// The window's root view.
@@ -620,6 +629,13 @@ pub struct Workspace {
     /// `&Workspace` rather than anything captured — so the registries can be
     /// filled without a workspace to fill them from.
     host: Host,
+    /// Which installed plugins the registry has taken back, and why.
+    ///
+    /// Kept beside the host rather than in it, because it is not a fact about
+    /// the plugin system: it is what one *registry* said about a version, read
+    /// off a file on this machine, and the host would have to be told about
+    /// stores to hold it.
+    withdrawn: BTreeMap<String, String>,
     /// The context menu a tab's secondary press opens, and what it is on.
     tab_context_menu: TabContextMenuState,
     /// The worktree menu, which is one entry of that one.
@@ -730,6 +746,7 @@ impl Workspace {
             settings,
             channel,
             plugins,
+            withdrawn,
         } = opening;
 
         let git = ctx.add_model(GitModel::new);
@@ -765,13 +782,15 @@ impl Workspace {
         // and the ones a person installed are a directory somebody has to have
         // gone and looked in. A window that read a directory would be a window
         // no test could give a plugin to.
-        let host = crate::plugin::load(
-            plugins,
-            settings.disabled_plugins(),
-            settings.plugin_grants().clone(),
-            fonts,
-            ctx,
-        );
+        // A withdrawn plugin is carried and not built, which is the same thing
+        // being switched off means and is deliberate: the row stays on the
+        // Plugins page, with the registry's sentence on its card, rather than
+        // the plugin quietly disappearing on the launch after a yank. What it
+        // must *not* be is written into `disabled_plugins`, which is a
+        // person's own answer and not the registry's — see `Workspace::withdrawn`.
+        let mut off: Vec<String> = settings.disabled_plugins().to_vec();
+        off.extend(withdrawn.keys().cloned());
+        let host = crate::plugin::load(plugins, &off, settings.plugin_grants().clone(), fonts, ctx);
 
         let options = settings.tab_options();
         let settings_path = settings.path().map(Path::to_owned);
@@ -821,6 +840,7 @@ impl Workspace {
             menu: MenuState::default(),
             page: SettingsState::default(),
             host,
+            withdrawn,
             tab_context_menu: TabContextMenuState::default(),
             tab_menu: TabMenuState::default(),
             block_menu: BlockMenuState::default(),
@@ -1143,10 +1163,53 @@ impl Workspace {
         promised(manifest)?;
 
         crate::plugins::wasm::installed_bytes(bytes)?;
-        self.host.carry(Box::new(plugin), ctx);
+
+        // Carried and run, unless this is a plugin somebody switched off:
+        // installing a new version of one that is off is an *update*, and an
+        // update that turned it back on would undo a decision nobody
+        // revisited.
+        let run = !self
+            .settings
+            .disabled_plugins()
+            .iter()
+            .any(|off| off == manifest.id.as_str());
+        self.host.carry(Box::new(plugin), run, ctx);
+        // The version that was withdrawn is not the version that just landed,
+        // and the card has to stop saying it is. What the new one's standing
+        // is comes from the index the store holds, through `withdrew`.
+        self.withdrawn.remove(manifest.id.as_str());
         self.sync_input_keys();
         ctx.notify();
-        Ok(manifest)
+
+        // A module that will not *build* is installed and not running, and the
+        // difference matters to whoever pressed the button: the file is there,
+        // the row is on the page, and the reason belongs in the answer rather
+        // than only on a card they would have to go and find.
+        match run && !self.host.is_loaded(&manifest.id) {
+            true => Err(format!(
+                "{} was installed and did not start: {}",
+                manifest.id,
+                self.host
+                    .refused()
+                    .iter()
+                    .find(|(id, _)| *id == manifest.id)
+                    .map(|(_, why)| why.clone())
+                    .unwrap_or_else(|| String::from("it registered nothing"))
+            )),
+            false => Ok(manifest),
+        }
+    }
+
+    /// Records what the registry now says about a plugin's version.
+    ///
+    /// The store's to say, because the store is what holds the index: a
+    /// version installed *out* of a yank is not withdrawn any more, and one
+    /// installed into one is.
+    pub fn withdrew(&mut self, plugin: &PluginId, why: Option<String>) {
+        match why {
+            Some(why) => self.withdrawn.insert(plugin.as_str().to_owned(), why),
+            None => self.withdrawn.remove(plugin.as_str()),
+        };
     }
 
     /// Takes a plugin off this machine, along with what it was allowed to do.
@@ -1174,6 +1237,16 @@ impl Workspace {
         self.sync_input_keys();
         ctx.notify();
         Ok(())
+    }
+
+    /// Why the registry took this plugin's version back, if it did.
+    ///
+    /// A withdrawn plugin is carried and not built, which is what being
+    /// switched off means — so the row stays on the Plugins page and the card
+    /// can say what happened, rather than the plugin disappearing on the
+    /// launch after a yank with a line in a log nobody reads.
+    pub fn withdrawn(&self, plugin: &PluginId) -> Option<&str> {
+        self.withdrawn.get(plugin.as_str()).map(String::as_str)
     }
 
     pub fn run_action(&mut self, id: ActionId, ctx: &mut ViewContext<Self>) {

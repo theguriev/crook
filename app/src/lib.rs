@@ -229,6 +229,14 @@ struct Overrides {
     /// plugin draws is to draw it — and a tier whose one worked example can
     /// only be seen by launching a window is a tier nobody can screenshot.
     with_plugins: bool,
+    /// A file of fixed plugin surfaces to draw, for a picture of the plugin
+    /// tier that is the same on every machine.
+    ///
+    /// The other half of the answer `with_plugins` is: that one draws whatever
+    /// somebody happens to have installed, which is what makes it useless in
+    /// CI, and this one draws a tree written down in the repository. See
+    /// [`plugins::wasm::fixture`](crate::plugins::wasm::fixture).
+    fixture: Option<PathBuf>,
     /// Start with the Themes panel open, and — with `creating` — on its
     /// creator.
     ///
@@ -501,6 +509,15 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 println!("removed {}", removed.display());
                 return Ok(Startup::Answered);
             }
+            // Not a plugin and not a setting: a fixture is a *picture*, and
+            // it lives for the run that takes one. See
+            // `plugins::wasm::fixture`.
+            "--plugin-fixture" => {
+                let path = args
+                    .next()
+                    .context("`--plugin-fixture` needs a path to a fixture")?;
+                overrides.fixture = Some(PathBuf::from(path));
+            }
             "--plugins" => {
                 println!("{}", installed_plugins_text());
                 return Ok(Startup::Answered);
@@ -715,6 +732,11 @@ OPTIONS:
                        it was allowed to do, and exit
     --plugins          List the plugins installed as files: name, version and
                        which file each is running from
+    --plugin-fixture <PATH>
+                       Draw a fixed plugin surface, read from a JSON file of
+                       slot names to the shapes a plugin describes, so a
+                       picture of what a plugin puts on screen is the same on
+                       every machine
     --snapshot <PATH>  Render one frame of the real view tree to a PNG and exit
     --frames <N>       Draw N frames, then exit; for running unattended
     --run <COMMAND>    Type COMMAND into the first pane's input field at startup,
@@ -1178,6 +1200,16 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
     // channel reaches is the About page's label, and a PNG that said "stable"
     // on a machine that built it from a working tree would be wrong in the one
     // way a snapshot exists to catch.
+    // Before the window, because a fixture that is not one is a line to print
+    // rather than a window to open — and a closure that builds a window has
+    // nowhere to return an error to.
+    let plugins = with_fixture(
+        match overrides.with_plugins {
+            true => everything_installed(),
+            false => crate::plugins::defaults(),
+        },
+        overrides.fixture.as_deref(),
+    )?;
     let (window_id, workspace) = app.add_window(|ctx| {
         Workspace::new(
             fonts,
@@ -1185,9 +1217,15 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
             Opening {
                 settings,
                 channel: Channel::Dev,
-                plugins: match overrides.with_plugins {
-                    true => everything_installed(),
-                    false => crate::plugins::defaults(),
+                plugins,
+                // With the plugins and not otherwise, which is the same rule
+                // the plugins themselves follow: a picture of the application
+                // is the same everywhere, and one that includes this machine's
+                // plugins already includes whatever this machine knows about
+                // them — a withdrawn one among them.
+                withdrawn: match overrides.with_plugins {
+                    true => withdrawn_plugins(),
+                    false => std::collections::BTreeMap::new(),
                 },
             },
             quit,
@@ -2014,6 +2052,63 @@ fn everything_installed() -> Vec<Box<dyn crate::plugin::Plugin>> {
     plugins
 }
 
+/// The plugins a window carries, with a fixture among them if one was asked
+/// for.
+///
+/// At the end of the list, which is the front of a slot: a fixture asks for a
+/// low order and load order settles the rest, so what a picture is being taken
+/// *of* is what fills a slot there is one of.
+fn with_fixture(
+    mut plugins: Vec<Box<dyn crate::plugin::Plugin>>,
+    fixture: Option<&std::path::Path>,
+) -> Result<Vec<Box<dyn crate::plugin::Plugin>>> {
+    let Some(path) = fixture else {
+        return Ok(plugins);
+    };
+
+    let fixture = crate::plugins::wasm::fixture::Fixture::read(path)
+        .map_err(anyhow::Error::msg)
+        .with_context(|| path.display().to_string())?;
+    plugins.push(Box::new(fixture));
+    Ok(plugins)
+}
+
+/// Which installed plugins the registry has withdrawn, and why.
+///
+/// Read off the store's copy of the index — the file the Store section keeps
+/// beside the plugins — rather than over the network, because a yank has to be
+/// honoured on a machine that is offline and on the launch after the registry
+/// said so. Nothing here fetches anything, and an index that is missing or
+/// unreadable withdraws nothing: a list that cannot be read is never a reason
+/// to stop running something somebody installed.
+///
+/// A version is what is withdrawn rather than a plugin, so the answer is about
+/// the version on this machine: somebody running the one before the bad one
+/// keeps running it.
+fn withdrawn_plugins() -> std::collections::BTreeMap<String, String> {
+    let Some(index) = crate::plugins::store::cache::Cache::user()
+        .and_then(|cache| cache.read())
+        .map(|cached| cached.index)
+    else {
+        return std::collections::BTreeMap::new();
+    };
+
+    let Some(directory) = crate::plugins::wasm::directory() else {
+        return std::collections::BTreeMap::new();
+    };
+
+    let mut withdrawn = std::collections::BTreeMap::new();
+    for plugin in crate::plugins::wasm::installed(&directory) {
+        let manifest = crate::plugin::Plugin::manifest(plugin.as_ref());
+        if let Some(why) =
+            crate::plugins::store::index::withdrawn(&index, &manifest.id, manifest.version)
+        {
+            withdrawn.insert(manifest.id.to_string(), why);
+        }
+    }
+    withdrawn
+}
+
 impl Shell {
     fn new(
         platform: &Platform,
@@ -2035,6 +2130,7 @@ impl Shell {
             Rc::new(move || proxy.exit())
         };
 
+        let plugins = everything_installed();
         let (window_id, workspace) = app.add_window(|ctx| {
             Workspace::new(
                 fonts,
@@ -2042,7 +2138,8 @@ impl Shell {
                 Opening {
                     settings,
                     channel: launch.channel,
-                    plugins: everything_installed(),
+                    plugins,
+                    withdrawn: withdrawn_plugins(),
                 },
                 quit,
                 window.clone(),

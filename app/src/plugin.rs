@@ -1118,14 +1118,25 @@ impl Host {
     /// gone before the new one's are made, and the object goes with them —
     /// otherwise the sandbox holding the old module would stay in memory for
     /// as long as the window is open.
-    pub fn carry(&mut self, plugin: Box<dyn Plugin>, ctx: &mut ViewContext<Workspace>) {
+    /// `run` is whether to build it. A plugin somebody switched off is carried
+    /// and not built, and installing a new version of one is an update rather
+    /// than a decision to turn it back on.
+    pub fn carry(&mut self, plugin: Box<dyn Plugin>, run: bool, ctx: &mut ViewContext<Workspace>) {
         let id = plugin.manifest().id.clone();
         self.unload(&id);
         self.carried.retain(|manifest| manifest.id != id);
         self.plugins.retain(|carried| carried.manifest().id != id);
+        // Whatever the version being replaced could not do is not a fact about
+        // the one arriving, and a card that went on saying it would be about a
+        // plugin nobody has any more.
+        self.refused.retain(|(refused, _)| *refused != id);
 
         self.carried.push(plugin.manifest());
         self.plugins.push(plugin);
+
+        if !run {
+            return;
+        }
 
         // Taken out and put back, the way `enable` does it and for the same
         // reason: building needs the host and the plugin at once.
@@ -1148,6 +1159,7 @@ impl Host {
         self.carried.retain(|manifest| manifest.id != *plugin);
         self.plugins
             .retain(|carried| carried.manifest().id != *plugin);
+        self.refused.retain(|(refused, _)| refused != plugin);
     }
 
     /// Builds a plugin that is not loaded, and does nothing to one that is.
@@ -1196,6 +1208,12 @@ impl Host {
         }
         self.fields.retain(|(by, _, _, _)| by != plugin);
         self.panels.retain(|(by, _, _)| by != plugin);
+        // And what it asked to be *told*. A watcher is the one registration
+        // that draws nothing, which is exactly why it was the one missing
+        // here: a plugin switched off went on being handed every command that
+        // finished and every bell that rang, and ran a little of itself on
+        // each — invisibly, since nothing it did could reach the screen.
+        self.watchers.retain(|(by, _, _)| by != plugin);
         self.loaded.retain(|manifest| &manifest.id != plugin);
     }
 

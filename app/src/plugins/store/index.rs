@@ -133,9 +133,16 @@ pub struct Offer {
     ///
     /// What this is for is the one sentence a person needs when `release` is
     /// `None`: a plugin that exists and cannot be installed here is not a
-    /// plugin that is missing, and saying "built for a newer Crook" is the
-    /// difference between a bug report and an upgrade.
+    /// plugin that is missing, and saying which vocabulary it was built for is
+    /// the difference between a bug report and an upgrade.
     pub newest_anywhere: Option<Release>,
+    /// Why the newest version this build could otherwise run was withdrawn.
+    ///
+    /// The other reason [`release`](Self::release) is `None`, and a different
+    /// sentence entirely: "nothing is built for this Crook" is somebody's to
+    /// fix by publishing, and "it was taken back, because —" is a thing to
+    /// read.
+    pub withdrawn: Option<String>,
 }
 
 impl Offer {
@@ -167,18 +174,29 @@ pub fn offers(index: &Index) -> Vec<Offer> {
                 }
             };
 
+            let ours = || {
+                listed
+                    .versions
+                    .iter()
+                    .filter(|release| release.abi == ABI_VERSION)
+            };
+            let offered = newest(ours().filter(|release| release.yanked.is_none()));
+
             Some(Offer {
                 id,
                 name: listed.name.clone(),
                 description: listed.description.clone(),
                 repository: listed.repository.clone(),
                 license: listed.license.clone(),
-                release: newest(
-                    listed
-                        .versions
-                        .iter()
-                        .filter(|release| release.abi == ABI_VERSION && release.yanked.is_none()),
-                ),
+                // Only when there is nothing left to offer: a plugin whose
+                // newest version was withdrawn and whose one before it still
+                // stands is a plugin somebody can install, and the yank is
+                // not their news.
+                withdrawn: match offered {
+                    Some(_) => None,
+                    None => newest(ours()).and_then(|release| release.yanked),
+                },
+                release: offered,
                 newest_anywhere: newest(listed.versions.iter()),
             })
         })

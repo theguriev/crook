@@ -21,7 +21,7 @@
 //! sandboxed one's has no picture in it — so there is nothing to draw and this
 //! says so rather than reserving a grey rectangle for a future release.
 
-use crookui_core::elements::{Padding, Paragraph};
+use crookui_core::elements::Paragraph;
 use crookui_core::fonts::FamilyId;
 use crookui_core::prelude::*;
 
@@ -36,24 +36,6 @@ use crate::workspace::{Workspace, WorkspaceAction};
 use super::{
     HOLDS_THE_PAGE, PLUGIN_CARD, Stance, action, covered, elsewhere, only_by_name, stalled, stance,
     tier_words, wanted,
-};
-
-/// The corner of the box a control sits in.
-///
-/// The card's own rounding, so the box reads as part of the card rather than
-/// as something dropped on top of it.
-const CONTROL_RADIUS: f32 = 8.;
-
-/// The inset inside that box.
-///
-/// Wider than it is tall, which is what the switch has carried since it was
-/// the only control here: a label at one end and a control at the other need
-/// more air along the row than across it, or both sit against a corner.
-const CONTROL_PADDING: Padding = Padding {
-    top: 10.,
-    bottom: 10.,
-    left: 12.,
-    right: 12.,
 };
 
 /// The body of the card: everything under the plugin's name.
@@ -91,6 +73,24 @@ pub(super) fn render(
     let drew_its_own = drawn.is_some();
     if let Some(status) = drawn {
         column.add_child(status);
+    }
+
+    // Above everything else that could be wrong with a plugin, because this
+    // is the one that is somebody else's news rather than this machine's
+    // trouble.
+    if let Some(why) = workspace.withdrawn(&manifest.id) {
+        column.add_child(section(
+            "Withdrawn from the registry",
+            vec![
+                widgets::note(why, ui),
+                widgets::note(
+                    "This version is not being offered any more, so it is not running. The Store \
+                     has whatever replaced it, and Remove takes this one off.",
+                    ui,
+                ),
+            ],
+            ui,
+        ));
     }
 
     if let Some(problem) = host
@@ -231,14 +231,19 @@ fn description(manifest: &Manifest, ui: FamilyId) -> Box<dyn Element> {
 /// The switch, with the word beside it rather than a bare toggle.
 fn switch(workspace: &Workspace, manifest: &Manifest, on: bool, ui: FamilyId) -> Box<dyn Element> {
     let holds_the_page = HOLDS_THE_PAGE.contains(&manifest.id.as_str());
+    // A version the registry withdrew is not a version to offer a switch for:
+    // the plugin is off because somebody published a sentence about it, and a
+    // switch that turned it back on would be a control that undoes a warning.
+    // Updating or removing it is what the Store is for.
+    let withdrawn = workspace.withdrawn(&manifest.id).is_some();
     let command = workspace
         .host()
         .action(&action("toggle", &manifest.id))
         .map(WorkspaceAction::Run)
-        .filter(|_| !holds_the_page);
+        .filter(|_| !holds_the_page && !withdrawn);
     let live = command.is_some();
 
-    answer(
+    widgets::answer(
         "Enabled",
         live,
         widgets::switch(
@@ -333,7 +338,7 @@ fn permissions(
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
             .with_child(section(title, rows, ui))
-            .with_child(answer(state, live, control, ui))
+            .with_child(widgets::answer(state, live, control, ui))
             .finish(),
     )
 }
@@ -364,44 +369,6 @@ fn explanation(stance: Stance) -> &'static str {
              above and starts the plugin again with it."
         }
     }
-}
-
-/// The box a control that answers a question about this plugin sits in.
-///
-/// One shape for both of them. "Is it on?" and "may it do this?" are the same
-/// kind of question — the two decisions this card exists to let somebody make —
-/// and two boxes differing by a couple of pixels would read as two mechanisms.
-///
-/// `live` is whether the control does anything, and it is the label that says
-/// so: a muted word beside a control that cannot be pressed is the only hint
-/// there is, since a disabled control carries no handler at all.
-fn answer(
-    label: &'static str,
-    live: bool,
-    control: Box<dyn Element>,
-    ui: FamilyId,
-) -> Box<dyn Element> {
-    Container::new(
-        Flex::row()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_child(
-                Text::new(label, ui, widgets::LABEL_SIZE)
-                    .with_color(if live {
-                        theme().text_primary
-                    } else {
-                        theme().text_muted
-                    })
-                    .finish(),
-            )
-            .with_child(Expanded::new(1., Empty::new().finish()).finish())
-            .with_child(control)
-            .finish(),
-    )
-    .with_background_color(theme().overlay_1)
-    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CONTROL_RADIUS)))
-    .with_padding(CONTROL_PADDING)
-    .finish()
 }
 
 /// A heading with lines under it.
@@ -524,9 +491,11 @@ fn status(
 
     Some(
         Container::new(body)
-            .with_padding(CONTROL_PADDING)
+            .with_padding(widgets::ANSWER_PADDING)
             .with_background_color(theme().overlay_1)
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CONTROL_RADIUS)))
+            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
+                widgets::ANSWER_RADIUS,
+            )))
             .with_margin_bottom(18.)
             .finish(),
     )

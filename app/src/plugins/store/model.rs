@@ -55,14 +55,19 @@ pub struct StoreModel {
     /// pool sized for the chains that park on it, for no gain a person could
     /// see — the second press is a second later.
     downloading: Option<PluginId>,
-    /// What went wrong last, for the page to say out loud.
-    problem: Option<String>,
+    /// What went wrong last, and which plugin it was about.
+    ///
+    /// The id is what keeps a sentence attached to the row it is about: a
+    /// message drawn on whatever card happens to be showing is a message about
+    /// the wrong plugin.
+    problem: Option<(Option<PluginId>, String)>,
     /// Downloads that have arrived and need a workspace to install them,
     /// each with the release it was asked for — which is what the module that
     /// arrived has to be checked against.
     landed: Vec<(PluginId, Release, Result<Vec<u8>, String>)>,
-    /// What the last install or removal came to.
-    said: Option<String>,
+    /// What the last install or removal came to, and which plugin it was
+    /// about. See [`problem`](Self::problem).
+    said: Option<(Option<PluginId>, String)>,
 }
 
 impl Entity for StoreModel {
@@ -116,25 +121,39 @@ impl StoreModel {
     }
 
     /// What went wrong, if the last thing that happened went wrong.
-    pub fn problem(&self) -> Option<&str> {
-        self.problem.as_deref()
+    pub fn problem(&self) -> Option<(Option<&PluginId>, &str)> {
+        self.problem
+            .as_ref()
+            .map(|(about, why)| (about.as_ref(), why.as_str()))
     }
 
     /// What the last install or removal came to.
-    pub fn said(&self) -> Option<&str> {
-        self.said.as_deref()
+    pub fn said(&self) -> Option<(Option<&PluginId>, &str)> {
+        self.said
+            .as_ref()
+            .map(|(about, said)| (about.as_ref(), said.as_str()))
     }
 
-    /// Says something on the page, and clears whatever went wrong before it.
-    pub fn say(&mut self, said: impl Into<String>, ctx: &mut ModelContext<Self>) {
-        self.said = Some(said.into());
+    /// Says something about a plugin, and clears whatever went wrong before.
+    pub fn say(
+        &mut self,
+        about: Option<&PluginId>,
+        said: impl Into<String>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.said = Some((about.cloned(), said.into()));
         self.problem = None;
         ctx.notify();
     }
 
-    /// Says what went wrong.
-    pub fn complain(&mut self, problem: impl Into<String>, ctx: &mut ModelContext<Self>) {
-        self.problem = Some(problem.into());
+    /// Says what went wrong, and what it was about.
+    pub fn complain(
+        &mut self,
+        about: Option<&PluginId>,
+        problem: impl Into<String>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.problem = Some((about.cloned(), problem.into()));
         self.said = None;
         ctx.notify();
     }
@@ -190,7 +209,7 @@ impl StoreModel {
                     // page says is how old this *answer* is, not how old the
                     // file happens to be.
                     Ok(None) => model.fetched = Some(SystemTime::now()),
-                    Err(problem) => model.problem = Some(problem),
+                    Err(problem) => model.problem = Some((None, problem)),
                 }
                 ctx.notify();
             },
@@ -201,7 +220,16 @@ impl StoreModel {
     /// Downloads one release, checks it is the one the index named, and leaves
     /// it for the observer to install.
     pub fn download(&mut self, plugin: &PluginId, release: &Release, ctx: &mut ModelContext<Self>) {
-        if self.downloading.is_some() {
+        // One at a time: two downloads at once are two workers held on a pool
+        // sized for the chains that park on it, for no gain anybody can see.
+        // Said out loud rather than dropped, because a button that does
+        // nothing and explains nothing is a button somebody presses again.
+        if let Some(already) = self.downloading.clone() {
+            self.complain(
+                Some(plugin),
+                format!("is waiting: {already} is being downloaded first."),
+                ctx,
+            );
             return;
         }
         self.downloading = Some(plugin.clone());

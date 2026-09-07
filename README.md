@@ -95,7 +95,10 @@ Eight features, and the page that configures them:
   have, and a machine that is offline shows the last list it read with its age under it.
   Pressing **Install** downloads one file, checks it hashes to what the list said, checks the
   module's own manifest against what the list promised — an index is a mirror and never the
-  authority — and then *runs it*, in the window that is already open. Installing is still not
+  authority — and then *runs it*, in the window that is already open. A version the registry
+  **withdraws** stops running at the next launch, with the sentence whoever withdrew it wrote on
+  its card; that is read off the list already on this machine, so it holds offline, and a list
+  that cannot be read withdraws nothing. Installing is still not
   allowing: a plugin that has just arrived may do nothing at all until its card in **Plugins**
   is answered, and **Remove** takes it and its permissions back off.
 

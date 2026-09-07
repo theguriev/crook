@@ -125,6 +125,16 @@ description of something that was never built.
     because which six colours a tab may be is the tab model's business and how a menu row
     looks is the menu's.
   - Still to move: the worktree menu's own popup, the Themes panel, the Omarchy palettes.
+- **Phase 3 — the store: done.** A registry in a repository of its own, a `crook/store`
+  section beside the Plugins page, and the whole of what an install is: fetch a list nobody is
+  told anything by, download one file, check it hashes to what the list said and that the
+  module says what the row said it would, write it, and run it in the window that is open.
+  `Host::carry` is the piece that was missing from the tier and not from the store — until it
+  existed, "installed" meant "after you restart". A withdrawn version is carried and not run,
+  read off the copy of the index this machine already has, so a yank holds offline and on the
+  launch after it is published. `crook_plugin_api` and `crook_wasm` are on crates.io because a
+  registry has to describe what it built with the host's own reader, and a plugin has to be
+  able to compile against the vocabulary without a copy of the terminal.
 - **Phase 2 — the sandbox: done, and dogfooded.** `crook_plugin_api` is the wire — a
   manifest, capabilities that each say what they are in a sentence, and a `Node` vocabulary
   that *describes* rather than paints: no colours, no pixels, tones and sizes the host
@@ -1019,6 +1029,14 @@ is not a different kind of thing from one that has.
   permission dialog in front of the first.
 - **Remove** deletes the plugin's directory, forgets its grant and takes it out of the window
   without a restart.
+- **A withdrawn version is carried and not run.** `yanked` is read off the copy of the index
+  this machine already has, at startup, so a yank is honoured on the launch after it is
+  published and on a machine that has been offline for a week — and an index that is missing or
+  unreadable withdraws nothing, which is the safe direction. It is not written into
+  `disabled_plugins`: that list is a person's own answer and this is the registry's, and a
+  person who reads "switched off" should be able to tell which of the two said so. The row
+  stays on the Plugins page with the registry's sentence on its card, the switch is drawn dead,
+  and what to do about it — update, or remove — is in the Store.
 
 What is not built: `--dev-plugin`, and updates that check themselves. Auto-update stays off —
 the architecture doc lists autoupdate as absent by design, and a terminal that changes under you
@@ -1058,11 +1076,19 @@ ten minutes.
    the header's right-hand side: it put a known reading in the chip, so the picture was the
    same on every machine and in every run — no network, no credentials, no clock. There is no
    equivalent now. A plugin's surface is whatever the plugin says it is, and nothing in the
-   binary can be told what a plugin ought to be saying. The candidates are a flag that stands
-   a named plugin's contribution in for a fixed `Node` tree, a plugin that draws a fixed one
-   and is installed by the snapshot script, and doing nothing on the grounds that a store
-   plugin's pixels are not Crook's to guarantee. Until one of them is chosen, the right-hand
-   end of the header is the one surface with no picture of it under test.
+   binary can be told what a plugin ought to be saying.
+
+   **Decided: the first of the three.** `--plugin-fixture <PATH>` reads a map of slot name to
+   `Node` and contributes each tree as a plugin would, through the same translator, at the same
+   scale, with the same chrome — so a picture of the plugin tier is a picture of *this build's*
+   plugin tier, and a change to what a badge looks like changes it. The file is JSON because a
+   `Node` is `serde`'s to decode either way, which means a fixture cannot describe anything a
+   plugin could not; `script/fixtures/header.json` is the one this repository keeps, and a test
+   fails if it stops parsing. `--with-plugins` stays what it was and is the other half of the
+   same answer: that one draws whatever a machine happens to have installed, which is exactly
+   what makes it useless in CI. A slot drawn once per row is refused by name rather than
+   filled — a fixture has one answer, and seven identical marks would be a picture of something
+   no plugin does.
 
 ## 8. The plan, in phases
 
@@ -1096,9 +1122,19 @@ sentence proposed: the plugin was not embedded but *removed* — the usage chip 
 another repository, installed with `--install-plugin`, and the binary no longer contains it in
 any form. What that proved, and what it cost, is in "Where this stands".
 
-**Phase 3 — the store.** `plugins/` layout, `plugin.toml`, CI (build, checks, index, publish),
-the Plugins page, install/enable/disable/update/yank, the capability dialog, `--dev-plugin`, a
-template repository, and the docs generated from `crook_plugin_api`.
+**Phase 3 — the store: done, except for two things it turned out not to need and one it does.**
+The registry is a repository of its own — [crook-plugins](https://github.com/theguriev/crook-plugins)
+— holding a four-line `plugin.toml` per plugin pinned to a commit, whose CI builds every
+artifact from source, describes it with the host's own reader, and rewrites one release in
+place. In the terminal: the Store section, install with the capability list read before the
+press, update, remove, and a yank honoured at the next launch and offline.
+
+What it did not need: a `plugins/` directory in this repository (the plugins live in their
+authors' own, which is what the six that exist already did), and a capability *dialog* (the
+grant is answered on the Plugins card, where an escalation is already compared against what was
+allowed last time — a second surface for the same question would be a second answer to keep in
+step). What it still wants is `--dev-plugin`, which is the one thing on the original list that
+is about writing a plugin rather than installing one.
 
 **Phase 4 — the process transport.** `plugins/host-process`: the NDJSON socket, the CLI as
 SDK, `--skill` output for an agent in a pane, supervised long-lived plugins with budgets.

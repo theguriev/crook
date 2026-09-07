@@ -60,6 +60,29 @@ fn a_version_that_was_withdrawn_is_not_offered_and_is_still_remembered() {
         Some("it read the wrong file")
     );
     assert_eq!(withdrawn(&index, &id, "0.9.0"), None);
+    assert_eq!(
+        offers[0].withdrawn, None,
+        "a plugin with a version left to offer is not a withdrawn plugin"
+    );
+}
+
+#[test]
+fn a_plugin_whose_every_version_was_withdrawn_says_that_rather_than_nothing() {
+    // The difference between two sentences a person can act on: "nothing is
+    // built for this Crook" is somebody's to fix by publishing, and "it was
+    // taken back, because —" is a thing to read.
+    let mut index = parse(ONE.as_bytes()).expect("it should parse");
+    for release in &mut index.plugins[0].versions {
+        release.yanked = Some(String::from("it read the wrong file"));
+    }
+
+    let offers = offers(&index);
+
+    assert!(!offers[0].installable());
+    assert_eq!(
+        offers[0].withdrawn.as_deref(),
+        Some("it read the wrong file")
+    );
 }
 
 #[test]
@@ -121,4 +144,50 @@ fn an_index_that_is_not_json_says_so_rather_than_answering_with_nothing() {
     // went wrong" is the difference between an empty page and a line a person
     // can act on.
     assert!(parse(b"<html>404</html>").is_err());
+}
+
+#[test]
+fn a_module_that_is_not_what_the_list_promised_is_refused() {
+    // The one check anybody has on the index being what it says it is: it was
+    // read out of the artifact by the registry's copy of this host's reader,
+    // so a row and a module that disagree is a registry with a mistake in it
+    // or a URL that now serves something else.
+    let release = Release {
+        version: "1.0.0".into(),
+        abi: 8,
+        url: "https://x.invalid/p.wasm".into(),
+        sha256: "aa".into(),
+        bytes: 0,
+        capabilities: vec![String::from("cwd.read")],
+        asks: Vec::new(),
+        yanked: None,
+    };
+    let manifest = crook_plugin::Manifest {
+        schema: crook_plugin::Manifest::SCHEMA,
+        id: PluginId::parse("eugen/probe").expect("a literal that parses"),
+        name: "Probe",
+        description: "d",
+        version: "1.0.0",
+        tier: crook_plugin::Tier::Wasm,
+        capabilities: &[crook_plugin_api::Capability::ReadWorkingDirectory],
+    };
+
+    promised(&release, &manifest).expect("the module the list described");
+
+    // A version that is not the version offered: what somebody read the
+    // capability list *of* is that version, and this is another one.
+    let mut newer = release.clone();
+    newer.version = String::from("1.1.0");
+    let refusal = promised(&newer, &manifest).expect_err("a different version");
+    assert!(
+        refusal.contains("1.1.0") && refusal.contains("1.0.0"),
+        "{refusal}"
+    );
+
+    // And a module that wants something the row did not say it wanted.
+    let mut quieter = release.clone();
+    quieter.capabilities = Vec::new();
+    let refusal = promised(&quieter, &manifest).expect_err("more than was offered");
+    assert!(refusal.contains("cwd.read"), "{refusal}");
+    assert!(refusal.contains("nothing"), "{refusal}");
 }

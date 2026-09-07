@@ -1,0 +1,11 @@
+{
+  "header.right": {
+    "Row": [
+      { "Icon": { "name": "pirate", "tone": "Accent" } },
+      { "Gap": "Small" },
+      { "Text": { "text": "62%", "size": "Small", "tone": "Primary" } },
+      { "Gap": "Small" },
+      { "Badge": { "text": "resets in 41m", "tone": "Muted" } }
+    ]
+  }
+}
