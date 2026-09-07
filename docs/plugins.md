@@ -213,10 +213,26 @@ description of something that was never built.
   would have put the second one here.
 
   - **`crook --install-plugin <path>`**, which opens a module, checks its ABI, decodes its
-    manifest and only then copies it into the plugins directory. There is no server and no
-    index; installing is a file copy, and the flag exists because "copy this into a directory
-    whose path is different on three platforms" is a sentence a README should not have to say
-    twice.
+    manifest and only then writes it into the plugins directory. Installing is a file copy, and
+    the flag exists because "copy this into a directory whose path is different on three
+    platforms" is a sentence a README should not have to say twice.
+
+    **The version the manifest named is in the path**, and three things follow from it that a
+    flat `plugin.wasm` could not have: an upgrade writes somewhere new rather than over the
+    bytes a running interpreter is reading, a person can see what they have by looking, and an
+    index can talk about one *version* of a plugin rather than about a plugin. Only one version
+    is kept — a directory that quietly accumulated every version ever installed is disk nobody
+    chose to spend — so rolling back is installing the older file, which is the same command.
+    The layout before this one still loads, because an upgrade of Crook that silently stopped
+    running somebody's plugins is indistinguishable from losing them; it is migrated the first
+    time that plugin is installed again. `crook --plugins` lists what is there,
+    `crook --uninstall-plugin owner/name` takes one back out, and taking one out forgets what
+    it was allowed to do: `settings.json` keeps a grant for a plugin it cannot find, because a
+    plugin can be missing for a morning, and being *removed* is a person saying they are done
+    with it. That last half is a file edit, so a Crook that is open at the time will write its
+    own copy of the settings back over it — the ordinary hazard of editing a file an
+    application has open, and the reason the Plugins page is where a plugin is meant to be
+    removed from.
 
   **ABI 4 is the version a plugin can be asked about something.** Every version up to it could
   be asked what goes in a slot; that is a question with one answer, and a slot drawn once per
@@ -861,8 +877,10 @@ than a decision.
 ## 6. The store
 
 **What the store distributes: `.wasm`, and only `.wasm`.** An installed plugin lives in
-`<data>/crook/plugins/<id>/<version>/plugin.wasm`; disabling it stops loading it; uninstalling
-deletes the directory. The binary never contains a store plugin, enabled or not, and does not
+`<data>/crook/plugins/<owner>.<name>/<version>/plugin.wasm` — one directory per plugin because
+`owner/name` is two path components and a plugin's home is one, and one directory per version
+inside it. Disabling stops loading it; uninstalling deletes the plugin's whole directory, which
+`crook --uninstall-plugin owner/name` is, along with whatever it had been allowed to do. The binary never contains a store plugin, enabled or not, and does not
 grow with the ecosystem. What it does carry, once: the `wasmi` runtime (about a megabyte, to be
 measured in Phase 2; `wasmtime` would be six to ten) and the built-in plugins, embedded with
 `include_bytes!` — a Rust plugin compiled to wasm with `opt-level = "z"`, `lto` and `wasm-opt`

@@ -28,6 +28,7 @@ pub(super) mod picker;
 mod render;
 mod runtime;
 mod sound;
+mod version;
 
 use std::cell::{Cell, RefCell};
 use std::fs;
@@ -48,7 +49,7 @@ use crate::plugins::tabs::{TAB_ROW_BADGE, TabRow};
 use crate::tab::AgentStatus;
 use crate::workspace::{BlockMenuState, Workspace, WorkspaceAction, block_menu};
 
-pub use install::install;
+pub use install::{home, install, module, uninstall};
 use picker::Held;
 use render::Placement;
 use runtime::{Gesture, Runtime};
@@ -65,12 +66,16 @@ const GIVE_UP_AFTER: u32 = 3;
 
 /// Every plugin installed in `directory`, in name order.
 ///
-/// A directory each, holding `plugin.wasm`, which is the shape the store
-/// installs. Anything that is not that is skipped with a line: a directory
-/// with no module, a module that is not wasm, a manifest naming an id that is
-/// not an id. **None of them stops the others loading**, and none of them
-/// stops the window opening — the rule the settings file has followed since
-/// the beginning.
+/// A directory each, holding a directory per version, holding `plugin.wasm`,
+/// and the newest of those versions is the one that runs. Anything that is not
+/// that is skipped with a line: a directory with no module anywhere in it, a
+/// module that is not wasm, a manifest naming an id that is not an id. **None
+/// of them stops the others loading**, and none of them stops the window
+/// opening — the rule the settings file has followed since the beginning.
+///
+/// Exactly one module per plugin is opened, because opening one *runs* it:
+/// instantiation executes the module's start function under a fuel budget, and
+/// a directory holding three versions must not cost three of those.
 pub fn installed(directory: &Path) -> Vec<Box<dyn Plugin>> {
     let Ok(entries) = fs::read_dir(directory) else {
         // No plugins directory is the ordinary state and not worth a line.
@@ -79,10 +84,9 @@ pub fn installed(directory: &Path) -> Vec<Box<dyn Plugin>> {
 
     let mut found: Vec<(String, Box<dyn Plugin>)> = Vec::new();
     for entry in entries.flatten() {
-        let path = entry.path().join(MODULE_FILE);
-        if !path.is_file() {
+        let Some(path) = newest_module(&entry.path()) else {
             continue;
-        }
+        };
         match open(&path) {
             Ok(plugin) => found.push((plugin.manifest().id.to_string(), Box::new(plugin))),
             Err(problem) => log::warn!("{}: {problem}", path.display()),
@@ -96,11 +100,61 @@ pub fn installed(directory: &Path) -> Vec<Box<dyn Plugin>> {
     found.into_iter().map(|(_, plugin)| plugin).collect()
 }
 
+/// The module to load out of one plugin's directory, newest version first.
+///
+/// A version is a directory name rather than something read out of a module,
+/// which is what keeps this cheap: choosing costs a `read_dir` and a string
+/// comparison, and only the winner is opened. The name is what the manifest
+/// said when it was installed, so the two agree unless somebody has renamed a
+/// directory by hand — in which case the manifest is what the page shows and
+/// this is only what decided which file to read.
+///
+/// The flat layout that came before versions still loads, and loses to any
+/// versioned directory beside it: a plugin found twice in one directory would
+/// contribute to its slot twice and have its second set of actions refused as
+/// already taken.
+fn newest_module(home: &Path) -> Option<PathBuf> {
+    let mut newest: Option<(String, PathBuf)> = None;
+    for entry in fs::read_dir(home).into_iter().flatten().flatten() {
+        let module = entry.path().join(MODULE_FILE);
+        if !module.is_file() {
+            continue;
+        }
+        let Some(version) = entry.file_name().to_str().map(str::to_owned) else {
+            continue;
+        };
+        let newer = match &newest {
+            Some((best, _)) => version::compare(&version, best).is_gt(),
+            None => true,
+        };
+        if newer {
+            newest = Some((version, module));
+        }
+    }
+
+    if let Some((_, module)) = newest {
+        return Some(module);
+    }
+
+    let flat = home.join(MODULE_FILE);
+    flat.is_file().then_some(flat)
+}
+
 /// Reads one module and checks everything that can be checked before it runs.
 pub fn open(path: &Path) -> Result<WasmPlugin, String> {
     let bytes = fs::read(path).map_err(|why| format!("could not be read: {why}"))?;
+    opened(&bytes)
+}
+
+/// The same, on bytes somebody already has.
+///
+/// Which is not a convenience: installing writes the bytes it was handed, and
+/// reading the file a second time to check it would be checking a file that
+/// may have changed since — a module still being written into place passes as
+/// the whole of itself and lands as the half that was there first.
+pub fn opened(bytes: &[u8]) -> Result<WasmPlugin, String> {
     let (sandbox, manifest) =
-        Sandbox::open(&bytes, Fuel::default()).map_err(|why| why.to_string())?;
+        Sandbox::open(bytes, Fuel::default()).map_err(|why| why.to_string())?;
 
     let id = PluginId::parse(&manifest.id)
         .map_err(|why| format!("its id {:?} is not one: {why}", manifest.id))?;

@@ -64,8 +64,11 @@ Eight features, and the page that configures them:
   be one of the features on this list and is now a file. It lives at
   [github.com/theguriev/crook-pirate](https://github.com/theguriev/crook-pirate) and ships as
   one 122KB `plugin.wasm`. `crook --install-plugin <path>` checks the module, reads its
-  manifest and puts it where Crook looks; copying it to
-  `<data>/crook/plugins/theguriev.pirate/plugin.wasm` does the same thing by hand. It draws
+  manifest and puts it where Crook looks —
+  `<data>/crook/plugins/theguriev.pirate/0.3.0/plugin.wasm`, the version in the path so that an
+  upgrade writes somewhere new rather than over the bytes a running interpreter is reading.
+  `crook --plugins` says what is installed and which file each one runs from, and
+  `crook --uninstall-plugin theguriev/pirate` takes it and its permissions back off. It draws
   Crook's own pirate — the artwork is the host's, asked for by icon name, and the plugin
   animates the bite itself by naming a different frame — and it says how much of the session's
   token budget is spent and when it resets. To do that it asks to read one file,
