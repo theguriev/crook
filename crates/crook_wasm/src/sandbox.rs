@@ -194,6 +194,20 @@ impl Sandbox {
         let manifest: Manifest =
             crook_plugin_api::from_bytes(&bytes).map_err(|why| Problem::Answer(why.to_string()))?;
 
+        // The number is in the module twice — once as the export that was
+        // just checked, and once inside the manifest — and a module that
+        // answers with two of them has been built out of two vocabularies.
+        // Nothing downstream would notice: the host enforces the export and
+        // everything that *describes* a plugin to a person, an index included,
+        // reads the manifest. So they are compared here, where the refusal is
+        // still about the module rather than about something it later drew.
+        if manifest.abi != theirs {
+            return Err(Problem::Answer(format!(
+                "it exports plugin API {theirs} and its manifest says {}",
+                manifest.abi
+            )));
+        }
+
         Ok((sandbox, manifest))
     }
 

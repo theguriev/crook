@@ -1,11 +1,25 @@
 [package]
 name = "crook_wasm"
-description = "The sandbox a store plugin runs in."
+description = "The wasm sandbox a Crook plugin runs in, and the reader that says what one is."
 authors.workspace = true
 edition.workspace = true
-version.workspace = true
-publish.workspace = true
+# `0.<abi>.<patch>`, the same rule `crook_plugin_api` follows and for the same
+# reason: this crate *is* the ABI check, so a release of it speaks exactly one
+# version of that vocabulary and says which in its own version number.
+version = "0.8.0"
+# Published for one job outside this repository. A registry that builds a
+# plugin from source has to say what it built — the id, the version, the ABI
+# and what it asks to be allowed — and every one of those is inside the module,
+# readable only by instantiating it. Reimplementing that read somewhere else is
+# a second thing to keep in step with the host that decides whether a plugin
+# loads; `crook-plugin-info` is the host's own reader, run somewhere else.
+publish = true
 license = "MIT"
+readme = "README.md"
+homepage = "https://github.com/theguriev/crook-plugins"
+keywords = ["crook", "plugin", "wasm", "sandbox", "wasmi"]
+categories = ["wasm", "development-tools"]
+rust-version = "1.85"
 
 [dependencies]
 crook_plugin_api.workspace = true

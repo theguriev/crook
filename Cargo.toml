@@ -11,7 +11,11 @@ publish = false
 [workspace.dependencies]
 # Local crates.
 crook_plugin = { path = "crates/crook_plugin" }
-crook_plugin_api = { path = "crates/crook_plugin_api" }
+# A version beside the path, because two crates here are published and a
+# published crate's dependency needs one: the path is what this workspace
+# builds against and the version is what crates.io resolves. `0.8` is the ABI,
+# which is the whole of the compatibility rule.
+crook_plugin_api = { path = "crates/crook_plugin_api", version = "0.8" }
 crook_wasm = { path = "crates/crook_wasm" }
 crook_terminal = { path = "crates/crook_terminal" }
 crookui = { path = "crates/crookui" }

@@ -66,7 +66,13 @@ fn escaped(bytes: &[u8]) -> String {
 /// the difference between two tests is the thing being tested rather than
 /// forty lines of wasm.
 fn module(body: &str, abi: u32) -> Vec<u8> {
-    let manifest = to_bytes(&manifest()).expect("a manifest should encode");
+    module_saying(&manifest(), body, abi)
+}
+
+/// The same, for the one test whose subject is a module carrying a manifest
+/// that is not the one its exports claim.
+fn module_saying(manifest: &Manifest, body: &str, abi: u32) -> Vec<u8> {
+    let manifest = to_bytes(manifest).expect("a manifest should encode");
     let tree = to_bytes(&tree()).expect("a tree should encode");
     let tree_at = DATA + manifest.len() as u32;
     let free = tree_at + tree.len() as u32;
@@ -192,6 +198,30 @@ fn a_plugin_says_what_it_is_before_any_of_it_runs() {
 
     assert_eq!(read_back, manifest());
     assert_eq!(read_back.capabilities[0].sentence(), "Reach api.github.com");
+}
+
+#[test]
+fn a_plugin_that_disagrees_with_itself_about_the_version_is_refused() {
+    // The number is in a module twice: the export the host enforces, and the
+    // field everything that *describes* the plugin reads — a Plugins page, and
+    // an index built by a registry. A module carrying two of them would be
+    // enforced by one and advertised by the other.
+    let mut manifest = manifest();
+    manifest.abi = ABI_VERSION + 1;
+
+    let problem = refused(&module_saying(
+        &manifest,
+        &with_strings(WELL_BEHAVED),
+        ABI_VERSION,
+    ));
+
+    assert_eq!(
+        problem,
+        Problem::Answer(format!(
+            "it exports plugin API {ABI_VERSION} and its manifest says {}",
+            ABI_VERSION + 1
+        ))
+    );
 }
 
 #[test]

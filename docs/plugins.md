@@ -840,8 +840,19 @@ numbers remembering the other. A wider range is not expressible, which is delibe
 compares one integer and refuses everything else by name, so a plugin that resolved to `0.9`
 would be one that compiled and was then turned away at load — the worst place to learn it.
 
-`./script/publish` is what uploads it: the checks CI runs, then `cargo publish`, then a tag on
-the commit the version was built from. It is not a CI job because publishing is the one
+`crook_wasm` is published beside it, versioned the same way and for one job: **`cargo install
+crook_wasm` puts `crook-plugin-info` on a machine**, which prints what a module says about
+itself as one line of JSON — the id, the version, the ABI, and the capability keys a grant is
+written down as. A registry indexing an artifact it has just built needs exactly that, and
+every field of it is *inside* the module rather than beside it: readable only by instantiating
+the thing and calling two exports, which is what the sandbox is. The alternative is a second
+implementation of the host's own read, drifting against the host that decides whether a plugin
+loads at all. The reader's version is the ABI it reads, so `cargo install crook_wasm --version
+0.8` is the reader for ABI 8, and one built for another version answers with that number and
+nothing else rather than guessing at a manifest encoded against a shape it does not have.
+
+`./script/publish` is what uploads them, in that order: the checks CI runs, then `cargo
+publish`, then a tag on the commit the version was built from. It is not a CI job because publishing is the one
 irreversible act in this tree — crates.io yanks a version and never deletes one — and because
 it needs a token nothing else here has. Until the first upload happens the five copies stay
 where they are; what changed is that removing them is now a one-line edit per plugin rather
