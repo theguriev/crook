@@ -31,7 +31,15 @@ use sha2::{Digest, Sha256};
 use super::index::Release;
 
 /// Where the registry publishes.
-pub const INDEX_URL: &str = "https://theguriev.github.io/crook-plugins/index.json";
+///
+/// A release asset rather than a page, and the tag never moves: `index` is
+/// the one release that is rewritten in place, by the same CI run that builds
+/// the artifacts beside it. What that buys over GitHub Pages is that it needs
+/// nothing configured — a registry is a repository with a workflow in it, and
+/// somebody forking this one to run their own list has one thing to change,
+/// this line, rather than a site to turn on first.
+pub const INDEX_URL: &str =
+    "https://github.com/theguriev/crook-plugins/releases/download/index/index.json";
 
 /// How long any one request may take, start to finish.
 const TIMEOUT: Duration = Duration::from_secs(20);
@@ -84,11 +92,16 @@ pub fn index(agent: &ureq::Agent, url: &str, etag: Option<&str>) -> Result<Fetch
 
     let mut response = match request.call() {
         Ok(response) => response,
-        // A 304 is the answer this asked for, and `ureq` reports it as a
-        // status error because it is not a 2xx.
+        // Both shapes, because which one a 304 arrives as is `ureq`'s
+        // configuration rather than the registry's: with statuses as errors it
+        // is an error, and without them it is a response with no body. The
+        // answer is the same either way, and it is the answer this asked for.
         Err(ureq::Error::StatusCode(304)) => return Ok(Fetched::Unchanged),
         Err(why) => return Err(why.to_string()),
     };
+    if response.status() == 304 {
+        return Ok(Fetched::Unchanged);
+    }
 
     let etag = response
         .headers()

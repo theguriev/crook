@@ -92,6 +92,48 @@ fn every_plugin_in_the_box_loads() {
 }
 
 #[test]
+fn a_plugin_that_arrives_after_everything_else_is_running_before_the_next_frame() {
+    // What installing from the store comes to. Everything else about a plugin
+    // — the switch, the grant, the card — works on one the host was built
+    // with, and until `carry` existed the answer to "it is installed, now
+    // what" was "restart", which is a thing to say about a terminal the way it
+    // is not about a browser.
+    with_host_and_context(|host, ctx| {
+        let carried = host.available().len();
+        let wasm = crate::plugins::wasm::tests::wasm("eugen/arrival", "header.right", 0);
+        let plugin = crate::plugins::wasm::opened(&wasm).expect("it should open");
+        let id = crate::plugin::Plugin::manifest(&plugin).id.clone();
+
+        host.carry(Box::new(plugin), ctx);
+
+        assert!(
+            host.is_loaded(&id),
+            "a plugin that arrived should be running"
+        );
+        assert_eq!(host.available().len(), carried + 1, "and be on the list");
+        assert!(
+            host.refused().iter().all(|(refused, _)| *refused != id),
+            "and not have been refused"
+        );
+
+        // And an upgrade is the same call again: the id is carried once
+        // however many times a module for it arrives, or the Plugins page
+        // would grow a second row for a plugin somebody updated.
+        let again = crate::plugins::wasm::opened(&wasm).expect("it should open");
+        host.carry(Box::new(again), ctx);
+        assert_eq!(host.available().len(), carried + 1);
+        assert!(host.is_loaded(&id));
+
+        // Forgetting is what uninstalling does, and it is not the switch: a
+        // plugin whose file has been deleted must not be left on the list of
+        // things that can be switched back on.
+        host.forget(&id);
+        assert!(!host.is_loaded(&id));
+        assert_eq!(host.available().len(), carried);
+    });
+}
+
+#[test]
 fn a_plugin_s_field_is_found_by_name_and_goes_out_with_it() {
     // A field is addressed the way an action is, because the thing that draws
     // this one — `workspace::tab_menu` — is not the plugin that owns it. And

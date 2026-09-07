@@ -58,6 +58,10 @@ pub fn defaults() -> Vec<Box<dyn Plugin>> {
         Box::new(shell::Shell),
         Box::new(shortcuts::Shortcuts),
         Box::new(plugins_page::Plugins::new()),
+        // After the page that lists what is installed, which is the order the
+        // two buttons appear in at the foot of the sidebar and the order a
+        // person reads them in: what I have, then what there is.
+        Box::new(store::Store::new()),
         Box::new(about::About),
         Box::new(palette::CommandPalette),
     ]

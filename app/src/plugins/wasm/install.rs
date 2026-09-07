@@ -50,6 +50,18 @@ pub fn install(path: &Path) -> Result<PathBuf, String> {
     into(&root, path)
 }
 
+/// Installs bytes somebody already has, and answers where they went.
+///
+/// What the store installs, and it never writes the download to a file first:
+/// a temporary file is a temporary file somebody has to remember to remove,
+/// and the bytes that were checked are the bytes that should be installed —
+/// the same reason [`into`] reads the file once.
+pub fn installed_bytes(bytes: &[u8]) -> Result<PathBuf, String> {
+    let root = directory()
+        .ok_or_else(|| String::from("this machine has no data directory to install into"))?;
+    write(&root, bytes)
+}
+
 /// The same, into a named plugins directory.
 pub(super) fn into(root: &Path, path: &Path) -> Result<PathBuf, String> {
     // Read once, and checked as the bytes that will be *written* rather than
@@ -58,7 +70,12 @@ pub(super) fn into(root: &Path, path: &Path) -> Result<PathBuf, String> {
     // itself and lands as the half that was there when the first read
     // happened, which is the outcome reading before writing exists to prevent.
     let bytes = fs::read(path).map_err(|why| format!("could not be read: {why}"))?;
-    let plugin = opened(&bytes)?;
+    write(root, &bytes)
+}
+
+/// Checks bytes and writes them where the loader will find them.
+pub(super) fn write(root: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
+    let plugin = opened(bytes)?;
     let manifest = plugin.manifest();
     let version = version_folder(manifest.version)?;
 
@@ -71,7 +88,7 @@ pub(super) fn into(root: &Path, path: &Path) -> Result<PathBuf, String> {
     // half-copied module is a plugin that is refused on the next launch with a
     // line about bytes rather than about an install that went wrong.
     let installed = at.join(MODULE_FILE);
-    atomic_write(&installed, &bytes)
+    atomic_write(&installed, bytes)
         .map_err(|why| format!("{} could not be written: {why}", installed.display()))?;
 
     sweep(&home, &at);

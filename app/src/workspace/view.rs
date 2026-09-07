@@ -1113,6 +1113,69 @@ impl Workspace {
         ctx.notify();
     }
 
+    /// Installs a module the store downloaded, and runs it here and now.
+    ///
+    /// Checked before it is written and written before it is run, in that
+    /// order and for the reasons `plugins::wasm::install` gives: the bytes
+    /// that were checked are the bytes that land, and a plugin that will not
+    /// open is a refusal with a line in it rather than a file in the plugins
+    /// directory that fails on every launch afterwards.
+    ///
+    /// Nothing is granted. A plugin that has just arrived may do exactly what
+    /// one somebody copied in by hand may do, which is nothing, until its card
+    /// is answered — installing is not agreeing, and the two are two presses
+    /// on purpose.
+    pub fn install_plugin(
+        &mut self,
+        bytes: &[u8],
+        promised: impl FnOnce(&'static crook_plugin::Manifest) -> Result<(), String>,
+        ctx: &mut ViewContext<Self>,
+    ) -> Result<&'static crook_plugin::Manifest, String> {
+        let plugin = crate::plugins::wasm::opened(bytes)?;
+        let manifest = crate::plugin::Plugin::manifest(&plugin);
+
+        // What the module says about itself against what the list that
+        // offered it said, before a byte is written. An index is a mirror and
+        // never the authority — a row promising one capability and a module
+        // asking for another is the one thing a store must not install, and
+        // it is also the only check anybody has on the index being what it
+        // says it is.
+        promised(manifest)?;
+
+        crate::plugins::wasm::installed_bytes(bytes)?;
+        self.host.carry(Box::new(plugin), ctx);
+        self.sync_input_keys();
+        ctx.notify();
+        Ok(manifest)
+    }
+
+    /// Takes a plugin off this machine, along with what it was allowed to do.
+    ///
+    /// The window's half of `--uninstall-plugin`, and the one that has no race
+    /// in it: the settings this writes are the settings this window is holding,
+    /// rather than a file it will overwrite from memory the next time anything
+    /// saves.
+    pub fn remove_plugin(
+        &mut self,
+        plugin: &PluginId,
+        ctx: &mut ViewContext<Self>,
+    ) -> Result<(), String> {
+        crate::plugins::wasm::uninstall(plugin)?;
+
+        // Forgotten rather than kept, which is the difference between a plugin
+        // that is missing and one that was removed: a plugin can fail to load
+        // for a morning, and somebody who took one off this machine is saying
+        // they are done with it. A reinstall a year later asks again.
+        self.settings.set_granted(plugin.as_str(), Vec::new());
+        self.settings.set_plugin_disabled(plugin.as_str(), false);
+        self.save_settings(ctx);
+
+        self.host.forget(plugin);
+        self.sync_input_keys();
+        ctx.notify();
+        Ok(())
+    }
+
     pub fn run_action(&mut self, id: ActionId, ctx: &mut ViewContext<Self>) {
         let Some(name) = self.host.action_name(id).cloned() else {
             return;

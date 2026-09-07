@@ -52,7 +52,7 @@ use crate::plugins::tabs::{TAB_ROW_BADGE, TabRow};
 use crate::tab::AgentStatus;
 use crate::workspace::{BlockMenuState, Workspace, WorkspaceAction, block_menu};
 
-pub use install::{home, install, module, uninstall};
+pub use install::{home, install, installed_bytes, module, uninstall};
 use picker::Held;
 use render::Placement;
 use runtime::{Gesture, Runtime};

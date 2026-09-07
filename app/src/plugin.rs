@@ -1103,6 +1103,53 @@ impl Host {
         }
     }
 
+    /// Takes on a plugin that was not in the list this host was made from, and
+    /// runs it.
+    ///
+    /// The store's half of installing. Everything else about a plugin — the
+    /// switch, the grant, the card — works on something already carried, and
+    /// until this existed the answer to "it is installed, now what" was
+    /// "restart Crook", which is a thing to say about a *terminal* the way it
+    /// is not about a browser: the window somebody has open is the work they
+    /// are doing.
+    ///
+    /// A plugin already carried under the same id is *replaced*, which is what
+    /// an upgrade is: the old one is unloaded first, so its registrations are
+    /// gone before the new one's are made, and the object goes with them —
+    /// otherwise the sandbox holding the old module would stay in memory for
+    /// as long as the window is open.
+    pub fn carry(&mut self, plugin: Box<dyn Plugin>, ctx: &mut ViewContext<Workspace>) {
+        let id = plugin.manifest().id.clone();
+        self.unload(&id);
+        self.carried.retain(|manifest| manifest.id != id);
+        self.plugins.retain(|carried| carried.manifest().id != id);
+
+        self.carried.push(plugin.manifest());
+        self.plugins.push(plugin);
+
+        // Taken out and put back, the way `enable` does it and for the same
+        // reason: building needs the host and the plugin at once.
+        let mut plugins = std::mem::take(&mut self.plugins);
+        if let Some(last) = plugins.last_mut() {
+            self.build_one(last.as_mut(), ctx);
+            self.ready_one(last.as_mut(), ctx);
+        }
+        self.plugins = plugins;
+    }
+
+    /// Forgets a plugin entirely: its registrations, its object and its row.
+    ///
+    /// What uninstalling is, and the one operation that is not [`Self::unload`]
+    /// with a different name: a plugin that has been *removed* must not be on
+    /// the list of things that can be switched back on, because the file it
+    /// would be switched back on from is not there.
+    pub fn forget(&mut self, plugin: &PluginId) {
+        self.unload(plugin);
+        self.carried.retain(|manifest| manifest.id != *plugin);
+        self.plugins
+            .retain(|carried| carried.manifest().id != *plugin);
+    }
+
     /// Builds a plugin that is not loaded, and does nothing to one that is.
     ///
     /// The other half of [`Self::unload`], and the reason the plugin objects

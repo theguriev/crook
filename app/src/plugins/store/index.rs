@@ -211,6 +211,52 @@ pub fn withdrawn(index: &Index, id: &PluginId, version: &str) -> Option<String> 
         .clone()
 }
 
+/// Whether a module is the one the index said it was.
+///
+/// The index is a mirror: everything in it was read out of an artifact by the
+/// registry's copy of the host's own reader, so the two agree — and a row that
+/// does *not* agree with the module it points at is the one thing a store must
+/// not install, whether that is a registry with a mistake in it or a URL
+/// serving something else entirely. Checked before a byte is written.
+///
+/// The version is compared and not only the id, because a version is what a
+/// person read the capability list of, and the capability *keys* are compared
+/// as a set because that list is what they were being asked to allow.
+pub fn promised(release: &Release, manifest: &crook_plugin::Manifest) -> Result<(), String> {
+    if manifest.version != release.version {
+        return Err(format!(
+            "the list offered {} and the module says it is {}",
+            release.version, manifest.version
+        ));
+    }
+
+    let mut asked: Vec<String> = manifest
+        .capabilities
+        .iter()
+        .flat_map(crook_plugin_api::Capability::keys)
+        .collect();
+    let mut offered = release.capabilities.clone();
+    asked.sort();
+    offered.sort();
+    if asked != offered {
+        return Err(format!(
+            "the list said it wants {} and the module asks for {}",
+            said(&offered),
+            said(&asked)
+        ));
+    }
+
+    Ok(())
+}
+
+/// A list of grant keys, for a sentence.
+fn said(keys: &[String]) -> String {
+    match keys.is_empty() {
+        true => String::from("nothing"),
+        false => keys.join(", "),
+    }
+}
+
 /// The newest of whatever is handed over.
 fn newest<'a>(releases: impl Iterator<Item = &'a Release>) -> Option<Release> {
     releases
