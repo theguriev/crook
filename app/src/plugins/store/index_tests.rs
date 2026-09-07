@@ -60,6 +60,29 @@ fn a_version_that_was_withdrawn_is_not_offered_and_is_still_remembered() {
         Some("it read the wrong file")
     );
     assert_eq!(withdrawn(&index, &id, "0.9.0"), None);
+    assert_eq!(
+        offers[0].withdrawn, None,
+        "a plugin with a version left to offer is not a withdrawn plugin"
+    );
+}
+
+#[test]
+fn a_plugin_whose_every_version_was_withdrawn_says_that_rather_than_nothing() {
+    // The difference between two sentences a person can act on: "nothing is
+    // built for this Crook" is somebody's to fix by publishing, and "it was
+    // taken back, because —" is a thing to read.
+    let mut index = parse(ONE.as_bytes()).expect("it should parse");
+    for release in &mut index.plugins[0].versions {
+        release.yanked = Some(String::from("it read the wrong file"));
+    }
+
+    let offers = offers(&index);
+
+    assert!(!offers[0].installable());
+    assert_eq!(
+        offers[0].withdrawn.as_deref(),
+        Some("it read the wrong file")
+    );
 }
 
 #[test]

@@ -2,9 +2,10 @@
 //!
 //! Two files beside each other: the index as it arrived, and the `ETag` the
 //! registry gave it. The next fetch sends the tag back, and a registry that
-//! has published nothing since answers `304` and no bytes — which is what
-//! makes opening the store page cheap enough to do on every visit without
-//! anybody thinking about it.
+//! has published nothing since answers `304` and no bytes — so looking again
+//! costs a round trip and nothing else, however often somebody presses it.
+//!
+//! Opening the store does not look. This file is what it reads instead.
 //!
 //! # Under the data directory rather than the cache one
 //!

@@ -8,15 +8,18 @@
 //!
 //! # What is here
 //!
-//! The three halves that have no window in them: [`index`], what a registry
-//! publishes and which of it this build can run; [`cache`], the copy on disk
-//! that makes the list openable offline and is the only record of what has
-//! been withdrawn; and [`fetch`], the one request Crook makes of its own,
-//! written under the rule the README states about telemetry.
+//! Three halves with no window in them — [`index`], what a registry publishes
+//! and which of it this build can run; [`cache`], the copy on disk that makes
+//! the list openable offline and is the only record of what has been
+//! withdrawn; and [`fetch`], the one request Crook makes of its own, written
+//! under the rule the README states about telemetry — and three with: `model`,
+//! which does the two slow things off the thread that draws; `section`, the
+//! list and the card; and `state`, what the list has selected.
 //!
-//! Nothing here draws anything, and nothing here installs anything: what a
-//! plugin may do is decided against the module that was downloaded, by the
-//! same code that decides it for a module somebody copied in by hand.
+//! What is *not* here is the deciding. A module that arrives is checked,
+//! written and carried by the workspace, by the same code that does it for a
+//! module somebody copied in by hand, and what a plugin may then do is
+//! answered on its card in Plugins like every other plugin's.
 
 pub mod cache;
 pub mod fetch;
@@ -92,7 +95,7 @@ impl Plugin for Store {
                     Ok(bytes) => bytes,
                     Err(why) => {
                         model.update(ctx, |model, ctx| {
-                            model.complain(format!("{plugin} did not arrive: {why}"), ctx);
+                            model.complain(Some(&plugin), format!("did not arrive: {why}"), ctx);
                         });
                         continue;
                     }
@@ -113,8 +116,22 @@ impl Plugin for Store {
                     ctx,
                 );
 
+                // What the registry says about the version that just landed,
+                // which is not what it said about the one it replaced: a card
+                // that went on saying "withdrawn" after an update out of a
+                // yank would be describing a plugin nobody has any more.
+                if let Ok(manifest) = &installed {
+                    let why = model.read(ctx, |model, _| {
+                        model
+                            .index()
+                            .and_then(|index| index::withdrawn(index, &plugin, manifest.version))
+                    });
+                    workspace.withdrew(&plugin, why);
+                }
+
                 model.update(ctx, |model, ctx| match installed {
                     Ok(manifest) => model.say(
+                        Some(&plugin),
                         format!(
                             "{} {} is installed, and may do nothing at all until you answer its \
                              card in Plugins.",
@@ -122,7 +139,9 @@ impl Plugin for Store {
                         ),
                         ctx,
                     ),
-                    Err(why) => model.complain(format!("{plugin} was not installed: {why}"), ctx),
+                    Err(why) => {
+                        model.complain(Some(&plugin), format!("was not installed: {why}"), ctx)
+                    }
                 });
             }
             ctx.notify();
@@ -179,26 +198,25 @@ fn install(state: &Rc<StoreState>, workspace: &Workspace, ctx: &mut ViewContext<
         return;
     };
     let offers = model.update(ctx, |model, _| model.offers());
-    let Some(chosen) = state.showing(&offers) else {
+    // Resolved the way the section resolves it, which means through the field
+    // above the list: a handler that asked the *unfiltered* list which row is
+    // showing would answer with whatever is first in that one, and install a
+    // plugin whose card nobody read.
+    let Some(offer) = section::chosen(workspace, state, &offers) else {
         return;
     };
-    let Some(offer) = offers.iter().find(|offer| offer.id == chosen) else {
-        return;
-    };
+    let chosen = offer.id.clone();
     let Some(release) = offer.release.clone() else {
         model.update(ctx, |model, ctx| {
             model.complain(
-                format!("{chosen} has nothing built for the plugin API this Crook speaks"),
+                Some(&offer.id),
+                String::from("has nothing built for the plugin API this Crook speaks"),
                 ctx,
             );
         });
         return;
     };
 
-    // Nothing about the workspace is touched here: what a download becomes is
-    // decided when it lands, by the observer that has the workspace to install
-    // it with.
-    let _ = workspace;
     model.update(ctx, |model, ctx| model.download(&chosen, &release, ctx));
 }
 
@@ -208,17 +226,18 @@ fn remove(state: &Rc<StoreState>, workspace: &mut Workspace, ctx: &mut ViewConte
         return;
     };
     let offers = model.update(ctx, |model, _| model.offers());
-    let Some(chosen) = state.showing(&offers) else {
+    let Some(chosen) = section::chosen(workspace, state, &offers).map(|offer| offer.id) else {
         return;
     };
 
     let outcome = workspace.remove_plugin(&chosen, ctx);
     model.update(ctx, |model, ctx| match outcome {
         Ok(()) => model.say(
-            format!("{chosen} is off this machine, and so is what it was allowed to do."),
+            Some(&chosen),
+            String::from("is off this machine, and so is what it was allowed to do."),
             ctx,
         ),
-        Err(why) => model.complain(format!("{chosen} was not removed: {why}"), ctx),
+        Err(why) => model.complain(Some(&chosen), format!("was not removed: {why}"), ctx),
     });
 }
 

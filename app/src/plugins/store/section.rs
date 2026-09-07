@@ -22,10 +22,11 @@
 //! answer it is showing is — so an offline machine shows last week's list with
 //! "checked 6 days ago" under it rather than an empty page.
 
+use std::cmp::Ordering;
 use std::rc::Rc;
 use std::time::SystemTime;
 
-use crookui_core::elements::{Padding, Paragraph};
+use crookui_core::elements::Paragraph;
 use crookui_core::fonts::FamilyId;
 use crookui_core::prelude::*;
 
@@ -37,6 +38,7 @@ use crate::workspace::settings_page::search::{Query, Words};
 use crate::workspace::settings_page::{named, widgets};
 use crate::workspace::{SettingsAction, TextField, Workspace, WorkspaceAction};
 
+use super::super::wasm::version;
 use super::index::Offer;
 use super::state::StoreState;
 use super::{FIELD, SECTION, action};
@@ -50,20 +52,6 @@ const LIST_SCROLL: &str = "store.list";
 /// Where the card has been scrolled to.
 const CARD_SCROLL: &str = "store.card";
 
-/// The corner and the inset of the box a control sits in.
-///
-/// The Plugins page's, because the two cards are read one after the other and
-/// a control that changed shape between them would read as a different kind of
-/// control.
-const CONTROL_RADIUS: f32 = 8.;
-/// See [`CONTROL_RADIUS`].
-const CONTROL_PADDING: Padding = Padding {
-    top: 10.,
-    bottom: 10.,
-    left: 12.,
-    right: 12.,
-};
-
 /// Everything the section draws from, read out of the model in one go.
 ///
 /// One read rather than six, because a model is checked out of the app for the
@@ -74,9 +62,68 @@ struct Known {
     offers: Vec<Offer>,
     looking: bool,
     fetched: Option<SystemTime>,
-    problem: Option<String>,
-    said: Option<String>,
+    /// What went wrong, and which plugin it was about — `None` for the
+    /// registry itself, which is nobody's row.
+    problem: Option<(Option<PluginId>, String)>,
+    /// The same for what went right.
+    said: Option<(Option<PluginId>, String)>,
     downloading: Option<PluginId>,
+}
+
+impl Known {
+    /// The line to draw on `plugin`'s card, if the last thing that happened
+    /// was about it.
+    fn about(&self, plugin: &PluginId) -> Option<(&str, bool)> {
+        fn mine<'a>(
+            line: &'a Option<(Option<PluginId>, String)>,
+            plugin: &PluginId,
+            wrong: bool,
+        ) -> Option<(&'a str, bool)> {
+            let (about, text) = line.as_ref()?;
+            (about.as_ref() == Some(plugin)).then_some((text.as_str(), wrong))
+        }
+
+        mine(&self.problem, plugin, true).or_else(|| mine(&self.said, plugin, false))
+    }
+
+    /// The line to draw under the list, which is everything that was about the
+    /// registry rather than about one plugin.
+    fn loose(&self) -> Option<(&str, bool)> {
+        match (&self.problem, &self.said) {
+            (Some((None, problem)), _) => Some((problem.as_str(), true)),
+            (None, Some((None, said))) => Some((said.as_str(), false)),
+            _ => None,
+        }
+    }
+}
+
+/// Which plugin the card is about, worked out the way the section works it
+/// out.
+///
+/// The one answer, in one place, because the section and the two buttons on it
+/// have to agree: the list is filtered by the field above it, and a handler
+/// that resolved the selection against everything the registry has would act
+/// on whatever happens to be first in *that* list — a card about one plugin
+/// and an Install that fetched another.
+pub(super) fn chosen(
+    workspace: &Workspace,
+    state: &Rc<StoreState>,
+    offers: &[Offer],
+) -> Option<Offer> {
+    let matching = matching(workspace, offers);
+    let id = state.showing(&matching)?;
+    matching.into_iter().find(|offer| offer.id == id)
+}
+
+/// Everything the field has not filtered out.
+fn matching(workspace: &Workspace, offers: &[Offer]) -> Vec<Offer> {
+    let (_, input) = workspace.field(SECTION, FIELD);
+    let query = Query::new(input.editor().text());
+    offers
+        .iter()
+        .filter(|offer| matches(offer, &query))
+        .cloned()
+        .collect()
 }
 
 /// The section: the list in the sidebar, and the card beside it.
@@ -94,20 +141,16 @@ pub(super) fn render(
         offers: model.offers(),
         looking: model.looking(),
         fetched: model.fetched(),
-        problem: model.problem().map(str::to_owned),
-        said: model.said().map(str::to_owned),
+        problem: model
+            .problem()
+            .map(|(about, why)| (about.cloned(), why.to_owned())),
+        said: model
+            .said()
+            .map(|(about, said)| (about.cloned(), said.to_owned())),
         downloading: model.downloading().cloned(),
     });
 
-    let (_, input) = workspace.field(SECTION, FIELD);
-    let query = Query::new(input.editor().text());
-    let matching: Vec<Offer> = known
-        .offers
-        .iter()
-        .filter(|offer| matches(offer, &query))
-        .cloned()
-        .collect();
-
+    let matching = matching(workspace, &known.offers);
     let selected = state.showing(&matching);
     let list = list(workspace, state, &known, &matching, selected.as_ref(), ui);
 
@@ -115,7 +158,18 @@ pub(super) fn render(
         .as_ref()
         .and_then(|id| matching.iter().find(|offer| offer.id == *id))
     else {
-        return (list, nothing_chosen(&known, ui));
+        // In the frame every other card is in, so the half of the window that
+        // has nothing to show is still a page with a title rather than a
+        // paragraph floating in the middle of it.
+        return (
+            list,
+            section::content(
+                "Store",
+                nothing_chosen(&known, ui),
+                workspace.settings_page().scroll_named(CARD_SCROLL),
+                ui,
+            ),
+        );
     };
 
     (
@@ -222,16 +276,23 @@ fn row(
         let line = Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            // The name takes what is left rather than what it wants: a
+            // registry is a list of names strangers chose, and one long enough
+            // would otherwise push the word after it off the row and out of
+            // the panel.
             .with_child(
-                Text::new(label.clone(), ui, widgets::LABEL_SIZE)
-                    .with_color(if installed {
-                        theme().text_primary
-                    } else {
-                        theme().text_muted
-                    })
-                    .finish(),
+                Expanded::new(
+                    1.,
+                    Text::new(label.clone(), ui, widgets::LABEL_SIZE)
+                        .with_color(if installed {
+                            theme().text_primary
+                        } else {
+                            theme().text_muted
+                        })
+                        .finish(),
+                )
+                .finish(),
             )
-            .with_child(Expanded::new(1., Empty::new().finish()).finish())
             .with_child(
                 Text::new(standing.clone(), ui, widgets::DESCRIPTION_SIZE)
                     .with_color(theme().text_muted)
@@ -366,7 +427,7 @@ fn button(workspace: &Workspace, known: &Known, offer: &Offer, ui: FamilyId) -> 
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_child(answer(
+        .with_child(widgets::answer(
             standing_label(offer, installed.as_deref(), busy),
             live,
             widgets::text_button(
@@ -385,7 +446,7 @@ fn button(workspace: &Workspace, known: &Known, offer: &Offer, ui: FamilyId) -> 
     // looking at this box.
     if installed.is_some() {
         column.add_child(
-            Container::new(answer(
+            Container::new(widgets::answer(
                 String::from("On this machine"),
                 true,
                 widgets::text_button(
@@ -406,11 +467,15 @@ fn button(workspace: &Workspace, known: &Known, offer: &Offer, ui: FamilyId) -> 
         );
     }
 
-    if let Some(said) = &known.said {
-        column.add_child(said_line(said, theme().text_muted, ui));
-    }
-    if let Some(problem) = &known.problem {
-        column.add_child(said_line(problem, theme().usage_critical, ui));
+    // Only what was said about *this* plugin. A line drawn on whatever card
+    // happens to be showing is a sentence about the wrong thing, which on a
+    // page about installing is worse than no sentence at all.
+    if let Some((line, wrong)) = known.about(&offer.id) {
+        let color = match wrong {
+            true => theme().usage_critical,
+            false => theme().text_muted,
+        };
+        column.add_child(said_line(&format!("{} {line}", offer.name), color, ui));
     }
 
     Container::new(column.finish())
@@ -427,31 +492,6 @@ fn said_line(text: &str, color: Color, ui: FamilyId) -> Box<dyn Element> {
             .finish(),
     )
     .with_margin_top(10.)
-    .finish()
-}
-
-/// The box a control sits in, with the label that says what it answers.
-fn answer(label: String, live: bool, control: Box<dyn Element>, ui: FamilyId) -> Box<dyn Element> {
-    Container::new(
-        Flex::row()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_child(
-                Text::new(label, ui, widgets::LABEL_SIZE)
-                    .with_color(if live {
-                        theme().text_primary
-                    } else {
-                        theme().text_muted
-                    })
-                    .finish(),
-            )
-            .with_child(Expanded::new(1., Empty::new().finish()).finish())
-            .with_child(control)
-            .finish(),
-    )
-    .with_background_color(theme().overlay_1)
-    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(CONTROL_RADIUS)))
-    .with_padding(CONTROL_PADDING)
     .finish()
 }
 
@@ -479,13 +519,23 @@ fn footer(workspace: &Workspace, known: &Known, ui: FamilyId) -> Box<dyn Element
             .map(WorkspaceAction::Run),
     };
 
+    // What went wrong with the *registry* belongs here rather than on a card:
+    // it is not about any one plugin, and the button it is about is the one
+    // under it.
+    let (line, color) = match known.loose() {
+        Some((line, true)) => (line.to_owned(), theme().usage_critical),
+        Some((line, false)) => (line.to_owned(), theme().text_muted),
+        None => (age(known), theme().text_muted),
+    };
+
     Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
         .with_child(
             Container::new(
-                Text::new(age(known), ui, widgets::DESCRIPTION_SIZE)
-                    .with_color(theme().text_muted)
+                Paragraph::new(line, ui, widgets::DESCRIPTION_SIZE)
+                    .with_color(color)
+                    .with_line_height_ratio(1.4)
                     .finish(),
             )
             .with_uniform_padding(8.)
@@ -501,9 +551,22 @@ fn footer(workspace: &Workspace, known: &Known, ui: FamilyId) -> Box<dyn Element
 }
 
 /// The card drawn when the list has nothing in it.
+///
+/// Not the sentence the list is showing: two copies of one line, side by side,
+/// read as a mistake. This one says what the *page* is for.
 fn nothing_chosen(known: &Known, ui: FamilyId) -> Box<dyn Element> {
+    let line = match (known.offers.is_empty(), known.looking) {
+        (_, true) => "Reading the list the registry publishes.",
+        (true, false) => {
+            "Every plugin the registry has built, with what each one will ask to be allowed to \
+             do. Nothing is fetched until you press the button under the list, and nothing about \
+             you goes with the request."
+        }
+        (false, false) => "Nothing in the registry matches what is in the field.",
+    };
+
     Container::new(
-        Paragraph::new(nothing_to_show(known).to_owned(), ui, widgets::LABEL_SIZE)
+        Paragraph::new(line.to_owned(), ui, widgets::LABEL_SIZE)
             .with_color(theme().text_muted)
             .with_line_height_ratio(1.5)
             .finish(),
@@ -578,17 +641,18 @@ fn standing_label(offer: &Offer, installed: Option<&str>, busy: bool) -> String 
     if busy {
         return String::from("Downloading");
     }
+    if let Some(why) = &offer.withdrawn {
+        return format!("Taken back: {why}");
+    }
     match (&offer.release, installed) {
         (None, _) => match &offer.newest_anywhere {
             Some(newest) => format!("Built for plugin API {}", newest.abi),
             None => String::from("Nothing built yet"),
         },
-        (Some(release), Some(installed)) if installed == release.version => {
-            format!("Version {installed}")
-        }
-        (Some(release), Some(installed)) => {
-            format!("{installed} installed, {} out", release.version)
-        }
+        (Some(release), Some(installed)) => match version::compare(&release.version, installed) {
+            Ordering::Greater => format!("{installed} installed, {} out", release.version),
+            _ => format!("Version {installed}"),
+        },
         (Some(release), None) => format!("Version {}", release.version),
     }
 }
@@ -612,3 +676,7 @@ fn matches(offer: &Offer, query: &Query) -> bool {
         &[],
     )
 }
+
+#[cfg(test)]
+#[path = "section_tests.rs"]
+mod tests;

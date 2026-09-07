@@ -512,6 +512,65 @@ pub(crate) fn choice(
 /// default" indicator either application has: the reset button is drawn
 /// de-emphasised and does nothing while there is nothing to reset, so the
 /// control that undoes a change is also the one that says a change was made.
+/// The corner of the box a control that answers a question sits in.
+///
+/// Softer than a row's, because the box is a *card's* and a card's own
+/// rounding is what makes it read as part of the page rather than as something
+/// dropped on top of it.
+pub(crate) const ANSWER_RADIUS: f32 = 8.;
+
+/// The inset inside that box.
+///
+/// Wider than it is tall, which is what the switch has carried since it was
+/// the only control on a card: a label at one end and a control at the other
+/// need more air along the row than across it, or both sit against a corner.
+pub(crate) const ANSWER_PADDING: Padding = Padding {
+    top: 10.,
+    bottom: 10.,
+    left: 12.,
+    right: 12.,
+};
+
+/// The box a control that answers a question about a plugin sits in.
+///
+/// One shape for every one of them, and there are now four: is it on, may it
+/// do this, do you want it, and do you want it gone. Two boxes differing by a
+/// couple of pixels would read as two mechanisms, which is why this is here
+/// rather than on either card — the Store and the Plugins page are read one
+/// after the other.
+///
+/// `live` is whether the control does anything, and it is the *label* that
+/// says so: a muted word beside a control that cannot be pressed is the only
+/// hint there is, since a disabled control carries no handler at all.
+pub(crate) fn answer(
+    label: impl Into<String>,
+    live: bool,
+    control: Box<dyn Element>,
+    ui: FamilyId,
+) -> Box<dyn Element> {
+    Container::new(
+        Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(
+                Text::new(label.into(), ui, LABEL_SIZE)
+                    .with_color(if live {
+                        theme().text_primary
+                    } else {
+                        theme().text_muted
+                    })
+                    .finish(),
+            )
+            .with_child(Expanded::new(1., Empty::new().finish()).finish())
+            .with_child(control)
+            .finish(),
+    )
+    .with_background_color(theme().overlay_1)
+    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ANSWER_RADIUS)))
+    .with_padding(ANSWER_PADDING)
+    .finish()
+}
+
 pub(crate) fn text_button(
     label: impl Into<String>,
     command: Command,
