@@ -31,7 +31,7 @@ mod tests;
 
 use std::path::Path;
 
-pub use branch::{Head, RepoLayout, discover, read_head};
+pub use branch::{Head, RepoLayout, branches as branches_in, discover, read_head};
 pub use diff::{DiffStats, diff_stats_blocking, git_is_missing};
 
 /// Everything a tab row knows about the repository its session sits in.
@@ -63,6 +63,21 @@ pub struct GitFacts {
 /// reads one small file, and spawns nothing.
 pub fn current_branch(dir: &Path) -> Option<Head> {
     discover(dir).and_then(|layout| read_head(&layout.git_dir))
+}
+
+/// Every branch the repository `dir` sits in has, in name order.
+///
+/// Cheap in the same way [`current_branch`] is — it reads files and spawns
+/// nothing — so it is safe wherever a directory is, though it reads a
+/// directory tree rather than one file and belongs on the background pool when
+/// the caller is already on one.
+///
+/// An empty list is "no branches to offer", which is what a directory outside
+/// a repository and a repository with no refs both come back as. Nothing here
+/// distinguishes them, because nothing that asks can do anything with the
+/// difference.
+pub fn branches(dir: &Path) -> Vec<String> {
+    discover(dir).as_ref().map(branches_in).unwrap_or_default()
 }
 
 /// Everything about `dir` that can be had without running git.

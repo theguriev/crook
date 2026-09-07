@@ -67,7 +67,9 @@ fn the_same_bytes_are_written_once() {
     let Ok(first) = store(&wav) else {
         return; // No cache directory here, which is not this test's subject.
     };
-    let written = fs::metadata(&first).expect("the sound was not written").len();
+    let written = fs::metadata(&first)
+        .expect("the sound was not written")
+        .len();
     let second = store(&wav).expect("the second store failed");
     assert_eq!(first, second, "the same bytes went to two different files");
     assert_eq!(
@@ -113,7 +115,12 @@ fn no_partial_file_is_left_behind() {
     let leftovers = fs::read_dir(directory)
         .expect("the sounds directory went away")
         .filter_map(Result::ok)
-        .filter(|entry| entry.path().extension().is_some_and(|kind| kind == "partial"))
+        .filter(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|kind| kind == "partial")
+        })
         .count();
     assert_eq!(leftovers, 0, "a half-written sound was left in the cache");
     let _ = fs::remove_file(&file);

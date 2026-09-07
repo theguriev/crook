@@ -49,6 +49,7 @@ fn tree() -> Node {
 fn for_slot(slot: &str) -> Render {
     Render {
         slot: slot.into(),
+        entry: "chip".into(),
         subject: None,
     }
 }
@@ -124,7 +125,7 @@ const WELL_BEHAVED: &str = r#"
       (i64.or
         (i64.shl (i64.extend_i32_u (global.get $tree_at)) (i64.const 32))
         (i64.extend_i32_u (global.get $tree_len))))
-    (func (export "crook_run") (param $name i32) (param $len i32) (result i32)
+    (func (export "crook_run") (param $name i32) (param $len i32) (param $arg i32) (param $arg_len i32) (result i32)
       ;; Answers with the first byte of the name it was handed, which is how
       ;; these tests see that the host wrote the string where the guest's own
       ;; allocator said to put it.
@@ -284,7 +285,7 @@ fn a_build_that_gives_up_registers_nothing() {
             (i32.const 0))
           (i32.const 1))
         (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
-        (func (export "crook_run") (param i32 i32) (result i32) (i32.const 0))
+        (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
         "#,
     );
     let (mut sandbox, _) = open(&module(&body, ABI_VERSION)).expect("it should open");
@@ -312,7 +313,7 @@ fn a_build_that_traps_registers_nothing_either() {
             (i32.const 0))
           unreachable)
         (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
-        (func (export "crook_run") (param i32 i32) (result i32) (i32.const 0))
+        (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
         "#,
     );
     let (mut sandbox, _) = open(&module(&body, ABI_VERSION)).expect("it should open");
@@ -330,7 +331,7 @@ fn a_plugin_that_never_stops_runs_out_of_fuel() {
         r#"
         (func (export "crook_build") (result i32) (loop br 0) (i32.const 0))
         (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
-        (func (export "crook_run") (param i32 i32) (result i32) (i32.const 0))
+        (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
         "#,
     );
     // A small budget on purpose. What is being tested is that a loop is
@@ -383,12 +384,13 @@ fn a_render_carries_what_it_is_about_and_not_only_where_it_goes() {
           (f32.store (i32.const 2049) (f32.convert_i32_u (local.get $len)))
           (i32.store8 (i32.const 2053) (i32.const 0))
           (i64.or (i64.shl (i64.const 2048) (i64.const 32)) (i64.const 6)))
-        (func (export "crook_run") (param i32 i32) (result i32) (i32.const 0))
+        (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
         "#,
     );
     let (mut sandbox, _) = open(&module(&body, ABI_VERSION)).expect("it should open");
     let bare = for_slot("tab.row.mark");
     let about_a_row = Render {
+        entry: "mark".into(),
         slot: "tab.row.mark".into(),
         subject: Some(Subject::Tab(TabFacts {
             key: 0x0123_4567_89ab_cdef,
@@ -429,7 +431,9 @@ fn the_host_writes_a_string_where_the_guest_asked_for_it() {
     let (mut sandbox, _) = open(&well_behaved()).expect("it should open");
     sandbox.build().expect("it should build");
 
-    let problem = sandbox.run("Ping").expect_err("this module always answers");
+    let problem = sandbox
+        .run("Ping", "")
+        .expect_err("this module always answers");
 
     assert_eq!(
         problem,
@@ -447,7 +451,7 @@ fn an_answer_that_points_outside_its_own_memory_is_refused() {
         (func (export "crook_build") (result i32) (i32.const 0))
         (func (export "crook_render") (param i32 i32) (result i64)
           (i64.or (i64.shl (i64.const 4294901760) (i64.const 32)) (i64.const 64)))
-        (func (export "crook_run") (param i32 i32) (result i32) (i32.const 0))
+        (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
         "#,
     );
     let (mut sandbox, _) = open(&module(&body, ABI_VERSION)).expect("it should open");
@@ -468,7 +472,7 @@ fn an_answer_longer_than_any_answer_could_be_is_refused_before_it_is_allocated()
         (func (export "crook_build") (result i32) (i32.const 0))
         (func (export "crook_render") (param i32 i32) (result i64)
           (i64.or (i64.shl (i64.const 16) (i64.const 32)) (i64.const 4294967295)))
-        (func (export "crook_run") (param i32 i32) (result i32) (i32.const 0))
+        (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
         "#,
     );
     let (mut sandbox, _) = open(&module(&body, ABI_VERSION)).expect("it should open");
@@ -493,7 +497,7 @@ fn an_answer_that_is_not_what_it_should_be_is_refused() {
           (i64.or
             (i64.shl (i64.extend_i32_u (global.get $manifest_at)) (i64.const 32))
             (i64.extend_i32_u (global.get $manifest_len))))
-        (func (export "crook_run") (param i32 i32) (result i32) (i32.const 0))
+        (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
         "#,
     );
     let (mut sandbox, _) = open(&module(&body, ABI_VERSION)).expect("it should open");
@@ -547,7 +551,7 @@ fn a_plugin_may_do_real_work_without_taking_the_host_stack_with_it() {
             (br_if $again (i32.lt_s (local.get $i) (i32.const 3000000))))
           (i32.const 0))
         (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
-        (func (export "crook_run") (param i32 i32) (result i32) (i32.const 0))
+        (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
         "#,
     );
     let (mut sandbox, _) = open(&module(&body, ABI_VERSION)).expect("it should open");
@@ -571,7 +575,7 @@ const ASKING: &str = r#"
       (i64.or
         (i64.shl (i64.extend_i32_u (global.get $tree_at)) (i64.const 32))
         (i64.extend_i32_u (global.get $tree_len))))
-    (func (export "crook_run") (param i32 i32) (result i32) (i32.const 0))
+    (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
     (func (export "crook_deliver") (param $ticket i32) (param $at i32) (param $len i32)
       (result i32)
       ;; The ticket it was given and the first byte of what it was given, in

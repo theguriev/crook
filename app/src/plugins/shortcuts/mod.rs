@@ -17,23 +17,48 @@
 //! out would be a page that answers "what does this key do" with silence for
 //! the keys somebody presses most.
 //!
-//! # Read-only, unlike VSCode's
+//! # It can change one, now
 //!
-//! VSCode's editor records a chord from the keyboard and writes the file for
-//! you. This one prints and does not edit, because recording a chord needs a
-//! control that takes over the keyboard and the settings page has no text
-//! input and no popup — see `settings_page::widgets`. The path to the file is
-//! on the page for that reason, and the format is documented beside it.
+//! It could not, and its own doc explained why: recording a chord needs a
+//! control that takes over the keyboard, and the settings page has no text
+//! input and no popup. It has one now — not on the page, but over the window,
+//! where `crook/window`'s overlay slot puts anything that floats. Every row
+//! carries a **Change** button, `crook/shortcuts/rebind` is the same thing by
+//! name for anything that would rather ask than draw a button, and
+//! [`recorder`] is the surface both of them put up. The path to the file is
+//! still on the page, and the format is still documented beside it, because
+//! this control writes one line of that format and a person's own file is
+//! still the authority.
+//!
+//! # Why the rebinding is a command with an argument
+//!
+//! Because the thing that most wants it is not this page. A chip that says
+//! which chord starts an agent is the natural place to offer "change that",
+//! and that chip may well be a plugin outside the binary — which can hold
+//! [`Capability::RunCommands`](crook_plugin_api::Capability::RunCommands)
+//! naming this one command and nothing else. So the flow is reachable by name
+//! and told *which* command through `Host::said`, and the button on this page
+//! is one caller of it rather than the only way in.
 
 use crookui_core::prelude::*;
 
-use crook_plugin::{Manifest, PluginId, Tier};
+use std::rc::Rc;
 
-use crate::keybindings::{self, Source};
+use crook_plugin::{ActionName, Manifest, PluginId, Tier};
+
+use crate::keybindings::{self, Keybindings, Source};
 use crate::plugin::{BuildError, Host, Plugin};
-use crate::workspace::Workspace;
+use crate::theme::theme;
+use crate::workspace::settings_page::named;
 use crate::workspace::settings_page::search::Words;
 use crate::workspace::settings_page::widgets::{self, Category, Entry};
+use crate::workspace::{Workspace, WorkspaceAction};
+
+use super::window::WINDOW_OVERLAY;
+
+mod recorder;
+
+use recorder::Recorder;
 
 /// The plugin that owns the Keyboard Shortcuts page.
 pub struct Shortcuts;
@@ -47,8 +72,153 @@ impl Plugin for Shortcuts {
         host.add_settings_page("page", "Keyboard Shortcuts", 30, |workspace, _| {
             shortcuts(workspace)
         });
+
+        let recorder = Rc::new(Recorder::new(
+            recorder::Names {
+                record: action("record"),
+                cancel: action("cancel"),
+                ignore: action("ignore"),
+            },
+            host.fonts(),
+        ));
+        // Every keystroke, while it is up: the chord being bound is very
+        // likely one the window itself answers to, and a recorder that let
+        // those through could not record them. See `recorder`.
+        let showing = host.claim_surface({
+            let recorder = recorder.clone();
+            move |keystroke| recorder.claims(keystroke)
+        });
+        recorder.armed_by(showing);
+
+        // A command rather than an action, so a person can find it: it is
+        // offered with no argument from the palette and does nothing there,
+        // which is worse than not offering it. So: an action, reachable by
+        // name and by anything holding the capability, and a button on every
+        // row of the page for the way a person finds it.
+        host.register_action(action("rebind"), {
+            let recorder = recorder.clone();
+            move |workspace, ctx| {
+                // Which command is what the caller said before it ran this.
+                let said = workspace.host().said();
+                let Ok(command) = ActionName::parse(said.trim()) else {
+                    log::warn!("crook/shortcuts/rebind was asked to rebind {said:?}");
+                    return;
+                };
+                let title = workspace
+                    .host()
+                    .title_of(&command)
+                    .unwrap_or(command.as_str())
+                    .to_owned();
+                recorder.open(command, title);
+                workspace.sync_input_keys();
+                ctx.notify();
+            }
+        });
+
+        host.register_action(action("record"), {
+            let recorder = recorder.clone();
+            move |workspace, ctx| {
+                let Some((command, chord)) = recorder.recorded() else {
+                    return;
+                };
+                match recorder::bind(&command, &chord) {
+                    Ok(path) => {
+                        log::info!("bound {chord} to {command} in {}", path.display());
+                        // Read back rather than added to the table in memory:
+                        // the file is the authority, and a binding that only
+                        // existed in this process would disappear at the next
+                        // launch without anybody being told.
+                        workspace.set_keybindings(Keybindings::load(&path));
+                        recorder.close();
+                        workspace.sync_input_keys();
+                    }
+                    // Left up, saying what went wrong: a person who has just
+                    // pressed three keys deserves to be told they landed
+                    // nowhere, and to be able to try again.
+                    Err(why) => recorder.failed(why),
+                }
+                ctx.notify();
+            }
+        });
+
+        for name in ["cancel", "ignore"] {
+            let recorder = recorder.clone();
+            // Two actions, one handler, and the difference is the name: a
+            // modifier on its way to a chord is claimed and does nothing,
+            // Escape is claimed and takes the recorder down.
+            host.register_action(action(name), move |workspace, ctx| {
+                if name == "cancel" {
+                    recorder.close();
+                    workspace.sync_input_keys();
+                    ctx.notify();
+                }
+            });
+        }
+
+        host.contribute(WINDOW_OVERLAY, "recorder", 10, {
+            let recorder = recorder.clone();
+            move |_, _| recorder::render(&recorder)
+        });
+
         Ok(())
     }
+}
+
+/// One command's row: what it is called, what reaches it, and a way to change
+/// that.
+///
+/// The chord is printed in the monospace family the page prints every other
+/// chord in, and the button beside it stands for *this* command — which is
+/// what the voice carries, an action having no argument of its own.
+fn rebindable(
+    workspace: &Workspace,
+    command: &ActionName,
+    title: &str,
+    described: String,
+    printed: String,
+    fonts: crate::workspace::Fonts,
+) -> Entry {
+    let words = Words::new(title.to_owned())
+        .with_description(described)
+        .with_keywords(&[
+            "command", "chord", "binding", "shortcut", "key", "rebind", "change",
+        ]);
+
+    let control = Flex::row()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_child(
+            Text::new(printed.clone(), fonts.monospace, 10.5)
+                .with_color(theme().text_primary)
+                .finish(),
+        )
+        .with_child(
+            Container::new(widgets::text_button_about(
+                "Change",
+                Some((workspace.host().voice(), command.to_string())),
+                workspace
+                    .host()
+                    .action(&action("rebind"))
+                    .map(WorkspaceAction::Run),
+                workspace
+                    .settings_page()
+                    .control(named(&format!("rebind.{command}"))),
+                fonts.ui,
+            ))
+            .with_margin_left(10.)
+            .finish(),
+        )
+        .finish();
+
+    // What the page's search matches on the right of a row. `widgets::row`
+    // does not fill it in — a switch has no text to find — and this row does:
+    // typing a chord into the box should find the command it runs.
+    widgets::row(words, true, control, fonts.ui).saying(printed)
+}
+
+/// `crook/shortcuts/<name>`.
+fn action(name: &str) -> ActionName {
+    ActionName::parse(&format!("crook/shortcuts/{name}")).expect("a name built from a literal")
 }
 
 /// Built once and leaked; see `header::manifest`.
@@ -97,19 +267,13 @@ fn commands(workspace: &Workspace) -> Vec<Category> {
             Some(source) => format!("{command} · {}", source.label()),
             None => command.to_string(),
         };
-        let row = widgets::fact(
-            Words::new(title.clone())
-                .with_description(described)
-                .with_keywords(&["command", "chord", "binding", "shortcut", "key"]),
-            match chords.is_empty() {
-                true => "not bound".to_owned(),
-                // Every chord, not the first one: somebody asking "why did
-                // this fire" needs to see the second one.
-                false => chords.join(", "),
-            },
-            true,
-            fonts,
-        );
+        // Every chord, not the first one: somebody asking "why did this fire"
+        // needs to see the second one.
+        let printed = match chords.is_empty() {
+            true => "not bound".to_owned(),
+            false => chords.join(", "),
+        };
+        let row = rebindable(workspace, command, title, described, printed, fonts);
 
         match owners.iter().position(|known| *known == owner) {
             Some(at) => categories[at].entries.push(row),

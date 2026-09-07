@@ -24,6 +24,7 @@
 //! sixty times a second has stopped working.
 
 mod install;
+pub(super) mod picker;
 mod render;
 mod runtime;
 mod sound;
@@ -37,7 +38,8 @@ use crookui_core::prelude::*;
 
 use crook_plugin::{ActionName, Manifest, PluginId, Tier};
 use crook_plugin_api::{
-    Capability, Event, Node, Place, Render, Status, Subject, TabFacts, TabInfo,
+    Answer, Capability, Command, Event, Node, Place, Render, Request, Status, Subject, TabFacts,
+    TabInfo,
 };
 use crook_wasm::{Fuel, Sandbox};
 
@@ -47,7 +49,9 @@ use crate::tab::AgentStatus;
 use crate::workspace::Workspace;
 
 pub use install::install;
-use runtime::Runtime;
+use picker::Held;
+use render::Placement;
+use runtime::{Gesture, Runtime};
 
 /// The file a plugin's directory has to hold.
 const MODULE_FILE: &str = "plugin.wasm";
@@ -188,8 +192,31 @@ impl Plugin for WasmPlugin {
         });
         // The bridge every model-backed feature in Crook has: an answer that
         // lands changes what the chip says, and the row around it has to be
-        // laid out again.
-        ctx.observe(&runtime, |_, _, ctx| ctx.notify());
+        // laid out again — and, since a workspace is exactly what this
+        // observer is handed and the model has none, it is also where the
+        // things only a workspace can answer are answered. See
+        // `runtime::Runtime::deeds`.
+        ctx.observe(&runtime, |workspace, runtime, ctx| {
+            loop {
+                let deeds = runtime.update(ctx, |runtime, _| runtime.deeds());
+                if deeds.is_empty() {
+                    break;
+                }
+                for (ticket, request) in deeds {
+                    let answer = serve(workspace, &request, ctx);
+                    runtime.update(ctx, |runtime, ctx| runtime.answer(ticket, answer, ctx));
+                }
+            }
+            ctx.notify();
+        });
+
+        // What the host holds on this plugin's behalf: the field of whatever
+        // picker it has up, the row the keyboard is on, the menu that is open,
+        // and what the last thing pressed had to say. The *keys* that act on
+        // it are not registered here and are not this plugin's: there is one
+        // set of them for the tier, on `crook/plugins`, because a panel is
+        // modal and only one plugin can have one up. See `picker`.
+        let chrome = Rc::new(Held::new(host.voice()));
 
         // Registered on the grant rather than on the export, so a plugin that
         // was refused hears nothing at all rather than being handed events it
@@ -220,6 +247,9 @@ impl Plugin for WasmPlugin {
             let hovers = Rc::new(render::Hovers::default());
 
             if let Some(slot) = host.slot_named(&contribution.slot) {
+                let entry = contribution.entry.clone();
+                let chrome = chrome.clone();
+                let placement = placement(&contribution.slot);
                 host.contribute(
                     slot,
                     contribution.entry,
@@ -227,10 +257,27 @@ impl Plugin for WasmPlugin {
                     move |workspace, _| {
                         let render = Render {
                             slot: name.clone(),
+                            entry: entry.clone(),
                             subject: None,
                         };
                         let node = ask(&sandbox, &failures, &who, &render);
-                        drawn(&node, workspace, &who, render::Scale::ROW, &hovers)
+                        let element = drawn(
+                            &node,
+                            workspace,
+                            &who,
+                            render::Scale::ROW,
+                            placement,
+                            &chrome,
+                            &hovers,
+                        );
+                        // A picker that has just appeared has taken the
+                        // keyboard off the pane it is drawn in, and nothing
+                        // else would say so: what put it up is the plugin's
+                        // own state, which the host finds out by drawing it.
+                        if chrome.keyboard_moved() {
+                            workspace.sync_input_keys();
+                        }
+                        element
                     },
                 );
                 continue;
@@ -250,6 +297,8 @@ impl Plugin for WasmPlugin {
 
             // A mark and the badge on its corner are the same vocabulary drawn
             // at two sizes, and the size is the host's to decide.
+            let entry = contribution.entry.clone();
+            let chrome = chrome.clone();
             let scale = if slot == TAB_ROW_BADGE {
                 render::Scale::BADGE
             } else {
@@ -262,6 +311,7 @@ impl Plugin for WasmPlugin {
                 move |workspace, row, _| {
                     let render = Render {
                         slot: name.clone(),
+                        entry: entry.clone(),
                         subject: Some(Subject::Tab(sees.facts(row, &who))),
                     };
                     match ask(&sandbox, &failures, &who, &render) {
@@ -269,7 +319,18 @@ impl Plugin for WasmPlugin {
                         // is most rows for most plugins. The host draws what
                         // it would have drawn anyway — see `plugins::tabs`.
                         Node::Empty => None,
-                        node => Some(drawn(&node, workspace, &who, scale, &hovers)),
+                        node => Some(drawn(
+                            &node,
+                            workspace,
+                            &who,
+                            scale,
+                            // A mark on a row hangs nothing under it: there is
+                            // one of it per row, and a panel per row is not a
+                            // thing this slot can mean.
+                            Placement::Below,
+                            &chrome,
+                            &hovers,
+                        )),
                     }
                 },
             );
@@ -293,12 +354,19 @@ impl Plugin for WasmPlugin {
             let who = self.manifest.id.clone();
             let called = action.name.clone();
             let runtime = runtime.clone();
-            let run = move |_: &mut Workspace, ctx: &mut ViewContext<Workspace>| {
+            let chrome = chrome.clone();
+            let run = move |workspace: &mut Workspace, ctx: &mut ViewContext<Workspace>| {
                 if failures.get() >= GIVE_UP_AFTER {
                     return;
                 }
+                // Whatever the thing that was pressed had to say: the key of a
+                // chosen row, the entry of a menu, or what the command line
+                // handed a `--action`. Empty for a chord, for the palette and
+                // for another plugin, which is most of the ways an action is
+                // reached.
+                let argument = workspace.host().said();
                 match sandbox.try_borrow_mut() {
-                    Ok(mut sandbox) => match sandbox.run(&called) {
+                    Ok(mut sandbox) => match sandbox.run(&called, &argument) {
                         Ok(()) => failures.set(0),
                         Err(problem) => {
                             log::warn!("{who}: {problem}");
@@ -312,6 +380,14 @@ impl Plugin for WasmPlugin {
                         return;
                     }
                 }
+                // The panel this ran out of may have closed itself: what a
+                // plugin's action does to its own state is its own business,
+                // and the host finds out by drawing it again. Letting go here
+                // rather than guessing means the keyboard is the pane's until
+                // the next frame puts a picker back on screen.
+                chrome.released();
+                workspace.sync_input_keys();
+
                 // The guest may have changed what it draws, and nothing out
                 // here can tell whether it did: its state is inside the
                 // module and what came back is a `()`. So every action asks
@@ -327,8 +403,10 @@ impl Plugin for WasmPlugin {
                 ctx.notify();
                 // Whatever pressing it made the plugin ask for. An action is
                 // one of the four calls that reach a context, which is what
-                // makes "the button refreshes the reading" work at all.
-                runtime.update(ctx, |runtime, ctx| runtime.pump(ctx));
+                // makes "the button refreshes the reading" work at all — and
+                // it is the *only* one that may type into a shell, which is
+                // what `Gesture` carries.
+                runtime.update(ctx, |runtime, ctx| runtime.pump(Gesture::Pressed, ctx));
             };
 
             match action.title {
@@ -343,11 +421,146 @@ impl Plugin for WasmPlugin {
 
         // Everything the build asked for. A plugin that reads a file and then
         // fetches what the file authorised starts here and carries on by
-        // itself, because a delivery pumps again.
-        runtime.update(ctx, |runtime, ctx| runtime.pump(ctx));
+        // itself, because a delivery pumps again. Nobody pressed anything to
+        // get here, so nothing that changes the window is taken from it.
+        runtime.update(ctx, |runtime, ctx| runtime.pump(Gesture::None, ctx));
 
         Ok(())
     }
+}
+
+/// Where a panel hangs, given the slot the chip is in.
+///
+/// The host's answer rather than the plugin's, and the slot is the whole of
+/// what it is worked out from: the header has the window below it, and a
+/// pane's own chips sit at the foot of one. A slot this build has never heard
+/// of is treated as the header's, which is the arrangement a chip in a row is
+/// usually in.
+fn placement(slot: &str) -> Placement {
+    if slot == crate::plugins::pane::PANE_CHIPS.as_str() {
+        Placement::Above
+    } else {
+        Placement::Below
+    }
+}
+
+/// What only a workspace can answer.
+///
+/// The other half of `runtime::Runtime::deeds`: everything here is a question
+/// about, or a change to, the window the plugin is drawn in, and the model
+/// that holds the plugin cannot see one. Every one of these has already been
+/// checked against what a person granted.
+fn serve(workspace: &mut Workspace, request: &Request, ctx: &mut ViewContext<Workspace>) -> Answer {
+    match request {
+        Request::Where => {
+            let (directory, facts) = workspace.focused_facts(ctx);
+            let diff = facts.as_ref().and_then(|facts| facts.diff.as_ref());
+            Answer::Where {
+                place: directory.map(|directory| Place {
+                    directory: directory.to_string_lossy().into_owned(),
+                    branch: facts
+                        .as_ref()
+                        .and_then(|facts| facts.branch.as_ref())
+                        .map(|head| head.label().to_owned()),
+                    worktree: facts.as_ref().is_some_and(|facts| facts.worktree),
+                }),
+                home: dirs::home_dir().map(|path| path.to_string_lossy().into_owned()),
+                // Zero rather than absent for a directory git has said nothing
+                // about, because the wire has no third answer and "nothing
+                // changed" is what a chip would print either way.
+                added: diff.map_or(0, |diff| diff.lines_added),
+                removed: diff.map_or(0, |diff| diff.lines_removed),
+            }
+        }
+        Request::Commands => {
+            let keybindings = workspace.keybindings();
+            Answer::Commands(
+                workspace
+                    .host()
+                    .commands()
+                    .iter()
+                    .map(|(_, action, title)| Command {
+                        name: action.to_string(),
+                        title: title.clone(),
+                        // The first, not all of them: a hint prints one chord,
+                        // and a plugin that wanted the rest can ask the person
+                        // to look at the Keyboard Shortcuts page, which is
+                        // where the whole list already is.
+                        chord: keybindings.chords_for(action).into_iter().next(),
+                    })
+                    .collect(),
+            )
+        }
+        Request::Type { template, argument } => match fill(template, argument) {
+            Some(line) if workspace.type_into_focused_pane(&line, ctx) => Answer::Done,
+            Some(_) => Answer::Failed(String::from("there is no shell in that pane to type into")),
+            None => Answer::Failed(String::from(
+                "that is not something this can put in a command line",
+            )),
+        },
+        Request::Run { name, argument } => {
+            let Ok(name) = ActionName::parse(name) else {
+                return Answer::Failed(format!("{name:?} is not the name of a command"));
+            };
+            let Some(id) = workspace.host().action(&name) else {
+                return Answer::Failed(format!("{name} is not something this Crook can do"));
+            };
+            // Said before it is run and taken when it runs, which is the same
+            // arrangement a picker's row uses to say which row it was.
+            workspace.host().say(argument);
+            workspace.run_action(id, ctx);
+            Answer::Done
+        }
+        // Everything else is work and was done on the pool; reaching one of
+        // these arms would be this file disagreeing with `runtime`.
+        Request::Fetch { .. }
+        | Request::ReadFile { .. }
+        | Request::List { .. }
+        | Request::Repository { .. }
+        | Request::Tally { .. }
+        | Request::PlaySound { .. } => {
+            Answer::Failed(String::from("that is not something the window can do"))
+        }
+    }
+}
+
+/// The line a granted template and an argument make, or `None` for an
+/// argument no command line should carry.
+///
+/// The template is the string a person allowed, so the *shape* of the command
+/// is theirs and only the hole is the plugin's. What goes in the hole is
+/// quoted here rather than by the plugin, because a plugin that quoted its own
+/// argument would be a plugin trusted to do it right — and a branch called
+/// `; rm -rf ~` is a branch name that has to stay one.
+///
+/// A control character is refused outright rather than escaped. A newline is
+/// the character that ends a command line, a carriage return is what a shell's
+/// line editor does something else with entirely, and a directory whose name
+/// holds either is not worth the reasoning it would take to be sure.
+fn fill(template: &str, argument: &str) -> Option<String> {
+    if argument.chars().any(char::is_control) {
+        return None;
+    }
+    let (before, after) = template.split_once("{}")?;
+    Some(format!("{before}{}{after}", quote(argument)))
+}
+
+/// One argument, as a shell will read it as one word.
+///
+/// Single quotes, because inside them every shell this can reach treats every
+/// character as itself — no expansion, no globbing, no command substitution.
+/// The two families differ only in how a single quote is written inside them:
+/// POSIX shells end the quoting, escape it and start again; PowerShell doubles
+/// it.
+#[cfg(not(windows))]
+fn quote(argument: &str) -> String {
+    format!("'{}'", argument.replace('\'', "'\\''"))
+}
+
+/// See the other one.
+#[cfg(windows)]
+fn quote(argument: &str) -> String {
+    format!("'{}'", argument.replace('\'', "''"))
 }
 
 /// Asks the guest what it wants drawn, and gives up on it if it keeps failing.
@@ -394,14 +607,21 @@ fn drawn(
     workspace: &Workspace,
     who: &PluginId,
     scale: render::Scale,
+    placement: Placement,
+    chrome: &Rc<Held>,
     hovers: &render::Hovers,
 ) -> Box<dyn Element> {
     let host = workspace.host();
     let prefix = who.clone();
     render::element(
         node,
-        workspace.fonts().ui,
-        scale,
+        render::Chrome::new(
+            workspace.fonts(),
+            scale,
+            placement,
+            chrome,
+            workspace.clipboard(),
+        ),
         &move |action| {
             ActionName::parse(&format!("{prefix}/{action}"))
                 .ok()

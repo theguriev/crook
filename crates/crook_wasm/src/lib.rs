@@ -133,10 +133,20 @@ pub mod exports {
 
     /// `crook_render(ptr, len) -> i64`, packed like the manifest, and given a
     /// [`Render`](crook_plugin_api::Render) rather than a bare slot name: the
-    /// slot, and what it is about when the slot is one drawn per row.
+    /// slot, the plugin's own name for the contribution being drawn, and what
+    /// the render is about when the slot is one drawn per row.
     pub const RENDER: &str = "crook_render";
 
-    /// `crook_run(name_ptr, name_len) -> i32`, zero for "done".
+    /// `crook_run(name_ptr, name_len, arg_ptr, arg_len) -> i32`, zero for
+    /// "done".
+    ///
+    /// The argument is what the thing that was pressed had to say: the key of
+    /// the row a person chose out of a
+    /// [`Picker`](crook_plugin_api::Node::Picker), what they typed into it,
+    /// the entry of a [`Menu`](crook_plugin_api::Node::Menu). Empty for every
+    /// other way an action is reached — a chord, the palette, another plugin —
+    /// which is most of them, and is why it is an argument the guest may
+    /// ignore rather than a second export.
     pub const RUN: &str = "crook_run";
 
     /// `crook_deliver(ticket, ptr, len) -> i32`, zero for "taken", carrying the

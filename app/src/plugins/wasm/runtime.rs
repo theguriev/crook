@@ -22,6 +22,23 @@
 //! taken on the next of those. A plugin that wants to poll asks from its tick,
 //! which is what a tick is for.
 //!
+//! # Three of the things it may ask for are not this model's to answer
+//!
+//! A fetch and a file are work: they belong on the pool and come back here.
+//! Where the active pane is, what Crook can be asked to do, typing a line into
+//! a shell and running one of Crook's own commands are none of them work —
+//! they are questions about, and changes to, the window this plugin is drawn
+//! in, and this model cannot see it. So those wait in [`Runtime::deeds`] and
+//! are served by the observer in `wasm::mod`, which is handed the workspace
+//! the moment anything here notifies.
+//!
+//! **And two of them may only happen because somebody pressed something.**
+//! A plugin that could type into a shell from a timer is a plugin that types
+//! while nobody is looking, so a request that *changes* something is taken
+//! only out of a [`crook_run`](crook_wasm::exports::RUN) a person caused. It
+//! is not refused — the grant is not the thing being failed — it comes back
+//! as [`Answer::Failed`] saying so.
+//!
 //! # Nothing a plugin asks for happens because it asked
 //!
 //! Every request is checked against what a person granted before it is
@@ -45,7 +62,7 @@ use crookui_core::prelude::*;
 
 use crook_plugin::PluginId;
 use crook_plugin_api::{
-    Answer, Bound, Capability, Cell as Field, Event, Method, Request, Table, Tallied,
+    Answer, Bound, Capability, Cell as Field, Entry, Event, Method, Request, Table, Tallied,
 };
 use crook_wasm::Sandbox;
 
@@ -107,6 +124,27 @@ const FILES_PER_WALK: usize = 20_000;
 /// hundred megabytes into memory would be finding it out too late.
 const MAX_ANSWER: u64 = 1 << 20;
 
+/// How many names one [`Request::List`] answers with.
+///
+/// A directory is one directory and never a tree, so this is a bound on the
+/// unusual rather than on the ordinary: `/nix/store` and a `node_modules` that
+/// got away from somebody are both real, and neither should be a megabyte
+/// copied into a plugin's memory for a list a person scrolls ten rows of.
+const MAX_NAMES: usize = 2048;
+
+/// Why the guest is being pumped.
+///
+/// The difference between a plugin that answers a click and a plugin that acts
+/// on its own, which is the whole of what makes typing into somebody's shell
+/// an acceptable thing for a stranger's plugin to be able to do.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(super) enum Gesture {
+    /// A person pressed something and this is what came of it.
+    Pressed,
+    /// Anything else: a build, a timer, an answer landing.
+    None,
+}
+
 /// One sandboxed plugin's runtime: what it asked for, and what came back.
 pub(super) struct Runtime {
     /// Whose requests these are, for the log line when one is refused.
@@ -145,6 +183,12 @@ pub(super) struct Runtime {
     /// deleted usage poller carried this same design and said why in the same
     /// words; this is that lesson, relearned the expensive way.
     wake: Option<Sender<()>>,
+    /// What it asked for that only the workspace can answer, waiting for
+    /// somewhere that holds one. See this module's own doc.
+    ///
+    /// Every one of these has already been checked against the grant: what is
+    /// waiting is the *doing*, and a request nobody allowed never gets here.
+    deeds: Vec<(u32, Request)>,
 }
 
 impl Entity for Runtime {
@@ -167,7 +211,17 @@ impl Runtime {
             refusals: 0,
             waiting: None,
             wake: None,
+            deeds: Vec::new(),
         }
+    }
+
+    /// Everything waiting for a workspace, taken.
+    ///
+    /// Drained rather than read, for the reason the sandbox drains what a
+    /// guest asked for: a deed served twice is a line typed into a shell
+    /// twice, and the second one would be the host's fault.
+    pub(super) fn deeds(&mut self) -> Vec<(u32, Request)> {
+        std::mem::take(&mut self.deeds)
     }
 
     /// Takes everything the guest asked for and starts it.
@@ -189,7 +243,7 @@ impl Runtime {
         }
     }
 
-    pub(super) fn pump(&mut self, ctx: &mut ModelContext<Self>) {
+    pub(super) fn pump(&mut self, gesture: Gesture, ctx: &mut ModelContext<Self>) {
         self.set_timezone();
 
         let (asked, timer) = {
@@ -202,7 +256,7 @@ impl Runtime {
         };
 
         for (ticket, request) in asked {
-            self.start(ticket, request, ctx);
+            self.start(ticket, request, gesture, ctx);
         }
         if let Some(after) = timer {
             self.wait(after, ctx);
@@ -210,7 +264,13 @@ impl Runtime {
     }
 
     /// Checks one request against the grant and starts it if it is inside.
-    fn start(&mut self, ticket: u32, request: Request, ctx: &mut ModelContext<Self>) {
+    fn start(
+        &mut self,
+        ticket: u32,
+        request: Request,
+        gesture: Gesture,
+        ctx: &mut ModelContext<Self>,
+    ) {
         // A plugin that asks for things without exporting anywhere to put the
         // answer is a plugin nothing can be done for. Said once, here, rather
         // than after the work is done.
@@ -240,15 +300,37 @@ impl Runtime {
             self.refusals = 0;
         }
 
+        // Asked for on nobody's behalf. Not a refusal — the grant is not the
+        // thing being failed — and not counted against one either: a plugin
+        // that got this wrong has a bug rather than a permission it is
+        // missing.
+        let declined = (refused.is_none() && changes_something(&request) && gesture == Gesture::None)
+            .then(|| {
+                String::from(
+                    "that only happens when somebody presses something, and nobody pressed anything",
+                )
+            });
+
+        // Allowed, invited, and about the window rather than about the world:
+        // it waits for somewhere that holds one. Notified, because the thing
+        // that serves it is an observer of this model and nothing else would
+        // say there is anything to serve.
+        if refused.is_none() && declined.is_none() && needs_the_workspace(&request) {
+            self.deeds.push((ticket, request));
+            ctx.notify();
+            return;
+        }
+
         // A refusal goes round the pool exactly as the work would, and that is
         // not ceremony: answering it here would mean `deliver` running inside
         // `pump`, and a guest that answers a refusal by asking again would
         // take the host's stack down with it. Off the foreground and back is
         // what makes the loop a loop rather than a recursion.
         let working = ctx.background().spawn(async move {
-            match refused {
-                Some(sentence) => Answer::Refused(sentence),
-                None => perform(request),
+            match (refused, declined) {
+                (Some(sentence), _) => Answer::Refused(sentence),
+                (None, Some(why)) => Answer::Failed(why),
+                (None, None) => perform(request),
             }
         });
         ctx.spawn(working, move |runtime, answer, ctx| {
@@ -298,11 +380,17 @@ impl Runtime {
             }
         }
 
-        self.pump(ctx);
+        // An event is something that happened, not somebody pressing
+        // something: whatever it makes the plugin ask for, it may not type.
+        self.pump(Gesture::None, ctx);
     }
 
     /// Hands one answer to the guest, and takes whatever that made it ask for.
-    fn answer(&mut self, ticket: u32, answer: Answer, ctx: &mut ModelContext<Self>) {
+    ///
+    /// Reachable from `wasm::mod` as well as from here: a deed the workspace
+    /// served comes back through the same door as a fetch off the pool, so a
+    /// guest cannot tell which of its requests took a detour.
+    pub(super) fn answer(&mut self, ticket: u32, answer: Answer, ctx: &mut ModelContext<Self>) {
         if self.failures.get() >= GIVE_UP_AFTER {
             return;
         }
@@ -335,7 +423,9 @@ impl Runtime {
             }
         }
 
-        self.pump(ctx);
+        // Whatever the answer made it ask for. Not a gesture: an answer
+        // landing is not somebody pressing something, however it started.
+        self.pump(Gesture::None, ctx);
         // The reading changed, so whatever is drawing it has to be asked
         // again. This is the bridge every model-backed feature in Crook has.
         ctx.notify();
@@ -430,7 +520,7 @@ impl Runtime {
             }
         }
 
-        self.pump(ctx);
+        self.pump(Gesture::None, ctx);
         ctx.notify();
     }
 
@@ -461,6 +551,13 @@ pub(super) fn allowed(granted: &[String], request: &Request) -> Result<(), Strin
         // directory *and* say it means everything under it.
         Request::Tally { root, .. } => Capability::ReadFiles(vec![format!("{root}/**")]),
         Request::PlaySound { .. } => Capability::PlaySound,
+        // The one grant that is not a string comparison: what was allowed is a
+        // *root* and what is being asked for is somewhere under it.
+        Request::List { path } => return under_a_root(granted, path),
+        Request::Where | Request::Repository { .. } => Capability::ReadWorkingDirectory,
+        Request::Type { template, .. } => Capability::TypeCommands(vec![template.clone()]),
+        Request::Run { name, .. } => Capability::RunCommands(vec![name.clone()]),
+        Request::Commands => Capability::ReadCommands,
     };
 
     if wanted
@@ -472,6 +569,52 @@ pub(super) fn allowed(granted: &[String], request: &Request) -> Result<(), Strin
     } else {
         Err(wanted.sentence())
     }
+}
+
+/// Whether a directory is under one of the roots a person allowed.
+///
+/// The comparison is on the *resolved* paths rather than on the text, because
+/// `~/Work` and `/home/eugen/Work` are the same directory and a plugin that
+/// asked for one on a grant written as the other is asking for what it was
+/// allowed. [`resolve`] refuses a path holding `..` outright, which is what
+/// makes "under a root" mean it — a path that can walk is a grant that means
+/// something other than what it says.
+fn under_a_root(granted: &[String], path: &str) -> Result<(), String> {
+    let refusal = || Capability::ListDirectories(vec![path.to_owned()]).sentence();
+    let Some(wanted) = resolve(path) else {
+        return Err(refusal());
+    };
+
+    let inside = granted
+        .iter()
+        .filter_map(|key| key.strip_prefix("list:"))
+        .filter_map(resolve)
+        .any(|root| wanted.starts_with(&root));
+
+    inside.then_some(()).ok_or_else(refusal)
+}
+
+/// Whether only the workspace can answer this.
+///
+/// Where the active pane is and what Crook can be asked to do are questions
+/// about the window; typing a line and running a command are changes to it.
+/// None of the four is work, and this model cannot see a window — see the
+/// module's own doc.
+fn needs_the_workspace(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Where | Request::Commands | Request::Type { .. } | Request::Run { .. }
+    )
+}
+
+/// Whether this is a request that *changes* something rather than reading it.
+///
+/// The two that do are the two that may only be raised out of an action a
+/// person caused. Reading is not on the list: a chip that says which branch
+/// you are on has to be able to ask on a timer, and asking is what a grant
+/// already answered for.
+fn changes_something(request: &Request) -> bool {
+    matches!(request, Request::Type { .. } | Request::Run { .. })
 }
 
 /// The host a URL names, which is the thing a person granted or did not.
@@ -501,6 +644,11 @@ pub(super) fn host_of(url: &str) -> Result<String, String> {
 }
 
 /// Does what was asked, on the pool.
+///
+/// Everything [`needs_the_workspace`] answers `true` to is served in
+/// `wasm::mod` instead and never arrives here; reaching one of those arms
+/// would be this file disagreeing with itself, so it says so rather than
+/// answering something plausible.
 fn perform(request: Request) -> Answer {
     match request {
         Request::Fetch {
@@ -528,6 +676,15 @@ fn perform(request: Request) -> Answer {
             &tables,
         ),
         Request::PlaySound { wav, volume } => super::sound::play(&wav, volume),
+        Request::List { path } => list_directory(&path),
+        Request::Repository { path } => repository(&path),
+        // Everything `needs_the_workspace` answers `true` to is served in
+        // `wasm::mod` instead and never arrives here; reaching one of these
+        // arms would be this file disagreeing with itself, so it says so
+        // rather than answering something plausible.
+        Request::Where | Request::Commands | Request::Type { .. } | Request::Run { .. } => {
+            Answer::Failed(String::from("that is not something the pool can do"))
+        }
     }
 }
 
@@ -789,6 +946,77 @@ fn pick(object: &serde_json::Value, field: &str) -> Field {
     }
 }
 
+/// The names in one directory, if it is under a root the grant named.
+///
+/// Directories first and then files, each by name, which is the order every
+/// file picker has used since the first one: the thing a person is walking
+/// down is a directory, and a list that interleaves them is a list they have
+/// to read twice.
+///
+/// Names alone. Not a size, not a time, not a permission bit — the capability
+/// says "see the names of the files", and a host that also handed over the
+/// rest would be a host whose permission dialog lied.
+pub(super) fn list_directory(path: &str) -> Answer {
+    let Some(resolved) = resolve(path) else {
+        return Answer::Failed(String::from("that is not a path this can read"));
+    };
+
+    let entries = match std::fs::read_dir(&resolved) {
+        Ok(entries) => entries,
+        Err(why) => return Answer::Failed(why.to_string()),
+    };
+
+    let mut found: Vec<Entry> = Vec::new();
+    for entry in entries.flatten() {
+        if found.len() >= MAX_NAMES {
+            break;
+        }
+        let Ok(name) = entry.file_name().into_string() else {
+            // A name that is not UTF-8 cannot cross the wire, and a plugin
+            // handed a lossy version of it would be a plugin asking to `cd`
+            // somewhere that does not exist.
+            continue;
+        };
+        // Followed rather than not: a symlink to a directory is a directory to
+        // everybody who is about to walk into it.
+        let directory = entry
+            .metadata()
+            .map(|metadata| metadata.is_dir())
+            .unwrap_or(false);
+        found.push(Entry { name, directory });
+    }
+
+    found.sort_by(|left, right| {
+        right
+            .directory
+            .cmp(&left.directory)
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    Answer::Listed(found)
+}
+
+/// What the repository at a path is, read out of its files.
+fn repository(path: &str) -> Answer {
+    let Some(resolved) = resolve(path) else {
+        return Answer::Failed(String::from("that is not a path this can read"));
+    };
+
+    let Some(layout) = crate::git::discover(&resolved) else {
+        // Not in a repository is an ordinary answer and not a failure: most
+        // directories are not in one, and a plugin that was told "failed"
+        // would have to guess which kind of nothing it was handed.
+        return Answer::Repository {
+            head: None,
+            branches: Vec::new(),
+        };
+    };
+
+    Answer::Repository {
+        head: crate::git::read_head(&layout.git_dir).map(|head| head.label().to_owned()),
+        branches: crate::git::branches_in(&layout),
+    }
+}
+
 /// One HTTP request, and whatever came back.
 ///
 /// A status is *not* a failure: a 401 is an answer about a session and only
@@ -862,6 +1090,13 @@ fn read(path: &str) -> Answer {
 pub(super) fn resolve(path: &str) -> Option<PathBuf> {
     if path.split('/').any(|part| part == "..") {
         return None;
+    }
+    // `~` on its own is the home directory itself, which a *root* is far more
+    // likely to be than a file: a grant written `~` that resolved to a
+    // directory literally called `~` would refuse everything and say nothing
+    // about why.
+    if path == "~" {
+        return dirs::home_dir();
     }
     match path.strip_prefix("~/") {
         Some(rest) => dirs::home_dir().map(|home| home.join(rest)),

@@ -130,6 +130,8 @@ impl Plugin for Plugins {
             10,
             move |workspace, app| page(workspace, app, &state),
         );
+
+        picker_keys(host);
         Ok(())
     }
 
@@ -379,6 +381,75 @@ fn plural(count: usize, word: &str) -> String {
     } else {
         format!("{word}s")
     }
+}
+
+/// The keys that drive whatever panel a sandboxed plugin has up.
+///
+/// Four actions and one claim for the whole tier, rather than four per
+/// installed plugin. A panel is modal — opening a second dismisses the first —
+/// so there is exactly one thing for a key to act on, and which plugin drew it
+/// is a question `wasm::picker` answers rather than one the *names* have to.
+/// The alternative was four actions on every plugin's card whether or not it
+/// had ever drawn a picker, which is the page saying a plugin offers something
+/// the plugin has never heard of.
+///
+/// They are registered as plain actions rather than commands, so they are not
+/// in the palette: a list of things to do whose rows are "move the selection"
+/// is a list nobody reads. Bound by name all the same, which is what lets
+/// somebody who wants ctrl-n on the selection have it.
+fn picker_keys(host: &mut Host) {
+    use crate::plugins::wasm::picker;
+
+    for (name, by) in [(picker::NEXT, 1_isize), (picker::PREVIOUS, -1)] {
+        host.register_action(named(name), move |_, ctx| {
+            if let Some(held) = picker::open() {
+                held.move_selection(by);
+                ctx.notify();
+            }
+        });
+    }
+
+    host.register_action(named(picker::CHOOSE), |workspace, ctx| {
+        // Through the ordinary action path, which is what makes Enter and a
+        // click on the row the same gesture: both say what was chosen and then
+        // run the plugin's own action.
+        let Some((action, key)) = picker::open().and_then(|held| {
+            let chosen = held.chosen()?;
+            held.say(chosen.1.clone());
+            Some(chosen)
+        }) else {
+            return;
+        };
+        let _ = key;
+        workspace.run_action(action, ctx);
+    });
+
+    host.register_action(named(picker::CLOSE), |workspace, ctx| {
+        // The host lets go of the keyboard, and the plugin is told its panel
+        // was dismissed — in that order, so a plugin that opens something of
+        // its own out of `dismiss` is not opening it into a keyboard this
+        // still owns.
+        let Some(held) = picker::open() else {
+            return;
+        };
+        let dismiss = held.dismissal();
+        held.shut();
+        workspace.sync_input_keys();
+        if let Some(action) = dismiss {
+            workspace.run_action(action, ctx);
+        }
+        ctx.notify();
+    });
+
+    // Claimed as a *panel* rather than as a surface: what a plugin puts up
+    // hangs off a chip in a place, and a place can stop being drawn. See
+    // `Host::claim_panel`.
+    picker::armed_by(host.claim_panel(picker::claims, picker::shut_open));
+}
+
+/// One of the tier's own action names, which are literals.
+fn named(name: &str) -> ActionName {
+    ActionName::parse(name).expect("a literal that parses")
 }
 
 /// Built once and leaked; see `header::manifest`.

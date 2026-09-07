@@ -24,7 +24,7 @@
 //! that fails to build is skipped by name, with one line in the log, and the
 //! window opens without whatever it was contributing.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -167,6 +167,10 @@ impl Showing {
     }
 }
 
+/// One surface that hangs off a place in the interface: whose it is, whether
+/// it is up, and how to take it down. See [`Host::claim_panel`].
+type Panel = (PluginId, Showing, Rc<dyn Fn()>);
+
 /// What a surface does with a keystroke while it is up.
 ///
 /// It names an action rather than doing anything, which is what keeps one
@@ -292,6 +296,9 @@ pub struct Host {
     /// used to answer by naming, in source, every field there was. There were
     /// two, and neither was a plugin's.
     fields: Vec<(PluginId, String, TextInput, FieldClaim)>,
+    /// The surfaces among those that hang off a *place* rather than over the
+    /// window, and how to take each one down. See [`Host::claim_panel`].
+    panels: Vec<Panel>,
     /// Whose registrations are being made right now. Set around each plugin's
     /// `build` so a plugin cannot register in another's name by accident.
     building: Option<PluginId>,
@@ -315,6 +322,37 @@ pub struct Host {
     loaded: Vec<&'static Manifest>,
     /// The ones that did not, and what went wrong.
     refused: Vec<(PluginId, String)>,
+    /// What the thing that invoked the next action had to say to it.
+    ///
+    /// An action is a `Fn(&mut Workspace, &mut ViewContext)` and takes no
+    /// argument, because a chord and a palette row have nothing to say. Some
+    /// callers do — a row chosen out of a picker is a row with a key, a menu
+    /// entry is an entry about something — and this is where that is left for
+    /// the handler to take. Set immediately before the action is dispatched
+    /// and taken when it runs, which is safe because a dispatched action is
+    /// applied after the whole tree has seen the event: one press, one thing
+    /// said, one action.
+    said: Voice,
+}
+
+/// A place to leave something for the next action that runs to take.
+///
+/// A handle rather than a field, because the thing that says something is
+/// usually an element's click handler: it holds no workspace and no host, only
+/// what it captured when it was built. So it captures one of these.
+#[derive(Clone, Default)]
+pub struct Voice(Rc<RefCell<String>>);
+
+impl Voice {
+    /// Leaves something for the next action.
+    pub fn say(&self, what: impl Into<String>) {
+        *self.0.borrow_mut() = what.into();
+    }
+
+    /// Takes it, leaving nothing behind.
+    pub fn taken(&self) -> String {
+        std::mem::take(&mut self.0.borrow_mut())
+    }
 }
 
 impl Host {
@@ -336,13 +374,36 @@ impl Host {
             surfaces: Vec::new(),
             watchers: Vec::new(),
             fields: Vec::new(),
+            panels: Vec::new(),
             building: None,
             kept: Vec::new(),
             plugins: Vec::new(),
             carried: Vec::new(),
             loaded: Vec::new(),
             refused: Vec::new(),
+            said: Voice::default(),
         }
+    }
+
+    /// Leaves something for the next action to be run to take.
+    ///
+    /// See the field. `&self` rather than `&mut self` because the thing that
+    /// says it is usually an element handler, which holds neither.
+    pub fn say(&self, what: impl Into<String>) {
+        self.said.say(what);
+    }
+
+    /// The handle an element holds to be able to say something.
+    pub fn voice(&self) -> Voice {
+        self.said.clone()
+    }
+
+    /// Takes it, leaving nothing behind.
+    ///
+    /// Taken rather than read, so an action reached by a chord a moment later
+    /// is not handed what somebody clicked before it.
+    pub fn said(&self) -> String {
+        self.said.taken()
     }
 
     /// The plugin whose registrations are being made.
@@ -704,6 +765,45 @@ impl Host {
             .collect()
     }
 
+    /// Registers a surface that hangs off a *place* in the interface rather
+    /// than floating over the window, and how to take it down.
+    ///
+    /// The same keyboard bargain [`Host::claim_surface`] makes, and one rule
+    /// more. A palette floats over everything: it is still on screen after a
+    /// tab switch and may go on owning its arrow keys. A panel hung under a
+    /// chip in a pane is drawn by that pane and stops being drawn when the
+    /// window's attention moves — and a key claim left standing then is a
+    /// keyboard whose owner is nowhere on screen. So the workspace takes these
+    /// down at every point it moves the attention, and `close` is how the
+    /// plugin holding one finds out.
+    pub fn claim_panel(
+        &mut self,
+        keys: impl Fn(&Keystroke) -> Option<ActionName> + 'static,
+        close: impl Fn() + 'static,
+    ) -> Showing {
+        let showing = self.claim_surface(keys);
+        let who = self.who();
+        self.panels
+            .push((who, showing.clone(), Rc::new(close) as Rc<dyn Fn()>));
+        showing
+    }
+
+    /// Takes down every panel that is up, and says whether any was.
+    ///
+    /// The answer is what tells the caller a re-sync is owed: taking a panel
+    /// down gives the keyboard back to a pane, and nothing else would say so.
+    pub fn take_panels_down(&self) -> bool {
+        let mut any = false;
+        for (_, showing, close) in &self.panels {
+            if showing.get() {
+                close();
+                showing.set(false);
+                any = true;
+            }
+        }
+        any
+    }
+
     /// Whether any plugin's surface is up.
     ///
     /// What takes the keyboard away from the focused pane, the same way an
@@ -993,6 +1093,7 @@ impl Host {
             }
         }
         self.fields.retain(|(by, _, _, _)| by != plugin);
+        self.panels.retain(|(by, _, _)| by != plugin);
         self.loaded.retain(|manifest| &manifest.id != plugin);
     }
 

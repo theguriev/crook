@@ -35,9 +35,10 @@ use crookui_core::platform::TextLayoutSystem;
 use crookui_core::text_layout::{Glyph, Line, Run};
 use crookui_core::{Action, App, Presenter, Scene, WindowId};
 
-use crook_plugin_api::{Capability, Gap, Manifest, Node, Size, Tone, to_bytes};
+use crook_plugin_api::{Capability, Gap, Manifest, Node, Row, Size, Tone, to_bytes};
 
-use crate::plugin::ActionId;
+use crate::clipboard::Clipboard;
+use crate::plugin::{ActionId, Voice};
 use crate::theme::theme;
 use crate::workspace::{Fonts, WorkspaceAction};
 
@@ -156,7 +157,7 @@ pub(crate) fn wasm(id: &str, slot: &str, order: i32) -> Vec<u8> {
               (i32.const 0))
             (func (export "crook_render") (param i32 i32) (result i64)
               (i64.or (i64.shl (i64.const {tree_at}) (i64.const 32)) (i64.const {tree_len})))
-            (func (export "crook_run") (param i32 i32) (result i32) (i32.const 0)))"#,
+            (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0)))"#,
         manifest_bytes = escaped(&manifest),
         manifest_len = manifest.len(),
         tree_bytes = escaped(&tree),
@@ -245,7 +246,7 @@ pub(crate) fn wasm_with_a_panel(id: &str, slot: &str, order: i32) -> Vec<u8> {
                               (i64.const {open_len})))
                 (else (i64.or (i64.shl (i64.const {shut_at}) (i64.const 32))
                               (i64.const {shut_len})))))
-            (func (export "crook_run") (param i32 i32) (result i32)
+            (func (export "crook_run") (param i32 i32 i32 i32) (result i32)
               (global.set $open (i32.eqz (global.get $open)))
               (i32.const 0)))"#,
         manifest_bytes = escaped(&manifest),
@@ -415,6 +416,17 @@ struct Drawn {
     /// same node twice — once to find a control and once after pressing it —
     /// and a handle made per render would forget the press in between.
     hovers: render::Hovers,
+    /// What the host holds on the plugin's behalf, for the same reason.
+    ///
+    /// The real one is made once per plugin in `build`; these tests have no
+    /// plugin, so this stands in for one — and it has to survive between two
+    /// draws for exactly the reason `hovers` does, since what a picker is
+    /// showing is what a key pressed after it was drawn acts on.
+    held: Rc<picker::Held>,
+    /// What a field in a picker would paste from. Never used by these tests
+    /// and required to build one, which is the ordinary state of a clipboard
+    /// in a headless window.
+    clipboard: Clipboard,
 }
 
 impl Entity for Drawn {
@@ -440,8 +452,16 @@ impl View for Drawn {
         let answers = self.answers;
         render::element(
             &self.node,
-            FamilyId(0),
-            self.scale,
+            render::Chrome::new(
+                Fonts {
+                    ui: FamilyId(0),
+                    monospace: FamilyId(0),
+                },
+                self.scale,
+                render::Placement::Below,
+                &self.held,
+                &self.clipboard,
+            ),
             &move |_| answers,
             &self.hovers,
         )
@@ -477,6 +497,8 @@ impl Frame {
             answers,
             scale,
             hovers: render::Hovers::default(),
+            held: Rc::new(picker::Held::new(Voice::default())),
+            clipboard: Clipboard::new(),
         });
         let presenter = Presenter::new(window_id, Arc::new(StubShaper));
 
@@ -1336,4 +1358,102 @@ fn the_same_click_on_the_same_row_without_the_pressable_runs_nothing() {
     let at = where_the(&frame.scene(), Lucide::Play);
 
     assert!(frame.click(at).is_empty(), "something else took the click");
+}
+
+#[test]
+fn what_a_plugin_types_is_the_template_it_was_granted_with_its_hole_filled() {
+    // The shape of the command is the person's — they allowed that string —
+    // and only the hole is the plugin's.
+    assert_eq!(
+        fill("cd {}", "/home/eugen/Work").as_deref(),
+        Some("cd '/home/eugen/Work'")
+    );
+    assert_eq!(
+        fill("git switch {}", "main").as_deref(),
+        Some("git switch 'main'")
+    );
+}
+
+#[test]
+fn an_argument_is_one_word_however_it_is_spelled() {
+    // The whole reason the host fills the hole rather than the plugin: a
+    // branch called `; rm -rf ~` has to stay a branch name.
+    let line = fill("git switch {}", "; rm -rf ~").expect("a template with a hole");
+
+    assert_eq!(line, "git switch '; rm -rf ~'");
+
+    // And a quote inside it does not end the quoting. How it is spelled is
+    // per platform — POSIX escapes the quote, PowerShell doubles it — so what
+    // is asserted is what it is: one word, opened and closed by this function
+    // and by nothing in the middle.
+    let quoted = fill("cd {}", "it's here").expect("a template with a hole");
+    assert!(quoted.starts_with("cd '") && quoted.ends_with('\''));
+    assert_ne!(quoted, "cd 'it's here'", "the quote has to be dealt with");
+}
+
+#[test]
+fn a_control_character_is_refused_rather_than_escaped() {
+    // A newline is the character that ends a command line. A directory whose
+    // name holds one is not worth the reasoning it would take to be sure.
+    assert_eq!(fill("cd {}", "one\ntwo"), None);
+    assert_eq!(fill("cd {}", "one\rtwo"), None);
+}
+
+#[test]
+fn a_template_with_nowhere_to_put_the_argument_types_nothing() {
+    // A grant is text, and text somebody wrote by hand can be wrong. What it
+    // must not be is a command run with the argument silently dropped.
+    assert_eq!(fill("git status", "main"), None);
+}
+
+#[test]
+fn a_chip_is_a_quiet_pill_and_a_badge_is_a_loud_one() {
+    // The one thing that tells the two apart, and the reason there are two: a
+    // chip's ground is the theme's own raised surface, so a row of them beside
+    // a prompt does not read as a row of readings.
+    let mut frame = Frame::new(Node::Chip {
+        icon: String::new(),
+        text: String::from("~/Work/crook"),
+        tone: Tone::Primary,
+    });
+    let scene = frame.scene();
+
+    assert!(
+        !rects_of(&scene, theme().surface_raised).is_empty(),
+        "a chip sits on the theme's raised ground"
+    );
+    assert!(
+        rects_of(&scene, theme().accent).is_empty(),
+        "and never on a tone: that is what a badge is for"
+    );
+}
+
+#[test]
+fn a_picker_outside_a_panel_draws_nothing_rather_than_dividing_infinity() {
+    // The rule `Fill` and `Meter` follow, for the same reason: a picker is a
+    // column in a field's width, and a slot offers no width. See `BOUNDED`.
+    let picker = Node::Picker {
+        placeholder: String::from("Search directories…"),
+        rows: vec![Row {
+            key: String::from("/home/eugen"),
+            label: String::from("home"),
+            icon: String::new(),
+            tone: Tone::Primary,
+        }],
+        choose: String::from("choose"),
+    };
+
+    let mut loose = Frame::new(picker.clone());
+    let bare = loose.scene();
+    let outside: usize = bare.layers().flat_map(|layer| layer.glyphs.iter()).count();
+
+    let mut panelled = Frame::new(in_a_panel(picker));
+    let drawn = panelled.scene();
+    let inside: usize = drawn.layers().flat_map(|layer| layer.glyphs.iter()).count();
+
+    assert_eq!(outside, 0, "a picker with no width to divide draws nothing");
+    assert!(
+        inside > 0,
+        "and one in a panel draws its field and its rows"
+    );
 }

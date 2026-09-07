@@ -169,6 +169,19 @@ fn two_plugins_cannot_have_one_name() {
     });
 }
 
+/// Whether `plugin` has anything in the window's overlay slot.
+///
+/// Asked of the *contributors* rather than of the slot's emptiness: the
+/// overlay is a list and the palette is no longer the only thing in it —
+/// `crook/shortcuts` hangs its chord recorder there too — so "empty" stopped
+/// being the same question as "the palette's is gone".
+fn overlays(host: &Host, plugin: &PluginId) -> bool {
+    host.slots()
+        .contributors(crate::plugins::window::WINDOW_OVERLAY)
+        .iter()
+        .any(|(owner, _)| owner == plugin)
+}
+
 #[test]
 fn unloading_a_plugin_takes_its_contribution_out_of_the_slot_it_filled() {
     // What disabling one will do, and the whole reason a registration is a
@@ -178,17 +191,12 @@ fn unloading_a_plugin_takes_its_contribution_out_of_the_slot_it_filled() {
     // in the box and filled only by one installed from a file.
     with_host(|host| {
         let palette = PluginId::parse("crook/palette").expect("a literal that parses");
-        assert!(
-            !host
-                .slots()
-                .is_empty(crate::plugins::window::WINDOW_OVERLAY)
-        );
+        assert!(overlays(host, &palette));
 
         host.unload(&palette);
 
         assert!(
-            host.slots()
-                .is_empty(crate::plugins::window::WINDOW_OVERLAY),
+            !overlays(host, &palette),
             "the palette outlived the plugin that contributed it"
         );
         assert!(!host.loaded().iter().any(|manifest| manifest.id == palette));
@@ -321,20 +329,12 @@ fn a_plugin_switched_off_can_be_switched_back_on() {
 
         host.unload(&palette);
         assert!(!host.is_loaded(&palette));
-        assert!(
-            host.slots()
-                .is_empty(crate::plugins::window::WINDOW_OVERLAY)
-        );
+        assert!(!overlays(host, &palette));
 
         host.enable(&palette, ctx);
 
         assert!(host.is_loaded(&palette));
-        assert!(
-            !host
-                .slots()
-                .is_empty(crate::plugins::window::WINDOW_OVERLAY),
-            "the palette did not come back"
-        );
+        assert!(overlays(host, &palette), "the palette did not come back");
         assert!(
             host.action(&open).is_some(),
             "the action did not come back with it"
@@ -360,10 +360,7 @@ fn a_plugin_the_settings_switched_off_is_carried_and_not_built() {
                 .any(|manifest| manifest.id == palette),
             "a switched-off plugin has to stay visible"
         );
-        assert!(
-            host.slots()
-                .is_empty(crate::plugins::window::WINDOW_OVERLAY)
-        );
+        assert!(!overlays(host, &palette));
         assert!(host.action(&open).is_none());
         // And nothing else noticed: a plugin that is off is not a plugin that
         // failed.

@@ -237,10 +237,22 @@ impl Sandbox {
         crook_plugin_api::from_bytes(&bytes).map_err(|why| Problem::Answer(why.to_string()))
     }
 
-    /// Runs one of its actions, by the name it registered.
-    pub fn run(&mut self, action: &str) -> Result<(), Problem> {
-        let (pointer, length) = self.write(action.as_bytes(), self.fuel.run)?;
-        match self.call::<(i32, i32), i32>(exports::RUN, (pointer, length), self.fuel.run)? {
+    /// Runs one of its actions, by the name it registered, with whatever the
+    /// thing that was pressed had to say.
+    ///
+    /// The argument is a string and is empty for every action reached by a
+    /// chord, by the palette or by another plugin. Both strings are written
+    /// through the guest's own allocator and both are charged to this call's
+    /// budget, so an action carrying a long argument is an action with less
+    /// fuel left rather than one the host paid for.
+    pub fn run(&mut self, action: &str, argument: &str) -> Result<(), Problem> {
+        let (name, name_len) = self.write(action.as_bytes(), self.fuel.run)?;
+        let (argument, argument_len) = self.write(argument.as_bytes(), self.fuel.run)?;
+        match self.call::<(i32, i32, i32, i32), i32>(
+            exports::RUN,
+            (name, name_len, argument, argument_len),
+            self.fuel.run,
+        )? {
             0 => Ok(()),
             other => Err(Problem::Ran(format!("the action answered {other}"))),
         }

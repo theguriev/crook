@@ -25,6 +25,7 @@ mod about;
 mod appearance;
 pub mod header;
 mod palette;
+pub mod pane;
 mod plugins_page;
 pub mod settings;
 mod shell;
@@ -41,6 +42,7 @@ pub fn defaults() -> Vec<Box<dyn Plugin>> {
     vec![
         Box::new(window::Window),
         Box::new(header::Header),
+        Box::new(pane::PaneSlots),
         Box::new(tabs::Tabs::new()),
         // After the plugin that declares the slot it puts a row in, which is
         // the convention this list's own doc gives rather than a requirement.

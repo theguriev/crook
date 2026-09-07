@@ -256,6 +256,7 @@ fn a_shut_panel_costs_almost_nothing() {
 fn what_a_render_is_about_survives_the_wire() {
     let render = Render {
         slot: "tab.row.mark".into(),
+        entry: "mark".into(),
         subject: Some(Subject::Tab(TabFacts {
             key: 0x9e37_79b9_7f4a_7c15,
             tab: Some(TabInfo {
