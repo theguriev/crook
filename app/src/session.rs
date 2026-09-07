@@ -116,6 +116,18 @@ pub struct TabSnapshot {
     pub focused: usize,
     /// The panes, in render order.
     pub panes: Vec<PaneSnapshot>,
+    /// Whether it was held at the front of its block.
+    ///
+    /// The order in `tabs` already carries where it *was*; this is what makes
+    /// it stay there, and what draws the pin on its row.
+    pub pinned: bool,
+    /// The colour a person put on it, by name.
+    ///
+    /// A name rather than a number, because the numbers are an enum's
+    /// discriminants and those are ours to reorder; a name a person's file
+    /// carries is not. One nothing matches reads as no colour — see
+    /// [`TabColor::named`](crate::tab::TabColor::named).
+    pub color: Option<String>,
     /// The group this tab was in, as a position in
     /// [`Session::groups`](Session::groups).
     ///
@@ -131,6 +143,14 @@ pub struct TabSnapshot {
 pub struct PaneSnapshot {
     /// The name the session was created with.
     pub title: String,
+    /// What a person renamed it to, if they did.
+    ///
+    /// Kept and the agent's own derived title is not, which is the same
+    /// judgement [`AgentSession::display_title`](crate::tab::AgentSession)
+    /// makes every frame: a name somebody typed is a fact about what they are
+    /// doing, and a name an agent chose belongs to a process that is not
+    /// running any more.
+    pub custom_title: Option<String>,
     /// Where the shell was working, as the shell last reported it.
     ///
     /// This is the whole point of the file: a window that comes back with its
@@ -200,6 +220,8 @@ impl Session {
                 horizontal: tab.panes().axis() == SplitAxis::Horizontal,
                 focused,
                 panes,
+                pinned: tab.is_pinned(),
+                color: tab.color().map(|color| color.name().to_owned()),
                 group: tab
                     .group()
                     .and_then(|id| groups.iter().position(|held| *held == id)),
@@ -307,11 +329,23 @@ impl TabSnapshot {
         let mut panes = self.panes.iter().take(MAX_PANES);
         let first = panes.next()?;
 
-        let mut tab = Tab::new(if self.name.is_empty() {
-            first.title.clone()
-        } else {
+        // Born as the session's own name and *then* renamed, rather than born
+        // as the name it was carrying: a tab that comes back renamed must
+        // still have somewhere to go when the rename is taken back, and the
+        // name it was opened with is the only thing that is.
+        let born_as = if first.title.is_empty() {
             self.name.clone()
-        });
+        } else {
+            first.title.clone()
+        };
+        let mut tab = Tab::new(born_as);
+        if !self.name.is_empty() {
+            tab.set_name(Some(self.name.clone()));
+        }
+        tab.restore_marks(
+            self.pinned,
+            self.color.as_deref().and_then(crate::tab::TabColor::named),
+        );
         first.apply_to_first(tab.panes_mut());
 
         let direction = if self.horizontal {
@@ -342,6 +376,7 @@ impl PaneSnapshot {
         let session = pane.session();
         Self {
             title: session.title.clone(),
+            custom_title: session.custom_title.clone(),
             working_directory: session.working_directory.clone(),
             flex: pane.flex(),
         }
@@ -364,6 +399,7 @@ impl PaneSnapshot {
     fn apply(&self, group: &mut PaneGroup, id: crate::tab::PaneId) {
         if let Some(pane) = group.get_mut(id) {
             pane.set_flex(self.flex);
+            pane.session_mut().custom_title = self.custom_title.clone();
             // Only a directory that still exists. A repository moved or
             // deleted between two launches would otherwise start a shell in a
             // directory that is not there, which most shells answer by

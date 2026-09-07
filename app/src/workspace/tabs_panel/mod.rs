@@ -161,9 +161,19 @@ const EMPTY_STATE_PADDING: f32 = 12.;
 ///
 /// The window's own section, and the only one no plugin contributes: the tabs
 /// are what Crook is, not a thing that was added to it.
-const AGENTS_SECTION_TITLE: &str = "Agents";
-/// See [`AGENTS_SECTION_TITLE`].
-const AGENTS_ICON: Lucide = Lucide::LayoutGrid;
+///
+/// It says `Sessions` and not `Agents` because the button names what the list
+/// holds, and a tab is as often a plain shell as an agent — the agent is what
+/// a session *may* be running, not what every row of the list is. `Agents`
+/// named the ambition; a person opening a terminal to run `git log` in it
+/// would have to read past that name to find their own window. `Tabs` was the
+/// other candidate and is worse: the panel already spends `Tabs` on a
+/// granularity — `View as: Tabs` against `Panes` — and one word for the
+/// section and for one of the two shapes it can take is a word that has
+/// stopped saying which.
+const SESSIONS_SECTION_TITLE: &str = "Sessions";
+/// See [`SESSIONS_SECTION_TITLE`].
+const SESSIONS_ICON: Lucide = Lucide::LayoutGrid;
 
 /// The inset around the row of section buttons.
 const SECTION_BAR_PADDING: f32 = 8.;
@@ -279,8 +289,8 @@ fn sections(workspace: &Workspace) -> Box<dyn Element> {
         .with_child(button(
             workspace,
             None,
-            AGENTS_SECTION_TITLE,
-            AGENTS_ICON,
+            SESSIONS_SECTION_TITLE,
+            SESSIONS_ICON,
             showing.is_none(),
         ));
 

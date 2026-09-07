@@ -100,6 +100,15 @@ pub mod imports {
 
     /// `now() -> i64`: the wall clock, in milliseconds since the epoch.
     pub const NOW: &str = "now";
+
+    /// `timezone() -> i32`: how far this machine's own time is from UTC, in
+    /// minutes east of it.
+    ///
+    /// Granted to everybody for the reason the clock is, and needed for the
+    /// same kind of question: "which day was that" has a different answer
+    /// three hours either side of midnight, and a chart of days a person is
+    /// meant to recognise has to be drawn against the days they lived.
+    pub const TIMEZONE: &str = "timezone";
 }
 
 /// The names a guest must export, and what each is for.
@@ -122,14 +131,10 @@ pub mod exports {
     /// registers by calling the imports above.
     pub const BUILD: &str = "crook_build";
 
-    /// `crook_render(slot_ptr, slot_len, entry_ptr, entry_len) -> i64`, packed
-    /// like the manifest.
-    ///
-    /// The entry as well as the slot, because a plugin may contribute more
-    /// than one thing to a list slot and a render told only which slot it was
-    /// in would have to draw all of them in each of them. It is the name the
-    /// plugin chose in its own `contribute` call, so it needs no table to know
-    /// what it means.
+    /// `crook_render(ptr, len) -> i64`, packed like the manifest, and given a
+    /// [`Render`](crook_plugin_api::Render) rather than a bare slot name: the
+    /// slot, the plugin's own name for the contribution being drawn, and what
+    /// the render is about when the slot is one drawn per row.
     pub const RENDER: &str = "crook_render";
 
     /// `crook_run(name_ptr, name_len, arg_ptr, arg_len) -> i32`, zero for
@@ -157,6 +162,16 @@ pub mod exports {
     ///
     /// Optional, for the same reason [`DELIVER`] is.
     pub const TICK: &str = "crook_tick";
+
+    /// `crook_event(ptr, len) -> i32`, zero for "taken", carrying an
+    /// [`Event`](crook_plugin_api::Event) the host is telling the guest about.
+    ///
+    /// The one export the guest does not ask for first, which is why what
+    /// arrives here is gated on capabilities rather than on a ticket: an
+    /// answer is a reply to a question the plugin asked, and an event is not.
+    ///
+    /// Optional, for the same reason [`DELIVER`] is.
+    pub const EVENT: &str = "crook_event";
 }
 
 /// Splits the `(ptr << 32) | len` a guest returns a slice as.

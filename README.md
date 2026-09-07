@@ -72,6 +72,19 @@ Eight features, and the page that configures them:
   `~/.claude/.credentials.json`, and to reach one host, `api.anthropic.com`. It can reach
   nothing else, and until somebody says yes it reaches neither.
 
+  **A plugin can also be asked the same question once per row.** The mark at the head of every
+  tab in the panel is a slot, and the small badge on its corner is another one, so a plugin
+  can replace what a tab is drawn as or add one more thing to it. A contribution to those is
+  handed the row it is being drawn on, with everything a person did not allow it to see left
+  out — and a plugin allowed *nothing* still gets one number per row, the same number for one
+  tab every day and a different one for the tab beside it. That is enough to give every tab a
+  picture of its own, and it is what
+  [github.com/theguriev/crook-emoji](https://github.com/theguriev/crook-emoji) does: an emoji
+  where the status dot was, asking for no permission at all. Beside it,
+  [github.com/theguriev/crook-worktree](https://github.com/theguriev/crook-worktree) puts a
+  branch mark on the corner of every tab whose directory is a git worktree, which it can only
+  do because somebody allowed it to see which project each tab is in.
+
   **The second worked example is the chips**, and it is the one that proves a plugin may
   *act*. It lives at [github.com/theguriev/crook-chips](https://github.com/theguriev/crook-chips)
   and draws the row under the line you are typing: where the pane is, which branch it is on,
@@ -190,9 +203,26 @@ Eight features, and the page that configures them:
   of the one you are looking at — five candidate colours clustered out of its palette, one
   click to choose the background, and everything else decided so the result is legible. What
   it writes is a file in your themes folder, in the same format as any other.
-- **Git worktrees, one click away.** Right-click a tab and, if it is inside a
-  repository, its menu lists that repository's checkouts: the one this tab is in, the ones
-  other tabs are in, and the rest. Choosing one opens a tab there — or brings forward the tab
+- **A tab's own menu.** Right-click any row and it opens over that row: pin, new group with
+  tab, copy pane title, copy working directory, rename tab, rename pane, close tab, a row of
+  colours, and — inside a repository — the worktrees. **Pinning** holds a tab at the front of
+  the block it is in rather than of the whole list, which is the one place this cannot be
+  Warp's: a group is a contiguous block that says two checkouts are one piece of work, and
+  pinning that lifted a member out of the middle would be pinning that takes a group apart. A
+  drop can no more land an unpinned tab among the pinned ones than it can split a group. A
+  **colour** is a stripe down the leading edge of a tab's rows, not a tinted status disc — the
+  disc says what the agent is doing, and one dot cannot carry both — and it is named rather
+  than written down, so a tab made red in one theme is red in a theme written years later. Renaming turns the entry itself into a field, in the
+  column you pressed it in; Enter keeps the name, Escape drops it, and an emptied field puts
+  back the name the tab was opened with. A name you typed beats the one the agent chose for
+  its own work, which is the whole point of typing one, and it comes back with the window. Not one of those entries is written into the menu. It is a
+  [slot](docs/plugins.md), `tab.menu.entries`, and every row in it is a contribution: they
+  come from two plugins today, each entry is also a named command the palette lists and a
+  chord can reach, and a plugin outside the binary puts a row there the same way. Escape is
+  one step back — out of the submenu, then out of the menu.
+- **Git worktrees, one entry away.** Open that menu on a tab inside a
+  repository and `Worktrees` lists that repository's checkouts: the one this tab is in, the
+  ones other tabs are in, and the rest. Choosing one opens a tab there — or brings forward the tab
   already in it, because two agents editing one checkout is exactly what a worktree exists to
   prevent. `New worktree…` asks for a branch name, fills one in that nothing is using, shows
   where the checkout will go, and opens a tab in it — folded into a group with the tab that

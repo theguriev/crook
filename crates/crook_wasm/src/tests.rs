@@ -10,7 +10,8 @@ use std::time::Duration;
 
 use super::*;
 use crook_plugin_api::{
-    ABI_VERSION, Answer, Capability, Manifest, Method, Node, Request, Size, Tone, to_bytes,
+    ABI_VERSION, Answer, Capability, Manifest, Method, Node, Render, Request, Size, Subject,
+    TabFacts, Tone, to_bytes,
 };
 
 /// Where a module's constant data starts. Below it is the bump allocator's
@@ -42,6 +43,15 @@ fn tree() -> Node {
             tone: Tone::Success,
         },
     ])
+}
+
+/// What the host asks for when the slot is drawn once and is about nothing.
+fn for_slot(slot: &str) -> Render {
+    Render {
+        slot: slot.into(),
+        entry: "chip".into(),
+        subject: None,
+    }
 }
 
 /// `bytes` as a wasm data-segment string.
@@ -111,7 +121,7 @@ const WELL_BEHAVED: &str = r#"
         (global.get $action_at) (global.get $action_len)
         (global.get $title_at) (global.get $title_len))
       (i32.const 0))
-    (func (export "crook_render") (param i32 i32 i32 i32) (result i64)
+    (func (export "crook_render") (param i32 i32) (result i64)
       (i64.or
         (i64.shl (i64.extend_i32_u (global.get $tree_at)) (i64.const 32))
         (i64.extend_i32_u (global.get $tree_len))))
@@ -274,7 +284,7 @@ fn a_build_that_gives_up_registers_nothing() {
             (global.get $entry_at) (global.get $entry_len)
             (i32.const 0))
           (i32.const 1))
-        (func (export "crook_render") (param i32 i32 i32 i32) (result i64) (i64.const 0))
+        (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
         (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
         "#,
     );
@@ -302,7 +312,7 @@ fn a_build_that_traps_registers_nothing_either() {
             (global.get $entry_at) (global.get $entry_len)
             (i32.const 0))
           unreachable)
-        (func (export "crook_render") (param i32 i32 i32 i32) (result i64) (i64.const 0))
+        (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
         (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
         "#,
     );
@@ -320,7 +330,7 @@ fn a_plugin_that_never_stops_runs_out_of_fuel() {
     let body = with_strings(
         r#"
         (func (export "crook_build") (result i32) (loop br 0) (i32.const 0))
-        (func (export "crook_render") (param i32 i32 i32 i32) (result i64) (i64.const 0))
+        (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
         (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
         "#,
     );
@@ -349,9 +359,66 @@ fn a_render_comes_back_as_a_tree() {
 
     assert_eq!(
         sandbox
-            .render("header.right", "chip")
+            .render(&for_slot("header.right"))
             .expect("it should render"),
         tree()
+    );
+}
+
+#[test]
+fn a_render_carries_what_it_is_about_and_not_only_where_it_goes() {
+    // The whole of ABI 3, proven from the guest's side: what arrives at
+    // `crook_render` is the encoded request, subject and all, rather than the
+    // slot name it used to be. The module answers with a meter whose fraction
+    // is the number of bytes it was handed, which is the one thing a module
+    // written in wasm text can say about a postcard value without decoding it
+    // — and it is enough, because a request carrying a subject is longer than
+    // the same request without one.
+    let body = with_strings(
+        r#"
+        (func (export "crook_build") (result i32) (i32.const 0))
+        (func (export "crook_render") (param $at i32) (param $len i32) (result i64)
+          ;; Node::Meter { fraction, tone }: variant 8, four bytes of f32, and
+          ;; the tone.
+          (i32.store8 (i32.const 2048) (i32.const 8))
+          (f32.store (i32.const 2049) (f32.convert_i32_u (local.get $len)))
+          (i32.store8 (i32.const 2053) (i32.const 0))
+          (i64.or (i64.shl (i64.const 2048) (i64.const 32)) (i64.const 6)))
+        (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
+        "#,
+    );
+    let (mut sandbox, _) = open(&module(&body, ABI_VERSION)).expect("it should open");
+    let bare = for_slot("tab.row.mark");
+    let about_a_row = Render {
+        entry: "mark".into(),
+        slot: "tab.row.mark".into(),
+        subject: Some(Subject::Tab(TabFacts {
+            key: 0x0123_4567_89ab_cdef,
+            tab: None,
+            place: None,
+        })),
+    };
+
+    let (
+        Ok(Node::Meter {
+            fraction: bare_len, ..
+        }),
+        Ok(Node::Meter {
+            fraction: with_len, ..
+        }),
+    ) = (sandbox.render(&bare), sandbox.render(&about_a_row))
+    else {
+        panic!("both renders should come back as a meter");
+    };
+
+    assert_eq!(
+        bare_len as usize,
+        to_bytes(&bare).expect("a request should encode").len(),
+        "the guest was handed something other than the whole request"
+    );
+    assert!(
+        with_len > bare_len,
+        "the subject did not cross: {with_len} against {bare_len}"
     );
 }
 
@@ -382,7 +449,7 @@ fn an_answer_that_points_outside_its_own_memory_is_refused() {
     let body = with_strings(
         r#"
         (func (export "crook_build") (result i32) (i32.const 0))
-        (func (export "crook_render") (param i32 i32 i32 i32) (result i64)
+        (func (export "crook_render") (param i32 i32) (result i64)
           (i64.or (i64.shl (i64.const 4294901760) (i64.const 32)) (i64.const 64)))
         (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
         "#,
@@ -390,7 +457,7 @@ fn an_answer_that_points_outside_its_own_memory_is_refused() {
     let (mut sandbox, _) = open(&module(&body, ABI_VERSION)).expect("it should open");
 
     let problem = sandbox
-        .render("header.right", "chip")
+        .render(&for_slot("header.right"))
         .expect_err("it should be refused");
 
     assert!(matches!(problem, Problem::Answer(_)), "{problem:?}");
@@ -403,7 +470,7 @@ fn an_answer_longer_than_any_answer_could_be_is_refused_before_it_is_allocated()
     let body = with_strings(
         r#"
         (func (export "crook_build") (result i32) (i32.const 0))
-        (func (export "crook_render") (param i32 i32 i32 i32) (result i64)
+        (func (export "crook_render") (param i32 i32) (result i64)
           (i64.or (i64.shl (i64.const 16) (i64.const 32)) (i64.const 4294967295)))
         (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
         "#,
@@ -411,7 +478,7 @@ fn an_answer_longer_than_any_answer_could_be_is_refused_before_it_is_allocated()
     let (mut sandbox, _) = open(&module(&body, ABI_VERSION)).expect("it should open");
 
     let problem = sandbox
-        .render("header.right", "chip")
+        .render(&for_slot("header.right"))
         .expect_err("it should be refused");
 
     assert!(matches!(problem, Problem::Answer(_)), "{problem:?}");
@@ -425,7 +492,7 @@ fn an_answer_that_is_not_what_it_should_be_is_refused() {
     let body = with_strings(
         r#"
         (func (export "crook_build") (result i32) (i32.const 0))
-        (func (export "crook_render") (param i32 i32 i32 i32) (result i64)
+        (func (export "crook_render") (param i32 i32) (result i64)
           ;; The manifest, offered where a tree was asked for.
           (i64.or
             (i64.shl (i64.extend_i32_u (global.get $manifest_at)) (i64.const 32))
@@ -436,7 +503,7 @@ fn an_answer_that_is_not_what_it_should_be_is_refused() {
     let (mut sandbox, _) = open(&module(&body, ABI_VERSION)).expect("it should open");
 
     let problem = sandbox
-        .render("header.right", "chip")
+        .render(&for_slot("header.right"))
         .expect_err("it should be refused");
 
     assert!(matches!(problem, Problem::Answer(_)), "{problem:?}");
@@ -453,7 +520,7 @@ fn each_call_gets_its_own_budget() {
     for _ in 0..100 {
         assert_eq!(
             sandbox
-                .render("header.right", "chip")
+                .render(&for_slot("header.right"))
                 .expect("it should render"),
             tree()
         );
@@ -483,7 +550,7 @@ fn a_plugin_may_do_real_work_without_taking_the_host_stack_with_it() {
             (local.set $i (i32.add (local.get $i) (i32.const 1)))
             (br_if $again (i32.lt_s (local.get $i) (i32.const 3000000))))
           (i32.const 0))
-        (func (export "crook_render") (param i32 i32 i32 i32) (result i64) (i64.const 0))
+        (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
         (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0))
         "#,
     );
@@ -504,7 +571,7 @@ const ASKING: &str = r#"
       (global.set $last (call $request (global.get $ask_at) (global.get $ask_len)))
       (drop (call $timer (i32.const 60000)))
       (i32.const 0))
-    (func (export "crook_render") (param i32 i32 i32 i32) (result i64)
+    (func (export "crook_render") (param i32 i32) (result i64)
       (i64.or
         (i64.shl (i64.extend_i32_u (global.get $tree_at)) (i64.const 32))
         (i64.extend_i32_u (global.get $tree_len))))
@@ -535,7 +602,7 @@ const GREEDY: &str = r#"
           (local.set $count (i32.add (local.get $count) (i32.const 1)))
           (br $again)))
       (i32.const 0))
-    (func (export "crook_render") (param i32 i32 i32 i32) (result i64) (i64.const 0))
+    (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
 "#;
 
 /// A plugin that hands the request import something that is not a request.
@@ -543,7 +610,7 @@ const BABBLING: &str = r#"
     (func (export "crook_build") (result i32)
       (drop (call $request (global.get $slot_at) (global.get $slot_len)))
       (i32.const 0))
-    (func (export "crook_render") (param i32 i32 i32 i32) (result i64) (i64.const 0))
+    (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
 "#;
 
 /// A plugin that only wants to know what time it is.
@@ -555,7 +622,7 @@ const CLOCK_WATCHING: &str = r#"
       (drop (call $timer
         (i32.wrap_i64 (i64.div_u (call $now) (i64.const 1000000000)))))
       (i32.const 0))
-    (func (export "crook_render") (param i32 i32 i32 i32) (result i64) (i64.const 0))
+    (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
 "#;
 
 /// The request every asking module holds, ready encoded.

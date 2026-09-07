@@ -1049,3 +1049,102 @@ mod groups {
         );
     }
 }
+
+#[test]
+fn pinning_moves_a_tab_to_the_front_of_its_own_block() {
+    // Not to the front of the *list*, which is Warp's rule and the one Crook
+    // cannot have: a group is a contiguous block that says two checkouts are
+    // one piece of work, and pinning that lifted a member out of the middle
+    // would be pinning that takes a group apart.
+    let mut strip = TabStrip::new();
+    strip.apply(TabAction::New);
+    strip.apply(TabAction::New);
+    let ids: Vec<TabId> = strip.iter().map(Tab::id).collect();
+    strip.apply(TabAction::NewInGroupOf(ids[1]));
+    let group = strip
+        .get(ids[1])
+        .and_then(Tab::group)
+        .expect("the two of them made a group");
+    let members: Vec<TabId> = strip.members(group).map(Tab::id).collect();
+    assert_eq!(members.len(), 2);
+
+    strip.apply(TabAction::TogglePin(members[1]));
+
+    assert_eq!(
+        strip.members(group).map(Tab::id).collect::<Vec<_>>(),
+        [members[1], members[0]],
+        "the pinned member did not come to the front of its group"
+    );
+    assert!(
+        strip.get(members[1]).is_some_and(Tab::is_pinned),
+        "it did not come back pinned"
+    );
+    assert_eq!(strip.len(), 4, "pinning lost or gained a tab");
+}
+
+#[test]
+fn an_unpinned_tab_cannot_be_dropped_above_a_pinned_one() {
+    // The clamp, which is pinning's whole enforcement: a drop is a pointer
+    // position, and a pointer that stopped halfway up a block of pinned rows
+    // is not somebody asking to unpin anything.
+    let mut strip = TabStrip::new();
+    strip.apply(TabAction::New);
+    strip.apply(TabAction::New);
+    let ids: Vec<TabId> = strip.iter().map(Tab::id).collect();
+
+    strip.apply(TabAction::TogglePin(ids[0]));
+    let pinned = ids[0];
+    let last = ids[2];
+
+    strip.apply(TabAction::MoveTab {
+        tab: last,
+        group: None,
+        before: Some(pinned),
+    });
+
+    assert_eq!(
+        strip.iter().next().map(Tab::id),
+        Some(pinned),
+        "an unpinned tab was dropped above the pinned one"
+    );
+}
+
+#[test]
+fn unpinning_leaves_a_tab_first_among_the_ones_that_are_not_pinned() {
+    // The shortest move that satisfies the rule, rather than back where it
+    // came from: nothing remembers where it came from, and a tab that jumped
+    // to the bottom of the list on being unpinned would be a gesture nobody
+    // would use twice.
+    let mut strip = TabStrip::new();
+    strip.apply(TabAction::New);
+    strip.apply(TabAction::New);
+    let ids: Vec<TabId> = strip.iter().map(Tab::id).collect();
+
+    strip.apply(TabAction::TogglePin(ids[0]));
+    strip.apply(TabAction::TogglePin(ids[1]));
+    assert_eq!(
+        strip.iter().map(Tab::id).collect::<Vec<_>>(),
+        [ids[0], ids[1], ids[2]],
+        "two pins did not leave the two of them at the front, in order"
+    );
+
+    strip.apply(TabAction::TogglePin(ids[0]));
+
+    assert_eq!(
+        strip.iter().map(Tab::id).collect::<Vec<_>>(),
+        [ids[1], ids[0], ids[2]],
+        "the unpinned tab did not land first among the unpinned"
+    );
+    assert!(!strip.get(ids[0]).is_some_and(Tab::is_pinned));
+}
+
+#[test]
+fn a_colour_is_a_name_a_theme_resolves_rather_than_a_number() {
+    // Both directions, because the file carries the name: a colour written by
+    // one build and read by another has to survive the enum being reordered,
+    // and a name nothing matches is a tab with no colour rather than a refusal.
+    for color in TabColor::ALL {
+        assert_eq!(TabColor::named(color.name()), Some(color));
+    }
+    assert_eq!(TabColor::named("chartreuse"), None);
+}

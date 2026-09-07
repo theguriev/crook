@@ -24,9 +24,10 @@
 //! sixty times a second has stopped working.
 
 mod install;
-mod picker;
+pub(super) mod picker;
 mod render;
 mod runtime;
+mod sound;
 
 use std::cell::{Cell, RefCell};
 use std::fs;
@@ -36,35 +37,24 @@ use std::rc::Rc;
 use crookui_core::prelude::*;
 
 use crook_plugin::{ActionName, Manifest, PluginId, Tier};
-use crook_plugin_api::{Answer, Command, Facts, Request};
+use crook_plugin_api::{
+    Answer, Capability, Command, Event, Node, Place, Render, Request, Status, Subject, TabFacts,
+    TabInfo,
+};
 use crook_wasm::{Fuel, Sandbox};
 
 use crate::plugin::{BuildError, Host, Plugin};
+use crate::plugins::tabs::{TAB_ROW_BADGE, TabRow};
+use crate::tab::AgentStatus;
 use crate::workspace::Workspace;
 
 pub use install::install;
-use picker::Chrome;
+use picker::Held;
 use render::Placement;
 use runtime::{Gesture, Runtime};
 
 /// The file a plugin's directory has to hold.
 const MODULE_FILE: &str = "plugin.wasm";
-
-/// The four actions the host registers in a plugin's name, and what each
-/// does with the picker that plugin has up.
-///
-/// In its name because that is where an action's name comes from — the host
-/// puts `owner/name/` on the front of everything, including these — and
-/// registered *before* the guest's own, so that a plugin spelling one of these
-/// loses its own action rather than taking the keyboard's. The registry
-/// refuses the second registration of a name and says so in the audit, which
-/// is exactly the right amount of noise for a plugin doing something odd.
-const PICKER_KEYS: [&str; 4] = [
-    "crook-picker-next",
-    "crook-picker-previous",
-    "crook-picker-choose",
-    "crook-picker-close",
-];
 
 /// How many failures in a row a plugin gets before it stops being asked.
 ///
@@ -171,6 +161,12 @@ impl Plugin for WasmPlugin {
         host: &mut Host,
         ctx: &mut ViewContext<Workspace>,
     ) -> Result<(), BuildError> {
+        {
+            // Before `build`, because a guest may work out its first question
+            // from what day it is.
+            let minutes = chrono::Local::now().offset().local_minus_utc() / 60;
+            self.sandbox.borrow_mut().set_timezone(minutes);
+        }
         let registered = self
             .sandbox
             .borrow_mut()
@@ -182,6 +178,10 @@ impl Plugin for WasmPlugin {
         // rule its switch follows: nothing a person allows or forbids should
         // land on a plugin half way through a frame.
         let granted = host.granted(&self.manifest.id).to_vec();
+        // What a grant comes to for a row, worked out once: a plugin's grant
+        // cannot change while it is built, because answering on the Plugins
+        // page is what rebuilds it.
+        let sees = Sees::granted(&granted);
         let runtime = ctx.add_model(|_| {
             Runtime::new(
                 self.manifest.id.clone(),
@@ -211,72 +211,79 @@ impl Plugin for WasmPlugin {
         });
 
         // What the host holds on this plugin's behalf: the field of whatever
-        // picker it has up, the row the keyboard is on, the menu that is
-        // open, and what the last thing pressed had to say. See `picker`.
-        let chrome = Rc::new(Chrome::new(
-            picker::Keys {
-                next: reserved(&self.manifest.id, PICKER_KEYS[0]),
-                previous: reserved(&self.manifest.id, PICKER_KEYS[1]),
-                choose: reserved(&self.manifest.id, PICKER_KEYS[2]),
-                close: reserved(&self.manifest.id, PICKER_KEYS[3]),
-            },
-            host.voice(),
-        ));
+        // picker it has up, the row the keyboard is on, the menu that is open,
+        // and what the last thing pressed had to say. The *keys* that act on
+        // it are not registered here and are not this plugin's: there is one
+        // set of them for the tier, on `crook/plugins`, because a panel is
+        // modal and only one plugin can have one up. See `picker`.
+        let chrome = Rc::new(Held::new(host.voice()));
 
-        for (name, by) in [(PICKER_KEYS[0], 1_isize), (PICKER_KEYS[1], -1)] {
-            let chrome = chrome.clone();
-            host.register_action(reserved(&self.manifest.id, name), move |_, ctx| {
-                chrome.move_selection(by);
-                ctx.notify();
-            });
+        // Registered on the grant rather than on the export, so a plugin that
+        // was refused hears nothing at all rather than being handed events it
+        // is not allowed and having them dropped further in. A plugin that
+        // asked and was allowed but exports no `crook_event` registers a watch
+        // that does nothing, which is its own affair.
+        if host
+            .granted(&self.manifest.id)
+            .iter()
+            .any(|key| Capability::WatchCommands.keys().contains(key))
+        {
+            let watching = runtime.clone();
+            host.watch_commands(Rc::new(move |_workspace, event: &Event, ctx| {
+                let event = event.clone();
+                watching.update(ctx, |runtime, ctx| runtime.notify(&event, ctx));
+            }));
         }
-        host.register_action(reserved(&self.manifest.id, PICKER_KEYS[2]), {
-            let chrome = chrome.clone();
-            move |workspace, ctx| {
-                // Through the ordinary action path, which is what makes Enter
-                // and a click on the row the same gesture: both say what was
-                // chosen and then run the plugin's own action.
-                let Some((action, key)) = chrome.chosen() else {
-                    return;
-                };
-                chrome.say(key);
-                workspace.run_action(action, ctx);
-            }
-        });
-        host.register_action(reserved(&self.manifest.id, PICKER_KEYS[3]), {
-            let chrome = chrome.clone();
-            move |workspace, ctx| {
-                // The host lets go of the keyboard, and the plugin is told its
-                // panel was dismissed — in that order, so a plugin that opens
-                // something of its own out of `dismiss` is not opening it into
-                // a keyboard this still owns.
-                let dismiss = chrome.dismissal();
-                chrome.shut();
-                workspace.sync_input_keys();
-                if let Some(action) = dismiss {
-                    workspace.run_action(action, ctx);
-                }
-                ctx.notify();
-            }
-        });
-
-        // Claimed as a *panel* rather than as a surface: what this plugin puts
-        // up hangs off a chip in a place, and a place can stop being drawn.
-        // See `Host::claim_panel`.
-        let showing = host.claim_panel(
-            {
-                let chrome = chrome.clone();
-                move |keystroke| chrome.claims(keystroke)
-            },
-            {
-                let chrome = chrome.clone();
-                move || chrome.shut()
-            },
-        );
-        chrome.armed_by(showing);
 
         for contribution in registered.contributions {
-            let Some(slot) = host.slot_named(&contribution.slot) else {
+            let sandbox = self.sandbox.clone();
+            let failures = self.failures.clone();
+            let name = contribution.slot.clone();
+            let who = self.manifest.id.clone();
+            // Made once, here, and kept for as long as the contribution is on
+            // screen: a plugin's controls have no identity of their own, so
+            // what remembers that one of them is under the pointer is the
+            // entry they were drawn from. See [`render::Hovers`].
+            let hovers = Rc::new(render::Hovers::default());
+
+            if let Some(slot) = host.slot_named(&contribution.slot) {
+                let entry = contribution.entry.clone();
+                let chrome = chrome.clone();
+                let placement = placement(&contribution.slot);
+                host.contribute(
+                    slot,
+                    contribution.entry,
+                    contribution.order,
+                    move |workspace, _| {
+                        let render = Render {
+                            slot: name.clone(),
+                            entry: entry.clone(),
+                            subject: None,
+                        };
+                        let node = ask(&sandbox, &failures, &who, &render);
+                        let element = drawn(
+                            &node,
+                            workspace,
+                            &who,
+                            render::Scale::ROW,
+                            placement,
+                            &chrome,
+                            &hovers,
+                        );
+                        // A picker that has just appeared has taken the
+                        // keyboard off the pane it is drawn in, and nothing
+                        // else would say so: what put it up is the plugin's
+                        // own state, which the host finds out by drawing it.
+                        if chrome.keyboard_moved() {
+                            workspace.sync_input_keys();
+                        }
+                        element
+                    },
+                );
+                continue;
+            }
+
+            let Some(slot) = host.row_slot_named(&contribution.slot) else {
                 // Refused, not fatal: a plugin written against a Crook that
                 // has a slot this one does not should be missing that one
                 // contribution, not missing entirely.
@@ -288,49 +295,43 @@ impl Plugin for WasmPlugin {
                 continue;
             };
 
-            let sandbox = self.sandbox.clone();
-            let failures = self.failures.clone();
-            let name = contribution.slot.clone();
+            // A mark and the badge on its corner are the same vocabulary drawn
+            // at two sizes, and the size is the host's to decide.
             let entry = contribution.entry.clone();
-            let who = self.manifest.id.clone();
             let chrome = chrome.clone();
-            let placement = placement(&contribution.slot);
-            // Made once, here, and kept for as long as the contribution is on
-            // screen: a plugin's controls have no identity of their own, so
-            // what remembers that one of them is under the pointer is the
-            // entry they were drawn from. See [`render::Hovers`].
-            let hovers = Rc::new(render::Hovers::default());
-            host.contribute(
+            let scale = if slot == TAB_ROW_BADGE {
+                render::Scale::BADGE
+            } else {
+                render::Scale::MARK
+            };
+            host.contribute_row(
                 slot,
                 contribution.entry,
                 contribution.order,
-                move |workspace, _| {
-                    let node = ask(&sandbox, &failures, &who, &name, &entry);
-                    let host = workspace.host();
-                    let prefix = who.clone();
-                    let drawn = render::element(
-                        &node,
-                        &render::Surroundings {
-                            fonts: workspace.fonts(),
-                            placement,
-                            action: &move |action| {
-                                ActionName::parse(&format!("{prefix}/{action}"))
-                                    .ok()
-                                    .and_then(|name| host.action(&name))
-                            },
-                            hovers: &hovers,
-                            chrome: &chrome,
-                            clipboard: workspace.clipboard(),
-                        },
-                    );
-                    // A picker that has just appeared has taken the keyboard
-                    // off the pane it is drawn in, and nothing else would say
-                    // so: what put it up is the plugin's own state, which the
-                    // host finds out about by drawing it.
-                    if chrome.keyboard_moved() {
-                        workspace.sync_input_keys();
+                move |workspace, row, _| {
+                    let render = Render {
+                        slot: name.clone(),
+                        entry: entry.clone(),
+                        subject: Some(Subject::Tab(sees.facts(row, &who))),
+                    };
+                    match ask(&sandbox, &failures, &who, &render) {
+                        // A row this plugin has nothing to say about, which
+                        // is most rows for most plugins. The host draws what
+                        // it would have drawn anyway — see `plugins::tabs`.
+                        Node::Empty => None,
+                        node => Some(drawn(
+                            &node,
+                            workspace,
+                            &who,
+                            scale,
+                            // A mark on a row hangs nothing under it: there is
+                            // one of it per row, and a panel per row is not a
+                            // thing this slot can mean.
+                            Placement::Below,
+                            &chrome,
+                            &hovers,
+                        )),
                     }
-                    drawn
                 },
             );
         }
@@ -387,6 +388,19 @@ impl Plugin for WasmPlugin {
                 chrome.released();
                 workspace.sync_input_keys();
 
+                // The guest may have changed what it draws, and nothing out
+                // here can tell whether it did: its state is inside the
+                // module and what came back is a `()`. So every action asks
+                // for the frame that will find out.
+                //
+                // Not belt and braces, because a press only *appears* to
+                // redraw on its own — what notifies is the hover bookkeeping
+                // under it, on the way past. An action that arrives without
+                // one did not redraw at all, and `Node::Anchored`'s dismissal
+                // is exactly that: the guest shut its panel, the frame went on
+                // drawing it, and its modal underlay then ate every press
+                // aimed at the controls beside it.
+                ctx.notify();
                 // Whatever pressing it made the plugin ask for. An action is
                 // one of the four calls that reach a context, which is what
                 // makes "the button refreshes the reading" work at all — and
@@ -415,17 +429,6 @@ impl Plugin for WasmPlugin {
     }
 }
 
-/// `owner/name/<one of the host's own>`.
-///
-/// The host registering an action in a plugin's name is not a trick: an
-/// action's name says which plugin it belongs to, and these belong to the
-/// plugin whose picker they move. What keeps them apart from the guest's own
-/// is that they are registered first and that they are spelled like nothing a
-/// plugin would call its own.
-fn reserved(plugin: &PluginId, name: &str) -> ActionName {
-    ActionName::parse(&format!("{plugin}/{name}")).expect("a name built from an id and a literal")
-}
-
 /// Where a panel hangs, given the slot the chip is in.
 ///
 /// The host's answer rather than the plugin's, and the slot is the whole of
@@ -452,19 +455,22 @@ fn serve(workspace: &mut Workspace, request: &Request, ctx: &mut ViewContext<Wor
         Request::Where => {
             let (directory, facts) = workspace.focused_facts(ctx);
             let diff = facts.as_ref().and_then(|facts| facts.diff.as_ref());
-            Answer::Where(Facts {
-                directory: directory.map(|path| path.to_string_lossy().into_owned()),
+            Answer::Where {
+                place: directory.map(|directory| Place {
+                    directory: directory.to_string_lossy().into_owned(),
+                    branch: facts
+                        .as_ref()
+                        .and_then(|facts| facts.branch.as_ref())
+                        .map(|head| head.label().to_owned()),
+                    worktree: facts.as_ref().is_some_and(|facts| facts.worktree),
+                }),
                 home: dirs::home_dir().map(|path| path.to_string_lossy().into_owned()),
-                branch: facts
-                    .as_ref()
-                    .and_then(|facts| facts.branch.as_ref())
-                    .map(|head| head.label().to_owned()),
                 // Zero rather than absent for a directory git has said nothing
                 // about, because the wire has no third answer and "nothing
                 // changed" is what a chip would print either way.
                 added: diff.map_or(0, |diff| diff.lines_added),
                 removed: diff.map_or(0, |diff| diff.lines_removed),
-            })
+            }
         }
         Request::Commands => {
             let keybindings = workspace.keybindings();
@@ -510,7 +516,9 @@ fn serve(workspace: &mut Workspace, request: &Request, ctx: &mut ViewContext<Wor
         Request::Fetch { .. }
         | Request::ReadFile { .. }
         | Request::List { .. }
-        | Request::Repository { .. } => {
+        | Request::Repository { .. }
+        | Request::Tally { .. }
+        | Request::PlaySound { .. } => {
             Answer::Failed(String::from("that is not something the window can do"))
         }
     }
@@ -560,19 +568,18 @@ fn ask(
     sandbox: &Rc<RefCell<Sandbox>>,
     failures: &Rc<Cell<u32>>,
     who: &PluginId,
-    slot: &str,
-    entry: &str,
-) -> crook_plugin_api::Node {
+    render: &Render,
+) -> Node {
     if failures.get() >= GIVE_UP_AFTER {
-        return crook_plugin_api::Node::Empty;
+        return Node::Empty;
     }
     // Already running: a guest's own render reached back into it, which it
     // cannot do through this API and so means a bug here rather than there.
     let Ok(mut sandbox) = sandbox.try_borrow_mut() else {
-        return crook_plugin_api::Node::Empty;
+        return Node::Empty;
     };
 
-    match sandbox.render(slot, entry) {
+    match sandbox.render(render) {
         Ok(node) => {
             failures.set(0);
             node
@@ -584,9 +591,140 @@ fn ask(
             if count == GIVE_UP_AFTER {
                 log::warn!("{who} has failed {count} times and will not be asked again");
             }
-            crook_plugin_api::Node::Empty
+            Node::Empty
         }
     }
+}
+
+/// Turns what a guest described into what the window draws.
+///
+/// The one place a plugin's action names are resolved, and the reason they are
+/// resolved *here* rather than where they were registered: a name is looked up
+/// every frame, so a plugin whose action was disabled between two frames draws
+/// an inert control rather than one that dispatches into nothing.
+fn drawn(
+    node: &Node,
+    workspace: &Workspace,
+    who: &PluginId,
+    scale: render::Scale,
+    placement: Placement,
+    chrome: &Rc<Held>,
+    hovers: &render::Hovers,
+) -> Box<dyn Element> {
+    let host = workspace.host();
+    let prefix = who.clone();
+    render::element(
+        node,
+        render::Chrome::new(
+            workspace.fonts(),
+            scale,
+            placement,
+            chrome,
+            workspace.clipboard(),
+        ),
+        &move |action| {
+            ActionName::parse(&format!("{prefix}/{action}"))
+                .ok()
+                .and_then(|name| host.action(&name))
+        },
+        hovers,
+    )
+}
+
+/// What one plugin may be told about a row.
+///
+/// A grant, reduced to the two questions a row raises, so that the answer is
+/// a comparison of booleans per row rather than a walk of a list of granted
+/// keys per row per frame. It is made when the plugin is built because that is
+/// when a grant can change: answering on the Plugins page rebuilds the plugin
+/// there and then.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+struct Sees {
+    /// [`Capability::ReadTabs`]: what the tab is called, and what it is doing.
+    tabs: bool,
+    /// [`Capability::ReadWorkingDirectory`]: where it is working, and what git
+    /// says about there.
+    place: bool,
+}
+
+impl Sees {
+    /// What these granted keys come to.
+    fn granted(granted: &[String]) -> Self {
+        Self {
+            tabs: holds(granted, &Capability::ReadTabs),
+            place: holds(granted, &Capability::ReadWorkingDirectory),
+        }
+    }
+
+    /// One row, with everything that was not granted left out.
+    ///
+    /// The key is given to everybody. It is a hash of where the tab is
+    /// working — of what it is called, for a session that has not said where
+    /// that is — salted with the plugin's own id, so that a plugin can tell
+    /// one row from another and keep telling them apart tomorrow, two plugins
+    /// cannot work out that two of their rows are one row, and nothing about
+    /// the tab can be read back out of the number. See `TabFacts::key`, which
+    /// says what that is and is not.
+    fn facts(self, row: &TabRow<'_>, who: &PluginId) -> TabFacts {
+        let named = row
+            .directory
+            .map(|directory| directory.to_string_lossy().into_owned())
+            .unwrap_or_else(|| row.title.to_owned());
+
+        TabFacts {
+            key: salted(who.as_str(), &named),
+            tab: self.tabs.then(|| TabInfo {
+                title: row.title.to_owned(),
+                active: row.active,
+                status: match row.status {
+                    AgentStatus::Idle => Status::Idle,
+                    AgentStatus::Running => Status::Running,
+                    AgentStatus::NeedsInput => Status::NeedsInput,
+                    AgentStatus::Failed => Status::Failed,
+                },
+            }),
+            place: self
+                .place
+                .then_some(row.directory)
+                .flatten()
+                .map(|directory| Place {
+                    directory: directory.to_string_lossy().into_owned(),
+                    branch: row
+                        .git
+                        .and_then(|facts| facts.branch.as_ref())
+                        .map(|head| head.label().to_owned()),
+                    worktree: row.git.is_some_and(|facts| facts.worktree),
+                }),
+        }
+    }
+}
+
+/// Whether every key a capability is written down as was granted.
+fn holds(granted: &[String], capability: &Capability) -> bool {
+    capability
+        .keys()
+        .iter()
+        .all(|key| granted.iter().any(|allowed| allowed == key))
+}
+
+/// FNV-1a over the salt and the string, which is what a row's key is.
+///
+/// Written out rather than reached for, because the property that matters is
+/// that the number is the *same next week*: `DefaultHasher` is explicitly not
+/// stable across releases of the standard library, and a mark that changed
+/// because Rust was upgraded would be a mark nobody could rely on. Nothing
+/// here needs a hash to be hard to invert — see `TabFacts::key` for what this
+/// number is and is not offered as.
+fn salted(salt: &str, text: &str) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut hash = OFFSET;
+    for byte in salt.as_bytes().iter().chain(b"\0").chain(text.as_bytes()) {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(PRIME);
+    }
+    hash
 }
 
 #[cfg(test)]

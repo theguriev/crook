@@ -36,6 +36,22 @@ pub struct RepoLayout {
     pub common_dir: PathBuf,
 }
 
+impl RepoLayout {
+    /// Whether this is a linked worktree — one `git worktree add` made —
+    /// rather than the checkout the repository was cloned into.
+    ///
+    /// The two git directories are the whole of the answer: a linked worktree
+    /// keeps its own `HEAD` under `<main>/.git/worktrees/<name>` and shares
+    /// everything else, so its `git_dir` is not its `common_dir`. A submodule
+    /// has a `git_dir` somewhere unexpected too, and is *not* a worktree: its
+    /// `common_dir` is that same directory, because nothing is shared with a
+    /// checkout elsewhere. See [`common_dir_of`], which is where both of those
+    /// answers come from.
+    pub fn is_linked_worktree(&self) -> bool {
+        self.git_dir != self.common_dir
+    }
+}
+
 /// What `HEAD` points at.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Head {

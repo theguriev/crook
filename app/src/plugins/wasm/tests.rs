@@ -155,13 +155,106 @@ pub(crate) fn wasm(id: &str, slot: &str, order: i32) -> Vec<u8> {
                 (i32.const {action_at}) (i32.const 4)
                 (i32.const {title_at}) (i32.const 14))
               (i32.const 0))
-            (func (export "crook_render") (param i32 i32 i32 i32) (result i64)
+            (func (export "crook_render") (param i32 i32) (result i64)
               (i64.or (i64.shl (i64.const {tree_at}) (i64.const 32)) (i64.const {tree_len})))
             (func (export "crook_run") (param i32 i32 i32 i32) (result i32) (i32.const 0)))"#,
         manifest_bytes = escaped(&manifest),
         manifest_len = manifest.len(),
         tree_bytes = escaped(&tree),
         tree_len = tree.len(),
+        slot_len = slot.len(),
+        abi = crook_plugin_api::ABI_VERSION,
+    );
+
+    wat::parse_str(&text).expect("the test module should assemble")
+}
+
+/// A module with a panel it opens and shuts itself.
+///
+/// [`wasm`] draws the same tree for ever, which is all a test about what a
+/// node *becomes* needs. This one has a state and one action that flips it, so
+/// what it draws on the frame after an action is not what it drew before —
+/// which is the only way to ask whether running an action redrew anything.
+pub(crate) fn wasm_with_a_panel(id: &str, slot: &str, order: i32) -> Vec<u8> {
+    let manifest = to_bytes(&manifest(id)).expect("a manifest should encode");
+    let chip = Node::Pressable {
+        content: Box::new(Node::Icon {
+            name: "chevron-down".to_owned(),
+            tone: Tone::Muted,
+        }),
+        action: "poke".to_owned(),
+    };
+    let shut = to_bytes(&Node::Anchored {
+        content: Box::new(chip.clone()),
+        panel: None,
+        dismiss: "poke".to_owned(),
+    })
+    .expect("a tree should encode");
+    let open = to_bytes(&Node::Anchored {
+        content: Box::new(chip),
+        panel: Some(Box::new(Node::Note {
+            text: "the panel is up".to_owned(),
+            tone: Tone::Muted,
+        })),
+        dismiss: "poke".to_owned(),
+    })
+    .expect("a tree should encode");
+
+    let shut_at = 16 + manifest.len() as u32;
+    let open_at = shut_at + shut.len() as u32;
+    let strings_at = 4096;
+    let entry_at = strings_at + slot.len() as u32;
+    let action_at = entry_at + 4;
+    let title_at = action_at + 4;
+
+    let text = format!(
+        r#"(module
+            (import "crook" "contribute"
+              (func $contribute (param i32 i32 i32 i32 i32)))
+            (import "crook" "register_action"
+              (func $register_action (param i32 i32 i32 i32)))
+            (memory (export "memory") 1)
+            (global $next (mut i32) (i32.const 8192))
+            (global $open (mut i32) (i32.const 0))
+            (data (i32.const 16) "{manifest_bytes}")
+            (data (i32.const {shut_at}) "{shut_bytes}")
+            (data (i32.const {open_at}) "{open_bytes}")
+            (data (i32.const {strings_at}) "{slot}")
+            (data (i32.const {entry_at}) "here")
+            (data (i32.const {action_at}) "poke")
+            (data (i32.const {title_at}) "Poke the probe")
+            (func (export "crook_abi_version") (result i32) (i32.const {abi}))
+            (func (export "crook_alloc") (param $len i32) (result i32)
+              (local $at i32)
+              (local.set $at (global.get $next))
+              (global.set $next (i32.add (global.get $next) (local.get $len)))
+              (local.get $at))
+            (func (export "crook_manifest") (result i64)
+              (i64.or (i64.shl (i64.const 16) (i64.const 32)) (i64.const {manifest_len})))
+            (func (export "crook_build") (result i32)
+              (call $contribute
+                (i32.const {strings_at}) (i32.const {slot_len})
+                (i32.const {entry_at}) (i32.const 4)
+                (i32.const {order}))
+              (call $register_action
+                (i32.const {action_at}) (i32.const 4)
+                (i32.const {title_at}) (i32.const 14))
+              (i32.const 0))
+            (func (export "crook_render") (param i32 i32) (result i64)
+              (if (result i64) (global.get $open)
+                (then (i64.or (i64.shl (i64.const {open_at}) (i64.const 32))
+                              (i64.const {open_len})))
+                (else (i64.or (i64.shl (i64.const {shut_at}) (i64.const 32))
+                              (i64.const {shut_len})))))
+            (func (export "crook_run") (param i32 i32 i32 i32) (result i32)
+              (global.set $open (i32.eqz (global.get $open)))
+              (i32.const 0)))"#,
+        manifest_bytes = escaped(&manifest),
+        manifest_len = manifest.len(),
+        shut_bytes = escaped(&shut),
+        shut_len = shut.len(),
+        open_bytes = escaped(&open),
+        open_len = open.len(),
         slot_len = slot.len(),
         abi = crook_plugin_api::ABI_VERSION,
     );
@@ -307,11 +400,6 @@ impl TextLayoutSystem for StubShaper {
     }
 }
 
-/// `owner/name/<what>`, for the four actions a picker's keys resolve to.
-fn name(what: &str) -> ActionName {
-    ActionName::parse(&format!("someone/theirs/{what}")).expect("a name built from a literal")
-}
-
 /// A view whose whole tree is one plugin's node.
 ///
 /// `answers` stands in for the host's action table, and it is one value rather
@@ -320,6 +408,9 @@ fn name(what: &str) -> ActionName {
 struct Drawn {
     node: Node,
     answers: Option<ActionId>,
+    /// Where this contribution is being drawn, which is what decides the size
+    /// of everything in it.
+    scale: render::Scale,
     /// The mouse state a contribution keeps between frames. Held here for the
     /// reason the real one is held on the contribution: the tests draw the
     /// same node twice — once to find a control and once after pressing it —
@@ -331,7 +422,7 @@ struct Drawn {
     /// plugin, so this stands in for one — and it has to survive between two
     /// draws for exactly the reason `hovers` does, since what a picker is
     /// showing is what a key pressed after it was drawn acts on.
-    chrome: Rc<picker::Chrome>,
+    held: Rc<picker::Held>,
     /// What a field in a picker would paste from. Never used by these tests
     /// and required to build one, which is the ordinary state of a clipboard
     /// in a headless window.
@@ -361,17 +452,18 @@ impl View for Drawn {
         let answers = self.answers;
         render::element(
             &self.node,
-            &render::Surroundings {
-                fonts: Fonts {
+            render::Chrome::new(
+                Fonts {
                     ui: FamilyId(0),
                     monospace: FamilyId(0),
                 },
-                placement: render::Placement::Below,
-                action: &move |_| answers,
-                hovers: &self.hovers,
-                chrome: &self.chrome,
-                clipboard: &self.clipboard,
-            },
+                self.scale,
+                render::Placement::Below,
+                &self.held,
+                &self.clipboard,
+            ),
+            &move |_| answers,
+            &self.hovers,
         )
     }
 }
@@ -392,22 +484,20 @@ impl Frame {
 
     /// The same, with every name in the node resolving to `answers`.
     fn answering(node: Node, answers: Option<ActionId>) -> Self {
+        Self::at(node, answers, render::Scale::ROW)
+    }
+
+    /// The same, drawn where a mark on a tab row is drawn.
+    fn at(node: Node, answers: Option<ActionId>, scale: render::Scale) -> Self {
         let queue = LocalQueue::new();
         // One worker: nothing drawn here waits on anything.
         let mut app = App::new(queue.foreground(), Arc::new(Background::new(1)));
         let (window_id, _) = app.add_window(|_| Drawn {
             node,
             answers,
+            scale,
             hovers: render::Hovers::default(),
-            chrome: Rc::new(picker::Chrome::new(
-                picker::Keys {
-                    next: name("next"),
-                    previous: name("previous"),
-                    choose: name("choose"),
-                    close: name("close"),
-                },
-                Voice::default(),
-            )),
+            held: Rc::new(picker::Held::new(Voice::default())),
             clipboard: Clipboard::new(),
         });
         let presenter = Presenter::new(window_id, Arc::new(StubShaper));
@@ -619,19 +709,21 @@ fn a_name_this_build_has_no_icon_for_draws_nothing() {
 }
 
 #[test]
-fn a_stale_reading_greys_the_whole_mark_and_not_half_of_it() {
+fn a_stale_reading_greys_the_face_and_leaves_the_face_a_face() {
     // `Muted` is what a plugin says when the figure beside the mark is not
-    // current. Both layers take it: a yellow face wearing a grey eyepatch
-    // would read as a rendering fault rather than as a stale reading.
+    // current, and greying the face is what says it. The ink — the eyepatch,
+    // the strap, the grin — stays dark, because it is drawn *on* the face:
+    // painting both in one colour does not make a grey pirate, it makes a
+    // plain disc with nothing on it. That shipped once, and what it looked
+    // like on somebody's screen was a grey circle.
     let mut stale = Frame::new(Node::Icon {
         name: "pirate".to_owned(),
         tone: Tone::Muted,
     });
 
-    assert_eq!(
-        mark_colors(&stale.scene()),
-        [theme().text_muted, theme().text_muted]
-    );
+    let colors = mark_colors(&stale.scene());
+    assert_eq!(colors, [theme().text_muted, Color::hex(0x151515)]);
+    assert_ne!(colors[0], colors[1], "the mark came out as one flat shape");
 
     // Every other tone leaves the artwork the colours it was drawn in, which
     // is the whole reason a mark is not an icon: a pirate that took the
@@ -861,6 +953,411 @@ fn a_pressable_is_its_content_and_an_even_edge_and_nothing_else() {
 
     assert_eq!(ground.width(), alone.width() + 14., "seven a side, evenly");
     assert_eq!(ground.height(), alone.height() + 6.);
+}
+
+/// One row, for the redaction tests below.
+fn a_row(worktree: bool) -> crate::git::GitFacts {
+    crate::git::GitFacts {
+        branch: Some(crate::git::Head::Branch("side".to_owned())),
+        diff: None,
+        worktree,
+    }
+}
+
+/// The plugin the keys below are salted with.
+fn asker() -> PluginId {
+    PluginId::parse("eugen/marks").expect("a literal that parses")
+}
+
+/// A row a plugin might be asked about.
+fn row<'a>(title: &'a str, directory: &'a Path, git: &'a crate::git::GitFacts) -> TabRow<'a> {
+    TabRow {
+        tab: crate::tab::TabId::next(),
+        pane: crate::tab::PaneId::next(),
+        title,
+        active: true,
+        status: AgentStatus::Running,
+        directory: Some(directory),
+        git: Some(git),
+    }
+}
+
+#[test]
+fn a_plugin_granted_nothing_is_told_which_row_it_is_drawing_and_nothing_else() {
+    // The whole reason a mark per tab can be a plugin nobody has to allow
+    // anything: it is told these two rows are different rows, and not one word
+    // about either of them.
+    let git = a_row(true);
+    let facts = Sees::granted(&[]).facts(&row("crook", Path::new("/work/crook"), &git), &asker());
+
+    assert_eq!(facts.tab, None, "a name crossed without tabs.read");
+    assert_eq!(facts.place, None, "a directory crossed without cwd.read");
+    assert_ne!(facts.key, 0);
+}
+
+#[test]
+fn a_grant_shows_a_plugin_what_it_was_granted_and_no_more() {
+    let git = a_row(true);
+    let row = row("crook", Path::new("/work/crook"), &git);
+    let asker = asker();
+
+    let named = Sees::granted(&["tabs.read".to_owned()]).facts(&row, &asker);
+    let placed = Sees::granted(&["cwd.read".to_owned()]).facts(&row, &asker);
+
+    let tab = named.tab.expect("tabs.read was granted");
+    assert_eq!(tab.title, "crook");
+    assert_eq!(tab.status, crook_plugin_api::Status::Running);
+    assert!(tab.active);
+    assert_eq!(named.place, None, "a directory crossed on tabs.read alone");
+
+    let place = placed.place.expect("cwd.read was granted");
+    assert_eq!(place.directory, "/work/crook");
+    assert_eq!(place.branch.as_deref(), Some("side"));
+    assert!(
+        place.worktree,
+        "the one fact the worktree plugin exists for"
+    );
+    assert_eq!(placed.tab, None, "a title crossed on cwd.read alone");
+}
+
+#[test]
+fn a_rows_key_is_the_same_tomorrow_and_is_not_the_same_for_two_plugins() {
+    // Both halves of what the key promises, and the literal is the point of
+    // the first: this number is what a plugin's choice of mark is a remainder
+    // of, so it has to survive a rebuild of Crook, not merely a second call
+    // within one run.
+    let git = a_row(false);
+    let here = row("crook", Path::new("/work/crook"), &git);
+    let elsewhere = row("crook", Path::new("/work/crook-side"), &git);
+    let granted = Sees::granted(&[]);
+    let other = PluginId::parse("eugen/other").expect("a literal that parses");
+
+    assert_eq!(granted.facts(&here, &asker()).key, 0xf0c0_8c7a_349e_059d);
+    assert_ne!(
+        granted.facts(&here, &asker()).key,
+        granted.facts(&elsewhere, &asker()).key,
+        "two directories are one row"
+    );
+    assert_ne!(
+        granted.facts(&here, &asker()).key,
+        granted.facts(&here, &other).key,
+        "two plugins can compare notes about which row is which"
+    );
+}
+
+#[test]
+fn a_session_that_has_not_said_where_it_is_working_still_has_a_key() {
+    // The state every tab is in for a moment after it is opened. A key that
+    // was zero — or absent — there would be a panel whose marks all changed
+    // the instant the shell answered.
+    let git = a_row(false);
+    let mut nowhere = row("crook", Path::new("/work/crook"), &git);
+    nowhere.directory = None;
+    let granted = Sees::granted(&[]);
+
+    let key = granted.facts(&nowhere, &asker()).key;
+
+    assert_ne!(key, 0);
+    assert_ne!(
+        key,
+        granted
+            .facts(&row("crook", Path::new("/work/crook"), &git), &asker())
+            .key,
+        "a title and a path that happen to look alike are not the same row"
+    );
+}
+
+#[test]
+fn a_note_is_not_drawn_until_the_pointer_is_on_it() {
+    // The whole of what `Explained` adds over drawing the words permanently:
+    // the plugin describes them on every frame, and the host puts them on
+    // screen only while somebody is asking.
+    let mut frame = Frame::new(Node::Explained {
+        content: Box::new(Node::Icon {
+            name: "pirate".to_owned(),
+            tone: Tone::Primary,
+        }),
+        explanation: Box::new(Node::Rule),
+    });
+
+    let scene = frame.scene();
+    assert!(
+        rects_of(&scene, theme().surface_raised).is_empty(),
+        "a note nobody is pointing at was already on screen"
+    );
+
+    frame.hover(mark_center(&scene));
+    let scene = frame.scene();
+    let ground = rects_of(&scene, theme().surface_raised);
+
+    // The host's ground, at the host's width — the same one a panel gets, so
+    // a rule inside it bleeds to the edge it was tuned for.
+    assert_eq!(ground.len(), 1, "reaching for it showed nothing");
+    assert_eq!(ground[0].width(), 280.);
+}
+
+#[test]
+fn a_note_does_not_swallow_the_click_it_is_explaining() {
+    // The trap in copying `anchored` across. A panel is modal, which is what
+    // makes clicking the chip again one toggle rather than two — but a note is
+    // up *because* the pointer is on the control, so a modal one would eat
+    // every press aimed at the thing it is describing. Somebody who reads a
+    // note and then presses is the ordinary case, not the corner.
+    let action = an_action();
+    let mut frame = Frame::answering(
+        Node::Explained {
+            content: Box::new(Node::Pressable {
+                content: Box::new(Node::Icon {
+                    name: "pirate".to_owned(),
+                    tone: Tone::Primary,
+                }),
+                action: "poke".to_owned(),
+            }),
+            explanation: Box::new(Node::Rule),
+        },
+        Some(action),
+    );
+
+    let at = mark_center(&frame.scene());
+    frame.hover(at);
+    assert!(
+        !rects_of(&frame.scene(), theme().surface_raised).is_empty(),
+        "the note should be up, or this proves nothing"
+    );
+
+    assert_eq!(frame.click(at), [WorkspaceAction::Run(action)]);
+}
+
+#[test]
+fn a_note_does_not_renumber_the_controls_after_it() {
+    // `Hovers` hands out mouse state in the order the tree asks for it, so a
+    // note built only on the frames it is up would shift every handle after it
+    // as the pointer arrived — and the control beside it would be wearing
+    // somebody else's hover, or answering to nothing. Both subtrees are built
+    // on every frame, and this is what says so.
+    let action = an_action();
+    let mut frame = Frame::answering(
+        Node::Row(vec![
+            Node::Explained {
+                content: Box::new(Node::Icon {
+                    name: "pirate".to_owned(),
+                    tone: Tone::Primary,
+                }),
+                explanation: Box::new(Node::Rule),
+            },
+            Node::Button {
+                label: "Play".to_owned(),
+                action: "poke".to_owned(),
+                tone: Tone::Accent,
+            },
+        ]),
+        Some(action),
+    );
+
+    // The button's own face, which is the one ground this tree draws at rest.
+    let scene = frame.scene();
+    let button = *rects_of(&scene, theme().overlay_1)
+        .first()
+        .expect("the button should have drawn its face");
+
+    frame.hover(mark_center(&scene));
+    assert!(
+        !rects_of(&frame.scene(), theme().surface_raised).is_empty(),
+        "the note should be up, or this proves nothing"
+    );
+
+    let at = button.origin() + button.size() / 2.;
+    assert_eq!(frame.click(at), [WorkspaceAction::Run(action)]);
+}
+
+/// The tree dziling describes, copied from the plugin's own `crook_render`.
+///
+/// Copied and not imported, because the plugin is a wasm module in somebody
+/// else's repository and this is the host's test: what is being asked is
+/// whether *this* shape, whoever wrote it, reaches its actions when it is
+/// clicked. A shape that stops matching the plugin makes this test say less
+/// than it claims, which is the price of not having the guest here.
+fn dziling(open: bool, ringing: bool) -> Node {
+    let select = Node::Anchored {
+        content: Box::new(Node::Pressable {
+            content: Box::new(Node::Row(vec![
+                Node::Badge {
+                    text: "Dzin".to_owned(),
+                    tone: if ringing { Tone::Accent } else { Tone::Muted },
+                },
+                Node::Gap(Gap::Small),
+                Node::Icon {
+                    name: "chevron-down".to_owned(),
+                    tone: Tone::Muted,
+                },
+            ])),
+            action: "open".to_owned(),
+        }),
+        panel: open.then(|| {
+            Box::new(Node::Column(
+                ["Dzin", "Microwave", "Engine", "Coin", "Sonar", "Typewriter"]
+                    .into_iter()
+                    .map(|label| Node::Pressable {
+                        content: Box::new(Node::Row(vec![Node::Text {
+                            text: label.to_owned(),
+                            size: Size::Body,
+                            tone: Tone::Primary,
+                        }])),
+                        action: label.to_lowercase(),
+                    })
+                    .collect(),
+            ))
+        }),
+        dismiss: "close".to_owned(),
+    };
+
+    Node::Row(vec![
+        Node::Text {
+            text: "Rings".to_owned(),
+            size: Size::Small,
+            tone: Tone::Muted,
+        },
+        Node::Gap(Gap::Small),
+        if open {
+            select
+        } else {
+            Node::Explained {
+                content: Box::new(select),
+                explanation: Box::new(Node::Column(vec![
+                    Node::Row(vec![
+                        Node::Text {
+                            text: "Dzin".to_owned(),
+                            size: Size::Body,
+                            tone: Tone::Primary,
+                        },
+                        Node::Fill,
+                        Node::Badge {
+                            text: if ringing { "ringing" } else { "muted" }.to_owned(),
+                            tone: if ringing { Tone::Accent } else { Tone::Muted },
+                        },
+                    ]),
+                    Node::Note {
+                        text: "Rings when a command that ran for two seconds or more finishes."
+                            .to_owned(),
+                        tone: Tone::Muted,
+                    },
+                    Node::Rule,
+                    Node::Note {
+                        text: "Six sounds. Click to choose one.".to_owned(),
+                        tone: Tone::Muted,
+                    },
+                ])),
+            }
+        },
+        Node::Gap(Gap::Medium),
+        Node::Pressable {
+            content: Box::new(Node::Row(vec![
+                Node::Icon {
+                    name: "play".to_owned(),
+                    tone: Tone::Accent,
+                },
+                Node::Gap(Gap::Small),
+                Node::Text {
+                    text: "Play".to_owned(),
+                    size: Size::Small,
+                    tone: Tone::Accent,
+                },
+            ])),
+            action: "test".to_owned(),
+        },
+        if ringing {
+            Node::Empty
+        } else {
+            Node::Row(vec![
+                Node::Gap(Gap::Medium),
+                Node::Text {
+                    text: "muted".to_owned(),
+                    size: Size::Small,
+                    tone: Tone::Warning,
+                },
+            ])
+        },
+    ])
+}
+
+/// Where the mark drawn from `icon` is, which is the only handle a test has on
+/// one control in a row of several.
+fn where_the(scene: &Scene, icon: Lucide) -> Vector2F {
+    let bounds = scene
+        .layers()
+        .flat_map(|layer| layer.icons.iter())
+        .find(|drawn| drawn.icon_key.mark == Mark::Icon(icon))
+        .unwrap_or_else(|| panic!("{icon:?} should have been drawn"))
+        .bounds;
+    bounds.origin() + bounds.size() / 2.
+}
+
+#[test]
+fn the_play_mark_on_the_real_plugins_row_runs_the_action_under_it() {
+    // The reported bug, at the tier it was suspected of being in: a click on
+    // the one control this plugin exists for, on the shape the plugin
+    // actually describes, read for what the window was told to do.
+    //
+    // Both states the row has at rest. Muted is here because that is the one
+    // the report was made from and because the mute changes the row's shape —
+    // a word appears after the triangle — and a shape that changes is a
+    // [`Hovers`] order that changes with it.
+    let action = an_action();
+
+    for ringing in [true, false] {
+        let mut frame = Frame::answering(dziling(false, ringing), Some(action));
+        let at = where_the(&frame.scene(), Lucide::Play);
+
+        assert_eq!(
+            frame.click(at),
+            [WorkspaceAction::Run(action)],
+            "the play mark ran nothing with the plugin {}",
+            if ringing { "ringing" } else { "muted" },
+        );
+    }
+}
+
+#[test]
+fn the_note_a_pointer_raised_on_the_way_past_does_not_cover_the_play_mark() {
+    // The way somebody actually reaches the triangle: across the chip that
+    // explains it. The note is 280 wide and the row is not, so a note put
+    // anywhere but clear of its own control would be lying between the pointer
+    // and the one control on this row that makes a noise.
+    let action = an_action();
+    let mut frame = Frame::answering(dziling(false, true), Some(action));
+
+    let scene = frame.scene();
+    frame.hover(where_the(&scene, Lucide::ChevronDown));
+    let scene = frame.scene();
+    assert!(
+        !rects_of(&scene, theme().surface_raised).is_empty(),
+        "the note should be up, or this proves nothing"
+    );
+
+    let at = where_the(&scene, Lucide::Play);
+    assert_eq!(frame.click(at), [WorkspaceAction::Run(action)]);
+}
+
+#[test]
+fn the_same_click_on_the_same_row_without_the_pressable_runs_nothing() {
+    // What makes the two above about the triangle rather than about the row.
+    // The identical tree with the play mark's `Pressable` taken off it, and
+    // the identical click: anything dispatched here would have been dispatched
+    // by something else, and the tests above would be reading a neighbour's
+    // answer.
+    let Node::Row(mut row) = dziling(false, true) else {
+        unreachable!("the plugin's contribution is a row");
+    };
+    let Node::Pressable { content, .. } = row.remove(4) else {
+        unreachable!("the fifth thing in it is the play mark");
+    };
+    row.insert(4, *content);
+
+    let action = an_action();
+    let mut frame = Frame::answering(Node::Row(row), Some(action));
+    let at = where_the(&frame.scene(), Lucide::Play);
+
+    assert!(frame.click(at).is_empty(), "something else took the click");
 }
 
 #[test]

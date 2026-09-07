@@ -60,6 +60,58 @@ fn test_a_window_of_tabs_and_splits_comes_back_the_shape_it_was() {
 }
 
 #[test]
+fn test_a_rename_comes_back_and_the_name_it_replaced_comes_back_with_it() {
+    // Both halves, because they are kept in two different places: a tab's name
+    // is the snapshot's own field and a pane's is one beside the title it
+    // overrides. The name a tab was *born* with is neither — it is rebuilt on
+    // the way in, and without it a tab that came back renamed would have
+    // nowhere to go when the rename was taken back.
+    let mut strip = split(1);
+    let tab = strip.iter().next().expect("a first tab").id();
+    let pane = strip
+        .iter()
+        .next()
+        .expect("a first tab")
+        .panes()
+        .focused_id();
+    let born_as = strip.get(tab).expect("the tab is open").name().to_owned();
+
+    strip
+        .get_mut(tab)
+        .expect("the tab is open")
+        .set_name(Some("release work".to_owned()));
+    strip
+        .pane_mut(pane)
+        .expect("the pane is open")
+        .session_mut()
+        .custom_title = Some("the long build".to_owned());
+
+    let mut restored = Session::of(&strip, None)
+        .restore()
+        .expect("there was something to restore");
+    let back = restored.iter().next().expect("a first tab").id();
+
+    assert_eq!(restored.get(back).expect("the tab").name(), "release work");
+    assert_eq!(
+        restored
+            .get(back)
+            .expect("the tab")
+            .panes()
+            .focused()
+            .expect("a focused pane")
+            .title(),
+        "the long build"
+    );
+
+    restored.get_mut(back).expect("the tab").set_name(None);
+    assert_eq!(
+        restored.get(back).expect("the tab").name(),
+        born_as,
+        "a rename taken back after a restart had nowhere to go"
+    );
+}
+
+#[test]
 fn test_every_identity_is_minted_fresh() {
     // A restored window has to be indistinguishable from one somebody opened
     // by hand. An id from a previous process means nothing in this one, and
@@ -426,4 +478,39 @@ fn test_a_group_naming_no_tab_that_came_back_is_not_created() {
 
     assert_eq!(restored.groups().count(), 0);
     assert_eq!(shape(&restored), vec![(None, vec!["alone".to_owned()])]);
+}
+
+#[test]
+fn test_a_pin_and_a_colour_come_back() {
+    // The order already comes back with the list; these two are what make a
+    // pinned tab *stay* at the front of its block afterwards and what draws
+    // the stripe on its rows. A colour is written by name rather than by an
+    // enum's discriminant, so a file survives the enum being reordered.
+    let mut strip = split(1);
+    strip.apply(TabAction::New);
+    let ids: Vec<crate::tab::TabId> = strip.iter().map(crate::tab::Tab::id).collect();
+
+    strip.apply(TabAction::TogglePin(ids[1]));
+    strip.apply(TabAction::SetColor {
+        tab: ids[1],
+        color: Some(crate::tab::TabColor::Magenta),
+    });
+
+    let restored = Session::of(&strip, None)
+        .restore()
+        .expect("there was something to restore");
+    let pinned: Vec<bool> = restored.iter().map(crate::tab::Tab::is_pinned).collect();
+    let colors: Vec<Option<crate::tab::TabColor>> =
+        restored.iter().map(crate::tab::Tab::color).collect();
+
+    assert_eq!(
+        pinned,
+        [true, false],
+        "the pin did not come back where it was"
+    );
+    assert_eq!(
+        colors,
+        [Some(crate::tab::TabColor::Magenta), None],
+        "the colour did not come back on the tab that had it"
+    );
 }

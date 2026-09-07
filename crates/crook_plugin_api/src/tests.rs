@@ -251,3 +251,127 @@ fn a_shut_panel_costs_almost_nothing() {
 
     assert!(bytes.len() < 32, "{} bytes for a shut chip", bytes.len());
 }
+
+#[test]
+fn what_a_render_is_about_survives_the_wire() {
+    let render = Render {
+        slot: "tab.row.mark".into(),
+        entry: "mark".into(),
+        subject: Some(Subject::Tab(TabFacts {
+            key: 0x9e37_79b9_7f4a_7c15,
+            tab: Some(TabInfo {
+                title: "crook".into(),
+                active: true,
+                status: Status::Running,
+            }),
+            place: Some(Place {
+                directory: "/home/somebody/work/crook".into(),
+                branch: Some("main".into()),
+                worktree: false,
+            }),
+        })),
+    };
+
+    let bytes = to_bytes(&render).expect("it should encode");
+
+    assert_eq!(
+        from_bytes::<Render>(&bytes).expect("and decode"),
+        render,
+        "a render does not survive its own wire"
+    );
+}
+
+#[test]
+fn an_explained_note_survives_the_wire() {
+    // The shape a control with its own explanation has: the thing in the slot,
+    // and beside it the whole of what a card would otherwise have to say
+    // permanently.
+    let tree = Node::Explained {
+        content: Box::new(Node::Pressable {
+            content: Box::new(Node::Badge {
+                text: "Microwave".into(),
+                tone: Tone::Accent,
+            }),
+            action: "open".into(),
+        }),
+        explanation: Box::new(Node::Column(vec![
+            Node::Row(vec![
+                Node::Text {
+                    text: "Microwave".into(),
+                    size: Size::Body,
+                    tone: Tone::Primary,
+                },
+                Node::Fill,
+                Node::Badge {
+                    text: "ringing".into(),
+                    tone: Tone::Accent,
+                },
+            ]),
+            Node::Rule,
+            Node::Note {
+                text: "Plays when a command that ran for two seconds or more finishes.".into(),
+                tone: Tone::Muted,
+            },
+        ])),
+    };
+
+    let bytes = to_bytes(&tree).expect("a tree should encode");
+    assert_eq!(
+        from_bytes::<Node>(&bytes).expect("a tree should decode"),
+        tree
+    );
+}
+
+#[test]
+fn a_plugin_granted_nothing_is_still_told_which_row_it_is_drawing() {
+    // The redaction, which is what makes a mark per tab something a plugin
+    // allowed to know nothing can draw: no title, no directory, and still two
+    // rows a plugin can tell apart and keep telling apart.
+    let first = TabFacts {
+        key: 1,
+        tab: None,
+        place: None,
+    };
+    let second = TabFacts {
+        key: 2,
+        ..first.clone()
+    };
+
+    let bytes = to_bytes(&Subject::Tab(first.clone())).expect("it should encode");
+
+    assert_ne!(first.key, second.key);
+    assert!(
+        bytes.len() < 8,
+        "{} bytes for a row a plugin may know nothing about",
+        bytes.len()
+    );
+}
+
+#[test]
+fn a_note_is_described_on_every_frame_and_that_is_what_it_costs() {
+    // The one price of the host showing a note itself rather than asking for
+    // it when the pointer arrives: the words are on the wire whether or not
+    // anybody is looking. The alternative is a call into the guest per pointer
+    // transition, on the thread that draws — so this is the trade, and the
+    // number is here so that a change to it is a change somebody notices.
+    let sheet = Node::Note {
+        text: "Plays when a command that ran for two seconds or more finishes.".into(),
+        tone: Tone::Muted,
+    };
+    let bare = Node::Badge {
+        text: "Microwave".into(),
+        tone: Tone::Accent,
+    };
+    let explained = Node::Explained {
+        content: Box::new(bare.clone()),
+        explanation: Box::new(sheet),
+    };
+
+    let cost = to_bytes(&explained).expect("it should encode").len()
+        - to_bytes(&bare).expect("it should encode").len();
+
+    assert!(
+        cost < 128,
+        "{cost} bytes a frame for one sentence of explanation"
+    );
+}

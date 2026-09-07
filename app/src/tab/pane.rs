@@ -36,6 +36,13 @@ impl PaneId {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         Self(NEXT.fetch_add(1, Ordering::Relaxed))
     }
+
+    /// The bare number, for the one place a pane has to be named outside the
+    /// process: a sandboxed plugin, which gets something it can key state on
+    /// and nothing it could reach the pane with.
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
 }
 
 /// Which way a group's panes are laid out. Warp's `SplitDirection`.

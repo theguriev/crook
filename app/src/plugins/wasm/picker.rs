@@ -8,7 +8,7 @@
 //! guest — a plugin that held it would need the keyboard, and the whole of
 //! what this tier is worth rests on a plugin not having one.
 //!
-//! So the host holds it, in a [`Chrome`] per plugin. The plugin says what can
+//! So the host holds it, in a [`Held`] per plugin. The plugin says what can
 //! be chosen; the host says what was chosen, in the argument of the action the
 //! plugin named. That is the same bargain as
 //! [`Meter`](crook_plugin_api::Node::Meter) — describe the reading, not the
@@ -20,7 +20,7 @@
 //! limitation anybody will meet: a panel is modal, so opening a second one
 //! dismisses the first, and a plugin with two chips has two panels of which a
 //! person can see one. What it buys is that the four keys have one thing to
-//! act on and no way of naming which — see [`Chrome::claims`].
+//! act on and no way of naming which — see [`Held::claims`].
 //!
 //! # The keys are actions, like everything else
 //!
@@ -103,11 +103,81 @@ enum Control {
 /// Held rather than built, because a claim runs on every keystroke the window
 /// sees and formatting four strings to answer "no" is a cost with nothing on
 /// the other side of it.
-pub(super) struct Keys {
-    pub(super) next: ActionName,
-    pub(super) previous: ActionName,
-    pub(super) choose: ActionName,
-    pub(super) close: ActionName,
+pub(crate) const NEXT: &str = "crook/plugins/picker-next";
+/// See [`NEXT`].
+pub(crate) const PREVIOUS: &str = "crook/plugins/picker-previous";
+/// See [`NEXT`].
+pub(crate) const CHOOSE: &str = "crook/plugins/picker-choose";
+/// See [`NEXT`].
+pub(crate) const CLOSE: &str = "crook/plugins/picker-close";
+
+thread_local! {
+    /// Whatever plugin has something up, and the flag the workspace reads.
+    ///
+    /// One of each, because one is all there can be: a panel is modal, so
+    /// opening a second dismisses the first, and the keys therefore have
+    /// exactly one thing to act on and no way of naming which. A thread local
+    /// rather than something the host holds because this *is* per thread —
+    /// there is one foreground and everything here runs on it — and because
+    /// the alternative is four actions and a key claim per installed plugin,
+    /// on every plugin's card, whether or not it has ever drawn a picker.
+    static OPEN: RefCell<Option<Rc<Held>>> = const { RefCell::new(None) };
+    static SHOWING: RefCell<Option<Showing>> = const { RefCell::new(None) };
+}
+
+/// Hands the tier the flag the workspace reads. Called once, by the plugin
+/// that registers the four keys.
+pub(crate) fn armed_by(showing: Showing) {
+    SHOWING.with(|held| *held.borrow_mut() = Some(showing));
+}
+
+/// Says that this is the one with something up.
+///
+/// The one before it is *not* told: a panel is modal, so the press that opened
+/// this one has already dismissed that one through its own underlay, and a
+/// second telling would be the host shutting a panel nobody touched.
+fn mark_open(held: &Rc<Held>) {
+    OPEN.with(|open| *open.borrow_mut() = Some(Rc::clone(held)));
+}
+
+/// Whatever has something up, for the four keys to act on.
+pub(crate) fn open() -> Option<Rc<Held>> {
+    OPEN.with(|open| open.borrow().clone())
+}
+
+/// Takes down whatever is up, without telling the plugin.
+///
+/// What [`Host::take_panels_down`](crate::plugin::Host::take_panels_down)
+/// calls: the host letting go of the keyboard, not the plugin being told its
+/// panel is gone. A panel still open in a plugin comes back with the pane that
+/// drew it, which is what a person who switched tabs and switched back means.
+pub(crate) fn shut_open() {
+    if let Some(held) = open() {
+        held.shut();
+    }
+}
+
+/// What one of these keys does while something is up.
+///
+/// Escape takes down whichever of the two is up — a menu first, since it is
+/// the one drawn over the other — and the rest belong to a picker and are left
+/// alone while there is none. A keystroke this returns `None` for falls
+/// through to the bindings and then to the pane, which is what keeps `cmd+t`
+/// working over an open panel.
+pub(crate) fn claims(keystroke: &Keystroke) -> Option<ActionName> {
+    if !keystroke.modifiers.is_empty() {
+        return None;
+    }
+    let held = open()?;
+    let picking = held.showing_a_picker();
+    let name = match keystroke.key.as_str() {
+        "escape" => CLOSE,
+        "up" if picking => PREVIOUS,
+        "down" if picking => NEXT,
+        "enter" if picking => CHOOSE,
+        _ => return None,
+    };
+    ActionName::parse(name).ok()
 }
 
 /// What the last frame drew, so that a key pressed on the next one knows what
@@ -124,7 +194,13 @@ struct Shown {
 }
 
 /// Everything the host is holding on one plugin's behalf.
-pub(super) struct Chrome {
+///
+/// Named for what it is rather than for what is in it: the picker's field and
+/// selection, the menu that is up, the flag that says the keyboard is here.
+/// `render::Chrome` is the other half of the same idea and is deliberately not
+/// this — that one is what a *node* is drawn with and travels down the tree by
+/// value; this is what a *plugin* is holding and outlives every frame.
+pub(crate) struct Held {
     /// Where what the thing that was pressed had to say is left.
     ///
     /// The host's own, shared with every other control that stands for a
@@ -143,11 +219,6 @@ pub(super) struct Chrome {
     /// fact is discovered while building a tree, and the thing that has to act
     /// on it holds the workspace.
     moved: Cell<bool>,
-    /// The same fact, where the workspace can read it. Attached after the
-    /// claim, which is what hands one over.
-    showing: RefCell<Option<Showing>>,
-    /// What the four keys are called.
-    keys: Keys,
     /// What has been typed into the picker's field.
     query: TextInput,
     /// Which row the keyboard is on.
@@ -155,7 +226,7 @@ pub(super) struct Chrome {
     scroll: ScrollStateHandle,
     controls: RefCell<HashMap<Control, MouseStateHandle>>,
     /// What the query was when the list was last worked out; see
-    /// [`Chrome::settle`].
+    /// [`Held::settle`].
     last_query: RefCell<String>,
     shown: RefCell<Shown>,
     /// The menu that is up, by the entries it holds.
@@ -166,15 +237,13 @@ pub(super) struct Chrome {
     menu: RefCell<Option<Vec<MenuItem>>>,
 }
 
-impl Chrome {
+impl Held {
     /// A plugin's chrome, with nothing up.
-    pub(super) fn new(keys: Keys, voice: Voice) -> Self {
+    pub(crate) fn new(voice: Voice) -> Self {
         Self {
             voice,
             open: Cell::new(false),
             moved: Cell::new(false),
-            showing: RefCell::new(None),
-            keys,
             query: TextInput::new(),
             selected: Cell::new(0),
             scroll: ScrollStateHandle::default(),
@@ -185,41 +254,13 @@ impl Chrome {
         }
     }
 
-    /// Hands it the flag the workspace reads.
-    pub(super) fn armed_by(&self, showing: Showing) {
-        showing.set(self.open.get());
-        *self.showing.borrow_mut() = Some(showing);
-    }
-
-    /// What one of these keys does while something of this plugin's is up.
-    ///
-    /// Escape takes down whichever of the two is up — a menu first, since it
-    /// is the one drawn over the other — and the rest belong to a picker and
-    /// are left alone while there is none. A keystroke this returns `None` for
-    /// falls through to the bindings and then to the pane, which is what keeps
-    /// `cmd+t` working over an open panel.
-    pub(super) fn claims(&self, keystroke: &Keystroke) -> Option<ActionName> {
-        if !keystroke.modifiers.is_empty() {
-            return None;
-        }
-        let picking = !self.shown.borrow().keys.is_empty() || self.showing_a_picker();
-        let name = match keystroke.key.as_str() {
-            "escape" => &self.keys.close,
-            "up" if picking => &self.keys.previous,
-            "down" if picking => &self.keys.next,
-            "enter" if picking => &self.keys.choose,
-            _ => return None,
-        };
-        Some(name.clone())
-    }
-
     /// Whether the last frame drew a picker rather than only a menu.
     fn showing_a_picker(&self) -> bool {
         self.shown.borrow().choose.is_some()
     }
 
     /// Says what the thing that was pressed had to say.
-    pub(super) fn say(&self, what: impl Into<String>) {
+    pub(crate) fn say(&self, what: impl Into<String>) {
         self.voice.say(what);
     }
 
@@ -236,8 +277,24 @@ impl Chrome {
         self.open.set(open);
         self.moved.set(true);
         self.query.set_has_keys(open && self.showing_a_picker());
-        if let Some(showing) = self.showing.borrow().as_ref() {
-            showing.set(open);
+        SHOWING.with(|showing| {
+            if let Some(showing) = showing.borrow().as_ref() {
+                showing.set(open);
+            }
+        });
+        // Nothing is up any more, and the keys have to stop acting on this.
+        // Cleared by identity rather than unconditionally: a panel that was
+        // dismissed *because* another opened must not take the new one down.
+        if !open {
+            OPEN.with(|held| {
+                let mine = held
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|open| std::ptr::eq(Rc::as_ptr(open), self));
+                if mine {
+                    held.borrow_mut().take();
+                }
+            });
         }
         true
     }
@@ -269,14 +326,14 @@ impl Chrome {
     /// go of the keyboard, so a panel that is still open in the plugin comes
     /// back with the pane that drew it, which is what a person who switched
     /// tabs and switched back means.
-    pub(super) fn shut(&self) {
+    pub(crate) fn shut(&self) {
         self.menu.replace(None);
         self.shown.replace(Shown::default());
         self.set_open(false);
     }
 
     /// Moves the selection, wrapping at both ends.
-    pub(super) fn move_selection(&self, by: isize) {
+    pub(crate) fn move_selection(&self, by: isize) {
         let len = self.shown.borrow().keys.len();
         if len == 0 {
             self.selected.set(0);
@@ -307,14 +364,14 @@ impl Chrome {
     }
 
     /// The action a chosen row runs, and what to hand it.
-    pub(super) fn chosen(&self) -> Option<(ActionId, String)> {
+    pub(crate) fn chosen(&self) -> Option<(ActionId, String)> {
         let shown = self.shown.borrow();
         let key = shown.keys.get(self.selected.get())?;
         Some((shown.choose?, key.clone()))
     }
 
     /// The action that takes down whatever this plugin has up.
-    pub(super) fn dismissal(&self) -> Option<ActionId> {
+    pub(crate) fn dismissal(&self) -> Option<ActionId> {
         self.shown.borrow().dismiss
     }
 
@@ -324,7 +381,8 @@ impl Chrome {
     }
 
     /// Opens the menu holding `items`, and says whether anything changed.
-    pub(super) fn open_menu(&self, items: &[MenuItem]) -> bool {
+    pub(super) fn open_menu(self: &Rc<Self>, items: &[MenuItem]) -> bool {
+        mark_open(self);
         self.menu.replace(Some(items.to_vec()));
         self.set_open(true);
         true
@@ -389,7 +447,7 @@ impl Chrome {
 /// match, and they need not match the same part — this is a person narrowing a
 /// list, not writing a pattern.
 pub(super) fn picker(
-    chrome: &Rc<Chrome>,
+    chrome: &Rc<Held>,
     placeholder: &str,
     rows: &[Row],
     choose: Option<ActionId>,
@@ -416,6 +474,7 @@ pub(super) fn picker(
     // rather than by whatever put the panel up, because the panel is the
     // guest's own state and this is the only place the host finds out what is
     // in it. The caller re-syncs when this answers `true`.
+    mark_open(chrome);
     chrome.set_open(true);
     chrome.query.set_has_keys(true);
 
@@ -481,7 +540,7 @@ fn offered(
     row: &Row,
     selected: bool,
     choose: Option<ActionId>,
-    chrome: &Rc<Chrome>,
+    chrome: &Rc<Held>,
     state: MouseStateHandle,
     ui: FamilyId,
 ) -> Box<dyn Element> {
@@ -545,7 +604,7 @@ fn offered(
 pub(super) fn menued(
     content: Box<dyn Element>,
     items: &[MenuItem],
-    chrome: &Rc<Chrome>,
+    chrome: &Rc<Held>,
     action: &dyn Fn(&str) -> Option<ActionId>,
     ui: FamilyId,
 ) -> Box<dyn Element> {
@@ -618,7 +677,7 @@ pub(super) fn menued(
 fn entry(
     item: &MenuItem,
     action: Option<ActionId>,
-    chrome: &Rc<Chrome>,
+    chrome: &Rc<Held>,
     state: MouseStateHandle,
     ui: FamilyId,
 ) -> Box<dyn Element> {

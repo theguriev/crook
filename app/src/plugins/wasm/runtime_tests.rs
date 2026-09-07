@@ -8,7 +8,14 @@
 
 use super::*;
 
-use crook_plugin_api::{Method, Request};
+use std::sync::Arc;
+
+use crookui_core::executor::{Background, LocalQueue};
+use crookui_core::{App, ModelHandle};
+
+use crook_plugin::PluginId;
+use crook_plugin_api::{Bound, Cell as Field, Key, Method, Request, Table, Tallied};
+use crook_wasm::{Fuel, Sandbox};
 
 /// What the pirate asks for, as it asks for it.
 fn fetch(url: &str) -> Request {
@@ -122,6 +129,424 @@ fn a_tilde_is_the_home_directory_and_nothing_else_is_expanded() {
         resolve("/tmp/~/thing"),
         Some(std::path::PathBuf::from("/tmp/~/thing"))
     );
+}
+
+/// A runtime over a real module, on a pool with exactly one worker.
+///
+/// One worker is the whole point: it makes "how many workers does a plugin
+/// hold?" a question a test can answer, because the second one to be held is
+/// the one that never comes back.
+fn on_one_worker() -> (App, Arc<LocalQueue>, Arc<Background>, ModelHandle<Runtime>) {
+    let background = Arc::new(Background::new(1));
+    let queue = LocalQueue::new();
+    let mut app = App::new(queue.foreground(), background.clone());
+
+    let module = crate::plugins::wasm::tests::wasm("eugen/probe", "header.right", 0);
+    let (sandbox, _) = Sandbox::open(&module, Fuel::default()).expect("the test module opens");
+    let runtime = app.update(|ctx| {
+        ctx.add_model(|_| {
+            Runtime::new(
+                PluginId::parse("eugen/probe").expect("a literal that parses"),
+                Rc::new(RefCell::new(sandbox)),
+                Rc::new(Cell::new(0)),
+                Vec::new(),
+            )
+        })
+    });
+
+    (app, queue, background, runtime)
+}
+
+#[test]
+fn changing_its_mind_about_when_parks_one_worker_and_not_six() {
+    // The bug this defends against, which took an hour of a person's session
+    // to show itself: a shorter wait used to start a *second* chain and drop
+    // the first task. Dropping cancels the callback and not the sleep, so a
+    // worker sat inside `thread::sleep` for the rest of the minute. Six clicks
+    // was six workers held, and everything else that needed one — the git
+    // gather, a settings save, this plugin's own next tick — queued behind
+    // them and then came back by itself, which is what made it so hard to see.
+    let (mut app, queue, background, runtime) = on_one_worker();
+
+    app.update(|ctx| {
+        runtime.update(ctx, |runtime, ctx| {
+            for _ in 0..6 {
+                runtime.wait(Duration::from_secs(60), ctx);
+            }
+        })
+    });
+    queue.run_until_parked();
+
+    // One worker, and a minute's wait parked on it. If more than one wait were
+    // parked, this probe would never be run at all.
+    let (ran, was_run) = std::sync::mpsc::channel();
+    background
+        .spawn(async move {
+            let _ = ran.send(());
+        })
+        .detach();
+
+    assert!(
+        was_run.recv_timeout(Duration::from_secs(5)).is_ok(),
+        "the pool's only worker is held by a wait nobody can wake"
+    );
+}
+
+#[test]
+fn a_wait_that_is_poked_ends_early_rather_than_at_its_own_time() {
+    // The other half: poking has to actually shorten the wait, or a plugin
+    // that asked for a minute and then asked for a frame would still be drawn
+    // a minute later — which is a mark that stands still when it should bite.
+    let (mut app, queue, _background, runtime) = on_one_worker();
+
+    app.update(|ctx| {
+        runtime.update(ctx, |runtime, ctx| {
+            runtime.wait(Duration::from_secs(60), ctx);
+            runtime.wait(Duration::from_millis(1), ctx);
+        })
+    });
+
+    // The parked wait returns as soon as it is poked, so the tick it books
+    // arrives now rather than in a minute. `run_until_parked` runs whatever
+    // the wait's completion put on the foreground queue.
+    let mut ticked = false;
+    for _ in 0..50 {
+        if queue.run_until_parked() > 0 {
+            ticked = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    assert!(ticked, "a poked wait did not come back inside a second");
+}
+
+/// A directory of line-delimited JSON, written for one test.
+fn transcripts(name: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!(
+        "crook-scan-{}-{}-{:?}",
+        std::process::id(),
+        name,
+        std::thread::current().id()
+    ));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(root.join("one")).expect("a scratch directory");
+    fs::create_dir_all(root.join("two")).expect("a scratch directory");
+
+    // Two turns worth keeping, one line that is not a turn, and one that is
+    // not JSON at all — which is what a file something is still writing looks
+    // like when it is read half way through a line.
+    fs::write(
+        root.join("one/a.jsonl"),
+        concat!(
+            r#"{"type":"user","message":{"content":"hello"}}"#, "\n",
+            r#"{"type":"assistant","timestamp":"2026-09-04T18:00:00Z","message":{"id":"m1","model":"claude-opus-5","usage":{"output_tokens":12}}}"#, "\n",
+            r#"{"type":"assistant","timestamp":"2026-09-04T19:00:00Z","message":{"id":"m2","model":"claude-fable-5-1","usage":{"output_tokens":34}}}"#, "\n",
+            r#"{"type":"assistant","usage":"#, "\n",
+        ),
+    )
+    .expect("a scratch file");
+    fs::write(
+        root.join("two/b.jsonl"),
+        format!(
+            "{}\n",
+            r#"{"type":"assistant","timestamp":"2026-09-05T09:00:00Z","message":{"id":"m3","model":"claude-haiku-4-5","usage":{"output_tokens":5}}}"#
+        ),
+    )
+    .expect("a scratch file");
+    // Not a transcript, and never opened.
+    fs::write(root.join("one/notes.txt"), "\"usage\"\n").expect("a scratch file");
+
+    root
+}
+
+/// What a tally of that directory asks for: turns per model, and per hour.
+fn tally_of(root: &Path) -> Request {
+    Request::Tally {
+        root: root.to_string_lossy().into_owned(),
+        extension: ".jsonl".into(),
+        touched_since: 0,
+        containing: "\"usage\"".into(),
+        at_least: Vec::new(),
+        distinct_by: vec!["message.id".into()],
+        tables: vec![
+            Table {
+                by: vec![Key {
+                    field: "message.model".into(),
+                    prefix: None,
+                }],
+                sum: vec!["message.usage.output_tokens".into()],
+            },
+            Table {
+                by: vec![Key {
+                    field: "timestamp".into(),
+                    // Thirteen characters of an RFC 3339 stamp is its hour,
+                    // which is how a plugin asks for "by the hour" without the
+                    // host knowing what a date is.
+                    prefix: Some(13),
+                }],
+                sum: vec!["message.usage.output_tokens".into()],
+            },
+        ],
+    }
+}
+
+/// The rows of one table, sorted so a test can name them.
+fn rows_of(tables: &[Vec<Tallied>], table: usize) -> Vec<(String, f64, u64)> {
+    let mut rows: Vec<(String, f64, u64)> = tables[table]
+        .iter()
+        .map(|row| {
+            let key = match row.key.first() {
+                Some(Field::Text(text)) => text.clone(),
+                other => format!("{other:?}"),
+            };
+            (key, row.sums[0], row.lines)
+        })
+        .collect();
+    rows.sort_by(|left, right| left.0.cmp(&right.0));
+    rows
+}
+
+#[test]
+fn a_tally_counts_where_it_reads_and_hands_back_the_answer() {
+    // The whole point of the request: a hundred megabytes of transcripts is a
+    // hundred megabytes wherever it is read, and handing a sandbox the *lines*
+    // was measured at ninety thousand instructions each.
+    let root = transcripts("counted");
+
+    let Answer::Counted { tables, lines } = perform(tally_of(&root)) else {
+        panic!("a tally answers with tables");
+    };
+
+    assert_eq!(lines, 3);
+    assert_eq!(
+        rows_of(&tables, 0),
+        vec![
+            (String::from("claude-fable-5-1"), 34., 1),
+            (String::from("claude-haiku-4-5"), 5., 1),
+            (String::from("claude-opus-5"), 12., 1),
+        ]
+    );
+}
+
+#[test]
+fn a_prefix_is_how_a_plugin_asks_for_by_the_hour() {
+    let root = transcripts("hours");
+
+    let Answer::Counted { tables, .. } = perform(tally_of(&root)) else {
+        panic!("a tally answers with tables");
+    };
+
+    assert_eq!(
+        rows_of(&tables, 1),
+        vec![
+            (String::from("2026-09-04T18"), 12., 1),
+            (String::from("2026-09-04T19"), 34., 1),
+            (String::from("2026-09-05T09"), 5., 1),
+        ]
+    );
+}
+
+#[test]
+fn a_line_written_twice_is_counted_once() {
+    let root = transcripts("twice");
+    // The same turn again, in another session's file — which is what a resumed
+    // conversation leaves on disk.
+    fs::write(
+        root.join("two/c.jsonl"),
+        format!(
+            "{}\n",
+            r#"{"type":"assistant","timestamp":"2026-09-04T18:00:00Z","message":{"id":"m1","model":"claude-opus-5","usage":{"output_tokens":12}}}"#
+        ),
+    )
+    .expect("a scratch file");
+    fs::write(
+        root.join("one/a.jsonl"),
+        format!(
+            "{}\n",
+            r#"{"type":"assistant","timestamp":"2026-09-04T18:00:00Z","message":{"id":"m1","model":"claude-opus-5","usage":{"output_tokens":12}}}"#
+        ),
+    )
+    .expect("a scratch file");
+
+    let Answer::Counted { lines, tables } = perform(tally_of(&root)) else {
+        panic!("a tally answers with tables");
+    };
+
+    assert_eq!(lines, 2, "the file with no id in it is counted too");
+    assert_eq!(
+        rows_of(&tables, 0)
+            .iter()
+            .find(|(model, _, _)| model == "claude-opus-5")
+            .map(|(_, sum, _)| *sum),
+        Some(12.),
+        "the same turn was added twice"
+    );
+}
+
+#[test]
+fn a_line_below_the_floor_is_not_counted() {
+    // `touched_since` skips files, which is what makes the walk cheap; a file
+    // touched an hour ago can still hold lines from a month ago, and without
+    // this they would quietly be in the total.
+    let root = transcripts("floor");
+    let Request::Tally {
+        root: at,
+        extension,
+        containing,
+        distinct_by,
+        tables,
+        ..
+    } = tally_of(&root)
+    else {
+        panic!("that is a tally");
+    };
+
+    let Answer::Counted { lines, .. } = perform(Request::Tally {
+        root: at,
+        extension,
+        touched_since: 0,
+        containing,
+        at_least: vec![Bound {
+            field: "timestamp".into(),
+            at_least: "2026-09-05T00:00:00Z".into(),
+        }],
+        distinct_by,
+        tables,
+    }) else {
+        panic!("a tally answers with tables");
+    };
+
+    assert_eq!(lines, 1, "only the turn on the 5th is above the floor");
+}
+
+#[test]
+fn walking_a_directory_is_a_different_thing_to_agree_to_than_reading_a_file() {
+    let root = transcripts("granted");
+    let tally = tally_of(&root);
+    let inside = root.join("one/a.jsonl").to_string_lossy().into_owned();
+
+    // Allowing every file in the directory does not allow walking it: a person
+    // agreeing to "read this file" has pictured one file.
+    let file_by_file = vec![format!("file:{inside}")];
+    assert!(allowed(&file_by_file, &tally).is_err());
+
+    // And the sentence a person is asked to agree to says what it means rather
+    // than spelling a pattern.
+    let refusal = allowed(&[], &tally).expect_err("nothing is allowed yet");
+    assert!(refusal.starts_with("Read everything under "), "{refusal}");
+
+    let granted = vec![format!("file:{}/**", root.to_string_lossy())];
+    assert!(allowed(&granted, &tally).is_ok());
+}
+
+/// A week of this machine's own transcripts, counted.
+///
+/// Ignored, and it has to be: what it walks is whatever Claude Code has
+/// written on the machine it runs on, so it proves nothing on a build server
+/// and everything on the one machine where the numbers can be checked against
+/// what a person knows they did. Run it by name when the tally changes.
+///
+/// It is the only test that can answer the question the request exists for —
+/// is a hundred megabytes of transcripts affordable — because a fixture with
+/// four lines in it cannot.
+#[test]
+#[ignore = "walks this machine's own Claude Code transcripts"]
+fn a_week_of_this_machine_is_counted_where_it_is_read() {
+    let Some(home) = dirs::home_dir() else {
+        return;
+    };
+    let root = home.join(".claude/projects");
+    if !root.is_dir() {
+        return;
+    }
+
+    let week = 7 * 86_400_000_i64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis() as i64)
+        .unwrap_or_default();
+    let sums: Vec<String> = [
+        "message.usage.input_tokens",
+        "message.usage.output_tokens",
+        "message.usage.cache_creation_input_tokens",
+        "message.usage.cache_read_input_tokens",
+    ]
+    .iter()
+    .map(|field| String::from(*field))
+    .collect();
+    let by = |subject: &str, prefix: Option<u32>| {
+        vec![
+            Key {
+                field: "type".into(),
+                prefix: None,
+            },
+            Key {
+                field: subject.into(),
+                prefix,
+            },
+        ]
+    };
+
+    let at = std::time::Instant::now();
+    let answer = perform(Request::Tally {
+        root: root.to_string_lossy().into_owned(),
+        extension: ".jsonl".into(),
+        touched_since: now - week,
+        containing: "\"usage\"".into(),
+        at_least: Vec::new(),
+        distinct_by: vec!["message.id".into(), "requestId".into()],
+        tables: vec![
+            Table {
+                by: by("message.model", None),
+                sum: sums.clone(),
+            },
+            Table {
+                by: by("timestamp", Some(13)),
+                sum: sums.clone(),
+            },
+            Table {
+                by: by("sessionId", None),
+                sum: Vec::new(),
+            },
+        ],
+    });
+    let took = at.elapsed();
+
+    let Answer::Counted { tables, lines } = answer else {
+        panic!("a tally answers with tables");
+    };
+    let rows: usize = tables.iter().map(Vec::len).sum();
+    println!(
+        "{lines} turns counted into {rows} rows in {took:?} ({} models, {} hours, {} sessions)",
+        tables[0].len(),
+        tables[1].len(),
+        tables[2].len()
+    );
+
+    // What crosses the boundary is the answer, not the reading: a plugin that
+    // was handed the lines instead was measured at ninety thousand
+    // instructions each, which for a week is forty seconds of interpreter.
+    assert!(rows < lines as usize / 20, "{rows} rows for {lines} turns");
+    // And the walk is one a person waits through once, not one they notice.
+    assert!(took < std::time::Duration::from_secs(20), "{took:?}");
+}
+
+#[test]
+fn a_sound_is_refused_to_a_plugin_nobody_has_answered_for() {
+    // The whole of the dead Play button, in one line. The press lands, the
+    // guest runs, it asks for its sound — and the asking stops here, because
+    // nobody ever answered the question its card is still asking.
+    let refusal = allowed(
+        &[],
+        &Request::PlaySound {
+            wav: Vec::new(),
+            volume: 70,
+        },
+    )
+    .expect_err("an ungranted plugin should be refused its sound");
+
+    assert_eq!(refusal, "Play a sound");
 }
 
 /// A listing of one directory, as the picker asks for it.

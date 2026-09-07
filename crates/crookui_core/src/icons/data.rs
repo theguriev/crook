@@ -127,6 +127,20 @@ pub(super) static MENU: &[Segment] = &[
     Line(20.0, 19.0),
 ];
 
+/// Lucide's `play`.
+pub(super) static PLAY: &[Segment] = &[
+    Move(5.0, 5.0),
+    Cubic(4.9998, 4.2846, 5.3834, 3.6216, 6.0038, 3.2652),
+    Cubic(6.6241, 2.9088, 7.3901, 2.9114, 8.008, 3.272),
+    Line(20.005, 10.27),
+    Cubic(20.6204, 10.6271, 21.0006, 11.2867, 21.0012, 11.9981),
+    Cubic(21.0019, 12.7096, 20.6228, 13.3699, 20.008, 13.728),
+    Line(8.008, 20.728),
+    Cubic(7.3901, 21.0886, 6.6241, 21.0912, 6.0038, 20.7348),
+    Cubic(5.3834, 20.3784, 4.9998, 19.7154, 5.0, 19.0),
+    Close,
+];
+
 /// Lucide's `plus`.
 pub(super) static PLUS: &[Segment] = &[
     Move(5.0, 12.0),
@@ -297,6 +311,7 @@ pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [
     (Lucide::Info, "info", INFO),
     (Lucide::LayoutGrid, "layout-grid", LAYOUT_GRID),
     (Lucide::Menu, "menu", MENU),
+    (Lucide::Play, "play", PLAY),
     (Lucide::Plus, "plus", PLUS),
     (Lucide::Blocks, "blocks", BLOCKS),
     (Lucide::Search, "search", SEARCH),
@@ -309,7 +324,7 @@ pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [
 ];
 
 /// How many there are.
-pub const ICONS: usize = 17;
+pub const ICONS: usize = 18;
 
 /// The icons Crook draws, from Lucide.
 ///
@@ -349,6 +364,10 @@ pub enum Lucide {
     ///
     /// Lucide's [`menu`](https://lucide.dev/icons/menu).
     Menu,
+    /// The mark on a control that plays a sound.
+    ///
+    /// Lucide's [`play`](https://lucide.dev/icons/play).
+    Play,
     /// New tab, and new theme.
     ///
     /// Lucide's [`plus`](https://lucide.dev/icons/plus).

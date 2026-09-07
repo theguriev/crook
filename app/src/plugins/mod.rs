@@ -30,8 +30,10 @@ mod plugins_page;
 pub mod settings;
 mod shell;
 mod shortcuts;
+pub mod tabs;
 pub mod wasm;
 pub mod window;
+pub mod worktrees;
 
 use crate::plugin::Plugin;
 
@@ -41,6 +43,10 @@ pub fn defaults() -> Vec<Box<dyn Plugin>> {
         Box::new(window::Window),
         Box::new(header::Header),
         Box::new(pane::PaneSlots),
+        Box::new(tabs::Tabs::new()),
+        // After the plugin that declares the slot it puts a row in, which is
+        // the convention this list's own doc gives rather than a requirement.
+        Box::new(worktrees::Worktrees),
         Box::new(settings::Settings),
         // The rail's order is these four, and it is the `order` each of them
         // asks for rather than this list — a plugin that adds a page cannot

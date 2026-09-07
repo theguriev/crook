@@ -92,6 +92,33 @@ fn every_plugin_in_the_box_loads() {
 }
 
 #[test]
+fn a_plugin_s_field_is_found_by_name_and_goes_out_with_it() {
+    // A field is addressed the way an action is, because the thing that draws
+    // this one — `workspace::tab_menu` — is not the plugin that owns it. And
+    // it goes out with that plugin: a field nothing can draw must not be left
+    // in the registry answering "the keyboard is mine".
+    with_host(|host| {
+        let worktrees = PluginId::parse("crook/worktrees").expect("a literal that parses");
+        let field = plugins::worktrees::BRANCH_FIELD;
+
+        let claimed = host.field(field).expect("the plugin registered no field");
+        claimed.set_has_keys(true);
+        assert!(host.a_field_has_keys());
+
+        host.unload(&worktrees);
+
+        assert!(
+            host.field(field).is_none(),
+            "a disabled plugin's field is still in the registry"
+        );
+        assert!(
+            !host.a_field_has_keys(),
+            "a field that went out with its plugin still says it has the keyboard"
+        );
+    });
+}
+
+#[test]
 fn the_plugins_in_the_box_have_nothing_to_complain_about() {
     // A misspelled slot name is the likeliest mistake in a plugin, and it is
     // invisible: the contribution is kept, nothing draws it, and the window
@@ -351,5 +378,48 @@ fn a_name_in_the_disabled_list_that_answers_to_nothing_costs_nothing() {
     with_disabled(&disabled, |host| {
         assert_eq!(host.loaded().len(), host.available().len());
         assert!(host.refused().is_empty());
+    });
+}
+
+#[test]
+fn the_marks_on_a_tab_row_are_slots_and_a_release_binary_leaves_them_empty() {
+    // Declared by `crook/tabs` and filled by nobody in the box, which is the
+    // shape `header.right` has: the disc a row draws is the *host's* answer to
+    // an empty slot rather than a contribution competing with a plugin's. See
+    // `plugins::tabs` for why that difference matters.
+    with_host(|host| {
+        let mark = crate::plugins::tabs::TAB_ROW_MARK;
+        let badge = crate::plugins::tabs::TAB_ROW_BADGE;
+
+        assert_eq!(host.row_slot_named("tab.row.mark"), Some(mark));
+        assert_eq!(host.row_slot_named("tab.row.badge"), Some(badge));
+        assert!(host.rows().is_empty(mark));
+        assert!(host.rows().is_empty(badge));
+        // And they are not in the other registry, so a plugin that contributed
+        // an ordinary element to one is told the slot does not exist there
+        // rather than drawing something with no way to ask which row it is on.
+        assert_eq!(host.slot_named("tab.row.mark"), None);
+        assert!(host.audit().is_empty(), "{:?}", host.audit());
+    });
+}
+
+#[test]
+fn a_row_contribution_goes_back_out_with_the_plugin_that_made_it() {
+    // The guard, for the registry the tab rows use. Every other registration
+    // in this file is proven the same way, and a second registry is a second
+    // place for one to be left behind.
+    with_host(|host| {
+        let mark = crate::plugins::tabs::TAB_ROW_MARK;
+        let who = PluginId::parse("crook/host").expect("a literal that parses");
+
+        host.contribute_row(mark, "mark", 0, |_, _, _| None);
+        assert_eq!(
+            host.rows().contributors(mark),
+            vec![(who.clone(), EntryId::new("mark"))]
+        );
+
+        host.unload(&who);
+
+        assert!(host.rows().is_empty(mark), "the contribution outlived it");
     });
 }

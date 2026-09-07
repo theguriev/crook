@@ -60,7 +60,56 @@ description of something that was never built.
     of the panel plus what the window shows while it is chosen — the sidebar's body and the
     main area, built together because they are two views of one answer. The settings stopped
     being a pane and the plugins left the settings rail entirely.
+  - The **tab row's leading mark is a slot**, and so is the badge on its corner:
+    `crook/tabs` declares `tab.row.mark` and `tab.row.badge`, and the status disc the panel has
+    always drawn is what the host puts there when nothing has taken them. These are the first
+    slots that are drawn **more than once** — once per row — which is a different kind of slot
+    and needed two things the others did not. A contribution is handed the *row*
+    (`plugin::RowContribution`, a second registry beside the one `header.right` lives in,
+    because a contribution that cannot be told which row it is on cannot answer differently for
+    two of them). And it may **decline** a row by answering `None`, which is what lets a plugin
+    mark the worktrees and leave everything else alone: declining means "as it was" rather than
+    "empty", which is also why the disc is the host's answer to an empty slot rather than a
+    contribution of its own competing at some order.
+
+    **What a slot per row costs**, because it is worth writing down before somebody declares one
+    per block: a sandboxed contribution to it is one guest call per row per frame, each with its
+    own fuel budget. Seven tabs is seven calls where the header's slot is one, and the budget is
+    per call rather than shared — so a plugin cannot be starved by the panel being long, and a
+    panel cannot be slowed to a crawl by a plugin that spends its whole budget, because spending
+    it is a trap and three traps in a row stop it being asked at all. The two plugins written
+    against it answer in a table lookup and a boolean; a slot per *block* would be the same
+    arithmetic against a list that is thousands long, and would need something this does not
+    have.
   - Still to move: the worktree menu, the Themes panel, the Omarchy palettes.
+  - `crook/tabs` owns `tab.menu.entries`, and a tab's secondary press opens a *place*
+    rather than a feature. The menu it opens knows no entry by name: four of them are
+    `crook/tabs`'s own — new group with tab, the two copies, close tab — and the fifth is
+    `crook/worktrees`, which is the first half of moving that menu. The claim moved and the
+    code did not: the worktree popup is still `workspace::tab_menu`, because that column
+    holds a text field, a background git read and a two-step confirmation. What did move is
+    what matters for the API — the menu is a list a stranger's plugin can put a row in, and
+    switching `crook/worktrees` off leaves a tab's menu four entries long with nothing
+    anywhere saying a fifth is missing. Entries are grouped by dividing `order` by a hundred,
+    so a slot that hands its renderer a flat list still draws its bands, and no
+    plugin can draw a seam across somebody else's group.
+  - **A plugin can own a text field.** `host.claim_field` is the other half of
+    `claim_surface`, and it closes the last gap between a plugin and a built-in: a plugin could
+    already put a surface on screen and claim a keystroke, and still had nowhere for a *letter*
+    to land, because which field is listening is a fact the element tree cannot work out and
+    `Workspace::sync_input_keys` answered by naming, in source, every field in the window.
+    There were two and neither was a plugin's. The host hands the field back — a plugin builds
+    before the workspace exists and has nothing to take one from — asks each claim in
+    registration order, and the first to want the keyboard gets it. The worktree menu's branch
+    field has moved onto it, so it now goes out with `crook/worktrees` when that is switched
+    off, even though the popup that draws it has not moved yet. `crook/tabs` renames a tab and
+    a pane through one of its own, and nothing about renaming is in the menu's shell — it
+    draws the field, and that is the whole of its involvement.
+  - The menu is nine entries from two plugins across seven bands, and one of them is not a line
+    of text: the colour swatches are a row of controls the shell offers and the plugin fills,
+    because which six colours a tab may be is the tab model's business and how a menu row
+    looks is the menu's.
+  - Still to move: the worktree menu's own popup, the Themes panel, the Omarchy palettes.
 - **Phase 2 — the sandbox: done, and dogfooded.** `crook_plugin_api` is the wire — a
   manifest, capabilities that each say what they are in a sentence, and a `Node` vocabulary
   that *describes* rather than paints: no colours, no pixels, tones and sizes the host
@@ -117,18 +166,63 @@ description of something that was never built.
     what makes "re-prompted on escalation" a comparison rather than a judgement. A person
     answers on the Plugins page, the answer is kept in `settings.json` under `plugin_grants`,
     and answering rebuilds that plugin there and then rather than at the next launch.
-  - **Six more `Node` variants** — `Meter`, `Rule`, `Fill`, `Note`, `Pressable`, `Anchored` —
-    which is what a panel needs and nothing beyond it.
+  - **Seven more `Node` variants** — `Meter`, `Rule`, `Fill`, `Note`, `Pressable`, `Anchored`
+    and `Bars` — which is what a panel needs and nothing beyond it. A `Bars` is a row of
+    columns each as tall as its share of the tallest, because nobody reads the height of a
+    chart of days: they read which day was the busy one.
   - **The pirate, by icon name.** `pirate`, `pirate-open` and `pirate-wide` resolve to Crook's
     own two-layer artwork in `crookui_core::icons::art`. The plugin ships no picture and the
     host runs no timer for it: a plugin that wants a chomping pirate holds its own clock and
     names a different frame, which is animation done entirely on the plugin's side of a
     boundary that carries no pixels.
+  **ABI 3 is the version a plugin can *count* in**, and it exists because of one measurement.
+  The usage chip's week — a column per day, a breakdown per model, the busiest projects — is
+  read out of the transcripts Claude Code writes: three hundred megabytes across five hundred
+  files, of which a hundred are lines carrying a `usage` object. The obvious shape was to hand
+  the guest those lines a page at a time and let it add them up. Measured, that costs **ninety
+  thousand instructions a line**, which for a week is forty seconds of interpreter on the
+  thread that draws, and no page size fixes a cost that is per line.
+
+  So `Request::Tally` has the host count instead. The plugin says which files, which lines are
+  worth parsing, which of them are the same event written twice, what to group by and what to
+  add up — every one of those a *field name* it supplies, none of them anything the host
+  understands. What crosses is a couple of hundred rows of totals rather than forty thousand
+  lines: about a second on the pool, thirteen milliseconds inside the guest. A `Key` may take
+  a prefix of a field, which is how "by the hour" is expressible without the host knowing what
+  a date is — and which hour belongs to which day is a question about time zones that stays
+  with the plugin, answered by a `timezone` import beside the clock.
+
+  The rule it is an instance of: **the host does what a host is for, and the plugin keeps what
+  it means.** Reading a directory and touching a hundred megabytes is the first; deciding that
+  two lines are one turn is the second. A capability that had said "read the transcripts"
+  would have put the second one here.
+
   - **`crook --install-plugin <path>`**, which opens a module, checks its ABI, decodes its
     manifest and only then copies it into the plugins directory. There is no server and no
     index; installing is a file copy, and the flag exists because "copy this into a directory
     whose path is different on three platforms" is a sentence a README should not have to say
     twice.
+
+  **ABI 4 is the version a plugin can be asked about something.** Every version up to it could
+  be asked what goes in a slot; that is a question with one answer, and a slot drawn once per
+  row of a list needs the answer to be different seven times. So a render carries a `Render` — the slot, and the
+  `Subject` it is about when the slot has one — and the first subject is a tab row.
+
+  What a subject carries is **redacted against the grant**, in `plugins::wasm`, one field at a
+  time: the title and the agent's status need `ReadTabs`, the directory and its branch and
+  whether it is a worktree need `ReadWorkingDirectory`, and a plugin that was granted neither
+  finds `None` where each would have been rather than a refusal it has to handle. What is left
+  for everybody is one number per row — a hash of where the tab is working, salted with the
+  asking plugin's own id, so a plugin can tell two rows apart and keep telling them apart
+  tomorrow, and two plugins cannot work out that two of their rows are one row. It is not
+  offered as a secret: a hash can be checked against a guess, which is exactly why it is *all*
+  that is ungated.
+
+  That is what makes a plugin that draws a picture on every tab a plugin nobody has to allow
+  anything, and the pair of them is the second dogfood:
+  [crook-emoji](https://github.com/theguriev/crook-emoji) takes `tab.row.mark` and asks for no
+  capability at all, and [crook-worktree](https://github.com/theguriev/crook-worktree) takes
+  `tab.row.badge`, asks for `ReadWorkingDirectory`, and draws nothing until somebody says yes.
 
   **And the usage chip is not in the binary any more.** It is a sandboxed plugin —
   `theguriev/pirate`, in a public repository of its own at github.com/theguriev/crook-pirate,
@@ -142,21 +236,31 @@ description of something that was never built.
   one by accident; this one had nothing to lean on, which is the only way to find out whether
   the ABI is enough.
 
-  **What that cost.** Two things did not survive the move, and neither is a bug waiting to be
-  fixed:
+  **What that cost.** One thing did not survive the move. A second thing was said not to have
+  survived, and that turned out to be a wrong answer worth keeping the record of:
 
-  - **The week-history panel does not come across.** It read the Claude Code transcripts under
-    `~/.claude/projects/` — a couple of hundred megabytes in a busy week — skipping most lines
-    without parsing them, deduplicating the turns a resumed session copies forward, and
-    totting up what was spent per model and per day. That is native work: a walk over a
-    directory tree that is cheap only because it never leaves the reader's own thread. A
-    sandbox cannot do it. One request answers with at most a megabyte, deliberately, because a
-    guest that could be handed two hundred of those into its own linear memory is a guest that
-    can exhaust the machine by asking; and a capability wide enough to cover the walk would
-    have to say "read every transcript of everything you have ever asked an agent", which is
-    not a sentence a permission dialog can honestly put to somebody. So the chip says how much
-    of the limit is gone and when it resets, which is what the endpoint knows, and the
-    breakdown is not offered at all rather than offered badly.
+  - **The week-history panel did come across, on the second attempt.** It reads the Claude
+    Code transcripts under `~/.claude/projects/` — three hundred megabytes in a busy week —
+    and the first conclusion here was that a sandbox cannot do that, because one request
+    answers with at most a megabyte and a guest handed three hundred of those can exhaust the
+    machine by asking. Every fact in that sentence is true and the conclusion did not follow.
+    The megabytes are not what the panel draws: a week is twenty-two thousand turns and the
+    panel is a hundred and sixty-nine rows of totals. What was needed was not a bigger pipe
+    but the counting happening where the reading happens, which is what `Request::Tally` is.
+
+    The measurement that settled it is worth writing down, because the argument had been going
+    on estimates: handing the guest the *lines* costs ninety thousand instructions each — for
+    a week, forty seconds of interpreter on the thread that draws. Counting them in the host
+    costs about a second on the pool, and the answer lands inside the guest in thirteen
+    milliseconds.
+
+    What it does cost is the sentence a person has to agree to, and that objection was the
+    real one: the grant reads "Read everything under `~/.claude/projects`", which is every
+    transcript of everything they have ever asked an agent. There is no narrower way to ask —
+    the files are named after sessions nobody knows in advance — so the honest thing is to
+    show the sentence and let them refuse it. What the plugin receives is totals; what it is
+    *allowed* is the directory, and those are not the same size.
+
   - **The macOS Keychain path does not come across.** Claude Code refreshes the Keychain copy
     of its credentials and lets `~/.claude/.credentials.json` lag, sometimes by days, and the
     only way to read the Keychain is to shell out to `security`. A sandboxed plugin cannot
@@ -165,10 +269,11 @@ description of something that was never built.
     reads the file alone and can be behind. That is a real regression on one platform, and it
     is the price of the chip being something a stranger could have written.
 
-- **ABI 3 — a plugin that can *do* something: done.** (Not a phase of its own: the phases
-  below are the plan's, and the store is still the one numbered three.) Version 2 could
-  describe a chip and read a file, which is a plugin that reports. Everything below is what it took for one to
-  **act**, and every line of it was demanded by a real plugin — the chips at
+- **ABI 6 — a plugin that can *do* something: done.** (A version, not a phase: the phases here
+  are the plan's, and the store is still the one numbered three.) Every version up to five let
+  a plugin describe what it already knew and ask for what it could be told — a chip that
+  reports. Everything below is what it took for one to **act**, and every line of it was
+  demanded by a real plugin — the chips at
   [github.com/theguriev/crook-chips](https://github.com/theguriev/crook-chips), which draws the
   row under the line you are typing and is the second thing in this document that lives outside
   the binary.
@@ -222,11 +327,12 @@ description of something that was never built.
     machine's installed plugins and their grants, and `--action <name [argument]>` runs a named
     action before the picture is taken, which is how a plugin's own panel gets photographed.
 
-  **What it cost.** ABI 2 modules are refused by number, which is the mechanism working
-  rather than failing: `crook_render` and `crook_run` both changed shape, and a host that
-  guessed which one a module meant would be a host that decodes a shape meaning something
-  else. The plugins in the store are rebuilt against the new vocabulary — the API crate is
-  vendored into each of them, so "rebuilt" is a copy of one directory and a `cargo build`.
+  **What it cost.** Modules built against version five are refused by number, which is the
+  mechanism working rather than failing: `crook_run` grew an argument and `Render` grew the
+  entry, and a host that guessed which shape a module meant would be a host decoding one that
+  means something else now. Every plugin in the store is rebuilt against the new vocabulary —
+  the API crate is vendored into each of them, so "rebuilt" is a copy of one directory and a
+  `cargo build`.
 
 ## 0. What was asked for, and what it means
 
@@ -360,8 +466,9 @@ plugin any other way:
 **Registries (each `register` returns a guard):**
 
 - `host.slots` — declare a slot (owner) or contribute to one (contributor). Slot ids are
-  dotted strings owned by the declaring plugin: `header.right`, `tab.row.chips`,
-  `tab.row.status`, `tab.menu.entries`, `block.footer`, `pane.content`, `settings.section`,
+  dotted strings owned by the declaring plugin: `header.right`, `tab.row.mark`,
+  `tab.row.badge` (both built), `tab.row.chips`, `tab.menu.entries`, `block.footer`,
+  `pane.content`, `settings.section`,
   `settings.page`, `palette.commands`, `overlay.layers`, `theme.tokens`. Cardinality is
   declared once, by the owner: `single` (highest priority renders), `list` (ordered by
   `order`, then registration), `keyed` (owner dispatches on a key), `chain` (each contributor
@@ -374,6 +481,11 @@ plugin any other way:
 - `host.settings` — register a schema under `plugins.<id>` in `settings.json`; the settings
   page renders it. The file already keeps unknown keys, so this is the one place a plugin can
   persist today; the schema is what makes it typed and visible.
+- `host.fields` — a text field the plugin owns, with the question that decides when the
+  keyboard is in it. Registered rather than handed over: a plugin builds before the workspace
+  and cannot be given one. This is what a rename, a search box or any other typing a plugin
+  offers is built out of, and without it a plugin's surface is one a person can look at and
+  not type into.
 - `host.keybindings` — default chords for the plugin's actions, as the weakest layer of the
   keybindings: the user's file wins, and so does every shipped binding. `Host::suggest_binding`
   is this, for a native plugin.
@@ -467,13 +579,32 @@ also settles what "change practically everything" means for a stranger's plugin:
 §3, every event, every query, every command — but never the scene. The way to make more of
 the application changeable is to add slots and queries, not to widen the vocabulary.
 
-**As built, that tree is seventeen `Node` variants**, and the list above is close but is not
-what landed: `Empty`, `Text`, `Badge`, `Icon`, `Row`, `Column`, `Gap`, `Button`, `Meter`,
-`Rule`, `Fill`, `Note`, `Pressable`, `Anchored`, and — with ABI 3 — `Chip`, `Picker` and
+**As built, that tree is fifteen `Node` variants**, and the list above is close but is not what
+landed: `Empty`, `Text`, `Badge`, `Icon`, `Row`, `Column`, `Gap`, `Button`, `Meter`, `Rule`,
+`Fill`, `Note`, `Pressable`, `Anchored`, `Explained`. There is no field and no switch, because
+nothing has needed one yet and a variant nobody uses is a variant that has to keep working for
+ever. The last two are the two ways something can be hung off a contribution, and they differ
+by who owns the fact that it is up: an `Anchored` panel is the plugin's state and needs an
+action to learn it was dismissed, while an `Explained` note is up exactly while the pointer is
+on the thing — so the host shows it without asking, and a plugin that has stopped answering
+cannot leave one on screen. Two of them are a *share of an axis* rather than a size — `Fill`,
+which takes whatever is left of a row, and `Meter`, which is a fraction of a bar the host
+decides the length of — and an axis nobody bounded cannot be shared. A contribution starts
+unbounded, because a slot offers no width: `header.right` hands its entry an infinite main
+axis, the row it sits in having already given its surplus away. The one thing the host bounds
+is a panel, which it made a fixed width itself. So **a `Fill` or a `Meter` outside a panel
+draws nothing**, and says so once in the log for whoever wrote the plugin. The alternative is
+what `Flex` does when it is asked to divide infinity, which is to assert in a debug build and
+lay out something degenerate in a release one, and a plugin from a store does not get to do
+either to somebody's window.
+
+**As built, that tree is nineteen `Node` variants**, and the list above is close but is not
+what landed: `Empty`, `Text`, `Badge`, `Chip`, `Icon`, `Row`, `Column`, `Gap`, `Button`,
+`Meter`, `Bars`, `Rule`, `Fill`, `Note`, `Pressable`, `Anchored`, `Explained`, `Picker` and
 `Menu`. There is still no switch, and there is no *field* either: `Picker` carries one, and it
 is the host's rather than the plugin's, so what is typed into it never crosses the wire. A
-variant nobody uses is a variant that has to keep working for ever, which is why the three
-that arrived arrived with a plugin that needed them. Two of them are a *share of an axis* rather than a size — `Fill`, which takes whatever is
+variant nobody uses is a variant that has to keep working for ever, which is why each of them
+arrived with a plugin that needed it. Two are a *share of an axis* rather than a size — `Fill`, which takes whatever is
 left of a row, and `Meter`, which is a fraction of a bar the host decides the length of — and
 an axis nobody bounded cannot be shared. A contribution starts unbounded, because a slot offers
 no width: `header.right` hands its entry an infinite main axis, the row it sits in having
@@ -494,12 +625,12 @@ patterns), `fs` (paths), `clipboard`, `notify`, `tabs`, `settings.read`, `settin
 session budget). A plugin with no capabilities can contribute UI and react to lifecycle events
 and nothing else — which is most plugins.
 
-Eleven are built, and they are the ones the two real plugins needed or could be given
+Thirteen are built, and they are the ones the plugins that exist needed or could be given
 honestly: `ReadSettings`, `ReadTabs`, `ReadWorkingDirectory`, `Clipboard`, `Storage`,
-`Network` as a list of hosts, `ReadFiles` as a list of exact paths, and the four ABI 3 added —
-`ListDirectories` (roots, and names rather than contents), `TypeCommands` (exact command
-templates, with the host filling and quoting the hole), `RunCommands` (exact command names)
-and `ReadCommands`. The last two are lists
+`Network` as a list of hosts, `ReadFiles` as a list of exact paths, `PlaySound`,
+`WatchCommands`, and the four ABI 6 added — `ListDirectories` (roots, and names rather than
+contents), `TypeCommands` (exact command templates, with the host filling and quoting the
+hole), `RunCommands` (exact command names) and `ReadCommands`. The last two are lists
 rather than flags for the same reason: "this plugin talks to the internet" and "this plugin
 reads your files" are not things anybody can meaningfully agree to, and "api.anthropic.com" and
 "~/.claude/.credentials.json" are. A leading `~` is the person's home directory and is the only
