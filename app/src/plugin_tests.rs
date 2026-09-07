@@ -92,6 +92,79 @@ fn every_plugin_in_the_box_loads() {
     });
 }
 
+/// A plugin whose whole contribution is asking to be told when things happen.
+struct Listener;
+
+impl Plugin for Listener {
+    fn manifest(&self) -> &'static Manifest {
+        static MANIFEST: std::sync::OnceLock<Manifest> = std::sync::OnceLock::new();
+        MANIFEST.get_or_init(|| Manifest {
+            schema: Manifest::SCHEMA,
+            id: PluginId::parse("eugen/listener").expect("a literal that parses"),
+            name: "Listener",
+            description: "A plugin that only listens.",
+            version: "0.1.0",
+            tier: crook_plugin::Tier::Native,
+            capabilities: &[],
+        })
+    }
+
+    fn build(&mut self, host: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
+        host.watch(Watch::Commands, Rc::new(|_, _, _| {}));
+        host.watch(Watch::Bells, Rc::new(|_, _, _| {}));
+        Ok(())
+    }
+}
+
+#[test]
+fn a_plugin_that_is_switched_off_stops_being_told_things() {
+    // The one registration that draws nothing, and the one that was left
+    // behind by `unload`: a plugin switched off went on being handed every
+    // command that finished and every bell that rang, and ran a little of
+    // itself on each — invisibly, because nothing it did could reach the
+    // screen. A plugin that has been *removed* would have gone on doing it
+    // with its file deleted.
+    let queue = LocalQueue::new();
+    let mut app = App::new(queue.foreground(), Arc::new(Background::new(2)));
+    let quits = Rc::new(Cell::new(0));
+    let quit: crate::workspace::QuitRequest = Rc::new(move || quits.set(quits.get() + 1));
+    let fonts = Fonts {
+        ui: FamilyId(0),
+        monospace: FamilyId(0),
+    };
+    let (_, workspace) = app.add_window(|ctx| {
+        Workspace::new(
+            fonts,
+            CellFont::headless(CELL_FONT_SIZE),
+            Opening {
+                settings: Settings::ephemeral(),
+                channel: Channel::Dev,
+                plugins: plugins::defaults(),
+                withdrawn: BTreeMap::new(),
+            },
+            quit,
+            Rc::new(Recorder::default()),
+            ctx,
+        )
+    });
+
+    workspace.update(&mut app, |_, ctx| {
+        let mut host = load(vec![Box::new(Listener)], &[], BTreeMap::new(), fonts, ctx);
+        let id = PluginId::parse("eugen/listener").expect("a literal that parses");
+        assert_eq!(host.watchers(Watch::Commands).len(), 1);
+        assert_eq!(host.watchers(Watch::Bells).len(), 1);
+
+        host.unload(&id);
+
+        assert!(host.watchers(Watch::Commands).is_empty());
+        assert!(host.watchers(Watch::Bells).is_empty());
+
+        // And switching it back on does not leave two.
+        host.enable(&id, ctx);
+        assert_eq!(host.watchers(Watch::Commands).len(), 1);
+    });
+}
+
 #[test]
 fn a_plugin_that_arrives_after_everything_else_is_running_before_the_next_frame() {
     // What installing from the store comes to. Everything else about a plugin
@@ -105,7 +178,7 @@ fn a_plugin_that_arrives_after_everything_else_is_running_before_the_next_frame(
         let plugin = crate::plugins::wasm::opened(&wasm).expect("it should open");
         let id = crate::plugin::Plugin::manifest(&plugin).id.clone();
 
-        host.carry(Box::new(plugin), ctx);
+        host.carry(Box::new(plugin), true, ctx);
 
         assert!(
             host.is_loaded(&id),
@@ -121,9 +194,17 @@ fn a_plugin_that_arrives_after_everything_else_is_running_before_the_next_frame(
         // however many times a module for it arrives, or the Plugins page
         // would grow a second row for a plugin somebody updated.
         let again = crate::plugins::wasm::opened(&wasm).expect("it should open");
-        host.carry(Box::new(again), ctx);
+        host.carry(Box::new(again), true, ctx);
         assert_eq!(host.available().len(), carried + 1);
         assert!(host.is_loaded(&id));
+
+        // Carried and not run is what installing an update to a plugin
+        // somebody switched off has to be: the file is replaced, the decision
+        // is not.
+        let off = crate::plugins::wasm::opened(&wasm).expect("it should open");
+        host.carry(Box::new(off), false, ctx);
+        assert!(!host.is_loaded(&id), "an update should not turn it back on");
+        assert_eq!(host.available().len(), carried + 1, "and it is still there");
 
         // Forgetting is what uninstalling does, and it is not the switch: a
         // plugin whose file has been deleted must not be left on the list of

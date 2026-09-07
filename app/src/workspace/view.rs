@@ -1163,10 +1163,53 @@ impl Workspace {
         promised(manifest)?;
 
         crate::plugins::wasm::installed_bytes(bytes)?;
-        self.host.carry(Box::new(plugin), ctx);
+
+        // Carried and run, unless this is a plugin somebody switched off:
+        // installing a new version of one that is off is an *update*, and an
+        // update that turned it back on would undo a decision nobody
+        // revisited.
+        let run = !self
+            .settings
+            .disabled_plugins()
+            .iter()
+            .any(|off| off == manifest.id.as_str());
+        self.host.carry(Box::new(plugin), run, ctx);
+        // The version that was withdrawn is not the version that just landed,
+        // and the card has to stop saying it is. What the new one's standing
+        // is comes from the index the store holds, through `withdrew`.
+        self.withdrawn.remove(manifest.id.as_str());
         self.sync_input_keys();
         ctx.notify();
-        Ok(manifest)
+
+        // A module that will not *build* is installed and not running, and the
+        // difference matters to whoever pressed the button: the file is there,
+        // the row is on the page, and the reason belongs in the answer rather
+        // than only on a card they would have to go and find.
+        match run && !self.host.is_loaded(&manifest.id) {
+            true => Err(format!(
+                "{} was installed and did not start: {}",
+                manifest.id,
+                self.host
+                    .refused()
+                    .iter()
+                    .find(|(id, _)| *id == manifest.id)
+                    .map(|(_, why)| why.clone())
+                    .unwrap_or_else(|| String::from("it registered nothing"))
+            )),
+            false => Ok(manifest),
+        }
+    }
+
+    /// Records what the registry now says about a plugin's version.
+    ///
+    /// The store's to say, because the store is what holds the index: a
+    /// version installed *out* of a yank is not withdrawn any more, and one
+    /// installed into one is.
+    pub fn withdrew(&mut self, plugin: &PluginId, why: Option<String>) {
+        match why {
+            Some(why) => self.withdrawn.insert(plugin.as_str().to_owned(), why),
+            None => self.withdrawn.remove(plugin.as_str()),
+        };
     }
 
     /// Takes a plugin off this machine, along with what it was allowed to do.
