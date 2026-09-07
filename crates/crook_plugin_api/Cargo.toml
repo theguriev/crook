@@ -3,9 +3,33 @@ name = "crook_plugin_api"
 description = "What a sandboxed Crook plugin and its host say to each other."
 authors.workspace = true
 edition.workspace = true
-version.workspace = true
-publish.workspace = true
+# Not the workspace's version, and this is the one crate here that does not
+# take it. The number after the zero is the ABI this vocabulary is at, so
+# `crook_plugin_api = "0.8"` — Cargo's own compatibility range for a 0.x crate
+# — is the same sentence as "built against Crook's plugin ABI 8". A host
+# accepts one ABI and refuses every other by name, so a dependency range wider
+# than that would be a plugin that compiles and is then turned away at load.
+# `tests.rs` asserts the coupling rather than trusting whoever bumps one of
+# the two numbers to remember the other.
+version = "0.8.0"
+# The one crate in this workspace that is published. A plugin is written
+# outside this repository, by somebody who has no copy of the terminal, and
+# every plugin written so far has had to *vendor* this file to do it — which
+# is exactly how a host and a guest come to hold two lists of capabilities
+# that disagree.
+publish = true
 license = "MIT"
+readme = "README.md"
+# Where a plugin author is sent, rather than where this file is edited: the
+# registry is the public half of the ecosystem, and it is what somebody
+# reading this crate on crates.io is looking for.
+homepage = "https://github.com/theguriev/crook-plugins"
+keywords = ["crook", "terminal", "plugin", "wasm", "abi"]
+categories = ["api-bindings", "wasm"]
+# Edition 2024's own floor. Nothing here is newer than that — the crate is
+# `no_std` data types and two derives — and CI compiles it at the version
+# `rust-toolchain.toml` pins.
+rust-version = "1.85"
 
 [dependencies]
 # Two, and both are the wire. `serde` derives the shapes and `postcard` is what

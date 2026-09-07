@@ -815,6 +815,38 @@ table above — the licence, the repository, the platforms, the default keybindi
 schema — is the *store's*, and arrives with the store in Phase 3. A plugin installed by hand
 today has no store and needs none.
 
+### Where a plugin gets the vocabulary
+
+`crook_plugin_api` is a crate to depend on rather than a file to copy, and that is the first
+thing the store needed — before an index, and long before a server. Until it was one, a plugin
+outside this repository had exactly one way to compile: **copy the crate**, which is what all
+five of them do, each carrying its own `crates/crook_plugin_api` under a header saying it is a
+copy and not a fork. Five copies of the list of capabilities is five chances for a grant to
+stop matching what it granted, and they are the one place `docs/architecture.md`'s rule about a
+shared shape having a single source had a hole in it — exactly at the boundary, where it costs
+the most.
+
+The crate is versioned `0.<abi>.<patch>`, so:
+
+```toml
+[dependencies]
+crook_plugin_api = "0.8"
+```
+
+is Cargo's way of writing "built against ABI 8", and it resolves to precisely the releases a
+host at ABI 8 will load. That equivalence is the whole of a plugin author's compatibility
+story, and it is held by a test in the crate rather than by whoever bumps one of the two
+numbers remembering the other. A wider range is not expressible, which is deliberate: the host
+compares one integer and refuses everything else by name, so a plugin that resolved to `0.9`
+would be one that compiled and was then turned away at load — the worst place to learn it.
+
+`./script/publish` is what uploads it: the checks CI runs, then `cargo publish`, then a tag on
+the commit the version was built from. It is not a CI job because publishing is the one
+irreversible act in this tree — crates.io yanks a version and never deletes one — and because
+it needs a token nothing else here has. Until the first upload happens the five copies stay
+where they are; what changed is that removing them is now a one-line edit per plugin rather
+than a decision.
+
 ## 6. The store
 
 **What the store distributes: `.wasm`, and only `.wasm`.** An installed plugin lives in

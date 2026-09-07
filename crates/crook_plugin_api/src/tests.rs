@@ -407,3 +407,28 @@ fn an_event_survives_the_wire() {
         );
     }
 }
+
+#[test]
+fn the_crate_version_names_the_abi() {
+    // A plugin writes `crook_plugin_api = "0.8"` and Cargo resolves that to
+    // every `0.8.x`, which is exactly the set of releases that speak ABI 8.
+    // That equivalence is the whole of a plugin author's compatibility story,
+    // and it holds only while these two numbers are bumped together — so the
+    // one that is easy to forget is asserted here rather than remembered.
+    let minor = env!("CARGO_PKG_VERSION")
+        .split('.')
+        .nth(1)
+        .and_then(|minor| minor.parse::<u32>().ok())
+        .expect("the crate version is major.minor.patch");
+
+    assert_eq!(
+        env!("CARGO_PKG_VERSION_MAJOR"),
+        "0",
+        "at 1.0 the ABI is the major version and this test is the wrong one"
+    );
+    assert_eq!(
+        minor, ABI_VERSION,
+        "the crate is at 0.{minor} and the ABI is {ABI_VERSION}: bump the version in \
+         crates/crook_plugin_api/Cargo.toml with the constant"
+    );
+}

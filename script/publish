@@ -1,0 +1,73 @@
+#!/bin/sh
+#
+# Publish the crates somebody outside this repository needs, to crates.io.
+#
+#   ./script/publish --dry-run    # everything except the upload
+#   ./script/publish
+#
+# There is one of them: `crook_plugin_api`, the vocabulary a sandboxed plugin
+# is written against. It is published because a plugin is written *outside*
+# this repository — the four that exist each carry a vendored copy of that
+# crate, and a copy is how a host and a guest come to hold two lists of
+# capabilities that disagree.
+#
+# Not a CI job, and not one by accident: publishing is the one irreversible
+# thing in this tree — crates.io yanks a version, it never deletes one — and it
+# needs a token no other step here has. A human runs this.
+
+set -eu
+
+cd "$(dirname "$0")/.."
+
+# rustup was installed with --no-modify-path on this machine, so the proxies
+# are not on a login shell's PATH.
+export PATH="$HOME/.cargo/bin:$PATH"
+
+# In dependency order, which is the order they have to be uploaded in: a crate
+# whose dependency is not on crates.io yet does not publish.
+CRATES="crook_plugin_api"
+
+DRY_RUN=0
+
+usage() {
+  cat <<'USAGE'
+Usage: ./script/publish [--dry-run]
+
+Publishes crook_plugin_api to crates.io, after running the checks CI runs.
+--dry-run does everything except the upload.
+USAGE
+}
+
+for argument in "$@"; do
+  case "$argument" in
+    --dry-run) DRY_RUN=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "unknown option: $argument" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+# The version *is* the ABI — `0.<abi>.<patch>` — and the test that says so is
+# in the crate. Running the whole crate's tests here is a second or two and it
+# is the last chance to catch a version bumped without the constant.
+cargo fmt --all --check
+for crate in $CRATES; do
+  cargo clippy --locked -p "$crate" --all-targets -- -D warnings
+  cargo test --locked -p "$crate"
+done
+
+for crate in $CRATES; do
+  version=$(cargo metadata --locked --format-version=1 --no-deps \
+    | sed -n "s/.*\"name\":\"$crate\",\"version\":\"\([^\"]*\)\".*/\1/p")
+
+  if [ "$DRY_RUN" = 1 ]; then
+    echo "==> $crate $version (dry run)"
+    cargo publish --locked --dry-run -p "$crate"
+  else
+    echo "==> $crate $version"
+    cargo publish --locked -p "$crate"
+    # A published version is a version a plugin can be pinned to forever, so
+    # it is worth a tag pointing at the commit it was built from.
+    git tag "$crate-v$version"
+    echo "tagged $crate-v$version; push it with: git push origin $crate-v$version"
+  fi
+done
