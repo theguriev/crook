@@ -75,6 +75,12 @@ thiserror = "2.0"
 # with no `cc` anywhere in its graph — fourteen crates and not one build script
 # that shells out to a compiler.
 wasmi = { version = "2.0", features = ["portable-dispatch"] }
+# `wasmi`'s own foundation crate, already in its graph, and named here for one
+# type: `ResourceLimiter` is re-exported from `wasmi` and the error its methods
+# return is not, so the trait cannot be implemented outside `wasmi_core` in
+# 2.0. What the limiter buys is the ceiling being asked about *before* the
+# allocation rather than after it — see `crook_wasm::sandbox`.
+wasmi_core = "2.0"
 # Assembling wasm from its text format, which is how the tests build a plugin
 # without a wasm toolchain being installed.
 wat = "1"

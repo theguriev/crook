@@ -51,9 +51,11 @@ for argument in "$@"; do
   esac
 done
 
-# The version *is* the ABI — `0.<abi>.<patch>` — and the test that says so is
-# in the crate. Running the whole crate's tests here is a second or two and it
-# is the last chance to catch a version bumped without the constant.
+# The version *is* the ABI — `0.<abi>.<patch>` — and each crate holds a test
+# saying so. Running their tests here is a second or two and the last chance to
+# catch a version bumped without the constant. It is not the whole of CI: that
+# is four commands over the workspace, and what runs here is the two crates
+# being uploaded.
 cargo fmt --all --check
 for crate in $CRATES; do
   cargo clippy --locked -p "$crate" --all-targets -- -D warnings
