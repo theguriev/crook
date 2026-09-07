@@ -160,6 +160,16 @@ pub(super) struct Runtime {
     /// How many things in a row it has asked for and not been allowed. See
     /// [`REFUSALS_ALLOWED`].
     refusals: u32,
+    /// Which tickets were raised out of a press, so that the answer to one is
+    /// still that press's business.
+    ///
+    /// A chain is one gesture. "Ask what the command printed, and when it
+    /// comes back put it on the clipboard" is two requests and one thing a
+    /// person did — and a delivery that forgot which would refuse the second
+    /// half of every plugin that reads before it acts. What it must *not*
+    /// become is a gesture that outlives the chain: an entry is remembered
+    /// only until its answer lands, and a tick or an event pumps as itself.
+    pressed: Vec<u32>,
     /// The tick that is coming.
     waiting: Option<Task<()>>,
     /// What pokes the wait awake, while there is one to poke.
@@ -209,6 +219,7 @@ impl Runtime {
             failures,
             granted,
             refusals: 0,
+            pressed: Vec::new(),
             waiting: None,
             wake: None,
             deeds: Vec::new(),
@@ -304,12 +315,21 @@ impl Runtime {
         // thing being failed — and not counted against one either: a plugin
         // that got this wrong has a bug rather than a permission it is
         // missing.
-        let declined = (refused.is_none() && changes_something(&request) && gesture == Gesture::None)
+        let declined = (refused.is_none()
+            && only_from_a_gesture(&request)
+            && gesture == Gesture::None)
             .then(|| {
                 String::from(
                     "that only happens when somebody presses something, and nobody pressed anything",
                 )
             });
+
+        // Written down before anything can answer it: what this ticket's
+        // answer may go on to ask for is decided by what raised it. See the
+        // field.
+        if gesture == Gesture::Pressed {
+            self.pressed.push(ticket);
+        }
 
         // Allowed, invited, and about the window rather than about the world:
         // it waits for somewhere that holds one. Notified, because the thing
@@ -423,9 +443,19 @@ impl Runtime {
             }
         }
 
-        // Whatever the answer made it ask for. Not a gesture: an answer
-        // landing is not somebody pressing something, however it started.
-        self.pump(Gesture::None, ctx);
+        // Whatever the answer made it ask for, under the gesture that started
+        // the chain: an answer to something a press asked for is still what
+        // came of that press, and a plugin that reads before it acts would
+        // otherwise be refused its second half every time. Anything else — a
+        // tick, an event, a build — pumps as itself.
+        let gesture = match self.pressed.iter().position(|raised| *raised == ticket) {
+            Some(index) => {
+                self.pressed.swap_remove(index);
+                Gesture::Pressed
+            }
+            None => Gesture::None,
+        };
+        self.pump(gesture, ctx);
         // The reading changed, so whatever is drawing it has to be asked
         // again. This is the bridge every model-backed feature in Crook has.
         ctx.notify();
@@ -558,6 +588,8 @@ pub(super) fn allowed(granted: &[String], request: &Request) -> Result<(), Strin
         Request::Type { template, .. } => Capability::TypeCommands(vec![template.clone()]),
         Request::Run { name, .. } => Capability::RunCommands(vec![name.clone()]),
         Request::Commands => Capability::ReadCommands,
+        Request::Output => Capability::ReadBlock,
+        Request::Copy { .. } => Capability::Clipboard,
     };
 
     if wanted
@@ -603,18 +635,32 @@ fn under_a_root(granted: &[String], path: &str) -> Result<(), String> {
 fn needs_the_workspace(request: &Request) -> bool {
     matches!(
         request,
-        Request::Where | Request::Commands | Request::Type { .. } | Request::Run { .. }
+        Request::Where
+            | Request::Commands
+            | Request::Type { .. }
+            | Request::Run { .. }
+            | Request::Output
+            | Request::Copy { .. }
     )
 }
 
-/// Whether this is a request that *changes* something rather than reading it.
+/// Whether this is a request that may only be raised out of an action a person
+/// caused.
 ///
-/// The two that do are the two that may only be raised out of an action a
-/// person caused. Reading is not on the list: a chip that says which branch
-/// you are on has to be able to ask on a timer, and asking is what a grant
-/// already answered for.
-fn changes_something(request: &Request) -> bool {
-    matches!(request, Request::Type { .. } | Request::Run { .. })
+/// Two kinds are. The ones that *change* something — typing a line, running a
+/// command, writing the clipboard — because a plugin that could do those on a
+/// timer is a plugin that does them while nobody is looking. And the one that
+/// is *about what was pressed*: what a command printed is an answer about the
+/// menu an entry was run in, and there is no such menu when nobody ran one.
+///
+/// Ordinary reading is not on the list: a chip that says which branch you are
+/// on has to be able to ask on a timer, and asking is what a grant already
+/// answered for.
+fn only_from_a_gesture(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Type { .. } | Request::Run { .. } | Request::Copy { .. } | Request::Output
+    )
 }
 
 /// The host a URL names, which is the thing a person granted or did not.
@@ -682,7 +728,12 @@ fn perform(request: Request) -> Answer {
         // `wasm::mod` instead and never arrives here; reaching one of these
         // arms would be this file disagreeing with itself, so it says so
         // rather than answering something plausible.
-        Request::Where | Request::Commands | Request::Type { .. } | Request::Run { .. } => {
+        Request::Where
+        | Request::Commands
+        | Request::Type { .. }
+        | Request::Run { .. }
+        | Request::Output
+        | Request::Copy { .. } => {
             Answer::Failed(String::from("that is not something the pool can do"))
         }
     }

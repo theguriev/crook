@@ -71,6 +71,30 @@ pub enum ScrollCause {
     Submit,
     /// A keystroke reached the pty.
     KeyToPty,
+    /// An entry of a block's menu asked for this line of the list to be at the
+    /// top of the box.
+    ///
+    /// A line rather than an edge or a block, because the only thing that
+    /// knows where a block starts is the prefix sum the list keeps — and the
+    /// only thing that knows which of a block's two edges was asked for is the
+    /// entry that was clicked. Both are worked out by the caller and arrive
+    /// here as one number, so the rule below stays a rule about scrolling.
+    ToLine(f32),
+}
+
+/// One of the controls a hovered block carries at its top right.
+///
+/// Two, and the split between them is what a menu is for: the one thing worth
+/// a click of its own is the one a person does over and over, and everything
+/// else is a list they read. So copying stays a square with an icon in it, and
+/// the rest of what can be done to a block is behind the dots beside it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Control {
+    /// Copies the block, which is what the block's own control has always
+    /// done.
+    Copy,
+    /// Opens the block's menu.
+    Menu,
 }
 
 /// What says a block list is the same one it was last frame: the pointer its
@@ -186,13 +210,24 @@ struct State {
     /// mouse event to say so, and the block that shows a copy control has to
     /// be the block a click would land on.
     pointer: Option<Vector2F>,
-    /// The block the pointer is over, whose copy control is therefore drawn.
+    /// The block the pointer is over, whose controls are therefore drawn.
     hovered: Option<BlockId>,
-    /// Whether the pointer is on that control rather than merely on its block.
-    on_control: bool,
-    /// The block whose control a press landed on, so that a release somewhere
-    /// else is not a click.
-    pressed: Option<BlockId>,
+    /// Which of that block's controls the pointer is on, if it is on one at
+    /// all rather than merely on the block.
+    on_control: Option<Control>,
+    /// The control a press landed on, and the block it belongs to, so that a
+    /// release somewhere else is not a click.
+    pressed: Option<(BlockId, Control)>,
+    /// Where the menu button was last painted, as the offset from the list's
+    /// own top-left corner to the button's bottom-right one.
+    ///
+    /// Kept because the menu is an element and the button is not: the popup is
+    /// built during a render, from a corner the *paint* of the last frame
+    /// worked out, and there is nowhere else in the frame that knows where a
+    /// block that scrolled ended up. It is written on every paint, so the menu
+    /// follows the block it belongs to rather than hanging where the block
+    /// was when it opened.
+    menu_at: Option<Vector2F>,
     heights: Heights,
 }
 
@@ -227,6 +262,15 @@ impl PaneBlocks {
     /// The largest offset that still has content under it, in lines.
     pub fn max_offset(&self) -> f32 {
         max_offset(&self.0.borrow())
+    }
+
+    /// How tall the box the list is drawn in was at the last layout, in lines.
+    ///
+    /// What "put this block's last row at the bottom of the pane" is measured
+    /// against, and the reason it is measured rather than assumed: a pane with
+    /// a composer under it holds fewer lines than the pane does.
+    pub fn viewport(&self) -> f32 {
+        self.0.borrow().viewport
     }
 
     /// Whether there is anything to scroll.
@@ -297,6 +341,18 @@ impl PaneBlocks {
             // Typing and running a command both mean the person is done
             // reading history, and both must land on the live block.
             ScrollCause::Submit | ScrollCause::KeyToPty => ScrollPosition::FollowBottom,
+            // Asked for outright, and clamped rather than refused: a block's
+            // last row is at the end of the list, and "put it at the bottom of
+            // the box" is a line past the end for every list shorter than one.
+            // Landing at the end goes back to following it, which is the wheel's
+            // rule and for the wheel's reason.
+            ScrollCause::ToLine(line) => {
+                if line >= limit - HEIGHT_TOLERANCE {
+                    ScrollPosition::FollowBottom
+                } else {
+                    ScrollPosition::Fixed(line.max(0.))
+                }
+            }
             // The mode is kept. Only an offset that no longer fits gives way,
             // because a list that shrank under a fixed position has nothing at
             // that position any more.
@@ -317,8 +373,8 @@ impl PaneBlocks {
         self.0.borrow().hovered
     }
 
-    /// Whether the pointer is on the hovered block's copy control.
-    pub fn is_on_control(&self) -> bool {
+    /// Which of the hovered block's controls the pointer is on.
+    pub fn on_control(&self) -> Option<Control> {
         self.0.borrow().on_control
     }
 
@@ -333,9 +389,9 @@ impl PaneBlocks {
     }
 
     /// Records what the pointer is over, reporting whether it moved.
-    pub fn hover(&self, block: Option<BlockId>, on_control: bool) -> bool {
+    pub fn hover(&self, block: Option<BlockId>, on_control: Option<Control>) -> bool {
         let mut state = self.0.borrow_mut();
-        let on_control = on_control && block.is_some();
+        let on_control = on_control.filter(|_| block.is_some());
         if state.hovered == block && state.on_control == on_control {
             return false;
         }
@@ -344,17 +400,29 @@ impl PaneBlocks {
         true
     }
 
-    /// Says a press landed on one block's copy control.
-    pub fn press_control(&self, block: BlockId) {
-        self.0.borrow_mut().pressed = Some(block);
+    /// Says a press landed on one of a block's controls.
+    pub fn press_control(&self, block: BlockId, control: Control) {
+        self.0.borrow_mut().pressed = Some((block, control));
     }
 
-    /// Takes the press back, reporting the block it landed on.
+    /// Takes the press back, reporting the control it landed on and the block
+    /// it belongs to.
     ///
     /// A release is only a click when it comes up on the control it went down
     /// on, which is what every other button in the application does.
-    pub fn release_control(&self) -> Option<BlockId> {
+    pub fn release_control(&self) -> Option<(BlockId, Control)> {
         self.0.borrow_mut().pressed.take()
+    }
+
+    /// Where the menu button's bottom-right corner is, relative to the list's
+    /// own origin, or `None` when no block is showing one.
+    pub fn menu_at(&self) -> Option<Vector2F> {
+        self.0.borrow().menu_at
+    }
+
+    /// Records that corner, or that there is no button on screen to record.
+    pub fn set_menu_at(&self, at: Option<Vector2F>) {
+        self.0.borrow_mut().menu_at = at;
     }
 
     /// Runs `use_heights` against this list's prefix sums.

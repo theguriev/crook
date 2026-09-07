@@ -9,6 +9,8 @@
 //! other direction, with one `WorkspaceAction` that carries tab actions and
 //! vertical-tab display options side by side.
 
+use crook_terminal::BlockId;
+
 use crate::plugin::{ActionId, PageId, SectionId};
 use crate::settings::{Density, Granularity, PrimaryInfo, Subtitle};
 use crate::tab::{PaneId, TabAction, TabId};
@@ -31,6 +33,9 @@ pub enum WorkspaceAction {
     TabMenu(TabMenuAction),
     /// Something happened in the worktree menu, which is one entry of that one.
     Worktree(WorktreeAction),
+    /// Something happened in the menu a block opens, which is about that
+    /// block.
+    Block(BlockAction),
     /// The pointer entered a row, or left it.
     ///
     /// Carried as an action rather than written directly, because a hover
@@ -210,6 +215,70 @@ pub enum WorktreeAction {
     },
     /// Back to the list, from the creator or from the confirmation.
     Cancel,
+}
+
+/// What the menu on a block does.
+///
+/// Every entry but the two that open and close it acts on **the block the menu
+/// is up on**, which is why none of them names one. The alternative — a block
+/// id in every variant — would say that an entry could be run against a block
+/// nothing is showing a menu for, and there is no gesture that does that: a
+/// menu is opened from a block's own dots and is taken down by anything else
+/// that happens in the window.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum BlockAction {
+    /// Open the menu on this block of this pane's list.
+    OpenMenu {
+        /// Whose list it is.
+        pane: PaneId,
+        /// Which block of it.
+        block: BlockId,
+    },
+    /// Take it down. What a press outside it sends, and Escape.
+    CloseMenu,
+    /// Put one of the block's facts on the clipboard.
+    Copy(BlockPart),
+    /// Bring one of the block's own edges to the edge of the pane.
+    ScrollTo(BlockEdge),
+    /// Put the block's command line back in the composer, unsent.
+    Rerun,
+}
+
+/// Which of a block's facts an entry copies.
+///
+/// Warp's list, minus the ones Crook has nothing behind: there is no session to
+/// share and no workflow to save one as. What is left is what the block itself
+/// knows, and each of them is a thing somebody would otherwise select with the
+/// pointer and hope they had not caught the prompt with it.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum BlockPart {
+    /// The prompt, the command and everything it printed: what the copy
+    /// square beside the menu takes.
+    Whole,
+    /// The command line alone.
+    Command,
+    /// What the command printed, without the prompt or the line it was typed
+    /// on. Only a block whose shell reported the `C` mark has one.
+    Output,
+    /// Where the shell was when the block opened.
+    Directory,
+    /// The branch that directory was on when the menu opened.
+    Branch,
+}
+
+/// Which edge of a block an entry brings into view.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum BlockEdge {
+    /// Its first row, at the top of the pane.
+    Top,
+    /// Its last row, at the bottom of the pane.
+    Bottom,
+}
+
+impl From<BlockAction> for WorkspaceAction {
+    fn from(action: BlockAction) -> Self {
+        Self::Block(action)
+    }
 }
 
 impl From<TabAction> for WorkspaceAction {

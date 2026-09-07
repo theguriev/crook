@@ -287,13 +287,54 @@ There is no box. A block has no border, no corner radius and no fill in its rest
 * **Running** — the same 5 px stripe in the accent, on the open block from the moment the
   shell reports `C` until it reports the end. A line the shell has not answered draws nothing:
   see §1.
-* **Copy** — a 26 px square control at the top-right of the *hovered* block, 12 px in from the
-  pane's right edge so it clears the thumb. It follows the block into view rather than sitting
-  on its top edge, because a block taller than the pane is the one most worth copying and its
-  top edge is usually above the window. Clicking it puts exactly that block's command and
-  output on the clipboard: no neighbour's text, no trailing blank rows, no space injected
-  after a wide character and no combining accent dropped. That is the thing scrollback cannot
-  do.
+* **The controls** — two 26 px squares at the top-right of the *hovered* block, the outer one
+  12 px in from the pane's right edge so it clears the thumb. They follow the block into view
+  rather than sitting on its top edge, because a block taller than the pane is the one most
+  worth acting on and its top edge is usually above the window.
+
+  The first is **copy**. Clicking it puts exactly that block's command and output on the
+  clipboard: no neighbour's text, no trailing blank rows, no space injected after a wide
+  character and no combining accent dropped. That is the thing scrollback cannot do.
+
+  The second is **three dots**, and it opens the block's menu — `app/src/workspace/block_menu.rs`,
+  Warp's shape and eight of Warp's entries. What is *in* it is a slot, `block.menu`, declared by
+  the `crook/blocks` plugin; Crook's own entries are that plugin's four contributions to its own
+  slot, and anything else may add a group of its own. A menu nothing has contributed to never
+  opens and its dots are not drawn.
+
+  A sandboxed plugin's group is drawn from what it describes — `Node::Menu`, whose items become
+  rows of *this* menu rather than of a menu the plugin drew — and its render carries the command
+  the menu is open on, redacted against what a person granted it (`Subject::Block`). What the
+  command *printed* is not in that: it can be a megabyte and the subject is built every frame,
+  so a plugin asks for it with `Request::Output` when an entry of its own is pressed, and the
+  host writes it down at the press because the menu has closed by the time the request is
+  served. See `docs/plugins.md` on ABI 7. The split between the two controls is what a menu is
+  for: copying is the thing done over and over and keeps a click of its own, and everything else
+  is a list that gets read. The menu is not the pane's context menu — a secondary click in the
+  output belongs to the shell, and taking a button away from every full-screen program would be
+  a worse trade than a control that is visible only where it applies.
+
+  What is in it: **Copy**, **Copy command** and **Copy output**; **Copy working directory** and
+  **Copy git branch**; **Run again**; **Scroll to top of block** and **Scroll to bottom of
+  block**. Every entry is something the block already knows, and the two that are text go
+  through the same region a drag over the block makes (`block_list::block_text`), so the menu,
+  the square beside it and a selection cannot disagree about where a folded line ends. "Copy
+  output" is the one that needed the emulator to grow a field: `Block::output_from` is where the
+  `C` mark left the cursor, measured from the block's own first row, which is the only thing
+  that knows how many rows a prompt drew. A block whose shell never sent `C` — an `ssh`, a
+  container, a resize mid-command, a shell with no integration — has no answer, and that row is
+  drawn disabled rather than dropped, because a menu that changes length between blocks is a
+  menu whose rows move under the pointer.
+
+  **Run again does not run anything.** It puts the command back in the composer, unsent, at the
+  caret. A menu that ran a command would be a menu that runs the `rm` somebody opened it to
+  read, and one that replaced the field would throw away a half-typed line.
+
+  The menu hangs from the bottom-right corner of the dots, which is a corner only the *paint*
+  of the last frame knows — the controls are drawn into the scene rather than built as elements
+  — so the list records it and the popup is anchored against it. The block whose menu is up
+  keeps its controls painted for the same reason: a modal underlay takes the pointer off the
+  list, and a menu hanging off a button that has just disappeared is a menu attached to nothing.
 
 A hover is re-derived from the pointer on every frame, not only when the pointer moves: a
 wheel and a command finishing both put a different block under a still pointer, and a control
@@ -349,7 +390,9 @@ measured for the grid the last frame had is refreshed rather than painted into t
 Stage 1 of the port. These are absent on purpose, not overlooked:
 
 * **Block selection.** No click-to-select, no shift-click, no accent wash, no per-block border.
-* **Keyboard block navigation.** No Cmd-Up / Cmd-Down, no scroll-to-top-of-block.
+* **Keyboard block navigation.** No Cmd-Up / Cmd-Down. The two scrolls are in the block's menu
+  and are reachable with the pointer only: there is no block *selection*, so there is no block
+  a chord could be about.
 * **The sticky header.** A block taller than the window scrolls like any other content; there
   is nothing pinned to say which command you are inside.
 * **Jump-to-bottom.** No button when a block continues below the fold.
@@ -363,5 +406,6 @@ Stage 1 of the port. These are absent on purpose, not overlooked:
   by the width of the prompt, to where the shell echoes it. The marks that would fix this now
   exist (`B` is exactly where the echoed command starts), so this is the next thing to build
   rather than a limitation of the design.
-* Share, re-run, bookmarks, block filters, and everything else that needs a block to be
-  addressable rather than merely visible.
+* Share, bookmarks, block filters, find-within-block, and everything else that needs a block to
+  be addressable rather than merely visible. Running a command a second time is in the menu —
+  as text put back in the composer, which needs nothing of the sort.

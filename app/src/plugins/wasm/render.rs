@@ -240,12 +240,12 @@ pub(super) struct Hovers {
 
 impl Hovers {
     /// Starts a render at the beginning of the order.
-    fn rewind(&self) {
+    pub(super) fn rewind(&self) {
         self.next.set(0);
     }
 
     /// The handle for the next control in the tree.
-    fn take(&self) -> MouseStateHandle {
+    pub(super) fn take(&self) -> MouseStateHandle {
         let index = self.next.get();
         self.next.set(index + 1);
 

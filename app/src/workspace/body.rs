@@ -95,8 +95,9 @@ use crate::terminal_font::CellFont;
 use crate::terminal_model::TerminalHandle;
 use crate::theme::theme;
 
-use super::action::WorkspaceAction;
+use super::action::{BlockAction, WorkspaceAction};
 use super::block_list::{self, BlockList};
+use super::block_menu;
 use super::input_element::{CommandInput, Ink};
 use super::pane_output::Keys;
 use super::terminal_element::{TerminalElement, color};
@@ -466,8 +467,14 @@ fn blocks(
 ) -> Box<dyn Element> {
     let history = workspace.terminal_blocks(pane, app).unwrap_or_default();
     let view = workspace.pane_blocks(pane).cloned().unwrap_or_default();
-    let mut list =
-        BlockList::new(history, snapshot, font, view).with_terminal(handle.clone(), keys);
+    // The block whose menu is up over this list, which the list is told about
+    // so that the block keeps its controls painted under the menu hanging off
+    // them. See `block_list::paint_control`.
+    let available = workspace.block_menu_is_available();
+    let menu = workspace.block_menu().block_in(pane).filter(|_| available);
+    let mut list = BlockList::new(history, snapshot, font, view.clone())
+        .with_terminal(handle.clone(), keys)
+        .with_menu(available, menu);
     // The list reads the composer's line to tell an end of input from a
     // delete, so it is given it here for the same reason the grid is.
     if let Some(input) = workspace.input(pane) {
@@ -485,7 +492,29 @@ fn blocks(
             )
             .with_links(interaction.links.clone());
     }
-    list.finish()
+    let list = list.finish();
+
+    if menu.is_none() {
+        return list;
+    }
+
+    // Hung off the list itself rather than off the pane, because the corner it
+    // is placed against is measured from the list's own origin — the two boxes
+    // differ by whatever the composer under them is worth.
+    let mut stack = Stack::new().with_child(list);
+    stack.add_anchored_overlay_child(
+        Dismiss::new(block_menu::render(workspace, app))
+            // The window behind it is inert while it is up, which is what
+            // makes a second press on the same dots one toggle rather than
+            // two, and what stops the block underneath from re-hovering.
+            .modal()
+            .on_dismiss(|ctx, _| {
+                ctx.dispatch_typed_action(WorkspaceAction::Block(BlockAction::CloseMenu));
+            })
+            .finish(),
+        block_menu::anchor(view.menu_at()),
+    );
+    stack.finish()
 }
 
 /// The pane's output as one grid: a full-screen program, or a shell with no

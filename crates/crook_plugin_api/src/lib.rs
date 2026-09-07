@@ -47,6 +47,21 @@ use serde::{Deserialize, Serialize};
 /// counts: postcard encodes a variant by its index, so an older host reading a
 /// newer plugin's `Node` would read the wrong variant rather than fail.
 ///
+/// **7** is the version a plugin can act on **one command** in.
+/// [`Subject::Block`], which is what a render of a slot in a block's menu is
+/// about — the command line, how it ended and where it ran, each redacted
+/// against what a person granted, exactly as a tab row's facts are.
+/// [`Capability::ReadBlock`] is what un-redacts it, and
+/// [`Request::Output`] is the half a subject cannot afford to carry: what the
+/// command *printed* can be a megabyte, and a subject is built on every frame
+/// a menu is open, so the output is asked for once when an entry runs rather
+/// than copied sixty times a second at somebody who may never press anything.
+/// [`Request::Copy`] is the other addition, and the shortest way for a plugin
+/// to hand a person what it worked out.
+///
+/// **6** gave a plugin a field the keyboard can be in, and a menu on a
+/// secondary click.
+///
 /// **5** is the version a plugin can be *noticed* in.
 /// [`Capability::PlaySound`] and [`Capability::WatchCommands`], which together
 /// are a plugin that can ring when a command finishes; the
@@ -79,7 +94,7 @@ use serde::{Deserialize, Serialize};
 /// behalf, and the six [`Node`] variants a panel needs. Version 1 could
 /// describe a badge and register an action, which is a plugin that can say
 /// what it already knew.
-pub const ABI_VERSION: u32 = 6;
+pub const ABI_VERSION: u32 = 7;
 
 /// What a sandboxed plugin says about itself, before any of it runs.
 ///
@@ -197,6 +212,16 @@ pub enum Capability {
     /// The command list and the chords bound to it, which is what a plugin
     /// needs to print a hint — and nothing about what is in a pane.
     ReadCommands,
+    /// Read the command a menu of this plugin's is open on: what was run, how
+    /// it ended, and what it printed.
+    ///
+    /// One command at a time, and only ever one a person pointed at: a plugin
+    /// with this sees the block whose menu they opened, for as long as it is
+    /// open, and has no way to name another or to ask about a session. What it
+    /// does *not* cover is where that command ran — a directory is a directory
+    /// wherever it is read, so that stays [`Capability::ReadWorkingDirectory`]
+    /// and a plugin that wants both asks for both.
+    ReadBlock,
 }
 
 impl Capability {
@@ -249,6 +274,7 @@ impl Capability {
             }
             Self::RunCommands(names) => list_sentence("Use Crook's own ", names),
             Self::ReadCommands => "See what Crook can be asked to do, and the keys for it".into(),
+            Self::ReadBlock => "Read the command you run it on, and what it printed".into(),
         }
     }
 
@@ -287,6 +313,7 @@ impl Capability {
                 .collect(),
             Self::RunCommands(names) => names.iter().map(|name| format!("run:{name}")).collect(),
             Self::ReadCommands => vec![String::from("commands.read")],
+            Self::ReadBlock => vec![String::from("block.read")],
         }
     }
 }
@@ -316,14 +343,54 @@ pub struct Render {
 
 /// What one render is about.
 ///
-/// An enum with one variant, because the second is a matter of time — a slot
-/// per pane, a slot per block — and a plugin that matches on a subject this
-/// build does not have draws nothing rather than guessing, which is the rule
-/// an unknown slot name already follows.
+/// A plugin that matches on a subject this build does not have draws nothing
+/// rather than guessing, which is the rule an unknown slot name already
+/// follows. The one still missing is a slot per *pane*.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Subject {
     /// One row of the tab panel.
     Tab(TabFacts),
+    /// The command whose menu this is being drawn in.
+    Block(BlockFacts),
+}
+
+/// One command, as much of it as this plugin was allowed to see.
+///
+/// **Redacted rather than refused**, the way [`TabFacts`] is: a plugin granted
+/// nothing still gets a [`key`](Self::key) and is still drawn, because an
+/// entry that says "send this somewhere" is a thing somebody can want without
+/// the plugin being told what they ran.
+///
+/// What it does *not* carry is the output. That is [`Request::Output`], and
+/// the split is a cost rather than a policy: this is built on every frame a
+/// menu is open, and what a command printed can be a megabyte.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockFacts {
+    /// Which command this is, as a number that says nothing else.
+    ///
+    /// Two renders of one block carry the same key and two blocks never carry
+    /// one, which is what lets a plugin notice that the menu it is drawing in
+    /// is the one it was drawing in a frame ago. Salted with the asking
+    /// plugin's own id, as [`TabFacts::key`] is, and it says nothing about the
+    /// command: a block's key is handed out fresh per session and means
+    /// nothing tomorrow, because a command is not a place.
+    pub key: u64,
+    /// What was run and how it ended, or `None` without
+    /// [`Capability::ReadBlock`].
+    pub ran: Option<Ran>,
+    /// Where it ran, or `None` without [`Capability::ReadWorkingDirectory`] —
+    /// and `None` as well for a shell that never said.
+    pub place: Option<Place>,
+}
+
+/// What a command was and what became of it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Ran {
+    /// The command line, as it was submitted or as the shell echoed it, or
+    /// `None` when neither happened.
+    pub command: Option<String>,
+    /// The status the shell reported, or `None` when it reported none.
+    pub exit: Option<i32>,
 }
 
 /// One row of the tab panel, as much of it as this plugin was allowed to see.
@@ -876,6 +943,27 @@ pub enum Request {
     /// Everything Crook can be asked to do, and the chord that reaches each.
     /// Needs [`Capability::ReadCommands`].
     Commands,
+    /// What the command printed, for the block a menu of this plugin's is open
+    /// on. Needs [`Capability::ReadBlock`].
+    ///
+    /// The half [`Subject::Block`] cannot afford to carry: a subject is built
+    /// on every frame a menu is up, and output can be a megabyte. So it is
+    /// asked for — once, by an entry somebody pressed, which is the only
+    /// moment a plugin has any business with it.
+    ///
+    /// Only from an action a person ran, for the reason [`Request::Type`] is:
+    /// a request raised while describing, or on a timer of the plugin's own,
+    /// is about a block nobody pointed it at and comes back [`Answer::Failed`].
+    Output,
+    /// Put text on the system clipboard. Needs [`Capability::Clipboard`].
+    ///
+    /// A request rather than something a [`Node`] could describe, because what
+    /// goes on a clipboard is a thing that *happens*, at a moment, because
+    /// somebody asked — not a thing that is drawn.
+    Copy {
+        /// What to put there.
+        text: String,
+    },
 }
 
 /// A floor under one field.
@@ -1044,6 +1132,18 @@ pub enum Answer {
     /// to hand back, and "nothing came back" and "it worked" have to be
     /// different answers or a plugin cannot tell them apart.
     Done,
+    /// What the command printed, without the prompt or the line it was typed
+    /// on.
+    ///
+    /// Empty for a command that printed nothing, which is a different thing
+    /// from a block whose shell never said where its output began — that is
+    /// [`Answer::Failed`], because a plugin handed an empty string would put an
+    /// empty fence on somebody's clipboard and never know why.
+    Output {
+        /// The rows, joined by newlines, with the blank ones at the end
+        /// trimmed off.
+        text: String,
+    },
 }
 
 /// Something that happened, which a plugin asked to be told about.

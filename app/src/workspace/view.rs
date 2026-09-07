@@ -16,7 +16,7 @@ use std::time::Duration;
 pub(super) const THEMES_POLL: Duration = Duration::from_millis(750);
 
 use crook_plugin_api::Event;
-use crook_terminal::{Rows, Snapshot};
+use crook_terminal::{BlockId, Rows, Snapshot};
 use crookui_core::elements::MouseStateHandle;
 use crookui_core::event::Keystroke;
 use crookui_core::fonts::FamilyId;
@@ -29,7 +29,7 @@ use crate::git::GitFacts;
 use crate::git_model::GitModel;
 use crate::input_keys::{Binding, Platform};
 use crate::keybindings::{Context, Keybindings, PendingSave, Recording, Resolution};
-use crate::pane_blocks::PaneBlocks;
+use crate::pane_blocks::{PaneBlocks, ScrollCause};
 use crate::pane_link::PaneLink;
 use crate::pane_selection::PaneSelection;
 use crate::pane_split::{DividerDrag, PaneExtent};
@@ -54,9 +54,10 @@ use crate::window_controls::WindowHandle;
 use crate::{Channel, WINDOW_CHROME};
 
 use super::action::{
-    OptionsAction, SearchAction, SettingsAction, TabMenuAction, ThemeAction, WindowAction,
-    WorkspaceAction, WorktreeAction,
+    BlockAction, BlockEdge, BlockPart, OptionsAction, SearchAction, SettingsAction, TabMenuAction,
+    ThemeAction, WindowAction, WorkspaceAction, WorktreeAction,
 };
+use super::block_list::block_text;
 use super::settings_page::SettingsState;
 use super::tab_context_menu::TabContextMenuState;
 use super::tab_menu::{Contents, Mode as WorktreeMode, TabMenuState};
@@ -225,6 +226,101 @@ impl MenuState {
             &self.diff_stats,
             &self.details_on_hover,
             &self.settings,
+        ] {
+            state.lock().reset_interaction_state();
+        }
+    }
+}
+
+/// The menu a block opens: which block it is up on, what could be read about
+/// that block when it opened, and what the mouse is doing to each of its rows.
+///
+/// One handle per row and never a shared one, for the reason
+/// [`MenuState`] gives.
+///
+/// **The two facts are read once, when the menu opens.** The branch is a file
+/// on disk and the block's own facts are behind a lock the terminal thread
+/// holds; a menu that asked for either on every frame it is drawn would be
+/// asking sixty times a second for an answer that cannot change while a modal
+/// underlay is over the window. It is the same reason the worktree menu reads
+/// its repository once.
+#[derive(Default)]
+pub struct BlockMenuState {
+    /// Whose list the menu is up on, and which block of it.
+    pub(super) on: Option<(PaneId, BlockId)>,
+    /// The branch the block's directory was on when the menu opened, when it
+    /// was in a repository at all.
+    pub(crate) branch: Option<String>,
+    /// Whether the block reported where its own output starts, which is what
+    /// says the "Copy output" row can do anything.
+    pub(super) output_from: Option<usize>,
+    /// Where the shell was when the block opened.
+    pub(crate) directory: Option<PathBuf>,
+    /// The command line the block ran, when it has one.
+    pub(crate) command: Option<String>,
+    /// The status the shell reported for it, when it reported one.
+    ///
+    /// Nothing in Crook's own entries draws this. It is here because a
+    /// plugin's may: "report this failure" is an entry that has no business
+    /// being offered on a command that succeeded.
+    pub(crate) exit: Option<i32>,
+    /// "Copy".
+    pub(super) copy: MouseStateHandle,
+    /// "Copy command".
+    pub(super) copy_command: MouseStateHandle,
+    /// "Copy output".
+    pub(super) copy_output: MouseStateHandle,
+    /// "Copy working directory".
+    pub(super) copy_directory: MouseStateHandle,
+    /// "Copy git branch".
+    pub(super) copy_branch: MouseStateHandle,
+    /// "Scroll to top of block".
+    pub(super) scroll_top: MouseStateHandle,
+    /// "Scroll to bottom of block".
+    pub(super) scroll_bottom: MouseStateHandle,
+    /// "Run again".
+    pub(super) rerun: MouseStateHandle,
+}
+
+impl BlockMenuState {
+    /// Whether the menu is up at all.
+    pub(super) fn is_open(&self) -> bool {
+        self.on.is_some()
+    }
+
+    /// What says one open menu is about the same command as the last.
+    ///
+    /// The pane and the block, as text, and it lives for exactly as long as
+    /// the session does — a block id is handed out in order and never reused,
+    /// and means nothing tomorrow. It is what a plugin's key is made of, and
+    /// the reason the key can be given to a plugin that was granted nothing:
+    /// there is nothing about the command in it to recover.
+    pub(crate) fn key(&self) -> String {
+        match self.on {
+            Some((pane, block)) => format!("{}/{}", pane.as_u64(), block.get()),
+            None => String::new(),
+        }
+    }
+
+    /// The block it is up on, when it is up on one of this pane's.
+    pub(super) fn block_in(&self, pane: PaneId) -> Option<BlockId> {
+        self.on
+            .filter(|(on, _)| *on == pane)
+            .map(|(_, block)| block)
+    }
+
+    /// Drops every hover and press the popup was holding, for the reason
+    /// [`MenuState::forget_hover_state`] does.
+    fn forget_hover_state(&self) {
+        for state in [
+            &self.copy,
+            &self.copy_command,
+            &self.copy_output,
+            &self.copy_directory,
+            &self.copy_branch,
+            &self.scroll_top,
+            &self.scroll_bottom,
+            &self.rerun,
         ] {
             state.lock().reset_interaction_state();
         }
@@ -528,6 +624,8 @@ pub struct Workspace {
     tab_context_menu: TabContextMenuState,
     /// The worktree menu, which is one entry of that one.
     tab_menu: TabMenuState,
+    /// The menu a block opens, which is about that block.
+    block_menu: BlockMenuState,
     /// The Themes panel, which is the other surface that lists themes.
     panel: ThemePanelState,
     /// Every theme that can be chosen, as of the last time a surface that
@@ -725,6 +823,7 @@ impl Workspace {
             host,
             tab_context_menu: TabContextMenuState::default(),
             tab_menu: TabMenuState::default(),
+            block_menu: BlockMenuState::default(),
             panel: ThemePanelState::default(),
             themes: crate::theme::available(),
             theme_before_draft: None,
@@ -1018,8 +1117,35 @@ impl Workspace {
         let Some(name) = self.host.action_name(id).cloned() else {
             return;
         };
+
+        // An action run out of a block's menu is *about* that block, and this
+        // is the one moment its output is worth copying: somebody has pressed
+        // an entry. See [`Host::set_pressed_output`] for why it is written
+        // here rather than while the menu was merely open, and why nothing
+        // clears it afterwards.
+        if self.block_menu.is_open() {
+            self.host.set_pressed_output(self.pressed_output(ctx));
+        }
+
         let actions = self.host.actions().clone();
         actions.with(&name, |handler| handler(self, ctx));
+
+        // A menu entry acts once, whoever contributed it: Crook's own close
+        // the menu on their way out, and a plugin's would otherwise leave it
+        // up over the block it had just acted on.
+        self.close_block_menu(ctx);
+    }
+
+    /// What the block the menu is open on printed, as a copy of it would read.
+    ///
+    /// `None` for a block whose shell never said where its output began, which
+    /// is the same answer the "Copy output" row gives by being drawn as one
+    /// that cannot be pressed.
+    fn pressed_output(&self, app: &AppContext) -> Option<String> {
+        let (pane, block) = self.block_menu.on?;
+        let from = self.block_menu.output_from?;
+        let text = self.block_rows_text(pane, block, from, app)?;
+        Some(text.trim_end().to_owned())
     }
 
     /// Every chord in force, for the page that prints them.
@@ -1187,7 +1313,27 @@ impl Workspace {
         self.menu.open
             || self.tab_menu.is_open()
             || self.tab_context_menu.is_open()
+            || self.block_menu.is_open()
             || self.host.a_surface_is_up()
+    }
+
+    /// The menu a block opens, which is about that block.
+    pub(crate) fn block_menu(&self) -> &BlockMenuState {
+        &self.block_menu
+    }
+
+    /// Whether anything has put a group in the block menu.
+    ///
+    /// The dots are drawn only where the answer is yes, and opening the menu
+    /// is refused where it is no. Nothing declares the slot when
+    /// [`crook/blocks`](crate::plugins::blocks) is switched off, and a control
+    /// that opened an empty popup would be a plugin that was disabled and left
+    /// its button behind.
+    pub(super) fn block_menu_is_available(&self) -> bool {
+        !self
+            .host
+            .slots()
+            .is_empty(crate::plugins::blocks::BLOCK_MENU)
     }
 
     /// The Themes panel's state.
@@ -1591,6 +1737,9 @@ impl Workspace {
         // Whatever was being recorded was being recorded on a page that is
         // about to stop being drawn. See [`Self::record`].
         self.recording.borrow_mut().take();
+        // And the menu on a block, for exactly the same reason: it is drawn
+        // inside the pane the section is about to cover.
+        self.close_block_menu(ctx);
         // The sidebar and the window are both about to be replaced, so every
         // control the pointer was on is about to stop existing without ever
         // seeing a hover-out — and a field on the section being left must not
@@ -1878,6 +2027,10 @@ impl Workspace {
             return;
         };
 
+        // The menu on a block is never up at the same time. See
+        // `a_popup_is_open`.
+        self.close_block_menu(ctx);
+
         // A submenu is drawn inside the menu it hangs off, so opening this one
         // opens that one — on the row the tab speaks through, which is its
         // focused pane. Nothing happens when it is already there.
@@ -2015,6 +2168,211 @@ impl Workspace {
         self.tab_menu.forget_hover_state();
         self.sync_input_keys();
         ctx.notify();
+    }
+
+    /// Everything the menu on a block does.
+    ///
+    /// Every entry closes the menu on its way out, which is the opposite of
+    /// the tab options menu's rule and for the opposite reason: that one is a
+    /// panel of preferences somebody changes three of at a time, and this is a
+    /// list of things to *do*, each of which is done once. A menu still up
+    /// after its entry ran would be a menu waiting to be told a second time.
+    fn apply_block(&mut self, action: BlockAction, ctx: &mut ViewContext<Self>) {
+        match action {
+            BlockAction::OpenMenu { pane, block } => self.open_block_menu(pane, block, ctx),
+            BlockAction::CloseMenu => self.close_block_menu(ctx),
+            BlockAction::Copy(part) => {
+                self.copy_block_part(part, ctx);
+                self.close_block_menu(ctx);
+            }
+            BlockAction::ScrollTo(edge) => {
+                self.scroll_to_block_edge(edge, ctx);
+                self.close_block_menu(ctx);
+            }
+            BlockAction::Rerun => {
+                self.rerun_block_command(ctx);
+                self.close_block_menu(ctx);
+            }
+        }
+    }
+
+    /// Opens the menu on one block, and reads what it needs off it.
+    ///
+    /// Pressing the dots of the block whose menu is already up closes it,
+    /// which is what every other popup in the window does.
+    fn open_block_menu(&mut self, pane: PaneId, block: BlockId, ctx: &mut ViewContext<Self>) {
+        if self.block_menu.on == Some((pane, block)) {
+            self.close_block_menu(ctx);
+            return;
+        }
+        if !self.block_menu_is_available() {
+            // Nothing to show. The dots are not drawn either, so this is the
+            // keyboard's and the command line's way in rather than the
+            // pointer's.
+            return;
+        }
+
+        let Some(history) = self.terminal_blocks(pane, ctx) else {
+            return;
+        };
+        let Some(found) = history.iter().find(|finished| finished.id == block) else {
+            // The block was evicted between the press and this action, which
+            // takes a session ten thousand commands long. There is nothing to
+            // open a menu about.
+            return;
+        };
+        let directory = found.working_directory.clone();
+        let command = found.command.clone();
+        let exit = found.exit;
+        let output_from = found.output_from;
+
+        // Two popups are never up at once. See `a_popup_is_open`.
+        self.close_menu();
+        self.close_tab_menu(ctx);
+
+        // The branch of the directory the *block* ran in, not of the pane's
+        // session: a person reading a command from an hour ago is asking what
+        // it was run against, and the pane may have been `cd`ed twice since.
+        // Cheap enough to do here — it walks up for `.git` and reads one small
+        // file, and spawns nothing — which is why it is not a background task
+        // whose answer would arrive after the menu was drawn.
+        self.block_menu.branch = directory
+            .as_deref()
+            .and_then(crate::git::current_branch)
+            .map(|head| head.label().to_owned());
+        self.block_menu.on = Some((pane, block));
+        self.block_menu.directory = directory;
+        self.block_menu.command = command;
+        self.block_menu.exit = exit;
+        self.block_menu.output_from = output_from;
+        self.block_menu.forget_hover_state();
+        self.sync_input_keys();
+        ctx.notify();
+    }
+
+    /// Takes the block menu down.
+    fn close_block_menu(&mut self, ctx: &mut ViewContext<Self>) {
+        if !self.block_menu.is_open() {
+            return;
+        }
+
+        self.block_menu.on = None;
+        self.block_menu.branch = None;
+        self.block_menu.directory = None;
+        self.block_menu.command = None;
+        self.block_menu.exit = None;
+        self.block_menu.output_from = None;
+        self.block_menu.forget_hover_state();
+        self.sync_input_keys();
+        ctx.notify();
+    }
+
+    /// Puts one of the block's facts on the clipboard.
+    ///
+    /// The two that are text out of the terminal go through the same region a
+    /// drag over the block makes — see
+    /// [`block_text`](super::block_list::block_text) — so that the menu, the
+    /// copy control beside it and a selection cannot disagree about where a
+    /// folded line ends. The three that are facts *about* the block are copied
+    /// as they were read when the menu opened.
+    fn copy_block_part(&mut self, part: BlockPart, ctx: &mut ViewContext<Self>) {
+        let Some((pane, block)) = self.block_menu.on else {
+            return;
+        };
+
+        let text = match part {
+            BlockPart::Whole => self.block_rows_text(pane, block, 0, ctx),
+            // Nothing at all for a block whose shell never said where its
+            // output starts — the row that would ask for it is drawn as one
+            // that cannot be pressed, and this is the same answer from the
+            // other side.
+            BlockPart::Output => self
+                .block_menu
+                .output_from
+                .and_then(|from| self.block_rows_text(pane, block, from, ctx)),
+            BlockPart::Command => self.block_menu.command.clone(),
+            BlockPart::Directory => self
+                .block_menu
+                .directory
+                .as_ref()
+                .map(|directory| directory.to_string_lossy().into_owned()),
+            BlockPart::Branch => self.block_menu.branch.clone(),
+        };
+        let Some(text) = text else {
+            return;
+        };
+        // Trimmed at the end for the reason the copy control trims: a block's
+        // last rows are blank as often as not, and a paste that ends in three
+        // newlines runs whatever was in the field.
+        self.clipboard.write(text.trim_end());
+        ctx.notify();
+    }
+
+    /// One block's rows from `from` onwards, as a copy of them would read.
+    fn block_rows_text(
+        &self,
+        pane: PaneId,
+        block: BlockId,
+        from: usize,
+        app: &AppContext,
+    ) -> Option<String> {
+        let (_, snapshot) = self.terminal(pane, app)?;
+        let history = self.terminal_blocks(pane, app)?;
+        block_text(&Blocks::list(&history, &snapshot), block, from)
+    }
+
+    /// Brings one edge of the block the menu is up on to the matching edge of
+    /// the pane.
+    ///
+    /// The arithmetic is the list's own prefix sum, which is where the height
+    /// of every block above this one is already kept — measuring it a second
+    /// way would be a second answer to "how tall is a block", and the pane
+    /// would jump to a row nobody asked for.
+    fn scroll_to_block_edge(&mut self, edge: BlockEdge, ctx: &mut ViewContext<Self>) {
+        let Some((pane, block)) = self.block_menu.on else {
+            return;
+        };
+        let (Some(view), Some(history)) = (self.pane_blocks(pane), self.terminal_blocks(pane, ctx))
+        else {
+            return;
+        };
+        let Some(index) = history.iter().position(|finished| finished.id == block) else {
+            return;
+        };
+
+        let viewport = view.viewport();
+        let line = view.with_heights(|heights| match edge {
+            BlockEdge::Top => heights.start(index),
+            // The block's own last line at the bottom of the box. A block
+            // taller than the pane therefore ends up with its *end* on screen,
+            // which is what "scroll to the bottom of this block" means and is
+            // not the same as scrolling to the block.
+            BlockEdge::Bottom => heights.start(index + 1) - viewport,
+        });
+        if view.apply(ScrollCause::ToLine(line)) {
+            ctx.notify();
+        }
+    }
+
+    /// Puts the block's command line back in the pane's composer, unsent.
+    ///
+    /// Unsent, and inserted at the caret rather than over whatever is in the
+    /// field. Running it outright is a thing a menu should not do to a shell —
+    /// the command may be the `rm` somebody opened the menu to read — and
+    /// replacing the line would throw away a half-typed one. In the ordinary
+    /// case the field is empty and the two are the same thing.
+    fn rerun_block_command(&mut self, ctx: &mut ViewContext<Self>) {
+        let Some((pane, _)) = self.block_menu.on else {
+            return;
+        };
+        let Some(command) = self.block_menu.command.clone() else {
+            return;
+        };
+        self.type_into_input(pane, &command, ctx);
+        // Where a person is about to type is where they should be looking.
+        if let Some(view) = self.pane_blocks(pane) {
+            view.apply(ScrollCause::Submit);
+        }
     }
 
     /// Makes the worktree the creator describes, and opens a pane in it.
@@ -2645,9 +3003,30 @@ impl Workspace {
         let Some(block) = history.get(index) else {
             return false;
         };
-        view.hover(Some(block.id), false);
+        view.hover(Some(block.id), None);
         ctx.notify();
         true
+    }
+
+    /// Opens the menu on one finished block by its index, reporting whether
+    /// there was a block at that index.
+    ///
+    /// For `--block-menu`, and for a test: everywhere else a menu is opened by
+    /// pressing the dots on a block, which names the block by its id.
+    pub fn open_block_menu_at(
+        &mut self,
+        pane: PaneId,
+        index: usize,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        let Some(history) = self.terminal_blocks(pane, ctx) else {
+            return false;
+        };
+        let Some(block) = history.get(index).map(|block| block.id) else {
+            return false;
+        };
+        self.open_block_menu(pane, block, ctx);
+        self.block_menu.is_open()
     }
 
     /// The commands that have finished in a pane, oldest first.
@@ -3225,6 +3604,13 @@ impl Workspace {
             return Some(action);
         }
 
+        // **And the menu a block opens owns Escape while it is up**, for the
+        // same reason and in the same place: it is modal, and a modal popup's
+        // way out is not a chord anything else in the window may take.
+        if let Some(action) = self.block_menu_action_for(keystroke) {
+            return Some(action);
+        }
+
         // **The search box owns its two ways out while it is being typed
         // into**, and it owns them here rather than in the field because the
         // field has nowhere to hand the keyboard back to: see
@@ -3437,6 +3823,19 @@ impl Workspace {
     /// work the button becomes "Remove anyway", and a person who pressed Enter
     /// and was answered with a warning would throw away the very work it warns
     /// about by repeating the press. That one stays a click.
+    /// What a keystroke means to the menu on a block.
+    ///
+    /// One key and one meaning: Escape takes it down. There is no Enter,
+    /// because there is no row a menu of things to do could lead with — every
+    /// entry here changes something, and a default that copied or scrolled on
+    /// a key nobody aimed would be a menu that acts on being dismissed.
+    fn block_menu_action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
+        if !self.block_menu.is_open() || !keystroke.modifiers.is_empty() {
+            return None;
+        }
+        (keystroke.key == "escape").then(|| BlockAction::CloseMenu.into())
+    }
+
     fn tab_menu_action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
         if !keystroke.modifiers.is_empty() {
             return None;
@@ -4649,6 +5048,7 @@ impl TypedActionView for Workspace {
             WorkspaceAction::Window(action) => self.apply_window_action(action),
             WorkspaceAction::TabMenu(action) => self.apply_tab_menu(action, ctx),
             WorkspaceAction::Worktree(action) => self.apply_worktree(action, ctx),
+            WorkspaceAction::Block(action) => self.apply_block(action, ctx),
             WorkspaceAction::HoverRow { pane, entered } => self.hover_row(pane, entered, ctx),
             WorkspaceAction::ReleaseSelection(pane) => self.release_selection(pane, ctx),
             WorkspaceAction::Complete(pane) => self.request_completions(pane, ctx),

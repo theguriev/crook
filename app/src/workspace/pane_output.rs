@@ -144,6 +144,15 @@ impl Output {
         self
     }
 
+    /// Which pane this output belongs to, when it belongs to one.
+    ///
+    /// What an element dispatching an action about this pane needs: a control
+    /// on a block names the pane its list is drawing, and the workspace is
+    /// where the answer to it lives.
+    pub fn pane(&self) -> Option<PaneId> {
+        self.mouse.as_ref().map(|mouse| mouse.pane)
+    }
+
     /// This pane's selection, when the output is selectable at all.
     pub fn pane_selection(&self) -> Option<&PaneSelection> {
         self.mouse.as_ref().map(|mouse| &mouse.gesture)
