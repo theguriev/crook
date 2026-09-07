@@ -414,6 +414,15 @@ pub struct TabFacts {
     /// tab is working, salted with the asking plugin's own id, so two plugins
     /// cannot compare notes about which of their rows are the same row.
     ///
+    /// Two tabs *in one directory* are told apart by which of them it is,
+    /// counted down the panel, because a directory alone could not do it: a
+    /// tab opened from the window starts where Crook started, so a hash of the
+    /// place alone gave a whole window of new tabs one key. The consequence a
+    /// plugin can see is that closing the first of several rows in a directory
+    /// moves the keys of the ones under it — they each became the row above —
+    /// while a restored session, which remembers its panes in order, brings
+    /// every one of them back with the key it had.
+    ///
     /// It is not a secret and is not offered as one: a hash can be checked
     /// against a guess, so a plugin that already knew a path could find out
     /// whether a tab is in it. That is exactly why the key is *all* that is

@@ -1083,6 +1083,7 @@ fn row<'a>(title: &'a str, directory: &'a Path, git: &'a crate::git::GitFacts) -
         status: AgentStatus::Running,
         directory: Some(directory),
         git: Some(git),
+        nth: 0,
     }
 }
 
@@ -1146,6 +1147,27 @@ fn a_rows_key_is_the_same_tomorrow_and_is_not_the_same_for_two_plugins() {
         granted.facts(&here, &asker()).key,
         granted.facts(&here, &other).key,
         "two plugins can compare notes about which row is which"
+    );
+}
+
+#[test]
+fn two_rows_in_one_directory_are_two_rows() {
+    // The bug this ordinal exists for. Every tab a person opens starts in the
+    // directory Crook was started in, so a key that was a hash of the place
+    // alone made a window of new tabs one row as far as every plugin could
+    // tell — and a plugin drawing a mark per tab drew one mark down the whole
+    // panel.
+    let git = a_row(false);
+    let mut second = row("crook", Path::new("/work/crook"), &git);
+    second.nth = 1;
+    let granted = Sees::granted(&[]);
+
+    assert_ne!(
+        granted
+            .facts(&row("crook", Path::new("/work/crook"), &git), &asker())
+            .key,
+        granted.facts(&second, &asker()).key,
+        "two tabs in one checkout are one row"
     );
 }
 
