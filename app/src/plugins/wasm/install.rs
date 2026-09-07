@@ -155,6 +155,12 @@ fn version_folder(version: &str) -> Result<String, String> {
         && version.len() <= 64
         && version != "."
         && version != ".."
+        // Windows drops a trailing dot from a filename, so a version ending in
+        // one names a directory that is not the directory it created — and
+        // everything downstream comparing the two is then comparing against a
+        // name that is not on disk. No version anybody writes ends in a dot,
+        // which makes this cheaper than making every comparison survive one.
+        && !version.ends_with('.')
         && version.bytes().all(|byte| {
             byte.is_ascii_alphanumeric()
                 || byte == b'.'
@@ -166,8 +172,8 @@ fn version_folder(version: &str) -> Result<String, String> {
     match usable {
         true => Ok(version.to_owned()),
         false => Err(format!(
-            "its version {version:?} is not one: letters, digits, `.`, `-`, `+` and `_`, and \
-             short enough to be a directory name"
+            "its version {version:?} is not one: letters, digits, `.`, `-`, `+` and `_`, not \
+             ending in a dot, and short enough to be a directory name"
         )),
     }
 }

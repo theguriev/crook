@@ -110,6 +110,52 @@ fn a_version_that_would_be_a_path_is_not_a_directory_name() {
 }
 
 #[test]
+fn installing_an_older_version_is_how_a_rollback_works() {
+    // There is no button for it and this is why there does not have to be:
+    // the newer directory goes, and what is left is what loads.
+    let scratch = Scratch::new("install-rollback");
+    into(scratch.path(), &written(&scratch, "0.4.0")).expect("the newer installs");
+
+    let installed = into(scratch.path(), &written(&scratch, "0.3.0")).expect("and the older");
+
+    assert_eq!(versions_in(&scratch.path().join("eugen.probe")), ["0.3.0"]);
+    assert_eq!(
+        crate::plugins::wasm::tests::newest_module_for(&scratch.path().join("eugen.probe")),
+        Some(installed),
+        "the version that was installed is the one that would load"
+    );
+}
+
+#[test]
+fn installing_the_version_that_is_already_there_keeps_it() {
+    // The sweep removes every version but the one just written, and the one
+    // just written is the one it is being asked to remove.
+    let scratch = Scratch::new("install-again");
+    into(scratch.path(), &written(&scratch, "0.3.0")).expect("the first installs");
+
+    let installed =
+        into(scratch.path(), &written(&scratch, "0.3.0")).expect("and so does it again");
+
+    assert!(installed.is_file());
+    assert_eq!(versions_in(&scratch.path().join("eugen.probe")), ["0.3.0"]);
+}
+
+#[test]
+fn a_version_that_is_a_directory_that_already_means_something_is_refused() {
+    // `.` and `..` are inside the character set a version is written with, so
+    // nothing but these two lines stops a manifest naming the plugin's own
+    // home directory or the one above it — which the sweep would then empty.
+    for version in [".", "..", "1.0.", ""] {
+        let refusal = version_folder(version)
+            .expect_err(&format!("{version:?} should not be a directory name"));
+        assert!(refusal.contains("is not one"), "{refusal}");
+    }
+
+    version_folder("0.3.0").expect("an ordinary one");
+    version_folder("1.0.0-rc.1+build.7").expect("and everything a version is written with");
+}
+
+#[test]
 fn uninstalling_takes_the_whole_plugin_and_not_one_version_of_it() {
     // A plugin whose last version was removed is not a plugin with an empty
     // directory: the row on the Plugins page comes from what is on disk.

@@ -229,7 +229,10 @@ description of something that was never built.
     `crook --uninstall-plugin owner/name` takes one back out, and taking one out forgets what
     it was allowed to do: `settings.json` keeps a grant for a plugin it cannot find, because a
     plugin can be missing for a morning, and being *removed* is a person saying they are done
-    with it.
+    with it. That last half is a file edit, so a Crook that is open at the time will write its
+    own copy of the settings back over it — the ordinary hazard of editing a file an
+    application has open, and the reason the Plugins page is where a plugin is meant to be
+    removed from.
 
   **ABI 4 is the version a plugin can be asked about something.** Every version up to it could
   be asked what goes in a slot; that is a question with one answer, and a slot drawn once per

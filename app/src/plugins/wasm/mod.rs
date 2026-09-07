@@ -143,8 +143,18 @@ fn newest_module(home: &Path) -> Option<PathBuf> {
 /// Reads one module and checks everything that can be checked before it runs.
 pub fn open(path: &Path) -> Result<WasmPlugin, String> {
     let bytes = fs::read(path).map_err(|why| format!("could not be read: {why}"))?;
+    opened(&bytes)
+}
+
+/// The same, on bytes somebody already has.
+///
+/// Which is not a convenience: installing writes the bytes it was handed, and
+/// reading the file a second time to check it would be checking a file that
+/// may have changed since — a module still being written into place passes as
+/// the whole of itself and lands as the half that was there first.
+pub fn opened(bytes: &[u8]) -> Result<WasmPlugin, String> {
     let (sandbox, manifest) =
-        Sandbox::open(&bytes, Fuel::default()).map_err(|why| why.to_string())?;
+        Sandbox::open(bytes, Fuel::default()).map_err(|why| why.to_string())?;
 
     let id = PluginId::parse(&manifest.id)
         .map_err(|why| format!("its id {:?} is not one: {why}", manifest.id))?;

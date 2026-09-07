@@ -1942,6 +1942,14 @@ struct Launch {
 /// Being *removed* is different: it is a person saying they are done with it,
 /// and a reinstall a year later must ask again rather than quietly running
 /// under a grant nobody remembers giving.
+///
+/// This is the command line's half, and it is a *file* edit: a Crook that is
+/// open at the time holds its own copy of the settings and will write the
+/// grant back the next time anything saves them. That is the ordinary hazard
+/// of editing a file an application has open, it is why `settings.json` says
+/// what it says about hand-editing, and it is not worth a lock — the answer is
+/// the Plugins page, which removes a plugin from inside the window that would
+/// otherwise overwrite this.
 fn forget_plugin(id: &crook_plugin::PluginId) -> Result<()> {
     let mut settings = Settings::for_user();
     settings.set_granted(id.as_str(), Vec::new());

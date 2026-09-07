@@ -392,6 +392,12 @@ pub(crate) fn install_version(directory: &Path, folder: &str, version: &str, was
     fs::write(home.join(MODULE_FILE), wasm).expect("the module should be writable");
 }
 
+/// Which module a plugin's directory would load, for the install tests, whose
+/// whole subject is what is left on disk afterwards.
+pub(crate) fn newest_module_for(home: &Path) -> Option<PathBuf> {
+    super::newest_module(home)
+}
+
 /// The layout before versions: the module straight in the plugin's own
 /// directory, which is what every Crook installed one as until this release.
 pub(crate) fn install_flat(directory: &Path, folder: &str, wasm: &[u8]) {
