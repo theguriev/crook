@@ -27,6 +27,13 @@
 //! The rule for changing this vocabulary is the one `docs/plugins.md` states:
 //! **add a slot, never widen the vocabulary**. A new [`Node`] variant is a new
 //! ABI version and a migration for everybody; a new slot is neither.
+//!
+//! The crate's own version says that number a second time on purpose: it is
+//! `0.<abi>.<patch>`, so `crook_plugin_api = "0.8"` is how Cargo writes "ABI
+//! 8" and there is no way for a plugin to depend on a range wider than the one
+//! host that will load it. Bumping [`ABI_VERSION`] and forgetting the version
+//! in `Cargo.toml` fails a test rather than shipping a plugin that resolves to
+//! a vocabulary it cannot speak.
 
 #![no_std]
 
