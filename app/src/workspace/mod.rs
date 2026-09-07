@@ -60,7 +60,7 @@ pub use pane_output::{Keys, Output};
 pub(crate) use settings_page::widgets::Category;
 pub use terminal_element::TerminalElement;
 pub use text_field::TextField;
-pub use view::{Fonts, Opening, QuitRequest, Workspace};
+pub use view::{BlockMenuState, Fonts, Opening, QuitRequest, Workspace};
 
 /// The square reserved for a tab's close button, drawn or not.
 pub(crate) const CLOSE_BUTTON_SIZE: f32 = 16.;

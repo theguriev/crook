@@ -300,7 +300,15 @@ There is no box. A block has no border, no corner radius and no fill in its rest
   Warp's shape and eight of Warp's entries. What is *in* it is a slot, `block.menu`, declared by
   the `crook/blocks` plugin; Crook's own entries are that plugin's four contributions to its own
   slot, and anything else may add a group of its own. A menu nothing has contributed to never
-  opens and its dots are not drawn. The split between the two controls is what a menu is
+  opens and its dots are not drawn.
+
+  A sandboxed plugin's group is drawn from what it describes — `Node::Menu`, whose items become
+  rows of *this* menu rather than of a menu the plugin drew — and its render carries the command
+  the menu is open on, redacted against what a person granted it (`Subject::Block`). What the
+  command *printed* is not in that: it can be a megabyte and the subject is built every frame,
+  so a plugin asks for it with `Request::Output` when an entry of its own is pressed, and the
+  host writes it down at the press because the menu has closed by the time the request is
+  served. See `docs/plugins.md` on ABI 7. The split between the two controls is what a menu is
   for: copying is the thing done over and over and keeps a click of its own, and everything else
   is a list that gets read. The menu is not the pane's context menu — a secondary click in the
   output belongs to the shell, and taking a button away from every full-screen program would be

@@ -628,20 +628,64 @@ fn a_command_of_crooks_own_is_allowed_by_name_and_no_other() {
 }
 
 #[test]
-fn the_two_requests_that_change_something_are_the_two_that_need_a_press() {
+fn the_requests_that_need_a_press_are_the_ones_that_act_or_are_about_a_press() {
     // What makes typing into somebody's shell an acceptable thing for a
     // stranger's plugin to be able to do: it only happens when a person did
-    // something. Reading is not on the list — a chip that says where you are
-    // has to be able to ask on a timer.
-    assert!(changes_something(&typed("cd {}", "/tmp")));
-    assert!(changes_something(&Request::Run {
+    // something. The clipboard is the same argument, and so is reading a
+    // block — that answer is *about* the menu an entry was pressed in, and
+    // there is no such menu when nobody pressed anything.
+    assert!(only_from_a_gesture(&typed("cd {}", "/tmp")));
+    assert!(only_from_a_gesture(&Request::Run {
         name: String::from("crook/window/new-tab"),
         argument: String::new(),
     }));
+    assert!(only_from_a_gesture(&Request::Copy {
+        text: String::from("anything"),
+    }));
+    assert!(only_from_a_gesture(&Request::Output));
 
-    assert!(!changes_something(&Request::Where));
-    assert!(!changes_something(&list("~")));
-    assert!(!changes_something(&Request::Commands));
+    // Ordinary reading is not on the list: a chip that says where you are has
+    // to be able to ask on a timer.
+    assert!(!only_from_a_gesture(&Request::Where));
+    assert!(!only_from_a_gesture(&list("~")));
+    assert!(!only_from_a_gesture(&Request::Commands));
+}
+
+#[test]
+fn reading_a_block_and_writing_the_clipboard_are_asked_for_like_anything_else() {
+    // Neither reaches a socket or a file, and neither is therefore free: what
+    // a plugin may read about the command a person ran it on, and what it may
+    // put on their clipboard, are answers a person gives once and the host
+    // checks every time.
+    let nothing: Vec<String> = Vec::new();
+
+    assert_eq!(
+        allowed(&nothing, &Request::Output).expect_err("nobody has allowed it"),
+        "Read the command you run it on, and what it printed"
+    );
+    assert_eq!(
+        allowed(
+            &nothing,
+            &Request::Copy {
+                text: String::from("anything"),
+            }
+        )
+        .expect_err("nobody has allowed it"),
+        "Read and change your clipboard"
+    );
+
+    let granted = vec![String::from("block.read")];
+    assert!(allowed(&granted, &Request::Output).is_ok());
+    assert!(
+        allowed(
+            &granted,
+            &Request::Copy {
+                text: String::from("anything"),
+            }
+        )
+        .is_err(),
+        "one grant is not the other"
+    );
 }
 
 #[test]

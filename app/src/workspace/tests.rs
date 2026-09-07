@@ -43,8 +43,7 @@ use crate::window_controls::{Recorder, Request, WindowState};
 
 use super::{
     BlockAction, Fonts, Opening, OptionsAction, QuitRequest, SettingsAction, TabMenuAction,
-    ThemeAction,
-    Workspace, WorkspaceAction, WorktreeAction, tab_options_menu, tabs_panel,
+    ThemeAction, Workspace, WorkspaceAction, WorktreeAction, tab_options_menu, tabs_panel,
 };
 
 /// Big enough that two tabs both reach their maximum width, so the geometry
@@ -9027,6 +9026,70 @@ mod shells {
                 probe < facts,
                 "the slot's order did not decide where it went: {lines:?}"
             );
+        }
+
+        #[test]
+        fn a_sandboxed_plugin_reads_the_block_its_entry_was_pressed_in() {
+            // The second tier reaching one command, end to end: a `.wasm` file
+            // in a directory describes two entries and never says what a menu
+            // row looks like; a person presses one; the plugin asks what the
+            // command printed, which only a press may ask; and asks for
+            // something to go on the clipboard, which only a press may do.
+            let scratch = crate::plugins::wasm::tests::Scratch::new("blockmenu");
+            crate::plugins::wasm::tests::install(
+                scratch.path(),
+                "probe",
+                &crate::plugins::wasm::tests::wasm_in_a_block_menu("eugen/probe"),
+            );
+            let mut settings = Settings::ephemeral();
+            settings.set_granted(
+                "eugen/probe",
+                vec![String::from("block.read"), String::from("clipboard")],
+            );
+            let mut plugins = crate::plugins::defaults();
+            plugins.extend(crate::plugins::wasm::installed(scratch.path()));
+            let mut harness = Harness::with_plugins(1, settings, plugins);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, "echo ALPHA") == 0 {
+                return;
+            }
+            let Some((clipboard, _system)) = working_clipboard(&harness) else {
+                return;
+            };
+
+            let scene = open_block_menu(&mut harness, pane, 0);
+            let popup = block_menu_box(&scene);
+            let lines: Vec<String> = text_lines(&scene, |at| {
+                at.x() >= popup.min_x() && at.x() <= popup.max_x()
+            })
+            .into_iter()
+            .map(|(_, line)| line.trim().to_owned())
+            .collect();
+            assert!(
+                lines.iter().any(|line| line == "Copy as Markdown"),
+                "the guest's entries are not in the menu: {lines:?}"
+            );
+            assert!(
+                lines.iter().any(|line| line == "Nothing to do here"),
+                "an entry whose action nothing answers to is drawn, not dropped: {lines:?}"
+            );
+
+            click_menu_entry(&mut harness, "Copy as Markdown");
+            assert!(
+                !harness.a_popup_is_open(),
+                "a sandboxed plugin's entry left the menu up"
+            );
+
+            // Two requests round the loop — what the command printed, then the
+            // clipboard — each served by the window rather than by the pool.
+            let fence = crate::plugins::wasm::tests::FENCE;
+            harness.wait_for("the plugin never copied anything", move |harness| {
+                harness.frame();
+                clipboard.read().as_deref() == Some(fence)
+            });
         }
 
         #[test]

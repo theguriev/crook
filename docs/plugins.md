@@ -284,6 +284,47 @@ description of something that was never built.
     reads the file alone and can be behind. That is a real regression on one platform, and it
     is the price of the chip being something a stranger could have written.
 
+- **ABI 7 — a plugin that can act on *one command*: done.** Everything before it was about the
+  window: a chip in the header, a row under the line you are typing, a mark on a tab. This is
+  the first version in which a plugin is handed the thing a person is actually looking at.
+
+  - **`Subject::Block`.** A contribution to `block.menu` is drawn once per *menu*, and a menu is
+    open on exactly one command — so its render carries that command, redacted the way a tab
+    row's facts are: everybody gets a `key`, the command line and the exit status need
+    `Capability::ReadBlock`, and where it ran needs the `ReadWorkingDirectory` every other
+    place-reading plugin already asks for. A plugin granted nothing still draws its entries,
+    which is what lets "send this somewhere" be a plugin that was never told what you ran.
+
+  - **`Request::Output`, and why it is not in the subject.** What a command *printed* can be a
+    megabyte, and a subject is built on every frame a menu is open. So the output is asked for
+    instead — once, by an entry somebody pressed, which is the only moment a plugin has any
+    business with it. The host writes it down at the press (`Host::set_pressed_output`) because
+    by the time the request is served the menu has closed behind the entry, which is what a
+    menu does when an entry of it acts.
+
+  - **`Request::Copy`.** The shortest way for a plugin to hand somebody what it worked out, and
+    the reason it is a request rather than something a `Node` could describe: what goes on a
+    clipboard is a thing that *happens*, at a moment, because somebody asked.
+
+  - **A chain is one gesture.** Both of those may only be raised out of an action a person
+    caused — the rule `Type` and `Run` already followed — and that used to end at the first
+    answer: a delivery pumped as `Gesture::None`, so "ask what it printed, then copy it" was a
+    press whose second half was refused. An answer to something a press asked for is still what
+    came of that press, so the ticket carries the gesture and the chain keeps it. A tick, an
+    event and a build pump as themselves, unchanged.
+
+  - **A guest's entries are the host's rows.** A plugin describes `Node::Menu` — the same
+    vocabulary it hangs a context menu off its own chip with, a label and an action and the
+    argument that says which entry it was — and the host draws each item as a row of *this*
+    menu. A plugin that had to describe a menu row would have to know its padding, its type
+    size and the colour one takes under the pointer, and would be wrong about all three the day
+    any of them changed.
+
+  The plugin that demanded every line of it is
+  [github.com/theguriev/crook-markdown](https://github.com/theguriev/crook-markdown): two
+  entries in a block's menu that copy the command and its output as a `console` fence, and as a
+  report with the status and the branch above it.
+
 - **ABI 6 — a plugin that can *do* something: done.** (A version, not a phase: the phases here
   are the plan's, and the store is still the one numbered three.) Every version up to five let
   a plugin describe what it already knew and ask for what it could be told — a chip that

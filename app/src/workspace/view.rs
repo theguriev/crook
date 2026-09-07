@@ -245,19 +245,25 @@ impl MenuState {
 /// underlay is over the window. It is the same reason the worktree menu reads
 /// its repository once.
 #[derive(Default)]
-pub(crate) struct BlockMenuState {
+pub struct BlockMenuState {
     /// Whose list the menu is up on, and which block of it.
     pub(super) on: Option<(PaneId, BlockId)>,
     /// The branch the block's directory was on when the menu opened, when it
     /// was in a repository at all.
-    pub(super) branch: Option<String>,
+    pub(crate) branch: Option<String>,
     /// Whether the block reported where its own output starts, which is what
     /// says the "Copy output" row can do anything.
     pub(super) output_from: Option<usize>,
     /// Where the shell was when the block opened.
-    pub(super) directory: Option<PathBuf>,
+    pub(crate) directory: Option<PathBuf>,
     /// The command line the block ran, when it has one.
-    pub(super) command: Option<String>,
+    pub(crate) command: Option<String>,
+    /// The status the shell reported for it, when it reported one.
+    ///
+    /// Nothing in Crook's own entries draws this. It is here because a
+    /// plugin's may: "report this failure" is an entry that has no business
+    /// being offered on a command that succeeded.
+    pub(crate) exit: Option<i32>,
     /// "Copy".
     pub(super) copy: MouseStateHandle,
     /// "Copy command".
@@ -280,6 +286,20 @@ impl BlockMenuState {
     /// Whether the menu is up at all.
     pub(super) fn is_open(&self) -> bool {
         self.on.is_some()
+    }
+
+    /// What says one open menu is about the same command as the last.
+    ///
+    /// The pane and the block, as text, and it lives for exactly as long as
+    /// the session does — a block id is handed out in order and never reused,
+    /// and means nothing tomorrow. It is what a plugin's key is made of, and
+    /// the reason the key can be given to a plugin that was granted nothing:
+    /// there is nothing about the command in it to recover.
+    pub(crate) fn key(&self) -> String {
+        match self.on {
+            Some((pane, block)) => format!("{}/{}", pane.as_u64(), block.get()),
+            None => String::new(),
+        }
     }
 
     /// The block it is up on, when it is up on one of this pane's.
@@ -1097,8 +1117,35 @@ impl Workspace {
         let Some(name) = self.host.action_name(id).cloned() else {
             return;
         };
+
+        // An action run out of a block's menu is *about* that block, and this
+        // is the one moment its output is worth copying: somebody has pressed
+        // an entry. See [`Host::set_pressed_output`] for why it is written
+        // here rather than while the menu was merely open, and why nothing
+        // clears it afterwards.
+        if self.block_menu.is_open() {
+            self.host.set_pressed_output(self.pressed_output(ctx));
+        }
+
         let actions = self.host.actions().clone();
         actions.with(&name, |handler| handler(self, ctx));
+
+        // A menu entry acts once, whoever contributed it: Crook's own close
+        // the menu on their way out, and a plugin's would otherwise leave it
+        // up over the block it had just acted on.
+        self.close_block_menu(ctx);
+    }
+
+    /// What the block the menu is open on printed, as a copy of it would read.
+    ///
+    /// `None` for a block whose shell never said where its output began, which
+    /// is the same answer the "Copy output" row gives by being drawn as one
+    /// that cannot be pressed.
+    fn pressed_output(&self, app: &AppContext) -> Option<String> {
+        let (pane, block) = self.block_menu.on?;
+        let from = self.block_menu.output_from?;
+        let text = self.block_rows_text(pane, block, from, app)?;
+        Some(text.trim_end().to_owned())
     }
 
     /// Every chord in force, for the page that prints them.
@@ -2176,6 +2223,7 @@ impl Workspace {
         };
         let directory = found.working_directory.clone();
         let command = found.command.clone();
+        let exit = found.exit;
         let output_from = found.output_from;
 
         // Two popups are never up at once. See `a_popup_is_open`.
@@ -2195,6 +2243,7 @@ impl Workspace {
         self.block_menu.on = Some((pane, block));
         self.block_menu.directory = directory;
         self.block_menu.command = command;
+        self.block_menu.exit = exit;
         self.block_menu.output_from = output_from;
         self.block_menu.forget_hover_state();
         self.sync_input_keys();
@@ -2211,6 +2260,7 @@ impl Workspace {
         self.block_menu.branch = None;
         self.block_menu.directory = None;
         self.block_menu.command = None;
+        self.block_menu.exit = None;
         self.block_menu.output_from = None;
         self.block_menu.forget_hover_state();
         self.sync_input_keys();

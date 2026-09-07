@@ -35,7 +35,9 @@ use crookui_core::platform::TextLayoutSystem;
 use crookui_core::text_layout::{Glyph, Line, Run};
 use crookui_core::{Action, App, Presenter, Scene, WindowId};
 
-use crook_plugin_api::{Capability, Gap, Manifest, Node, Row, Size, Tone, to_bytes};
+use crook_plugin_api::{
+    Capability, Gap, Manifest, MenuItem, Node, Request, Row, Size, Tone, to_bytes,
+};
 
 use crate::clipboard::Clipboard;
 use crate::plugin::{ActionId, Voice};
@@ -163,6 +165,108 @@ pub(crate) fn wasm(id: &str, slot: &str, order: i32) -> Vec<u8> {
         tree_bytes = escaped(&tree),
         tree_len = tree.len(),
         slot_len = slot.len(),
+        abi = crook_plugin_api::ABI_VERSION,
+    );
+
+    wat::parse_str(&text).expect("the test module should assemble")
+}
+
+/// What a plugin contributing to a block's menu puts there, and what it copies
+/// when an entry of it is pressed.
+pub(crate) const FENCE: &str = "```console\n$ cargo test\nok\n```";
+
+/// A module that puts two entries in a block's menu and, when one is pressed,
+/// asks what the command printed and then asks for something to be copied.
+///
+/// The two asks are the whole of the ABI this exercises: a request that only a
+/// press may raise, answered out of the menu the press happened in, and one
+/// that changes something the person can see.
+pub(crate) fn wasm_in_a_block_menu(id: &str) -> Vec<u8> {
+    let mut manifest = manifest(id);
+    manifest.capabilities = vec![Capability::ReadBlock, Capability::Clipboard];
+    let manifest = to_bytes(&manifest).expect("a manifest should encode");
+    let tree = to_bytes(&Node::Menu {
+        content: Box::new(Node::Empty),
+        items: vec![
+            MenuItem {
+                label: "Copy as Markdown".to_owned(),
+                action: "poke".to_owned(),
+                argument: "fenced".to_owned(),
+            },
+            MenuItem {
+                label: "Nothing to do here".to_owned(),
+                action: "nowhere".to_owned(),
+                argument: String::new(),
+            },
+        ],
+    })
+    .expect("a tree should encode");
+    let output = to_bytes(&Request::Output).expect("a request should encode");
+    let copy = to_bytes(&Request::Copy {
+        text: FENCE.to_owned(),
+    })
+    .expect("a request should encode");
+
+    let tree_at = 16 + manifest.len() as u32;
+    let output_at = tree_at + tree.len() as u32;
+    let copy_at = output_at + output.len() as u32;
+    let strings_at = 4096;
+    let entry_at = strings_at + "block.menu".len() as u32;
+    let action_at = entry_at + 4;
+
+    let text = format!(
+        r#"(module
+            (import "crook" "contribute"
+              (func $contribute (param i32 i32 i32 i32 i32)))
+            (import "crook" "register_action"
+              (func $register_action (param i32 i32 i32 i32)))
+            (import "crook" "request" (func $request (param i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (global $next (mut i32) (i32.const 8192))
+            (global $copied (mut i32) (i32.const 0))
+            (data (i32.const 16) "{manifest_bytes}")
+            (data (i32.const {tree_at}) "{tree_bytes}")
+            (data (i32.const {output_at}) "{output_bytes}")
+            (data (i32.const {copy_at}) "{copy_bytes}")
+            (data (i32.const {strings_at}) "block.menu")
+            (data (i32.const {entry_at}) "here")
+            (data (i32.const {action_at}) "poke")
+            (func (export "crook_abi_version") (result i32) (i32.const {abi}))
+            (func (export "crook_alloc") (param $len i32) (result i32)
+              (local $at i32)
+              (local.set $at (global.get $next))
+              (global.set $next (i32.add (global.get $next) (local.get $len)))
+              (local.get $at))
+            (func (export "crook_manifest") (result i64)
+              (i64.or (i64.shl (i64.const 16) (i64.const 32)) (i64.const {manifest_len})))
+            (func (export "crook_build") (result i32)
+              (call $contribute
+                (i32.const {strings_at}) (i32.const 10)
+                (i32.const {entry_at}) (i32.const 4)
+                (i32.const 0))
+              (call $register_action
+                (i32.const {action_at}) (i32.const 4)
+                (i32.const {action_at}) (i32.const 0))
+              (i32.const 0))
+            (func (export "crook_render") (param i32 i32) (result i64)
+              (i64.or (i64.shl (i64.const {tree_at}) (i64.const 32)) (i64.const {tree_len})))
+            (func (export "crook_run") (param i32 i32 i32 i32) (result i32)
+              (drop (call $request (i32.const {output_at}) (i32.const {output_len})))
+              (i32.const 0))
+            (func (export "crook_deliver") (param i32 i32 i32) (result i32)
+              (if (i32.eqz (global.get $copied))
+                (then
+                  (global.set $copied (i32.const 1))
+                  (drop (call $request (i32.const {copy_at}) (i32.const {copy_len})))))
+              (i32.const 0)))"#,
+        manifest_bytes = escaped(&manifest),
+        manifest_len = manifest.len(),
+        tree_bytes = escaped(&tree),
+        tree_len = tree.len(),
+        output_bytes = escaped(&output),
+        output_len = output.len(),
+        copy_bytes = escaped(&copy),
+        copy_len = copy.len(),
         abi = crook_plugin_api::ABI_VERSION,
     );
 
@@ -1456,4 +1560,53 @@ fn a_picker_outside_a_panel_draws_nothing_rather_than_dividing_infinity() {
         inside > 0,
         "and one in a panel draws its field and its rows"
     );
+}
+
+#[test]
+fn a_block_says_only_what_a_plugin_was_allowed_to_be_told() {
+    // The redaction a subject is built through, which is what lets a plugin
+    // put an entry in a block's menu while being told nothing about the
+    // command it is on. The key is the one thing everybody gets, and it is a
+    // number about *which* block rather than about what ran in it.
+    let mut menu = BlockMenuState::default();
+    menu.command = Some(String::from("cargo test"));
+    menu.exit = Some(101);
+    menu.directory = Some(PathBuf::from("/home/eugen/Work/crook"));
+    menu.branch = Some(String::from("blocks-helpers"));
+    let who = PluginId::parse("eugen/probe").expect("a literal");
+
+    let nothing = Sees::default().block(&menu, &who);
+    assert!(
+        nothing.ran.is_none(),
+        "a plugin nobody answered for was told"
+    );
+    assert!(nothing.place.is_none());
+    assert_ne!(nothing.key, 0, "and it still knows which block it is on");
+
+    let told = Sees {
+        block: true,
+        place: true,
+        ..Sees::default()
+    }
+    .block(&menu, &who);
+    let ran = told.ran.expect("granted, and told");
+    assert_eq!(ran.command.as_deref(), Some("cargo test"));
+    assert_eq!(ran.exit, Some(101));
+    let place = told.place.expect("granted, and told");
+    assert_eq!(place.directory, "/home/eugen/Work/crook");
+    assert_eq!(place.branch.as_deref(), Some("blocks-helpers"));
+    assert_eq!(
+        told.key, nothing.key,
+        "the key is the same block's whatever was granted"
+    );
+
+    // Each half is its own grant: what ran is one sentence a person answers,
+    // and where it ran is the sentence every other place-reading plugin asks.
+    let placed = Sees {
+        place: true,
+        ..Sees::default()
+    }
+    .block(&menu, &who);
+    assert!(placed.ran.is_none());
+    assert!(placed.place.is_some());
 }

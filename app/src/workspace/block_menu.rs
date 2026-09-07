@@ -178,23 +178,24 @@ pub(crate) fn copy_group(workspace: &Workspace) -> Box<dyn Element> {
     group([
         entry(
             "Copy",
-            true,
+            Some(dispatching(BlockAction::Copy(BlockPart::Whole))),
             menu.copy.clone(),
-            BlockAction::Copy(BlockPart::Whole),
             ui,
         ),
         entry(
             "Copy command",
-            menu.command.is_some(),
+            menu.command
+                .is_some()
+                .then(|| dispatching(BlockAction::Copy(BlockPart::Command))),
             menu.copy_command.clone(),
-            BlockAction::Copy(BlockPart::Command),
             ui,
         ),
         entry(
             "Copy output",
-            menu.output_from.is_some(),
+            menu.output_from
+                .is_some()
+                .then(|| dispatching(BlockAction::Copy(BlockPart::Output))),
             menu.copy_output.clone(),
-            BlockAction::Copy(BlockPart::Output),
             ui,
         ),
     ])
@@ -210,16 +211,18 @@ pub(crate) fn facts_group(workspace: &Workspace) -> Box<dyn Element> {
     group([
         entry(
             "Copy working directory",
-            menu.directory.is_some(),
+            menu.directory
+                .is_some()
+                .then(|| dispatching(BlockAction::Copy(BlockPart::Directory))),
             menu.copy_directory.clone(),
-            BlockAction::Copy(BlockPart::Directory),
             ui,
         ),
         entry(
             "Copy git branch",
-            menu.branch.is_some(),
+            menu.branch
+                .is_some()
+                .then(|| dispatching(BlockAction::Copy(BlockPart::Branch))),
             menu.copy_branch.clone(),
-            BlockAction::Copy(BlockPart::Branch),
             ui,
         ),
     ])
@@ -234,9 +237,10 @@ pub(crate) fn run_group(workspace: &Workspace) -> Box<dyn Element> {
     let menu = workspace.block_menu();
     group([entry(
         "Run again",
-        menu.command.is_some(),
+        menu.command
+            .is_some()
+            .then(|| dispatching(BlockAction::Rerun)),
         menu.rerun.clone(),
-        BlockAction::Rerun,
         workspace.fonts().ui,
     )])
 }
@@ -249,23 +253,21 @@ pub(crate) fn scroll_group(workspace: &Workspace) -> Box<dyn Element> {
     group([
         entry(
             "Scroll to top of block",
-            true,
+            Some(dispatching(BlockAction::ScrollTo(BlockEdge::Top))),
             menu.scroll_top.clone(),
-            BlockAction::ScrollTo(BlockEdge::Top),
             ui,
         ),
         entry(
             "Scroll to bottom of block",
-            true,
+            Some(dispatching(BlockAction::ScrollTo(BlockEdge::Bottom))),
             menu.scroll_bottom.clone(),
-            BlockAction::ScrollTo(BlockEdge::Bottom),
             ui,
         ),
     ])
 }
 
 /// One contribution's entries, as the column the menu puts a hairline under.
-fn group(entries: impl IntoIterator<Item = Box<dyn Element>>) -> Box<dyn Element> {
+pub(crate) fn group(entries: impl IntoIterator<Item = Box<dyn Element>>) -> Box<dyn Element> {
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
@@ -275,20 +277,35 @@ fn group(entries: impl IntoIterator<Item = Box<dyn Element>>) -> Box<dyn Element
     column.finish()
 }
 
-/// One entry: a label, and what pressing it dispatches.
+/// What pressing an entry does, or `None` for a row that cannot be pressed:
+/// being pressable *is* having something to run.
 ///
-/// A row that cannot act takes the muted role and no hover of its own, and its
-/// press dispatches nothing — rather than being a `Hoverable` with an empty
+/// A closure rather than an action, because two kinds of entry end up in this
+/// menu and they act differently. Crook's own dispatch a
+/// [`BlockAction`]; a plugin's says which entry it was and then runs the
+/// plugin's named action, which is the arrangement every other guest control
+/// already uses.
+pub(crate) type Press = Box<dyn Fn(&mut EventContext)>;
+
+/// A press that dispatches one of the window's own actions.
+pub(crate) fn dispatching(action: impl Into<WorkspaceAction> + Copy + 'static) -> Press {
+    Box::new(move |ctx: &mut EventContext| ctx.dispatch_typed_action(action.into()))
+}
+
+/// One entry: a label, and what pressing it does.
+///
+/// A row that cannot be pressed takes the muted role and no hover of its own,
+/// and its press does nothing — rather than being a `Hoverable` with an empty
 /// handler, which would still light up under the pointer and still claim the
 /// press. Nothing about it invites a click.
-fn entry(
-    label: &'static str,
-    enabled: bool,
+pub(crate) fn entry(
+    label: impl Into<std::borrow::Cow<'static, str>>,
+    press: Option<Press>,
     state: MouseStateHandle,
-    action: BlockAction,
     ui: FamilyId,
 ) -> Box<dyn Element> {
-    if !enabled {
+    let label = label.into();
+    let Some(press) = press else {
         // The hover state a disabled row is not using is dropped, so that a
         // row which becomes pressable again on the next block does not come
         // back lit under a pointer that has moved away.
@@ -299,7 +316,7 @@ fn entry(
                 .finish(),
             Color::TRANSPARENT,
         );
-    }
+    };
 
     Hoverable::new(state, move |mouse| {
         let background = if mouse.is_hovered() {
@@ -308,16 +325,24 @@ fn entry(
             Color::TRANSPARENT
         };
         plate(
-            Text::new(label, ui, LABEL_SIZE)
+            Text::new(label.clone(), ui, LABEL_SIZE)
                 .with_color(theme().text_primary)
                 .finish(),
             background,
         )
     })
-    .on_click(move |_, ctx, _| {
-        ctx.dispatch_typed_action(WorkspaceAction::Block(action));
-    })
+    .on_click(move |_, ctx, _| press(ctx))
     .finish()
+}
+
+/// The box a plugin's own element goes in when it is not an entry.
+///
+/// A group that describes something other than rows — a badge, a meter, a line
+/// of prose — is still drawn, in the padding every row in this menu has, so it
+/// lines up with the labels above and below it rather than sitting against the
+/// popup's edge.
+pub(crate) fn framed(content: Box<dyn Element>) -> Box<dyn Element> {
+    plate(content, Color::TRANSPARENT)
 }
 
 /// The box a row's label sits in, which is the same box whether the row can be

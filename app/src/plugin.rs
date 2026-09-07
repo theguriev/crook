@@ -333,6 +333,13 @@ pub struct Host {
     /// applied after the whole tree has seen the event: one press, one thing
     /// said, one action.
     said: Voice,
+    /// What the command whose menu an entry was pressed in printed.
+    ///
+    /// Beside [`Host::said`] and for a related reason — something the press
+    /// knows and the handler needs — but written once per press rather than
+    /// per dispatch, because it can be a megabyte. See
+    /// [`Host::set_pressed_output`].
+    pressed_output: Rc<std::cell::RefCell<Option<String>>>,
 }
 
 /// A place to leave something for the next action that runs to take.
@@ -361,6 +368,7 @@ impl Host {
         Self {
             fonts,
             grants,
+            pressed_output: Rc::default(),
             slots: Slots::new(),
             rows: Slots::new(),
             pages: Slots::new(),
@@ -391,6 +399,30 @@ impl Host {
     /// says it is usually an element handler, which holds neither.
     pub fn say(&self, what: impl Into<String>) {
         self.said.say(what);
+    }
+
+    /// Writes down what the command whose menu an entry was just pressed in
+    /// printed, for a plugin allowed to ask.
+    ///
+    /// **Written at the press and not before.** A subject is built on every
+    /// frame a menu is open and can afford to carry a command line; output can
+    /// be a megabyte, so it is copied once, when somebody has actually pressed
+    /// something, and the plugin asks for it with `Request::Output`.
+    ///
+    /// **And not cleared afterwards**, which is the ordering the whole thing
+    /// turns on: a menu closes as its entry runs, and what the entry asked for
+    /// is served after that — so a cell emptied on the way out would be a
+    /// plugin told there was no block a moment after it was shown one. What
+    /// keeps it honest instead is that the request may only be raised out of
+    /// an action a person caused, so nothing can read it except the press that
+    /// filled it.
+    pub(crate) fn set_pressed_output(&self, text: Option<String>) {
+        *self.pressed_output.borrow_mut() = text;
+    }
+
+    /// What that was, for whoever is serving the request.
+    pub(crate) fn pressed_output(&self) -> Option<String> {
+        self.pressed_output.borrow().clone()
     }
 
     /// The handle an element holds to be able to say something.

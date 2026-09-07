@@ -38,15 +38,15 @@ use crookui_core::prelude::*;
 
 use crook_plugin::{ActionName, Manifest, PluginId, Tier};
 use crook_plugin_api::{
-    Answer, Capability, Command, Event, Node, Place, Render, Request, Status, Subject, TabFacts,
-    TabInfo,
+    Answer, BlockFacts, Capability, Command, Event, Node, Place, Ran, Render, Request, Status,
+    Subject, TabFacts, TabInfo,
 };
 use crook_wasm::{Fuel, Sandbox};
 
 use crate::plugin::{BuildError, Host, Plugin};
 use crate::plugins::tabs::{TAB_ROW_BADGE, TabRow};
 use crate::tab::AgentStatus;
-use crate::workspace::Workspace;
+use crate::workspace::{BlockMenuState, Workspace, WorkspaceAction, block_menu};
 
 pub use install::install;
 use picker::Held;
@@ -250,6 +250,13 @@ impl Plugin for WasmPlugin {
                 let entry = contribution.entry.clone();
                 let chrome = chrome.clone();
                 let placement = placement(&contribution.slot);
+                // The one slot that is drawn about something: a menu on a
+                // block is open on exactly one command, so a contribution to
+                // it is a render with that command as its subject. Every other
+                // slot there is one of, and a plugin asked what goes in it
+                // knows everything it needs from the question.
+                let about_a_block =
+                    contribution.slot == crate::plugins::blocks::BLOCK_MENU.as_str();
                 host.contribute(
                     slot,
                     contribution.entry,
@@ -258,9 +265,18 @@ impl Plugin for WasmPlugin {
                         let render = Render {
                             slot: name.clone(),
                             entry: entry.clone(),
-                            subject: None,
+                            subject: about_a_block
+                                .then(|| Subject::Block(sees.block(workspace.block_menu(), &who))),
                         };
                         let node = ask(&sandbox, &failures, &who, &render);
+                        // A menu's rows are the host's to draw — their
+                        // padding, their type size, the colour one takes under
+                        // the pointer — so what a guest describes here is
+                        // mapped onto them rather than laid inside them. See
+                        // [`render::menu_group`].
+                        if about_a_block {
+                            return menu_group(&node, workspace, &who, &chrome, &hovers);
+                        }
                         let element = drawn(
                             &node,
                             workspace,
@@ -511,6 +527,25 @@ fn serve(workspace: &mut Workspace, request: &Request, ctx: &mut ViewContext<Wor
             workspace.run_action(id, ctx);
             Answer::Done
         }
+        // What the command printed, for the entry that was just pressed in its
+        // menu. Written down when the entry ran — see
+        // `Workspace::run_action` — because by the time this is served the
+        // menu has closed behind it, which is what a menu does when an entry
+        // of it acts.
+        Request::Output => match workspace.host().pressed_output() {
+            Some(text) => Answer::Output { text },
+            None => Answer::Failed(String::from(
+                "no block is open for this plugin, or its shell never said where the output \
+                 began: a block can only be read from an entry of its own menu",
+            )),
+        },
+        Request::Copy { text } => {
+            if workspace.clipboard().write(text) {
+                Answer::Done
+            } else {
+                Answer::Failed(String::from("this window has no clipboard to write to"))
+            }
+        }
         // Everything else is work and was done on the pool; reaching one of
         // these arms would be this file disagreeing with `runtime`.
         Request::Fetch { .. }
@@ -631,20 +666,99 @@ fn drawn(
     )
 }
 
-/// What one plugin may be told about a row.
+/// What a guest put in a block's menu, drawn as rows of that menu.
 ///
-/// A grant, reduced to the two questions a row raises, so that the answer is
-/// a comparison of booleans per row rather than a walk of a list of granted
-/// keys per row per frame. It is made when the plugin is built because that is
-/// when a grant can change: answering on the Plugins page rebuilds the plugin
-/// there and then.
+/// **A `Menu` node is the group and its items are the rows.** The same
+/// vocabulary a plugin hangs a context menu off its own chip with — a label,
+/// an action and the argument that says which entry it was — reused here,
+/// where the menu is Crook's and the entries are the plugin's. Its `content`
+/// is not drawn: there is nothing to hang a menu off when the menu is the slot.
+///
+/// Anything else a guest describes is drawn as it describes itself, in the
+/// padding a row of this menu has, so a plugin that puts a line of prose or a
+/// meter in a menu gets one that lines up with the labels around it rather
+/// than one against the popup's edge.
+///
+/// The rows themselves are the *host's*: their padding, their type size and
+/// the colour one takes under the pointer are this menu's, not a guest's
+/// guess at them, and they change with the menu when it changes.
+fn menu_group(
+    node: &Node,
+    workspace: &Workspace,
+    who: &PluginId,
+    chrome: &Rc<Held>,
+    hovers: &render::Hovers,
+) -> Box<dyn Element> {
+    let Node::Menu { items, .. } = node else {
+        // Nothing at all is the ordinary answer for a plugin with nothing to
+        // say about this block, and it must not leave a blank row behind.
+        if matches!(node, Node::Empty) {
+            return Empty::new().finish();
+        }
+        return block_menu::framed(drawn(
+            node,
+            workspace,
+            who,
+            render::Scale::ROW,
+            Placement::Below,
+            chrome,
+            hovers,
+        ));
+    };
+
+    let host = workspace.host();
+    let prefix = who.clone();
+    let resolve = move |action: &str| {
+        ActionName::parse(&format!("{prefix}/{action}"))
+            .ok()
+            .and_then(|name| host.action(&name))
+    };
+
+    hovers.rewind();
+    block_menu::group(items.iter().map(|item| {
+        let action = resolve(&item.action);
+        let argument = item.argument.clone();
+        let chrome = chrome.clone();
+        block_menu::entry(
+            item.label.clone(),
+            // An entry naming an action nothing answers to is drawn as a row
+            // that cannot be pressed, for the reason a button whose action is
+            // missing is drawn inert: a control that vanishes is harder to
+            // explain than one that does not respond.
+            action.map(|action| -> block_menu::Press {
+                Box::new(move |ctx| {
+                    // Said before it is run and taken when it runs, which is
+                    // the arrangement a picker's row and a guest's own menu
+                    // entry both already use.
+                    chrome.say(argument.clone());
+                    ctx.dispatch_typed_action(WorkspaceAction::Run(action));
+                })
+            }),
+            // One handle per entry, in the order the tree asks for them, which
+            // is what keeps a hover on the row it started on. See
+            // [`render::Hovers`].
+            hovers.take(),
+            workspace.fonts().ui,
+        )
+    }))
+}
+
+/// What one plugin may be told about the thing it is drawing for.
+///
+/// A grant, reduced to the three questions a subject raises, so that the
+/// answer is a comparison of booleans per render rather than a walk of a list
+/// of granted keys per row per frame. It is made when the plugin is built
+/// because that is when a grant can change: answering on the Plugins page
+/// rebuilds the plugin there and then.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 struct Sees {
     /// [`Capability::ReadTabs`]: what the tab is called, and what it is doing.
     tabs: bool,
-    /// [`Capability::ReadWorkingDirectory`]: where it is working, and what git
-    /// says about there.
+    /// [`Capability::ReadWorkingDirectory`]: where a tab is working, or where
+    /// a command ran, and what git says about there.
     place: bool,
+    /// [`Capability::ReadBlock`]: what the command was and how it ended.
+    block: bool,
 }
 
 impl Sees {
@@ -653,6 +767,37 @@ impl Sees {
         Self {
             tabs: holds(granted, &Capability::ReadTabs),
             place: holds(granted, &Capability::ReadWorkingDirectory),
+            block: holds(granted, &Capability::ReadBlock),
+        }
+    }
+
+    /// The command a menu is open on, with everything that was not granted
+    /// left out.
+    ///
+    /// The key is given to everybody, as a row's is, and says less than one: a
+    /// block's is handed out per session rather than derived from anything, so
+    /// two plugins cannot compare notes and nothing about the command can be
+    /// read back out of it. What it is for is a plugin noticing that the menu
+    /// it is drawing in now is the one it was drawing in a frame ago.
+    fn block(self, menu: &BlockMenuState, who: &PluginId) -> BlockFacts {
+        BlockFacts {
+            key: salted(who.as_str(), &menu.key()),
+            ran: self.block.then(|| Ran {
+                command: menu.command.clone(),
+                exit: menu.exit,
+            }),
+            place: self
+                .place
+                .then_some(menu.directory.as_deref())
+                .flatten()
+                .map(|directory| Place {
+                    directory: directory.to_string_lossy().into_owned(),
+                    branch: menu.branch.clone(),
+                    // A block is not a checkout: what it says is where a
+                    // command ran, and whether that directory is a linked
+                    // worktree is a question about the tab it ran in.
+                    worktree: false,
+                }),
         }
     }
 
