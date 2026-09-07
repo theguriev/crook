@@ -88,13 +88,14 @@ use crookui_core::prelude::*;
 
 use crook_plugin::{ActionName, Cardinality, Manifest, PluginId, SlotId, Tier};
 
+use std::borrow::Cow;
 use std::cell::{Cell, RefCell};
 use std::path::Path;
 use std::rc::Rc;
 
 use crate::git::GitFacts;
 use crate::plugin::{ActionId, BuildError, Host, Plugin, Showing};
-use crate::tab::{AgentStatus, PaneId, TabAction, TabColor, TabId};
+use crate::tab::{AgentStatus, PaneId, TabAction, TabColor, TabId, TabStrip};
 use crate::text_input::TextInput;
 use crate::theme::theme;
 use crate::workspace::tab_context_menu::{entry, field_entry, inert_entry, nothing, swatch_entry};
@@ -159,6 +160,64 @@ pub struct TabRow<'a> {
     /// What git knows about that directory, when it is in a repository and the
     /// answer has come home.
     pub git: Option<&'a GitFacts>,
+    /// How many rows before this one, in panel order, are working in the same
+    /// [`place`].
+    ///
+    /// Zero for all but the second and later rows in one directory, and the
+    /// only reason it is here: a row is named to a plugin as a hash of where
+    /// it is working, every tab opened from the window starts in Crook's own
+    /// directory, and a person with four tabs in one checkout was four rows
+    /// that every plugin could only see as one. See [`place_ordinal`].
+    pub nth: usize,
+}
+
+/// What a row is *called*, where a plugin's key is concerned: where it is
+/// working, or what it says when nothing has answered where that is.
+///
+/// A borrow in both cases and on the path anything is likely to be — a
+/// directory that is valid UTF-8 is a `Cow::Borrowed` — because this is asked
+/// asked of every row *before* each row, once a frame, by [`place_ordinal`],
+/// and a rule that allocated to compare two rows would be a panel allocating
+/// with the square of its tabs.
+pub fn place<'a>(directory: Option<&'a Path>, title: &'a str) -> Cow<'a, str> {
+    directory.map_or(Cow::Borrowed(title), Path::to_string_lossy)
+}
+
+/// Which of the rows working in one place this one is, counted in panel order.
+///
+/// A row's key is a hash of [`place`] and nothing else, which is what makes it
+/// the same number tomorrow — a `PaneId` is minted from a counter and means
+/// nothing in a later process, so an id could not have done this job. The cost
+/// of that is the collision this counts past: every session starts in the
+/// directory Crook itself was started in, so a window of new tabs is a window
+/// of rows that are all *the same place*, and a plugin drawing a mark per tab
+/// drew one mark on all of them.
+///
+/// The ordinal is what a restored session brings back rather than what a
+/// process mints: `session.json` remembers the panes in order, so the second
+/// tab in a checkout is the second one again tomorrow and keeps its mark.
+/// Closing the first of them does move the second's — it is now the first —
+/// and that is the honest price of naming a row by where it works rather than
+/// by an identity nothing outlives the process to carry.
+pub fn place_ordinal(strip: &TabStrip, pane: PaneId) -> usize {
+    let Some(mine) = strip.pane(pane) else {
+        return 0;
+    };
+    let mine = place(
+        mine.session().working_directory.as_deref(),
+        mine.session().display_title(),
+    );
+
+    strip
+        .panes()
+        .take_while(|(_, other)| other.id() != pane)
+        .filter(|(_, other)| {
+            place(
+                other.session().working_directory.as_deref(),
+                other.session().display_title(),
+            ) == mine
+        })
+        .count()
 }
 
 /// Every row in the menu a tab's secondary press opens.

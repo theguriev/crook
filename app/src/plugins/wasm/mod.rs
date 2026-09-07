@@ -810,14 +810,19 @@ impl Sees {
     /// cannot work out that two of their rows are one row, and nothing about
     /// the tab can be read back out of the number. See `TabFacts::key`, which
     /// says what that is and is not.
+    ///
+    /// Where it is working and *which of the rows working there this is*,
+    /// because those are not the same question and the difference was a bug: a
+    /// new tab starts in the directory Crook was started in, so a window of
+    /// them was a window of rows carrying one key, and a plugin drawing a mark
+    /// per tab drew the same mark on every one. See
+    /// `plugins::tabs::place_ordinal` for why the ordinal is what tells them
+    /// apart rather than an id.
     fn facts(self, row: &TabRow<'_>, who: &PluginId) -> TabFacts {
-        let named = row
-            .directory
-            .map(|directory| directory.to_string_lossy().into_owned())
-            .unwrap_or_else(|| row.title.to_owned());
+        let named = crate::plugins::tabs::place(row.directory, row.title);
 
         TabFacts {
-            key: salted(who.as_str(), &named),
+            key: keyed(who.as_str(), &named, row.nth),
             tab: self.tabs.then(|| TabInfo {
                 title: row.title.to_owned(),
                 active: row.active,
@@ -852,7 +857,14 @@ fn holds(granted: &[String], capability: &Capability) -> bool {
         .all(|key| granted.iter().any(|allowed| allowed == key))
 }
 
-/// FNV-1a over the salt and the string, which is what a row's key is.
+/// What FNV-1a starts from.
+const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// What it multiplies by.
+const PRIME: u64 = 0x0000_0100_0000_01b3;
+
+/// FNV-1a over the salt and the string, which is what a block's key is and
+/// what a row's is built on.
 ///
 /// Written out rather than reached for, because the property that matters is
 /// that the number is the *same next week*: `DefaultHasher` is explicitly not
@@ -861,12 +873,28 @@ fn holds(granted: &[String], capability: &Capability) -> bool {
 /// here needs a hash to be hard to invert — see `TabFacts::key` for what this
 /// number is and is not offered as.
 fn salted(salt: &str, text: &str) -> u64 {
-    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    folded(OFFSET, salt.bytes().chain([0]).chain(text.bytes()))
+}
 
-    let mut hash = OFFSET;
-    for byte in salt.as_bytes().iter().chain(b"\0").chain(text.as_bytes()) {
-        hash ^= u64::from(*byte);
+/// A row's key: [`salted`], carried on over the row's ordinal when it is not
+/// the first row working where it works.
+///
+/// Nothing at all is folded in for the first, which is the point: a build that
+/// hashed the ordinal unconditionally would be a build in which every mark in
+/// the panel moved on upgrade. The tab that had the octopus keeps it, and the
+/// second tab in that checkout is the one that stops being an octopus too.
+fn keyed(salt: &str, text: &str, nth: usize) -> u64 {
+    let key = salted(salt, text);
+    match nth {
+        0 => key,
+        nth => folded(key, [0].into_iter().chain((nth as u64).to_le_bytes())),
+    }
+}
+
+/// FNV-1a over `bytes`, carried on from a hash already made.
+fn folded(mut hash: u64, bytes: impl IntoIterator<Item = u8>) -> u64 {
+    for byte in bytes {
+        hash ^= u64::from(byte);
         hash = hash.wrapping_mul(PRIME);
     }
     hash

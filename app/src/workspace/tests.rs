@@ -6,7 +6,7 @@
 //! button closes its own tab, and that revealing that button does not move
 //! the bar out from under the cursor.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::fs;
 use std::ops::Range;
@@ -12657,6 +12657,65 @@ fn a_row_the_plugin_declines_keeps_the_disc_it_had() {
         tab_boxes(&scene)[0].contains_point(center(discs[0])),
         "the disc came back on the wrong row"
     );
+}
+
+/// What every row a plugin was asked about said it was, in panel order.
+type Ordinals = Rc<RefCell<Vec<usize>>>;
+
+/// A plugin that draws nothing and writes down which row it was asked about.
+struct TestOrdinals(Ordinals);
+
+impl crate::plugin::Plugin for TestOrdinals {
+    fn manifest(&self) -> &'static crate::plugin::Manifest {
+        static MANIFEST: std::sync::OnceLock<crate::plugin::Manifest> = std::sync::OnceLock::new();
+        MANIFEST.get_or_init(|| crate::plugin::Manifest {
+            schema: crate::plugin::Manifest::SCHEMA,
+            id: crate::plugin::PluginId::parse("eugen/ordinals").expect("a literal that parses"),
+            name: "Ordinals",
+            description: "Writes down which row it is drawing.",
+            version: "0.1.0",
+            tier: crate::plugin::Tier::Native,
+            capabilities: &[],
+        })
+    }
+
+    fn build(
+        &mut self,
+        host: &mut crate::plugin::Host,
+        _: &mut ViewContext<Workspace>,
+    ) -> Result<(), crate::plugin::BuildError> {
+        let seen = self.0.clone();
+        host.contribute_row(
+            crate::plugins::tabs::TAB_ROW_MARK,
+            "mark",
+            0,
+            move |_, row, _| {
+                seen.borrow_mut().push(row.nth);
+                // Declined, so the panel looks exactly as it did: this plugin
+                // is here to be asked, not to draw.
+                None
+            },
+        );
+        Ok(())
+    }
+}
+
+#[test]
+fn every_tab_in_one_directory_is_still_a_row_of_its_own() {
+    // The bug a mark per tab had: `AgentSession::new` seeds every session with
+    // the process's own directory, so three new tabs are three rows in one
+    // place — and a plugin told only *where* a row is working could not tell
+    // them apart, which is one emoji drawn three times down the panel.
+    let seen = Ordinals::default();
+    let mut plugins = crate::plugins::defaults();
+    plugins.push(Box::new(TestOrdinals(seen.clone())));
+    // Drawn by the harness's own first frame; a second would be answered out
+    // of the element cache, since nothing has been invalidated since.
+    let _harness = Harness::with_plugins(3, Settings::ephemeral(), plugins);
+
+    let seen = seen.borrow();
+
+    assert_eq!(*seen, vec![0, 1, 2], "three tabs, one row");
 }
 
 #[test]

@@ -164,6 +164,11 @@ pub(super) fn render(
         status,
         directory: session.working_directory.as_deref(),
         git,
+        // Which of the rows in this directory it is, which is all that tells
+        // two of them apart: every session starts where Crook was started, so
+        // a plugin naming a row by where it works sees one row until this
+        // counts past them. See `plugins::tabs::place_ordinal`.
+        nth: crate::plugins::tabs::place_ordinal(strip, pane),
     };
 
     let close_state = interaction.close.clone();
