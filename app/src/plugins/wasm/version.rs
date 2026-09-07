@@ -24,7 +24,7 @@
 use std::cmp::Ordering;
 
 /// Compares two version strings, newest last.
-pub(super) fn compare(left: &str, right: &str) -> Ordering {
+pub fn compare(left: &str, right: &str) -> Ordering {
     let (left, left_pre) = split(left);
     let (right, right_pre) = split(right);
 

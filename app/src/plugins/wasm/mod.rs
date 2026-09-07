@@ -28,7 +28,10 @@ pub(super) mod picker;
 mod render;
 mod runtime;
 mod sound;
-mod version;
+// Not private, because the store compares two versions of the same plugin for
+// exactly the reason the loader compares two directories: `1.10.0` is newer
+// than `1.9.0` and text says otherwise.
+pub mod version;
 
 use std::cell::{Cell, RefCell};
 use std::fs;
