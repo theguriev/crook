@@ -908,13 +908,78 @@ capabilities against a policy (a `write.input` plugin gets a human look, every t
 the PR contains **no binaries** — every artifact is built by CI from source with the pinned
 toolchain, so a user never runs a byte a reviewer did not see built.
 
-**Artifacts and index.** CI on `main` builds each Tier-2 plugin to `wasm32-wasip1`, writes a
-`plugins/index.json` (id, versions, api range, sha256 per artifact, capabilities, `builtin`,
-`yanked`, a global blocklist) and publishes index and archives to a GitHub release or Pages.
-**No server exists.** The app fetches only the index and the archive it was asked for, through
-the existing `ureq`/rustls agent, `ETag`-cached on disk, carrying no identifier of any kind —
-README says no telemetry and this is where that promise is easiest to break by accident. Offline
-shows the cache. Obsidian proves GitHub-as-CDN carries 2,000 plugins.
+**Artifacts and index.** CI builds each plugin from source to `wasm32-unknown-unknown` — the
+target the sandbox links, and not `wasm32-wasip1`, which imports things a module here is refused
+for importing — reads what it built with the host's own `crook-plugin-info`, and publishes one
+static `index.json` beside the artifacts. **No server exists.** Obsidian proves GitHub-as-CDN
+carries 2,000 plugins.
+
+The file, which `app/src/plugins/store/index.rs` is the reader for:
+
+```json
+{
+  "schema": 1,
+  "plugins": [
+    {
+      "id": "theguriev/pirate",
+      "name": "Pirate",
+      "description": "How much of the Claude Code session budget is spent, and when it resets.",
+      "repository": "https://github.com/theguriev/crook-pirate",
+      "license": "MIT",
+      "versions": [
+        {
+          "version": "0.3.0",
+          "abi": 8,
+          "url": "https://theguriev.github.io/crook-plugins/artifacts/theguriev.pirate-0.3.0.wasm",
+          "sha256": "…",
+          "bytes": 122880,
+          "capabilities": ["net:api.anthropic.com", "file:~/.claude/.credentials.json"],
+          "asks": ["Reach api.anthropic.com", "Read ~/.claude/.credentials.json"],
+          "yanked": null
+        }
+      ]
+    }
+  ]
+}
+```
+
+Five decisions are in that shape:
+
+- **`abi` is per artifact, not a range per plugin.** The host compares one integer and refuses
+  every other version by name, so a range would let a plugin resolve to something that installs
+  and is then turned away at load. What it costs is that an ABI bump makes every plugin
+  invisible to updated Crooks until each is rebuilt — and what saves it from being a cliff is
+  that the index keeps *every* version: a Crook still on ABI 8 goes on being offered the last
+  0.x built for 8 long after the registry has moved on.
+- **`yanked` is a reason, not a flag**, and it is per version. "This version is gone" with no
+  reason leaves somebody nothing to decide with, and a yank that took the whole plugin with it
+  would take four working versions down with one bad one. A yanked version is not offered and
+  the one under it is.
+- **`capabilities` are the grant keys**, the same strings `settings.json` writes, so that "you
+  have already allowed this" is a comparison rather than a translation. `asks` is the same list
+  as the sentences the permission dialog says, so a person can read what a plugin wants before
+  downloading a byte of it.
+- **The index is a mirror and never the authority.** Every field of it was read out of the
+  module by the registry's copy of the host's own reader, so the two agree — but what a plugin
+  is allowed to do is decided against the module that arrives, and one whose manifest does not
+  match what the index promised is refused rather than installed.
+- **`sha256` is not a signature and nothing calls it verification.** The registry builds the
+  artifact and writes the hash in the same run, so a match says the bytes that arrived are the
+  bytes that were built and nothing about who built them. What it is worth is real anyway: a
+  truncated download, a moved URL now serving something else, and a stale mirror are each
+  caught before anything runs, and a version somebody agreed to install is the version that
+  installs.
+
+**The fetch is the first request Crook makes of its own**, and every other byte this application
+has sent belonged to a plugin under a capability somebody granted by host name. So: nothing is
+sent that identifies anybody — a `GET` and an `If-None-Match` carrying a tag the registry itself
+wrote, no account, no machine id, no version, no list of what is installed; nothing is fetched
+until somebody opens the store, not at launch and not on a timer; and a failed fetch is the
+cached list with a line saying how old it is, never an empty page. The cache lives under the
+*data* directory beside the plugins rather than under the cache directory, because it is not
+only a speed-up: it is the only record of which versions have been **withdrawn**, and that has
+to survive a spring clean and a launch with no network. An index that cannot be read withdraws
+nothing, which is the safe direction.
 
 **Built-ins.** The same mechanism, dogfooded: default Tier-2 plugins are embedded in the binary
 with `include_bytes!` (no build script needed) and listed in the index with `builtin: true`, so

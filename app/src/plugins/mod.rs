@@ -31,6 +31,7 @@ mod plugins_page;
 pub mod settings;
 mod shell;
 pub mod shortcuts;
+pub mod store;
 pub mod tabs;
 pub mod wasm;
 pub mod window;

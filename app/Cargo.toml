@@ -51,6 +51,8 @@ unicode-width.workspace = true
 png.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# What says the module the store downloaded is the module the index named.
+sha2.workspace = true
 # The network a sandboxed plugin reaches through the host: a plugin never
 # opens a socket, it asks, and this is what does the asking on its behalf.
 ureq.workspace = true
