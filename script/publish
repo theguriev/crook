@@ -5,11 +5,13 @@
 #   ./script/publish --dry-run    # everything except the upload
 #   ./script/publish
 #
-# There is one of them: `crook_plugin_api`, the vocabulary a sandboxed plugin
-# is written against. It is published because a plugin is written *outside*
-# this repository — the four that exist each carry a vendored copy of that
-# crate, and a copy is how a host and a guest come to hold two lists of
-# capabilities that disagree.
+# There are two. `crook_plugin_api` is the vocabulary a sandboxed plugin is
+# written against, and every plugin that exists carries a vendored copy of it
+# for want of a published one — which is how a host and a guest come to hold
+# two lists of capabilities that disagree. `crook_wasm` is the sandbox, and it
+# goes with it for one job: `crook-plugin-info`, the reader a registry
+# describes an artifact with, which has to be the host's own or the index and
+# the terminal will not agree about what a plugin is.
 #
 # Not a CI job, and not one by accident: publishing is the one irreversible
 # thing in this tree — crates.io yanks a version, it never deletes one — and it
@@ -24,8 +26,9 @@ cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 
 # In dependency order, which is the order they have to be uploaded in: a crate
-# whose dependency is not on crates.io yet does not publish.
-CRATES="crook_plugin_api"
+# whose dependency is not on crates.io yet does not publish, and `cargo
+# publish --dry-run` on the second one fails until the first is up for real.
+CRATES="crook_plugin_api crook_wasm"
 
 DRY_RUN=0
 
@@ -33,8 +36,10 @@ usage() {
   cat <<'USAGE'
 Usage: ./script/publish [--dry-run]
 
-Publishes crook_plugin_api to crates.io, after running the checks CI runs.
---dry-run does everything except the upload.
+Publishes crook_plugin_api and crook_wasm to crates.io, in that order,
+after running the checks CI runs. --dry-run does everything except the
+upload — and cannot check crook_wasm until crook_plugin_api is up, because
+packaging rewrites the path dependency to a registry one.
 USAGE
 }
 

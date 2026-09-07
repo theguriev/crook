@@ -440,7 +440,7 @@ crates/crookui_core/     entities, handles, contexts, elements, layout, Scene   
 crates/crookui/          winit windowing, wgpu renderer, cosmic-text font stack (MIT)
 crates/crook_plugin/     identities, manifests, slots and registration guards   (MIT)
 crates/crook_plugin_api/ the wire a sandboxed plugin and its host share (MIT, on crates.io)
-crates/crook_wasm/       the wasmi sandbox: fuel, memory, and checked bytes     (MIT)
+crates/crook_wasm/       the wasmi sandbox: fuel, memory, and checked bytes (MIT, on crates.io)
 crates/crook_terminal/   pty, emulator, and the snapshot the renderer draws     (MIT)
 docs/architecture.md     the design, and the reasoning behind each divergence
 docs/blocks.md           the block surface: what draws it, and what it does not do yet
@@ -448,11 +448,14 @@ docs/plugins.md          the two plugin tiers, and what each of them may do
 script/                  bootstrap, run, bundle, publish
 ```
 
-One crate is meant to leave this repository. A plugin is written outside it, by somebody with
+Two crates are meant to leave this repository. A plugin is written outside it, by somebody with
 no checkout, and `crook_plugin_api` is the one thing they cannot do without — so it is packaged
 for crates.io and versioned `0.<abi>.<patch>`, which makes `crook_plugin_api = "0.8"` Cargo's
-way of writing "built against ABI 8". `./script/publish` is what uploads it, and until the
-first upload every plugin carries a copy of that crate instead.
+way of writing "built against ABI 8". `crook_wasm` goes with it for one job: `cargo install
+crook_wasm` puts `crook-plugin-info` on a machine, which is how a registry says what an
+artifact it just built actually is, using the host's own reader rather than a second one.
+`./script/publish` is what uploads them, and until the first upload every plugin carries a copy
+of the API crate instead.
 
 
 ## Checks
