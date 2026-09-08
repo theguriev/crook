@@ -237,6 +237,13 @@ struct Overrides {
     /// CI, and this one draws a tree written down in the repository. See
     /// [`plugins::wasm::fixture`](crate::plugins::wasm::fixture).
     fixture: Option<PathBuf>,
+    /// A module to run without installing it, and to run again every time it
+    /// is built.
+    ///
+    /// The plugin somebody is *writing*, which is a different thing from one
+    /// they chose to have: nothing is copied anywhere, and when the window
+    /// closes the machine is as it was.
+    dev_plugin: Option<PathBuf>,
     /// Start with the Themes panel open, and — with `creating` — on its
     /// creator.
     ///
@@ -512,6 +519,15 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
             // Not a plugin and not a setting: a fixture is a *picture*, and
             // it lives for the run that takes one. See
             // `plugins::wasm::fixture`.
+            // Not installed and not remembered: the module runs from wherever
+            // it was built, for as long as this window is open. See
+            // `plugins::wasm::dev`.
+            "--dev-plugin" => {
+                let path = args
+                    .next()
+                    .context("`--dev-plugin` needs a module, or the directory it is built in")?;
+                overrides.dev_plugin = Some(PathBuf::from(path));
+            }
             "--plugin-fixture" => {
                 let path = args
                     .next()
@@ -732,6 +748,11 @@ OPTIONS:
                        it was allowed to do, and exit
     --plugins          List the plugins installed as files: name, version and
                        which file each is running from
+    --dev-plugin <PATH>
+                       Run the plugin you are writing, from wherever you built
+                       it, and run it again every time you build it. Takes a
+                       `.wasm` or the directory holding one. Nothing is
+                       installed and nothing is left behind
     --plugin-fixture <PATH>
                        Draw a fixed plugin surface, read from a JSON file of
                        slot names to the shapes a plugin describes, so a
@@ -910,6 +931,13 @@ THE INPUT FIELD:
 /// from costing anybody a save; a fleet of polling plugins would want this
 /// number raised, and there is nothing here that can count them at startup
 /// because a plugin is installed by dropping a file in a directory.
+///
+/// One more chain exists and is deliberately not counted: the watch behind
+/// `--dev-plugin`, which parks a worker between looks exactly as the others
+/// do. It is not counted because it is not there — the flag has to be typed,
+/// and a person typing it is a person building a plugin on a machine they are
+/// paying attention to. If it were ever anything but a development flag, this
+/// number would be six.
 ///
 /// The store is deliberately not on that list, and it is worth saying why
 /// since it is the newest thing that reaches the network. It parks nothing: a
@@ -1092,6 +1120,15 @@ fn open_window(channel: Channel, frames: Option<u32>, overrides: Overrides) -> R
 
     // Everything fallible happens before the event loop takes over, because
     // the delegate is built inside a closure that cannot report an error.
+    //
+    // The dev plugin's path is resolved here for that reason and one more: a
+    // `--dev-plugin` naming nothing should be a line where the flag was typed,
+    // not a window that opens missing the one thing it was started for.
+    if let Some(path) = launch.overrides.dev_plugin.as_deref() {
+        crate::plugins::wasm::dev::Dev::module(path)
+            .map_err(anyhow::Error::msg)
+            .with_context(|| path.display().to_string())?;
+    }
     let font_db = CosmicFontDb::new().context("no usable system fonts")?;
     // Blocking, and deliberately: one small file, read once, before there is a
     // window to stall. Before the fonts, because it names one of them.
@@ -1203,12 +1240,15 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
     // Before the window, because a fixture that is not one is a line to print
     // rather than a window to open — and a closure that builds a window has
     // nowhere to return an error to.
-    let plugins = with_fixture(
-        match overrides.with_plugins {
-            true => everything_installed(),
-            false => crate::plugins::defaults(),
-        },
-        overrides.fixture.as_deref(),
+    let plugins = with_dev_plugin(
+        with_fixture(
+            match overrides.with_plugins {
+                true => everything_installed(),
+                false => crate::plugins::defaults(),
+            },
+            overrides.fixture.as_deref(),
+        )?,
+        overrides.dev_plugin.as_deref(),
     )?;
     let (window_id, workspace) = app.add_window(|ctx| {
         Workspace::new(
@@ -2073,6 +2113,52 @@ fn with_fixture(
     Ok(plugins)
 }
 
+/// The same, for the plugin somebody is writing.
+///
+/// The path is resolved here so that a `--dev-plugin` naming nothing is a line
+/// on the command line rather than a window that opens missing the one thing
+/// it was started for. Whether the module *loads* is a different question and
+/// deliberately not this one: a build that is half written is the ordinary
+/// state of a plugin being worked on, and the watcher takes the next one.
+fn with_dev_plugin(
+    mut plugins: Vec<Box<dyn crate::plugin::Plugin>>,
+    dev: Option<&std::path::Path>,
+) -> Result<Vec<Box<dyn crate::plugin::Plugin>>> {
+    let Some(path) = dev else {
+        return Ok(plugins);
+    };
+
+    use crate::plugins::wasm::dev::Dev;
+
+    let module = Dev::module(path)
+        .map_err(anyhow::Error::msg)
+        .with_context(|| path.display().to_string())?;
+
+    // Loaded here rather than by the watcher, so that the plugin somebody is
+    // writing is on the *first* frame: a window that came up without it and
+    // grew it a second later would be a second of every launch, and a
+    // snapshot with nothing in it.
+    //
+    // A module that does not open is a line and a window that still opens,
+    // because half a build is the ordinary state of a plugin being written and
+    // the next one is a second away.
+    let seen = Dev::about(&module);
+    match std::fs::read(&module)
+        .map_err(|why| why.to_string())
+        .and_then(|bytes| crate::plugins::wasm::opened(&bytes).map(|plugin| (plugin, bytes.len())))
+    {
+        Ok((plugin, bytes)) => {
+            let named = crate::plugin::Plugin::manifest(&plugin).id.clone();
+            log::info!("{named} from {} ({bytes} bytes)", module.display());
+            plugins.push(Box::new(plugin));
+        }
+        Err(why) => log::warn!("{}: {why}", module.display()),
+    }
+
+    plugins.push(Box::new(Dev::watching(module, seen)));
+    Ok(plugins)
+}
+
 /// Which installed plugins the registry has withdrawn, and why.
 ///
 /// Read off the store's copy of the index — the file the Store section keeps
@@ -2130,7 +2216,17 @@ impl Shell {
             Rc::new(move || proxy.exit())
         };
 
-        let plugins = everything_installed();
+        // A path that names nothing was already refused before the window was
+        // asked for — see `open_window` — so anything wrong here is a plugin
+        // that will not load, which the watcher says and the window survives.
+        let plugins = with_dev_plugin(
+            everything_installed(),
+            launch.overrides.dev_plugin.as_deref(),
+        )
+        .unwrap_or_else(|why| {
+            log::warn!("{why:#}");
+            everything_installed()
+        });
         let (window_id, workspace) = app.add_window(|ctx| {
             Workspace::new(
                 fonts,

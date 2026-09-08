@@ -23,6 +23,7 @@
 //! on frame one will trap on frame two, and a terminal that finds that out
 //! sixty times a second has stopped working.
 
+pub mod dev;
 pub mod fixture;
 mod install;
 pub(super) mod picker;

@@ -1154,6 +1154,12 @@ impl Workspace {
         let plugin = crate::plugins::wasm::opened(bytes)?;
         let manifest = crate::plugin::Plugin::manifest(&plugin);
 
+        // Not something that is already here in the binary. A registry row
+        // naming `crook/tabs` would otherwise take the tab strip out of the
+        // window and put a stranger's module where it was — the one thing a
+        // store must never be able to do, and one comparison to refuse.
+        self.refuse_a_builtin(manifest)?;
+
         // What the module says about itself against what the list that
         // offered it said, before a byte is written. An index is a mirror and
         // never the authority — a row promising one capability and a module
@@ -1163,6 +1169,51 @@ impl Workspace {
         promised(manifest)?;
 
         crate::plugins::wasm::installed_bytes(bytes)?;
+        self.run_module(plugin, ctx)
+    }
+
+    /// Runs a module without installing it: the plugin somebody is *writing*.
+    ///
+    /// Everything [`Self::install_plugin`] does except the writing, because
+    /// there is nothing to write — the file is wherever `cargo build` put it,
+    /// and the whole point of `--dev-plugin` is that the next build is the
+    /// next version with no copy in between.
+    pub fn run_dev_plugin(
+        &mut self,
+        bytes: &[u8],
+        ctx: &mut ViewContext<Self>,
+    ) -> Result<&'static crook_plugin::Manifest, String> {
+        let plugin = crate::plugins::wasm::opened(bytes)?;
+        self.refuse_a_builtin(crate::plugin::Plugin::manifest(&plugin))?;
+        self.run_module(plugin, ctx)
+    }
+
+    /// A module that is not one of Crook's own, or the reason it is not
+    /// allowed to be.
+    fn refuse_a_builtin(&self, manifest: &'static crook_plugin::Manifest) -> Result<(), String> {
+        let taken = self
+            .host
+            .available()
+            .iter()
+            .find(|carried| carried.id == manifest.id)
+            .is_some_and(|carried| carried.tier == crook_plugin::Tier::Native);
+
+        match taken {
+            true => Err(format!(
+                "{} is one of Crook's own, and a plugin cannot replace it",
+                manifest.id
+            )),
+            false => Ok(()),
+        }
+    }
+
+    /// Carries a module into the window that is open, and says whether it ran.
+    fn run_module(
+        &mut self,
+        plugin: crate::plugins::wasm::WasmPlugin,
+        ctx: &mut ViewContext<Self>,
+    ) -> Result<&'static crook_plugin::Manifest, String> {
+        let manifest = crate::plugin::Plugin::manifest(&plugin);
 
         // Carried and run, unless this is a plugin somebody switched off:
         // installing a new version of one that is off is an *update*, and an
@@ -1181,13 +1232,13 @@ impl Workspace {
         self.sync_input_keys();
         ctx.notify();
 
-        // A module that will not *build* is installed and not running, and the
-        // difference matters to whoever pressed the button: the file is there,
-        // the row is on the page, and the reason belongs in the answer rather
-        // than only on a card they would have to go and find.
+        // A module that will not *build* is carried and not running, and the
+        // difference matters to whoever asked for it: the row is on the page,
+        // the file is wherever it was, and the reason belongs in the answer
+        // rather than only on a card they would have to go and find.
         match run && !self.host.is_loaded(&manifest.id) {
             true => Err(format!(
-                "{} was installed and did not start: {}",
+                "{} did not start: {}",
                 manifest.id,
                 self.host
                     .refused()
