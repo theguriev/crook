@@ -80,10 +80,11 @@ use std::time::Instant;
 
 use crook_terminal::{Snapshot, TerminalSize};
 use crookui_core::element::SizeConstraint;
-use crookui_core::elements::Padding;
+use crookui_core::elements::{MouseStateHandle, Padding};
 use crookui_core::event::{DispatchedEvent, Event, MouseButton};
 use crookui_core::fonts::{Properties, Weight};
 use crookui_core::geometry::{Point, Vector2F, vec2f};
+use crookui_core::icons::Lucide;
 use crookui_core::prelude::*;
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 
@@ -95,12 +96,14 @@ use crate::terminal_font::CellFont;
 use crate::terminal_model::TerminalHandle;
 use crate::theme::theme;
 
+use super::action::FindAction;
 use super::action::{BlockAction, WorkspaceAction};
 use super::block_list::{self, BlockList};
 use super::block_menu;
 use super::input_element::{CommandInput, Ink};
 use super::pane_output::Keys;
 use super::terminal_element::{TerminalElement, color};
+use super::text_field::TextField;
 use super::view::Workspace;
 
 /// The gap between a pane's edge and the text inside it, left and right.
@@ -371,6 +374,15 @@ fn contents(
     // theme's, so that a shell which changed them takes the field with it.
     let ink = Ink::of(&snapshot);
     let surface = pane_surface::of(&snapshot, Instant::now());
+    // The find bar is over the list of commands. A full-screen program takes
+    // the whole pane and draws one grid, so a bar left open from before it
+    // started would steal Enter from it — close it as the surface leaves the
+    // list, which is where the snapshot to see that is.
+    if surface.surface != Surface::Blocks
+        && let Some(find) = workspace.find(id)
+    {
+        find.close();
+    }
     // Read before the snapshot goes to the surface, and from the same three
     // facts the list itself reads, so the two elements cannot disagree about
     // whether they share a row. See `block_list::inline_start`.
@@ -481,9 +493,20 @@ fn blocks(
     // them. See `block_list::paint_control`.
     let available = workspace.block_menu_is_available();
     let menu = workspace.block_menu().block_in(pane).filter(|_| available);
+    // The find bar and the highlight are the same walk: the matches feed the
+    // list so it can paint them, and the bar so it can count them.
+    let finding = workspace.find(pane).filter(|find| find.is_open());
+    let matches = if finding.is_some() {
+        workspace.find_matches(pane, app)
+    } else {
+        Vec::new()
+    };
+    let current = finding.and_then(|find| find.clamped(matches.len()));
+
     let mut list = BlockList::new(history, snapshot, font, view.clone())
         .with_terminal(handle.clone(), keyboard.keys)
-        .with_menu(available, menu);
+        .with_menu(available, menu)
+        .with_find(matches.clone(), current);
     // The list is given the composer only while one is drawn under it, and
     // that is what decides who the keyboard belongs to: with no field the
     // block is a running program and every key is its own. It reads the line
@@ -504,6 +527,27 @@ fn blocks(
             .with_links(interaction.links.clone());
     }
     let list = list.finish();
+
+    // The bar floats over the top-right of the output, the way a browser's
+    // does: it is about the whole pane, so it does not take a row from it.
+    let list = match finding {
+        Some(find) => {
+            let bar = find_bar(workspace, pane, find, &matches);
+            let mut stack = Stack::new().with_child(list);
+            stack.add_anchored_overlay_child(
+                bar,
+                AnchorTo {
+                    parent: Corner::TopRight,
+                    child: Corner::TopRight,
+                    offset: vec2f(-FIND_BAR_INSET, FIND_BAR_INSET),
+                    keep_on_screen: true,
+                    keep_clear_of_parent: false,
+                },
+            );
+            stack.finish()
+        }
+        None => list,
+    };
 
     if menu.is_none() {
         return list;
@@ -1142,5 +1186,147 @@ impl Element for SplitDivider {
 
     fn origin(&self) -> Option<Point> {
         self.origin
+    }
+}
+
+/// How far in from the corner the find bar sits.
+const FIND_BAR_INSET: f32 = 10.;
+/// The icon size on the bar's buttons.
+const FIND_BUTTON_ICON: f32 = 14.;
+
+/// The find bar itself: a field, a count, two steps and a way out.
+///
+/// Everything on it dispatches a [`FindAction`] about `pane`, named rather
+/// than done here for the reason every control does: the handler runs with a
+/// `&mut Workspace` this render pass does not have. The field is the tab
+/// search box's, one screen over — it announces a press and lets the workspace
+/// decide what the press means.
+fn find_bar(
+    workspace: &Workspace,
+    pane: PaneId,
+    find: &crate::pane_find::PaneFind,
+    matches: &[crate::selection::Selection],
+) -> Box<dyn Element> {
+    let total = matches.len();
+    let current = find.clamped(total);
+    let has_matches = total > 0;
+
+    let field = ConstrainedBox::new(
+        TextField::new(
+            find.input(),
+            workspace.clipboard().clone(),
+            workspace.fonts(),
+            find.field(),
+            "Find in output",
+        )
+        .with_icon(Lucide::Search)
+        .with_focus(WorkspaceAction::Find {
+            pane,
+            action: FindAction::Open,
+        })
+        .finish(),
+    )
+    .with_width(190.)
+    .finish();
+
+    let count = if find.query().is_empty() {
+        String::new()
+    } else if !has_matches {
+        "No results".to_owned()
+    } else {
+        format!("{}/{}", current.map_or(1, |index| index + 1), total)
+    };
+
+    let mut row = Flex::row()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_spacing(6.)
+        .with_child(field);
+
+    if !count.is_empty() {
+        row.add_child(
+            Text::new(count, workspace.fonts().ui, 11.)
+                .with_color(theme().text_muted)
+                .finish(),
+        );
+    }
+
+    row.add_child(find_button(
+        find.step_state(false),
+        Lucide::ChevronUp,
+        WorkspaceAction::Find {
+            pane,
+            action: FindAction::Step { forward: false },
+        },
+        has_matches,
+    ));
+    row.add_child(find_button(
+        find.step_state(true),
+        Lucide::ChevronDown,
+        WorkspaceAction::Find {
+            pane,
+            action: FindAction::Step { forward: true },
+        },
+        has_matches,
+    ));
+    row.add_child(find_button(
+        find.close_state(),
+        Lucide::X,
+        WorkspaceAction::Find {
+            pane,
+            action: FindAction::Close,
+        },
+        true,
+    ));
+
+    Container::new(row.finish())
+        .with_background_color(theme().surface_raised)
+        .with_border(Border::all(1.).with_border_color(theme().overlay_2))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(7.)))
+        .with_padding(Padding {
+            top: 5.,
+            bottom: 5.,
+            left: 7.,
+            right: 6.,
+        })
+        .finish()
+}
+
+/// One of the find bar's buttons: an icon that lights under the pointer and
+/// dispatches `action`, or a greyed one that does nothing when there is
+/// nothing to do — no match to step to.
+fn find_button(
+    state: MouseStateHandle,
+    icon: Lucide,
+    action: WorkspaceAction,
+    enabled: bool,
+) -> Box<dyn Element> {
+    let colour = if enabled {
+        theme().text_muted
+    } else {
+        theme().overlay_3
+    };
+    let button = Hoverable::new(state, move |mouse| {
+        let ground = if enabled && mouse.is_hovered() {
+            theme().overlay_2
+        } else {
+            Color::TRANSPARENT
+        };
+        Container::new(
+            Icon::new(icon, FIND_BUTTON_ICON)
+                .with_color(colour)
+                .finish(),
+        )
+        .with_uniform_padding(3.)
+        .with_background_color(ground)
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
+        .finish()
+    });
+    if enabled {
+        button
+            .on_click(move |_, ctx, _| ctx.dispatch_typed_action(action))
+            .finish()
+    } else {
+        button.finish()
     }
 }

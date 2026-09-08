@@ -8587,6 +8587,45 @@ mod shells {
     }
 
     #[test]
+    fn a_program_in_a_marked_shell_reports_its_status_to_the_strip() {
+        // The whole chain, with a real shell: the sequence `crook --agent`
+        // writes, through the pty, the emulator, the model's subscription and
+        // into the session the row is drawn from — and then taken back by the
+        // shell's own `D` when the command ends.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = marked_shell(&mut harness) else {
+            return;
+        };
+        await_prompt(&mut harness, pane);
+
+        let status = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .tabs()
+                    .pane(pane)
+                    .map(|pane| pane.session().status)
+            })
+        };
+        assert_eq!(status(&harness), Some(AgentStatus::Idle));
+
+        harness.type_into(
+            pane,
+            "printf '\\033]6340;needs-input;port the tab bar\\007'; read\n",
+        );
+        harness.wait_for("the status never reached the strip", |harness| {
+            status(harness) == Some(AgentStatus::NeedsInput)
+        });
+        assert_eq!(harness.pane_title(pane), "port the tab bar");
+
+        // Ending the command — `read` gets its line — is the shell's `D`,
+        // which takes a waiting status back to idle.
+        harness.type_into(pane, "\n");
+        harness.wait_for("the command ending never took the status back", |harness| {
+            status(harness) == Some(AgentStatus::Idle)
+        });
+    }
+
+    #[test]
     fn a_shell_that_exits_closes_its_tab_and_takes_its_terminal_with_it() {
         // The ordinary case, and the one that closes the loop: the pane goes
         // through `TabAction::ClosePane`, the strip's change comes back round
@@ -10491,6 +10530,317 @@ mod shells {
             }
         }
     }
+
+    /// The find bar over a pane's output: what it counts, where it steps, and
+    /// what it does to the keyboard.
+    mod find {
+        use super::*;
+        use crate::tab::AgentStatus;
+
+        /// Opens the bar and leaves `query` in it, on a marked shell that has
+        /// printed `line` as one finished command. Returns the pane, or `None`
+        /// on a machine where no shell could be started.
+        fn searching(harness: &mut Harness, line: &str, query: &str) -> Option<PaneId> {
+            let pane = marked_shell(harness)?;
+            await_prompt(harness, pane);
+            harness.type_into(pane, &format!("printf '{line}'; echo\n"));
+            // Wait for the command to become a finished block, which is what
+            // the find walks — not for the output on the grid, which is
+            // harvested off it the moment the prompt comes back. `await_prompt`
+            // will not do: the shell is already at one when this starts, so it
+            // would return before the command had run at all.
+            harness.wait_for("the command never became a block", |harness| {
+                harness.workspace.read(&harness.app, |workspace, app| {
+                    workspace.terminal_blocks(pane, app).is_some_and(|blocks| {
+                        blocks.iter().any(|block| {
+                            block
+                                .command
+                                .as_deref()
+                                .is_some_and(|command| command.contains(line))
+                        })
+                    })
+                })
+            });
+
+            harness.run_command("crook/window/find");
+            let find = harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.find(pane).cloned())
+                .expect("the pane has a find bar");
+            assert!(find.is_open(), "the chord opened it");
+            find.input().edit(|editor| editor.set_text(query));
+            Some(pane)
+        }
+
+        fn matches(harness: &Harness, pane: PaneId) -> usize {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                workspace.find_matches(pane, app).len()
+            })
+        }
+
+        fn current(harness: &Harness, pane: PaneId) -> Option<usize> {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                let total = workspace.find_matches(pane, app).len();
+                workspace.find(pane).and_then(|find| find.clamped(total))
+            })
+        }
+
+        fn step(harness: &mut Harness, pane: PaneId, forward: bool) {
+            harness.dispatch_workspace_action(WorkspaceAction::Find {
+                pane,
+                action: crate::workspace::action::FindAction::Step { forward },
+            });
+        }
+
+        #[test]
+        fn it_counts_the_matches_and_steps_round_them() {
+            let mut harness = Harness::panel(1);
+            // `beta` is in the echoed command line once and in the output
+            // once: two matches, and a query nothing has to guess about.
+            let Some(pane) = searching(&mut harness, "alpha beta gamma", "beta") else {
+                return;
+            };
+
+            assert_eq!(2, matches(&harness, pane));
+            assert_eq!(Some(0), current(&harness, pane));
+
+            let scene = harness.frame();
+            assert!(
+                frame_text(&scene).contains("1/2"),
+                "the bar counts the current match out of the total"
+            );
+
+            step(&mut harness, pane, true);
+            assert_eq!(Some(1), current(&harness, pane));
+            step(&mut harness, pane, true);
+            assert_eq!(
+                Some(0),
+                current(&harness, pane),
+                "forward wraps round the end"
+            );
+            step(&mut harness, pane, false);
+            assert_eq!(Some(1), current(&harness, pane), "back wraps the other way");
+        }
+
+        #[test]
+        fn a_query_that_matches_nothing_says_so() {
+            let mut harness = Harness::panel(1);
+            let Some(pane) = searching(&mut harness, "alpha beta gamma", "nowhere") else {
+                return;
+            };
+
+            assert_eq!(0, matches(&harness, pane));
+            assert_eq!(None, current(&harness, pane));
+            let scene = harness.frame();
+            assert!(
+                frame_text(&scene).contains("results"),
+                "an open bar with a query nothing matches says so"
+            );
+        }
+
+        #[test]
+        fn the_bar_takes_the_keyboard_and_gives_it_back() {
+            let mut harness = Harness::panel(1);
+            let Some(pane) = searching(&mut harness, "alpha beta gamma", "beta") else {
+                return;
+            };
+
+            let field_has_keys = harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.find(pane).unwrap().input().has_keys()
+            });
+            assert!(field_has_keys, "the open bar is where the keyboard is");
+            assert!(!harness.pane_takes_keys(), "so the shell under it is not");
+
+            harness.dispatch_workspace_action(WorkspaceAction::Find {
+                pane,
+                action: crate::workspace::action::FindAction::Close,
+            });
+            let still_open = harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.find(pane).unwrap().is_open()
+            });
+            assert!(!still_open, "Escape closed it");
+            assert!(
+                harness.pane_takes_keys(),
+                "and the shell has the keyboard back"
+            );
+        }
+
+        #[test]
+        fn a_full_screen_program_has_no_find_bar() {
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            await_prompt(&mut harness, pane);
+            // The alternate screen: one grid, not a list of commands. The
+            // doubled backslash is the shell's: its printf is what turns \033
+            // into an ESC, so what is typed at it is a backslash and not an
+            // escape this Rust string already resolved.
+            harness.type_into(pane, "printf '\\033[?1049h'\n");
+            harness.wait_for("the alternate screen never came up", |harness| {
+                harness.alt_screen(pane)
+            });
+
+            harness.run_command("crook/window/find");
+            let opened = harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.find(pane).unwrap().is_open()
+            });
+            assert!(!opened, "Ctrl-F is the program's key, not a find bar's");
+            // Silence the unused import on machines with no shell.
+            let _ = AgentStatus::Idle;
+        }
+    }
+
+    /// Stepping through the finished blocks with the keyboard.
+    mod block_keyboard {
+        use super::*;
+        use crook_terminal::BlockId;
+
+        /// Runs three echo commands and returns the pane with three finished
+        /// blocks behind it, or `None` where no shell could be started.
+        fn three_commands(harness: &mut Harness) -> Option<PaneId> {
+            let pane = marked_shell(harness)?;
+            await_prompt(harness, pane);
+            for word in ["first", "second", "third"] {
+                harness.type_into(pane, &format!("echo {word}\n"));
+                harness.wait_for("a command never became a block", |harness| {
+                    harness.workspace.read(&harness.app, |workspace, app| {
+                        workspace.terminal_blocks(pane, app).is_some_and(|blocks| {
+                            blocks.iter().any(|block| {
+                                block.command.as_deref() == Some(&format!("echo {word}"))
+                            })
+                        })
+                    })
+                });
+            }
+            Some(pane)
+        }
+
+        fn ids(harness: &Harness, pane: PaneId) -> Vec<BlockId> {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                workspace
+                    .terminal_blocks(pane, app)
+                    .map(|blocks| blocks.iter().map(|block| block.id).collect())
+                    .unwrap_or_default()
+            })
+        }
+
+        fn selected(harness: &Harness, pane: PaneId) -> Option<BlockId> {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.pane_blocks(pane).and_then(|view| view.selected())
+            })
+        }
+
+        fn up(harness: &mut Harness) {
+            harness.run_command("crook/window/select-block-up");
+        }
+        fn down(harness: &mut Harness) {
+            harness.run_command("crook/window/select-block-down");
+        }
+
+        #[test]
+        fn stepping_up_walks_the_blocks_from_the_prompt_and_stops_at_the_top() {
+            let mut harness = Harness::panel(1);
+            let Some(pane) = three_commands(&mut harness) else {
+                return;
+            };
+            let blocks = ids(&harness, pane);
+            assert!(blocks.len() >= 3, "the three commands each left a block");
+            let top = blocks[0];
+            let last = blocks[blocks.len() - 1];
+            let second_last = blocks[blocks.len() - 2];
+            assert_eq!(
+                None,
+                selected(&harness, pane),
+                "the keyboard starts at the prompt"
+            );
+
+            up(&mut harness);
+            assert_eq!(
+                Some(last),
+                selected(&harness, pane),
+                "up from the prompt is the last block"
+            );
+            up(&mut harness);
+            assert_eq!(Some(second_last), selected(&harness, pane));
+            // All the way to the top, however many blocks the shell's own
+            // start-up left in front of the three.
+            for _ in 0..blocks.len() {
+                up(&mut harness);
+            }
+            assert_eq!(
+                Some(top),
+                selected(&harness, pane),
+                "the top is as far as up goes"
+            );
+        }
+
+        #[test]
+        fn stepping_down_returns_to_the_prompt_and_stays_there() {
+            let mut harness = Harness::panel(1);
+            let Some(pane) = three_commands(&mut harness) else {
+                return;
+            };
+            let blocks = ids(&harness, pane);
+            let last = blocks[blocks.len() - 1];
+            let second_last = blocks[blocks.len() - 2];
+
+            up(&mut harness); // last
+            up(&mut harness); // second last
+            assert_eq!(Some(second_last), selected(&harness, pane));
+
+            down(&mut harness);
+            assert_eq!(Some(last), selected(&harness, pane));
+            down(&mut harness);
+            assert_eq!(
+                None,
+                selected(&harness, pane),
+                "down off the last block is the prompt"
+            );
+            down(&mut harness);
+            assert_eq!(None, selected(&harness, pane), "and it stays there");
+        }
+
+        #[test]
+        fn escape_and_copy_are_the_selections_only_when_there_is_one() {
+            let mut harness = Harness::panel(1);
+            let Some(pane) = three_commands(&mut harness) else {
+                return;
+            };
+
+            // With nothing selected, Escape and the copy chord are nobody's
+            // here — they fall through to the pane.
+            assert_eq!(None, harness.action_for("escape", Modifiers::default()));
+            let copy = Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Modifiers::default()
+            };
+            assert_eq!(None, harness.action_for("c", copy));
+
+            up(&mut harness);
+            assert!(selected(&harness, pane).is_some());
+
+            // Now Escape clears it and the copy chord copies it.
+            assert!(matches!(
+                harness.action_for("escape", Modifiers::default()),
+                Some(WorkspaceAction::Block(
+                    crate::workspace::action::BlockAction::ClearSelection(_)
+                ))
+            ));
+            assert!(matches!(
+                harness.action_for("c", copy),
+                Some(WorkspaceAction::Block(
+                    crate::workspace::action::BlockAction::CopySelection(_)
+                ))
+            ));
+
+            harness.dispatch_workspace_action(WorkspaceAction::Block(
+                crate::workspace::action::BlockAction::ClearSelection(pane),
+            ));
+            assert_eq!(None, selected(&harness, pane), "Escape let go of it");
+        }
+    }
 }
 
 #[test]
@@ -11113,6 +11463,256 @@ mod the_bell {
         harness.dispatch_action(TabAction::FocusPane(failed));
 
         assert_eq!(status_of(&harness, failed), Some(AgentStatus::Failed));
+    }
+}
+
+/// The agent's own report: what a program in a pane says it is doing, and
+/// what the strip remembers about whether anybody saw it.
+mod the_agent {
+    use super::*;
+    use crate::terminal_model::TerminalUpdate;
+
+    fn report(harness: &mut Harness, pane: PaneId, status: AgentStatus, title: Option<&str>) {
+        let update = TerminalUpdate::Agent {
+            pane,
+            status,
+            title: title.map(str::to_owned),
+        };
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(&update, ctx);
+        });
+    }
+
+    fn session_of(harness: &Harness, pane: PaneId) -> (AgentStatus, bool, Option<String>) {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            let session = workspace
+                .tabs()
+                .pane(pane)
+                .expect("the pane is open")
+                .session();
+            (
+                session.status,
+                session.attention,
+                session.derived_title.clone(),
+            )
+        })
+    }
+
+    /// The pane of the tab that is *not* active.
+    fn background_of(harness: &Harness) -> PaneId {
+        let active = harness.focused_pane_id().expect("the window has a pane");
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| {
+                workspace
+                    .tabs()
+                    .panes()
+                    .map(|(_, pane)| pane.id())
+                    .find(|id| *id != active)
+            })
+            .expect("two tabs have two panes")
+    }
+
+    #[test]
+    fn what_the_agent_says_is_what_the_row_shows() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+
+        report(&mut harness, pane, AgentStatus::Running, None);
+        assert_eq!(
+            (AgentStatus::Running, false, None),
+            session_of(&harness, pane),
+            "the pane with the keyboard is being looked at, so nothing asks for a look"
+        );
+
+        report(&mut harness, pane, AgentStatus::NeedsInput, None);
+        assert_eq!(AgentStatus::NeedsInput, session_of(&harness, pane).0);
+    }
+
+    #[test]
+    fn a_title_in_the_report_is_the_agents_name_for_its_work() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+
+        report(
+            &mut harness,
+            pane,
+            AgentStatus::Running,
+            Some("port the tab bar"),
+        );
+
+        assert_eq!(
+            Some("port the tab bar".to_owned()),
+            session_of(&harness, pane).2
+        );
+        let shown = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tabs().active().map(|tab| tab.title().to_owned())
+        });
+        assert_eq!(Some("port the tab bar".to_owned()), shown);
+    }
+
+    #[test]
+    fn an_agent_stopping_where_nobody_is_looking_asks_for_a_look() {
+        let mut harness = Harness::new(2);
+        let away = background_of(&harness);
+
+        report(&mut harness, away, AgentStatus::Running, None);
+        assert_eq!(
+            (AgentStatus::Running, false, None),
+            session_of(&harness, away),
+            "an agent getting on with it is the one change nobody needs to see"
+        );
+
+        report(&mut harness, away, AgentStatus::NeedsInput, None);
+        assert_eq!(
+            (AgentStatus::NeedsInput, true, None),
+            session_of(&harness, away)
+        );
+
+        harness.dispatch_action(TabAction::FocusPane(away));
+        assert_eq!(
+            (AgentStatus::NeedsInput, false, None),
+            session_of(&harness, away),
+            "looking answers the request for a look, and not the agent's question"
+        );
+    }
+
+    #[test]
+    fn an_agent_going_back_to_work_takes_its_request_back() {
+        let mut harness = Harness::new(2);
+        let away = background_of(&harness);
+
+        report(&mut harness, away, AgentStatus::Failed, None);
+        assert!(session_of(&harness, away).1);
+
+        report(&mut harness, away, AgentStatus::Running, None);
+        assert_eq!(
+            (AgentStatus::Running, false, None),
+            session_of(&harness, away)
+        );
+    }
+
+    #[test]
+    fn a_bell_keeps_a_running_agent_running_and_still_asks_for_a_look() {
+        // The dot says what the agent said; the ring is remembered beside it.
+        let mut harness = Harness::new(2);
+        let away = background_of(&harness);
+        report(&mut harness, away, AgentStatus::Running, None);
+
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(
+                &TerminalUpdate::Bell {
+                    pane: away,
+                    while_running: true,
+                },
+                ctx,
+            );
+        });
+
+        assert_eq!(
+            (AgentStatus::Running, true, None),
+            session_of(&harness, away)
+        );
+        let shown = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tabs().pane(away).map(Pane::status)
+        });
+        assert_eq!(Some(AgentStatus::Running), shown);
+    }
+
+    #[test]
+    fn the_chord_goes_round_the_waiting_panes_in_the_panels_order() {
+        let mut harness = Harness::new(4);
+        let tabs = harness.tab_ids();
+        let first = harness.panes_of(tabs[0])[0];
+        let third = harness.panes_of(tabs[2])[0];
+        assert_eq!(
+            harness.active_id(),
+            tabs[3],
+            "the last tab opened is active"
+        );
+
+        harness.run_command("crook/tabs/next-waiting");
+        assert_eq!(
+            harness.active_id(),
+            tabs[3],
+            "nothing is waiting, so nothing moves"
+        );
+
+        report(&mut harness, third, AgentStatus::NeedsInput, None);
+        report(&mut harness, first, AgentStatus::Failed, None);
+        let count = harness.workspace.read(&harness.app, |workspace, _| {
+            crate::plugins::tabs::waiting_count(workspace.tabs())
+        });
+        assert_eq!(2, count);
+
+        // Round the end of the list: the first tab comes before the third.
+        harness.run_command("crook/tabs/next-waiting");
+        assert_eq!(harness.active_id(), tabs[0]);
+        assert_eq!(
+            (AgentStatus::Failed, false, None),
+            session_of(&harness, first),
+            "arriving is what answers the request for a look"
+        );
+
+        harness.run_command("crook/tabs/next-waiting");
+        assert_eq!(harness.active_id(), tabs[2]);
+
+        // The third is still waiting — an agent's question is not answered
+        // by a glance — but it is the one being looked at, so the chord has
+        // nowhere left to go and stays put.
+        harness.run_command("crook/tabs/next-waiting");
+        assert_eq!(harness.active_id(), tabs[2]);
+
+        // Leaving it makes it waiting again, from the strip's point of view.
+        harness.dispatch_action(TabAction::Select(tabs[3]));
+        harness.run_command("crook/tabs/next-waiting");
+        assert_eq!(harness.active_id(), tabs[2]);
+    }
+
+    #[test]
+    fn the_header_counts_the_waiting_panes_and_says_nothing_at_zero() {
+        let mut harness = Harness::new(2);
+        let away = background_of(&harness);
+
+        let scene = harness.frame();
+        assert!(
+            !frame_text(&scene).contains(" waiting"),
+            "a count of zero is not information"
+        );
+
+        report(&mut harness, away, AgentStatus::NeedsInput, None);
+        let scene = harness.frame();
+        assert!(frame_text(&scene).contains("1 waiting"));
+
+        harness.dispatch_action(TabAction::FocusPane(away));
+        let scene = harness.frame();
+        assert!(
+            !frame_text(&scene).contains(" waiting"),
+            "the one waiting pane is the one being looked at"
+        );
+    }
+
+    #[test]
+    fn only_a_pane_nobody_is_looking_at_is_waiting() {
+        let mut harness = Harness::new(2);
+        let away = background_of(&harness);
+        let here = harness.focused_pane_id().expect("the window has a pane");
+        report(&mut harness, away, AgentStatus::NeedsInput, None);
+        report(&mut harness, here, AgentStatus::NeedsInput, None);
+
+        let waiting = harness.workspace.read(&harness.app, |workspace, _| {
+            let waits = |pane: PaneId, active: bool| {
+                workspace
+                    .tabs()
+                    .pane(pane)
+                    .unwrap()
+                    .session()
+                    .is_waiting(active)
+            };
+            (waits(away, false), waits(here, true))
+        });
+
+        assert_eq!((true, false), waiting);
     }
 }
 

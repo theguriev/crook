@@ -69,6 +69,15 @@ pub enum WorkspaceAction {
     ReleaseSelection(PaneId),
     /// Something happened to the search box above the tabs.
     Search(SearchAction),
+    /// Something happened to the find bar over a pane's output.
+    Find {
+        /// Which pane's bar. A pane, not "the focused one", because a button
+        /// on the bar names the pane it is drawn over and the answer must not
+        /// depend on which pane the keyboard was in when it was clicked.
+        pane: PaneId,
+        /// What happened to it.
+        action: FindAction,
+    },
     /// Show one section of the sidebar, or `None` for the tab list.
     ///
     /// The sections come from a slot, so this carries a
@@ -124,6 +133,28 @@ impl From<SearchAction> for WorkspaceAction {
     fn from(action: SearchAction) -> Self {
         Self::Search(action)
     }
+}
+
+/// What a keystroke or a press does to a pane's find bar.
+///
+/// The shape of the search box's actions, one member longer: this box shares
+/// its screen with a shell too, so [`Self::Close`] is a way out that empties
+/// nothing — a query kept is a search a person comes back to — and the extra
+/// member is the one thing the tab search has no equivalent of, stepping
+/// between the several matches a query in a screenful of output turns up.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum FindAction {
+    /// Open the bar and put the keyboard in it. The chord, and a press on a
+    /// bar that is already open.
+    Open,
+    /// Take the bar down and give the keyboard back to the shell. Escape.
+    Close,
+    /// Go to the next match, or the previous one. Enter and Shift-Enter, and
+    /// the two buttons on the bar.
+    Step {
+        /// Forwards, rather than back.
+        forward: bool,
+    },
 }
 
 /// What the header does as a title bar.
@@ -248,6 +279,18 @@ pub enum BlockAction {
     ScrollTo(BlockEdge),
     /// Put the block's command line back in the composer, unsent.
     Rerun,
+    /// Step the keyboard's block selection one older, towards the top of the
+    /// list — or onto the last block from the prompt. Names a pane because,
+    /// unlike the menu's entries, it is reached from a chord over whichever
+    /// pane has the keyboard rather than from a block's own dots.
+    SelectUp(PaneId),
+    /// Step it one newer, towards the prompt, and off the last block back to
+    /// the prompt itself.
+    SelectDown(PaneId),
+    /// Let go of the block selection, back to composing at the prompt.
+    ClearSelection(PaneId),
+    /// Copy the selected block, the way its own copy control would.
+    CopySelection(PaneId),
 }
 
 /// Which of a block's facts an entry copies.

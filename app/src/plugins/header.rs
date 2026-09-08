@@ -23,6 +23,15 @@ use crate::workspace::Workspace;
 /// The one item pinned to the right of the header.
 pub const HEADER_RIGHT: SlotId = SlotId::new("header.right");
 
+/// The one item pinned to the left of it, after the panel.
+///
+/// A second slot rather than a second contribution to the first, for the
+/// reason the tab row has a mark and a badge: the right-hand item is a
+/// plugin's — the usage chip, in the box that ships it — and something Crook
+/// itself has to say about the window should not have to take that away to
+/// be said. It is [`Cardinality::Single`] on the same judgement as the other.
+pub const HEADER_LEFT: SlotId = SlotId::new("header.left");
+
 /// The plugin that owns the header's slot.
 pub struct Header;
 
@@ -33,6 +42,7 @@ impl Plugin for Header {
 
     fn build(&mut self, host: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
         host.declare_slot(HEADER_RIGHT, Cardinality::Single);
+        host.declare_slot(HEADER_LEFT, Cardinality::Single);
         Ok(())
     }
 }

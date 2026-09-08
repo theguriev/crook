@@ -171,9 +171,9 @@ impl Pane {
         self.session.display_title()
     }
 
-    /// What the agent in it is doing.
+    /// What the agent in it is doing, as the row's dot says it.
     pub fn status(&self) -> AgentStatus {
-        self.session.status
+        self.session.shown_status()
     }
 }
 

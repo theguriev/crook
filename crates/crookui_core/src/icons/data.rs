@@ -17,6 +17,9 @@ pub(super) static CHECK: &[Segment] = &[Move(20.0, 6.0), Line(9.0, 17.0), Line(4
 /// Lucide's `chevron-down`.
 pub(super) static CHEVRON_DOWN: &[Segment] = &[Move(6.0, 9.0), Line(12.0, 15.0), Line(18.0, 9.0)];
 
+/// Lucide's `chevron-up`.
+pub(super) static CHEVRON_UP: &[Segment] = &[Move(18.0, 15.0), Line(12.0, 9.0), Line(6.0, 15.0)];
+
 /// Lucide's `chevron-right`.
 pub(super) static CHEVRON_RIGHT: &[Segment] = &[Move(9.0, 18.0), Line(15.0, 12.0), Line(9.0, 6.0)];
 
@@ -320,6 +323,23 @@ pub(super) static DIFF: &[Segment] = &[
     Line(19.0, 21.0),
 ];
 
+/// Lucide's `bell`.
+pub(super) static BELL: &[Segment] = &[
+    Move(10.268, 21.0),
+    Cubic(10.6248, 21.618, 11.2864, 21.9999, 12.0, 21.9999),
+    Cubic(12.7136, 21.9999, 13.3752, 21.618, 13.732, 21.0),
+    Move(3.262, 15.326),
+    Cubic(2.9956, 15.618, 2.9263, 16.0417, 3.0857, 16.4034),
+    Cubic(3.2452, 16.7651, 3.6047, 16.9997, 4.0, 17.0),
+    Line(20.0, 17.0),
+    Cubic(20.3952, 17.0001, 20.755, 16.766, 20.9149, 16.4045),
+    Cubic(21.0748, 16.0431, 21.006, 15.6193, 20.74, 15.327),
+    Cubic(19.41, 13.956, 18.0, 12.499, 18.0, 8.0),
+    Cubic(18.0, 4.7085, 15.2915, 2.0, 12.0, 2.0),
+    Cubic(8.7085, 2.0, 6.0, 4.7085, 6.0, 8.0),
+    Cubic(6.0, 12.499, 4.589, 13.956, 3.262, 15.326),
+];
+
 /// Every icon, its Lucide name, and its geometry.
 ///
 /// One table rather than three `match`es, because the three answers are
@@ -327,6 +347,7 @@ pub(super) static DIFF: &[Segment] = &[
 pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [
     (Lucide::Check, "check", CHECK),
     (Lucide::ChevronDown, "chevron-down", CHEVRON_DOWN),
+    (Lucide::ChevronUp, "chevron-up", CHEVRON_UP),
     (Lucide::ChevronRight, "chevron-right", CHEVRON_RIGHT),
     (Lucide::Copy, "copy", COPY),
     (
@@ -348,10 +369,11 @@ pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [
     (Lucide::CornerLeftUp, "corner-left-up", CORNER_LEFT_UP),
     (Lucide::Keyboard, "keyboard", KEYBOARD),
     (Lucide::Diff, "diff", DIFF),
+    (Lucide::Bell, "bell", BELL),
 ];
 
 /// How many there are.
-pub const ICONS: usize = 19;
+pub const ICONS: usize = 21;
 
 /// The icons Crook draws, from Lucide.
 ///
@@ -363,10 +385,14 @@ pub enum Lucide {
     ///
     /// Lucide's [`check`](https://lucide.dev/icons/check).
     Check,
-    /// An open group's heading in the tabs panel: click to fold it away.
+    /// An open group's heading in the tabs panel; the find bar's step-to-next-match button.
     ///
     /// Lucide's [`chevron-down`](https://lucide.dev/icons/chevron-down).
     ChevronDown,
+    /// The find bar's step-to-previous-match button.
+    ///
+    /// Lucide's [`chevron-up`](https://lucide.dev/icons/chevron-up).
+    ChevronUp,
     /// A folded group's heading, in the same place.
     ///
     /// Lucide's [`chevron-right`](https://lucide.dev/icons/chevron-right).
@@ -435,4 +461,8 @@ pub enum Lucide {
     ///
     /// Lucide's [`diff`](https://lucide.dev/icons/diff).
     Diff,
+    /// The tabs that are waiting for you, on the chip in the header that counts them.
+    ///
+    /// Lucide's [`bell`](https://lucide.dev/icons/bell).
+    Bell,
 }

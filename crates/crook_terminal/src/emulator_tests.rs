@@ -502,3 +502,83 @@ fn test_an_ordinary_screen_carries_no_combining_table_at_all() {
     assert!(!snapshot.has_combining());
     assert!(snapshot.combining.is_empty());
 }
+
+#[test]
+fn test_a_program_reports_what_it_is_doing() {
+    let mut emulator = emulator();
+    assert_eq!(AgentReport::Idle, emulator.agent());
+
+    emulator.advance(b"\x1b]6340;needs-input;port the tab bar\x07");
+
+    assert_eq!(AgentReport::NeedsInput, emulator.agent());
+    assert_eq!(
+        vec![TerminalEvent::Agent(Reported {
+            status: AgentReport::NeedsInput,
+            title: Some("port the tab bar".to_owned()),
+        })],
+        emulator.take_events()
+    );
+}
+
+#[test]
+fn test_the_same_status_twice_is_reported_once_unless_it_brings_a_title() {
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b]6340;running\x07");
+    assert_eq!(1, emulator.take_events().len());
+
+    emulator.advance(b"\x1b]6340;running\x07");
+    assert!(emulator.take_events().is_empty());
+
+    // A title is news even when the status is not: the agent renamed its work.
+    emulator.advance(b"\x1b]6340;running;still at it\x07");
+    assert_eq!(1, emulator.take_events().len());
+}
+
+#[test]
+fn test_a_report_survives_a_split_between_two_reads() {
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b]6340;fai");
+    emulator.advance(b"led\x07");
+
+    assert_eq!(AgentReport::Failed, emulator.agent());
+}
+
+#[test]
+fn test_the_command_ending_takes_a_running_status_with_it() {
+    // An agent that was interrupted never says it stopped. The shell's `D`
+    // says it instead.
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07claude\r\n\x1b]133;C\x07");
+    emulator.advance(b"\x1b]6340;running\x07");
+    emulator.take_events();
+
+    emulator.advance(b"\x1b]133;D;130\x07");
+
+    assert_eq!(AgentReport::Idle, emulator.agent());
+    assert!(
+        emulator
+            .take_events()
+            .contains(&TerminalEvent::Agent(Reported {
+                status: AgentReport::Idle,
+                title: None,
+            }))
+    );
+}
+
+#[test]
+fn test_a_failure_outlives_its_command_and_goes_with_the_next_one() {
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07claude\r\n\x1b]133;C\x07");
+    emulator.advance(b"\x1b]6340;failed\x07\x1b]133;D;1\x07");
+    assert_eq!(AgentReport::Failed, emulator.agent());
+    emulator.take_events();
+
+    // The prompt coming back changes nothing; a new command starting does.
+    emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+    assert_eq!(AgentReport::Failed, emulator.agent());
+    assert!(emulator.take_events().is_empty());
+
+    emulator.advance(b"ls\r\n\x1b]133;C\x07");
+    assert_eq!(AgentReport::Idle, emulator.agent());
+    assert_eq!(1, emulator.take_events().len());
+}

@@ -93,7 +93,7 @@ use crookui_core::prelude::*;
 use crate::completion::{self, Completions};
 use crate::pane_surface;
 use crate::shell_integration;
-use crate::tab::PaneId;
+use crate::tab::{AgentStatus, PaneId};
 use crate::theme::theme;
 
 /// The longest a pane goes between repaints while its shell is talking.
@@ -206,6 +206,19 @@ pub enum TerminalUpdate {
     /// Tab twice quickly leaves two outstanding, and only the answer to the
     /// second is about the line on screen.
     Completions(PaneId, u64, Completions),
+    /// A program in the pane said what it is doing, or the command it was
+    /// running ended and the emulator took the status back to idle.
+    ///
+    /// The status is the app's own from here on: the wire's word is the
+    /// emulator's business, and what a tab does with it is the strip's.
+    Agent {
+        /// Which pane it is in.
+        pane: PaneId,
+        /// What it said.
+        status: AgentStatus,
+        /// What it called its work, when it said.
+        title: Option<String>,
+    },
 }
 
 /// The finished blocks of one pane, as the surface holds them.
@@ -825,6 +838,11 @@ impl TerminalModel {
                         updates.push(TerminalUpdate::ClipboardStore(pane, text));
                     }
                 }
+                TerminalEvent::Agent(reported) => updates.push(TerminalUpdate::Agent {
+                    pane,
+                    status: reported.status.into(),
+                    title: reported.title,
+                }),
                 // The enum is `#[non_exhaustive]`. A shell asking for something
                 // a later version of the emulator learned to report is not an
                 // error here; it is a line in the log and a feature to add.

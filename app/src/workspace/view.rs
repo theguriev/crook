@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// How often the themes folder is re-read while the Themes panel is open.
 ///
@@ -30,10 +30,11 @@ use crate::git_model::GitModel;
 use crate::input_keys::{Binding, Platform};
 use crate::keybindings::{Context, Keybindings, PendingSave, Recording, Resolution};
 use crate::pane_blocks::{PaneBlocks, ScrollCause};
+use crate::pane_find::PaneFind;
 use crate::pane_link::PaneLink;
 use crate::pane_selection::PaneSelection;
 use crate::pane_split::{DividerDrag, PaneExtent};
-use crate::pane_surface;
+use crate::pane_surface::{self, Surface};
 use crate::platform_insets::{ControlLayout, LayoutInsets, WindowChrome};
 use crate::plugin::{ActionId, ActionName, Host, PageId, PluginId, SectionId, Watch};
 use crate::plugins::settings::SETTINGS_SECTION;
@@ -54,8 +55,8 @@ use crate::window_controls::WindowHandle;
 use crate::{Channel, WINDOW_CHROME};
 
 use super::action::{
-    BlockAction, BlockEdge, BlockPart, OptionsAction, SearchAction, SettingsAction, TabMenuAction,
-    ThemeAction, WindowAction, WorkspaceAction, WorktreeAction,
+    BlockAction, BlockEdge, BlockPart, FindAction, OptionsAction, SearchAction, SettingsAction,
+    TabMenuAction, ThemeAction, WindowAction, WorkspaceAction, WorktreeAction,
 };
 use super::block_list::block_text;
 use super::settings_page::SettingsState;
@@ -115,6 +116,8 @@ pub(super) struct PaneInteraction {
     pub(super) body: MouseStateHandle,
     /// The selection gesture in the pane's output. See [`PaneSelection`].
     pub(super) selection: PaneSelection,
+    /// The find bar over the pane's output. See [`PaneFind`].
+    pub(super) find: PaneFind,
     /// The link under the pointer in the pane's output. See [`PaneLink`].
     pub(super) links: PaneLink,
     /// How many pixels the pane last measured along the split's axis. See
@@ -1775,7 +1778,166 @@ impl Workspace {
         self.section.is_none()
     }
 
-    /// Whether the keyboard is the search box's rather than the pane's.
+    /// One pane's find bar, when the pane is open.
+    pub(super) fn find(&self, pane: PaneId) -> Option<&PaneFind> {
+        self.interactions.get(&pane).map(|state| &state.find)
+    }
+
+    /// The focused pane's find bar, when there is a focused pane.
+    fn focused_find(&self) -> Option<&PaneFind> {
+        self.tabs.focused_pane_id().and_then(|pane| self.find(pane))
+    }
+
+    /// Whether the keyboard is a find bar's rather than the pane's.
+    ///
+    /// The bar is over the focused pane, so this is the focused pane's bar and
+    /// no other; every other clause is a thing that has taken the keyboard
+    /// away from panes wholesale, and this shares them with
+    /// [`Self::search_takes_keys`] so that a find bar and the tab search box
+    /// cannot both believe they are being typed into.
+    pub(super) fn find_takes_keys(&self) -> bool {
+        self.focused_find().is_some_and(PaneFind::is_open)
+            && !self.panel.open
+            && !self.a_popup_is_open()
+            && !self.host.a_surface_is_up()
+            && !self.search_takes_keys()
+    }
+
+    /// Every place the focused pane\'s find query occurs in its output, in
+    /// reading order — or nothing at all when the bar is empty or shut.
+    ///
+    /// Walked fresh rather than kept, because the output it searches changes
+    /// under the bar as a command prints: a list of matches held from a frame
+    /// ago would point at rows a `clear` had wiped. The block list is what it
+    /// searches, which is the surface the bar only ever opens over.
+    pub(super) fn find_matches(
+        &self,
+        pane: PaneId,
+        app: &AppContext,
+    ) -> Vec<crate::selection::Selection> {
+        let Some(find) = self.find(pane) else {
+            return Vec::new();
+        };
+        if !find.is_open() {
+            return Vec::new();
+        }
+        let query = find.query();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let (Some(history), Some((_, snapshot))) =
+            (self.terminal_blocks(pane, app), self.terminal(pane, app))
+        else {
+            return Vec::new();
+        };
+        Blocks::list(&history, &snapshot).find_all(&query)
+    }
+
+    /// Opens a pane's find bar with `query` already in it.
+    ///
+    /// For the command line's `--find-output`, which needs to put a picture of
+    /// a search on screen with no person there to type one. It is the two
+    /// things a person does — fill the field, press the chord — in order.
+    pub(crate) fn open_find_with(
+        &mut self,
+        pane: PaneId,
+        query: &str,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if let Some(find) = self.find(pane) {
+            find.input().edit(|editor| editor.set_text(query));
+        }
+        self.apply_find(pane, FindAction::Open, ctx);
+    }
+
+    /// Handles what a keystroke or a press did to a pane's find bar.
+    fn apply_find(&mut self, pane: PaneId, action: FindAction, ctx: &mut ViewContext<Self>) {
+        let Some(find) = self.find(pane).cloned() else {
+            return;
+        };
+        match action {
+            FindAction::Open => {
+                // Over the list of commands, never over a full-screen program:
+                // there the pane is one grid, the bar has nothing to search,
+                // and Ctrl-F is one of the program's own keys.
+                let is_blocks = self.terminal(pane, ctx).is_some_and(|(_, snapshot)| {
+                    pane_surface::of(&snapshot, Instant::now()).surface == Surface::Blocks
+                });
+                if !is_blocks {
+                    return;
+                }
+                find.open();
+                // Come back onto a match if the query already found some, so
+                // reopening a search shows where it left off rather than an
+                // emphasised nothing.
+                let matches = self.find_matches(pane, ctx);
+                if let Some(current) = find.clamped(matches.len()) {
+                    self.scroll_find_into_view(pane, &matches[current], ctx);
+                }
+            }
+            FindAction::Close => {
+                find.close();
+            }
+            FindAction::Step { forward } => {
+                let matches = self.find_matches(pane, ctx);
+                let delta = if forward { 1 } else { -1 };
+                if let Some(current) = find.step(delta, matches.len()) {
+                    self.scroll_find_into_view(pane, &matches[current], ctx);
+                }
+            }
+        }
+        self.sync_input_keys();
+        ctx.notify();
+    }
+
+    /// Brings a match into view in the pane\'s block list, if it is not
+    /// already.
+    ///
+    /// The match\'s own top row: `selection.anchor` is the start of it, and a
+    /// match on one line has its start and end on the same row. The line it is
+    /// on is the block\'s offset in the list plus the block\'s top padding
+    /// plus the row within it — the same arithmetic the height index is built
+    /// from — and a third of a screen is left above it so it lands in the body
+    /// of the viewport rather than jammed against its top edge.
+    fn scroll_find_into_view(
+        &self,
+        pane: PaneId,
+        selection: &crate::selection::Selection,
+        app: &AppContext,
+    ) {
+        let Some(view) = self.pane_blocks(pane) else {
+            return;
+        };
+        let block = selection.anchor.block;
+        let (Some(history), Some((_, snapshot))) =
+            (self.terminal_blocks(pane, app), self.terminal(pane, app))
+        else {
+            return;
+        };
+        let index = match history.iter().position(|finished| finished.id == block) {
+            Some(index) => index,
+            // The open block, whose id is the one the snapshot carries. Its
+            // index is one past the last finished block.
+            None if snapshot.live_block.id == block => history.len(),
+            None => return,
+        };
+        let top_padding = super::block_list::padding_top(history.get(index).map(|block| &**block));
+        let line = view.with_heights(|heights| heights.start(index))
+            + top_padding
+            + selection.anchor.row as f32;
+
+        let offset = view.offset();
+        let viewport = view.viewport();
+        // Already in view: leave the list where it is, so stepping between two
+        // matches a few lines apart does not lurch the whole screen.
+        if line >= offset && line < offset + viewport {
+            return;
+        }
+        let target = (line - viewport / 3.).max(0.);
+        view.apply(ScrollCause::ToLine(target));
+    }
+
+    /// Whether the keyboard is the search box\'s rather than the pane\'s.
     ///
     /// The wish is [`SearchState::is_focused`]; this is the wish granted. Every
     /// other clause is a thing that has taken the keyboard away from the pane
@@ -2453,7 +2615,113 @@ impl Workspace {
                 self.rerun_block_command(ctx);
                 self.close_block_menu(ctx);
             }
+            BlockAction::SelectUp(pane) => self.step_block_selection(pane, false, ctx),
+            BlockAction::SelectDown(pane) => self.step_block_selection(pane, true, ctx),
+            BlockAction::ClearSelection(pane) => {
+                if self.clear_block_selection(pane) {
+                    ctx.notify();
+                }
+            }
+            BlockAction::CopySelection(pane) => self.copy_selected_block(pane, ctx),
         }
+    }
+
+    /// Steps a pane's block selection: `down` towards the prompt, otherwise
+    /// towards the older commands at the top.
+    ///
+    /// The one gesture for both directions, because they are one line of
+    /// reasoning about the same three positions — at the prompt, on a block,
+    /// on the oldest block — and splitting it would be two arms that had to
+    /// agree about the middle. Stepping down off the last block goes back to
+    /// the prompt, which is what a person on the newest command means by
+    /// "further down"; stepping up from the prompt lands on the last block.
+    fn step_block_selection(&mut self, pane: PaneId, down: bool, ctx: &mut ViewContext<Self>) {
+        let Some(history) = self.terminal_blocks(pane, ctx) else {
+            return;
+        };
+        let count = history.len();
+        if count == 0 {
+            return;
+        }
+        let Some(view) = self.pane_blocks(pane) else {
+            return;
+        };
+        let current = view
+            .selected()
+            .and_then(|id| history.iter().position(|block| block.id == id));
+
+        // `None` means "leave it": at the oldest block Up does nothing, and at
+        // the prompt Down does nothing. The inner value is where to land, with
+        // `None` standing for the prompt.
+        let target: Option<Option<usize>> = if down {
+            match current {
+                None => None,
+                Some(index) if index + 1 < count => Some(Some(index + 1)),
+                Some(_) => Some(None),
+            }
+        } else {
+            match current {
+                None => Some(Some(count - 1)),
+                Some(index) if index > 0 => Some(Some(index - 1)),
+                Some(_) => None,
+            }
+        };
+        let Some(landing) = target else {
+            return;
+        };
+
+        let block = landing.and_then(|index| history.get(index).map(|block| block.id));
+        if !view.select(block) {
+            return;
+        }
+        // A block selection and a dragged text selection are two answers to
+        // "what would a copy take", so only one may be live at a time.
+        if let Some(interaction) = self.interactions.get(&pane) {
+            interaction.selection.clear();
+        }
+        if let Some(index) = landing {
+            self.scroll_block_into_view(pane, index);
+        }
+        ctx.notify();
+    }
+
+    /// Lets go of a pane's block selection, reporting whether there was one.
+    fn clear_block_selection(&mut self, pane: PaneId) -> bool {
+        self.pane_blocks(pane).is_some_and(|view| view.select(None))
+    }
+
+    /// Puts the selected block's whole text on the clipboard.
+    fn copy_selected_block(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        let (Some(view), Some(history), Some((_, snapshot))) = (
+            self.pane_blocks(pane),
+            self.terminal_blocks(pane, ctx),
+            self.terminal(pane, ctx),
+        ) else {
+            return;
+        };
+        let Some(block) = view.selected() else {
+            return;
+        };
+        let blocks = crate::selection::Blocks::list(&history, &snapshot);
+        if let Some(text) = super::block_list::block_text(&blocks, block, 0) {
+            self.clipboard.write(text.trim_end());
+        }
+    }
+
+    /// Brings the block at `index` into the pane's viewport if it is not
+    /// already, the way stepping the find bar's matches does.
+    fn scroll_block_into_view(&self, pane: PaneId, index: usize) {
+        let Some(view) = self.pane_blocks(pane) else {
+            return;
+        };
+        let line = view.with_heights(|heights| heights.start(index));
+        let offset = view.offset();
+        let viewport = view.viewport();
+        if line >= offset && line < offset + viewport {
+            return;
+        }
+        let target = (line - viewport / 3.).max(0.);
+        view.apply(ScrollCause::ToLine(target));
     }
 
     /// Opens the menu on one block, and reads what it needs off it.
@@ -3674,29 +3942,59 @@ impl Workspace {
             // that means a pane has gone.
             return true;
         }
+        self.update_session(pane, ctx, |session| session.attention = true)
+    }
+
+    /// Records what the program in a pane said it was doing.
+    ///
+    /// The status is written as said, and the title beside it when one came:
+    /// it is the agent's own name for its work, which is what
+    /// `derived_title` has always been. What is decided here is attention. A
+    /// change in a pane without the keyboard is something that happened
+    /// while nobody was looking, and it asks for a look — unless the change
+    /// is to running, which is an agent getting on with it and the one
+    /// change nobody needs to see. Running also *takes back* the attention
+    /// a stop asked for, since the stop it announced is over.
+    fn agent_reported(
+        &mut self,
+        pane: PaneId,
+        status: AgentStatus,
+        title: Option<String>,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        let looking = self.tabs.focused_pane_id() == Some(pane);
         self.update_session(pane, ctx, |session| {
-            session.status = AgentStatus::NeedsInput;
+            if let Some(title) = title {
+                session.derived_title = Some(title);
+            }
+            let changed = session.status != status;
+            session.status = status;
+            if status == AgentStatus::Running {
+                session.attention = false;
+            } else if changed && !looking {
+                session.attention = true;
+            }
         })
     }
 
-    /// Clears the attention a bell asked for, now that the pane has it.
+    /// Clears the attention a pane asked for, now that it has it.
     ///
-    /// Only [`AgentStatus::NeedsInput`] is cleared, and only ever back to
-    /// [`AgentStatus::Idle`]: a pane that failed stays failed until something
-    /// says otherwise, and looking at a running command does not stop it.
+    /// Only the attention: a status is what the agent said, and looking at a
+    /// pane that is waiting for an answer does not answer it. A pane that
+    /// failed stays failed, and a running command keeps running.
     fn attend(&mut self, ctx: &mut ViewContext<Self>) {
         let Some(pane) = self.tabs.focused_pane_id() else {
             return;
         };
-        let rang = self
+        let asked = self
             .tabs
             .pane(pane)
             .map(Pane::session)
-            .is_some_and(|session| session.status == AgentStatus::NeedsInput);
-        if !rang {
+            .is_some_and(|session| session.attention);
+        if !asked {
             return;
         }
-        self.update_session(pane, ctx, |session| session.status = AgentStatus::Idle);
+        self.update_session(pane, ctx, |session| session.attention = false);
     }
 
     /// Asks a pane's shell what the word before its caret could become.
@@ -3785,6 +4083,11 @@ impl Workspace {
                 }
                 true
             }
+            TerminalUpdate::Agent {
+                pane,
+                status,
+                title,
+            } => self.agent_reported(*pane, *status, title.clone(), ctx),
         };
 
         if !reported {
@@ -4049,7 +4352,73 @@ impl Workspace {
             return Some(action);
         }
 
+        // The find bar owns Escape and Enter while it has the keyboard, for
+        // the reason the search box owns its two: the field answers Escape by
+        // clearing itself and Enter by nothing, and neither of those is a way
+        // to close the bar or step to the next match. Everything else typed
+        // into it is the query and is left to the field.
+        if self.find_takes_keys()
+            && let Some(action) = self.find_action_for(keystroke)
+        {
+            return Some(action);
+        }
+
+        // A selected block owns Escape and the copy chord: Escape lets go of
+        // it, and the copy chord takes it — both keys that would otherwise go
+        // to the shell under it. Before the bindings, because a modal-feeling
+        // selection's Escape is not a chord anything else may take.
+        if let Some(action) = self.block_selection_action_for(keystroke) {
+            return Some(action);
+        }
+
         self.bound(keystroke)
+    }
+
+    /// What a keystroke means to a selected block, if anything.
+    ///
+    /// Only ever when a block is selected in the focused pane, and never over
+    /// an open find bar, which owns those keys itself. The copy chord is
+    /// declined while the pointer has selected text, because that selection is
+    /// what a copy takes then and the block selection is the quieter of the
+    /// two.
+    fn block_selection_action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
+        if self.find_takes_keys() {
+            return None;
+        }
+        let pane = self.tabs.focused_pane_id()?;
+        self.pane_blocks(pane)?.selected()?;
+
+        if keystroke.key == "escape" && keystroke.modifiers.is_empty() {
+            return Some(WorkspaceAction::Block(BlockAction::ClearSelection(pane)));
+        }
+
+        let text_selected = self
+            .interaction(pane)
+            .is_some_and(|interaction| interaction.selection.has_selection());
+        if !text_selected && is_copy_chord(keystroke) {
+            return Some(WorkspaceAction::Block(BlockAction::CopySelection(pane)));
+        }
+        None
+    }
+
+    /// What a keystroke means to the find bar, if it means anything.
+    ///
+    /// Three keys: Escape closes it, Enter steps to the next match and
+    /// Shift-Enter to the previous one. Enter rather than a chord because the
+    /// bar has the keyboard and a person in it expects Enter to move, the way
+    /// it does in every find bar there is.
+    fn find_action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
+        let pane = self.tabs.focused_pane_id()?;
+        let modifiers = keystroke.modifiers;
+        let action = match keystroke.key.as_str() {
+            "escape" if modifiers.is_empty() => FindAction::Close,
+            "enter" if modifiers.is_empty() => FindAction::Step { forward: true },
+            "enter" if modifiers.shift && !modifiers.ctrl && !modifiers.alt && !modifiers.cmd => {
+                FindAction::Step { forward: false }
+            }
+            _ => return None,
+        };
+        Some(WorkspaceAction::Find { pane, action })
     }
 
     /// What a keystroke does to a recording, which is one of four things.
@@ -4212,9 +4581,36 @@ impl Workspace {
             Binding::ZoomReset => {
                 return Some(SettingsAction::SetFontSize(DEFAULT_FONT_SIZE).into());
             }
+            // The bar is over the *list of commands*, so it opens only where
+            // there is one: a full-screen program has taken the whole pane and
+            // draws no blocks, and Ctrl-F is one of its own keys there.
+            Binding::FindInOutput => return self.find_open_action(),
+            Binding::SelectBlockUp => {
+                return Some(WorkspaceAction::Block(BlockAction::SelectUp(
+                    self.tabs.focused_pane_id()?,
+                )));
+            }
+            Binding::SelectBlockDown => {
+                return Some(WorkspaceAction::Block(BlockAction::SelectDown(
+                    self.tabs.focused_pane_id()?,
+                )));
+            }
         };
 
         Some(WorkspaceAction::Tab(tab))
+    }
+
+    /// Opening the find bar for the focused pane.
+    ///
+    /// Whether it may actually open — the pane must be drawing its output as a
+    /// list of blocks, not as one full-screen grid — is decided in
+    /// [`Self::apply_find`], which has the snapshot this does not.
+    fn find_open_action(&self) -> Option<WorkspaceAction> {
+        let pane = self.tabs.focused_pane_id()?;
+        Some(WorkspaceAction::Find {
+            pane,
+            action: FindAction::Open,
+        })
     }
 
     /// What a keystroke means to the search box, if it means anything.
@@ -4504,6 +4900,7 @@ impl Workspace {
                     close: MouseStateHandle::default(),
                     body: MouseStateHandle::default(),
                     selection: PaneSelection::new(),
+                    find: PaneFind::new(),
                     links: PaneLink::new(),
                     extent: PaneExtent::new(),
                     blocks: PaneBlocks::new(),
@@ -4610,15 +5007,31 @@ impl Workspace {
         // built-in could: it could put a popup on screen, draw a box in it and
         // claim Escape, and still have nowhere for a keystroke to land.
         let a_field_has_keys = self.host.sync_fields(self);
+        // A pane\'s own find bar counts exactly as the search box does: while
+        // a person is typing a query into it they are not typing into the
+        // shell under it. It is over the focused pane, so it competes only
+        // with that pane\'s composer.
+        let find_has_keys = self.find_takes_keys();
         let listening = (!self.a_popup_is_open()
             && !self.panel.open
             && !self.host.a_surface_is_up()
             && !self.search_takes_keys()
+            && !find_has_keys
             && !a_field_has_keys)
             .then(|| self.tabs.focused_pane_id())
             .flatten();
         for (id, input) in &self.inputs {
             input.set_has_keys(Some(*id) == listening);
+        }
+        // The find field of the focused pane, and no other: a background
+        // pane\'s bar left open holds no keys, so a person switching to it
+        // finds it drawn but quiet until they click into it.
+        let find_listening = find_has_keys.then(|| self.tabs.focused_pane_id()).flatten();
+        for (id, interaction) in &self.interactions {
+            interaction
+                .find
+                .input()
+                .set_has_keys(Some(*id) == find_listening);
         }
 
         // The settings page's search box, which is the one field that is not a
@@ -5420,6 +5833,19 @@ fn worktree_store() -> Option<PathBuf> {
     dirs::data_dir().map(|directory| directory.join("crook").join("worktrees"))
 }
 
+/// Whether a keystroke is this platform's "copy" chord: cmd-c on macOS, and
+/// ctrl-shift-c off it, where bare ctrl-c is the interrupt the tty must keep.
+fn is_copy_chord(keystroke: &Keystroke) -> bool {
+    let modifiers = keystroke.modifiers;
+    if keystroke.key != "c" {
+        return false;
+    }
+    match Platform::current() {
+        Platform::Mac => modifiers.cmd && !modifiers.ctrl && !modifiers.alt && !modifiers.shift,
+        Platform::Other => modifiers.ctrl && modifiers.shift && !modifiers.cmd && !modifiers.alt,
+    }
+}
+
 impl TypedActionView for Workspace {
     type Action = WorkspaceAction;
 
@@ -5474,6 +5900,7 @@ impl TypedActionView for Workspace {
             WorkspaceAction::Options(action) => self.apply_option(action, ctx),
             WorkspaceAction::Settings(action) => self.apply_settings(action, ctx),
             WorkspaceAction::Search(action) => self.apply_search(action, ctx),
+            WorkspaceAction::Find { pane, action } => self.apply_find(pane, action, ctx),
             WorkspaceAction::Theme(action) => self.apply_theme_action(action, ctx),
             WorkspaceAction::Window(action) => self.apply_window_action(action),
             WorkspaceAction::TabMenu(action) => self.apply_tab_menu(action, ctx),

@@ -362,6 +362,13 @@ read as a widget. Column zero in the composer is column zero in the output: one 
 constant is the list's left inset, the composer's left padding, and the width `PaneSizer`
 takes off the pane before working out how many columns to tell the pty about.
 
+And the line being typed is on the prompt's **own** row, not the one under it. Shell integration
+emits mark `B` at the end of the prompt, so the exact cell the prompt finished on is known, and
+`block_list::inline_start` hands the composer that column: its first row starts one cell past the
+prompt and wraps to the gutter like a shell's own line editor, so pressing Enter no longer jumps
+the text up a row and across to where the shell echoes it. Without integration there is no mark
+and no honest way to guess where a prompt ends, so that one case keeps its own row.
+
 The text and the caret are painted in the colours the *shell* resolved — `Snapshot::foreground`
 and the cursor colour the grid paints the shell's own cursor in — rather than the theme's. A
 shell that changes them at runtime (OSC 10 and OSC 12, which is what every light-or-dark theme
@@ -385,27 +392,60 @@ measured for the grid the last frame had is refreshed rather than painted into t
 
 ---
 
+## Finding in the output
+
+`cmd-f` (`ctrl-shift-f` off macOS) opens a bar over the top-right of the output, and it
+searches the *blocks* — every command that has finished and the one still open — rather than
+the screenful the grid is showing. It is the same walk a copy is: `Blocks::find_all` in
+`app/src/selection.rs` turns a query into a list of `Selection`s, one per match, in reading
+order and ASCII-case-insensitive. Each match is highlighted where it is, the current one in
+the accent and the rest in the terminal's amber, painted the way a drag's selection is — over
+the cell's own background and under its glyph, so the text stays legible through the wash.
+
+The bar counts the matches (`3/12`), steps between them with Enter and Shift-Enter or its two
+buttons, and brings the current one into view if it is not already, a third of a screen down.
+Escape closes it and hands the keyboard back to the shell; the query is kept, so opening the
+bar again comes back to it. It is a per-pane thing — `PaneFind` on the pane's interaction
+state, beside its selection — so a search in one pane holds while another prints, and which
+pane's bar has the keyboard is the focused pane's, decided in `Workspace::sync_input_keys`
+exactly as the tab search box's is.
+
+Two things it is not. It is not a filter: every block stays where it is and the matches are
+marked in place, because the output is a transcript and hiding the lines between the hits would
+be hiding what a command did. And it is over the list of commands only — a full-screen program
+has taken the whole pane and draws one grid, so the bar does not open there, where `ctrl-f` is
+one of the program's own keys.
+
+## Navigating the blocks
+
+`cmd-alt-up` and `cmd-alt-down` (`ctrl-alt-up` / `ctrl-alt-down` off macOS) step a selection
+through the finished blocks. The bare arrows are the composer's history and the modified ones
+the field already spends on selection, so the block selection takes the pair that is free on
+each platform. Up from the prompt lands on the last command; up walks towards the oldest and
+stops there; down walks back towards the prompt and off the last block returns to it. The
+selected block wears an accent wash and a full-height stripe down its edge — wider and
+brighter than a running command's, so a selection and a status never read as the same mark —
+and stepping to one that is off screen scrolls it into view, a third of a screen down.
+
+The selection is one per pane, on `PaneBlocks` beside the scroll position, and it answers the
+same question a drag does — *what would a copy take* — so the two are mutually exclusive:
+stepping to a block lets go of any text the pointer had selected. `cmd-c` (`ctrl-shift-c` off
+macOS) copies the selected block whole, through the very region its own copy control uses, and
+only while the pointer has selected no text of its own, where that copy belongs to the drag.
+Escape lets the selection go, back to composing at the prompt.
+
 ## What this does not do
 
 Stage 1 of the port. These are absent on purpose, not overlooked:
 
-* **Block selection.** No click-to-select, no shift-click, no accent wash, no per-block border.
-* **Keyboard block navigation.** No Cmd-Up / Cmd-Down. The two scrolls are in the block's menu
-  and are reachable with the pointer only: there is no block *selection*, so there is no block
-  a chord could be about.
+* **Click-to-select a block.** The keyboard selects a block (see above), but the pointer does
+  not yet: no click-to-select, no shift-click to extend, no per-block border. Pointer selection
+  is still the text drag across the list.
 * **The sticky header.** A block taller than the window scrolls like any other content; there
   is nothing pinned to say which command you are inside.
 * **Jump-to-bottom.** No button when a block continues below the fold.
 * **`clear` as a gap.** Ctrl-L does what the emulator does with it.
 * **Lazy reflow on a column change.** A harvested block keeps the width it was harvested at.
-* **The prompt hoisted into the composer.** Warp lifts the shell's own prompt out of the grid
-  and re-draws it as a one-line lead-in inside the field, so that exactly one prompt is on
-  screen and the line being typed is attached to it. Crook leaves the prompt where the shell
-  drew it — the last row of the open block — and puts the field on the row under it. The
-  consequence is visible and worth stating: pressing Enter moves the text up one row and right
-  by the width of the prompt, to where the shell echoes it. The marks that would fix this now
-  exist (`B` is exactly where the echoed command starts), so this is the next thing to build
-  rather than a limitation of the design.
-* Share, bookmarks, block filters, find-within-block, and everything else that needs a block to
+* Share, bookmarks, block filters, and everything else that needs a block to
   be addressable rather than merely visible. Running a command a second time is in the menu —
   as text put back in the composer, which needs nothing of the sort.

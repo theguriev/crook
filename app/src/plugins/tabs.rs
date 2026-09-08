@@ -84,6 +84,8 @@
 //! means the tab a person is looking at, which is the only thing it could
 //! sensibly mean, and the same handler serves both without a branch.
 
+use crookui_core::elements::{MouseStateHandle, Padding};
+use crookui_core::icons::Lucide;
 use crookui_core::prelude::*;
 
 use crook_plugin::{ActionName, Cardinality, Manifest, PluginId, SlotId, Tier};
@@ -94,7 +96,9 @@ use std::path::Path;
 use std::rc::Rc;
 
 use crate::git::GitFacts;
+use crate::input_keys::Platform;
 use crate::plugin::{ActionId, BuildError, Host, Plugin, Showing};
+use crate::plugins::header::HEADER_LEFT;
 use crate::tab::{AgentStatus, PaneId, TabAction, TabColor, TabId, TabStrip};
 use crate::text_input::TextInput;
 use crate::theme::theme;
@@ -294,6 +298,11 @@ impl Rename {
 #[derive(Default)]
 pub struct Tabs {
     rename: Rc<Rename>,
+    /// The pointer's relationship to the chip in the header, kept here for
+    /// the reason the rename state is: the contribution that draws the chip
+    /// is a closure that outlives `build`, and a fresh state on every frame
+    /// would be a chip that never knew it was hovered.
+    waiting: MouseStateHandle,
 }
 
 impl Tabs {
@@ -395,6 +404,37 @@ impl Plugin for Tabs {
             };
             workspace.close_tab_context_menu(ctx);
             workspace.handle_action(&WorkspaceAction::Tab(TabAction::Close(tab)), ctx);
+        });
+
+        // The one command here that is about the strip rather than a row of
+        // it: go to the next pane that is waiting for a person. A pane, not a
+        // tab, because a split can hold two agents and only one of them
+        // asked; focusing it activates its tab the way a click on its row
+        // does, and looking at it is what answers the request.
+        let next_waiting =
+            host.register_command(action("next-waiting"), "Next tab waiting for you", {
+                |workspace, ctx| {
+                    let Some(pane) = next_waiting(workspace.tabs()) else {
+                        return;
+                    };
+                    workspace.close_tab_context_menu(ctx);
+                    workspace.handle_action(&WorkspaceAction::Tab(TabAction::FocusPane(pane)), ctx);
+                }
+            });
+        // A suggestion, on the same terms as the palette's chord: a person's
+        // own file and every one of Crook's own chords win over it. `cmd-j`
+        // is nobody's on macOS, and the Shift off it is the one every chord
+        // takes there, since bare ctrl-j is a newline to the tty.
+        host.suggest_binding(
+            match Platform::current() {
+                Platform::Mac => "cmd+j",
+                Platform::Other => "ctrl+shift+j",
+            },
+            action("next-waiting"),
+        );
+        host.contribute(HEADER_LEFT, "waiting", 0, {
+            let hover = self.waiting.clone();
+            move |workspace, _| waiting_chip(workspace, hover.clone(), next_waiting)
         });
 
         // The field every rename is typed into. One, not two: only one of the
@@ -665,6 +705,107 @@ fn rename_entry(
 }
 
 /// `crook/tabs/<name>`.
+/// The pane the "next waiting" chord goes to: the first one after the active
+/// tab, in the panel's order and round the end of it, that is waiting for a
+/// person — or `None` when nothing is.
+///
+/// The panel's order rather than most-recent-first, because a person working
+/// down a list of agents wants the list's order back: the chord pressed
+/// three times visits three tabs and not the same two in turn.
+pub fn next_waiting(strip: &TabStrip) -> Option<PaneId> {
+    let panes: Vec<(TabId, PaneId, bool)> = strip
+        .panes()
+        .map(|(tab, pane)| {
+            let active = strip.is_active(tab) && strip.focused_pane_id() == Some(pane.id());
+            (tab, pane.id(), pane.session().is_waiting(active))
+        })
+        .collect();
+    let after_active = panes
+        .iter()
+        .rposition(|(tab, _, _)| strip.is_active(*tab))
+        .map_or(0, |index| index + 1);
+    panes
+        .iter()
+        .cycle()
+        .skip(after_active)
+        .take(panes.len())
+        .find(|(_, _, waiting)| *waiting)
+        .map(|(_, pane, _)| *pane)
+}
+
+/// How many panes are waiting for a person, which is the number on the chip.
+pub fn waiting_count(strip: &TabStrip) -> usize {
+    strip
+        .panes()
+        .filter(|(tab, pane)| {
+            let active = strip.is_active(*tab) && strip.focused_pane_id() == Some(pane.id());
+            pane.session().is_waiting(active)
+        })
+        .count()
+}
+
+/// The chip in the header that counts the waiting panes and goes to the next
+/// one when pressed — or nothing at all, which is what the header shows
+/// while nobody is waiting. A count of zero is not information.
+fn waiting_chip(workspace: &Workspace, hover: MouseStateHandle, go: ActionId) -> Box<dyn Element> {
+    let count = waiting_count(workspace.tabs());
+    if count == 0 {
+        return Empty::new().finish();
+    }
+    let ui = workspace.fonts().ui;
+    let label = if count == 1 {
+        "1 waiting".to_owned()
+    } else {
+        format!("{count} waiting")
+    };
+
+    Hoverable::new(hover, move |mouse| {
+        let ground = if mouse.is_hovered() {
+            theme().overlay_2
+        } else {
+            theme().overlay_1
+        };
+        Container::new(
+            Flex::row()
+                .with_main_axis_size(MainAxisSize::Min)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_spacing(WAITING_GAP)
+                .with_child(
+                    Icon::new(Lucide::Bell, WAITING_ICON)
+                        .with_color(theme().usage_high)
+                        .finish(),
+                )
+                .with_child(
+                    Text::new(label.clone(), ui, WAITING_TEXT)
+                        .with_color(theme().text_primary)
+                        .finish(),
+                )
+                .finish(),
+        )
+        .with_background_color(ground)
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(WAITING_RADIUS)))
+        .with_padding(Padding {
+            top: 3.,
+            bottom: 3.,
+            left: 8.,
+            right: 9.,
+        })
+        .finish()
+    })
+    .on_click(move |_, ctx, _| ctx.dispatch_typed_action(WorkspaceAction::Run(go)))
+    .finish()
+}
+
+/// The chip's type, the same size as a row's chips in the panel.
+const WAITING_TEXT: f32 = 11.;
+/// Its bell, a little larger than the type beside it so the two read as one
+/// line.
+const WAITING_ICON: f32 = 13.;
+/// The air between the bell and the count.
+const WAITING_GAP: f32 = 5.;
+/// The corner the chip is cut to — the pill a row's chips use, one up.
+const WAITING_RADIUS: f32 = 5.;
+
 fn action(name: &str) -> ActionName {
     ActionName::parse(&format!("crook/tabs/{name}")).expect("a name built from a literal")
 }

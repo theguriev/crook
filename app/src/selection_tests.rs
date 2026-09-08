@@ -563,3 +563,40 @@ fn an_evicted_block_leaves_the_highlight_and_the_copy_agreeing() {
         "what is painted as selected is what a copy takes"
     );
 }
+
+#[test]
+fn find_all_finds_every_occurrence_across_blocks_and_folds_ascii_case() {
+    // Two commands, each printing its own name in capitals twice. The word
+    // "one" appears once per command's output, so a search for it finds two,
+    // one in each block, and the search is ASCII case-insensitive.
+    let session = session(40, 12, &["alpha", "beta"]);
+
+    let matches = session.blocks().find_all("one");
+    assert_eq!(
+        2,
+        matches.len(),
+        "`one` ends each block's first output line"
+    );
+    assert!(
+        matches[0].anchor.order() < matches[1].anchor.order(),
+        "matches come back in reading order, oldest block first"
+    );
+
+    // What each match covers is the word, wherever it fell.
+    for found in &matches {
+        assert_eq!(Some("one".to_owned()), found.text(&session.blocks()));
+    }
+
+    // Case folds over ASCII: a block's first row is its prompt and command
+    // line, so `alpha` matches once there and once per upper-cased output
+    // line — three times, all in the one block whose command it was — and the
+    // query's own case does not change the count.
+    assert_eq!(3, session.blocks().find_all("alpha").len());
+    assert_eq!(3, session.blocks().find_all("beta").len());
+    assert_eq!(3, session.blocks().find_all("BETA").len());
+
+    // Nothing matches nothing, and an empty needle finds nothing rather than
+    // everything.
+    assert!(session.blocks().find_all("nowhere").is_empty());
+    assert!(session.blocks().find_all("").is_empty());
+}

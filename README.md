@@ -4,8 +4,8 @@ A terminal whose unit of work is an agent, not a tab.
 
 Every terminal ever written treats a shell session as the thing you open, arrange and close.
 Crook treats an *agent* as that thing. A tab is one agent's workspace: its transcript, its
-working directory, its state, its budget. The tab strip is therefore a list of what is
-currently being worked on, and the header carries whatever says what that work is costing.
+working directory, its state. The tab strip is therefore a list of what is currently being
+worked on, and the header carries whatever says what that work is costing.
 
 Crook copies the architecture of [Warp](https://www.warp.dev) — an Entity/Handle application
 core, immutable `View::render`, constraint-based layout, a `Scene` display list handed to a
@@ -124,6 +124,20 @@ Eight features, and the page that configures them:
   Crook's own Keyboard Shortcuts page with that row recording, not a recorder of the plugin's. The field, the filtering, the arrow keys, Enter and
   Escape all belong to Crook: the plugin says what can be chosen and is told which row a
   person chose, so a chip with a search box in it is never handed a keystroke.
+- **An agent that says what it is doing.** The dot on a tab's row is written by the program
+  in the pane, over the one channel it already has: `crook --agent running`, `needs-input`,
+  `failed` or `idle`, with `--title` for what it calls its work, writes one escape sequence to
+  its own terminal and exits. No socket and no pane id — the terminal it has *is* the pane —
+  so it works from a hook, over `ssh` and inside a container, and every other terminal drops
+  the sequence unread. `crook --agent-hooks claude` prints the hooks that make Claude Code
+  say all of it by itself: running when a prompt is sent and around every tool, needing input
+  whenever it stops to ask, idle when it is done; merge them into `~/.claude/settings.json`.
+  A status the agent never took back goes when the shell's own marks say the command ended,
+  and a failure stays on the row until the next command starts. Looking at a tab clears the
+  *attention* it asked for and nothing else: an agent waiting for an approval is still waiting
+  after you glance at it. A row that is waiting for you is washed amber, the header counts them
+  in a chip that goes to the next one when pressed, and `cmd-j` (`ctrl-shift-j` off macOS) does
+  the same from the keyboard, round the list in the panel's order.
 - **A shell in every pane.** A real pseudo-terminal and a real xterm-compatible emulator:
   colour, bold and italic faces, underline and strikeout, the alternate screen, ten thousand
   lines of scrollback, `SIGWINCH` on resize, and titles and working directories the shell
@@ -162,6 +176,22 @@ Eight features, and the page that configures them:
   as well as its screen. What no selection survives is the picture under it changing: resizing
   the pane re-wraps the rows, and crossing between the list and the grid renumbers them, so the
   selection is let go of rather than re-read against text nobody selected.
+- **Find across every command in the output.** `cmd-f` (`ctrl-shift-f` off macOS) opens a bar
+  over the top-right of a pane and searches the blocks, not the screenful — every finished
+  command and the open one at once. Each match is highlighted where it is, the current one in
+  the accent and the rest in amber; the bar counts them, Enter and Shift-Enter step between
+  them and scroll the current one into view, and Escape hands the keyboard back to the shell
+  with the query kept for next time. It is a search, not a filter: the lines between the hits
+  stay where they are, because the output is a transcript. It opens only over the list of
+  commands, never over a full-screen program, where `ctrl-f` is the program's own key.
+- **Step through the commands with the keyboard.** `cmd-alt-up` and `cmd-alt-down`
+  (`ctrl-alt-up` / `ctrl-alt-down` off macOS) move a selection through the finished blocks:
+  up from the prompt lands on the last command, up walks to the oldest, down walks back and off
+  the last block returns to the prompt. The selected block wears an accent wash and a stripe,
+  and steps to an off-screen one scroll it into view. `cmd-c` (`ctrl-shift-c` off macOS) copies
+  the whole selected block, and Escape lets the selection go. It is one selection per pane, and
+  it answers the same question a drag does, so the two never both hold: stepping to a block
+  drops any text the pointer had selected.
 - **A command line that behaves like a text field.** Under each pane's output is the line
   being composed — not a box and not a raw terminal line: no border, no fill, no focus ring,
   on the pane's own ground, in the terminal's own font and colours, at the same column zero as
@@ -304,10 +334,11 @@ Eight features, and the page that configures them:
 Everything else is out of scope on purpose. There is no telemetry, and OSC 8 hyperlinks are
 not read — though a URL a program *printed* is clickable, because the scan that finds one
 works the same on a finished block as on the live grid, which an OSC 8 carried on the grid
-alone would not. Blocks are stage one — no
-block-level selection, no keyboard navigation between blocks, no sticky header,
-no jump-to-bottom, and the shell's prompt stays on its own row rather than being lifted into
-the composer; [`docs/blocks.md`](docs/blocks.md) lists those and says what each would touch.
+alone would not. The keyboard steps through the blocks and selects one, and the composer types
+on the prompt's own line, but the blocks are still short of a few things: no pointer
+click-to-select a block, no sticky header for one taller than the window, and no
+jump-to-bottom button; [`docs/blocks.md`](docs/blocks.md) lists those and says what each would
+touch.
 The terminal grid still reaches no clipboard of its own: the input field copies and pastes, an
 OSC 52 from the shell does not. The list of what is absent — and what adding each item would
 touch — is the last section of the architecture doc.

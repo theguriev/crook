@@ -42,6 +42,7 @@
 //! which is the state a person is in the instant before they press copy and one
 //! nobody can hold a button down for in a headless run.
 
+pub mod agent;
 pub mod browser;
 pub mod clipboard;
 pub mod completion;
@@ -51,6 +52,7 @@ pub mod git_model;
 pub mod input_keys;
 pub mod keybindings;
 pub mod pane_blocks;
+pub mod pane_find;
 pub mod pane_link;
 pub mod pane_selection;
 pub mod pane_split;
@@ -337,6 +339,10 @@ struct Overrides {
     /// Repeatable, because one command is one block and a picture of a *list*
     /// of blocks needs several.
     run: Vec<String>,
+    /// Open the first pane's find bar and leave this in it, so a picture of a
+    /// search over the output can be taken. Needs a `--run` before it to have
+    /// output to search.
+    find_output: Option<String>,
     /// Hover the finished block at this index, so its copy control is drawn.
     ///
     /// A hover is a state that only exists while a pointer is over something,
@@ -412,6 +418,7 @@ impl Overrides {
         !self.run.is_empty()
             || self.type_text.is_some()
             || self.select_output.is_some()
+            || self.find_output.is_some()
             || self.hover_block.is_some()
             || self.block_menu.is_some()
             || self.scroll_blocks.is_some()
@@ -483,6 +490,37 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
             "--shell-integration" => {
                 let shell = args.next();
                 println!("{}", shell_integration_text(shell.as_deref())?);
+                return Ok(Startup::Answered);
+            }
+            // Answered without a window, like `--version`: the window this is
+            // about is already open, and this process is a program inside it
+            // saying one thing to it.
+            "--agent" => {
+                let status = args
+                    .next()
+                    .context("`--agent` needs a status: idle, running, needs-input or failed")?;
+                let title = match args.peek().map(String::as_str) {
+                    Some("--title") => {
+                        args.next();
+                        Some(args.next().context("`--title` needs the title")?)
+                    }
+                    _ => None,
+                };
+                agent::report(&status, title.as_deref())?;
+                return Ok(Startup::Answered);
+            }
+            "--title" => bail!("`--title` goes after `--agent <status>`"),
+            "--agent-hooks" => {
+                let agent = args
+                    .next()
+                    .context("`--agent-hooks` needs the agent to write hooks for: claude")?;
+                let binary =
+                    std::env::current_exe().context("could not find this binary's own path")?;
+                println!("{}", agent::hooks_text(&agent, &binary)?);
+                eprintln!(
+                    "# Merge the `hooks` above into ~/.claude/settings.json, or into a project's \
+.claude/settings.json. Claude Code then tells the tab it runs in what it is doing."
+                );
                 return Ok(Startup::Answered);
             }
             // Answered like `--version` rather than started like `--theme`: a
@@ -631,6 +669,12 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 let name = args.next().context("`--action` needs a command name")?;
                 overrides.actions.push(name);
             }
+            "--find-output" => {
+                overrides.find_output = Some(
+                    args.next()
+                        .context("`--find-output` needs the text to search for")?,
+                );
+            }
             "--run" => {
                 let command = args.next().context("`--run` needs a command")?;
                 overrides.run.push(command);
@@ -772,6 +816,9 @@ OPTIONS:
     --run <COMMAND>    Type COMMAND into the first pane's input field at startup,
                        send it, and report what the shell printed. Repeatable:
                        one command is one block
+    --find-output <TEXT>
+                       Open the first pane's find bar over its output with TEXT
+                       in it; needs a `--run` before it to have output to search
     --hover-block <N>  Hover the Nth finished block, so its controls are drawn
     --block-menu <N>   Open the menu on the Nth finished block
     --scroll-blocks <N>
@@ -822,6 +869,16 @@ OPTIONS:
                        Print the OSC 133 snippet for `zsh`, `bash` or `fish`,
                        to paste into that shell\'s own configuration on a machine
                        Crook cannot start the shell on — over ssh, in a container
+    --agent <STATUS> [--title <TEXT>]
+                       Tell the pane this is run in what the program in it is
+                       doing: `idle`, `running`, `needs-input` or `failed`,
+                       and what it calls its work. Written to the terminal,
+                       so it works from a hook, over ssh and in a container;
+                       `--title -` takes the prompt out of a Claude Code hook\'s
+                       input on stdin
+    --agent-hooks <AGENT>
+                       Print the hooks that make `claude` (Claude Code) say
+                       all of that by itself, to merge into its settings file
     -h, --help         Print this message
     -V, --version      Print the version and channel
 
@@ -833,6 +890,7 @@ KEYS (macOS):
     cmd+k                      Search the tabs
     alt+cmd+left/right         Select the previous/next tab
     ctrl+cmd+left/right        Move the active tab
+    cmd+alt+up / cmd+alt+down   Select the block above / below, and copy it with cmd+c
     cmd+plus / cmd+minus       Make the terminal's text bigger / smaller
     cmd+0                      Put the text back to its default size
 
@@ -1356,6 +1414,7 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
         // are on screen to be hovered.
         frame(&mut app, &mut presenter);
         aim_at_blocks(&mut app, &workspace, pane, &overrides);
+        open_find_output(&mut app, &workspace, pane, &overrides);
 
         // And then, for a menu, a second frame between the hover and the
         // opening: the corner a menu hangs from is where the dots were last
@@ -1588,6 +1647,27 @@ fn compose_pane(app: &mut App, workspace: &ViewHandle<Workspace>, pane: PaneId, 
 
 /// Puts the pointer and the scroll position where `--hover-block` and
 /// `--scroll-blocks` asked for them.
+/// Opens the first pane's find bar with a query in it, for `--find-output`.
+///
+/// After [`aim_at_blocks`], so there is output to search and a frame has
+/// measured how far it can scroll — the bar scrolls the first match into view
+/// the way a keypress would.
+fn open_find_output(
+    app: &mut App,
+    workspace: &ViewHandle<Workspace>,
+    pane: PaneId,
+    overrides: &Overrides,
+) {
+    let Some(query) = overrides.find_output.clone() else {
+        return;
+    };
+    app.update(|ctx| {
+        workspace.update(ctx, |workspace, ctx| {
+            workspace.open_find_with(pane, &query, ctx);
+        });
+    });
+}
+
 fn aim_at_blocks(
     app: &mut App,
     workspace: &ViewHandle<Workspace>,
@@ -2755,8 +2835,11 @@ mod tests {
             "--hover",
             "--section",
             "--find",
+            "--find-output",
             "--granularity",
             "--density",
+            "--agent",
+            "--agent-hooks",
         ] {
             assert!(help.contains(flag), "{flag} is not in --help");
             // Either it parses, or it complains about the value it is missing.
