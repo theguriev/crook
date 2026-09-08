@@ -8587,6 +8587,45 @@ mod shells {
     }
 
     #[test]
+    fn a_program_in_a_marked_shell_reports_its_status_to_the_strip() {
+        // The whole chain, with a real shell: the sequence `crook --agent`
+        // writes, through the pty, the emulator, the model's subscription and
+        // into the session the row is drawn from — and then taken back by the
+        // shell's own `D` when the command ends.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = marked_shell(&mut harness) else {
+            return;
+        };
+        await_prompt(&mut harness, pane);
+
+        let status = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .tabs()
+                    .pane(pane)
+                    .map(|pane| pane.session().status)
+            })
+        };
+        assert_eq!(status(&harness), Some(AgentStatus::Idle));
+
+        harness.type_into(
+            pane,
+            "printf '\\033]6340;needs-input;port the tab bar\\007'; read\n",
+        );
+        harness.wait_for("the status never reached the strip", |harness| {
+            status(harness) == Some(AgentStatus::NeedsInput)
+        });
+        assert_eq!(harness.pane_title(pane), "port the tab bar");
+
+        // Ending the command — `read` gets its line — is the shell's `D`,
+        // which takes a waiting status back to idle.
+        harness.type_into(pane, "\n");
+        harness.wait_for("the command ending never took the status back", |harness| {
+            status(harness) == Some(AgentStatus::Idle)
+        });
+    }
+
+    #[test]
     fn a_shell_that_exits_closes_its_tab_and_takes_its_terminal_with_it() {
         // The ordinary case, and the one that closes the loop: the pane goes
         // through `TabAction::ClosePane`, the strip's change comes back round
@@ -11113,6 +11152,183 @@ mod the_bell {
         harness.dispatch_action(TabAction::FocusPane(failed));
 
         assert_eq!(status_of(&harness, failed), Some(AgentStatus::Failed));
+    }
+}
+
+/// The agent's own report: what a program in a pane says it is doing, and
+/// what the strip remembers about whether anybody saw it.
+mod the_agent {
+    use super::*;
+    use crate::terminal_model::TerminalUpdate;
+
+    fn report(harness: &mut Harness, pane: PaneId, status: AgentStatus, title: Option<&str>) {
+        let update = TerminalUpdate::Agent {
+            pane,
+            status,
+            title: title.map(str::to_owned),
+        };
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(&update, ctx);
+        });
+    }
+
+    fn session_of(harness: &Harness, pane: PaneId) -> (AgentStatus, bool, Option<String>) {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            let session = workspace
+                .tabs()
+                .pane(pane)
+                .expect("the pane is open")
+                .session();
+            (
+                session.status,
+                session.attention,
+                session.derived_title.clone(),
+            )
+        })
+    }
+
+    /// The pane of the tab that is *not* active.
+    fn background_of(harness: &Harness) -> PaneId {
+        let active = harness.focused_pane_id().expect("the window has a pane");
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| {
+                workspace
+                    .tabs()
+                    .panes()
+                    .map(|(_, pane)| pane.id())
+                    .find(|id| *id != active)
+            })
+            .expect("two tabs have two panes")
+    }
+
+    #[test]
+    fn what_the_agent_says_is_what_the_row_shows() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+
+        report(&mut harness, pane, AgentStatus::Running, None);
+        assert_eq!(
+            (AgentStatus::Running, false, None),
+            session_of(&harness, pane),
+            "the pane with the keyboard is being looked at, so nothing asks for a look"
+        );
+
+        report(&mut harness, pane, AgentStatus::NeedsInput, None);
+        assert_eq!(AgentStatus::NeedsInput, session_of(&harness, pane).0);
+    }
+
+    #[test]
+    fn a_title_in_the_report_is_the_agents_name_for_its_work() {
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+
+        report(
+            &mut harness,
+            pane,
+            AgentStatus::Running,
+            Some("port the tab bar"),
+        );
+
+        assert_eq!(
+            Some("port the tab bar".to_owned()),
+            session_of(&harness, pane).2
+        );
+        let shown = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tabs().active().map(|tab| tab.title().to_owned())
+        });
+        assert_eq!(Some("port the tab bar".to_owned()), shown);
+    }
+
+    #[test]
+    fn an_agent_stopping_where_nobody_is_looking_asks_for_a_look() {
+        let mut harness = Harness::new(2);
+        let away = background_of(&harness);
+
+        report(&mut harness, away, AgentStatus::Running, None);
+        assert_eq!(
+            (AgentStatus::Running, false, None),
+            session_of(&harness, away),
+            "an agent getting on with it is the one change nobody needs to see"
+        );
+
+        report(&mut harness, away, AgentStatus::NeedsInput, None);
+        assert_eq!(
+            (AgentStatus::NeedsInput, true, None),
+            session_of(&harness, away)
+        );
+
+        harness.dispatch_action(TabAction::FocusPane(away));
+        assert_eq!(
+            (AgentStatus::NeedsInput, false, None),
+            session_of(&harness, away),
+            "looking answers the request for a look, and not the agent's question"
+        );
+    }
+
+    #[test]
+    fn an_agent_going_back_to_work_takes_its_request_back() {
+        let mut harness = Harness::new(2);
+        let away = background_of(&harness);
+
+        report(&mut harness, away, AgentStatus::Failed, None);
+        assert!(session_of(&harness, away).1);
+
+        report(&mut harness, away, AgentStatus::Running, None);
+        assert_eq!(
+            (AgentStatus::Running, false, None),
+            session_of(&harness, away)
+        );
+    }
+
+    #[test]
+    fn a_bell_keeps_a_running_agent_running_and_still_asks_for_a_look() {
+        // The dot says what the agent said; the ring is remembered beside it.
+        let mut harness = Harness::new(2);
+        let away = background_of(&harness);
+        report(&mut harness, away, AgentStatus::Running, None);
+
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(
+                &TerminalUpdate::Bell {
+                    pane: away,
+                    while_running: true,
+                },
+                ctx,
+            );
+        });
+
+        assert_eq!(
+            (AgentStatus::Running, true, None),
+            session_of(&harness, away)
+        );
+        let shown = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tabs().pane(away).map(Pane::status)
+        });
+        assert_eq!(Some(AgentStatus::Running), shown);
+    }
+
+    #[test]
+    fn only_a_pane_nobody_is_looking_at_is_waiting() {
+        let mut harness = Harness::new(2);
+        let away = background_of(&harness);
+        let here = harness.focused_pane_id().expect("the window has a pane");
+        report(&mut harness, away, AgentStatus::NeedsInput, None);
+        report(&mut harness, here, AgentStatus::NeedsInput, None);
+
+        let waiting = harness.workspace.read(&harness.app, |workspace, _| {
+            let waits = |pane: PaneId, active: bool| {
+                workspace
+                    .tabs()
+                    .pane(pane)
+                    .unwrap()
+                    .session()
+                    .is_waiting(active)
+            };
+            (waits(away, false), waits(here, true))
+        });
+
+        assert_eq!((true, false), waiting);
     }
 }
 

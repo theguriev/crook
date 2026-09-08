@@ -38,6 +38,7 @@ use alacritty_terminal::vte::ansi::Processor;
 use alacritty_terminal::vte::{Parser, Perform};
 use parking_lot::Mutex;
 
+use crate::agent::{self, AgentReport, Reported};
 use crate::blocks::{Block, BlockId, BlockTracker, IgnoreReason, LiveBlock};
 use crate::harvest::{self, BlockRows};
 use crate::input::{InputModes, KeyboardModes};
@@ -94,6 +95,14 @@ pub enum TerminalEvent {
     /// that has to base64 its own output needs a `base64` this machine may not
     /// have.
     Completions(u64),
+    /// A program in the pane said what it is doing, on the channel
+    /// [`crate::agent`] describes — or the command it was running ended and
+    /// took its status with it, which arrives as [`AgentReport::Idle`] with
+    /// no title.
+    ///
+    /// Reported on change only, so a program that says `running` on every
+    /// tool call costs one event when it starts and nothing after.
+    Agent(Reported),
 }
 
 /// Collects `Term`'s events so they can be handled after parsing, rather than
@@ -141,6 +150,7 @@ struct OscWatcher {
     working_directory: Option<PathBuf>,
     mark: Option<ShellMark>,
     completions: Option<u64>,
+    agent: Option<Reported>,
 }
 
 impl Perform for OscWatcher {
@@ -161,7 +171,14 @@ impl Perform for OscWatcher {
                     .ok()
                     .and_then(|serial| serial.parse().ok());
             }
-            _ => {}
+            // Position-independent like OSC 7: a status means the same thing
+            // wherever in the chunk the program wrote it. The last one in a
+            // chunk wins, which is the last thing the program said.
+            _ => {
+                if let Some(reported) = agent::parse(params) {
+                    self.agent = Some(reported);
+                }
+            }
         }
     }
 
@@ -249,6 +266,8 @@ pub struct Emulator {
     size: TerminalSize,
     title: Option<String>,
     working_directory: Option<PathBuf>,
+    /// What the program in the pane last said it was doing.
+    agent: AgentReport,
     events: Vec<TerminalEvent>,
     replies: Vec<u8>,
     snapshot: Arc<Snapshot>,
@@ -295,6 +314,7 @@ impl Emulator {
             size,
             title: None,
             working_directory: None,
+            agent: AgentReport::default(),
             events: Vec::new(),
             replies: Vec::new(),
             snapshot,
@@ -335,6 +355,7 @@ impl Emulator {
             let (piece, remaining) = rest.split_at(consumed);
             self.parser.advance(&mut self.term, piece);
             if let Some(mark) = self.osc_watcher.mark.take() {
+                self.settle_agent(mark);
                 let finished = self.blocks.mark(
                     mark,
                     &mut self.term,
@@ -527,6 +548,11 @@ impl Emulator {
         self.working_directory.as_deref()
     }
 
+    /// What the program in the pane last said it was doing.
+    pub fn agent(&self) -> AgentReport {
+        self.agent
+    }
+
     /// Everything the child has asked for since the last call.
     pub fn take_events(&mut self) -> Vec<TerminalEvent> {
         std::mem::take(&mut self.events)
@@ -683,6 +709,13 @@ impl Emulator {
             self.events.push(TerminalEvent::Completions(serial));
         }
 
+        if let Some(reported) = self.osc_watcher.agent.take()
+            && (reported.status != self.agent || reported.title.is_some())
+        {
+            self.agent = reported.status;
+            self.events.push(TerminalEvent::Agent(reported));
+        }
+
         if let Some(directory) = self.osc_watcher.working_directory.take()
             && self.working_directory.as_deref() != Some(directory.as_path())
         {
@@ -694,6 +727,31 @@ impl Emulator {
         // on the way out belongs to the block that is still open.
         if let Some(exit) = exited {
             self.child_exited(exit);
+        }
+    }
+
+    /// Takes a status back when the command that reported it is over.
+    ///
+    /// A program that was interrupted never says it stopped, so the shell's
+    /// own marks say it: `D` ends the command a running or waiting agent was,
+    /// and with it the claim that anything is running or waiting. A failure
+    /// outlives its command on purpose — it is the one status worth seeing
+    /// after the fact — and goes when the *next* command starts, because new
+    /// work is the thing that answers it.
+    fn settle_agent(&mut self, mark: ShellMark) {
+        let over = matches!(
+            (mark, self.agent),
+            (
+                ShellMark::CommandFinished(_),
+                AgentReport::Running | AgentReport::NeedsInput
+            ) | (ShellMark::OutputStart, AgentReport::Failed)
+        );
+        if over {
+            self.agent = AgentReport::Idle;
+            self.events.push(TerminalEvent::Agent(Reported {
+                status: AgentReport::Idle,
+                title: None,
+            }));
         }
     }
 

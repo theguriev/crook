@@ -74,6 +74,7 @@
 //! a block's text whichever store it is in, [`Rows`], which is also what
 //! [`Terminal::harvest_rows`] hands back for a pane drawing one grid.
 
+pub mod agent;
 mod blocks;
 mod emulator;
 mod harvest;
@@ -93,6 +94,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 
+pub use crate::agent::{AgentReport, Reported};
 pub use crate::blocks::{Block, BlockId, BlockState, IgnoreReason, LiveBlock, PromptEnd};
 pub use crate::emulator::{Emulator, TerminalEvent};
 pub use crate::harvest::{BlockRows, RowCombining, StyleRun};

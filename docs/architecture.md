@@ -966,6 +966,58 @@ is loose in a checkout — with a timeout on every call, two reader threads per 
 repository with a fat `target/` cannot deadlock a pipe, and an error type whose variants are
 the things a UI can offer to do about them.
 
+### The agent says what it is doing
+
+The dot on a tab's row has four colours and, until this section, one real source: a bell in a
+pane nobody was looking at. `AgentStatus::Running`, `NeedsInput` and `Failed` were written by
+the snapshot fixture and by nothing else, which made the sidebar a list of shells with a
+promise painted on it. The promise is now kept by the program the promise is about, and it is
+kept over the one channel that program already has.
+
+**The report is an escape sequence.** `OSC 6340 ; <status> [; <title>] BEL`, read by the same
+watcher that reads OSC 7 and the completion channel's 6339, in `crates/crook_terminal/src/agent.rs`.
+Four words — `idle`, `running`, `needs-input`, `failed` — and an optional name for the work,
+which lands in `derived_title` because that is what `derived_title` has always been: what the
+agent calls what it is doing. The alternative was a socket, and a socket is the wrong shape
+three times over. It needs an address, which the agent would have to be told; it stops at this
+machine, where the terminal crosses `ssh` and `docker exec` without noticing; and it needs to
+say *which pane*, where the terminal a program writes to *is* the pane. Every other terminal
+drops an OSC it does not know, so a program that reports this way costs nothing in one of
+them.
+
+**The CLI writes it.** `crook --agent running --title "port the tab bar"` opens `/dev/tty` —
+`CONOUT$` on Windows — and writes the sequence there, not to standard output. The caller is a
+hook, and a hook's standard output belongs to the program that ran it: Claude Code reads what
+its hooks print. `crook --agent-hooks claude` prints the fragment of Claude Code's settings
+that makes it say all of this by itself — running on a prompt and around every tool, needing
+input on every notification, idle on stop — naming the binary by its full path, since a hook
+runs in whatever `PATH` Claude Code was started with. It is printed rather than installed:
+Crook writes no file it does not own, and it has never opened that one.
+
+**The shell takes the status back.** An agent that was interrupted never says it stopped, so
+the emulator listens to the shell's marks beside the report: `D` ends the command a running or
+waiting agent was, and takes the claim with it. A failure is the one status worth seeing after
+the fact, so it outlives its `D` and goes with the next command's `C` — new work being the
+thing that answers it. All of that is in `Emulator::settle_agent`, and none of it in the
+workspace, which only ever hears a status change.
+
+**Attention is a separate fact.** The bell used to write `NeedsInput` and looking used to
+clear it, and that was right for a bell and wrong for an agent: an agent waiting for an
+approval is still waiting after somebody glanced at its row. So `AgentSession` carries
+`status`, which is what the agent said, and `attention`, which is whether something happened
+while nobody was looking — the bell, or a status changing to anything but running in a pane
+without the keyboard. Looking clears attention and only attention; running clears it too,
+since the stop it announced is over. The dot shows the status, with one exception kept from
+before: an idle pane that asked for attention is drawn as needing input, because a bell in a
+pane nobody is looking at is a program saying exactly that. `is_waiting` is the two combined,
+and it is what a count in the header or a "next tab that wants me" chord reads.
+
+What is deliberately not here is a plugin. `docs/plugins.md` planned this seam as an `Agent`
+service a plugin provides, and that is still the right shape for anything that *drives* an
+agent — spending its budget, reading its transcript. Saying what it is doing needed none of
+that: a word on a wire, written by the agent itself, which is why it reached the sidebar in a
+day and why a plugin that wants to do more starts from a status that is already true.
+
 ### The command line is an input field
 
 A pane's next command is composed under its output — an ordinary GUI text input, with a caret

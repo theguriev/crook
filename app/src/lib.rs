@@ -42,6 +42,7 @@
 //! which is the state a person is in the instant before they press copy and one
 //! nobody can hold a button down for in a headless run.
 
+pub mod agent;
 pub mod browser;
 pub mod clipboard;
 pub mod completion;
@@ -485,6 +486,37 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 println!("{}", shell_integration_text(shell.as_deref())?);
                 return Ok(Startup::Answered);
             }
+            // Answered without a window, like `--version`: the window this is
+            // about is already open, and this process is a program inside it
+            // saying one thing to it.
+            "--agent" => {
+                let status = args
+                    .next()
+                    .context("`--agent` needs a status: idle, running, needs-input or failed")?;
+                let title = match args.peek().map(String::as_str) {
+                    Some("--title") => {
+                        args.next();
+                        Some(args.next().context("`--title` needs the title")?)
+                    }
+                    _ => None,
+                };
+                agent::report(&status, title.as_deref())?;
+                return Ok(Startup::Answered);
+            }
+            "--title" => bail!("`--title` goes after `--agent <status>`"),
+            "--agent-hooks" => {
+                let agent = args
+                    .next()
+                    .context("`--agent-hooks` needs the agent to write hooks for: claude")?;
+                let binary =
+                    std::env::current_exe().context("could not find this binary's own path")?;
+                println!("{}", agent::hooks_text(&agent, &binary)?);
+                eprintln!(
+                    "# Merge the `hooks` above into ~/.claude/settings.json, or into a project's \
+.claude/settings.json. Claude Code then tells the tab it runs in what it is doing."
+                );
+                return Ok(Startup::Answered);
+            }
             // Answered like `--version` rather than started like `--theme`: a
             // person installing a plugin is not opening a window, and doing
             // both would be a window that opened before the plugin it was
@@ -822,6 +854,16 @@ OPTIONS:
                        Print the OSC 133 snippet for `zsh`, `bash` or `fish`,
                        to paste into that shell\'s own configuration on a machine
                        Crook cannot start the shell on — over ssh, in a container
+    --agent <STATUS> [--title <TEXT>]
+                       Tell the pane this is run in what the program in it is
+                       doing: `idle`, `running`, `needs-input` or `failed`,
+                       and what it calls its work. Written to the terminal,
+                       so it works from a hook, over ssh and in a container;
+                       `--title -` takes the prompt out of a Claude Code hook\'s
+                       input on stdin
+    --agent-hooks <AGENT>
+                       Print the hooks that make `claude` (Claude Code) say
+                       all of that by itself, to merge into its settings file
     -h, --help         Print this message
     -V, --version      Print the version and channel
 
@@ -2757,6 +2799,8 @@ mod tests {
             "--find",
             "--granularity",
             "--density",
+            "--agent",
+            "--agent-hooks",
         ] {
             assert!(help.contains(flag), "{flag} is not in --help");
             // Either it parses, or it complains about the value it is missing.

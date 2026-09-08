@@ -3674,29 +3674,59 @@ impl Workspace {
             // that means a pane has gone.
             return true;
         }
+        self.update_session(pane, ctx, |session| session.attention = true)
+    }
+
+    /// Records what the program in a pane said it was doing.
+    ///
+    /// The status is written as said, and the title beside it when one came:
+    /// it is the agent's own name for its work, which is what
+    /// `derived_title` has always been. What is decided here is attention. A
+    /// change in a pane without the keyboard is something that happened
+    /// while nobody was looking, and it asks for a look — unless the change
+    /// is to running, which is an agent getting on with it and the one
+    /// change nobody needs to see. Running also *takes back* the attention
+    /// a stop asked for, since the stop it announced is over.
+    fn agent_reported(
+        &mut self,
+        pane: PaneId,
+        status: AgentStatus,
+        title: Option<String>,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        let looking = self.tabs.focused_pane_id() == Some(pane);
         self.update_session(pane, ctx, |session| {
-            session.status = AgentStatus::NeedsInput;
+            if let Some(title) = title {
+                session.derived_title = Some(title);
+            }
+            let changed = session.status != status;
+            session.status = status;
+            if status == AgentStatus::Running {
+                session.attention = false;
+            } else if changed && !looking {
+                session.attention = true;
+            }
         })
     }
 
-    /// Clears the attention a bell asked for, now that the pane has it.
+    /// Clears the attention a pane asked for, now that it has it.
     ///
-    /// Only [`AgentStatus::NeedsInput`] is cleared, and only ever back to
-    /// [`AgentStatus::Idle`]: a pane that failed stays failed until something
-    /// says otherwise, and looking at a running command does not stop it.
+    /// Only the attention: a status is what the agent said, and looking at a
+    /// pane that is waiting for an answer does not answer it. A pane that
+    /// failed stays failed, and a running command keeps running.
     fn attend(&mut self, ctx: &mut ViewContext<Self>) {
         let Some(pane) = self.tabs.focused_pane_id() else {
             return;
         };
-        let rang = self
+        let asked = self
             .tabs
             .pane(pane)
             .map(Pane::session)
-            .is_some_and(|session| session.status == AgentStatus::NeedsInput);
-        if !rang {
+            .is_some_and(|session| session.attention);
+        if !asked {
             return;
         }
-        self.update_session(pane, ctx, |session| session.status = AgentStatus::Idle);
+        self.update_session(pane, ctx, |session| session.attention = false);
     }
 
     /// Asks a pane's shell what the word before its caret could become.
@@ -3785,6 +3815,11 @@ impl Workspace {
                 }
                 true
             }
+            TerminalUpdate::Agent {
+                pane,
+                status,
+                title,
+            } => self.agent_reported(*pane, *status, title.clone(), ctx),
         };
 
         if !reported {

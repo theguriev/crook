@@ -28,6 +28,8 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crook_terminal::AgentReport;
+
 use crate::settings::Granularity;
 
 mod group;
@@ -74,6 +76,17 @@ pub enum AgentStatus {
     Failed,
 }
 
+impl From<AgentReport> for AgentStatus {
+    fn from(report: AgentReport) -> Self {
+        match report {
+            AgentReport::Idle => Self::Idle,
+            AgentReport::Running => Self::Running,
+            AgentReport::NeedsInput => Self::NeedsInput,
+            AgentReport::Failed => Self::Failed,
+        }
+    }
+}
+
 impl AgentStatus {
     /// A word for this status, for the tab body's status line.
     pub fn label(self) -> &'static str {
@@ -118,8 +131,23 @@ pub struct AgentSession {
     /// back to — a person who empties the field is asking for the name they
     /// had before they touched it, not for a row with no name.
     pub custom_title: Option<String>,
-    /// What the agent is doing right now.
+    /// What the agent is doing right now, as it last said.
+    ///
+    /// Written by the agent's own report and by the shell's marks when the
+    /// command the report came from ends — never by a person looking at the
+    /// tab, which is what [`Self::attention`] is for. An agent that is
+    /// waiting for an answer is still waiting after somebody has glanced at
+    /// its row.
     pub status: AgentStatus,
+    /// Whether something happened here while nobody was looking.
+    ///
+    /// The bell in a pane without the keyboard, or a status that changed
+    /// there to anything but running: a person who walked away from a tab
+    /// wants to know its agent stopped, whatever it stopped for. Cleared by
+    /// looking — every focus change runs `attend` — because attention is a
+    /// fact about the person and not about the work, which is the whole
+    /// reason it is not folded into [`Self::status`].
+    pub attention: bool,
     /// Where the agent is working.
     ///
     /// Seeded from the process's own directory, because that is where a
@@ -152,6 +180,7 @@ impl AgentSession {
             derived_title: None,
             custom_title: None,
             status: AgentStatus::default(),
+            attention: false,
             working_directory: std::env::current_dir().ok(),
             pull_request: None,
         }
@@ -164,6 +193,29 @@ impl AgentSession {
             .as_deref()
             .or(self.derived_title.as_deref())
             .unwrap_or(&self.title)
+    }
+
+    /// What the row's dot says, which is the status with one exception: a
+    /// pane that asked for attention and has no status of its own to show
+    /// it with is shown as needing input, because a bell in a pane nobody is
+    /// looking at is a program saying exactly that. A running agent that rang
+    /// stays running — the ring is remembered in [`Self::attention`] and the
+    /// dot keeps saying what the agent said.
+    pub fn shown_status(&self) -> AgentStatus {
+        match self.status {
+            AgentStatus::Idle if self.attention => AgentStatus::NeedsInput,
+            status => status,
+        }
+    }
+
+    /// Whether this pane is waiting on the person who is not looking at it.
+    ///
+    /// The count in the header and the tab the "next waiting" chord goes to:
+    /// something happened here unseen, or the agent said it needs input and
+    /// is still saying so. `active` is whether the pane is the one being
+    /// looked at, and a pane that is can wait for nobody.
+    pub fn is_waiting(&self, active: bool) -> bool {
+        !active && (self.attention || self.status == AgentStatus::NeedsInput)
     }
 
     /// What a pull-request chip says: `PR #123`, or the raw URL when the number

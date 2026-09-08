@@ -4,8 +4,8 @@ A terminal whose unit of work is an agent, not a tab.
 
 Every terminal ever written treats a shell session as the thing you open, arrange and close.
 Crook treats an *agent* as that thing. A tab is one agent's workspace: its transcript, its
-working directory, its state, its budget. The tab strip is therefore a list of what is
-currently being worked on, and the header carries whatever says what that work is costing.
+working directory, its state. The tab strip is therefore a list of what is currently being
+worked on, and the header carries whatever says what that work is costing.
 
 Crook copies the architecture of [Warp](https://www.warp.dev) — an Entity/Handle application
 core, immutable `View::render`, constraint-based layout, a `Scene` display list handed to a
@@ -124,6 +124,18 @@ Eight features, and the page that configures them:
   Crook's own Keyboard Shortcuts page with that row recording, not a recorder of the plugin's. The field, the filtering, the arrow keys, Enter and
   Escape all belong to Crook: the plugin says what can be chosen and is told which row a
   person chose, so a chip with a search box in it is never handed a keystroke.
+- **An agent that says what it is doing.** The dot on a tab's row is written by the program
+  in the pane, over the one channel it already has: `crook --agent running`, `needs-input`,
+  `failed` or `idle`, with `--title` for what it calls its work, writes one escape sequence to
+  its own terminal and exits. No socket and no pane id — the terminal it has *is* the pane —
+  so it works from a hook, over `ssh` and inside a container, and every other terminal drops
+  the sequence unread. `crook --agent-hooks claude` prints the hooks that make Claude Code
+  say all of it by itself: running when a prompt is sent and around every tool, needing input
+  whenever it stops to ask, idle when it is done; merge them into `~/.claude/settings.json`.
+  A status the agent never took back goes when the shell's own marks say the command ended,
+  and a failure stays on the row until the next command starts. Looking at a tab clears the
+  *attention* it asked for and nothing else: an agent waiting for an approval is still waiting
+  after you glance at it.
 - **A shell in every pane.** A real pseudo-terminal and a real xterm-compatible emulator:
   colour, bold and italic faces, underline and strikeout, the alternate screen, ten thousand
   lines of scrollback, `SIGWINCH` on resize, and titles and working directories the shell

@@ -1192,10 +1192,16 @@ somewhere to live.
 **Phase 4 — the process transport.** `plugins/host-process`: the NDJSON socket, the CLI as
 SDK, `--skill` output for an agent in a pane, supervised long-lived plugins with budgets.
 
-**Phase 5 — the agent seam.** `AgentStatus::Running`/`Failed` finally written by something:
-an `Agent` service that a plugin provides (Claude Code, Codex, a local model), with `agent.read`
-and `agent.spend` as the capabilities that gate it. This is the seam the product's name
-promises, and it is a plugin from the first day it exists.
+**Phase 5 — the agent seam: the status half is done, and it is not a plugin.**
+`AgentStatus::Running`/`NeedsInput`/`Failed` are written by the agent itself, over an escape
+sequence the emulator reads — `OSC 6340`, `crook --agent <status>`, and `crook --agent-hooks
+claude` for the hooks that make Claude Code send it. See "The agent says what it is doing" in
+`docs/architecture.md` for why a word on the pane's own wire beat a service: it needs no
+address, no pane id and no plugin, and it crosses `ssh`. What remains of this phase is what
+*drives* an agent rather than hears from it — an `Agent` service a plugin provides (Claude Code,
+Codex, a local model), with `agent.read` and `agent.spend` as the capabilities that gate it —
+and that is still a plugin from the first day it exists, standing on a status that is already
+true.
 
 ## 9. What is deliberately not in the plan
 
