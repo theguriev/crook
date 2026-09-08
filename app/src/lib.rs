@@ -2143,6 +2143,7 @@ fn with_dev_plugin(
     // because half a build is the ordinary state of a plugin being written and
     // the next one is a second away.
     let seen = Dev::about(&module);
+    let mut carried = None;
     match std::fs::read(&module)
         .map_err(|why| why.to_string())
         .and_then(|bytes| crate::plugins::wasm::opened(&bytes).map(|plugin| (plugin, bytes.len())))
@@ -2150,12 +2151,16 @@ fn with_dev_plugin(
         Ok((plugin, bytes)) => {
             let named = crate::plugin::Plugin::manifest(&plugin).id.clone();
             log::info!("{named} from {} ({bytes} bytes)", module.display());
+            // Which plugin this turned out to be, so that a rebuild renaming
+            // it can take the old one out rather than leaving it loaded under
+            // a name its source no longer has.
+            carried = Some(named);
             plugins.push(Box::new(plugin));
         }
         Err(why) => log::warn!("{}: {why}", module.display()),
     }
 
-    plugins.push(Box::new(Dev::watching(module, seen)));
+    plugins.push(Box::new(Dev::watching(module, seen, carried)));
     Ok(plugins)
 }
 

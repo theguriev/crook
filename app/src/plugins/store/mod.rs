@@ -120,13 +120,35 @@ impl Plugin for Store {
                 // which is not what it said about the one it replaced: a card
                 // that went on saying "withdrawn" after an update out of a
                 // yank would be describing a plugin nobody has any more.
+                let mut withdrawn = None;
                 if let Ok(manifest) = &installed {
-                    let why = model.read(ctx, |model, _| {
+                    withdrawn = model.read(ctx, |model, _| {
                         model
                             .index()
                             .and_then(|index| index::withdrawn(index, &plugin, manifest.version))
                     });
-                    workspace.withdrew(&plugin, why);
+                    workspace.withdrew(&plugin, withdrawn.clone());
+
+                    // And it does not run. The store does not *offer* a
+                    // withdrawn version, so this is the list having changed
+                    // under somebody between the look and the press — rare,
+                    // and the one case where "installed" and "withdrawn" would
+                    // otherwise both be true of a plugin that is drawing.
+                    if withdrawn.is_some() {
+                        workspace.disable_plugin(&manifest.id, ctx);
+                    }
+                }
+
+                if let (Ok(manifest), Some(why)) = (&installed, &withdrawn) {
+                    let (named, why) = (manifest.id.clone(), why.clone());
+                    model.update(ctx, |model, ctx| {
+                        model.complain(
+                            Some(&named),
+                            format!("was withdrawn while you were reading it: {why}"),
+                            ctx,
+                        );
+                    });
+                    continue;
                 }
 
                 model.update(ctx, |model, ctx| match installed {

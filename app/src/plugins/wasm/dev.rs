@@ -37,7 +37,9 @@
 //! because that is what somebody in the middle of writing a plugin needs. The
 //! next good build replaces it.
 
+use std::cell::RefCell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
 use crookui_core::prelude::*;
@@ -77,14 +79,27 @@ pub struct Dev {
     /// second, forever. `build` cannot hold it, because `build` returns; the
     /// plugin object is what the host keeps.
     watch: Option<ModelHandle<Watch>>,
+    /// Which plugin the last build turned out to be.
+    ///
+    /// A module's id is in its manifest, which is a line somebody edits like
+    /// any other — and a build that changes it is two plugins as far as the
+    /// host is concerned: `carry` replaces by id, so the one that was there
+    /// under the old name would stay loaded, drawing, and impossible to get
+    /// rid of without closing the window.
+    carried: Option<PluginId>,
 }
 
 impl Dev {
     /// One, watching `path`, which has already been loaded if `seen` says so.
-    pub fn watching(path: PathBuf, seen: Option<(u64, SystemTime)>) -> Self {
+    pub fn watching(
+        path: PathBuf,
+        seen: Option<(u64, SystemTime)>,
+        carried: Option<PluginId>,
+    ) -> Self {
         Self {
             path,
             seen,
+            carried,
             watch: None,
         }
     }
@@ -141,12 +156,34 @@ impl Plugin for Dev {
         // The bridge every model-backed feature has, carrying the one thing a
         // model cannot do: running a module needs the host, and the host is
         // the workspace's.
-        ctx.observe(&watch, |workspace, watch, ctx| {
+        let carried = Rc::new(RefCell::new(self.carried.clone()));
+        let mine = manifest().id.clone();
+        ctx.observe(&watch, move |workspace, watch, ctx| {
             let Some(bytes) = watch.update(ctx, |watch, _| watch.rebuilt()) else {
                 return;
             };
+
+            // Switched off, and this is the one registration a switch cannot
+            // take back: an observer is the workspace's rather than the
+            // host's. A plugin that was turned off must not go on putting
+            // modules into the window.
+            if !workspace.host().is_loaded(&mine) {
+                return;
+            }
+
             match workspace.run_dev_plugin(&bytes, ctx) {
-                Ok(manifest) => log::info!("{} {} reloaded", manifest.id, manifest.version),
+                Ok(manifest) => {
+                    // A build that renamed itself is two plugins to the host,
+                    // and the one that was there is not replaced by the one
+                    // that arrived — so it is taken out, or it stays drawing
+                    // under a name the source no longer has.
+                    let was = carried.replace(Some(manifest.id.clone()));
+                    if let Some(was) = was.filter(|was| *was != manifest.id) {
+                        log::info!("{was} was renamed to {}, and is gone", manifest.id);
+                        workspace.forget_plugin(&was, ctx);
+                    }
+                    log::info!("{} {} reloaded", manifest.id, manifest.version);
+                }
                 // A line rather than anything on screen: somebody watching a
                 // window they are writing a plugin for is watching a terminal,
                 // and the terminal they are watching is the one printing this.
