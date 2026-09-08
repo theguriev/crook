@@ -62,6 +62,13 @@ const ICON_GAP: f32 = 8.;
 /// Warp's `ROW_CORNER_RADIUS`.
 const ROW_RADIUS: f32 = 4.;
 
+/// How strong the wash on a waiting row is, out of 255.
+///
+/// Enough to be seen against the panel from across a room and not enough to
+/// fight the text on it: the amber is the terminal's own bright yellow, which
+/// at full strength is a warning and at this strength is a note.
+const WAITING_WASH_ALPHA: u8 = 28;
+
 /// Warp's row padding: `Padding::uniform(8.)`, in both densities.
 const ROW_PADDING: f32 = 8.;
 
@@ -131,6 +138,9 @@ pub(super) fn render(
     // is selected, so "which tab" and "which pane" stay two separate signals.
     // Painting every row of the active tab as selected loses the distinction.
     let is_selected = strip.is_active(tab) && tab_data.panes().is_focused(pane);
+    // Waiting is a fact about a pane nobody is looking at, so the selected
+    // row never is — which is what keeps the two washes from ever meeting.
+    let is_waiting = session.is_waiting(is_selected);
 
     // Under `Tabs` the row stands for its whole tab, so its close button
     // closes the tab. Under `Panes` it closes the pane it names, and the tab
@@ -202,6 +212,7 @@ pub(super) fn render(
                 .finish(),
             is_selected,
             hovered,
+            is_waiting,
             color,
         )
     })
@@ -391,12 +402,19 @@ fn row_shell(
     content: Box<dyn Element>,
     is_selected: bool,
     is_hovered: bool,
+    is_waiting: bool,
     color: Option<TabColor>,
 ) -> Box<dyn Element> {
+    // A waiting row is washed in the colour its dot already shows, faintly:
+    // the dot is nine pixels and a person scanning a long list wants the
+    // whole row to say it. Hovering lifts it the way it lifts any row, since
+    // a pointer over a row is a person already looking.
     let background = if is_selected {
         theme().overlay_2
     } else if is_hovered {
         theme().overlay_1
+    } else if is_waiting {
+        theme().usage_high.with_alpha(WAITING_WASH_ALPHA)
     } else {
         Color::TRANSPARENT
     };

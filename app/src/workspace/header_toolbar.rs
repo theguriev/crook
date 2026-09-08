@@ -6,11 +6,14 @@
 //! not know what that is — nothing a release binary carries fills it, and a
 //! plugin installed from a file does. This is the first surface in Crook that
 //! draws something it was given rather than something it imports, which is why
-//! an empty slot has to be as ordinary here as a full one.
+//! an empty slot has to be as ordinary here as a full one. The left end is
+//! [`HEADER_LEFT`](crate::plugins::header::HEADER_LEFT) on the same terms, and
+//! `crook/tabs` fills it with the count of tabs waiting for a person, when
+//! there are any.
 //!
-//! One item, not a list, and that is a judgement about the surface: this row is
-//! also the window's title bar, and a line of competing chips across it is how
-//! a status bar becomes a place nobody reads.
+//! One item at each end, not a list, and that is a judgement about the
+//! surface: this row is also the window's title bar, and a line of competing
+//! chips across it is how a status bar becomes a place nobody reads.
 //!
 //! # It holds no tabs at all
 //!
@@ -69,8 +72,18 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
             .with_cross_axis_alignment(CrossAxisAlignment::End)
             // The panel draws the tabs; this row draws none. Warp takes the
             // same early return and leaves a flexible slot where its
-            // title-bar search bar would go; Crook has no search bar, so the
-            // slot is empty and whatever a plugin pinned is the whole of it.
+            // title-bar search bar would go; Crook has no search bar, so what
+            // stands there is whatever was pinned to the left, and the rest of
+            // the row is the gap to the right-hand item.
+            .with_child(
+                workspace
+                    .host()
+                    .slots()
+                    .one(crate::plugins::header::HEADER_LEFT, |build| {
+                        build(workspace, app)
+                    })
+                    .unwrap_or_else(|| Empty::new().finish()),
+            )
             .with_child(Expanded::new(1., Empty::new().finish()).finish())
             // Not a chip drawn transparently: the settings page's switch turns
             // the poll off as well as the pill, and a chip that was still in

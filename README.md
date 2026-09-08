@@ -135,7 +135,9 @@ Eight features, and the page that configures them:
   A status the agent never took back goes when the shell's own marks say the command ended,
   and a failure stays on the row until the next command starts. Looking at a tab clears the
   *attention* it asked for and nothing else: an agent waiting for an approval is still waiting
-  after you glance at it.
+  after you glance at it. A row that is waiting for you is washed amber, the header counts them
+  in a chip that goes to the next one when pressed, and `cmd-j` (`ctrl-shift-j` off macOS) does
+  the same from the keyboard, round the list in the panel's order.
 - **A shell in every pane.** A real pseudo-terminal and a real xterm-compatible emulator:
   colour, bold and italic faces, underline and strikeout, the alternate screen, ten thousand
   lines of scrollback, `SIGWINCH` on resize, and titles and working directories the shell

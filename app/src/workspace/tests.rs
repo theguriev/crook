@@ -11309,6 +11309,79 @@ mod the_agent {
     }
 
     #[test]
+    fn the_chord_goes_round_the_waiting_panes_in_the_panels_order() {
+        let mut harness = Harness::new(4);
+        let tabs = harness.tab_ids();
+        let first = harness.panes_of(tabs[0])[0];
+        let third = harness.panes_of(tabs[2])[0];
+        assert_eq!(
+            harness.active_id(),
+            tabs[3],
+            "the last tab opened is active"
+        );
+
+        harness.run_command("crook/tabs/next-waiting");
+        assert_eq!(
+            harness.active_id(),
+            tabs[3],
+            "nothing is waiting, so nothing moves"
+        );
+
+        report(&mut harness, third, AgentStatus::NeedsInput, None);
+        report(&mut harness, first, AgentStatus::Failed, None);
+        let count = harness.workspace.read(&harness.app, |workspace, _| {
+            crate::plugins::tabs::waiting_count(workspace.tabs())
+        });
+        assert_eq!(2, count);
+
+        // Round the end of the list: the first tab comes before the third.
+        harness.run_command("crook/tabs/next-waiting");
+        assert_eq!(harness.active_id(), tabs[0]);
+        assert_eq!(
+            (AgentStatus::Failed, false, None),
+            session_of(&harness, first),
+            "arriving is what answers the request for a look"
+        );
+
+        harness.run_command("crook/tabs/next-waiting");
+        assert_eq!(harness.active_id(), tabs[2]);
+
+        // The third is still waiting — an agent's question is not answered
+        // by a glance — but it is the one being looked at, so the chord has
+        // nowhere left to go and stays put.
+        harness.run_command("crook/tabs/next-waiting");
+        assert_eq!(harness.active_id(), tabs[2]);
+
+        // Leaving it makes it waiting again, from the strip's point of view.
+        harness.dispatch_action(TabAction::Select(tabs[3]));
+        harness.run_command("crook/tabs/next-waiting");
+        assert_eq!(harness.active_id(), tabs[2]);
+    }
+
+    #[test]
+    fn the_header_counts_the_waiting_panes_and_says_nothing_at_zero() {
+        let mut harness = Harness::new(2);
+        let away = background_of(&harness);
+
+        let scene = harness.frame();
+        assert!(
+            !frame_text(&scene).contains(" waiting"),
+            "a count of zero is not information"
+        );
+
+        report(&mut harness, away, AgentStatus::NeedsInput, None);
+        let scene = harness.frame();
+        assert!(frame_text(&scene).contains("1 waiting"));
+
+        harness.dispatch_action(TabAction::FocusPane(away));
+        let scene = harness.frame();
+        assert!(
+            !frame_text(&scene).contains(" waiting"),
+            "the one waiting pane is the one being looked at"
+        );
+    }
+
+    #[test]
     fn only_a_pane_nobody_is_looking_at_is_waiting() {
         let mut harness = Harness::new(2);
         let away = background_of(&harness);
