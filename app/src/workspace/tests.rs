@@ -10690,6 +10690,157 @@ mod shells {
             let _ = AgentStatus::Idle;
         }
     }
+
+    /// Stepping through the finished blocks with the keyboard.
+    mod block_keyboard {
+        use super::*;
+        use crook_terminal::BlockId;
+
+        /// Runs three echo commands and returns the pane with three finished
+        /// blocks behind it, or `None` where no shell could be started.
+        fn three_commands(harness: &mut Harness) -> Option<PaneId> {
+            let pane = marked_shell(harness)?;
+            await_prompt(harness, pane);
+            for word in ["first", "second", "third"] {
+                harness.type_into(pane, &format!("echo {word}\n"));
+                harness.wait_for("a command never became a block", |harness| {
+                    harness.workspace.read(&harness.app, |workspace, app| {
+                        workspace.terminal_blocks(pane, app).is_some_and(|blocks| {
+                            blocks.iter().any(|block| {
+                                block.command.as_deref() == Some(&format!("echo {word}"))
+                            })
+                        })
+                    })
+                });
+            }
+            Some(pane)
+        }
+
+        fn ids(harness: &Harness, pane: PaneId) -> Vec<BlockId> {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                workspace
+                    .terminal_blocks(pane, app)
+                    .map(|blocks| blocks.iter().map(|block| block.id).collect())
+                    .unwrap_or_default()
+            })
+        }
+
+        fn selected(harness: &Harness, pane: PaneId) -> Option<BlockId> {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.pane_blocks(pane).and_then(|view| view.selected())
+            })
+        }
+
+        fn up(harness: &mut Harness) {
+            harness.run_command("crook/window/select-block-up");
+        }
+        fn down(harness: &mut Harness) {
+            harness.run_command("crook/window/select-block-down");
+        }
+
+        #[test]
+        fn stepping_up_walks_the_blocks_from_the_prompt_and_stops_at_the_top() {
+            let mut harness = Harness::panel(1);
+            let Some(pane) = three_commands(&mut harness) else {
+                return;
+            };
+            let blocks = ids(&harness, pane);
+            assert!(blocks.len() >= 3, "the three commands each left a block");
+            let top = blocks[0];
+            let last = blocks[blocks.len() - 1];
+            let second_last = blocks[blocks.len() - 2];
+            assert_eq!(
+                None,
+                selected(&harness, pane),
+                "the keyboard starts at the prompt"
+            );
+
+            up(&mut harness);
+            assert_eq!(
+                Some(last),
+                selected(&harness, pane),
+                "up from the prompt is the last block"
+            );
+            up(&mut harness);
+            assert_eq!(Some(second_last), selected(&harness, pane));
+            // All the way to the top, however many blocks the shell's own
+            // start-up left in front of the three.
+            for _ in 0..blocks.len() {
+                up(&mut harness);
+            }
+            assert_eq!(
+                Some(top),
+                selected(&harness, pane),
+                "the top is as far as up goes"
+            );
+        }
+
+        #[test]
+        fn stepping_down_returns_to_the_prompt_and_stays_there() {
+            let mut harness = Harness::panel(1);
+            let Some(pane) = three_commands(&mut harness) else {
+                return;
+            };
+            let blocks = ids(&harness, pane);
+            let last = blocks[blocks.len() - 1];
+            let second_last = blocks[blocks.len() - 2];
+
+            up(&mut harness); // last
+            up(&mut harness); // second last
+            assert_eq!(Some(second_last), selected(&harness, pane));
+
+            down(&mut harness);
+            assert_eq!(Some(last), selected(&harness, pane));
+            down(&mut harness);
+            assert_eq!(
+                None,
+                selected(&harness, pane),
+                "down off the last block is the prompt"
+            );
+            down(&mut harness);
+            assert_eq!(None, selected(&harness, pane), "and it stays there");
+        }
+
+        #[test]
+        fn escape_and_copy_are_the_selections_only_when_there_is_one() {
+            let mut harness = Harness::panel(1);
+            let Some(pane) = three_commands(&mut harness) else {
+                return;
+            };
+
+            // With nothing selected, Escape and the copy chord are nobody's
+            // here — they fall through to the pane.
+            assert_eq!(None, harness.action_for("escape", Modifiers::default()));
+            let copy = Modifiers {
+                ctrl: true,
+                shift: true,
+                ..Modifiers::default()
+            };
+            assert_eq!(None, harness.action_for("c", copy));
+
+            up(&mut harness);
+            assert!(selected(&harness, pane).is_some());
+
+            // Now Escape clears it and the copy chord copies it.
+            assert!(matches!(
+                harness.action_for("escape", Modifiers::default()),
+                Some(WorkspaceAction::Block(
+                    crate::workspace::action::BlockAction::ClearSelection(_)
+                ))
+            ));
+            assert!(matches!(
+                harness.action_for("c", copy),
+                Some(WorkspaceAction::Block(
+                    crate::workspace::action::BlockAction::CopySelection(_)
+                ))
+            ));
+
+            harness.dispatch_workspace_action(WorkspaceAction::Block(
+                crate::workspace::action::BlockAction::ClearSelection(pane),
+            ));
+            assert_eq!(None, selected(&harness, pane), "Escape let go of it");
+        }
+    }
 }
 
 #[test]

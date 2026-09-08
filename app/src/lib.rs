@@ -890,6 +890,7 @@ KEYS (macOS):
     cmd+k                      Search the tabs
     alt+cmd+left/right         Select the previous/next tab
     ctrl+cmd+left/right        Move the active tab
+    cmd+alt+up / cmd+alt+down   Select the block above / below, and copy it with cmd+c
     cmd+plus / cmd+minus       Make the terminal's text bigger / smaller
     cmd+0                      Put the text back to its default size
 

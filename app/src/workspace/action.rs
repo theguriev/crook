@@ -279,6 +279,18 @@ pub enum BlockAction {
     ScrollTo(BlockEdge),
     /// Put the block's command line back in the composer, unsent.
     Rerun,
+    /// Step the keyboard's block selection one older, towards the top of the
+    /// list — or onto the last block from the prompt. Names a pane because,
+    /// unlike the menu's entries, it is reached from a chord over whichever
+    /// pane has the keyboard rather than from a block's own dots.
+    SelectUp(PaneId),
+    /// Step it one newer, towards the prompt, and off the last block back to
+    /// the prompt itself.
+    SelectDown(PaneId),
+    /// Let go of the block selection, back to composing at the prompt.
+    ClearSelection(PaneId),
+    /// Copy the selected block, the way its own copy control would.
+    CopySelection(PaneId),
 }
 
 /// Which of a block's facts an entry copies.

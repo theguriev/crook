@@ -2615,7 +2615,113 @@ impl Workspace {
                 self.rerun_block_command(ctx);
                 self.close_block_menu(ctx);
             }
+            BlockAction::SelectUp(pane) => self.step_block_selection(pane, false, ctx),
+            BlockAction::SelectDown(pane) => self.step_block_selection(pane, true, ctx),
+            BlockAction::ClearSelection(pane) => {
+                if self.clear_block_selection(pane) {
+                    ctx.notify();
+                }
+            }
+            BlockAction::CopySelection(pane) => self.copy_selected_block(pane, ctx),
         }
+    }
+
+    /// Steps a pane's block selection: `down` towards the prompt, otherwise
+    /// towards the older commands at the top.
+    ///
+    /// The one gesture for both directions, because they are one line of
+    /// reasoning about the same three positions — at the prompt, on a block,
+    /// on the oldest block — and splitting it would be two arms that had to
+    /// agree about the middle. Stepping down off the last block goes back to
+    /// the prompt, which is what a person on the newest command means by
+    /// "further down"; stepping up from the prompt lands on the last block.
+    fn step_block_selection(&mut self, pane: PaneId, down: bool, ctx: &mut ViewContext<Self>) {
+        let Some(history) = self.terminal_blocks(pane, ctx) else {
+            return;
+        };
+        let count = history.len();
+        if count == 0 {
+            return;
+        }
+        let Some(view) = self.pane_blocks(pane) else {
+            return;
+        };
+        let current = view
+            .selected()
+            .and_then(|id| history.iter().position(|block| block.id == id));
+
+        // `None` means "leave it": at the oldest block Up does nothing, and at
+        // the prompt Down does nothing. The inner value is where to land, with
+        // `None` standing for the prompt.
+        let target: Option<Option<usize>> = if down {
+            match current {
+                None => None,
+                Some(index) if index + 1 < count => Some(Some(index + 1)),
+                Some(_) => Some(None),
+            }
+        } else {
+            match current {
+                None => Some(Some(count - 1)),
+                Some(index) if index > 0 => Some(Some(index - 1)),
+                Some(_) => None,
+            }
+        };
+        let Some(landing) = target else {
+            return;
+        };
+
+        let block = landing.and_then(|index| history.get(index).map(|block| block.id));
+        if !view.select(block) {
+            return;
+        }
+        // A block selection and a dragged text selection are two answers to
+        // "what would a copy take", so only one may be live at a time.
+        if let Some(interaction) = self.interactions.get(&pane) {
+            interaction.selection.clear();
+        }
+        if let Some(index) = landing {
+            self.scroll_block_into_view(pane, index);
+        }
+        ctx.notify();
+    }
+
+    /// Lets go of a pane's block selection, reporting whether there was one.
+    fn clear_block_selection(&mut self, pane: PaneId) -> bool {
+        self.pane_blocks(pane).is_some_and(|view| view.select(None))
+    }
+
+    /// Puts the selected block's whole text on the clipboard.
+    fn copy_selected_block(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        let (Some(view), Some(history), Some((_, snapshot))) = (
+            self.pane_blocks(pane),
+            self.terminal_blocks(pane, ctx),
+            self.terminal(pane, ctx),
+        ) else {
+            return;
+        };
+        let Some(block) = view.selected() else {
+            return;
+        };
+        let blocks = crate::selection::Blocks::list(&history, &snapshot);
+        if let Some(text) = super::block_list::block_text(&blocks, block, 0) {
+            self.clipboard.write(text.trim_end());
+        }
+    }
+
+    /// Brings the block at `index` into the pane's viewport if it is not
+    /// already, the way stepping the find bar's matches does.
+    fn scroll_block_into_view(&self, pane: PaneId, index: usize) {
+        let Some(view) = self.pane_blocks(pane) else {
+            return;
+        };
+        let line = view.with_heights(|heights| heights.start(index));
+        let offset = view.offset();
+        let viewport = view.viewport();
+        if line >= offset && line < offset + viewport {
+            return;
+        }
+        let target = (line - viewport / 3.).max(0.);
+        view.apply(ScrollCause::ToLine(target));
     }
 
     /// Opens the menu on one block, and reads what it needs off it.
@@ -4257,7 +4363,42 @@ impl Workspace {
             return Some(action);
         }
 
+        // A selected block owns Escape and the copy chord: Escape lets go of
+        // it, and the copy chord takes it — both keys that would otherwise go
+        // to the shell under it. Before the bindings, because a modal-feeling
+        // selection's Escape is not a chord anything else may take.
+        if let Some(action) = self.block_selection_action_for(keystroke) {
+            return Some(action);
+        }
+
         self.bound(keystroke)
+    }
+
+    /// What a keystroke means to a selected block, if anything.
+    ///
+    /// Only ever when a block is selected in the focused pane, and never over
+    /// an open find bar, which owns those keys itself. The copy chord is
+    /// declined while the pointer has selected text, because that selection is
+    /// what a copy takes then and the block selection is the quieter of the
+    /// two.
+    fn block_selection_action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
+        if self.find_takes_keys() {
+            return None;
+        }
+        let pane = self.tabs.focused_pane_id()?;
+        self.pane_blocks(pane)?.selected()?;
+
+        if keystroke.key == "escape" && keystroke.modifiers.is_empty() {
+            return Some(WorkspaceAction::Block(BlockAction::ClearSelection(pane)));
+        }
+
+        let text_selected = self
+            .interaction(pane)
+            .is_some_and(|interaction| interaction.selection.has_selection());
+        if !text_selected && is_copy_chord(keystroke) {
+            return Some(WorkspaceAction::Block(BlockAction::CopySelection(pane)));
+        }
+        None
     }
 
     /// What a keystroke means to the find bar, if it means anything.
@@ -4444,6 +4585,16 @@ impl Workspace {
             // there is one: a full-screen program has taken the whole pane and
             // draws no blocks, and Ctrl-F is one of its own keys there.
             Binding::FindInOutput => return self.find_open_action(),
+            Binding::SelectBlockUp => {
+                return Some(WorkspaceAction::Block(BlockAction::SelectUp(
+                    self.tabs.focused_pane_id()?,
+                )));
+            }
+            Binding::SelectBlockDown => {
+                return Some(WorkspaceAction::Block(BlockAction::SelectDown(
+                    self.tabs.focused_pane_id()?,
+                )));
+            }
         };
 
         Some(WorkspaceAction::Tab(tab))
@@ -5680,6 +5831,19 @@ const OVERLAY_ANCHOR: AnchorTo = AnchorTo {
 /// platform keeps data rather than in a dotfile of our own.
 fn worktree_store() -> Option<PathBuf> {
     dirs::data_dir().map(|directory| directory.join("crook").join("worktrees"))
+}
+
+/// Whether a keystroke is this platform's "copy" chord: cmd-c on macOS, and
+/// ctrl-shift-c off it, where bare ctrl-c is the interrupt the tty must keep.
+fn is_copy_chord(keystroke: &Keystroke) -> bool {
+    let modifiers = keystroke.modifiers;
+    if keystroke.key != "c" {
+        return false;
+    }
+    match Platform::current() {
+        Platform::Mac => modifiers.cmd && !modifiers.ctrl && !modifiers.alt && !modifiers.shift,
+        Platform::Other => modifiers.ctrl && modifiers.shift && !modifiers.cmd && !modifiers.alt,
+    }
 }
 
 impl TypedActionView for Workspace {

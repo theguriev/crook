@@ -49,7 +49,7 @@ pub const WINDOW_OVERLAY: SlotId = SlotId::new("window.overlay");
 ///
 /// The order is the order the shipped keybindings are written in, so a person
 /// reading one and the other is reading the same order twice.
-pub const COMMANDS: [(&str, &str, Binding); 14] = [
+pub const COMMANDS: [(&str, &str, Binding); 16] = [
     ("new-tab", "New agent tab", Binding::NewTab),
     ("close-pane", "Close the focused pane", Binding::ClosePane),
     ("split-right", "Split to the right", Binding::SplitRight),
@@ -64,6 +64,16 @@ pub const COMMANDS: [(&str, &str, Binding); 14] = [
     ),
     ("search-tabs", "Search the tabs", Binding::SearchTabs),
     ("find", "Find in output", Binding::FindInOutput),
+    (
+        "select-block-up",
+        "Select the block above",
+        Binding::SelectBlockUp,
+    ),
+    (
+        "select-block-down",
+        "Select the block below",
+        Binding::SelectBlockDown,
+    ),
     ("open-settings", "Settings", Binding::OpenSettings),
     ("zoom-in", "Make the text bigger", Binding::ZoomIn),
     ("zoom-out", "Make the text smaller", Binding::ZoomOut),

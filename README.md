@@ -184,6 +184,14 @@ Eight features, and the page that configures them:
   with the query kept for next time. It is a search, not a filter: the lines between the hits
   stay where they are, because the output is a transcript. It opens only over the list of
   commands, never over a full-screen program, where `ctrl-f` is the program's own key.
+- **Step through the commands with the keyboard.** `cmd-alt-up` and `cmd-alt-down`
+  (`ctrl-alt-up` / `ctrl-alt-down` off macOS) move a selection through the finished blocks:
+  up from the prompt lands on the last command, up walks to the oldest, down walks back and off
+  the last block returns to the prompt. The selected block wears an accent wash and a stripe,
+  and steps to an off-screen one scroll it into view. `cmd-c` (`ctrl-shift-c` off macOS) copies
+  the whole selected block, and Escape lets the selection go. It is one selection per pane, and
+  it answers the same question a drag does, so the two never both hold: stepping to a block
+  drops any text the pointer had selected.
 - **A command line that behaves like a text field.** Under each pane's output is the line
   being composed — not a box and not a raw terminal line: no border, no fill, no focus ring,
   on the pane's own ground, in the terminal's own font and colours, at the same column zero as
@@ -326,10 +334,11 @@ Eight features, and the page that configures them:
 Everything else is out of scope on purpose. There is no telemetry, and OSC 8 hyperlinks are
 not read — though a URL a program *printed* is clickable, because the scan that finds one
 works the same on a finished block as on the live grid, which an OSC 8 carried on the grid
-alone would not. Blocks are stage one — no
-block-level selection, no keyboard navigation between blocks, no sticky header,
-no jump-to-bottom, and the shell's prompt stays on its own row rather than being lifted into
-the composer; [`docs/blocks.md`](docs/blocks.md) lists those and says what each would touch.
+alone would not. The keyboard steps through the blocks and selects one, and the composer types
+on the prompt's own line, but the blocks are still short of a few things: no pointer
+click-to-select a block, no sticky header for one taller than the window, and no
+jump-to-bottom button; [`docs/blocks.md`](docs/blocks.md) lists those and says what each would
+touch.
 The terminal grid still reaches no clipboard of its own: the input field copies and pastes, an
 OSC 52 from the shell does not. The list of what is absent — and what adding each item would
 touch — is the last section of the architecture doc.

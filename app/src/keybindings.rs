@@ -930,6 +930,11 @@ pub const DEFAULTS_MAC: &[(&str, &str)] = &[
     // is free: the field spends ctrl on its emacs bindings and cmd on the
     // clipboard, and cmd-f is nobody's here.
     ("cmd+f", "crook/window/find"),
+    // Stepping through the blocks. Not cmd+arrow: macOS text fields spend
+    // that on document-start and document-end, and the composer is one. The
+    // Option beside it is free there, and nothing in a terminal wants it.
+    ("cmd+alt+up", "crook/window/select-block-up"),
+    ("cmd+alt+down", "crook/window/select-block-down"),
     ("cmd+,", "crook/window/open-settings"),
     // Not cmd+shift+arrow, which every macOS text field spends on selecting to
     // the end of a line — the field needs it more than the tabs do, and
@@ -971,6 +976,11 @@ pub const DEFAULTS_OTHER: &[(&str, &str)] = &[
     // character" and the field needs it — the same reason every other chord
     // here carries a Shift the macOS one does not.
     ("ctrl+shift+f", "crook/window/find"),
+    // Not ctrl+shift+arrow: that is the field's own selection-by-word off
+    // macOS. Alt beside the ctrl is free there, and mirrors the cmd+alt the
+    // Mac uses for the same step.
+    ("ctrl+alt+up", "crook/window/select-block-up"),
+    ("ctrl+alt+down", "crook/window/select-block-down"),
     // ctrl+comma without a Shift: the settings chord is the same on every
     // platform, and unlike the tab bindings it has no field gesture to stay
     // out of the way of.

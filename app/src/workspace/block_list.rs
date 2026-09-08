@@ -973,6 +973,25 @@ impl BlockList {
             Verdict::Plain => {}
         }
 
+        // The block the keyboard is standing on: an accent wash over the whole
+        // of it and a full-height stripe down its edge — wider and brighter
+        // than a running command's, because this is a selection a person is
+        // moving through the history, not a status the block is reporting.
+        if self.block(item.index).map(|block| block.id) == self.view.selected() {
+            ctx.scene
+                .draw_rect_without_hit_recording(RectF::new(
+                    vec2f(origin.x(), top),
+                    vec2f(size.x(), item.height),
+                ))
+                .with_background(theme().accent.with_alpha(SELECT_WASH_ALPHA));
+            ctx.scene
+                .draw_rect_without_hit_recording(RectF::new(
+                    vec2f(origin.x(), top),
+                    vec2f(SELECT_STRIPE, item.height),
+                ))
+                .with_background(theme().accent);
+        }
+
         // Over the wash rather than under it, and only above a block that has
         // one before it: a rule along the very top of the pane separates the
         // pane from nothing.
@@ -1775,6 +1794,12 @@ pub(super) fn inline_start(
 fn bounded(max: f32, min: f32) -> f32 {
     if max.is_finite() { max } else { min }
 }
+
+/// How strong the wash on the block the keyboard is on is, out of 255.
+const SELECT_WASH_ALPHA: u8 = 22;
+/// How wide its edge stripe is, a touch wider than a running command's so the
+/// two never read as the same mark.
+const SELECT_STRIPE: f32 = STRIPE + 2.;
 
 /// A selected run of columns, cut down to the ones this list is drawing.
 ///

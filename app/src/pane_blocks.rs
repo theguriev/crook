@@ -228,6 +228,15 @@ struct State {
     /// follows the block it belongs to rather than hanging where the block
     /// was when it opened.
     menu_at: Option<Vector2F>,
+    /// The finished block a person is standing on with the keyboard, when they
+    /// have stepped off the prompt into the history.
+    ///
+    /// A [`BlockId`] and not an index, for the reason everything else that
+    /// names a block here is: the list is a moving window and an index would
+    /// point at whatever slid into that slot. `None` is the ordinary state —
+    /// the keyboard is at the prompt, composing — and stepping down off the
+    /// last block goes back to it.
+    selected: Option<BlockId>,
     heights: Heights,
 }
 
@@ -423,6 +432,23 @@ impl PaneBlocks {
     /// Records that corner, or that there is no button on screen to record.
     pub fn set_menu_at(&self, at: Option<Vector2F>) {
         self.0.borrow_mut().menu_at = at;
+    }
+
+    /// The finished block the keyboard is on, or `None` when it is at the
+    /// prompt.
+    pub fn selected(&self) -> Option<BlockId> {
+        self.0.borrow().selected
+    }
+
+    /// Puts the keyboard on a block, or takes it back to the prompt, reporting
+    /// whether that changed anything.
+    pub fn select(&self, block: Option<BlockId>) -> bool {
+        let mut state = self.0.borrow_mut();
+        if state.selected == block {
+            return false;
+        }
+        state.selected = block;
+        true
     }
 
     /// Runs `use_heights` against this list's prefix sums.

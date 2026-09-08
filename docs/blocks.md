@@ -416,14 +416,31 @@ be hiding what a command did. And it is over the list of commands only — a ful
 has taken the whole pane and draws one grid, so the bar does not open there, where `ctrl-f` is
 one of the program's own keys.
 
+## Navigating the blocks
+
+`cmd-alt-up` and `cmd-alt-down` (`ctrl-alt-up` / `ctrl-alt-down` off macOS) step a selection
+through the finished blocks. The bare arrows are the composer's history and the modified ones
+the field already spends on selection, so the block selection takes the pair that is free on
+each platform. Up from the prompt lands on the last command; up walks towards the oldest and
+stops there; down walks back towards the prompt and off the last block returns to it. The
+selected block wears an accent wash and a full-height stripe down its edge — wider and
+brighter than a running command's, so a selection and a status never read as the same mark —
+and stepping to one that is off screen scrolls it into view, a third of a screen down.
+
+The selection is one per pane, on `PaneBlocks` beside the scroll position, and it answers the
+same question a drag does — *what would a copy take* — so the two are mutually exclusive:
+stepping to a block lets go of any text the pointer had selected. `cmd-c` (`ctrl-shift-c` off
+macOS) copies the selected block whole, through the very region its own copy control uses, and
+only while the pointer has selected no text of its own, where that copy belongs to the drag.
+Escape lets the selection go, back to composing at the prompt.
+
 ## What this does not do
 
 Stage 1 of the port. These are absent on purpose, not overlooked:
 
-* **Block selection.** No click-to-select, no shift-click, no accent wash, no per-block border.
-* **Keyboard block navigation.** No Cmd-Up / Cmd-Down. The two scrolls are in the block's menu
-  and are reachable with the pointer only: there is no block *selection*, so there is no block
-  a chord could be about.
+* **Click-to-select a block.** The keyboard selects a block (see above), but the pointer does
+  not yet: no click-to-select, no shift-click to extend, no per-block border. Pointer selection
+  is still the text drag across the list.
 * **The sticky header.** A block taller than the window scrolls like any other content; there
   is nothing pinned to say which command you are inside.
 * **Jump-to-bottom.** No button when a block continues below the fold.
