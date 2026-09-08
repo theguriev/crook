@@ -91,14 +91,37 @@ pub(super) fn with_chrome(attributes: WindowAttributes, chrome: WindowChrome) ->
         .with_undecorated_shadow(!decorated)
 }
 
+/// What a Linux desktop calls this application.
+///
+/// Wayland's `app_id` and X11's `WM_CLASS`, which are the same fact under two
+/// names: it is what a window rule matches, what a dock groups by, what an
+/// alt-tab list labels, and what a `.desktop` file is tied to. A window
+/// without one is a window a person cannot write a rule for — and this had
+/// none, because winit only sets it when asked and nothing asked.
+///
+/// One name for both channels. The dev build says so in its *title*, which is
+/// what a person reads; the id is what their configuration matches, and a rule
+/// that stopped working because they ran a different build of the same
+/// application would be a rule nobody could debug.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+const APPLICATION: &str = "crook";
+
 /// Adds `chrome` to the attributes a window is about to be created with.
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]
 pub(super) fn with_chrome(attributes: WindowAttributes, chrome: WindowChrome) -> WindowAttributes {
+    // Wayland's extension, and it is not only Wayland's: `with_name` writes
+    // one field, which the X11 backend reads as `WM_CLASS` and the Wayland one
+    // as `app_id`. Which display server is in force is the session's business
+    // rather than this line's.
+    use winit::platform::wayland::WindowAttributesExtWayland;
+
     // No Linux compositor has macOS's arrangement either, so a
     // client-decorated window here is a borderless one and the application
     // draws the controls and finds the resize edges itself. The shadow around
     // it is the compositor's own business and there is nothing to ask for.
-    attributes.with_decorations(matches!(chrome, WindowChrome::Native))
+    let attributes = attributes.with_decorations(matches!(chrome, WindowChrome::Native));
+
+    WindowAttributesExtWayland::with_name(attributes, APPLICATION, APPLICATION)
 }
 
 /// How far into a frameless window a press still counts as grabbing its edge,

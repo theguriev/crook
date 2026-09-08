@@ -44,8 +44,11 @@ Eight features, and the page that configures them:
   Crook draws no caption buttons of its own anywhere: on Windows and Linux the window has no
   frame at all, the header runs to both corners, and minimising, maximising and closing are the
   desktop's own shortcuts and the window plugin's commands. Crook still finds its own resize
-  edges there. **That half has never been run** — see
-  [`docs/architecture.md`](docs/architecture.md) §3 for exactly what was checked instead.
+  edges there. **Linux has been run and Windows has not**: the frameless window comes up under
+  Hyprland with a shell drawing in it, and what that first run found was a window with no
+  `app_id` — nothing a window rule could match — which is fixed. See
+  [`docs/architecture.md`](docs/architecture.md) §3 for what is still unrun and what was checked
+  instead of running it.
 - **Plugins, in two tiers, and the second one is not in the binary.** Everything Crook itself
   does is a plugin on the registries a stranger's plugin uses — the header, the window's
   thirteen commands, the command palette, every settings page — which is the only way to know
