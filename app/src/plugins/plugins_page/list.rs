@@ -27,9 +27,6 @@ use crate::workspace::{SettingsAction, TextField, Workspace, WorkspaceAction};
 
 use super::{action, tier_words};
 
-/// The dot that says whether a plugin is running.
-const DOT: f32 = 6.;
-
 /// What the field says while nothing has been typed.
 const PLACEHOLDER: &str = "Search plugins";
 
@@ -151,8 +148,9 @@ fn row(
             label: manifest.name.to_owned(),
             // A filled dot for a plugin that is running and a hollow one for a
             // plugin that is not, which is the whole of what a row has to say
-            // about a plugin beyond its name.
-            leading: Some(dot(on)),
+            // about a plugin beyond its name. The card draws the same dot
+            // before the same word, from the same function.
+            leading: Some(widgets::state_dot(on)),
             selected,
             emphasis: if on {
                 section::Emphasis::Lit
@@ -164,24 +162,4 @@ fn row(
         },
         ui,
     )
-}
-
-/// Filled for a plugin that is running, hollow for one that is not.
-fn dot(on: bool) -> Box<dyn Element> {
-    let (background, border) = if on {
-        (theme().usage_normal, theme().usage_normal)
-    } else {
-        (Color::TRANSPARENT, theme().text_muted)
-    };
-
-    ConstrainedBox::new(
-        Container::new(Empty::new().finish())
-            .with_background_color(background)
-            .with_border(Border::all(1.).with_border_color(border))
-            .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
-            .finish(),
-    )
-    .with_width(DOT)
-    .with_height(DOT)
-    .finish()
 }
