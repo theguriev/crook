@@ -10530,6 +10530,166 @@ mod shells {
             }
         }
     }
+
+    /// The find bar over a pane's output: what it counts, where it steps, and
+    /// what it does to the keyboard.
+    mod find {
+        use super::*;
+        use crate::tab::AgentStatus;
+
+        /// Opens the bar and leaves `query` in it, on a marked shell that has
+        /// printed `line` as one finished command. Returns the pane, or `None`
+        /// on a machine where no shell could be started.
+        fn searching(harness: &mut Harness, line: &str, query: &str) -> Option<PaneId> {
+            let pane = marked_shell(harness)?;
+            await_prompt(harness, pane);
+            harness.type_into(pane, &format!("printf '{line}'; echo\n"));
+            // Wait for the command to become a finished block, which is what
+            // the find walks — not for the output on the grid, which is
+            // harvested off it the moment the prompt comes back. `await_prompt`
+            // will not do: the shell is already at one when this starts, so it
+            // would return before the command had run at all.
+            harness.wait_for("the command never became a block", |harness| {
+                harness.workspace.read(&harness.app, |workspace, app| {
+                    workspace.terminal_blocks(pane, app).is_some_and(|blocks| {
+                        blocks.iter().any(|block| {
+                            block
+                                .command
+                                .as_deref()
+                                .is_some_and(|command| command.contains(line))
+                        })
+                    })
+                })
+            });
+
+            harness.run_command("crook/window/find");
+            let find = harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.find(pane).cloned())
+                .expect("the pane has a find bar");
+            assert!(find.is_open(), "the chord opened it");
+            find.input().edit(|editor| editor.set_text(query));
+            Some(pane)
+        }
+
+        fn matches(harness: &Harness, pane: PaneId) -> usize {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                workspace.find_matches(pane, app).len()
+            })
+        }
+
+        fn current(harness: &Harness, pane: PaneId) -> Option<usize> {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                let total = workspace.find_matches(pane, app).len();
+                workspace.find(pane).and_then(|find| find.clamped(total))
+            })
+        }
+
+        fn step(harness: &mut Harness, pane: PaneId, forward: bool) {
+            harness.dispatch_workspace_action(WorkspaceAction::Find {
+                pane,
+                action: crate::workspace::action::FindAction::Step { forward },
+            });
+        }
+
+        #[test]
+        fn it_counts_the_matches_and_steps_round_them() {
+            let mut harness = Harness::panel(1);
+            // `beta` is in the echoed command line once and in the output
+            // once: two matches, and a query nothing has to guess about.
+            let Some(pane) = searching(&mut harness, "alpha beta gamma", "beta") else {
+                return;
+            };
+
+            assert_eq!(2, matches(&harness, pane));
+            assert_eq!(Some(0), current(&harness, pane));
+
+            let scene = harness.frame();
+            assert!(
+                frame_text(&scene).contains("1/2"),
+                "the bar counts the current match out of the total"
+            );
+
+            step(&mut harness, pane, true);
+            assert_eq!(Some(1), current(&harness, pane));
+            step(&mut harness, pane, true);
+            assert_eq!(
+                Some(0),
+                current(&harness, pane),
+                "forward wraps round the end"
+            );
+            step(&mut harness, pane, false);
+            assert_eq!(Some(1), current(&harness, pane), "back wraps the other way");
+        }
+
+        #[test]
+        fn a_query_that_matches_nothing_says_so() {
+            let mut harness = Harness::panel(1);
+            let Some(pane) = searching(&mut harness, "alpha beta gamma", "nowhere") else {
+                return;
+            };
+
+            assert_eq!(0, matches(&harness, pane));
+            assert_eq!(None, current(&harness, pane));
+            let scene = harness.frame();
+            assert!(
+                frame_text(&scene).contains("results"),
+                "an open bar with a query nothing matches says so"
+            );
+        }
+
+        #[test]
+        fn the_bar_takes_the_keyboard_and_gives_it_back() {
+            let mut harness = Harness::panel(1);
+            let Some(pane) = searching(&mut harness, "alpha beta gamma", "beta") else {
+                return;
+            };
+
+            let field_has_keys = harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.find(pane).unwrap().input().has_keys()
+            });
+            assert!(field_has_keys, "the open bar is where the keyboard is");
+            assert!(!harness.pane_takes_keys(), "so the shell under it is not");
+
+            harness.dispatch_workspace_action(WorkspaceAction::Find {
+                pane,
+                action: crate::workspace::action::FindAction::Close,
+            });
+            let still_open = harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.find(pane).unwrap().is_open()
+            });
+            assert!(!still_open, "Escape closed it");
+            assert!(
+                harness.pane_takes_keys(),
+                "and the shell has the keyboard back"
+            );
+        }
+
+        #[test]
+        fn a_full_screen_program_has_no_find_bar() {
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            await_prompt(&mut harness, pane);
+            // The alternate screen: one grid, not a list of commands. The
+            // doubled backslash is the shell's: its printf is what turns \033
+            // into an ESC, so what is typed at it is a backslash and not an
+            // escape this Rust string already resolved.
+            harness.type_into(pane, "printf '\\033[?1049h'\n");
+            harness.wait_for("the alternate screen never came up", |harness| {
+                harness.alt_screen(pane)
+            });
+
+            harness.run_command("crook/window/find");
+            let opened = harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.find(pane).unwrap().is_open()
+            });
+            assert!(!opened, "Ctrl-F is the program's key, not a find bar's");
+            // Silence the unused import on machines with no shell.
+            let _ = AgentStatus::Idle;
+        }
+    }
 }
 
 #[test]

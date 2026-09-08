@@ -204,6 +204,8 @@ pub enum Binding {
     MoveTabRight,
     /// Put the keyboard in the search box above the tabs.
     SearchTabs,
+    /// Open the find bar over the focused pane's output.
+    FindInOutput,
     /// Open the settings page.
     OpenSettings,
     /// Make the terminal's text bigger.

@@ -69,6 +69,15 @@ pub enum WorkspaceAction {
     ReleaseSelection(PaneId),
     /// Something happened to the search box above the tabs.
     Search(SearchAction),
+    /// Something happened to the find bar over a pane's output.
+    Find {
+        /// Which pane's bar. A pane, not "the focused one", because a button
+        /// on the bar names the pane it is drawn over and the answer must not
+        /// depend on which pane the keyboard was in when it was clicked.
+        pane: PaneId,
+        /// What happened to it.
+        action: FindAction,
+    },
     /// Show one section of the sidebar, or `None` for the tab list.
     ///
     /// The sections come from a slot, so this carries a
@@ -124,6 +133,28 @@ impl From<SearchAction> for WorkspaceAction {
     fn from(action: SearchAction) -> Self {
         Self::Search(action)
     }
+}
+
+/// What a keystroke or a press does to a pane's find bar.
+///
+/// The shape of the search box's actions, one member longer: this box shares
+/// its screen with a shell too, so [`Self::Close`] is a way out that empties
+/// nothing — a query kept is a search a person comes back to — and the extra
+/// member is the one thing the tab search has no equivalent of, stepping
+/// between the several matches a query in a screenful of output turns up.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum FindAction {
+    /// Open the bar and put the keyboard in it. The chord, and a press on a
+    /// bar that is already open.
+    Open,
+    /// Take the bar down and give the keyboard back to the shell. Escape.
+    Close,
+    /// Go to the next match, or the previous one. Enter and Shift-Enter, and
+    /// the two buttons on the bar.
+    Step {
+        /// Forwards, rather than back.
+        forward: bool,
+    },
 }
 
 /// What the header does as a title bar.

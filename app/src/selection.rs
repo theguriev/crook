@@ -490,6 +490,55 @@ impl<'a> Blocks<'a> {
         ))
     }
 
+    /// Every place `needle` occurs in the output, each as the selection that
+    /// covers it, in reading order.
+    ///
+    /// What a find bar highlights and steps through. Case-insensitive over
+    /// ASCII — a `grep` for `error` finds `Error` — and no more than that,
+    /// because a case fold that changed the number of characters would put
+    /// the highlight one cell off the text it grew from, and terminal output
+    /// is ASCII far more often than not. A match never crosses the line break
+    /// [`walk`] writes between two rows, so a query with no newline in it is
+    /// found within one logical line, folds and all.
+    pub fn find_all(&self, needle: &str) -> Vec<Selection> {
+        if needle.is_empty() {
+            return Vec::new();
+        }
+
+        let mut showing = String::new();
+        let mut at = Vec::new();
+        self.walk(|character, place| {
+            showing.push(character);
+            at.push(place);
+        });
+
+        // ASCII case folding keeps every byte where it was, so a byte index
+        // into the folded haystack is a byte index into the shown text — and
+        // the char count up to it is the index into `at`.
+        let haystack = showing.to_ascii_lowercase();
+        let needle = needle.to_ascii_lowercase();
+        let needle_chars = needle.chars().count();
+
+        let mut found = Vec::new();
+        let mut from = 0;
+        while let Some(relative) = haystack[from..].find(&needle) {
+            let byte = from + relative;
+            let first = haystack[..byte].chars().count();
+            let last = first + needle_chars - 1;
+            if let (Some(start), Some(end)) = (at.get(first), at.get(last)) {
+                found.push(Selection::new(
+                    SelectionKind::Simple,
+                    Anchor::new(start.block, start.row, start.column, CellSide::Left),
+                    Anchor::new(end.block, end.row, end.column, CellSide::Right),
+                ));
+            }
+            // Past the whole match, so overlapping runs of a repeated needle
+            // are counted once each rather than at every offset.
+            from = byte + needle.len();
+        }
+        found
+    }
+
     /// The selection that runs from the start of the first `from` to the end
     /// of the first `to`.
     ///

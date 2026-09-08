@@ -926,6 +926,10 @@ pub const DEFAULTS_MAC: &[(&str, &str)] = &[
     // on macOS: the field's own emacs bindings are ctrl-keys, and cmd-k is
     // nobody's here.
     ("cmd+k", "crook/window/search-tabs"),
+    // The chord every browser and editor opens a find bar with. On macOS it
+    // is free: the field spends ctrl on its emacs bindings and cmd on the
+    // clipboard, and cmd-f is nobody's here.
+    ("cmd+f", "crook/window/find"),
     ("cmd+,", "crook/window/open-settings"),
     // Not cmd+shift+arrow, which every macOS text field spends on selecting to
     // the end of a line — the field needs it more than the tabs do, and
@@ -963,6 +967,10 @@ pub const DEFAULTS_OTHER: &[(&str, &str)] = &[
     // it is load-bearing twice over: bare ctrl-k is the field's "delete to the
     // end of the line", which a window binding would take from every pane.
     ("ctrl+shift+k", "crook/window/search-tabs"),
+    // With the Shift, because bare ctrl-f is readline\'s "forward one
+    // character" and the field needs it — the same reason every other chord
+    // here carries a Shift the macOS one does not.
+    ("ctrl+shift+f", "crook/window/find"),
     // ctrl+comma without a Shift: the settings chord is the same on every
     // platform, and unlike the tab bindings it has no field gesture to stay
     // out of the way of.

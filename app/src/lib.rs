@@ -52,6 +52,7 @@ pub mod git_model;
 pub mod input_keys;
 pub mod keybindings;
 pub mod pane_blocks;
+pub mod pane_find;
 pub mod pane_link;
 pub mod pane_selection;
 pub mod pane_split;
@@ -338,6 +339,10 @@ struct Overrides {
     /// Repeatable, because one command is one block and a picture of a *list*
     /// of blocks needs several.
     run: Vec<String>,
+    /// Open the first pane's find bar and leave this in it, so a picture of a
+    /// search over the output can be taken. Needs a `--run` before it to have
+    /// output to search.
+    find_output: Option<String>,
     /// Hover the finished block at this index, so its copy control is drawn.
     ///
     /// A hover is a state that only exists while a pointer is over something,
@@ -413,6 +418,7 @@ impl Overrides {
         !self.run.is_empty()
             || self.type_text.is_some()
             || self.select_output.is_some()
+            || self.find_output.is_some()
             || self.hover_block.is_some()
             || self.block_menu.is_some()
             || self.scroll_blocks.is_some()
@@ -663,6 +669,12 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 let name = args.next().context("`--action` needs a command name")?;
                 overrides.actions.push(name);
             }
+            "--find-output" => {
+                overrides.find_output = Some(
+                    args.next()
+                        .context("`--find-output` needs the text to search for")?,
+                );
+            }
             "--run" => {
                 let command = args.next().context("`--run` needs a command")?;
                 overrides.run.push(command);
@@ -804,6 +816,9 @@ OPTIONS:
     --run <COMMAND>    Type COMMAND into the first pane's input field at startup,
                        send it, and report what the shell printed. Repeatable:
                        one command is one block
+    --find-output <TEXT>
+                       Open the first pane's find bar over its output with TEXT
+                       in it; needs a `--run` before it to have output to search
     --hover-block <N>  Hover the Nth finished block, so its controls are drawn
     --block-menu <N>   Open the menu on the Nth finished block
     --scroll-blocks <N>
@@ -1398,6 +1413,7 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
         // are on screen to be hovered.
         frame(&mut app, &mut presenter);
         aim_at_blocks(&mut app, &workspace, pane, &overrides);
+        open_find_output(&mut app, &workspace, pane, &overrides);
 
         // And then, for a menu, a second frame between the hover and the
         // opening: the corner a menu hangs from is where the dots were last
@@ -1630,6 +1646,27 @@ fn compose_pane(app: &mut App, workspace: &ViewHandle<Workspace>, pane: PaneId, 
 
 /// Puts the pointer and the scroll position where `--hover-block` and
 /// `--scroll-blocks` asked for them.
+/// Opens the first pane's find bar with a query in it, for `--find-output`.
+///
+/// After [`aim_at_blocks`], so there is output to search and a frame has
+/// measured how far it can scroll — the bar scrolls the first match into view
+/// the way a keypress would.
+fn open_find_output(
+    app: &mut App,
+    workspace: &ViewHandle<Workspace>,
+    pane: PaneId,
+    overrides: &Overrides,
+) {
+    let Some(query) = overrides.find_output.clone() else {
+        return;
+    };
+    app.update(|ctx| {
+        workspace.update(ctx, |workspace, ctx| {
+            workspace.open_find_with(pane, &query, ctx);
+        });
+    });
+}
+
 fn aim_at_blocks(
     app: &mut App,
     workspace: &ViewHandle<Workspace>,
@@ -2797,6 +2834,7 @@ mod tests {
             "--hover",
             "--section",
             "--find",
+            "--find-output",
             "--granularity",
             "--density",
             "--agent",

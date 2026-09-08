@@ -17,6 +17,9 @@ pub(super) static CHECK: &[Segment] = &[Move(20.0, 6.0), Line(9.0, 17.0), Line(4
 /// Lucide's `chevron-down`.
 pub(super) static CHEVRON_DOWN: &[Segment] = &[Move(6.0, 9.0), Line(12.0, 15.0), Line(18.0, 9.0)];
 
+/// Lucide's `chevron-up`.
+pub(super) static CHEVRON_UP: &[Segment] = &[Move(18.0, 15.0), Line(12.0, 9.0), Line(6.0, 15.0)];
+
 /// Lucide's `chevron-right`.
 pub(super) static CHEVRON_RIGHT: &[Segment] = &[Move(9.0, 18.0), Line(15.0, 12.0), Line(9.0, 6.0)];
 
@@ -344,6 +347,7 @@ pub(super) static BELL: &[Segment] = &[
 pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [
     (Lucide::Check, "check", CHECK),
     (Lucide::ChevronDown, "chevron-down", CHEVRON_DOWN),
+    (Lucide::ChevronUp, "chevron-up", CHEVRON_UP),
     (Lucide::ChevronRight, "chevron-right", CHEVRON_RIGHT),
     (Lucide::Copy, "copy", COPY),
     (
@@ -369,7 +373,7 @@ pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [
 ];
 
 /// How many there are.
-pub const ICONS: usize = 20;
+pub const ICONS: usize = 21;
 
 /// The icons Crook draws, from Lucide.
 ///
@@ -381,10 +385,14 @@ pub enum Lucide {
     ///
     /// Lucide's [`check`](https://lucide.dev/icons/check).
     Check,
-    /// An open group's heading in the tabs panel: click to fold it away.
+    /// An open group's heading in the tabs panel; the find bar's step-to-next-match button.
     ///
     /// Lucide's [`chevron-down`](https://lucide.dev/icons/chevron-down).
     ChevronDown,
+    /// The find bar's step-to-previous-match button.
+    ///
+    /// Lucide's [`chevron-up`](https://lucide.dev/icons/chevron-up).
+    ChevronUp,
     /// A folded group's heading, in the same place.
     ///
     /// Lucide's [`chevron-right`](https://lucide.dev/icons/chevron-right).

@@ -37,7 +37,8 @@ OUTPUT = Path(__file__).resolve().parent.parent / "crates/crookui_core/src/icons
 # where an icon is used without grepping.
 ICONS = [
     ("Check", "check", "The mark on a chosen row of the tab options menu and of the settings page."),
-    ("ChevronDown", "chevron-down", "An open group's heading in the tabs panel: click to fold it away."),
+    ("ChevronDown", "chevron-down", "An open group's heading in the tabs panel; the find bar's step-to-next-match button."),
+    ("ChevronUp", "chevron-up", "The find bar's step-to-previous-match button."),
     ("ChevronRight", "chevron-right", "A folded group's heading, in the same place."),
     ("Copy", "copy", "The control that takes a block's text, on the block the pointer is on."),
     ("EllipsisVertical", "ellipsis-vertical", "The control that opens a block's menu, beside that one."),

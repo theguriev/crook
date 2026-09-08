@@ -385,6 +385,30 @@ measured for the grid the last frame had is refreshed rather than painted into t
 
 ---
 
+## Finding in the output
+
+`cmd-f` (`ctrl-shift-f` off macOS) opens a bar over the top-right of the output, and it
+searches the *blocks* — every command that has finished and the one still open — rather than
+the screenful the grid is showing. It is the same walk a copy is: `Blocks::find_all` in
+`app/src/selection.rs` turns a query into a list of `Selection`s, one per match, in reading
+order and ASCII-case-insensitive. Each match is highlighted where it is, the current one in
+the accent and the rest in the terminal's amber, painted the way a drag's selection is — over
+the cell's own background and under its glyph, so the text stays legible through the wash.
+
+The bar counts the matches (`3/12`), steps between them with Enter and Shift-Enter or its two
+buttons, and brings the current one into view if it is not already, a third of a screen down.
+Escape closes it and hands the keyboard back to the shell; the query is kept, so opening the
+bar again comes back to it. It is a per-pane thing — `PaneFind` on the pane's interaction
+state, beside its selection — so a search in one pane holds while another prints, and which
+pane's bar has the keyboard is the focused pane's, decided in `Workspace::sync_input_keys`
+exactly as the tab search box's is.
+
+Two things it is not. It is not a filter: every block stays where it is and the matches are
+marked in place, because the output is a transcript and hiding the lines between the hits would
+be hiding what a command did. And it is over the list of commands only — a full-screen program
+has taken the whole pane and draws one grid, so the bar does not open there, where `ctrl-f` is
+one of the program's own keys.
+
 ## What this does not do
 
 Stage 1 of the port. These are absent on purpose, not overlooked:
@@ -406,6 +430,6 @@ Stage 1 of the port. These are absent on purpose, not overlooked:
   by the width of the prompt, to where the shell echoes it. The marks that would fix this now
   exist (`B` is exactly where the echoed command starts), so this is the next thing to build
   rather than a limitation of the design.
-* Share, bookmarks, block filters, find-within-block, and everything else that needs a block to
+* Share, bookmarks, block filters, and everything else that needs a block to
   be addressable rather than merely visible. Running a command a second time is in the menu —
   as text put back in the composer, which needs nothing of the sort.

@@ -176,6 +176,14 @@ Eight features, and the page that configures them:
   as well as its screen. What no selection survives is the picture under it changing: resizing
   the pane re-wraps the rows, and crossing between the list and the grid renumbers them, so the
   selection is let go of rather than re-read against text nobody selected.
+- **Find across every command in the output.** `cmd-f` (`ctrl-shift-f` off macOS) opens a bar
+  over the top-right of a pane and searches the blocks, not the screenful — every finished
+  command and the open one at once. Each match is highlighted where it is, the current one in
+  the accent and the rest in amber; the bar counts them, Enter and Shift-Enter step between
+  them and scroll the current one into view, and Escape hands the keyboard back to the shell
+  with the query kept for next time. It is a search, not a filter: the lines between the hits
+  stay where they are, because the output is a transcript. It opens only over the list of
+  commands, never over a full-screen program, where `ctrl-f` is the program's own key.
 - **A command line that behaves like a text field.** Under each pane's output is the line
   being composed — not a box and not a raw terminal line: no border, no fill, no focus ring,
   on the pane's own ground, in the terminal's own font and colours, at the same column zero as
