@@ -32,6 +32,18 @@ CRATES="crook_plugin_api crook_wasm"
 
 DRY_RUN=0
 
+# Whether crates.io already has this version.
+#
+# Asked of the sparse index rather than of the website, because that is the
+# file cargo itself resolves against: one line of JSON per version, under a
+# path made of the first four characters of the name.
+already_published() {
+  crate=$1
+  version=$2
+  index="https://index.crates.io/$(echo "$crate" | cut -c1-2)/$(echo "$crate" | cut -c3-4)/$crate"
+  curl --silent --fail "$index" 2>/dev/null | grep -q "\"vers\":\"$version\""
+}
+
 usage() {
   cat <<'USAGE'
 Usage: ./script/publish [--dry-run]
@@ -69,12 +81,22 @@ for crate in $CRATES; do
   if [ "$DRY_RUN" = 1 ]; then
     echo "==> $crate $version (dry run)"
     cargo publish --locked --dry-run -p "$crate"
-  else
-    echo "==> $crate $version"
-    cargo publish --locked -p "$crate"
-    # A published version is a version a plugin can be pinned to forever, so
-    # it is worth a tag pointing at the commit it was built from.
-    git tag "$crate-v$version"
-    echo "tagged $crate-v$version; push it with: git push origin $crate-v$version"
+    continue
   fi
+
+  # Skipped if it is already up there, which makes this safe to run again.
+  # The likely failure is the *second* crate — it cannot even be packaged
+  # until the first is in the registry — and a rerun that died on "crate
+  # version already uploaded" would never reach it.
+  if already_published "$crate" "$version"; then
+    echo "==> $crate $version is already on crates.io"
+    continue
+  fi
+
+  echo "==> $crate $version"
+  cargo publish --locked -p "$crate"
+  # A published version is a version a plugin can be pinned to forever, so it
+  # is worth a tag pointing at the commit it was built from.
+  git tag "$crate-v$version" 2>/dev/null || true
+  echo "tagged $crate-v$version; push it with: git push origin $crate-v$version"
 done
