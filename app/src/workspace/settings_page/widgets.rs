@@ -506,12 +506,6 @@ pub(crate) fn choice(
     with_command(control, command)
 }
 
-/// A small outlined button.
-///
-/// `changed` is Warp's trick, and it is the only "this differs from the
-/// default" indicator either application has: the reset button is drawn
-/// de-emphasised and does nothing while there is nothing to reset, so the
-/// control that undoes a change is also the one that says a change was made.
 /// The corner of the box a control that answers a question sits in.
 ///
 /// Softer than a row's, because the box is a *card's* and a card's own
@@ -571,6 +565,12 @@ pub(crate) fn answer(
     .finish()
 }
 
+/// A small outlined button.
+///
+/// `changed` is Warp's trick, and it is the only "this differs from the
+/// default" indicator either application has: the reset button is drawn
+/// de-emphasised and does nothing while there is nothing to reset, so the
+/// control that undoes a change is also the one that says a change was made.
 pub(crate) fn text_button(
     label: impl Into<String>,
     command: Command,

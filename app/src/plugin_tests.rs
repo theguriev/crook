@@ -206,12 +206,23 @@ fn a_plugin_that_arrives_after_everything_else_is_running_before_the_next_frame(
         assert!(!host.is_loaded(&id), "an update should not turn it back on");
         assert_eq!(host.available().len(), carried + 1, "and it is still there");
 
+        // What it was allowed to do goes with it. This map is what a plugin
+        // is *built* with, so an entry left behind for a plugin whose file has
+        // been deleted is a permission that comes back the moment somebody
+        // installs it again — in the same session, with no card answered.
+        host.set_granted(&id, vec![String::from("cwd.read")]);
+        assert_eq!(host.granted(&id), ["cwd.read"]);
+
         // Forgetting is what uninstalling does, and it is not the switch: a
         // plugin whose file has been deleted must not be left on the list of
         // things that can be switched back on.
         host.forget(&id);
         assert!(!host.is_loaded(&id));
         assert_eq!(host.available().len(), carried);
+        assert!(
+            host.granted(&id).is_empty(),
+            "a plugin that was removed is a plugin nobody has allowed anything"
+        );
     });
 }
 

@@ -1160,6 +1160,15 @@ impl Host {
         self.plugins
             .retain(|carried| carried.manifest().id != *plugin);
         self.refused.retain(|(refused, _)| refused != plugin);
+        // And what it was allowed to do. This map is what a plugin is *built*
+        // with — `WasmPlugin::build` reads it and hands the list to the
+        // runtime that authorises every request — so leaving an entry here for
+        // a plugin whose file has been deleted is a permission that comes back
+        // the moment somebody installs it again, in the same session, with no
+        // card answered and nothing said. The settings are cleared by whoever
+        // called this; that is the copy on disk, and this is the copy that
+        // decides.
+        self.grants.remove(plugin.as_str());
     }
 
     /// Builds a plugin that is not loaded, and does nothing to one that is.

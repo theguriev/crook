@@ -1251,6 +1251,32 @@ impl Workspace {
         }
     }
 
+    /// Stops a plugin running, without recording that anybody chose to.
+    ///
+    /// What a withdrawal is: the registry said so rather than the person, so
+    /// nothing is written to `disabled_plugins` — which is their answer and
+    /// not a registry's — and the card says which of the two it was.
+    pub fn disable_plugin(&mut self, plugin: &PluginId, ctx: &mut ViewContext<Self>) {
+        self.host.unload(plugin);
+        self.sync_input_keys();
+        ctx.notify();
+    }
+
+    /// Takes a plugin out of the window without touching a file.
+    ///
+    /// What `--dev-plugin` needs when the module it is watching renames
+    /// itself: the plugin that was there is not the plugin that arrived, and
+    /// `carry` replaces by id, so the old one would stay loaded and drawing
+    /// under a name its source no longer has. Nothing is uninstalled — there
+    /// is nothing installed — and the grant goes with it for the reason
+    /// `Host::forget` gives.
+    pub fn forget_plugin(&mut self, plugin: &PluginId, ctx: &mut ViewContext<Self>) {
+        self.host.forget(plugin);
+        self.withdrawn.remove(plugin.as_str());
+        self.sync_input_keys();
+        ctx.notify();
+    }
+
     /// Records what the registry now says about a plugin's version.
     ///
     /// The store's to say, because the store is what holds the index: a
