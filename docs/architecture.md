@@ -332,11 +332,18 @@ which swallows the button-up that ends it, so the windowing layer forgets every 
 a gesture starts — *after* dispatching to the application, because a window move is started by
 the header, inside that dispatch.
 
-**What has never been run.** There is no Windows or Linux machine in this project's loop, so two
-thirds of the above has never opened a window: the borderless window itself, the resize edges,
-the shadow, and the drag and double-click acting on a frame that is not macOS's. What was done
-instead
-is worth stating precisely, so it is not mistaken for more. `--controls macos|windows|linux`
+**Linux has now been run, and Windows has not.** The borderless window was opened on Wayland
+under Hyprland 0.56: it comes up with no frame, the header runs to both corners, a real shell
+draws in it, and the compositor reports the size and position the application asked for. One
+thing was wrong and is fixed — the window had no `app_id`, so no window rule could match it, no
+dock could group it and no `.desktop` file could be tied to it. winit only sets that when asked
+and nothing asked; `crookui::windowing::chrome` asks now, and Hyprland reports `class: crook`.
+
+What is still unrun on Linux is what needs a pointer rather than a window: the resize edges, the
+drag that moves the window and the double click that maximises it. On **Windows**, none of it
+has opened a window at all.
+
+What was done instead is worth stating precisely, so it is not mistaken for more. `--controls macos|windows|linux`
 lays the header out for another platform's controls on this one — the real element tree, real
 hit-testing, the real action path — so every platform's reservation, and the corner that is now
 title bar on all three, was laid out and pressed here; `cargo clippy --target
