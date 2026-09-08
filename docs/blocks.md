@@ -362,6 +362,13 @@ read as a widget. Column zero in the composer is column zero in the output: one 
 constant is the list's left inset, the composer's left padding, and the width `PaneSizer`
 takes off the pane before working out how many columns to tell the pty about.
 
+And the line being typed is on the prompt's **own** row, not the one under it. Shell integration
+emits mark `B` at the end of the prompt, so the exact cell the prompt finished on is known, and
+`block_list::inline_start` hands the composer that column: its first row starts one cell past the
+prompt and wraps to the gutter like a shell's own line editor, so pressing Enter no longer jumps
+the text up a row and across to where the shell echoes it. Without integration there is no mark
+and no honest way to guess where a prompt ends, so that one case keeps its own row.
+
 The text and the caret are painted in the colours the *shell* resolved — `Snapshot::foreground`
 and the cursor colour the grid paints the shell's own cursor in — rather than the theme's. A
 shell that changes them at runtime (OSC 10 and OSC 12, which is what every light-or-dark theme
@@ -422,14 +429,6 @@ Stage 1 of the port. These are absent on purpose, not overlooked:
 * **Jump-to-bottom.** No button when a block continues below the fold.
 * **`clear` as a gap.** Ctrl-L does what the emulator does with it.
 * **Lazy reflow on a column change.** A harvested block keeps the width it was harvested at.
-* **The prompt hoisted into the composer.** Warp lifts the shell's own prompt out of the grid
-  and re-draws it as a one-line lead-in inside the field, so that exactly one prompt is on
-  screen and the line being typed is attached to it. Crook leaves the prompt where the shell
-  drew it — the last row of the open block — and puts the field on the row under it. The
-  consequence is visible and worth stating: pressing Enter moves the text up one row and right
-  by the width of the prompt, to where the shell echoes it. The marks that would fix this now
-  exist (`B` is exactly where the echoed command starts), so this is the next thing to build
-  rather than a limitation of the design.
 * Share, bookmarks, block filters, and everything else that needs a block to
   be addressable rather than merely visible. Running a command a second time is in the menu —
   as text put back in the composer, which needs nothing of the sort.
