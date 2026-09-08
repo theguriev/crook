@@ -1038,9 +1038,19 @@ is not a different kind of thing from one that has.
   stays on the Plugins page with the registry's sentence on its card, the switch is drawn dead,
   and what to do about it — update, or remove — is in the Store.
 
-What is not built: `--dev-plugin`, and updates that check themselves. Auto-update stays off —
-the architecture doc lists autoupdate as absent by design, and a terminal that changes under you
-is worse than a stale one.
+- **`--dev-plugin <path>` is the plugin somebody is *writing*.** It takes a `.wasm` or the
+  directory it was built in, runs it from wherever `cargo build` put it, and runs it again every
+  time it is built — no copy, nothing installed, and nothing left behind when the window closes.
+  A store exists because a plugin is easy to get; a plugin is only easy to *write* if the loop is
+  short, and without this the loop was build, copy into a directory whose path is different on
+  three platforms, close the window, open it again. It polls once a second rather than watching,
+  because a watcher is a crate and three platform backends for one file that changes when
+  somebody runs a build; and a build that fails is a line in the log with the previous version
+  still running, which is what somebody in the middle of writing a plugin needs.
+
+What is not built: updates that check themselves. Auto-update stays off — the architecture doc
+lists autoupdate as absent by design, and a terminal that changes under you is worse than a
+stale one.
 
 **The plan's own sketch, for the record.** A `Plugins` page in the settings rail — searchable, since the rail searches —
 listing installed, available and built-in plugins with state, granted capabilities, version,
@@ -1133,8 +1143,9 @@ What it did not need: a `plugins/` directory in this repository (the plugins liv
 authors' own, which is what the six that exist already did), and a capability *dialog* (the
 grant is answered on the Plugins card, where an escalation is already compared against what was
 allowed last time — a second surface for the same question would be a second answer to keep in
-step). What it still wants is `--dev-plugin`, which is the one thing on the original list that
-is about writing a plugin rather than installing one.
+step) and a template repository, which is the shape of the loop rather than the loop itself.
+`--dev-plugin` — the one item on the original list that is about *writing* a plugin rather than
+installing one — is built.
 
 **Phase 4 — the process transport.** `plugins/host-process`: the NDJSON socket, the CLI as
 SDK, `--skill` output for an agent in a pane, supervised long-lived plugins with budgets.

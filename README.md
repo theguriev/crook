@@ -102,6 +102,11 @@ Eight features, and the page that configures them:
   allowing: a plugin that has just arrived may do nothing at all until its card in **Plugins**
   is answered, and **Remove** takes it and its permissions back off.
 
+  **Writing one is a flag.** `crook --dev-plugin <path>` runs the module you are working on
+  straight out of `target/`, and runs it again every time you build it: no install, no copy, and
+  nothing left on the machine when the window closes. A build that does not compile is a line in
+  the log and the version before it still running.
+
   **The second worked example is the chips**, and it is the one that proves a plugin may
   *act*. It lives at [github.com/theguriev/crook-chips](https://github.com/theguriev/crook-chips)
   and draws the row under the line you are typing: where the pane is, which branch it is on,
