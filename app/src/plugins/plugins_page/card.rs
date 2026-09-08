@@ -7,10 +7,26 @@
 //! The frame is [`section::content`](crate::workspace::section::content)'s,
 //! which is the same frame a settings page is drawn in, so what is here is
 //! only the body: the plugin's *name* is the page title and is drawn by the
-//! frame. What follows it is the facts, the description and the switch, which
-//! belong to no heading — and then one [`widgets::category_element`] per
-//! headed block, so a heading here has the same weight, the same rule above it
-//! and the same gap under it as a category of settings.
+//! frame.
+//!
+//! # Three zones, and each is a shape the settings already have
+//!
+//! **Identity** is bare text: one line of facts with the plugin's state at the
+//! front of it, and the sentence it describes itself with. **Decisions** are
+//! boxes — [`widgets::asked`], the box the Store answers Install in — one per
+//! thing a person decides here, holding what has to be read before pressing
+//! anything in the same rectangle as the control that is pressed; and the
+//! same box, captioned, around the one row on the card the host did not
+//! write. **Reference** is categories, drawn by [`widgets::category_element`]
+//! exactly as a category of settings is, so a heading here has the same rule
+//! above it and the same gap under it as one over a group of settings.
+//!
+//! A box is where something is decided or where the plugin is drawing; the
+//! bare page is where the host explains. That is the whole of the visual
+//! grammar, and it is why the card no longer opens with a heading over a list
+//! over a paragraph over a box: the eye lands on the state, then on the stack
+//! of boxes, then past the first rule on the lists — which is the order the
+//! questions are asked in. Is it on, what did I agree to, what does it do.
 //!
 //! # There is room here for a picture
 //!
@@ -21,15 +37,13 @@
 //! sandboxed one's has no picture in it — so there is nothing to draw and this
 //! says so rather than reserving a grey rectangle for a future release.
 
-use crookui_core::elements::Paragraph;
 use crookui_core::fonts::FamilyId;
 use crookui_core::prelude::*;
 
 use crook_plugin::{EntryId, Manifest, PluginId, SlotId, Slots};
 
-use crate::theme::theme;
 use crate::workspace::settings_page::search::Words;
-use crate::workspace::settings_page::widgets::Command;
+use crate::workspace::settings_page::widgets::{Command, Mark, Tone};
 use crate::workspace::settings_page::{named, widgets};
 use crate::workspace::{Workspace, WorkspaceAction};
 
@@ -38,6 +52,13 @@ use super::{
     tier_words, wanted,
 };
 
+/// The gap under a box, before the next one.
+///
+/// Half the gap over the first box: the boxes are one stack, and members that
+/// sat as far apart as the stack sits from the description would read as
+/// three things rather than one.
+const BOX_GAP: f32 = 8.;
+
 /// The body of the card: everything under the plugin's name.
 pub(super) fn render(
     workspace: &Workspace,
@@ -45,74 +66,60 @@ pub(super) fn render(
     manifest: &'static Manifest,
 ) -> Box<dyn Element> {
     let ui = workspace.fonts().ui;
-    let host = workspace.host();
+    let on = workspace.host().is_loaded(&manifest.id);
 
-    let on = host.is_loaded(&manifest.id);
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
         .with_child(facts(manifest, on, ui))
-        .with_child(description(manifest, ui))
-        .with_child(switch(workspace, manifest, on, ui));
+        .with_child(widgets::description(manifest.description, ui));
 
-    // Directly under the switch, and above everything that merely describes
-    // the plugin: what it may do is the other decision this card exists to
-    // let somebody make, and an escalation is a thing to see without
-    // scrolling past four sections of prose first.
-    if let Some(block) = permissions(workspace, manifest, ui) {
-        column.add_child(block);
+    // The stack of boxes: the switch, then what the plugin may do, then what
+    // it says it is doing. In that order because it is the order somebody who
+    // has just installed something needs them in — a fresh arrival should
+    // meet the question before the controls that depend on the answer, and
+    // the note under those controls says "the answer is above".
+    let mut boxes = vec![Boxed::plain(switch(workspace, manifest, on, ui))];
+    if let Some(block) = permissions(workspace, manifest, on, ui) {
+        boxes.push(block);
     }
 
-    // What the plugin says about itself right now, if it says anything. Above
-    // the sections that merely describe it, because "Microwave, ringing" is
-    // the line somebody opened this card to read and the rest is reference.
-    //
     // Kept, rather than only added, because whether the plugin drew its own
     // controls is also what decides how the list at the foot is drawn.
     let drawn = status(workspace, app, manifest, ui);
     let drew_its_own = drawn.is_some();
-    if let Some(status) = drawn {
-        column.add_child(status);
+    if let Some(block) = drawn {
+        boxes.push(Boxed::plain(block));
     }
 
-    // Above everything else that could be wrong with a plugin, because this
-    // is the one that is somebody else's news rather than this machine's
-    // trouble.
-    if let Some(why) = workspace.withdrawn(&manifest.id) {
-        column.add_child(section(
-            "Withdrawn from the registry",
-            vec![
-                widgets::note(why, ui),
-                widgets::note(
-                    "This version is not being offered any more, so it is not running. The Store \
-                     has whatever replaced it, and Remove takes this one off.",
-                    ui,
-                ),
-            ],
-            ui,
-        ));
+    let last = boxes.len() - 1;
+    for (index, boxed) in boxes.into_iter().enumerate() {
+        // A box that ends in an explanation ends in the note's own gap
+        // instead, which is what a note before a rule gets on the Appearance
+        // page; the last bare box keeps the gap a row keeps before the rule.
+        let gap = match (boxed.explained, index == last) {
+            (true, _) => 0.,
+            (false, true) => widgets::ROW_SPACING,
+            (false, false) => BOX_GAP,
+        };
+        column.add_child(
+            Container::new(boxed.element)
+                .with_margin_bottom(gap)
+                .finish(),
+        );
     }
 
-    if let Some(problem) = host
-        .refused()
-        .iter()
-        .find(|(id, _)| *id == manifest.id)
-        .map(|(_, problem)| problem.clone())
-    {
-        column.add_child(section(
-            "Did not load",
-            vec![widgets::note(&problem, ui)],
-            ui,
-        ));
-    }
-
+    // Before the list of slots rather than after everything, because every
+    // complaint the audit can make is about a slot.
     let problems = problems(workspace, &manifest.id);
     if !problems.is_empty() {
-        column.add_child(section(
+        column.add_child(widgets::toned_category(
             "Problems",
+            Tone::Warning,
+            false,
             problems
                 .into_iter()
-                .map(|line| widgets::note(&line, ui))
+                .map(|line| widgets::note(&line, ui).element)
                 .collect(),
             ui,
         ));
@@ -120,14 +127,26 @@ pub(super) fn render(
 
     let contributions = draws(workspace, &manifest.id);
     if !contributions.is_empty() {
-        column.add_child(section(
-            "What it puts on screen",
-            contributions
-                .into_iter()
-                .map(|line| widgets::note(&line, ui))
-                .collect(),
-            ui,
-        ));
+        // One row per slot, with what the plugin put there on the line under
+        // it. This used to be one line per entry, and a plugin with eight
+        // entries in one menu said the menu's name eight times: what the
+        // section is read for is *where*, and the entries are the detail.
+        let rows: Vec<widgets::Entry> = contributions
+            .into_iter()
+            .map(|(slot, entries)| {
+                let names: Vec<String> = entries.iter().map(ToString::to_string).collect();
+                let keywords: Vec<&str> = names.iter().map(String::as_str).collect();
+                widgets::row(
+                    Words::new(slot.to_string())
+                        .with_description(names.join(", "))
+                        .with_keywords(&keywords),
+                    true,
+                    Empty::new().finish(),
+                    ui,
+                )
+            })
+            .collect();
+        column.add_child(section("What it puts on screen", rows, ui));
     }
 
     let (commands, unoffered) = offers(workspace, &manifest.id);
@@ -144,7 +163,10 @@ pub(super) fn render(
         // be worse than one that answers at length. What the count keeps is
         // the two facts a list of names is actually read for: how many there
         // are, and where to go for them.
-        let rows: Vec<widgets::Entry> = if drew_its_own {
+        let rows: Vec<widgets::Entry> = if drew_its_own || commands.is_empty() {
+            // Also the shape for a plugin that offers nothing and answers to
+            // something: "and 7 more it does not offer" under a heading with
+            // no list above it was a sentence starting with "and".
             vec![widgets::note(&elsewhere(commands.len(), unoffered), ui)]
         } else {
             // A row with a button rather than a line of text. What this
@@ -188,71 +210,109 @@ pub(super) fn render(
     column.finish()
 }
 
-/// The line under it: who owns it, which version, where it came from.
+/// One box of the stack, and whether it ends in a sentence of its own.
+///
+/// The gap under a box depends on what comes after it, which is known only
+/// once the stack is built — and on whether the box brought its explanation
+/// with it, which only the box knows.
+struct Boxed {
+    element: Box<dyn Element>,
+    /// Whether an explanation with its own gap is already under the box.
+    explained: bool,
+}
+
+impl Boxed {
+    /// A box with nothing under it.
+    fn plain(element: Box<dyn Element>) -> Self {
+        Self {
+            element,
+            explained: false,
+        }
+    }
+}
+
+/// The line under the name: whether it is running, who owns it, which version,
+/// where it came from.
 fn facts(manifest: &Manifest, on: bool, ui: FamilyId) -> Box<dyn Element> {
     let (_, tier) = tier_words(manifest.tier);
-    let running = if on { "running" } else { "switched off" };
-    let line = format!(
-        "{} \u{b7} {} \u{b7} {tier} \u{b7} {running}",
-        manifest.id, manifest.version
-    );
-
-    Container::new(
-        Text::new(line, ui, widgets::DESCRIPTION_SIZE)
-            .with_color(theme().text_muted)
-            .finish(),
+    let state = if on { "running" } else { "switched off" };
+    widgets::facts(
+        Some((on, state)),
+        &format!("{} \u{b7} {} \u{b7} {tier}", manifest.id, manifest.version),
+        ui,
     )
-    .with_margin_bottom(14.)
-    .finish()
 }
 
-/// What the plugin says it is for.
-fn description(manifest: &Manifest, ui: FamilyId) -> Box<dyn Element> {
-    let text = if HOLDS_THE_PAGE.contains(&manifest.id.as_str()) {
-        format!(
-            "{} It is what draws the page you are on, so it cannot be switched off from here \
-             \u{2014} the way back would be editing settings.json by hand.",
-            manifest.description
-        )
-    } else {
-        manifest.description.to_owned()
-    };
-
-    Container::new(
-        Paragraph::new(text, ui, widgets::LABEL_SIZE)
-            .with_color(theme().text_primary)
-            .with_line_height_ratio(1.5)
-            .finish(),
-    )
-    .with_margin_bottom(18.)
-    .finish()
-}
-
-/// The switch, with the word beside it rather than a bare toggle.
+/// The switch, with the word beside it rather than a bare toggle — and above
+/// it, whatever a person has to know to read it.
+///
+/// A switch that cannot be thrown is told about *in the box it is in*, not in
+/// the description and not in a section further down: the sentence that
+/// explains a control belongs with the control. Three things can be that
+/// sentence, and a warning is a heading in the one colour the Store already
+/// speaks warnings in.
 fn switch(workspace: &Workspace, manifest: &Manifest, on: bool, ui: FamilyId) -> Box<dyn Element> {
     let holds_the_page = HOLDS_THE_PAGE.contains(&manifest.id.as_str());
     // A version the registry withdrew is not a version to offer a switch for:
     // the plugin is off because somebody published a sentence about it, and a
     // switch that turned it back on would be a control that undoes a warning.
     // Updating or removing it is what the Store is for.
-    let withdrawn = workspace.withdrawn(&manifest.id).is_some();
+    let withdrawn = workspace.withdrawn(&manifest.id);
     let command = workspace
         .host()
         .action(&action("toggle", &manifest.id))
         .map(WorkspaceAction::Run)
-        .filter(|_| !holds_the_page && !withdrawn);
+        .filter(|_| !holds_the_page && withdrawn.is_none());
     let live = command.is_some();
 
-    widgets::answer(
-        "Enabled",
-        live,
-        widgets::switch(
-            on,
-            command,
-            workspace
-                .settings_page()
-                .control(named(&format!("plugins.switch.{}", manifest.id))),
-        ),
+    let mut question = None;
+    let mut body = Vec::new();
+
+    // Above everything else that could be wrong with a plugin, because this
+    // is the one that is somebody else's news rather than this machine's
+    // trouble.
+    if let Some(why) = withdrawn {
+        question = Some(("Withdrawn from the registry", Tone::Warning));
+        body.push(widgets::note_text(why, ui));
+        body.push(widgets::note_text(
+            "This version is not being offered any more, so it is not running. The Store has \
+             whatever replaced it, and Remove there takes this one off.",
+            ui,
+        ));
+    }
+
+    if let Some((_, problem)) = workspace
+        .host()
+        .refused()
+        .iter()
+        .find(|(id, _)| *id == manifest.id)
+    {
+        // A withdrawn version that also failed to load keeps the withdrawal
+        // as its heading — that is the news — and the loader's sentence
+        // follows as one more line.
+        question = question.or(Some(("Did not load", Tone::Warning)));
+        body.push(widgets::note_text(problem, ui));
+    }
+
+    if holds_the_page {
+        body.push(widgets::note_text(
+            "It is what draws the page you are on, so it cannot be switched off from here \
+             \u{2014} the way back would be editing settings.json by hand.",
+            ui,
+        ));
+    }
+
+    let control = widgets::switch(
+        on,
+        command,
+        workspace
+            .settings_page()
+            .control(named(&format!("plugins.switch.{}", manifest.id))),
+    );
+    widgets::asked(
+        question,
+        body,
+        vec![widgets::answer_row("Enabled", live, control, ui)],
         ui,
     )
 }
@@ -269,12 +329,18 @@ fn switch(workspace: &Workspace, manifest: &Manifest, on: bool, ui: FamilyId) ->
 /// request is answered against, while the settings hold the answer as it
 /// stands. A card that showed the host's copy would go on saying "Not allowed"
 /// after somebody pressed Allow. What it shows instead is the answer, and the
-/// paragraph under the list says when the plugin acts on it.
+/// paragraph under the box says when the plugin acts on it.
+///
+/// The list and the button share a box, and the paragraph is under it rather
+/// than between the two: the card exists so that a person reads the list
+/// before answering, and what stood between the terms and the control was the
+/// mechanism — reference, which goes where reference goes.
 fn permissions(
     workspace: &Workspace,
     manifest: &Manifest,
+    on: bool,
     ui: FamilyId,
-) -> Option<Box<dyn Element>> {
+) -> Option<Boxed> {
     if manifest.capabilities.is_empty() {
         return None;
     }
@@ -282,26 +348,26 @@ fn permissions(
     let granted = workspace.settings().granted_to(manifest.id.as_str());
     let stance = stance(&wanted(manifest), granted);
 
-    let mut rows: Vec<widgets::Entry> = manifest
+    let items: Vec<Box<dyn Element>> = manifest
         .capabilities
         .iter()
         .map(|capability| {
             let sentence = capability.sentence();
-            // Marked only in the state where a mark says something. A column
-            // of "allowed" beside every line is a column nobody reads to the
-            // bottom; on the card where the list has grown, which line is new
-            // is the whole message.
-            let line = match stance {
-                Stance::Escalated if covered(capability, granted) => {
-                    format!("{sentence} \u{2014} allowed")
-                }
-                Stance::Escalated => format!("{sentence} \u{2014} new"),
-                _ => sentence,
+            // Marked by the dot, and by the dot alone in every stance but
+            // one. On the card where the list has grown, which line is new is
+            // the whole message: the lines already in force go grey behind
+            // filled dots, and the new ones are the only lit text in the list
+            // — with the word kept, because the paragraph under the box says
+            // "the lines marked new" and a shape is not a thing to quote.
+            let (line, mark) = match stance {
+                Stance::Unanswered => (sentence, Mark::Open),
+                Stance::Allowed => (sentence, Mark::Settled),
+                Stance::Escalated if covered(capability, granted) => (sentence, Mark::Faded),
+                Stance::Escalated => (format!("{sentence} \u{2014} new"), Mark::Open),
             };
-            widgets::note(&line, ui)
+            widgets::item(&line, mark, ui)
         })
         .collect();
-    rows.push(widgets::note(explanation(stance), ui));
 
     let (title, state, label, verb) = match stance {
         Stance::Unanswered => (
@@ -333,17 +399,25 @@ fn permissions(
         ui,
     );
 
-    Some(
-        Flex::column()
-            .with_main_axis_size(MainAxisSize::Min)
-            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_child(section(title, rows, ui))
-            .with_child(widgets::answer(state, live, control, ui))
-            .finish(),
-    )
+    let element = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_child(widgets::asked(
+            Some((title, Tone::Plain)),
+            items,
+            vec![widgets::answer_row(state, live, control, ui)],
+            ui,
+        ))
+        .with_child(widgets::footnote(explanation(stance, on), Tone::Plain, ui))
+        .finish();
+
+    Some(Boxed {
+        element,
+        explained: true,
+    })
 }
 
-/// The paragraph under the list, where the mechanism is said out loud.
+/// The paragraph under the box, where the mechanism is said out loud.
 ///
 /// Three things the sentences themselves cannot say: that anything not allowed
 /// is refused rather than quietly working, that allowing answers the whole list
@@ -353,20 +427,37 @@ fn permissions(
 /// one is worth saying on the card rather than only in a comment: a person who
 /// allows something and is told nothing about what happens next has no way to
 /// tell a control that worked from one that did not.
-fn explanation(stance: Stance) -> &'static str {
-    match stance {
-        Stance::Unanswered => {
+///
+/// Unless the plugin is not running, in which case nothing is started and the
+/// sentence must not say it is: the answer is written down, and the plugin
+/// reads it when it is next switched on.
+fn explanation(stance: Stance, on: bool) -> &'static str {
+    match (stance, on) {
+        (Stance::Unanswered, true) => {
             "None of this is allowed yet, and a plugin is refused everything it has not been \
              allowed. Allowing starts it again with the answer, which takes a moment."
         }
-        Stance::Allowed => {
+        (Stance::Unanswered, false) => {
+            "None of this is allowed yet, and a plugin is refused everything it has not been \
+             allowed. The answer takes effect when it is next switched on."
+        }
+        (Stance::Allowed, true) => {
             "Allowed, and nothing beyond it \u{2014} anything else this plugin asks for is \
              refused. Revoking starts it again with nothing allowed."
         }
-        Stance::Escalated => {
+        (Stance::Allowed, false) => {
+            "Allowed, and nothing beyond it \u{2014} anything else this plugin asks for is \
+             refused. Revoking takes effect when it is next switched on."
+        }
+        (Stance::Escalated, true) => {
             "This version asks for more than you allowed. What you allowed still holds and the \
              lines marked new are refused until you allow them; allowing answers the whole list \
              above and starts the plugin again with it."
+        }
+        (Stance::Escalated, false) => {
+            "This version asks for more than you allowed. What you allowed still holds and the \
+             lines marked new are refused until you allow them; allowing answers the whole list \
+             above, and takes effect when it is next switched on."
         }
     }
 }
@@ -413,25 +504,25 @@ fn contributes_to<C: 'static>(slots: &Slots<C>, slot: SlotId, plugin: &PluginId)
     slots.contributors(slot).iter().any(|(by, _)| by == plugin)
 }
 
-/// Where this plugin has put something, in words.
+/// Where this plugin has put something: each slot, and what is in it.
 ///
 /// Asked of the host rather than of the plugin, which is the point: a plugin
 /// cannot claim to draw something it did not contribute, and one that
 /// contributed something it forgot to mention is listed anyway.
-fn draws(workspace: &Workspace, plugin: &PluginId) -> Vec<String> {
+fn draws(workspace: &Workspace, plugin: &PluginId) -> Vec<(SlotId, Vec<EntryId>)> {
     let host = workspace.host();
     // Both registries, because a plugin's card should say what it draws and
     // not what kind of slot it drew it in: a mark on every tab row is the
     // loudest thing a plugin can put on screen, and listing only the slots
     // that are drawn once would leave it out.
-    let mut lines = drawn_in(host.slots(), plugin);
-    lines.extend(drawn_in(host.rows(), plugin));
-    lines
+    let mut slots = drawn_in(host.slots(), plugin);
+    slots.extend(drawn_in(host.rows(), plugin));
+    slots
 }
 
-/// The lines for one registry.
-fn drawn_in<C: 'static>(slots: &Slots<C>, plugin: &PluginId) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
+/// The slots of one registry this plugin is in, each with its entries.
+fn drawn_in<C: 'static>(slots: &Slots<C>, plugin: &PluginId) -> Vec<(SlotId, Vec<EntryId>)> {
+    let mut filled = Vec::new();
     for slot in slots.declared() {
         // Not the card's own status line. This section exists to say where on
         // screen a plugin's work shows up — which chip in the header is whose
@@ -446,11 +537,11 @@ fn drawn_in<C: 'static>(slots: &Slots<C>, plugin: &PluginId) -> Vec<String> {
             .filter(|(by, _)| by == plugin)
             .map(|(_, entry)| entry)
             .collect();
-        for entry in mine {
-            lines.push(format!("{slot} \u{2014} {entry}"));
+        if !mine.is_empty() {
+            filled.push((slot, mine));
         }
     }
-    lines
+    filled
 }
 
 /// What the plugin is doing, drawn from its own contribution to
@@ -459,6 +550,12 @@ fn drawn_in<C: 'static>(slots: &Slots<C>, plugin: &PluginId) -> Vec<String> {
 /// Only its own: the slot is a list every plugin may put one entry on, and a
 /// card that drew the whole list would put every plugin's state on every one
 /// of their pages.
+///
+/// In a box with a heading, because it is the one thing on the card the host
+/// did not write, and a box is how this card marks where the host stops. The
+/// heading is in the same "What it…" family as the others so that the row
+/// reads as an answer to a question the card asked, not as controls that
+/// wandered in.
 fn status(
     workspace: &Workspace,
     app: &AppContext,
@@ -476,29 +573,20 @@ fn status(
     // Inside the box rather than under it, because what it is about is the
     // controls in the box. A line of prose floating between two blocks belongs
     // to whichever one the reader guesses.
-    let body = match stalled(
+    let mut body = vec![drawn];
+    if let Some(why) = stalled(
         manifest,
         workspace.settings().granted_to(manifest.id.as_str()),
     ) {
-        None => drawn,
-        Some(why) => Flex::column()
-            .with_main_axis_size(MainAxisSize::Min)
-            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_child(drawn)
-            .with_child(widgets::note(why, ui).element)
-            .finish(),
-    };
+        body.push(widgets::note_text(why, ui));
+    }
 
-    Some(
-        Container::new(body)
-            .with_padding(widgets::ANSWER_PADDING)
-            .with_background_color(theme().overlay_1)
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(
-                widgets::ANSWER_RADIUS,
-            )))
-            .with_margin_bottom(18.)
-            .finish(),
-    )
+    Some(widgets::asked(
+        Some(("What it is doing", Tone::Plain)),
+        body,
+        Vec::new(),
+        ui,
+    ))
 }
 
 /// What this plugin *offers*, and how many more it merely answers to.

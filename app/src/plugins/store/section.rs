@@ -35,6 +35,7 @@ use crook_plugin::PluginId;
 use crate::theme::theme;
 use crate::workspace::section;
 use crate::workspace::settings_page::search::{Query, Words};
+use crate::workspace::settings_page::widgets::{Mark, Tone};
 use crate::workspace::settings_page::{named, widgets};
 use crate::workspace::{SettingsAction, TextField, Workspace, WorkspaceAction};
 
@@ -320,35 +321,8 @@ fn card(workspace: &Workspace, known: &Known, offer: &Offer, ui: FamilyId) -> Bo
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
         .with_child(facts(workspace, offer, ui))
-        .with_child(description(&offer.description, ui))
-        .with_child(button(workspace, known, offer, ui));
-
-    if let Some(release) = &offer.release {
-        let asks: Vec<widgets::Entry> = match release.asks.is_empty() {
-            // Said rather than left out: a plugin that asks for nothing is the
-            // strongest thing this card can tell somebody, and an absent
-            // heading says it to nobody.
-            true => vec![widgets::note(
-                "Nothing. It draws what it draws and reaches none of this machine.",
-                ui,
-            )],
-            false => release
-                .asks
-                .iter()
-                .map(|ask| widgets::note(ask, ui))
-                .collect(),
-        };
-        column.add_child(headed("What it will ask to be allowed to do", asks, ui));
-        column.add_child(headed(
-            "Installing is not allowing",
-            vec![widgets::note(
-                "A plugin that has just arrived may do nothing at all. What it asks for is \
-                 answered on its own card in Plugins, after you have read it there.",
-                ui,
-            )],
-            ui,
-        ));
-    }
+        .with_child(widgets::description(&offer.description, ui))
+        .with_child(decision(workspace, known, offer, ui));
 
     if !offer.repository.is_empty() {
         column.add_child(headed(
@@ -381,29 +355,19 @@ fn facts(workspace: &Workspace, offer: &Offer, ui: FamilyId) -> Box<dyn Element>
         parts.push(offer.license.clone());
     }
 
-    Container::new(
-        Text::new(parts.join(" \u{b7} "), ui, widgets::DESCRIPTION_SIZE)
-            .with_color(theme().text_muted)
-            .finish(),
-    )
-    .with_margin_bottom(14.)
-    .finish()
+    // No state to lead with: a plugin in the registry is not running or
+    // stopped, it is offered. The plugin's own card says the rest.
+    widgets::facts(None, &parts.join(" \u{b7} "), ui)
 }
 
-/// What the plugin says it is for.
-fn description(text: &str, ui: FamilyId) -> Box<dyn Element> {
-    Container::new(
-        Paragraph::new(text.to_owned(), ui, widgets::LABEL_SIZE)
-            .with_color(theme().text_primary)
-            .with_line_height_ratio(1.5)
-            .finish(),
-    )
-    .with_margin_bottom(18.)
-    .finish()
-}
-
-/// The box the one decision on this card sits in.
-fn button(workspace: &Workspace, known: &Known, offer: &Offer, ui: FamilyId) -> Box<dyn Element> {
+/// The box the one decision on this card is made in: what the plugin will ask
+/// to be allowed to do, and Install directly under it.
+///
+/// One box rather than a box and two categories, for the reason the plugin's
+/// own card keeps its terms and its Allow in one rectangle: a person cannot
+/// reach Install without their eye crossing the list, and the hollow dots are
+/// the ones they will meet again on the plugin's card once it has arrived.
+fn decision(workspace: &Workspace, known: &Known, offer: &Offer, ui: FamilyId) -> Box<dyn Element> {
     let busy = known.downloading.as_ref() == Some(&offer.id);
     let installed = installed_version(workspace, &offer.id);
     let (label, live): (String, bool) = match (&offer.release, &installed) {
@@ -424,75 +388,109 @@ fn button(workspace: &Workspace, known: &Known, offer: &Offer, ui: FamilyId) -> 
         false => None,
     };
 
-    let mut column = Flex::column()
-        .with_main_axis_size(MainAxisSize::Min)
-        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_child(widgets::answer(
-            standing_label(offer, installed.as_deref(), busy),
-            live,
+    // What the plugin will ask for, above the button that fetches it. Nothing
+    // at all for a plugin this build cannot run: there is no release to read
+    // the asks off, and a heading over nothing would be a question with no
+    // terms.
+    let question = offer
+        .release
+        .as_ref()
+        .map(|_| ("What it will ask to be allowed to do", Tone::Plain));
+    let body: Vec<Box<dyn Element>> = match &offer.release {
+        // Said rather than left out: a plugin that asks for nothing is the
+        // strongest thing this card can tell somebody, and an empty list says
+        // it to nobody.
+        Some(release) if release.asks.is_empty() => vec![widgets::note_text(
+            "Nothing. It draws what it draws and reaches none of this machine.",
+            ui,
+        )],
+        Some(release) => release
+            .asks
+            .iter()
+            .map(|ask| widgets::item(ask, Mark::Open, ui))
+            .collect(),
+        None => Vec::new(),
+    };
+
+    let mut foot = vec![widgets::answer_row(
+        standing_label(offer, installed.as_deref(), busy),
+        live,
+        widgets::text_button(
+            label,
+            command,
+            workspace
+                .settings_page()
+                .control(named(&format!("store.install.{}", offer.id))),
+            ui,
+        ),
+        ui,
+    )];
+
+    // Under the install rather than in a box of its own: it is the same
+    // decision, answered the other way, and a person looking for it is
+    // looking at this box.
+    if installed.is_some() {
+        foot.push(widgets::answer_row(
+            "On this machine",
+            true,
             widgets::text_button(
-                label,
-                command,
+                "Remove",
+                workspace
+                    .host()
+                    .action(&action("remove"))
+                    .map(WorkspaceAction::Run),
                 workspace
                     .settings_page()
-                    .control(named(&format!("store.install.{}", offer.id))),
+                    .control(named(&format!("store.remove.{}", offer.id))),
                 ui,
             ),
             ui,
         ));
+    }
 
-    // Beside the install rather than under a heading of its own: it is the
-    // same decision, answered the other way, and a person looking for it is
-    // looking at this box.
-    if installed.is_some() {
-        column.add_child(
-            Container::new(widgets::answer(
-                String::from("On this machine"),
-                true,
-                widgets::text_button(
-                    "Remove",
-                    workspace
-                        .host()
-                        .action(&action("remove"))
-                        .map(WorkspaceAction::Run),
-                    workspace
-                        .settings_page()
-                        .control(named(&format!("store.remove.{}", offer.id))),
-                    ui,
-                ),
-                ui,
-            ))
-            .with_margin_top(8.)
-            .finish(),
-        );
+    let mut column = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_child(widgets::asked(question, body, foot, ui));
+
+    // Under the box, as the mechanism is under the box on the plugin's own
+    // card: it explains the decision and is not part of it. It used to be a
+    // heading over one sentence after the terms — and the terms came after
+    // the button, so Install sat above the list it is the answer to.
+    let mut prose = false;
+    if offer.release.is_some() {
+        column.add_child(widgets::footnote(
+            "Installing is not allowing: a plugin that has just arrived may do nothing at all. \
+             What it asks for is answered on its own card in Plugins, after you have read it \
+             there.",
+            Tone::Plain,
+            ui,
+        ));
+        prose = true;
     }
 
     // Only what was said about *this* plugin. A line drawn on whatever card
     // happens to be showing is a sentence about the wrong thing, which on a
     // page about installing is worse than no sentence at all.
     if let Some((line, wrong)) = known.about(&offer.id) {
-        let color = match wrong {
-            true => theme().usage_critical,
-            false => theme().text_muted,
+        let tone = match wrong {
+            true => Tone::Warning,
+            false => Tone::Plain,
         };
-        column.add_child(said_line(&format!("{} {line}", offer.name), color, ui));
+        column.add_child(widgets::footnote(
+            &format!("{} {line}", offer.name),
+            tone,
+            ui,
+        ));
+        prose = true;
     }
 
+    // A box that ends in prose ends in the prose's own gap, which is what a
+    // note before a rule gets on every settings page; a bare box keeps the gap
+    // a row keeps before the rule.
     Container::new(column.finish())
-        .with_margin_bottom(18.)
+        .with_margin_bottom(if prose { 0. } else { widgets::ROW_SPACING })
         .finish()
-}
-
-/// A line under the controls, in whatever colour it deserves.
-fn said_line(text: &str, color: Color, ui: FamilyId) -> Box<dyn Element> {
-    Container::new(
-        Paragraph::new(text.to_owned(), ui, widgets::DESCRIPTION_SIZE)
-            .with_color(color)
-            .with_line_height_ratio(1.4)
-            .finish(),
-    )
-    .with_margin_top(10.)
-    .finish()
 }
 
 /// A heading with lines under it, in the settings' own shape.

@@ -18,6 +18,20 @@
 //! A **text button**, for the one action a page can take. And a **fact row**,
 //! label left and value right, for the About page, where nothing is editable.
 //!
+//! And, because the plugin cards are drawn out of the same pieces, the shapes
+//! a *card* needs that a settings page does not. A **facts line** with the
+//! **dot** the plugins list draws, so the state under a name and the state
+//! beside it in the list are one mark. A **box** ([`asked`]) in which a
+//! question, its terms and the row that answers it share one fill, because a
+//! control four things away from what it decides is a control pressed unread;
+//! an **item** for one term of that question, marked by the same dot; and a
+//! **footnote** under the box for the mechanism. The category **heading**
+//! comes in two tones, so that a warning is the same heading in the one
+//! signal colour rather than a note that happens to be red. They are here
+//! rather than on either card because the Store's card and a plugin's are
+//! read one after the other, and two boxes differing by a couple of pixels
+//! would read as two mechanisms.
+//!
 //! No dropdown and no text input: both need a popup or a caret, and Crook has
 //! neither. Where Warp uses a dropdown for a short list, the choice row says
 //! the same thing with every option visible, which is strictly more useful at
@@ -62,14 +76,26 @@ pub(crate) const LABEL_SIZE: f32 = 12.;
 /// rather than naming.
 pub(crate) const DESCRIPTION_SIZE: f32 = 11.;
 
-/// The gap under one row, before the next one's label.
 /// The check on the chosen row of a picker.
 const CHECK_SIZE: f32 = 13.;
 
-const ROW_SPACING: f32 = 14.;
+/// The gap under one row, before the next one's label — and under the last
+/// box on a card, before the first rule, so that the rule sits above a box
+/// exactly where it sits above the last row of a category.
+pub(crate) const ROW_SPACING: f32 = 14.;
 
-/// How far a description stops short of the right edge, so it wraps — or here,
-/// where nothing wraps, is cut off — well clear of the control.
+/// The gap a note ends in, before whatever is next: another note, a rule, or
+/// a box.
+const NOTE_GAP: f32 = 10.;
+
+/// The gap between a box and the paragraph that explains it.
+///
+/// Closer to its box than the next box is, so that it reads as the box's
+/// footnote rather than as the next thing.
+const FOOTNOTE_GAP: f32 = 6.;
+
+/// How far a description stops short of the right edge, so that it wraps well
+/// clear of the control beside its first line rather than under it.
 const DESCRIPTION_RIGHT_MARGIN: f32 = 96.;
 
 /// The switch's track.
@@ -82,6 +108,30 @@ const KNOB_INSET: f32 = 2.;
 
 /// The corner radius of a segmented control's track and of a button.
 const CONTROL_RADIUS: f32 = 6.;
+
+/// The height a row that answers a question is held to, whatever control is
+/// in it.
+///
+/// A switch is 16 tall and an outlined button 23, and until this existed the
+/// box around each took its height from whichever it held: the Enabled box on
+/// a plugin's card was 36 tall and the box under it 43, two boxes that
+/// [`asked`] promises are one shape. Twenty-four holds both with air to
+/// spare. Not twenty, which would make the box 40: the theme creator's tests
+/// find a swatch by "any filled rect exactly 40 tall", and a box that answered
+/// to that would become a swatch the day the two share a frame.
+const CONTROL_LANE: f32 = 24.;
+
+/// The gap between two things inside a box, and under a heading.
+///
+/// Six between items, and ten under a heading — the ten a category keeps
+/// under its own, so a heading inside a box and a heading over a category
+/// hold their lines at the same distance.
+const BODY_GAP: f32 = 6.;
+/// See [`BODY_GAP`].
+const HEADING_GAP: f32 = 10.;
+
+/// The dot that says whether something is running.
+const DOT: f32 = 6.;
 
 /// What a control does when it is clicked, and whether it can be.
 ///
@@ -181,6 +231,46 @@ pub(crate) fn category(title: impl Into<String>, entries: Vec<Entry>) -> Categor
     }
 }
 
+/// The colour a heading speaks in.
+///
+/// Two, not a ladder. A heading is quiet or it is a warning, and the Store
+/// already says what went wrong in the one colour a theme calls red; three
+/// rare headings in three shades would be a scale nobody learns.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Tone {
+    /// Over a category of settings, and over anything else that is merely
+    /// being described.
+    Plain,
+    /// Something is wrong with what is under it: a version the registry took
+    /// back, a plugin that did not load.
+    Warning,
+}
+
+/// The colour a tone is drawn in, for a heading and for a note alike.
+fn ink(tone: Tone) -> Color {
+    match tone {
+        Tone::Plain => theme().text_muted,
+        Tone::Warning => theme().usage_critical,
+    }
+}
+
+/// A heading on its own, with nothing above or below it.
+///
+/// The bare text [`category_element`] draws over a category, taken out so
+/// that the same heading can open a box: a box that opened with a heading of
+/// its own would be a second kind of heading on the page, and a warning has to
+/// be this heading in the one signal colour rather than a note that happens
+/// to be red.
+pub(crate) fn heading(title: &str, tone: Tone, ui: FamilyId) -> Box<dyn Element> {
+    Text::new(title.to_owned(), ui, CATEGORY_SIZE)
+        .with_color(ink(tone))
+        .with_style(Properties {
+            weight: Weight::Semibold,
+            ..Properties::default()
+        })
+        .finish()
+}
+
 /// One category, drawn.
 ///
 /// The separator goes *above* the heading rather than below the last row, so
@@ -198,36 +288,38 @@ pub(crate) fn category_element(
     rows: Vec<Box<dyn Element>>,
     ui: FamilyId,
 ) -> Box<dyn Element> {
+    toned_category(title, Tone::Plain, first, rows, ui)
+}
+
+/// The same, with the heading in whatever colour it deserves.
+///
+/// Beside [`category_element`] rather than a parameter on it, because every
+/// category of settings is plain, and a signature that made forty call sites
+/// say so would be forty copies of one word.
+pub(crate) fn toned_category(
+    title: &str,
+    tone: Tone,
+    first: bool,
+    rows: Vec<Box<dyn Element>>,
+    ui: FamilyId,
+) -> Box<dyn Element> {
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
 
     if !first {
         column.add_child(
-            Container::new(
-                ConstrainedBox::new(Empty::new().finish())
-                    .with_height(1.)
-                    .finish(),
-            )
-            .with_background_color(theme().border)
-            .with_margin_top(6.)
-            .with_margin_bottom(18.)
-            .finish(),
+            Container::new(hairline(theme().border))
+                .with_margin_top(6.)
+                .with_margin_bottom(18.)
+                .finish(),
         );
     }
 
     column.add_child(
-        Container::new(
-            Text::new(title.to_owned(), ui, CATEGORY_SIZE)
-                .with_color(theme().text_muted)
-                .with_style(Properties {
-                    weight: Weight::Semibold,
-                    ..Properties::default()
-                })
-                .finish(),
-        )
-        .with_margin_bottom(10.)
-        .finish(),
+        Container::new(heading(title, tone, ui))
+            .with_margin_bottom(HEADING_GAP)
+            .finish(),
     );
 
     column.add_children(rows);
@@ -282,9 +374,15 @@ fn label_text(label: String, enabled: bool, ui: FamilyId) -> Box<dyn Element> {
 }
 
 /// The second line under a label.
+///
+/// Wrapped rather than cut off. This was a `Text`, which loses its last words
+/// wherever a description is long — under a slot that lists eight entries, or
+/// in the window the docked Themes panel leaves — and at the line height a
+/// `Text` draws one line at, so a description that fitted draws the pixels it
+/// drew.
 fn description_text(description: String, ui: FamilyId) -> Box<dyn Element> {
     Container::new(
-        Text::new(description, ui, DESCRIPTION_SIZE)
+        Paragraph::new(description, ui, DESCRIPTION_SIZE)
             .with_color(theme().text_muted)
             .finish(),
     )
@@ -525,18 +623,91 @@ pub(crate) const ANSWER_PADDING: Padding = Padding {
     right: 12.,
 };
 
-/// The box a control that answers a question about a plugin sits in.
+/// The box a decision about a plugin is made in: what is being asked, and the
+/// row that answers it, in one fill.
 ///
-/// One shape for every one of them, and there are now four: is it on, may it
-/// do this, do you want it, and do you want it gone. Two boxes differing by a
-/// couple of pixels would read as two mechanisms, which is why this is here
-/// rather than on either card — the Store and the Plugins page are read one
-/// after the other.
+/// One shape for every one of them, and there are now five: is it on, may it
+/// do this, what is it doing, do you want it, and do you want it gone. Two
+/// boxes differing by a couple of pixels would read as two mechanisms, which
+/// is why this is here rather than on either card — the Store and the Plugins
+/// page are read one after the other.
+///
+/// It used to be the answer row alone, and what it answered was drawn above it
+/// on the bare page — a heading, a list of lines, a paragraph, and then the
+/// box — so the control was four things away from what it decided, and a
+/// plugin's own row under it was a second box touching the first. This is the
+/// same box grown to hold the question: a heading, a body of whatever the
+/// decision is about, a hairline seam, and the foot. What a person has to
+/// read before pressing anything is inside the rectangle the button is in.
+/// A box with nothing to read is a foot on its own, which is what the Enabled
+/// box is on most cards — and on the rest it holds the reason the switch is
+/// what it is, above the switch.
+///
+/// The body column owns every gap — an item, a note and a plugin's row all sit
+/// ten pixels above the seam, and the foot's label ten below it — so a body
+/// may end in anything. The box has a fill and no border, and a foot row has
+/// neither, so nothing here has `overlay_1` and a border at once: that is the
+/// shape a text field is found by, and a box that matched it would be one the
+/// tests pressed as a field.
+pub(crate) fn asked(
+    question: Option<(&str, Tone)>,
+    body: Vec<Box<dyn Element>>,
+    foot: Vec<Box<dyn Element>>,
+    ui: FamilyId,
+) -> Box<dyn Element> {
+    let mut column = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+
+    let has_body = question.is_some() || !body.is_empty();
+    if has_body {
+        let mut inside = Flex::column()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_spacing(BODY_GAP);
+        if let Some((title, tone)) = question {
+            // Its own margin plus the column's gap under it: the ten a
+            // category keeps under its heading.
+            inside.add_child(
+                Container::new(heading(title, tone, ui))
+                    .with_margin_bottom(HEADING_GAP - BODY_GAP)
+                    .finish(),
+            );
+        }
+        inside.add_children(body);
+        column.add_child(
+            Container::new(inside.finish())
+                .with_padding(ANSWER_PADDING)
+                .finish(),
+        );
+    }
+
+    for (index, row) in foot.into_iter().enumerate() {
+        if index > 0 || has_body {
+            column.add_child(seam());
+        }
+        column.add_child(row);
+    }
+
+    Container::new(column.finish())
+        .with_background_color(theme().overlay_1)
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ANSWER_RADIUS)))
+        .finish()
+}
+
+/// The row at the foot of an [`asked`] box: a label, and the control that
+/// answers it, hard against the right edge.
+///
+/// Held to [`CONTROL_LANE`] by a post of no width standing in the row rather
+/// than by a minimum height on a box around it: a flex centres its children
+/// on its own cross size, and a box's minimum is not the flex's size — the
+/// reason `choice` draws its check in a transparent colour rather than leaving
+/// it out.
 ///
 /// `live` is whether the control does anything, and it is the *label* that
 /// says so: a muted word beside a control that cannot be pressed is the only
 /// hint there is, since a disabled control carries no handler at all.
-pub(crate) fn answer(
+pub(crate) fn answer_row(
     label: impl Into<String>,
     live: bool,
     control: Box<dyn Element>,
@@ -546,6 +717,12 @@ pub(crate) fn answer(
         Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(
+                ConstrainedBox::new(Empty::new().finish())
+                    .with_width(0.)
+                    .with_height(CONTROL_LANE)
+                    .finish(),
+            )
             .with_child(
                 Text::new(label.into(), ui, LABEL_SIZE)
                     .with_color(if live {
@@ -559,11 +736,209 @@ pub(crate) fn answer(
             .with_child(control)
             .finish(),
     )
-    .with_background_color(theme().overlay_1)
-    .with_corner_radius(CornerRadius::with_all(Radius::Pixels(ANSWER_RADIUS)))
     .with_padding(ANSWER_PADDING)
     .finish()
 }
+
+/// The hairline between a box's body and its foot, and between two feet.
+///
+/// The column it sits in stretches it to the box's edge, so it runs the full
+/// width with no negative margin; and it is a fill rather than a border, so
+/// nothing that looks for a bordered box can see it.
+///
+/// `overlay_2` and not `border`, though the category rule is `border`: a
+/// theme flattens `border` against its surface, and on a light theme that
+/// comes out *lighter* than a box on the receded ground — a seam that was
+/// drawn in it vanished there. A hairline inside a fill has to be the
+/// foreground at a percentage over whatever it lies on, which is what the
+/// overlay ladder is, and `overlay_2` is already what divides a menu.
+fn seam() -> Box<dyn Element> {
+    hairline(theme().overlay_2)
+}
+
+/// One pixel of `color`, as wide as whatever holds it.
+fn hairline(color: Color) -> Box<dyn Element> {
+    Container::new(
+        ConstrainedBox::new(Empty::new().finish())
+            .with_height(1.)
+            .finish(),
+    )
+    .with_background_color(color)
+    .finish()
+}
+
+/// Where one line of a list stands.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Mark {
+    /// Not yet allowed, or not yet decided: a hollow dot and lit text.
+    Open,
+    /// In force: a filled dot and lit text.
+    Settled,
+    /// In force, beside lines that are not: a filled dot and muted text, so
+    /// that the open lines are the only lit ones in the list.
+    Faded,
+}
+
+/// One term of what a box asks about, with the dot that says where it stands.
+///
+/// Filled means in force and hollow means not, which is what the dot means on
+/// the row of the list two inches to the left. A check mark would spend the
+/// accent once per line, and a card that spent it a dozen times would have
+/// none left for the switch.
+///
+/// The sentence is a `Paragraph` inside an `Expanded`, in a row, which this
+/// file otherwise avoids — and it holds here for a reason `flex.rs` states: a
+/// flexible child is handed what is left of a *bounded* axis as its maximum,
+/// and a card's column is stretched to the measure, so a sentence wider than
+/// the box breaks at the box's inner edge and its second line sits under the
+/// first line's text rather than under the dot. A plugin's manifest names
+/// hosts and paths, and a line that could not wrap would be cut off at
+/// whichever host came last.
+pub(crate) fn item(text: &str, mark: Mark, ui: FamilyId) -> Box<dyn Element> {
+    let color = match mark {
+        Mark::Open | Mark::Settled => theme().text_primary,
+        Mark::Faded => theme().text_muted,
+    };
+    // On the first line rather than in the paragraph's middle, so a sentence
+    // that wraps keeps its dot beside its first words.
+    let drop = (LABEL_SIZE * SENTENCE_LINE_HEIGHT - DOT) / 2.;
+
+    Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Start)
+        .with_child(
+            Container::new(state_dot(mark != Mark::Open))
+                .with_margin_top(drop)
+                .with_margin_right(super::super::section::LEADING_GAP)
+                .finish(),
+        )
+        .with_child(
+            Expanded::new(
+                1.,
+                Paragraph::new(text.to_owned(), ui, LABEL_SIZE)
+                    .with_color(color)
+                    .with_line_height_ratio(SENTENCE_LINE_HEIGHT)
+                    .finish(),
+            )
+            .finish(),
+        )
+        .finish()
+}
+
+/// The line height of a card's [`description`] and of an [`item`] in a box
+/// under it: the same sentences at the same size, so a term and the sentence
+/// above it hold their lines at one distance.
+const SENTENCE_LINE_HEIGHT: f32 = 1.5;
+
+/// What a plugin says it is for, under its facts and above its first box.
+///
+/// The one sentence on a card in the plugin's own words; everything under it
+/// is the host's. Here rather than on either card because the two cards are
+/// read one after the other.
+pub(crate) fn description(text: &str, ui: FamilyId) -> Box<dyn Element> {
+    Container::new(
+        Paragraph::new(text.to_owned(), ui, LABEL_SIZE)
+            .with_color(theme().text_primary)
+            .with_line_height_ratio(SENTENCE_LINE_HEIGHT)
+            .finish(),
+    )
+    .with_margin_bottom(IDENTITY_GAP)
+    .finish()
+}
+
+/// Filled for something that is running, hollow for something that is not.
+///
+/// The plugins list draws one before every row, and a card draws the same one
+/// before the plugin's state and before every line of what it may do — from
+/// one function, so that "filled means in force" is one rule the page cannot
+/// contradict. The filled one is `usage_normal`, which a theme derives exactly
+/// as it derives muted text: a signal at rest is grey, and the accent is kept
+/// for what the window is doing.
+pub(crate) fn state_dot(on: bool) -> Box<dyn Element> {
+    let (background, border) = if on {
+        (theme().usage_normal, theme().usage_normal)
+    } else {
+        (Color::TRANSPARENT, theme().text_muted)
+    };
+
+    ConstrainedBox::new(
+        Container::new(Empty::new().finish())
+            .with_background_color(background)
+            .with_border(Border::all(1.).with_border_color(border))
+            .with_corner_radius(CornerRadius::with_all(Radius::Percentage(50.)))
+            .finish(),
+    )
+    .with_width(DOT)
+    .with_height(DOT)
+    .finish()
+}
+
+/// The line under a card's title: the state the thing is in, and the facts
+/// that do not change.
+///
+/// The state goes first, with the list's own dot in front of it, because it is
+/// what the card is opened for — it used to be the last word of a muted
+/// sentence, after the id and the version, where the eye arrives after reading
+/// three things it did not come to read. The Store's cards have no state to
+/// lead with and pass `None`; both cards are drawn through this so that the
+/// line under a name is one line on both.
+///
+/// Two `Text`s rather than one because they are two colours, and an
+/// `Expanded` around the tail because a flex measures an inflexible child free
+/// along its axis, and an id somebody else chose could otherwise run past the
+/// measure.
+pub(crate) fn facts(state: Option<(bool, &str)>, rest: &str, ui: FamilyId) -> Box<dyn Element> {
+    let mut line = Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center);
+
+    let tail = match state {
+        Some((on, word)) => {
+            line.add_child(
+                Container::new(state_dot(on))
+                    .with_margin_right(super::super::section::LEADING_GAP)
+                    .finish(),
+            );
+            line.add_child(
+                Text::new(word.to_owned(), ui, DESCRIPTION_SIZE)
+                    .with_color(if on {
+                        theme().text_primary
+                    } else {
+                        theme().text_muted
+                    })
+                    .finish(),
+            );
+            format!(" \u{b7} {rest}")
+        }
+        None => rest.to_owned(),
+    };
+    line.add_child(
+        Expanded::new(
+            1.,
+            Text::new(tail, ui, DESCRIPTION_SIZE)
+                .with_color(theme().text_muted)
+                .finish(),
+        )
+        .finish(),
+    );
+
+    Container::new(line.finish())
+        .with_margin_bottom(FACTS_GAP)
+        .finish()
+}
+
+/// The gap under the facts line, before the description: the two are one
+/// group, and read closer together than either is to the first box.
+const FACTS_GAP: f32 = 8.;
+
+/// The gap under a card's description, before its first box.
+///
+/// Wider than the gap between the facts and the description, which are one
+/// group, and wider than the gap between two boxes, which are one stack: the
+/// eye has to see that the sentence and the switch are different kinds of
+/// thing. Here rather than on either card, because the Store's card and the
+/// plugin's are read one after the other.
+pub(crate) const IDENTITY_GAP: f32 = 16.;
 
 /// A small outlined button.
 ///
@@ -604,8 +979,14 @@ pub(crate) fn text_button(
             right: 10.,
         })
         .with_background_color(background)
+        // `overlay_3` rather than `border`, for the reason the seam in a box
+        // is not `border` either: a theme flattens `border` against its
+        // surface, and inside a box on a light theme that came out lighter
+        // than the fill around it, so Allow and Revoke were bare words. The
+        // foreground at 15% is the same weight `border` has on the ground of
+        // a dark theme and reads on every ground of a light one.
         .with_border(Border::all(1.).with_border_color(if enabled {
-            theme().border
+            theme().overlay_3
         } else {
             Color::TRANSPARENT
         }))
@@ -638,14 +1019,16 @@ pub(crate) fn chord_button(
     let chord = chord.into();
 
     let control = Hoverable::new(state, move |mouse| {
+        // `overlay_3` for the outline, as on [`text_button`], and for the same
+        // reason.
         let (background, border, color) = if recording {
             (theme().overlay_2, theme().accent, theme().text_primary)
         } else if !enabled {
-            (Color::TRANSPARENT, theme().border, theme().text_muted)
+            (Color::TRANSPARENT, theme().overlay_3, theme().text_muted)
         } else if mouse.is_hovered() {
-            (theme().overlay_2, theme().border, theme().text_primary)
+            (theme().overlay_2, theme().overlay_3, theme().text_primary)
         } else {
-            (Color::TRANSPARENT, theme().border, theme().text_primary)
+            (Color::TRANSPARENT, theme().overlay_3, theme().text_primary)
         };
 
         Container::new(
@@ -866,19 +1249,42 @@ pub(crate) fn fact(
 /// wherever its category goes and is left out the moment something is being
 /// searched for.
 pub(crate) fn note(text: &str, ui: FamilyId) -> Entry {
-    Entry::unsearchable(paragraph(text, ui))
-}
-
-/// The wrapped, muted lines both of the above are made of.
-fn paragraph(text: &str, ui: FamilyId) -> Box<dyn Element> {
-    Container::new(
-        Paragraph::new(text.to_owned(), ui, DESCRIPTION_SIZE)
-            .with_color(theme().text_muted)
-            .with_line_height_ratio(1.45)
+    Entry::unsearchable(
+        Container::new(note_text(text, ui))
+            .with_margin_bottom(NOTE_GAP)
             .finish(),
     )
-    .with_margin_bottom(10.)
-    .finish()
+}
+
+/// The wrapped, muted lines a note is made of, with nothing around them.
+///
+/// Inside an [`asked`] box the column owns the gaps, and a note that brought
+/// its own ten pixels would end the box in twenty of air.
+pub(crate) fn note_text(text: &str, ui: FamilyId) -> Box<dyn Element> {
+    toned_note(text, Tone::Plain, ui)
+}
+
+/// The same lines, in whatever colour they deserve: the Store's line about
+/// what just went wrong is this paragraph in the warning's colour.
+fn toned_note(text: &str, tone: Tone, ui: FamilyId) -> Box<dyn Element> {
+    Paragraph::new(text.to_owned(), ui, DESCRIPTION_SIZE)
+        .with_color(ink(tone))
+        .with_line_height_ratio(1.45)
+        .finish()
+}
+
+/// The paragraph under an [`asked`] box: the mechanism, which explains the
+/// decision and is not part of it.
+///
+/// Under the box rather than in it, because the card exists so that a person
+/// reads the terms before answering, and a paragraph inside the box stood
+/// between the terms and the button. It sits closer to its box than the next
+/// box does, and ends in the gap a note ends in everywhere else.
+pub(crate) fn footnote(text: &str, tone: Tone, ui: FamilyId) -> Box<dyn Element> {
+    Container::new(toned_note(text, tone, ui))
+        .with_margin_top(FOOTNOTE_GAP)
+        .with_margin_bottom(NOTE_GAP)
+        .finish()
 }
 
 /// Attaches the click handler, or does not.

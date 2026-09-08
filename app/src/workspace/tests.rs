@@ -6539,6 +6539,74 @@ fn settings_switch_boxes(scene: &Scene) -> Vec<RectF> {
     switches
 }
 
+/// The boxes a card makes a decision in, top to bottom: the Enabled box, the
+/// permission box, the plugin's own row.
+///
+/// Found by the box's own ground — `overlay_1`, rounded by
+/// [`widgets::ANSWER_RADIUS`] — inside the page beside the list. A hovered row
+/// is `overlay_1` too and is rounded by six; the field is bordered and is in
+/// the sidebar.
+fn answer_boxes(scene: &Scene) -> Vec<RectF> {
+    let pane = settings_pane_box(scene);
+    let mut boxes: Vec<RectF> = visible_rects(scene)
+        .filter(|(rect, _)| {
+            rect.background == Fill::Solid(theme().overlay_1)
+                && rect.corner_radius.get_top_left()
+                    == Radius::Pixels(crate::workspace::settings_page::widgets::ANSWER_RADIUS)
+        })
+        .map(|(_, bounds)| bounds)
+        .filter(|bounds| pane.contains_point(center(*bounds)))
+        .collect();
+    boxes.sort_by(|left, right| left.min_y().total_cmp(&right.min_y()));
+    boxes
+}
+
+/// The lines of text on the page beside the list, top to bottom, with where
+/// each starts.
+fn page_lines(scene: &Scene) -> Vec<(Vector2F, String)> {
+    let pane = settings_pane_box(scene);
+    text_lines(scene, |at| pane.contains_point(at))
+}
+
+/// The one line of the page that says `phrase`, and where it starts.
+///
+/// A point four pixels under the baseline of the first glyph — inside the
+/// line's own box, and inside any padding a box gives its text — which is
+/// what a test asks "is this line inside that box" with.
+fn page_line(scene: &Scene, phrase: &str) -> (Vector2F, String) {
+    let (at, line) = page_lines(scene)
+        .into_iter()
+        .find(|(_, line)| line.contains(phrase))
+        .unwrap_or_else(|| panic!("no line on the page says {phrase:?}: {}", frame_text(scene)));
+    (at + vec2f(4., 4.), line)
+}
+
+/// The colour the line of the page that says `phrase` is set in.
+///
+/// The first glyph's, which is the line's: a line is one `Text` or one line
+/// of one `Paragraph`, and either has one colour.
+fn page_line_color(scene: &Scene, phrase: &str) -> Color {
+    let (at, _) = page_line(scene, phrase);
+    let at = at - vec2f(4., 4.);
+    scene
+        .layers()
+        .flat_map(|layer| layer.glyphs.iter())
+        .find(|glyph| glyph.position.x() == at.x() && glyph.position.y().round() == at.y())
+        .map(|glyph| glyph.color)
+        .unwrap_or_else(|| panic!("no glyph starts the line that says {phrase:?}"))
+}
+
+/// Whether the frame says `phrase`, wherever the paragraph wrapped.
+///
+/// [`frame_text`] joins the lines it found with nothing between them, so a
+/// sentence that wrapped comes back with two of its words run together.
+/// Comparing both sides with their spaces taken out is what lets a test name
+/// a phrase without also knowing the width the card came out at.
+fn says(scene: &Scene, phrase: &str) -> bool {
+    let bare = |text: &str| text.split_whitespace().collect::<String>();
+    bare(&frame_text(scene)).contains(&bare(phrase))
+}
+
 /// The text fields anywhere in the frame, left to right.
 ///
 /// Found by the field's own ground: a rounded box in `overlay_1` exactly
@@ -6637,7 +6705,7 @@ fn settings_button_box(scene: &Scene) -> Option<RectF> {
         // control says there is nothing to reset.
         .filter(|(rect, _)| {
             rect.corner_radius.get_top_left() == Radius::Pixels(6.)
-                && rect.border.color == Fill::Solid(theme().border)
+                && rect.border.color == Fill::Solid(theme().overlay_3)
         })
         .map(|(_, bounds)| bounds)
         // In the page rather than in the sidebar, which the two are now on
@@ -11959,7 +12027,8 @@ fn a_settings_page_can_be_reached_by_the_name_on_its_rail_row() {
 
 mod sandboxed {
     use super::*;
-    use crate::plugins::wasm::tests::{Scratch, install, wasm};
+    use crate::plugins::wasm::tests::{Scratch, install, manifest, wasm, wasm_saying};
+    use crook_plugin_api::Capability;
 
     /// A harness whose plugins are the ones in the box plus whatever is in a
     /// scratch directory.
@@ -12056,7 +12125,8 @@ mod sandboxed {
 
         harness.show_plugins();
         harness.click_plugin("Probe");
-        let text = frame_text(&harness.frame());
+        let scene = harness.frame();
+        let text = frame_text(&scene);
 
         assert!(text.contains("Withdrawn from the registry"), "{text}");
         assert!(
@@ -12064,6 +12134,26 @@ mod sandboxed {
             "the registry's own sentence is missing: {text}"
         );
         assert!(text.contains("switched off"), "{text}");
+
+        // And the sentence is in the box with the switch it explains, above
+        // it: a warning under a heading four sections down is a warning about
+        // a control somebody has already given up on.
+        let switch = settings_switch_boxes(&scene)[0];
+        let enabled = answer_boxes(&scene)
+            .into_iter()
+            .find(|boxed| boxed.contains_point(center(switch)))
+            .expect("the switch is in a box");
+        let (at, _) = page_line(&scene, "Withdrawn from the registry");
+        assert!(
+            enabled.contains_point(at),
+            "the warning is not in the switch's box"
+        );
+        assert!(at.y() < switch.min_y(), "the warning is under the switch");
+        // And it is a warning: the one colour the Store already speaks them in.
+        assert_eq!(
+            page_line_color(&scene, "Withdrawn from the registry"),
+            theme().usage_critical
+        );
     }
 
     #[test]
@@ -12092,15 +12182,257 @@ mod sandboxed {
         assert!(text.contains("eugen/probe"), "{text}");
     }
 
-    /// Whether the frame says `phrase`, wherever the paragraph wrapped.
-    ///
-    /// [`frame_text`] joins the lines it found with nothing between them, so a
-    /// sentence that wrapped comes back with two of its words run together.
-    /// Comparing both sides with their spaces taken out is what lets a test
-    /// name a phrase without also knowing the width the card came out at.
-    fn says(scene: &Scene, phrase: &str) -> bool {
-        let bare = |text: &str| text.split_whitespace().collect::<String>();
-        bare(&frame_text(scene)).contains(&bare(phrase))
+    /// The probe's card, open, with nothing allowed.
+    fn probe_card(name: &str) -> (Scratch, Harness) {
+        let scratch = Scratch::new(name);
+        install(
+            scratch.path(),
+            "probe",
+            &wasm("eugen/probe", "header.right", 10),
+        );
+        let mut harness = harness(&scratch);
+        harness.show_plugins();
+        harness.click_plugin("Probe");
+        (scratch, harness)
+    }
+
+    #[test]
+    fn the_terms_and_the_button_share_a_box() {
+        // What the card exists for: a person reads the list before answering.
+        // The list, the state and the button are one rectangle, and the
+        // paragraph about the mechanism is under it rather than between the
+        // terms and the control.
+        let (_scratch, mut harness) = probe_card("one-box");
+        let scene = harness.frame();
+
+        let (term, _) = page_line(&scene, "See what your tabs are called");
+        let (answer, _) = page_line(&scene, "Not allowed");
+        let asked = answer_boxes(&scene)
+            .into_iter()
+            .find(|boxed| boxed.contains_point(term))
+            .expect("the terms are in a box");
+        assert!(
+            asked.contains_point(answer),
+            "the answer is not in the terms' box"
+        );
+
+        let (explanation, _) = page_line(&scene, "None of this is allowed yet");
+        assert!(
+            explanation.y() > asked.max_y(),
+            "the explanation is inside the box, between the terms and the button"
+        );
+    }
+
+    #[test]
+    fn the_enabled_box_and_the_answer_row_are_one_shape() {
+        // A switch is 16 tall and a button 23, and the box around each used
+        // to take its height from whichever it held: 36 and 43, two boxes
+        // that promise to be one shape. Both rows are held to one lane now.
+        let (_scratch, mut harness) = probe_card("one-shape");
+        let scene = harness.frame();
+
+        let boxes = answer_boxes(&scene);
+        assert_eq!(boxes.len(), 2, "the switch's box and the terms' box");
+        let (enabled_label, _) = page_line(&scene, "Enabled");
+        let (answer_label, _) = page_line(&scene, "Not allowed");
+        let enabled = boxes[0];
+        let asked = boxes[1];
+        assert!(enabled.contains_point(enabled_label));
+        assert!(asked.contains_point(answer_label));
+
+        // The label sits the same distance above the foot of either box: the
+        // row is the same row.
+        let above_switch = enabled.max_y() - enabled_label.y();
+        let above_button = asked.max_y() - answer_label.y();
+        assert!(
+            (above_switch - above_button).abs() < 0.5,
+            "the switch's row is {above_switch} tall under its label and the button's is \
+             {above_button}"
+        );
+        // Forty-four, and pointedly not forty: `CONTROL_LANE` says why.
+        assert!(
+            (enabled.height() - 44.).abs() < 0.5,
+            "the Enabled box is {} tall",
+            enabled.height()
+        );
+    }
+
+    #[test]
+    fn no_box_on_the_card_is_a_text_field() {
+        // The tests find a field by "overlay_1, a border, about 26 tall", and
+        // a card is a stack of overlay_1 boxes. None of them may be bordered:
+        // one that was would be pressed as the search field.
+        let (_scratch, mut harness) = probe_card("no-field");
+        let scene = harness.frame();
+
+        assert_eq!(
+            settings_field_boxes(&scene).len(),
+            1,
+            "something on the card looks like a text field"
+        );
+    }
+
+    #[test]
+    fn a_plugin_that_was_allowed_keeps_its_terms_and_its_revoke_in_one_box() {
+        // The state the owner's own example was in. Every line is in force
+        // and says so by its dot, not by a word at the end of each.
+        let scratch = Scratch::new("allowed");
+        install(
+            scratch.path(),
+            "probe",
+            &wasm("eugen/probe", "header.right", 10),
+        );
+        let mut harness = harness(&scratch);
+        let probe = crook_plugin::PluginId::parse("eugen/probe").expect("a literal that parses");
+        harness.workspace_update(|workspace, ctx| {
+            workspace.set_plugin_granted(&probe, vec![String::from("tabs.read")], ctx);
+        });
+        harness.show_plugins();
+        harness.click_plugin("Probe");
+        let scene = harness.frame();
+
+        assert!(
+            says(&scene, "What it is allowed to do"),
+            "{}",
+            frame_text(&scene)
+        );
+        assert!(!says(&scene, "\u{2014} allowed"), "{}", frame_text(&scene));
+        let (term, _) = page_line(&scene, "See what your tabs are called");
+        let (revoke, _) = page_line(&scene, "Revoke");
+        let asked = answer_boxes(&scene)
+            .into_iter()
+            .find(|boxed| boxed.contains_point(term))
+            .expect("the terms are in a box");
+        assert!(
+            asked.contains_point(revoke),
+            "Revoke is not in the terms' box"
+        );
+    }
+
+    #[test]
+    fn a_long_capability_sentence_wraps_inside_the_box() {
+        // A manifest names hosts and paths, and eight of them are wider than
+        // the box. The sentence wraps at the box's inner edge, and its second
+        // line starts under the first line's text rather than under the dot —
+        // which is what a paragraph in a flexible child of a row is for, and
+        // the reason `widgets::item` may have one.
+        let hosts: Vec<String> = (0..8)
+            .map(|n| format!("service-{n}.example-registry.com"))
+            .collect();
+        let mut asking = manifest("eugen/probe");
+        asking.capabilities = vec![Capability::Network(hosts.clone())];
+        let scratch = Scratch::new("wrapped");
+        install(
+            scratch.path(),
+            "probe",
+            &wasm_saying(&asking, "header.right", 10),
+        );
+        let mut harness = harness(&scratch);
+        harness.show_plugins();
+        harness.click_plugin("Probe");
+        let scene = harness.frame();
+
+        let sentence = Capability::Network(hosts).sentence();
+        assert!(
+            says(&scene, &sentence),
+            "the sentence was cut off: {}",
+            frame_text(&scene)
+        );
+
+        let lines = page_lines(&scene);
+        let first = lines
+            .iter()
+            .position(|(_, line)| line.starts_with("Reach "))
+            .expect("the sentence starts a line");
+        let (start, _) = lines[first];
+        let (next, continued) = &lines[first + 1];
+        assert!(
+            !continued.contains("Not allowed"),
+            "the sentence fitted on one line, so nothing wrapped: {continued}"
+        );
+        assert!(
+            (next.x() - start.x()).abs() < 0.5,
+            "the second line starts at {} and the first at {}",
+            next.x(),
+            start.x()
+        );
+        let (answer, _) = page_line(&scene, "Not allowed");
+        assert!(
+            next.y() < answer.y(),
+            "the sentence ran past the box's foot"
+        );
+
+        // Beside the dot, inside the box: the sentence starts a dot and a gap
+        // in from the heading, which sits at the box's own inset.
+        let (heading, _) = page_line(&scene, "What it wants to be allowed to do");
+        let asked = answer_boxes(&scene)
+            .into_iter()
+            .find(|boxed| boxed.contains_point(heading))
+            .expect("the heading is in a box");
+        assert!(
+            asked.contains_point(start + vec2f(4., 4.)),
+            "the sentence is outside the box"
+        );
+        assert!(
+            asked.contains_point(*next + vec2f(4., 4.)),
+            "the second line is outside the box"
+        );
+        let inset = start.x() - (heading.x() - 4.);
+        assert!(
+            (inset - (6. + 8.)).abs() < 0.5,
+            "the text sits {inset} in from the heading, not a 6px dot and an 8px gap"
+        );
+    }
+
+    #[test]
+    fn a_line_the_grant_does_not_cover_is_marked_new() {
+        // The card where the list has grown: a version that asks for a host
+        // on top of what was allowed. The line in force goes quiet behind a
+        // filled dot and the new one is the only lit text in the list — the
+        // word "new" stays for a reading that cannot see the contrast.
+        let mut asking = manifest("eugen/probe");
+        asking.capabilities = vec![
+            Capability::ReadTabs,
+            Capability::Network(vec![String::from("api.example.com")]),
+        ];
+        let scratch = Scratch::new("escalated");
+        install(
+            scratch.path(),
+            "probe",
+            &wasm_saying(&asking, "header.right", 10),
+        );
+        let mut harness = harness(&scratch);
+        let probe = crook_plugin::PluginId::parse("eugen/probe").expect("a literal that parses");
+        harness.workspace_update(|workspace, ctx| {
+            workspace.set_plugin_granted(&probe, vec![String::from("tabs.read")], ctx);
+        });
+        harness.show_plugins();
+        harness.click_plugin("Probe");
+        let scene = harness.frame();
+
+        assert!(
+            says(&scene, "It is asking for more than you allowed"),
+            "{}",
+            frame_text(&scene)
+        );
+        assert!(
+            says(&scene, "Reach api.example.com \u{2014} new"),
+            "{}",
+            frame_text(&scene)
+        );
+        // The covered line carries no word: the dot and the grey say it.
+        assert!(!says(&scene, "\u{2014} allowed"), "{}", frame_text(&scene));
+        assert_eq!(
+            page_line_color(&scene, "See what your tabs are called"),
+            theme().text_muted,
+            "the line already in force is not quiet"
+        );
+        assert_eq!(
+            page_line_color(&scene, "Reach api.example.com"),
+            theme().text_primary,
+            "the new line is not lit"
+        );
+        assert!(says(&scene, "Partly allowed"), "{}", frame_text(&scene));
     }
 
     #[test]
@@ -12125,6 +12457,28 @@ mod sandboxed {
             says(&scene, "refused rather than broken"),
             "the card drew the plugin's own controls without saying they cannot work: {}",
             frame_text(&scene)
+        );
+
+        // In the box the controls are in, under them, under the caption that
+        // says whose they are: a line of prose floating between two boxes
+        // belongs to whichever one the reader guesses.
+        let (caption, _) = page_line(&scene, "What it is doing");
+        let (row, _) = page_line(&scene, "from a sandbox");
+        // By the note's first words: the phrase above is on its second line
+        // in this window, and a line is one line.
+        let (note, _) = page_line(&scene, "Nothing this plugin asks for");
+        let status = answer_boxes(&scene)
+            .into_iter()
+            .find(|boxed| boxed.contains_point(row))
+            .expect("the plugin's row is in a box");
+        assert!(
+            status.contains_point(caption),
+            "the caption is outside the box"
+        );
+        assert!(status.contains_point(note), "the note is outside the box");
+        assert!(
+            caption.y() < row.y() && row.y() < note.y(),
+            "caption, row and note are not in that order"
         );
     }
 
@@ -12332,6 +12686,82 @@ mod plugins_page {
         let mut harness = Harness::new(1);
         harness.show_plugins();
         harness
+    }
+
+    #[test]
+    fn the_card_says_the_state_before_the_id() {
+        // The state is what the card is opened for, and it used to be the
+        // last word of the facts line, after the id and the version.
+        let mut harness = harness();
+        let (_, line) = page_line(&harness.frame(), "crook/window");
+
+        let state = line.find("running").expect("the facts line says the state");
+        let id = line
+            .find("crook/window")
+            .expect("the facts line says the id");
+        assert!(state < id, "the state comes after the id: {line}");
+
+        // Lit, where the rest of the line is not: the state is the one word
+        // on the line the card is opened for.
+        let scene = harness.frame();
+        assert_eq!(page_line_color(&scene, "running"), theme().text_primary);
+    }
+
+    #[test]
+    fn a_slot_is_named_once_however_much_is_in_it() {
+        // Eight entries in one menu used to be eight lines each starting with
+        // the menu's name. The slot is one fact; what is in it goes under it.
+        let mut harness = harness();
+        harness.click_plugin("Tabs");
+        let scene = harness.frame();
+
+        let named = page_lines(&scene)
+            .into_iter()
+            .filter(|(_, line)| line.contains("tab.menu.entries"))
+            .count();
+        assert_eq!(
+            named,
+            1,
+            "the slot is named more than once: {}",
+            frame_text(&scene)
+        );
+        // The last entries, not the first: a line that was cut off at the
+        // measure would still start with pin-tab.
+        assert!(
+            says(&scene, "close-tab, color"),
+            "the last entries were cut off: {}",
+            frame_text(&scene)
+        );
+    }
+
+    #[test]
+    fn a_plugin_that_holds_the_page_says_so_above_its_switch() {
+        // The sentence is about the switch, so it sits with the switch — in
+        // the same box, above it — and not at the end of the description.
+        let mut harness = harness();
+        harness.click_plugin("Plugins");
+        let scene = harness.frame();
+
+        let switch = settings_switch_boxes(&scene)[0];
+        let enabled = answer_boxes(&scene)
+            .into_iter()
+            .find(|boxed| boxed.contains_point(center(switch)))
+            .expect("the switch is in a box");
+        let (at, _) = page_line(&scene, "It is what draws the page");
+        assert!(
+            enabled.contains_point(at),
+            "the reason is not in the switch's box"
+        );
+        assert!(
+            at.y() < switch.min_y(),
+            "the reason is under the switch it explains"
+        );
+
+        let (_, description) = page_line(&scene, "What this build is made of");
+        assert!(
+            !description.contains("It is what draws"),
+            "the reason is still in the description: {description}"
+        );
     }
 
     #[test]
