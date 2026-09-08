@@ -1047,6 +1047,13 @@ is not a different kind of thing from one that has.
   because a watcher is a crate and three platform backends for one file that changes when
   somebody runs a build; and a build that fails is a line in the log with the previous version
   still running, which is what somebody in the middle of writing a plugin needs.
+- **A template repository**, [crook-plugin-template](https://github.com/theguriev/crook-plugin-template),
+  which is the other half of the same sentence: the flag is the loop, and this is what somebody
+  runs it against on the first afternoon. Five exports, a manifest that asks for nothing, one
+  `Node`, and a `sys.rs` that stubs the host's two functions off wasm so the tests are ordinary
+  tests. Its README spends its length on the three things anybody changes first — the id, the
+  slot, the tree — and on the one thing to read before adding a fourth, which is that nothing is
+  granted by asking.
 
 What is not built: updates that check themselves. Auto-update stays off — the architecture doc
 lists autoupdate as absent by design, and a terminal that changes under you is worse than a
@@ -1143,9 +1150,8 @@ What it did not need: a `plugins/` directory in this repository (the plugins liv
 authors' own, which is what the six that exist already did), and a capability *dialog* (the
 grant is answered on the Plugins card, where an escalation is already compared against what was
 allowed last time — a second surface for the same question would be a second answer to keep in
-step) and a template repository, which is the shape of the loop rather than the loop itself.
-`--dev-plugin` — the one item on the original list that is about *writing* a plugin rather than
-installing one — is built.
+step). `--dev-plugin` and the template repository — the two items on the original list about
+*writing* a plugin rather than installing one — are built.
 
 **Phase 4 — the process transport.** `plugins/host-process`: the NDJSON socket, the CLI as
 SDK, `--skill` output for an agent in a pane, supervised long-lived plugins with budgets.
