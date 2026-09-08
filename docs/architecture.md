@@ -950,6 +950,17 @@ worktree, or that a tab is open in is not offered for removal at all: Crook's ow
 worktrees are locked by the session holding them, and that lock is what stops one agent tidying
 away another's work.
 
+**A sweep asks once and never forces.** The same offer made about the list — remove every
+checkout nothing is working in — is deliberately the weaker one. A confirmation about a single
+checkout can say "there is work in there" and offer to delete it anyway, because a person is
+looking at the one thing they asked about; a confirmation about six cannot, so anything git
+would refuse is left standing and named as left standing, and the × on its row is still there
+for the one somebody means. It is also why the question opens *before* it can be answered:
+which checkouts git will actually let go is a `git status` apiece, so the face says it is
+looking, then names the branches a press would really take. The row that opens it is absent
+where there is nothing free, which is the same promise the menu itself makes by not opening
+outside a repository.
+
 `app/src/git/worktree.rs` is the whole of the git side — list, add, remove, and a count of what
 is loose in a checkout — with a timeout on every call, two reader threads per call so a
 repository with a fat `target/` cannot deadlock a pipe, and an error type whose variants are

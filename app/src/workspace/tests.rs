@@ -589,6 +589,20 @@ impl Harness {
         })
     }
 
+    /// Whether the menu is asking about removing every free checkout.
+    fn worktree_menu_is_tidying(&self) -> bool {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.worktree_menu_is_tidying()
+        })
+    }
+
+    /// How many checkouts that question would take, once it has looked in all
+    /// of them.
+    fn worktrees_going(&self) -> Option<usize> {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.worktrees_going())
+    }
+
     /// Whether the menu is making a worktree.
     fn worktree_menu_is_creating(&self) -> bool {
         self.workspace.read(&self.app, |workspace, _| {
@@ -3126,6 +3140,15 @@ fn worktree_menu_box(scene: &Scene) -> Option<RectF> {
         .next()
 }
 
+/// Whether the worktree menu says `needle` anywhere on it.
+///
+/// The window behind the popup says "main" too, so every question about what
+/// this menu says has to be asked inside the box it is drawn in.
+fn worktree_menu_says(scene: &Scene, needle: &str) -> bool {
+    let menu = worktree_menu_box(scene).expect("the menu is not up");
+    text_where(scene, |position| menu.contains_point(position)).contains(needle)
+}
+
 /// Every rect painted in `fill`, which for a tab colour is its stripe.
 fn stripes_of(scene: &Scene, fill: Color) -> Vec<RectF> {
     visible_rects(scene)
@@ -4260,6 +4283,186 @@ fn escape_takes_the_menu_down_and_enter_removes_the_checkout() {
             .map(|worktrees| worktrees.len() == 1)
             .unwrap_or(false)
     });
+}
+
+/// A checkout of the repository `tab` is in, made through the menu the way a
+/// person makes one and then walked away from.
+///
+/// The pane it opened in is closed again, because a checkout a tab is working
+/// in is not free — which is the rule these tests set up rather than the one
+/// they are about.
+fn spare_checkout(harness: &mut Harness, tab: TabId, store: &Path, made: &[PathBuf]) -> PathBuf {
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+
+    let before = harness.pane_ids().len();
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    harness.dispatch_worktree(WorktreeAction::Create);
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.pane_ids().len() > before
+    });
+
+    let opened = harness
+        .focused_pane_id()
+        .expect("the checkout did not open a pane");
+    let path = harness
+        .working_directory(opened)
+        .expect("the pane that opened does not know where it is");
+    assert!(
+        path.starts_with(store) && !made.contains(&path),
+        "{} is not a checkout this call made",
+        path.display()
+    );
+
+    harness.dispatch_action(TabAction::ClosePane(opened));
+    harness.dispatch_action(TabAction::Select(tab));
+    path
+}
+
+#[test]
+fn tidying_up_takes_the_free_checkouts_and_leaves_the_work_alone() {
+    // The whole of the sweep against a real repository: three checkouts
+    // nobody is in, one of them with a file in it that git will refuse over,
+    // and one press that has to take exactly the other two. What makes this
+    // worth a real `git worktree remove` rather than a stub is the refusal —
+    // "which of these will git actually let go" is a question only git
+    // answers, and the face is built entirely around not guessing it.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let tab = harness.active_id();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    let mut free: Vec<PathBuf> = Vec::new();
+    for _ in 0..3 {
+        let made = spare_checkout(&mut harness, tab, &store, &free);
+        free.push(made);
+    }
+    fs::write(free[1].join("scratch.txt"), "half a thought\n").expect("the checkout is there");
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("every checkout to be read", |harness| {
+        harness.worktrees_listed() == Some(4)
+    });
+    assert!(
+        worktree_menu_says(&harness.frame(), "3 free checkouts"),
+        "the list did not offer the three checkouts nothing is working in"
+    );
+
+    harness.dispatch_worktree(WorktreeAction::AskTidy);
+    assert!(
+        harness.worktree_menu_is_tidying(),
+        "the row did not open its question"
+    );
+    harness.wait_for("the checkouts to be looked in", |harness| {
+        harness.worktrees_going().is_some()
+    });
+    assert_eq!(
+        harness.worktrees_going(),
+        Some(2),
+        "the checkout with a file in it was counted as one that would go"
+    );
+
+    harness.dispatch_worktree(WorktreeAction::Tidy);
+    harness.wait_for("the free checkouts to go", |_| {
+        crate::git::worktree::list(&repository)
+            .map(|worktrees| worktrees.len() == 2)
+            .unwrap_or(false)
+    });
+
+    assert!(
+        !free[0].exists() && !free[2].exists(),
+        "a checkout git let go was left on disk"
+    );
+    assert!(
+        free[1].is_dir(),
+        "the checkout with work in it was removed anyway"
+    );
+    let left = crate::git::worktree::list(&repository).expect("the repository still lists");
+    assert!(
+        left.iter().any(|worktree| worktree.path == free[1]),
+        "git no longer knows about the checkout that was kept: {left:?}"
+    );
+}
+
+#[test]
+fn nothing_offers_to_tidy_a_checkout_a_tab_is_working_in() {
+    // The row is absent rather than inert, so its absence is the whole of what
+    // says "there is nothing here to remove" — and a checkout somebody has
+    // open must not be counted, or the offer becomes one that fails when it is
+    // taken up. Three states of one repository, in the order they happen.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let tab = harness.active_id();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    // One checkout, which is the main one and is never removable.
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    assert!(
+        !worktree_menu_says(&harness.frame(), "free checkout"),
+        "a repository with only its main checkout was offered a tidy-up"
+    );
+
+    // A second one, with the tab it opened in still there.
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    harness.dispatch_worktree(WorktreeAction::Create);
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.pane_ids().len() > 1
+    });
+    let opened = harness
+        .focused_pane_id()
+        .expect("the checkout did not open a pane");
+
+    harness.dispatch_action(TabAction::Select(tab));
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("both checkouts to be read", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    assert!(
+        !worktree_menu_says(&harness.frame(), "free checkout"),
+        "a checkout a tab is working in was offered for removal"
+    );
+
+    // And once nothing is working in it, it is exactly what this row is for.
+    harness.dispatch_worktree(WorktreeAction::CloseMenu);
+    harness.dispatch_action(TabAction::ClosePane(opened));
+    harness.dispatch_action(TabAction::Select(tab));
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("both checkouts to be read again", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    assert!(
+        worktree_menu_says(&harness.frame(), "1 free checkout"),
+        "the checkout nothing is working in any more was not offered"
+    );
 }
 
 #[test]

@@ -256,7 +256,10 @@ Eight features, and the page that configures them:
   where the checkout will go, and opens a tab in it — folded into a group with the tab that
   asked for it. Removal is offered only for a checkout
   that is not locked, not the main one, and not one a tab is working in; it says what it will
-  delete first, and it never deletes the branch. Checkouts go in a store of Crook's own —
+  delete first, and it never deletes the branch. One row down, `Remove 3 free checkouts…`
+  does the same to all of them at once — it looks in each one first, names the branches that
+  will actually go, and leaves anything with work in it exactly where it is. That row is there
+  only when there is something for it to take. Checkouts go in a store of Crook's own —
   neither inside the repository, where git will happily let you put one and every build and
   every search then trips over it, nor beside it in a directory somebody else laid out.
 

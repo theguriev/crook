@@ -60,7 +60,7 @@ use super::action::{
 use super::block_list::block_text;
 use super::settings_page::SettingsState;
 use super::tab_context_menu::TabContextMenuState;
-use super::tab_menu::{Contents, Mode as WorktreeMode, TabMenuState};
+use super::tab_menu::{Contents, Going, Mode as WorktreeMode, Sweep, TabMenuState};
 use super::tabs_panel::drag::{Carried, PanelDrag};
 use super::tabs_panel::geometry::RowGeometry;
 use super::tabs_panel::search::SearchState;
@@ -1036,6 +1036,21 @@ impl Workspace {
     /// Whether the menu is asking about removing a checkout. For a test.
     pub fn worktree_menu_is_confirming(&self) -> bool {
         matches!(self.tab_menu.mode, WorktreeMode::Removing { .. })
+    }
+
+    /// Whether the menu is asking about removing every free checkout at once.
+    /// For a test.
+    pub fn worktree_menu_is_tidying(&self) -> bool {
+        matches!(self.tab_menu.mode, WorktreeMode::Tidying)
+    }
+
+    /// How many checkouts that question would take, once it has looked in all
+    /// of them, and `None` while it is still looking. For a test.
+    pub fn worktrees_going(&self) -> Option<usize> {
+        match &self.tab_menu.sweep {
+            Sweep::Ready { going, .. } => Some(going.len()),
+            Sweep::Counting => None,
+        }
     }
 
     /// Whether the confirmation has already been refused once, which is what
@@ -2207,6 +2222,8 @@ impl Workspace {
             WorktreeAction::Create => self.create_worktree(ctx),
             WorktreeAction::AskRemove(index) => self.ask_about_removing(index, ctx),
             WorktreeAction::Remove { force } => self.remove_worktree(force, ctx),
+            WorktreeAction::AskTidy => self.ask_about_tidying(ctx),
+            WorktreeAction::Tidy => self.tidy_worktrees(ctx),
 
             WorktreeAction::Cancel => {
                 self.tab_menu.mode = WorktreeMode::Listing;
@@ -2256,6 +2273,7 @@ impl Workspace {
         self.tab_menu.tab = Some(tab);
         self.tab_menu.pane_directory = Some(directory.clone());
         self.tab_menu.mode = WorktreeMode::Listing;
+        self.tab_menu.sweep = Sweep::Counting;
         self.tab_menu.contents = Contents::Reading;
         self.tab_menu.branches.clear();
         self.tab_menu.problem = None;
@@ -2366,6 +2384,34 @@ impl Workspace {
         self.apply_worktree(WorktreeAction::StartCreating, ctx);
     }
 
+    /// Puts it into its sweep, for a run that was asked to start there.
+    ///
+    /// Blocking, and only here, for the reason
+    /// [`open_tab_menu_for_snapshot`](Self::open_tab_menu_for_snapshot) is: a
+    /// snapshot draws one frame, and the frame this face is worth
+    /// photographing in is the one after every checkout has been looked in.
+    pub fn start_tidying_worktrees(&mut self, ctx: &mut ViewContext<Self>) {
+        let free = super::tab_menu::free_checkouts(self);
+        if free.is_empty() {
+            return;
+        }
+
+        let mut going = Vec::new();
+        let mut kept = Vec::new();
+        for (path, label) in free {
+            match crate::git::worktree::local_work(&path) {
+                Ok(local) if !local.blocks_removal() => going.push(Going { path, label, local }),
+                _ => kept.push(label),
+            }
+        }
+
+        self.tab_menu.mode = WorktreeMode::Tidying;
+        self.tab_menu.sweep = Sweep::Ready { going, kept };
+        self.tab_menu.problem = None;
+        self.tab_menu.forget_hover_state();
+        ctx.notify();
+    }
+
     /// Takes the menu down.
     fn close_tab_menu(&mut self, ctx: &mut ViewContext<Self>) {
         if !self.tab_menu.is_open() {
@@ -2374,6 +2420,7 @@ impl Workspace {
 
         self.tab_menu.tab = None;
         self.tab_menu.mode = WorktreeMode::Listing;
+        self.tab_menu.sweep = Sweep::Counting;
         self.tab_menu.contents = Contents::Reading;
         self.tab_menu.branches.clear();
         self.tab_menu.problem = None;
@@ -2690,6 +2737,138 @@ impl Workspace {
                 && *asking == index
             {
                 *local = counted.ok();
+                ctx.notify();
+            }
+        })
+        .detach();
+    }
+
+    /// Asks about removing every free checkout, and looks in each of them
+    /// while it asks.
+    ///
+    /// The looking is what makes the question answerable: which of them git
+    /// will actually let go is not a fact the list carries, and a face that
+    /// named all six and then removed four would have asked about something
+    /// other than what it did.
+    fn ask_about_tidying(&mut self, ctx: &mut ViewContext<Self>) {
+        let free = super::tab_menu::free_checkouts(self);
+        if free.is_empty() {
+            return;
+        }
+
+        self.tab_menu.mode = WorktreeMode::Tidying;
+        self.tab_menu.sweep = Sweep::Counting;
+        self.tab_menu.problem = None;
+        self.tab_menu.forget_hover_state();
+        ctx.notify();
+
+        let opened_on = self.tab_menu.tab;
+        let counting = ctx.background().spawn(async move {
+            free.into_iter()
+                .map(|(path, label)| {
+                    let local = crate::git::worktree::local_work(&path);
+                    (path, label, local.ok())
+                })
+                .collect::<Vec<_>>()
+        });
+
+        ctx.spawn(counting, move |workspace, counted, ctx| {
+            // Only into the question that asked it, and only while it is
+            // still waiting for one. Six `git status` calls is long enough for
+            // the menu to have been taken down, opened on another tab, or
+            // walked back to the list — and long enough for a second sweep to
+            // have been opened and answered, which is the one case where
+            // landing this would replace a fresh count with a stale one.
+            if workspace.tab_menu.tab != opened_on
+                || workspace.tab_menu.mode != WorktreeMode::Tidying
+                || !matches!(workspace.tab_menu.sweep, Sweep::Counting)
+            {
+                return;
+            }
+
+            let mut going = Vec::new();
+            let mut kept = Vec::new();
+            for (path, label, local) in counted {
+                match local {
+                    // Modified or untracked files are what `git worktree
+                    // remove` refuses over, so a checkout holding either is one
+                    // this face leaves alone rather than one it offers to
+                    // force past — see the module's header. A checkout git
+                    // would not answer about at all is kept for the same
+                    // reason, one step further out.
+                    Some(local) if !local.blocks_removal() => {
+                        going.push(Going { path, label, local });
+                    }
+                    _ => kept.push(label),
+                }
+            }
+            workspace.tab_menu.sweep = Sweep::Ready { going, kept };
+            ctx.notify();
+        })
+        .detach();
+    }
+
+    /// Removes the checkouts the sweep is about, one after another.
+    ///
+    /// Sequential rather than at once, because `git worktree remove` writes
+    /// the same `.git/worktrees` directory every time and two of them racing
+    /// over it is a repository somebody has to repair by hand. Six subprocesses
+    /// one after another is a moment, and it happens on the pool.
+    fn tidy_worktrees(&mut self, ctx: &mut ViewContext<Self>) {
+        let Sweep::Ready { going, .. } = &self.tab_menu.sweep else {
+            return;
+        };
+        if self.tab_menu.working || going.is_empty() {
+            return;
+        }
+        let Some(repository) = self.tab_menu.pane_directory.clone() else {
+            return;
+        };
+        let paths: Vec<PathBuf> = going.iter().map(|going| going.path.clone()).collect();
+
+        self.tab_menu.working = true;
+        self.tab_menu.problem = None;
+        ctx.notify();
+
+        let opened_on = self.tab_menu.tab;
+        let removed = ctx.background().spawn(async move {
+            let mut refused = 0;
+            for path in paths {
+                // Never forced, and one refusal does not stop the others: a
+                // checkout somebody started working in between the counting
+                // and the button is a checkout to leave standing, not a reason
+                // to abandon the five that are finished.
+                if let Err(problem) = crate::git::worktree::remove(&repository, &path, false) {
+                    log::warn!("{} was not removed: {problem}", path.display());
+                    refused += 1;
+                }
+            }
+            refused
+        });
+
+        ctx.spawn(removed, move |workspace, refused, ctx| {
+            if workspace.tab_menu.tab != opened_on {
+                return;
+            }
+            workspace.tab_menu.working = false;
+
+            // Back to the list, which has to be read again: the things it was
+            // listing are gone. What is left is git's answer rather than this
+            // handler's arithmetic, which is the only one that cannot be wrong.
+            if let Some(tab) = workspace.tab_menu.tab {
+                workspace.tab_menu.tab = None;
+                workspace.open_tab_menu(tab, ctx);
+            }
+
+            // Said after the list has been asked for, because opening the menu
+            // clears the line — and said as a count rather than as git's own
+            // words, which are about one checkout and there were several. The
+            // log has each of them.
+            if refused > 0 {
+                workspace.tab_menu.problem = Some(match refused {
+                    1 => "One checkout would not go; the log says why.".to_owned(),
+                    refused => format!("{refused} checkouts would not go; the log says why."),
+                });
                 ctx.notify();
             }
         })
@@ -4107,6 +4286,10 @@ impl Workspace {
             ("enter", WorktreeMode::Removing { refused: false, .. }) => {
                 WorktreeAction::Remove { force: false }
             }
+            // No `refused` to check, because a sweep never forces: the button
+            // this key is standing in for removes what git lets go and leaves
+            // the rest, whether it is pressed once or twice.
+            ("enter", WorktreeMode::Tidying) => WorktreeAction::Tidy,
             _ => return None,
         };
         Some(action.into())
