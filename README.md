@@ -63,7 +63,7 @@ Eight features, and the page that configures them:
   **The Claude Code usage chip is the worked example**, and it is the proof, because it used to
   be one of the features on this list and is now a file. It lives at
   [github.com/theguriev/crook-pirate](https://github.com/theguriev/crook-pirate) and ships as
-  one 122KB `plugin.wasm`. `crook --install-plugin <path>` checks the module, reads its
+  one 204KB `plugin.wasm`. `crook --install-plugin <path>` checks the module, reads its
   manifest and puts it where Crook looks —
   `<data>/crook/plugins/theguriev.pirate/0.3.0/plugin.wasm`, the version in the path so that an
   upgrade writes somewhere new rather than over the bytes a running interpreter is reading.

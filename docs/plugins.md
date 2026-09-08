@@ -267,7 +267,7 @@ description of something that was never built.
 
   **And the usage chip is not in the binary any more.** It is a sandboxed plugin —
   `theguriev/pirate`, in a public repository of its own at github.com/theguriev/crook-pirate,
-  released as one 122KB `plugin.wasm`, asking to read `~/.claude/.credentials.json` and to
+  released as one 204KB `plugin.wasm`, asking to read `~/.claude/.credentials.json` and to
   reach `api.anthropic.com`, and able to reach nothing else. `crates/crook_usage`,
   `app/src/usage_model.rs`, `app/src/plugins/usage/`, the `show_usage_chip` setting and the
   `--usage` and `--usage-panel` flags are gone with it. This is the dogfooding the plan asked
