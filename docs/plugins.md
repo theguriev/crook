@@ -124,7 +124,9 @@ description of something that was never built.
     of text: the colour swatches are a row of controls the shell offers and the plugin fills,
     because which six colours a tab may be is the tab model's business and how a menu row
     looks is the menu's.
-  - Still to move: the worktree menu's own popup, the Themes panel, the Omarchy palettes.
+  - Still to move: the worktree menu's own popup, the Themes panel, the Omarchy palettes. What
+    each of them needs is written down in §8, so the next person to pick one starts from a
+    design rather than from a survey.
 - **Phase 3 — the store: done.** A registry in a repository of its own, a `crook/store`
   section beside the Plugins page, and the whole of what an install is: fetch a list nobody is
   told anything by, download one file, check it hashes to what the list said and that the
@@ -1152,6 +1154,40 @@ grant is answered on the Plugins card, where an escalation is already compared a
 allowed last time — a second surface for the same question would be a second answer to keep in
 step). `--dev-plugin` and the template repository — the two items on the original list about
 *writing* a plugin rather than installing one — are built.
+
+### The three that are left, and what each of them needs
+
+Phase 1 moved every feature it could onto the registries. Three did not go, and the line saying
+so has been in this document since — without saying *why*, which is what turns a plan into a
+list nobody starts from. Each is a different amount of work and only one of them needs anything
+that does not exist.
+
+**The worktree popup needs nothing new, and is the one to do first.** Its *entry* is already
+`crook/worktrees`; what stayed behind is `workspace::tab_menu`, 815 lines holding a text field, a
+background git read and a two-step confirmation — and every one of those is something a plugin
+can now own: `claim_panel` puts a surface under a place, `claim_field` gives it somewhere for a
+letter to land, and a model does the reading. What makes it a day rather than an hour is not the
+panel, it is `TabMenuState` living on `Workspace` and five call sites reading it, plus whatever
+of the twelve thousand lines of workspace tests names it.
+
+**The Themes panel needs one new slot, and it is a new *kind* of slot.** The panel is not a
+floating surface — it is a docked column between the sidebar and the work, which is a place
+nothing can contribute to today: `window.overlay` floats and `sidebar.section` replaces. So
+`crook/window` declares `window.column`, `Cardinality::Single`, and `Workspace::render` composes
+whatever is in it exactly where it composes the panel now. After that it is a move:
+`ThemePanelState` into the plugin, its actions registered by name, the creator's field through
+`claim_field`, and the Appearance page's "Current theme" row reaching it the way the palette
+reaches everything — by action name. What does *not* move is `Workspace::set_theme`: applying a
+theme is the window's, and the plugin asks for it by name.
+
+**The Omarchy palettes need a decision before they need code.** A theme is *data*, not an
+element, so there is no slot shaped like it: contributing one is either a new registry in the
+host (`Slots<ThemePack>`, native-only, a few dozen lines) or an addition to the wire, which is an
+ABI bump and a promise to keep forever. The recommendation is the registry: `crook/omarchy`
+contributes the palettes it reads, the wire stays as it is, and the question of whether a
+*sandboxed* plugin may ship a theme waits until one wants to — at which point the answer is a
+`Request` and a version number, decided on purpose rather than because the palettes needed
+somewhere to live.
 
 **Phase 4 — the process transport.** `plugins/host-process`: the NDJSON socket, the CLI as
 SDK, `--skill` output for an agent in a pane, supervised long-lived plugins with budgets.
