@@ -266,6 +266,11 @@ struct Overrides {
     worktrees: bool,
     /// Start with that menu making a worktree.
     creating_worktree: bool,
+    /// Start with that menu asking about removing every free checkout.
+    ///
+    /// Implies `worktrees`, and is the other half of `creating_worktree`: the
+    /// menu has four faces and a picture of one of them needs a way in.
+    tidying_worktrees: bool,
     /// Start in this theme rather than the saved one.
     ///
     /// Applied straight to the palette rather than through
@@ -554,6 +559,10 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 overrides.worktrees = true;
                 overrides.creating_worktree = true;
             }
+            "--tidy-worktrees" => {
+                overrides.worktrees = true;
+                overrides.tidying_worktrees = true;
+            }
             "--new-theme" => {
                 overrides.themes = true;
                 overrides.creating = true;
@@ -785,6 +794,8 @@ OPTIONS:
     --theme <NAME>     Start in this theme rather than the saved one
     --worktrees        Start with the active tab's worktree menu open
     --new-worktree     Start with that menu making a worktree
+    --tidy-worktrees   Start with that menu asking about removing every checkout
+                       nothing is working in
     --themes           Start with the Themes panel open
     --new-theme        Start with the Themes panel making a theme
     --hover            Start with the first row's detail card up
@@ -1107,6 +1118,9 @@ fn apply_overrides(
         workspace.open_tab_menu_for_snapshot(ctx);
         if overrides.creating_worktree {
             workspace.start_creating_worktree(ctx);
+        }
+        if overrides.tidying_worktrees {
+            workspace.start_tidying_worktrees(ctx);
         }
     }
 }

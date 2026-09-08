@@ -213,6 +213,12 @@ pub enum WorktreeAction {
         /// Whether to delete a checkout with local work in it.
         force: bool,
     },
+    /// Ask about removing every checkout that is free: not the main one, not
+    /// locked, and nothing in the window working in it.
+    AskTidy,
+    /// Remove those of them git lets go without being forced, and leave the
+    /// rest standing. There is no second question: this one never forces.
+    Tidy,
     /// Back to the list, from the creator or from the confirmation.
     Cancel,
 }

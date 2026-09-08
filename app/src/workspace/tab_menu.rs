@@ -31,7 +31,26 @@
 //!   the tab the menu was opened on belongs to* — or brings forward the pane
 //!   already there;
 //! * a way to make one, which asks for a branch name and nothing else;
-//! * a way to remove one, offered only for a checkout nothing is working in.
+//! * a way to remove one, offered only for a checkout nothing is working in;
+//! * a way to remove all of those at once, for the day a repository has eight
+//!   of them and seven are finished.
+//!
+//! # Tidying up
+//!
+//! The last of those is the same offer as the ×, made about the list rather
+//! than about a row, and it is deliberately the *weaker* one: it never forces.
+//! A confirmation about one checkout can say "there is work in there" and
+//! offer to delete it anyway, because a person is looking at the one thing
+//! they asked about. A confirmation about six cannot — "remove anyway" over a
+//! list is a button whose consequences nobody can hold in their head — so a
+//! checkout git would refuse is a checkout this leaves standing, and says it
+//! is leaving standing, and the × is still there for the one somebody means.
+//!
+//! Which is why the face asks after looking rather than before: what a person
+//! needs to agree to is the list of branches that will actually go, and that
+//! list is not known until every candidate has been `git status`-ed. So the
+//! question opens saying it is looking, the same way the menu itself opens
+//! saying it is reading.
 //!
 //! The branches of one repository stay together because of that second half.
 //! A [group](crate::tab::TabGroup) is the repository and its tabs are its
@@ -129,6 +148,14 @@ pub(super) enum Mode {
     Listing,
     /// Making one.
     Creating,
+    /// Asking about removing every free checkout at once.
+    ///
+    /// What it is asking about lives in [`TabMenuState::sweep`] rather than
+    /// here: this enum is `Copy` and is read by value on the render path and
+    /// in `Workspace::action_for`, and a `Vec` of paths in it would end that
+    /// for the sake of one variant. The worktrees themselves are kept beside
+    /// the mode for the same reason.
+    Tidying,
     /// Asking about removing the one at this index, and saying what is in it.
     ///
     /// `local` is `None` until the count comes back, and `refused` is set once
@@ -156,6 +183,38 @@ pub(super) enum Contents {
     Failed(String),
 }
 
+/// What a tidy-up would do, once every free checkout has been looked in.
+///
+/// Two states and not three: there is no "failed". A checkout git could not
+/// be asked about is kept with the ones holding work, because the only thing
+/// this face may do with a checkout it does not understand is leave it alone.
+#[derive(Clone, Debug, Default)]
+pub(super) enum Sweep {
+    /// Each free checkout is being counted, which is a `git status` apiece.
+    #[default]
+    Counting,
+    /// What the button would take, and what it would not.
+    Ready {
+        /// The checkouts that would go, in the order the list has them.
+        going: Vec<Going>,
+        /// The branches of the ones being left alone.
+        kept: Vec<String>,
+    },
+}
+
+/// One checkout a tidy-up would remove.
+#[derive(Clone, Debug)]
+pub(super) struct Going {
+    /// Where it is, which is what `git worktree remove` is given.
+    pub(super) path: PathBuf,
+    /// What the list calls it: its branch, or the head it is sitting on.
+    pub(super) label: String,
+    /// What is loose in it — which for one of these can only be ignored
+    /// files, since anything git would refuse over put it in `kept` instead.
+    /// Nobody is warned about those by git, so this face is the only chance.
+    pub(super) local: Local,
+}
+
 /// One clickable thing in the menu.
 ///
 /// Keyed by identity rather than named one field at a time, for the reason the
@@ -170,6 +229,8 @@ pub(super) enum Control {
     Remove(usize),
     /// "New worktree…".
     Create,
+    /// "Remove N free checkouts…".
+    Tidy,
     /// The creator's branch field.
     Branch,
     /// The creator's and the confirmation's "Cancel".
@@ -205,6 +266,11 @@ pub(super) struct TabMenuState {
     pub(super) repository: Option<String>,
     /// Where Crook keeps checkouts it made.
     pub(super) store: Option<PathBuf>,
+    /// What a tidy-up would take, while one is being asked about.
+    ///
+    /// Meaningless outside [`Mode::Tidying`], which is what reads it: the mode
+    /// is the question and this is the answer being assembled for it.
+    pub(super) sweep: Sweep,
     /// What git said about the last thing that was asked of it, if it refused.
     pub(super) problem: Option<String>,
     /// Whether a git command is running for this menu right now.
@@ -256,6 +322,7 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
     let body = match state.mode {
         Mode::Listing => listing(workspace, ui),
         Mode::Creating => creator(workspace, ui),
+        Mode::Tidying => tidying(workspace, ui),
         Mode::Removing {
             index,
             local,
@@ -302,11 +369,60 @@ fn listing(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
 
     column.add_child(divider());
     column.add_child(create_row(workspace, ui));
+    // Absent rather than inert where there is nothing to tidy, which is the
+    // promise this whole menu is built on: a repository with one checkout has
+    // no free ones, and a row offering to remove none of them is a row that
+    // teaches people the menu is full of things that do nothing.
+    let free = free_checkouts(workspace).len();
+    if free > 0 {
+        column.add_child(tidy_row(workspace, free, ui));
+    }
     if let Some(problem) = &state.problem {
         column.add_child(note(problem.as_str(), ui));
     }
 
     column.finish()
+}
+
+/// Whether a checkout is one this menu may take away.
+///
+/// Never the main checkout, never one somebody is working in, never a locked
+/// one, and never one git has already noticed is not there. git refuses all
+/// four, and an × that always fails is worse than no × at all — the locked
+/// case especially, because Crook's own agent worktrees are locked by the
+/// session that holds them, and that lock is exactly what stops one agent
+/// tidying away another's work.
+///
+/// One function rather than the same four conjuncts written twice, because
+/// the × on a row and the row that sweeps all of them have to mean the same
+/// thing by "free": a person who has read what the × is offered for should not
+/// have to find out that the other one goes further.
+fn removable(worktree: &Worktree, occupied: bool) -> bool {
+    !worktree.is_main && !occupied && worktree.locked.is_none() && worktree.prunable.is_none()
+}
+
+/// Every free checkout, as its path and the name the list calls it by.
+///
+/// The pane directories are read once for the whole list rather than once per
+/// row, which is the only difference between this and asking [`removable`]
+/// about each row in turn.
+pub(super) fn free_checkouts(workspace: &Workspace) -> Vec<(PathBuf, String)> {
+    let state = workspace.tab_menu();
+    let worktrees = state.worktrees();
+    let directories = workspace.pane_directories();
+
+    worktrees
+        .iter()
+        .enumerate()
+        .filter(|(index, worktree)| {
+            let occupied = holding(worktrees, state.pane_directory.as_deref()) == Some(*index)
+                || directories
+                    .iter()
+                    .any(|(_, directory)| holding(worktrees, Some(directory)) == Some(*index));
+            removable(worktree, occupied)
+        })
+        .map(|(_, worktree)| (worktree.path.clone(), branch_label(worktree)))
+        .collect()
 }
 
 /// One worktree.
@@ -324,12 +440,7 @@ fn worktree_row(
             .pane_directories()
             .iter()
             .any(|(_, directory)| holding(worktrees, Some(directory)) == Some(index));
-    // Never the main checkout, never one somebody is working in, and never a
-    // locked one. git refuses all three, and an × that always fails is worse
-    // than no × at all — the last of them especially, because Crook's own
-    // agent worktrees are locked by the session that holds them, and that lock
-    // is exactly what stops one agent tidying away another's work.
-    let removable = !worktree.is_main && !here && !elsewhere && worktree.locked.is_none();
+    let removable = removable(worktree, here || elsewhere);
 
     let label = branch_label(worktree);
     let path = crate::git::user_friendly_path(&worktree.path, workspace.home());
@@ -504,6 +615,64 @@ fn create_row(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
     }
 }
 
+/// "Remove 3 free checkouts…", which is the × made about the whole list.
+///
+/// Drawn only where there is something free, so it needs no inert state:
+/// [`listing`] does not add it otherwise, and hands it the count it counted to
+/// decide that.
+fn tidy_row(workspace: &Workspace, free: usize, ui: FamilyId) -> Box<dyn Element> {
+    let state = workspace.tab_menu();
+
+    Hoverable::new(state.control(Control::Tidy), move |mouse| {
+        Container::new(
+            Flex::row()
+                .with_main_axis_size(MainAxisSize::Max)
+                .with_cross_axis_alignment(CrossAxisAlignment::Center)
+                .with_child(
+                    Container::new(
+                        // The same × the rows offer, because this is the same
+                        // offer: a mark of its own here would say it was a
+                        // different kind of removal.
+                        Icon::new(Lucide::X, 12.)
+                            .with_color(theme().text_muted)
+                            .finish(),
+                    )
+                    .with_margin_right(8.)
+                    .finish(),
+                )
+                .with_child(
+                    Text::new(
+                        // Counted in the label, because how many is the whole
+                        // of what a person needs to decide whether to look:
+                        // "tidy up" on a repository with one stale checkout
+                        // and on one with nine reads the same.
+                        match free {
+                            1 => "Remove 1 free checkout…".to_owned(),
+                            free => format!("Remove {free} free checkouts…"),
+                        },
+                        ui,
+                        LABEL_SIZE,
+                    )
+                    .with_color(theme().text_primary)
+                    .finish(),
+                )
+                .finish(),
+        )
+        .with_background_color(if mouse.is_hovered() {
+            theme().overlay_1
+        } else {
+            Color::TRANSPARENT
+        })
+        .with_horizontal_padding(ROW_INSET)
+        .with_vertical_padding(6.)
+        .finish()
+    })
+    .on_click(|_, ctx, _| {
+        ctx.dispatch_typed_action(WorkspaceAction::Worktree(WorktreeAction::AskTidy));
+    })
+    .finish()
+}
+
 /// Making one: a branch name, and where it would go.
 ///
 /// One field, because there is one question. herdr asks the same one and
@@ -561,8 +730,111 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
         column.add_child(note(problem.as_str(), ui));
     }
 
-    column.add_child(buttons(workspace, "Create", WorktreeAction::Create, ui));
+    column.add_child(buttons(
+        workspace,
+        "Create",
+        Some(WorktreeAction::Create),
+        ui,
+    ));
     column.finish()
+}
+
+/// How many of the branches going are named before the list gives up counting.
+///
+/// Six, which is a face that stays one screenful. Past that the names have
+/// stopped being a list somebody reads and become a wall they scroll, and the
+/// count in the button is the fact they were after anyway.
+const NAMED: usize = 6;
+
+/// Removing every free checkout, which asks once and never forces.
+///
+/// The order is the order of the sentence a person is being asked to agree to:
+/// what goes, what that costs, and what is being left where it is.
+fn tidying(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
+    let state = workspace.tab_menu();
+
+    let mut column = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_child(header("Remove these checkouts?", ui));
+
+    let (going, kept) = match &state.sweep {
+        // Every candidate is a `git status`, so the question is on screen
+        // before it can be answered — the same order the list itself opens in,
+        // and for the same reason: a popup that appeared once git had finished
+        // would be a gesture that does nothing for half a second.
+        Sweep::Counting => {
+            column.add_child(note("Looking in each of them…", ui));
+            column.add_child(buttons(workspace, "Remove", None, ui));
+            return column.finish();
+        }
+        Sweep::Ready { going, kept } => (going, kept),
+    };
+
+    for going in going.iter().take(NAMED) {
+        column.add_child(note(&going.label, ui));
+    }
+    if going.len() > NAMED {
+        column.add_child(note(format!("and {} more.", going.len() - NAMED), ui));
+    }
+
+    // The seam between the branches and the sentences about them. Without it
+    // the list runs straight into "The branches are kept" in the same size and
+    // the same tone, and a person skimming cannot see where the names stop.
+    column.add_child(divider());
+
+    if going.is_empty() {
+        // Which is a real answer and not an error: every free checkout has
+        // something in it. The face still opens, because "nothing to do here"
+        // is what the person asked to be told.
+        column.add_child(note("There is work in every one of them.", ui));
+    } else {
+        column.add_child(note("The branches are kept. Only the checkouts go.", ui));
+    }
+
+    // What git will delete without ever mentioning it, summed over the lot:
+    // the `target/` in each of six finished checkouts is the real cost of
+    // this button, and nothing else on screen would say so.
+    let ignored: usize = going.iter().map(|going| going.local.ignored).sum();
+    if ignored > 0 {
+        column.add_child(note(
+            format!("{ignored} ignored in them will be deleted."),
+            ui,
+        ));
+    }
+
+    if !kept.is_empty() {
+        column.add_child(note(format!("Left alone: {}.", named(kept)), ui));
+    }
+
+    if let Some(problem) = &state.problem {
+        column.add_child(note(problem.as_str(), ui));
+    }
+
+    column.add_child(buttons(
+        workspace,
+        &match going.len() {
+            0 => "Remove".to_owned(),
+            count => format!("Remove {count}"),
+        },
+        (!going.is_empty()).then_some(WorktreeAction::Tidy),
+        ui,
+    ));
+    column.finish()
+}
+
+/// Some branches in a line, with the ones past [`NAMED`] counted instead.
+fn named(branches: &[String]) -> String {
+    let mut sentence = branches
+        .iter()
+        .take(NAMED)
+        .cloned()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if branches.len() > NAMED {
+        sentence.push_str(&format!(" and {} more", branches.len() - NAMED));
+    }
+    sentence
 }
 
 /// Removing one, which is the only destructive thing in the menu and is
@@ -610,7 +882,7 @@ fn confirmation(
     column.add_child(buttons(
         workspace,
         label,
-        WorktreeAction::Remove { force: refused },
+        Some(WorktreeAction::Remove { force: refused }),
         ui,
     ));
     column.finish()
@@ -632,10 +904,15 @@ fn local_summary(local: &Local) -> String {
 }
 
 /// Cancel, and the button that does the thing.
+///
+/// `action` is `None` for a face whose button has nothing to do yet — one
+/// still counting, or one that found nothing it may remove. It is drawn
+/// without a click handler rather than with one that returns early, which is
+/// the rule every other disabled control in this application follows.
 fn buttons(
     workspace: &Workspace,
-    label: &'static str,
-    action: WorktreeAction,
+    label: &str,
+    action: Option<WorktreeAction>,
     ui: FamilyId,
 ) -> Box<dyn Element> {
     let state = workspace.tab_menu();
@@ -653,7 +930,7 @@ fn buttons(
                         state.control(Control::Cancel),
                         "Cancel",
                         false,
-                        WorktreeAction::Cancel,
+                        Some(WorktreeAction::Cancel),
                         ui,
                     ),
                 )
@@ -684,13 +961,17 @@ fn button(
     state: MouseStateHandle,
     label: &str,
     primary: bool,
-    action: WorktreeAction,
+    action: Option<WorktreeAction>,
     ui: FamilyId,
 ) -> Box<dyn Element> {
     let label = label.to_owned();
+    let inert = action.is_none();
 
-    Hoverable::new(state, move |mouse| {
-        let (background, border) = match (primary, mouse.is_hovered()) {
+    let control = Hoverable::new(state, move |mouse| {
+        // An inert button takes the quiet ground rather than the accent, and
+        // its own hover does nothing: a filled primary button that answers the
+        // pointer and not the press is a control that looks broken.
+        let (background, border) = match (primary && !inert, mouse.is_hovered() && !inert) {
             (true, false) => (theme().accent, theme().accent),
             (true, true) => (theme().accent, theme().text_primary),
             (false, false) => (Color::TRANSPARENT, theme().border),
@@ -700,7 +981,11 @@ fn button(
         Container::new(
             Align::new(
                 Text::new(label.clone(), ui, 11.)
-                    .with_color(theme().text_primary)
+                    .with_color(if inert {
+                        theme().text_muted
+                    } else {
+                        theme().text_primary
+                    })
                     .finish(),
             )
             .finish(),
@@ -715,9 +1000,16 @@ fn button(
         .with_border(Border::all(1.).with_border_color(border))
         .with_corner_radius(CornerRadius::with_all(Radius::Pixels(MENU_RADIUS)))
         .finish()
-    })
-    .on_click(move |_, ctx, _| ctx.dispatch_typed_action(WorkspaceAction::Worktree(action)))
-    .finish()
+    });
+
+    match action {
+        Some(action) => control
+            .on_click(move |_, ctx, _| {
+                ctx.dispatch_typed_action(WorkspaceAction::Worktree(action));
+            })
+            .finish(),
+        None => control.finish(),
+    }
 }
 
 /// Which of `worktrees` a directory sits in.
