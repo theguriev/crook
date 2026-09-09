@@ -30,6 +30,80 @@ fn a_list_that_fits_has_nothing_to_scroll() {
     );
 }
 
+/// The two keyboard causes, which are the wheel's arithmetic asked for by a
+/// key rather than by a notch.
+mod keys {
+    use super::*;
+
+    #[test]
+    fn a_page_moves_a_screenful_less_the_overlap() {
+        let list = measured(100., 24.);
+        assert_eq!(list.offset(), 76., "a fresh list follows the bottom");
+
+        assert!(list.apply(ScrollCause::Page { down: false }));
+
+        assert_eq!(
+            list.offset(),
+            76. - (24. - PAGE_OVERLAP),
+            "the line somebody stopped reading on has to still be on screen"
+        );
+    }
+
+    #[test]
+    fn paging_back_to_the_end_follows_it_again() {
+        // The wheel's rule, and the whole reason it is a rule: a person who
+        // pages up to read and pages back down must not find the view frozen
+        // where the end happened to be.
+        let list = measured(100., 24.);
+        list.apply(ScrollCause::Page { down: false });
+        assert_eq!(list.position(), ScrollPosition::Fixed(54.));
+
+        list.apply(ScrollCause::Page { down: true });
+
+        assert_eq!(list.position(), ScrollPosition::FollowBottom);
+    }
+
+    #[test]
+    fn a_page_stops_at_the_top() {
+        let list = measured(100., 24.);
+        for _ in 0..20 {
+            list.apply(ScrollCause::Page { down: false });
+        }
+
+        assert_eq!(list.offset(), 0.);
+        assert!(!list.apply(ScrollCause::Page { down: false }), "and stays");
+    }
+
+    #[test]
+    fn the_ends_are_the_ends() {
+        let list = measured(100., 24.);
+
+        assert!(list.apply(ScrollCause::ToEnd { bottom: false }));
+        assert_eq!(list.offset(), 0.);
+
+        assert!(list.apply(ScrollCause::ToEnd { bottom: true }));
+        assert_eq!(list.position(), ScrollPosition::FollowBottom);
+    }
+
+    #[test]
+    fn the_top_of_a_list_with_nothing_to_scroll_is_still_the_end_of_it() {
+        // The trap. On a short list the top *is* the bottom, so pinning it at
+        // zero would look like nothing happened and then quietly stop the pane
+        // following the next command's output. `ToLine(0.)` has always landed
+        // on `FollowBottom` here; this has to agree with it.
+        let list = measured(10., 24.);
+        assert!(!list.is_scrollable());
+
+        list.apply(ScrollCause::ToEnd { bottom: false });
+        assert_eq!(list.position(), ScrollPosition::FollowBottom);
+
+        // And the proof of what that is worth: output arrives, and the list
+        // is still following it.
+        list.measured(100., 24.);
+        assert_eq!(list.offset(), 76.);
+    }
+}
+
 #[test]
 fn following_the_bottom_re_resolves_rather_than_pinning_a_number() {
     // The pitfall this enum exists for: a float that was the maximum a moment

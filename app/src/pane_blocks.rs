@@ -411,7 +411,14 @@ impl PaneBlocks {
                 }
             }
             ScrollCause::ToEnd { bottom } => {
-                if bottom {
+                // The bottom is a *mode*, for the reason the wheel's arm gives:
+                // where it is is decided this frame, and the number that was
+                // the end a moment ago freezes the view. The top is a number —
+                // except on a list with nothing to scroll, where the top is
+                // also the end, and pinning it there would quietly stop a pane
+                // following output it has the room for. That is the wheel's own
+                // rule and `ToLine`'s, applied here rather than restated.
+                if bottom || limit <= HEIGHT_TOLERANCE {
                     ScrollPosition::FollowBottom
                 } else {
                     ScrollPosition::Fixed(0.)
