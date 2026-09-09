@@ -40,6 +40,13 @@ use crookui_core::geometry::Vector2F;
 /// what "at the end" means.
 pub const HEIGHT_TOLERANCE: f32 = 0.01;
 
+/// How many lines of the old screenful a page key keeps.
+///
+/// Every pager ever written keeps some: the line somebody stopped reading on
+/// has to still be on screen afterwards, or a page key is a way to skip a line
+/// without noticing. Two is `less`'s.
+pub const PAGE_OVERLAP: f32 = 2.;
+
 /// Where a list is scrolled to.
 #[derive(Copy, Clone, Debug, Default, PartialEq)]
 pub enum ScrollPosition {
@@ -80,6 +87,28 @@ pub enum ScrollCause {
     /// entry that was clicked. Both are worked out by the caller and arrive
     /// here as one number, so the rule below stays a rule about scrolling.
     ToLine(f32),
+    /// A key asked for a screenful, in this direction.
+    ///
+    /// A screenful rather than a count of lines, because that is the promise
+    /// the key makes and the only thing that knows how big one is is the list
+    /// itself — the wheel's caller counts lines, and a caller that had to ask
+    /// how tall the box was before it could send a Page Up would be a second
+    /// place the answer lived. [`PAGE_OVERLAP`] is why it is not the whole
+    /// box.
+    Page {
+        /// Towards the newest output, rather than the oldest.
+        down: bool,
+    },
+    /// A key asked for one end of the list outright.
+    ///
+    /// Not [`Self::ToLine`] with a number worked out by the caller: the bottom
+    /// of the list is wherever it turns out to be *this* frame, and pinning
+    /// the number that was the end a moment ago is exactly the freeze the
+    /// wheel's arm exists to avoid.
+    ToEnd {
+        /// The newest output, rather than the oldest.
+        bottom: bool,
+    },
 }
 
 /// One of the controls a hovered block carries at its top right.
@@ -329,6 +358,8 @@ impl PaneBlocks {
         let mut state = self.0.borrow_mut();
         let limit = max_offset(&state);
         let was = state.position;
+        // Read before the assignment below, which borrows the same cell.
+        let viewport = state.viewport;
 
         state.position = match cause {
             // Landing at the end returns to *following* it rather than pinning
@@ -360,6 +391,37 @@ impl PaneBlocks {
                     ScrollPosition::FollowBottom
                 } else {
                     ScrollPosition::Fixed(line.max(0.))
+                }
+            }
+            // The wheel's arithmetic over a step the list works out for
+            // itself, and the wheel's rule about landing at the end. Sharing
+            // the rule rather than the arm, because the step is the whole
+            // difference between the two causes.
+            ScrollCause::Page { down } => {
+                let offset = match was {
+                    ScrollPosition::FollowBottom => limit,
+                    ScrollPosition::Fixed(at) => at,
+                };
+                let step = (viewport - PAGE_OVERLAP).max(1.);
+                let moved = (offset + if down { step } else { -step }).clamp(0., limit);
+                if moved >= limit - HEIGHT_TOLERANCE {
+                    ScrollPosition::FollowBottom
+                } else {
+                    ScrollPosition::Fixed(moved)
+                }
+            }
+            ScrollCause::ToEnd { bottom } => {
+                // The bottom is a *mode*, for the reason the wheel's arm gives:
+                // where it is is decided this frame, and the number that was
+                // the end a moment ago freezes the view. The top is a number —
+                // except on a list with nothing to scroll, where the top is
+                // also the end, and pinning it there would quietly stop a pane
+                // following output it has the room for. That is the wheel's own
+                // rule and `ToLine`'s, applied here rather than restated.
+                if bottom || limit <= HEIGHT_TOLERANCE {
+                    ScrollPosition::FollowBottom
+                } else {
+                    ScrollPosition::Fixed(0.)
                 }
             }
             // The mode is kept. Only an offset that no longer fits gives way,

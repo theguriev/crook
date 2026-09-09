@@ -88,6 +88,13 @@ const MENU_WIDTH: f32 = 260.;
 /// The popup's corner radius, which is every other popup's.
 const MENU_RADIUS: f32 = 6.;
 
+/// The size a row's chord is printed at.
+///
+/// Smaller than the label, for the reason the tab menu's is: the label is what
+/// somebody came to read and the chord is the answer to a question they have
+/// not asked yet.
+const CHORD_SIZE: f32 = 10.5;
+
 /// The inset around every row. Dividers are full-bleed and are not inset,
 /// which is the one thing easiest to get backwards.
 const ROW_INSET: f32 = 12.;
@@ -178,12 +185,14 @@ pub(crate) fn copy_group(workspace: &Workspace) -> Box<dyn Element> {
     group([
         entry(
             "Copy",
+            chord_for(workspace, "crook/window/copy-block"),
             Some(dispatching(BlockAction::Copy(BlockPart::Whole))),
             menu.copy.clone(),
             ui,
         ),
         entry(
             "Copy command",
+            chord_for(workspace, "crook/window/copy-block-command"),
             menu.command
                 .is_some()
                 .then(|| dispatching(BlockAction::Copy(BlockPart::Command))),
@@ -192,6 +201,7 @@ pub(crate) fn copy_group(workspace: &Workspace) -> Box<dyn Element> {
         ),
         entry(
             "Copy output",
+            chord_for(workspace, "crook/window/copy-block-output"),
             menu.output_from
                 .is_some()
                 .then(|| dispatching(BlockAction::Copy(BlockPart::Output))),
@@ -211,6 +221,7 @@ pub(crate) fn facts_group(workspace: &Workspace) -> Box<dyn Element> {
     group([
         entry(
             "Copy working directory",
+            chord_for(workspace, "crook/window/copy-block-directory"),
             menu.directory
                 .is_some()
                 .then(|| dispatching(BlockAction::Copy(BlockPart::Directory))),
@@ -219,6 +230,7 @@ pub(crate) fn facts_group(workspace: &Workspace) -> Box<dyn Element> {
         ),
         entry(
             "Copy git branch",
+            chord_for(workspace, "crook/window/copy-block-branch"),
             menu.branch
                 .is_some()
                 .then(|| dispatching(BlockAction::Copy(BlockPart::Branch))),
@@ -237,6 +249,7 @@ pub(crate) fn run_group(workspace: &Workspace) -> Box<dyn Element> {
     let menu = workspace.block_menu();
     group([entry(
         "Run again",
+        chord_for(workspace, "crook/window/rerun-block"),
         menu.command
             .is_some()
             .then(|| dispatching(BlockAction::Rerun)),
@@ -253,12 +266,14 @@ pub(crate) fn scroll_group(workspace: &Workspace) -> Box<dyn Element> {
     group([
         entry(
             "Scroll to top of block",
+            chord_for(workspace, "crook/window/scroll-to-block-top"),
             Some(dispatching(BlockAction::ScrollTo(BlockEdge::Top))),
             menu.scroll_top.clone(),
             ui,
         ),
         entry(
             "Scroll to bottom of block",
+            chord_for(workspace, "crook/window/scroll-to-block-bottom"),
             Some(dispatching(BlockAction::ScrollTo(BlockEdge::Bottom))),
             menu.scroll_bottom.clone(),
             ui,
@@ -292,14 +307,21 @@ pub(crate) fn dispatching(action: impl Into<WorkspaceAction> + Copy + 'static) -
     Box::new(move |ctx: &mut EventContext| ctx.dispatch_typed_action(action.into()))
 }
 
-/// One entry: a label, and what pressing it does.
+/// One entry: a label, the chord that also reaches it, and what pressing it
+/// does.
 ///
 /// A row that cannot be pressed takes the muted role and no hover of its own,
 /// and its press does nothing — rather than being a `Hoverable` with an empty
 /// handler, which would still light up under the pointer and still claim the
 /// press. Nothing about it invites a click.
+///
+/// `chord` is what [`chord_for`] found, or `None` for a row nothing is bound
+/// to — which is most of them, since almost every command about a block ships
+/// without one. The row is the place that answers "is there a faster way to do
+/// this again", so it prints whatever is in force rather than what was shipped.
 pub(crate) fn entry(
     label: impl Into<std::borrow::Cow<'static, str>>,
+    chord: Option<String>,
     press: Option<Press>,
     state: MouseStateHandle,
     ui: FamilyId,
@@ -310,6 +332,8 @@ pub(crate) fn entry(
         // row which becomes pressable again on the next block does not come
         // back lit under a pointer that has moved away.
         state.lock().reset_interaction_state();
+        // No chord on a row that cannot be pressed: a key that is bound and
+        // would decline is worse than a row that says nothing.
         return plate(
             Text::new(label, ui, LABEL_SIZE)
                 .with_color(theme().text_muted)
@@ -324,15 +348,46 @@ pub(crate) fn entry(
         } else {
             Color::TRANSPARENT
         };
-        plate(
-            Text::new(label.clone(), ui, LABEL_SIZE)
-                .with_color(theme().text_primary)
-                .finish(),
-            background,
-        )
+        plate(line(label.clone(), chord.clone(), ui), background)
     })
     .on_click(move |_, ctx, _| press(ctx))
     .finish()
+}
+
+/// A row's label, and its chord against the far edge.
+fn line(
+    label: std::borrow::Cow<'static, str>,
+    chord: Option<String>,
+    ui: FamilyId,
+) -> Box<dyn Element> {
+    let text = Text::new(label, ui, LABEL_SIZE)
+        .with_color(theme().text_primary)
+        .finish();
+    let Some(chord) = chord else {
+        return text;
+    };
+
+    Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_child(text)
+        .with_child(Expanded::new(1., Empty::new().finish()).finish())
+        .with_child(
+            Text::new(chord, ui, CHORD_SIZE)
+                .with_color(theme().text_muted)
+                .finish(),
+        )
+        .finish()
+}
+
+/// The chord that reaches one of the window's own commands, if one does.
+///
+/// The first of them, because a row is one line. Nothing is cached: the
+/// keybindings are read on the frame the menu is drawn, so a chord recorded on
+/// the Keyboard Shortcuts page is on this row the next time it opens.
+pub(crate) fn chord_for(workspace: &Workspace, command: &str) -> Option<String> {
+    let name = crook_plugin::ActionName::parse(command).ok()?;
+    workspace.keybindings().chords_for(&name).into_iter().next()
 }
 
 /// The box a plugin's own element goes in when it is not an entry.

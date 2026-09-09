@@ -229,21 +229,30 @@ fn binding_row(
 
     // One slot, and what is in it is whatever this command can still be asked
     // for: a recording is cancelled, a binding of the person's own is put
-    // back, and anything else is taken away. Three labels rather than three
+    // back, and anything else is taken away. One label rather than three
     // buttons, because a row with a live control for every state it is not in
     // is a row nobody can read at a glance.
-    let (label, action) = match (recording.is_some(), keybindings.is_yours(command)) {
-        (true, _) => ("Cancel", Some(SettingsAction::StopRecording.into())),
-        (false, true) => (
+    //
+    // The fourth state is the empty one, and it is not decoration. A command
+    // that ships with no chord and has no line in the person's file has
+    // nothing to be asked for — no binding to take away, and none to put back
+    // — and "Unbind" beside "not bound" is a word describing nothing. The
+    // state could not happen while every command the window had shipped with a
+    // chord; most of them now do not.
+    let (label, action) = match (
+        recording.is_some(),
+        keybindings.is_yours(command),
+        chords.is_empty(),
+    ) {
+        (true, _, _) => ("Cancel", Some(SettingsAction::StopRecording.into())),
+        (false, true, _) => (
             "Reset",
             id.and_then(|id| editing(SettingsAction::ResetBinding(id))),
         ),
-        (false, false) => (
+        (false, false, true) => ("", None),
+        (false, false, false) => (
             "Unbind",
-            match chords.is_empty() {
-                true => None,
-                false => id.and_then(|id| editing(SettingsAction::UnbindCommand(id))),
-            },
+            id.and_then(|id| editing(SettingsAction::UnbindCommand(id))),
         ),
     };
     let button = widgets::text_button(

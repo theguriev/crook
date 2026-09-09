@@ -1240,7 +1240,7 @@ disagree, because they are the same range.
 binding is `{ key, command, when }`, the shipped table and a person's `keybindings.json` are
 the same kind of thing in the same list, the last rule that matches wins, a `-` in front of a
 command takes it off a chord, and a key may be a sequence like `ctrl+k ctrl+s`. A command is
-an action name — the window's own thirteen are `crook/window/*`, registered by a plugin like
+an action name — the window's own are `crook/window/*`, registered by a plugin like
 anything else — so nothing enumerates the bindable set and the settings page lists commands it
 has never heard of.
 
@@ -1273,8 +1273,30 @@ The two platforms differ, and not by taste:
   by word. Copy and undo are `ctrl-shift-c` and `ctrl-shift-z` for the same reason every
   terminal emulator on Linux arrived at.
 
+- **The two families that are not on either.** Tab-by-position is `cmd-1`…`cmd-9` on macOS
+  and `alt-1`…`alt-9` off it — not `ctrl-shift-<digit>`, because `control_code` folds
+  `ctrl-shift-3`, `+4` and `+8` to ESC, FS and DEL, so that family would take Escape away from
+  vim. Pane focus is `ctrl-shift-<arrow>` on macOS and `alt-<arrow>` off it: each platform
+  takes the arrow modifier the other spends on text, since `word_chord` is Alt on macOS and
+  Ctrl everywhere else.
+
 The platform is a parameter of the keymap rather than a `cfg!` inside it, so both halves are
 tested on either machine.
+
+**Most commands ship with no chord, and that is the arrangement.** A shipped chord is a key
+taken away from the shell in every pane forever, so the table spends one only on what somebody
+arrives expecting — which is the list `MUST_HAVE_A_CHORD` names in `keybindings_tests.rs`, and
+what a test holds the shipped table to. Everything else is reached by *name*: `register_command`
+puts it in the palette and on the Keyboard Shortcuts page, where a person binds it to whatever
+they like. Two tests hold the other end of that promise — every command in the window's table
+resolves to a binding, and no two of them share a name — because a command that is neither
+bound nor registered is one no keyboard can reach at all.
+
+**A chord that cannot act declines.** `Workspace::command` returns `None` — for a direction the
+split has no pane in, a tab index past the end of the strip, a block command at a prompt with
+nothing selected — and `action_for` then returns `None`, so the keystroke goes on to the
+element under it and from there to the shell. That is what lets Crook bind `ctrl-shift-up`
+without `ctrl-shift-up` ceasing to mean anything in vim.
 
 **Three dependencies came with the field**, and each is a pure-Rust crate with no build
 script, which is the standing constraint of §3:

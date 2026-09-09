@@ -207,13 +207,53 @@ fn every_shipped_binding_names_a_command_of_the_window() {
     }
 }
 
+/// Every command a person would report as broken if pressing its key did
+/// nothing.
+///
+/// This list used to be [`COMMANDS`](crate::plugins::window::COMMANDS) itself,
+/// and it stopped being it the day the window grew commands nobody expects a
+/// shipped chord for — colouring a tab, copying a block's branch, splitting
+/// leftwards. A shipped chord is a key taken away from the shell in every
+/// pane, forever, and most of these are better reached by name: the palette
+/// runs one, and the Keyboard Shortcuts page binds it to whatever a person
+/// likes. What has to hold is that the chords somebody arrives *expecting*
+/// are there, which is what this names.
+const MUST_HAVE_A_CHORD: &[&str] = &[
+    "new-tab",
+    "close-pane",
+    "split-right",
+    "split-down",
+    "previous-tab",
+    "next-tab",
+    "move-tab-left",
+    "move-tab-right",
+    "select-tab-1",
+    "select-last-tab",
+    "focus-pane-left",
+    "focus-pane-right",
+    "focus-pane-up",
+    "focus-pane-down",
+    "focus-next-pane",
+    "focus-previous-pane",
+    "search-tabs",
+    "find",
+    "select-block-up",
+    "select-block-down",
+    "page-up",
+    "page-down",
+    "scroll-to-top",
+    "scroll-to-bottom",
+    "open-settings",
+    "zoom-in",
+    "zoom-out",
+    "zoom-reset",
+];
+
 #[test]
-fn every_command_of_the_window_is_bound_on_both_platforms() {
-    // The other direction: a command with no chord is a feature reachable only
-    // through the palette, and each of these is one somebody expects a key for.
+fn the_commands_a_person_arrives_expecting_are_bound_on_both_platforms() {
     for platform in [Platform::Mac, Platform::Other] {
         let keybindings = Keybindings::for_platform(platform);
-        for (name, _, _) in crate::plugins::window::COMMANDS {
+        for name in MUST_HAVE_A_CHORD {
             let action = command(&format!("crook/window/{name}"));
             assert!(
                 !keybindings.chords_for(&action).is_empty(),
@@ -221,6 +261,130 @@ fn every_command_of_the_window_is_bound_on_both_platforms() {
             );
         }
     }
+}
+
+#[test]
+fn nothing_in_that_list_has_gone_away() {
+    // The list above names commands by string, so a command that is renamed or
+    // dropped would quietly stop being checked rather than failing.
+    for name in MUST_HAVE_A_CHORD {
+        assert!(
+            crate::plugins::window::COMMANDS
+                .iter()
+                .any(|(command, _, _)| command == name),
+            "crook/window/{name} is in MUST_HAVE_A_CHORD and is not a command"
+        );
+    }
+}
+
+#[test]
+fn no_command_of_the_window_is_in_the_table_twice() {
+    // A duplicate name is two rows on the Keyboard Shortcuts page for one
+    // command, and a `binding_for` that answers with whichever came first —
+    // so the second row's chord would run the first row's handler.
+    //
+    // That the table's names are *registered* is not asked here, because it
+    // cannot be: `binding_for` is a search of this same table and would say
+    // yes to anything in it. The registry is asked where there is one, in
+    // `workspace::tests::from_the_keyboard::every_command_in_the_table_is_registered`.
+    let names: Vec<String> = crate::plugins::window::COMMANDS
+        .iter()
+        .map(|(name, _, _)| format!("crook/window/{name}"))
+        .collect();
+    for (at, name) in names.iter().enumerate() {
+        assert!(
+            !names[..at].contains(name),
+            "{name} is in the command table twice"
+        );
+    }
+}
+
+/// What Shift turns a punctuation key into on a US layout.
+///
+/// Only the keys a chord table would reasonably reach for; a layout that
+/// disagrees is exactly why both spellings are bound rather than one.
+const SHIFTED: &[(&str, &str)] = &[
+    ("`", "~"),
+    ("-", "_"),
+    ("=", "+"),
+    ("[", "{"),
+    ("]", "}"),
+    ("\\", "|"),
+    (";", ":"),
+    ("'", "\""),
+    (",", "<"),
+    (".", ">"),
+    ("/", "?"),
+];
+
+#[test]
+fn a_shift_chord_on_a_punctuation_key_is_bound_under_both_spellings() {
+    // **The bug this exists to make impossible.** A `Keystroke`'s key is the
+    // character the platform *reports*, and Shift has already been applied to
+    // it: the window builds it from winit's `logical_key`, which is
+    // shift-applied for everything but Ctrl. So a rule written `ctrl+shift+]`
+    // is a rule that never fires on a layout where that key prints `}` — and
+    // `resolve` compares the key exactly, so nothing anywhere would say so.
+    // It looks bound on the Keyboard Shortcuts page and does nothing.
+    //
+    // The zoom family has always shipped `=` and `+` and both of `-` and `_`
+    // for this reason, and its comment says so. This is that rule, applied to
+    // every chord rather than remembered by whoever writes the next one.
+    let twins: Vec<(&str, &str)> = SHIFTED
+        .iter()
+        .flat_map(|(bare, shifted)| [(*bare, *shifted), (*shifted, *bare)])
+        .collect();
+
+    for platform in [Platform::Mac, Platform::Other] {
+        let keybindings = Keybindings::for_platform(platform);
+        let rules: Vec<(String, String)> = keybindings
+            .effective()
+            .into_iter()
+            .map(|rule| (rule.chord(), rule.command.to_string()))
+            .collect();
+
+        for (chord, command) in &rules {
+            let Some((modifiers, key)) = chord.rsplit_once('+') else {
+                continue;
+            };
+            if !modifiers.contains("shift") {
+                continue;
+            }
+            let Some((_, twin)) = twins.iter().find(|(from, _)| from == &key) else {
+                continue;
+            };
+            let wanted = format!("{modifiers}+{twin}");
+            assert!(
+                rules
+                    .iter()
+                    .any(|(chord, bound)| chord == &wanted && bound == command),
+                "{platform:?} binds {chord} to {command} and not {wanted}, \
+                 so the chord is dead on any layout that reports {twin:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn the_two_platforms_bind_the_same_commands() {
+    // What `every_command_of_the_window_is_bound_on_both_platforms` was
+    // really holding before it became `MUST_HAVE_A_CHORD`: not that every
+    // command has a chord — most now deliberately do not — but that the two
+    // tables agree about *which* ones do. A command bound on one platform and
+    // not the other is a feature half the people who install this have.
+    let bound = |platform| -> Vec<String> {
+        let mut commands: Vec<String> = Keybindings::for_platform(platform)
+            .effective()
+            .into_iter()
+            .filter(|rule| rule.source == Source::Default)
+            .map(|rule| rule.command.to_string())
+            .collect();
+        commands.sort();
+        commands.dedup();
+        commands
+    };
+
+    assert_eq!(bound(Platform::Mac), bound(Platform::Other));
 }
 
 #[test]

@@ -378,10 +378,20 @@ fn contents(
     // the whole pane and draws one grid, so a bar left open from before it
     // started would steal Enter from it — close it as the surface leaves the
     // list, which is where the snapshot to see that is.
-    if surface.surface != Surface::Blocks
-        && let Some(find) = workspace.find(id)
-    {
-        find.close();
+    if surface.surface != Surface::Blocks {
+        if let Some(find) = workspace.find(id) {
+            find.close();
+        }
+        // And the block the keyboard was standing on, for the same reason and
+        // in the same place. A selection that outlived the list would keep
+        // Escape and the copy chord away from the program that now owns the
+        // screen — `block_selection_action_for` claims both while one is set —
+        // and would leave every command about *the* block acting on one
+        // nothing is drawing: `rerun-block` would type into a composer that is
+        // not on screen, and the `blockSelected` clause would hold over vim.
+        if let Some(blocks) = workspace.pane_blocks(id) {
+            blocks.select(None);
+        }
     }
     // Read before the snapshot goes to the surface, and from the same three
     // facts the list itself reads, so the two elements cannot disagree about

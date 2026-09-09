@@ -207,6 +207,15 @@ pub enum TabMenuAction {
     },
     /// Take it down, and any submenu with it. What a press outside it sends.
     Close,
+    /// Step the keyboard's row through the menu by this many places.
+    ///
+    /// The menu is a list of things to do, so it can be walked — and it is the
+    /// entries themselves rather than this enum that say what each one does,
+    /// which is why running one is [`Self::RunSelected`] and not an arm per
+    /// row. See the doc on this enum.
+    MoveSelection(isize),
+    /// Do what pressing the row the keyboard is on would have done.
+    RunSelected,
 }
 
 impl From<TabMenuAction> for WorkspaceAction {
@@ -252,6 +261,20 @@ pub enum WorktreeAction {
     Tidy,
     /// Back to the list, from the creator or from the confirmation.
     Cancel,
+    /// Step the keyboard's row through the list by this many places.
+    ///
+    /// The list is the one mode of this menu with more than one thing to aim
+    /// at, so it is the one mode that needs a way to aim. Clamped at both
+    /// ends, and landing on one of them from nothing.
+    MoveSelection(isize),
+    /// Open the checkout the keyboard is standing on, or offer to remove it.
+    ///
+    /// Two variants rather than [`Self::Show`] and [`Self::AskRemove`] with an
+    /// index, because the index a key means is the menu's own selection and
+    /// nothing outside the menu knows it.
+    ShowSelected,
+    /// Ask about removing the one the keyboard is standing on.
+    AskRemoveSelected,
 }
 
 /// What the menu on a block does.
@@ -291,6 +314,25 @@ pub enum BlockAction {
     ClearSelection(PaneId),
     /// Copy the selected block, the way its own copy control would.
     CopySelection(PaneId),
+    /// Scroll a pane's output by a screenful.
+    ///
+    /// Names a pane for the reason [`Self::SelectUp`] does: it is reached from
+    /// a chord over whichever pane has the keyboard rather than from a block's
+    /// own dots, and the action is applied once the whole tree has seen the
+    /// keystroke.
+    Page {
+        /// Whose output.
+        pane: PaneId,
+        /// Towards the newest output, rather than the oldest.
+        down: bool,
+    },
+    /// Take a pane's output to one end of everything it holds.
+    ScrollToEnd {
+        /// Whose output.
+        pane: PaneId,
+        /// The newest output, rather than the oldest.
+        bottom: bool,
+    },
 }
 
 /// Which of a block's facts an entry copies.

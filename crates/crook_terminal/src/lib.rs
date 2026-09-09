@@ -420,6 +420,15 @@ impl Terminal {
         self.emulator.scroll_to_bottom();
     }
 
+    /// How many lines of scrollback sit above the viewport.
+    ///
+    /// What "scroll to the top" needs and the only thing that knows it: a
+    /// caller that guessed a large enough delta would be a caller that has to
+    /// be changed the day the scrollback limit is.
+    pub fn history_len(&self) -> usize {
+        self.emulator.history_len()
+    }
+
     /// Copies lines out of the grid into the same store a finished block's
     /// rows live in, numbered from the oldest line of the scrollback.
     ///

@@ -2,13 +2,20 @@
 //!
 //! # Every one of Crook's own commands, by name
 //!
-//! Thirteen of these were variants of a closed enum reachable only by a chord
-//! a table in `input_keys` knew about. They are the same thirteen — the
-//! handlers come back through [`Workspace::command`], so a palette entry and a
-//! chord cannot drift apart — with names on them, which is what lets a person
-//! bind one in `keybindings.json`, another plugin invoke one, and a palette
-//! list them. [`COMMANDS`] is that list, and the shipped keybindings bind it
-//! by name like anything else.
+//! These began as variants of a closed enum reachable only by a chord a table
+//! in `input_keys` knew about. They are the same handlers — they come back
+//! through [`Workspace::command`], so a palette entry and a chord cannot drift
+//! apart — with names on them, which is what lets a person bind one in
+//! `keybindings.json`, another plugin invoke one, and a palette list them.
+//! [`COMMANDS`] is that list, and the shipped keybindings bind it by name like
+//! anything else.
+//!
+//! **Most of them ship with no chord**, and that is the arrangement rather
+//! than an omission. A name is what makes something reachable from the
+//! keyboard at all — the palette runs it, and the Keyboard Shortcuts page
+//! binds it to whatever a person likes — so a shipped chord is only spent on
+//! what is pressed often enough to be worth taking a key away from the shell
+//! for. See [`crate::keybindings::DEFAULTS_MAC`].
 //!
 //! They are registered as *commands* rather than as bare actions: each has a
 //! title, because a list of `crook/window/move-tab-left` is not a list a
@@ -31,6 +38,8 @@ use crookui_core::prelude::*;
 use crook_plugin::{ActionName, Cardinality, Manifest, PluginId, SlotId, Tier};
 
 use crate::input_keys::Binding;
+use crate::tab::Direction;
+use crate::workspace::{BlockEdge, BlockPart};
 use crate::workspace::{WindowAction, Workspace, WorkspaceAction};
 
 use crate::plugin::{BuildError, Host, Plugin};
@@ -49,11 +58,13 @@ pub const WINDOW_OVERLAY: SlotId = SlotId::new("window.overlay");
 ///
 /// The order is the order the shipped keybindings are written in, so a person
 /// reading one and the other is reading the same order twice.
-pub const COMMANDS: [(&str, &str, Binding); 16] = [
+pub const COMMANDS: [(&str, &str, Binding); 49] = [
     ("new-tab", "New agent tab", Binding::NewTab),
     ("close-pane", "Close the focused pane", Binding::ClosePane),
     ("split-right", "Split to the right", Binding::SplitRight),
     ("split-down", "Split downwards", Binding::SplitDown),
+    ("split-left", "Split to the left", Binding::SplitLeft),
+    ("split-up", "Split upwards", Binding::SplitUp),
     ("previous-tab", "Previous tab", Binding::PreviousTab),
     ("next-tab", "Next tab", Binding::NextTab),
     ("move-tab-left", "Move the tab left", Binding::MoveTabLeft),
@@ -62,6 +73,95 @@ pub const COMMANDS: [(&str, &str, Binding); 16] = [
         "Move the tab right",
         Binding::MoveTabRight,
     ),
+    // Nine and a last, which is every browser's arrangement and the one every
+    // terminal copied from them: the ninth key is the end of the list rather
+    // than the ninth tab, because a person with twenty tabs pressing it wants
+    // the one they just opened.
+    (
+        "select-tab-1",
+        "Select the first tab",
+        Binding::SelectTab(0),
+    ),
+    (
+        "select-tab-2",
+        "Select the second tab",
+        Binding::SelectTab(1),
+    ),
+    (
+        "select-tab-3",
+        "Select the third tab",
+        Binding::SelectTab(2),
+    ),
+    (
+        "select-tab-4",
+        "Select the fourth tab",
+        Binding::SelectTab(3),
+    ),
+    (
+        "select-tab-5",
+        "Select the fifth tab",
+        Binding::SelectTab(4),
+    ),
+    (
+        "select-tab-6",
+        "Select the sixth tab",
+        Binding::SelectTab(5),
+    ),
+    (
+        "select-tab-7",
+        "Select the seventh tab",
+        Binding::SelectTab(6),
+    ),
+    (
+        "select-tab-8",
+        "Select the eighth tab",
+        Binding::SelectTab(7),
+    ),
+    (
+        "select-last-tab",
+        "Select the last tab",
+        Binding::SelectLastTab,
+    ),
+    // The four directions a split can be walked, and the two ways round it.
+    // A group is one vector along one axis, so two of the four always decline
+    // — which is what leaves the other two keys to the shell.
+    (
+        "focus-pane-left",
+        "Focus the pane to the left",
+        Binding::FocusPane(Direction::Left),
+    ),
+    (
+        "focus-pane-right",
+        "Focus the pane to the right",
+        Binding::FocusPane(Direction::Right),
+    ),
+    (
+        "focus-pane-up",
+        "Focus the pane above",
+        Binding::FocusPane(Direction::Up),
+    ),
+    (
+        "focus-pane-down",
+        "Focus the pane below",
+        Binding::FocusPane(Direction::Down),
+    ),
+    (
+        "focus-next-pane",
+        "Focus the next pane",
+        Binding::CyclePane { forward: true },
+    ),
+    (
+        "focus-previous-pane",
+        "Focus the previous pane",
+        Binding::CyclePane { forward: false },
+    ),
+    ("grow-pane", "Give the pane more room", Binding::GrowPane),
+    (
+        "shrink-pane",
+        "Give the pane less room",
+        Binding::ShrinkPane,
+    ),
+    ("even-panes", "Even out the split", Binding::EvenPanes),
     ("search-tabs", "Search the tabs", Binding::SearchTabs),
     ("find", "Find in output", Binding::FindInOutput),
     (
@@ -73,6 +173,78 @@ pub const COMMANDS: [(&str, &str, Binding); 16] = [
         "select-block-down",
         "Select the block below",
         Binding::SelectBlockDown,
+    ),
+    // The scrollback, over both surfaces: a list of blocks moves its own
+    // offset and a full-screen program's grid moves the emulator's history.
+    // One command either way, because a person pressing Page Up is not asking
+    // which of the two they are looking at.
+    (
+        "page-up",
+        "Scroll up a screenful",
+        Binding::Page { down: false },
+    ),
+    (
+        "page-down",
+        "Scroll down a screenful",
+        Binding::Page { down: true },
+    ),
+    (
+        "scroll-to-top",
+        "Scroll to the oldest output",
+        Binding::ScrollToTop,
+    ),
+    (
+        "scroll-to-bottom",
+        "Scroll to the newest output",
+        Binding::ScrollToBottom,
+    ),
+    // Everything the menu on a block offers, as a name each. They act on the
+    // block the menu is up on, or — with no menu — on the one the keyboard has
+    // selected, so each of these is a chord as well as a row.
+    (
+        "copy-block",
+        "Copy the block",
+        Binding::CopyBlock(BlockPart::Whole),
+    ),
+    (
+        "copy-block-command",
+        "Copy the block's command",
+        Binding::CopyBlock(BlockPart::Command),
+    ),
+    (
+        "copy-block-output",
+        "Copy the block's output",
+        Binding::CopyBlock(BlockPart::Output),
+    ),
+    (
+        "copy-block-directory",
+        "Copy the block's working directory",
+        Binding::CopyBlock(BlockPart::Directory),
+    ),
+    (
+        "copy-block-branch",
+        "Copy the block's branch",
+        Binding::CopyBlock(BlockPart::Branch),
+    ),
+    (
+        "rerun-block",
+        "Put the block's command back in the composer",
+        Binding::RerunBlock,
+    ),
+    (
+        "open-block-menu",
+        "Open the selected block's menu",
+        Binding::OpenBlockMenu,
+    ),
+    (
+        "scroll-to-block-top",
+        "Bring the block's first line to the top",
+        Binding::ScrollToBlock(BlockEdge::Top),
+    ),
+    (
+        "scroll-to-block-bottom",
+        "Bring the block's last line to the bottom",
+        Binding::ScrollToBlock(BlockEdge::Bottom),
     ),
     ("open-settings", "Settings", Binding::OpenSettings),
     ("zoom-in", "Make the text bigger", Binding::ZoomIn),

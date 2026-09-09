@@ -45,6 +45,8 @@
 use crookui_core::event::{Keystroke, Modifiers};
 
 use crate::editor::Motion;
+use crate::tab::Direction;
+use crate::workspace::{BlockEdge, BlockPart};
 
 /// Which keymap to read a keystroke against.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -218,6 +220,57 @@ pub enum Binding {
     ZoomOut,
     /// Put it back to the size a fresh install opens at.
     ZoomReset,
+    /// Move the keyboard to the pane on one side of the focused one.
+    ///
+    /// A direction rather than four variants because a pane group is one
+    /// vector along one axis, so the four are one question asked four ways —
+    /// and the group answers `None` for the two that point across its axis.
+    FocusPane(Direction),
+    /// Move it to the next pane of the split, or the previous one, wrapping.
+    CyclePane {
+        /// Towards the end of the split, rather than the start.
+        forward: bool,
+    },
+    /// Split the focused pane, putting the new one before it.
+    ///
+    /// The other half of the pair [`Self::SplitRight`] and [`Self::SplitDown`]
+    /// are: the model has had all four directions since it was written, and
+    /// only two of them had a name.
+    SplitLeft,
+    /// The same upwards.
+    SplitUp,
+    /// Give the focused pane a larger share of the split.
+    GrowPane,
+    /// Give it a smaller one.
+    ShrinkPane,
+    /// Give every pane of the split an equal share again.
+    EvenPanes,
+    /// Select the tab at this position in the strip, counting from zero.
+    SelectTab(usize),
+    /// Select the last tab, wherever it is.
+    ///
+    /// The chord every browser puts on the ninth slot, which is why the ninth
+    /// is not [`Self::SelectTab`]`(8)`: a person pressing it wants the end of
+    /// the list rather than the ninth thing in it.
+    SelectLastTab,
+    /// Scroll the focused pane's output by a screenful.
+    Page {
+        /// Downwards, towards the newest output.
+        down: bool,
+    },
+    /// Jump to the oldest output the pane still holds.
+    ScrollToTop,
+    /// Jump back to the newest, which is where a pane that is not scrolled
+    /// back already is.
+    ScrollToBottom,
+    /// Put one of the selected block's facts on the clipboard.
+    CopyBlock(BlockPart),
+    /// Put the selected block's command line back in the composer, unsent.
+    RerunBlock,
+    /// Open the menu on the selected block, at the dots it would open from.
+    OpenBlockMenu,
+    /// Bring one edge of the selected block to the matching edge of the pane.
+    ScrollToBlock(BlockEdge),
 }
 
 /// **The whole keyboard policy of a pane, in one function.**

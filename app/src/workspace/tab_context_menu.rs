@@ -76,6 +76,8 @@ use crookui_core::icons::Lucide;
 use crookui_core::prelude::*;
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 
+use crook_plugin::ActionName;
+
 use crate::tab::{PaneId, TabId};
 use crate::text_input::TextInput;
 use crate::theme::theme;
@@ -101,6 +103,13 @@ const LABEL_SIZE: f32 = 12.;
 
 /// The size of the chevron on the one row that has one.
 const CHEVRON_SIZE: f32 = 12.;
+
+/// The size the chord beside an entry is printed at.
+///
+/// Smaller than the label, because it is the answer to a question nobody asked
+/// yet: a person reads the row, and the chord is what they find when they
+/// wonder whether there is a faster way to do it again.
+const CHORD_SIZE: f32 = 10.5;
 
 /// The diameter of one colour swatch.
 const SWATCH_SIZE: f32 = 16.;
@@ -140,6 +149,26 @@ pub(crate) struct TabContextMenuState {
     /// here. The Themes panel's controls are keyed the same way and for the
     /// same reason.
     controls: RefCell<HashMap<String, MouseStateHandle>>,
+    /// The pressable rows the last frame drew, in the order it drew them.
+    ///
+    /// Written while the menu is being built and read by the keyboard, and
+    /// there is no other way the two could agree about what "the next row" is:
+    /// the entries come from a slot, so nothing outside a render knows how
+    /// many there are, which of them a contribution declined to draw this
+    /// frame, or what any of them does. `PaneBlocks` keeps the block menu's
+    /// corner the same way and for the same reason.
+    ///
+    /// Only the rows a *press* would do something to: an inert entry and the
+    /// row a rename is being typed into are both skipped, because Enter on
+    /// either of them would be a key that looks aimed and does nothing.
+    rows: RefCell<Vec<(String, WorkspaceAction)>>,
+    /// The row the keyboard is standing on, by key.
+    ///
+    /// By key rather than by position, for the reason every other identity in
+    /// this application is not an index: the list is rebuilt every frame and a
+    /// contribution that stops having something to say takes its row with it,
+    /// so a remembered number would come back pointing at its neighbour.
+    selected: RefCell<Option<String>>,
 }
 
 impl TabContextMenuState {
@@ -157,15 +186,80 @@ impl TabContextMenuState {
             .clone()
     }
 
+    /// Whether the keyboard is standing on this row.
+    pub(crate) fn is_selected(&self, key: &str) -> bool {
+        self.selected.borrow().as_deref() == Some(key)
+    }
+
+    /// Starts a frame's list of pressable rows.
+    fn begin_rows(&self) {
+        self.rows.borrow_mut().clear();
+    }
+
+    /// Records one, in the order it was drawn.
+    fn add_row(&self, key: &str, action: WorkspaceAction) {
+        self.rows.borrow_mut().push((key.to_owned(), action));
+    }
+
+    /// Steps the keyboard `by` rows, or onto an end of the menu from nothing,
+    /// and reports whether it moved.
+    ///
+    /// Clamped rather than wrapped, which is the worktree list's rule and the
+    /// same reasoning: a short list read top to bottom, where an arrow that
+    /// jumped from the last row to the first is one nobody can press twice
+    /// with confidence.
+    pub(crate) fn move_selection(&self, by: isize) -> bool {
+        let rows = self.rows.borrow();
+        if rows.is_empty() {
+            return false;
+        }
+        let last = rows.len() as isize - 1;
+        let at = self
+            .selected
+            .borrow()
+            .as_deref()
+            .and_then(|key| rows.iter().position(|(row, _)| row == key));
+        let next = match at {
+            Some(at) => (at as isize + by).clamp(0, last),
+            None if by < 0 => last,
+            None => 0,
+        };
+        let next = rows[next as usize].0.clone();
+        let mut selected = self.selected.borrow_mut();
+        let moved = selected.as_deref() != Some(next.as_str());
+        *selected = Some(next);
+        moved
+    }
+
+    /// What pressing the selected row would dispatch.
+    ///
+    /// `None` when nothing is selected, and also when the row that was
+    /// selected is not in the frame that was last drawn — a contribution can
+    /// stop having something to say between one frame and the next, and
+    /// running what it *used* to do would be acting on a row nobody can see.
+    pub(crate) fn selected_action(&self) -> Option<WorkspaceAction> {
+        let selected = self.selected.borrow();
+        let key = selected.as_deref()?;
+        self.rows
+            .borrow()
+            .iter()
+            .find(|(row, _)| row == key)
+            .map(|(_, action)| *action)
+    }
+
     /// Forgets every hover and press the menu was holding.
     ///
     /// Called when it closes: every row is about to stop existing without
     /// seeing a hover-out, and the next opening would come back with an entry
-    /// lit under a pointer that is somewhere else.
+    /// lit under a pointer that is somewhere else. The keyboard's row goes
+    /// with them, and so does the list it indexes — a menu that is not up must
+    /// not have an action Enter could still find.
     pub(crate) fn forget_hover_state(&self) {
         for state in self.controls.borrow().values() {
             state.lock().reset_interaction_state();
         }
+        self.selected.borrow_mut().take();
+        self.rows.borrow_mut().clear();
     }
 }
 
@@ -437,7 +531,25 @@ fn build_row(
     action: Option<WorkspaceAction>,
 ) -> Box<dyn Element> {
     let ui = workspace.fonts().ui;
-    let state = workspace.tab_context_menu().control(key);
+    let menu = workspace.tab_context_menu();
+    let state = menu.control(key);
+    if live && let Some(action) = action {
+        menu.add_row(key, action);
+    }
+    // The keyboard's row is lit exactly as the pointer's is. There is no
+    // second treatment for it, because a person who arrived by the arrows and
+    // a person who arrived by the pointer are looking at the same question.
+    let picked = menu.is_selected(key);
+
+    // The chord that reaches this entry, if one does. The key a row is built
+    // with *is* the name of the action it runs — see `contribute` in the tabs
+    // plugin — so the menu can print exactly what the Keyboard Shortcuts page
+    // prints without being told a thing, and a person who rebound it reads
+    // their own chord here. The first of them, because a row is one line and
+    // the zoom's four spellings would fill it.
+    let chord = ActionName::parse(key)
+        .ok()
+        .and_then(|name| workspace.keybindings().chords_for(&name).into_iter().next());
 
     let row = Hoverable::new(state, move |mouse| {
         let mut line = Flex::row()
@@ -453,10 +565,23 @@ fn build_row(
                     .finish(),
             );
 
+        // One spacer, whatever ends up after it: a chord, a chevron, or the
+        // chord and then the chevron. Two would divide the gap between them
+        // and leave the chord adrift in the middle of the row.
+        if chord.is_some() || matches!(chevron, Chevron::Showing(_)) {
+            line.add_child(Expanded::new(1., Empty::new().finish()).finish());
+        }
+        if let Some(chord) = &chord {
+            line.add_child(
+                Text::new(chord.clone(), ui, CHORD_SIZE)
+                    .with_color(theme().text_muted)
+                    .finish(),
+            );
+        }
+
         let showing = match chevron {
             Chevron::None => false,
             Chevron::Showing(open) => {
-                line.add_child(Expanded::new(1., Empty::new().finish()).finish());
                 line.add_child(
                     Icon::new(Lucide::ChevronRight, CHEVRON_SIZE)
                         .with_color(theme().text_muted)
@@ -467,7 +592,7 @@ fn build_row(
         };
 
         Container::new(line.finish())
-            .with_background_color(if showing || (live && mouse.is_hovered()) {
+            .with_background_color(if showing || picked || (live && mouse.is_hovered()) {
                 theme().overlay_1
             } else {
                 Color::TRANSPARENT
@@ -490,6 +615,9 @@ fn build_row(
 /// The whole popup: the entries a slot put in it, and whatever hangs off one.
 pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
     let slot = crate::plugins::tabs::TAB_MENU_ENTRIES;
+    // Before the contributions run, because each of them records its own row
+    // as it builds it. See `TabContextMenuState::rows`.
+    workspace.tab_context_menu().begin_rows();
     let rows = workspace
         .host()
         .slots()

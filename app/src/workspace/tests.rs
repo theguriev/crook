@@ -769,7 +769,7 @@ impl Harness {
         let keybindings = crate::keybindings::Keybindings::load(&path);
         assert!(!keybindings.is_empty(), "nothing in {text:?} was a binding");
 
-        self.workspace_update(|workspace, _| workspace.set_keybindings(keybindings));
+        self.workspace_update(|workspace, ctx| workspace.set_keybindings(keybindings, ctx));
     }
 
     /// Turns the wheel over the middle of the settings card.
@@ -3422,6 +3422,67 @@ fn the_menu_reads_the_repository_the_click_landed_on() {
         harness.worktrees_listed(),
         Some(1),
         "a fresh repository has one checkout"
+    );
+}
+
+#[test]
+fn the_worktree_list_is_walked_and_opened_with_the_keyboard() {
+    // The list was the deepest pointer-only thing in the window: opening a
+    // checkout was a press on a row, and the × that offers to remove one was
+    // drawn on hover, so neither had a key at all.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(scratch.path()) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+
+    let mut harness = Harness::seeded();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+
+    let tab = harness
+        .workspace
+        .read(&harness.app, |workspace, _| workspace.tabs().active_id());
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    harness.frame();
+
+    let selected = |harness: &Harness| {
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.tab_menu().selected)
+    };
+    assert_eq!(selected(&harness), None, "the list opens with nothing lit");
+
+    // Down from nothing is the first row, and a clamped list stays on it.
+    assert!(harness.press_key("down", Modifiers::default()));
+    assert_eq!(selected(&harness), Some(0));
+    assert!(harness.press_key("up", Modifiers::default()));
+    assert_eq!(selected(&harness), Some(0), "the top is as far as up goes");
+
+    // The one checkout a fresh repository has is its main one, which is
+    // exactly the row the × is never drawn on — so Delete must not open a
+    // question git is certain to refuse.
+    assert!(harness.press_key("delete", Modifiers::default()));
+    assert!(
+        !harness.worktree_menu_is_confirming(),
+        "Delete asked about a checkout the × is not drawn on"
+    );
+
+    // Enter on the checkout this tab is already in brings it forward, which
+    // closes the menu the way the row's own press does.
+    assert!(harness.press_key("enter", Modifiers::default()));
+    assert!(
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| !workspace
+                .worktree_menu_is_open()),
+        "Enter left the menu standing"
     );
 }
 
@@ -10731,6 +10792,15 @@ mod shells {
             })
         }
 
+        /// Whether the list is on its own end rather than scrolled off it.
+        fn is_following(harness: &Harness, pane: PaneId) -> bool {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .pane_blocks(pane)
+                    .is_some_and(|view| !view.is_cut_off())
+            })
+        }
+
         fn up(harness: &mut Harness) {
             harness.run_command("crook/window/select-block-up");
         }
@@ -10839,6 +10909,104 @@ mod shells {
                 crate::workspace::action::BlockAction::ClearSelection(pane),
             ));
             assert_eq!(None, selected(&harness, pane), "Escape let go of it");
+        }
+        #[test]
+        fn a_block_command_acts_on_the_selected_block_with_no_menu_open() {
+            // The whole of why `block_target` exists. Every entry of the block
+            // menu used to read what it needed off the menu's own cache, so a
+            // chord for one of them was a chord that did nothing until a
+            // pointer had opened the menu first.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = three_commands(&mut harness) else {
+                return;
+            };
+            up(&mut harness);
+            let block = selected(&harness, pane).expect("a block is selected");
+            assert!(
+                harness
+                    .workspace
+                    .read(&harness.app, |workspace, _| !workspace
+                        .block_menu()
+                        .is_open()),
+                "no menu should be open"
+            );
+
+            let command = harness.workspace.read(&harness.app, |workspace, app| {
+                workspace
+                    .terminal_blocks(pane, app)
+                    .and_then(|blocks| {
+                        blocks
+                            .iter()
+                            .find(|finished| finished.id == block)
+                            .and_then(|finished| finished.command.clone())
+                    })
+                    .unwrap_or_default()
+            });
+            assert!(!command.is_empty(), "the block has no command line");
+
+            harness.run_command("crook/window/rerun-block");
+
+            assert!(
+                harness.field_text(pane).contains(&command),
+                "the composer holds {:?} rather than {command:?}",
+                harness.field_text(pane)
+            );
+        }
+
+        #[test]
+        fn paging_moves_the_list_and_the_ends_come_back_to_following_it() {
+            let mut harness = Harness::panel(1);
+            let Some(pane) = three_commands(&mut harness) else {
+                return;
+            };
+            // A window short enough that three commands do not fit in it, so
+            // there is something for a page to move. Measured by drawing:
+            // `PaneBlocks` learns its viewport and its content from layout,
+            // and a list nothing has laid out has nothing to scroll.
+            harness.frame_sized(vec2f(1024., 220.));
+
+            let list = |harness: &Harness| {
+                harness.workspace.read(&harness.app, |workspace, _| {
+                    workspace
+                        .pane_blocks(pane)
+                        .map(|view| (view.offset(), view.viewport(), view.is_scrollable()))
+                })
+            };
+            let Some((bottom, viewport, scrollable)) = list(&harness) else {
+                return;
+            };
+            if !scrollable {
+                eprintln!("skipped: three echoes still fit in a short window");
+                return;
+            }
+
+            harness.run_command("crook/window/page-up");
+            let paged = list(&harness).expect("a list").0;
+            // A screenful less the overlap, or the whole of what there is to
+            // move — the clamp is half of what the arithmetic has to get
+            // right, and a short scrollback is the ordinary case for three
+            // echo commands.
+            let expected = (viewport - crate::pane_blocks::PAGE_OVERLAP).min(bottom);
+            assert!(
+                (bottom - paged - expected).abs() < 0.01,
+                "a page moved {} lines of a {viewport}-line box with {bottom} to move",
+                bottom - paged
+            );
+
+            harness.run_command("crook/window/page-down");
+            assert!(
+                is_following(&harness, pane),
+                "paging back onto the end did not start following it again"
+            );
+
+            harness.run_command("crook/window/scroll-to-top");
+            assert_eq!(list(&harness).expect("a list").0, 0.);
+
+            harness.run_command("crook/window/scroll-to-bottom");
+            assert!(
+                is_following(&harness, pane),
+                "scroll-to-bottom left the list off its own end"
+            );
         }
     }
 }
@@ -11976,7 +12144,7 @@ fn the_shortcuts_page_lists_what_a_plugin_registered_and_the_chord_that_reaches_
 fn keybindings_in(harness: &mut Harness, scratch: &Scratch) -> PathBuf {
     let path = scratch.path().join("keybindings.json");
     let keybindings = crate::keybindings::Keybindings::load(&path);
-    harness.workspace_update(|workspace, _| workspace.set_keybindings(keybindings));
+    harness.workspace_update(|workspace, ctx| workspace.set_keybindings(keybindings, ctx));
     path
 }
 
@@ -14051,4 +14219,438 @@ fn a_badge_is_drawn_on_the_corner_of_the_mark_it_belongs_to() {
         center(ring).x() > center(mark).x() && center(ring).y() > center(mark).y(),
         "the badge at {ring:?} is not on the corner of the mark at {mark:?}"
     );
+}
+
+/// Reaching the panes, the tabs and the block menu with nothing but the
+/// keyboard.
+///
+/// The window's commands are one table read three ways — the palette runs one,
+/// a chord names one, and the Keyboard Shortcuts page binds one — so these go
+/// in through `run_command`, which is the palette's path, and through
+/// `press_key`, which is the chord's. A command that declines is the case
+/// worth most of the cases here: `Workspace::command` answering `None` is what
+/// sends the keystroke on to the shell, and a chord that swallowed a key it
+/// could do nothing with would be a terminal that eats input.
+mod from_the_keyboard {
+    use super::*;
+
+    /// The active tab's panes, in render order.
+    fn panes(harness: &Harness) -> Vec<PaneId> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .active()
+                .expect("a tab is active")
+                .panes()
+                .iter()
+                .map(Pane::id)
+                .collect()
+        })
+    }
+
+    fn focused(harness: &Harness) -> PaneId {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .focused_pane_id()
+                .expect("a pane is focused")
+        })
+    }
+
+    fn active_tab(harness: &Harness) -> TabId {
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.tabs().active_id())
+    }
+
+    fn tabs_in_order(harness: &Harness) -> Vec<TabId> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tabs().iter().map(Tab::id).collect()
+        })
+    }
+
+    #[test]
+    fn the_focus_commands_step_along_the_split() {
+        let mut harness = Harness::panel(1);
+        harness.run_command("crook/window/split-right");
+        harness.run_command("crook/window/split-right");
+        let panes = panes(&harness);
+        assert_eq!(panes.len(), 3);
+        assert_eq!(focused(&harness), panes[2], "a split focuses what it made");
+
+        harness.run_command("crook/window/focus-pane-left");
+        assert_eq!(focused(&harness), panes[1]);
+        harness.run_command("crook/window/focus-pane-left");
+        assert_eq!(focused(&harness), panes[0]);
+        harness.run_command("crook/window/focus-pane-right");
+        assert_eq!(focused(&harness), panes[1]);
+    }
+
+    #[test]
+    fn a_focus_chord_across_the_axis_reaches_the_shell_instead() {
+        // The rule the whole pane family rests on. A row of panes has nothing
+        // above it, so the chord must decline rather than be swallowed —
+        // otherwise `ctrl+shift+up` would stop meaning anything in vim the
+        // moment somebody split a tab sideways.
+        let mut harness = Harness::panel(1);
+        harness.run_command("crook/window/split-right");
+
+        let modifiers =
+            if crate::input_keys::Platform::current() == crate::input_keys::Platform::Mac {
+                Modifiers {
+                    ctrl: true,
+                    shift: true,
+                    ..Default::default()
+                }
+            } else {
+                Modifiers {
+                    alt: true,
+                    ..Default::default()
+                }
+            };
+
+        assert!(
+            !harness.press_key("up", modifiers),
+            "a direction the split has no pane in was consumed"
+        );
+        assert!(
+            harness.press_key("left", modifiers),
+            "the direction it does have was not"
+        );
+    }
+
+    #[test]
+    fn nothing_in_the_pane_family_fires_on_a_tab_that_was_never_split() {
+        let mut harness = Harness::panel(1);
+        let alone = focused(&harness);
+
+        for command in [
+            "crook/window/focus-pane-left",
+            "crook/window/focus-pane-right",
+            "crook/window/focus-next-pane",
+            "crook/window/focus-previous-pane",
+            "crook/window/grow-pane",
+            "crook/window/shrink-pane",
+            "crook/window/even-panes",
+        ] {
+            harness.run_command(command);
+            assert_eq!(focused(&harness), alone, "{command}");
+        }
+    }
+
+    #[test]
+    fn cycling_comes_back_round_where_the_directions_stop() {
+        let mut harness = Harness::panel(1);
+        harness.run_command("crook/window/split-right");
+        let panes = panes(&harness);
+
+        harness.run_command("crook/window/focus-next-pane");
+        assert_eq!(focused(&harness), panes[0], "past the end is the start");
+        harness.run_command("crook/window/focus-previous-pane");
+        assert_eq!(focused(&harness), panes[1]);
+    }
+
+    #[test]
+    fn splitting_leftwards_puts_the_new_pane_in_front_of_the_old_one() {
+        // The half of the pair that had a model and no name until now.
+        let mut harness = Harness::panel(1);
+        let first = focused(&harness);
+
+        harness.run_command("crook/window/split-left");
+
+        let panes = panes(&harness);
+        assert_eq!(panes.len(), 2);
+        assert_eq!(panes[1], first, "the pane that was there moved along");
+        assert_eq!(focused(&harness), panes[0], "the new one has the keyboard");
+    }
+
+    #[test]
+    fn the_digits_pick_a_tab_by_its_place_in_the_strip() {
+        let mut harness = Harness::panel(4);
+        let tabs = tabs_in_order(&harness);
+
+        harness.run_command("crook/window/select-tab-1");
+        assert_eq!(active_tab(&harness), tabs[0]);
+        harness.run_command("crook/window/select-tab-3");
+        assert_eq!(active_tab(&harness), tabs[2]);
+        harness.run_command("crook/window/select-last-tab");
+        assert_eq!(active_tab(&harness), tabs[3]);
+    }
+
+    #[test]
+    fn a_digit_past_the_end_of_the_strip_reaches_the_shell() {
+        // Four tabs and a chord for the eighth. Every browser leaves that key
+        // to whatever is under it rather than selecting the last tab, because
+        // a person pressing it has counted and is wrong about something.
+        let mut harness = Harness::panel(4);
+        let before = active_tab(&harness);
+
+        harness.run_command("crook/window/select-tab-8");
+
+        assert_eq!(active_tab(&harness), before);
+    }
+
+    #[test]
+    fn the_block_commands_decline_at_the_prompt() {
+        // Nothing is selected until somebody steps off the prompt, and each of
+        // these is about *the* block. Consumed, they would take the copy chord
+        // away from a shell for a command nobody could aim.
+        let harness = Harness::panel(1);
+
+        for command in [
+            "crook/window/copy-block",
+            "crook/window/copy-block-command",
+            "crook/window/copy-block-output",
+            "crook/window/rerun-block",
+            "crook/window/open-block-menu",
+            "crook/window/scroll-to-block-top",
+        ] {
+            let action = ActionName::parse(command).expect("a literal that parses");
+            let resolved = harness.workspace.read(&harness.app, |workspace, _| {
+                crate::plugins::window::binding_for(&action)
+                    .and_then(|binding| workspace.command(binding))
+            });
+            assert!(resolved.is_none(), "{command} did not decline");
+        }
+    }
+
+    #[test]
+    fn every_command_in_the_table_is_registered() {
+        // The promise every unbound command rests on. `register_command` is
+        // what puts one in the palette and on the Keyboard Shortcuts page, so
+        // a name in `window::COMMANDS` that the host does not carry would be a
+        // command no keyboard can reach at all — not by a chord, since most of
+        // them ship without one, and not by name either.
+        //
+        // Asked of the host rather than of the table, because the table is
+        // where the name came from: `binding_for` is a search of that same
+        // array and cannot fail for anything in it.
+        let harness = Harness::panel(1);
+        let registered: Vec<String> = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .host()
+                .commands()
+                .iter()
+                .map(|(_, action, _)| action.to_string())
+                .collect()
+        });
+
+        for (name, title, _) in crate::plugins::window::COMMANDS {
+            let action = format!("crook/window/{name}");
+            assert!(
+                registered.contains(&action),
+                "{action} ({title}) is in the table and nothing registered it"
+            );
+        }
+    }
+
+    #[test]
+    fn the_pane_family_declines_rather_than_swallowing_on_an_unsplit_tab() {
+        // `nothing_in_the_pane_family_fires...` watches the focus, which three
+        // of these never move even when they act. This watches the thing that
+        // matters: `Workspace::command` answering `None`, which is what sends
+        // the keystroke on to the shell.
+        let harness = Harness::panel(1);
+
+        for name in [
+            "focus-pane-left",
+            "focus-pane-right",
+            "focus-pane-up",
+            "focus-pane-down",
+            "focus-next-pane",
+            "focus-previous-pane",
+            "grow-pane",
+            "shrink-pane",
+            "even-panes",
+        ] {
+            let action = ActionName::parse(&format!("crook/window/{name}")).expect("a literal");
+            let resolved = harness.workspace.read(&harness.app, |workspace, _| {
+                crate::plugins::window::binding_for(&action)
+                    .and_then(|binding| workspace.command(binding))
+            });
+            assert!(resolved.is_none(), "{name} did not decline on one pane");
+        }
+    }
+
+    #[test]
+    fn the_menu_answers_the_arrow_keys_themselves() {
+        // Through `press_key`, which is the chord's own path: the arms in
+        // `tab_menu_action_for` are what a person actually presses, and the
+        // test above them drives the actions directly.
+        let mut harness = Harness::panel(1);
+        harness.run_command("crook/tabs/open-menu");
+        harness.frame();
+
+        let selected = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.tab_context_menu().selected_action()
+            })
+        };
+        assert!(selected(&harness).is_none());
+
+        assert!(harness.press_key("down", Modifiers::default()));
+        assert!(selected(&harness).is_some(), "Down selected nothing");
+
+        assert!(harness.press_key("escape", Modifiers::default()));
+        assert!(
+            harness.tab_menu_row().is_none(),
+            "Escape left the menu standing"
+        );
+    }
+
+    #[test]
+    fn a_rename_field_keeps_the_arrows_the_menu_would_otherwise_take() {
+        // The guard in `tab_menu_action_for`, which nothing else covers. While
+        // a row has become a field, its arrows belong to the caret in it — a
+        // selection that moved under somebody editing a tab's name would be
+        // the menu answering a key aimed at the text.
+        let mut harness = Harness::panel(1);
+        harness.run_command("crook/tabs/open-menu");
+        harness.frame();
+        harness.run_command("crook/tabs/rename-tab");
+        harness.frame();
+        assert!(
+            harness.a_plugin_field_has_keys(),
+            "the rename field did not take the keyboard"
+        );
+
+        let before = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tab_context_menu().selected_action()
+        });
+        harness.press_key("down", Modifiers::default());
+        let after = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tab_context_menu().selected_action()
+        });
+
+        assert_eq!(before, after, "the menu moved under a caret");
+    }
+
+    #[test]
+    fn every_settings_page_can_be_opened_by_name() {
+        // Registered by `Host::add_settings_page` rather than by each plugin,
+        // so this is also the check that a page a stranger's plugin adds gets
+        // one for free.
+        let mut harness = Harness::panel(1);
+        let commands: Vec<String> = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .host()
+                .commands()
+                .iter()
+                .map(|(_, action, _)| action.to_string())
+                .collect()
+        });
+
+        for page in ["appearance", "shell", "shortcuts", "about"] {
+            let expected = format!("crook/{page}/open-page");
+            assert!(
+                commands.contains(&expected),
+                "{expected} is not a command; the page list is {commands:?}"
+            );
+        }
+
+        harness.run_command("crook/shortcuts/open-page");
+        assert!(
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace
+                    .is_settings_page_open()),
+            "opening a page by name did not show the settings"
+        );
+    }
+
+    #[test]
+    fn the_tab_menu_can_be_opened_walked_and_run_without_a_pointer() {
+        let mut harness = Harness::panel(2);
+        assert!(harness.tab_menu_row().is_none());
+
+        harness.run_command("crook/tabs/open-menu");
+        assert!(harness.tab_menu_row().is_some(), "the menu did not open");
+        harness.frame();
+
+        // Down from nothing is the first row, and it is the pin entry —
+        // band 0, which is the top of the menu.
+        harness.dispatch_workspace_action(TabMenuAction::MoveSelection(1).into());
+        let first = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tab_context_menu().selected_action()
+        });
+        assert!(first.is_some(), "nothing was selected by the first arrow");
+
+        let pinned_before = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .active()
+                .expect("a tab is active")
+                .is_pinned()
+        });
+        harness.dispatch_workspace_action(TabMenuAction::RunSelected.into());
+        let pinned_after = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .active()
+                .expect("a tab is active")
+                .is_pinned()
+        });
+        assert_ne!(pinned_before, pinned_after, "Enter ran no entry");
+    }
+
+    #[test]
+    fn a_menu_row_prints_the_chord_that_reaches_it() {
+        // The whole of why the chord is not passed in: the key a row is built
+        // with is the name of the action it runs, so a binding written this
+        // morning is on the row this afternoon with nothing told about it.
+        let mut harness = Harness::panel(1);
+        harness.run_command("crook/tabs/open-menu");
+        assert!(
+            !frame_text(&harness.frame()).contains("ctrl+alt+9"),
+            "the chord was printed before anything was bound to it"
+        );
+
+        harness.bind(r#"[{ "key": "ctrl+alt+9", "command": "crook/tabs/close-tab" }]"#);
+        let text = frame_text(&harness.frame());
+        assert!(
+            text.contains("ctrl+alt+9"),
+            "the menu does not print the chord it was given: {text}"
+        );
+    }
+
+    #[test]
+    fn a_palette_row_prints_the_chord_that_reaches_it() {
+        let mut harness = Harness::panel(1);
+        harness.run_command("crook/palette/open");
+
+        let text = frame_text(&harness.frame());
+        // Whichever platform this runs on, the chord for a new tab is shipped
+        // and the palette lists it.
+        let expected = match crate::input_keys::Platform::current() {
+            crate::input_keys::Platform::Mac => "cmd+t",
+            crate::input_keys::Platform::Other => "ctrl+shift+t",
+        };
+        assert!(
+            text.contains("New agent tab"),
+            "the palette did not open: {text}"
+        );
+        assert!(
+            text.contains(expected),
+            "the palette does not print {expected}: {text}"
+        );
+    }
+
+    #[test]
+    fn the_menus_selection_does_not_outlive_the_menu() {
+        // An action Enter could still find with nothing on screen would be a
+        // key that acts on a row nobody can see.
+        let mut harness = Harness::panel(1);
+        harness.run_command("crook/tabs/open-menu");
+        harness.frame();
+        harness.dispatch_workspace_action(TabMenuAction::MoveSelection(1).into());
+        assert!(harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tab_context_menu().selected_action().is_some()
+        }));
+
+        harness.dispatch_workspace_action(TabMenuAction::Close.into());
+
+        assert!(harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tab_context_menu().selected_action().is_none()
+        }));
+    }
 }

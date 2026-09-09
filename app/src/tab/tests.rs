@@ -710,6 +710,201 @@ mod resizing {
     }
 }
 
+/// Walking a split with the keyboard, and sizing it from there.
+///
+/// A pane group is one vector along one axis, so half of what "left, right, up
+/// and down" could mean is a direction the group cannot answer — and the
+/// cases here are mostly about that half, because a command that answered it
+/// anyway would move the keyboard somewhere nobody pointed and eat the chord
+/// on the way.
+mod walking {
+    use super::*;
+
+    /// A row of `count` panes, and their ids in render order.
+    fn row(count: usize) -> (TabStrip, Vec<PaneId>) {
+        let mut strip = TabStrip::new();
+        for _ in 1..count {
+            strip.apply(TabAction::Split(Direction::Right));
+        }
+        let panes = panes_of(&strip, strip.active_id());
+        (strip, panes)
+    }
+
+    /// The active tab's pane group.
+    fn group(strip: &TabStrip) -> &PaneGroup {
+        strip.active().expect("a tab is active").panes()
+    }
+
+    fn flexes(strip: &TabStrip) -> Vec<f32> {
+        group(strip).iter().map(Pane::flex).collect()
+    }
+
+    #[test]
+    fn the_neighbour_along_the_axis_is_the_next_pane_either_way() {
+        let (mut strip, panes) = row(3);
+        strip.apply(TabAction::FocusPane(panes[1]));
+
+        assert_eq!(group(&strip).neighbour(Direction::Left), Some(panes[0]));
+        assert_eq!(group(&strip).neighbour(Direction::Right), Some(panes[2]));
+    }
+
+    #[test]
+    fn a_direction_across_the_axis_names_no_pane() {
+        // The whole reason `neighbour` is an `Option`. A row of panes has
+        // nothing above or below it, and `Workspace::command` turns this
+        // `None` into a keystroke that reaches the shell.
+        let (mut strip, panes) = row(3);
+        strip.apply(TabAction::FocusPane(panes[1]));
+
+        assert_eq!(group(&strip).neighbour(Direction::Up), None);
+        assert_eq!(group(&strip).neighbour(Direction::Down), None);
+    }
+
+    #[test]
+    fn the_ends_of_a_split_have_no_neighbour_beyond_them() {
+        // A split focuses the pane it just made, so the row opens with the
+        // keyboard on the last of them.
+        let (mut strip, panes) = row(2);
+        assert_eq!(group(&strip).focused_id(), panes[1]);
+        assert_eq!(group(&strip).neighbour(Direction::Right), None);
+        assert_eq!(group(&strip).neighbour(Direction::Left), Some(panes[0]));
+
+        strip.apply(TabAction::FocusPane(panes[0]));
+        assert_eq!(group(&strip).neighbour(Direction::Left), None);
+        assert_eq!(group(&strip).neighbour(Direction::Right), Some(panes[1]));
+    }
+
+    #[test]
+    fn a_tab_that_was_never_split_has_no_neighbour_in_any_direction() {
+        let (strip, _) = row(1);
+
+        for direction in [
+            Direction::Left,
+            Direction::Right,
+            Direction::Up,
+            Direction::Down,
+        ] {
+            assert_eq!(group(&strip).neighbour(direction), None, "{direction:?}");
+        }
+        assert_eq!(group(&strip).cycled(1), None);
+        assert_eq!(group(&strip).cycled(-1), None);
+    }
+
+    #[test]
+    fn cycling_wraps_where_the_directions_stop() {
+        // The difference between the two gestures, and the reason both exist:
+        // "the next one" comes back round, and "the one to my right" does not.
+        let (mut strip, panes) = row(3);
+        strip.apply(TabAction::FocusPane(panes[2]));
+
+        assert_eq!(group(&strip).cycled(1), Some(panes[0]));
+        assert_eq!(group(&strip).neighbour(Direction::Right), None);
+
+        strip.apply(TabAction::FocusPane(panes[0]));
+        assert_eq!(group(&strip).cycled(-1), Some(panes[2]));
+    }
+
+    #[test]
+    fn a_column_answers_up_and_down_instead() {
+        let mut strip = TabStrip::new();
+        strip.apply(TabAction::Split(Direction::Down));
+        let panes = panes_of(&strip, strip.active_id());
+        strip.apply(TabAction::FocusPane(panes[0]));
+
+        assert_eq!(group(&strip).neighbour(Direction::Down), Some(panes[1]));
+        assert_eq!(group(&strip).neighbour(Direction::Right), None);
+    }
+
+    #[test]
+    fn growing_takes_from_the_pane_after_the_focused_one() {
+        let (mut strip, panes) = row(3);
+        strip.apply(TabAction::FocusPane(panes[0]));
+
+        assert_eq!(
+            TabEffect::Changed,
+            strip.apply(TabAction::NudgePane { grow: true })
+        );
+
+        let flexes = flexes(&strip);
+        assert!(flexes[0] > 1., "the focused pane took room");
+        assert!(flexes[1] < 1., "its neighbour gave it up");
+        assert_eq!(flexes[2], 1., "the pane beyond the divider never moved");
+        assert!(
+            (flexes[0] + flexes[1] - 2.).abs() < 1e-5,
+            "the pair keeps the share it had between them"
+        );
+    }
+
+    #[test]
+    fn the_last_pane_grows_against_the_divider_before_it() {
+        // The asymmetry `nudge` documents: the last pane has no divider after
+        // it, and a version that only ever looked forwards would leave it the
+        // one pane in the split that cannot be made wider.
+        let (mut strip, panes) = row(2);
+        strip.apply(TabAction::FocusPane(panes[1]));
+
+        assert_eq!(
+            TabEffect::Changed,
+            strip.apply(TabAction::NudgePane { grow: true })
+        );
+
+        let flexes = flexes(&strip);
+        assert!(flexes[1] > 1., "the focused pane took room");
+        assert!(flexes[0] < 1.);
+    }
+
+    #[test]
+    fn shrinking_is_growing_the_other_way_round() {
+        let (mut strip, panes) = row(2);
+        strip.apply(TabAction::FocusPane(panes[0]));
+        strip.apply(TabAction::NudgePane { grow: true });
+        let grown = flexes(&strip);
+
+        strip.apply(TabAction::NudgePane { grow: false });
+
+        let back = flexes(&strip);
+        assert!(back[0] < grown[0]);
+        assert!((back[0] - 1.).abs() < 1e-5, "one step each way is no step");
+    }
+
+    #[test]
+    fn a_tab_with_one_pane_cannot_be_resized() {
+        let (mut strip, _) = row(1);
+
+        assert_eq!(
+            TabEffect::Unchanged,
+            strip.apply(TabAction::NudgePane { grow: true })
+        );
+    }
+
+    #[test]
+    fn a_pane_cannot_be_nudged_past_the_minimum() {
+        // `resize` clamps at MIN_FLEX, and the step is a share of the pair, so
+        // a chord held down settles rather than driving a pane to nothing.
+        let (mut strip, panes) = row(2);
+        strip.apply(TabAction::FocusPane(panes[0]));
+
+        for _ in 0..200 {
+            strip.apply(TabAction::NudgePane { grow: false });
+        }
+
+        let flexes = flexes(&strip);
+        // The exact floor is `pane::MIN_FLEX`, which is private; what has to
+        // hold here is that neither pane was driven to nothing.
+        assert!(flexes[0] > 0.05, "{flexes:?}");
+        assert!(flexes[1] > 0.05, "{flexes:?}");
+    }
+
+    #[test]
+    fn the_pane_at_a_position_is_the_one_the_panel_draws_there() {
+        let (strip, panes) = row(3);
+
+        assert_eq!(group(&strip).at(0), Some(panes[0]));
+        assert_eq!(group(&strip).at(2), Some(panes[2]));
+        assert_eq!(group(&strip).at(3), None, "past the end names nothing");
+    }
+}
+
 /// The strip's groups, as the panel would draw them: one entry per block,
 /// naming its group's tabs.
 mod groups {

@@ -184,6 +184,11 @@ fn matching(workspace: &Workspace, palette: &Palette) -> Vec<(Command, ActionId)
             Command {
                 action: action.clone(),
                 title: title.clone(),
+                chord: workspace
+                    .keybindings()
+                    .chords_for(action)
+                    .into_iter()
+                    .next(),
             },
             id,
         ));
