@@ -36,7 +36,13 @@ description of something that was never built.
     chord from `Host::suggest_binding` (a suggestion — a person's own file and every
     built-in chord win over it), and its Escape and arrows from `Host::claim_surface`, which
     names an action rather than doing anything, so they end at `WorkspaceAction::Run` like
-    every other key.
+    every other key. It has a second mode, and it is the same trick again: a query
+    beginning with `?` lists **the keys** rather than the commands — the same
+    `Host::commands`, grouped by `Host::name_of` and paired with whatever
+    `Keybindings::standing` has in force, then every standing rule naming something that is
+    not a command, then the keys a pane eats and no binding can reach. Nothing is registered
+    to get there beyond the command `crook/palette/keys` and the action `crook/palette/mode`
+    behind `tab`; the plugin still asks for exactly one chord, the one that opens the box.
   - The settings pages come from a slot. `crook/settings` owns the rail; every page belongs
     to the plugin whose feature it configures — `crook/appearance`, `crook/shell`,
     `crook/shortcuts`, `crook/about` — so disabling a plugin takes its page off the rail with

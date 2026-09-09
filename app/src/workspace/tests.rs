@@ -12754,6 +12754,439 @@ fn palette_selected_row(scene: &Scene) -> RectF {
     assert_eq!(rows.len(), 1, "exactly one selected palette row per frame");
     rows[0]
 }
+/// Opens the palette on the list of keys, with `query` typed after the sigil.
+///
+/// Through the chord and then the field, because that is the entry path this
+/// feature ships: `crook/palette/keys` spends no chord of its own, and a `?`
+/// typed at the front of the query is the whole of how a person gets here.
+fn open_keys(harness: &mut Harness, query: &str) {
+    harness.press("p", palette_chord(), "");
+    harness.frame();
+    harness.type_text(&format!("?{query}"));
+}
+
+/// Every place the frame draws `text` as a line of its own.
+///
+/// Whole lines rather than a search over the frame, because that is the only
+/// way a heading can be asked about: `Window commands` names a plugin *and* is
+/// four words inside `Turn the Window commands plugin on or off`, and
+/// `Worktrees` is a heading the fold exists to prevent *and* the title of the
+/// one command that plugin registers. A `contains` over the frame cannot tell
+/// any of those apart.
+fn drawn_lines(scene: &Scene, text: &str) -> Vec<Vector2F> {
+    text_lines(scene, |_| true)
+        .into_iter()
+        .filter(|(_, line)| line == text)
+        .map(|(at, _)| at)
+        .collect()
+}
+
+/// Where the frame draws `text` as a line of its own, if it does anywhere.
+fn drawn_line(scene: &Scene, text: &str) -> Option<Vector2F> {
+    drawn_lines(scene, text).first().copied()
+}
+
+/// What the selected row is called.
+///
+/// The topmost line inside the band, which is the title: a row's keys and its
+/// action name are set two pixels lower, in the secondary size, so they group
+/// as a line of their own.
+fn palette_selected_title(scene: &Scene) -> String {
+    let band = palette_selected_row(scene);
+    text_lines(scene, |at| band.contains_point(at))
+        .into_iter()
+        .next()
+        .map(|(_, line)| line)
+        .unwrap_or_default()
+}
+
+/// The chord the shipped table binds `command` to, as a row's cap prints it.
+///
+/// Read out of the table rather than written down again. A test about what a
+/// row says must not carry a second copy of what the window is bound to, and
+/// this way the assertion is the same true sentence on a Mac, where the two
+/// chords below are spelled `cmd+t` and `cmd+f`.
+fn shipped_chord(command: &str) -> &'static str {
+    let table = if cfg!(target_os = "macos") {
+        crate::keybindings::DEFAULTS_MAC
+    } else {
+        crate::keybindings::DEFAULTS_OTHER
+    };
+
+    table
+        .iter()
+        .find(|(_, bound)| *bound == command)
+        .map(|(keys, _)| *keys)
+        .unwrap_or_else(|| panic!("nothing in the shipped table binds {command}"))
+}
+
+#[test]
+fn a_question_mark_turns_the_palette_into_a_list_of_keys() {
+    // One character, and the launcher is a keymap: headings over the rows and
+    // a word on every command no key reaches. Neither of those can come from
+    // the list of things to run, which is what makes them the mode's
+    // signature.
+    let mut harness = Harness::new(1);
+    open_keys(&mut harness, "");
+    let scene = harness.frame();
+
+    assert!(
+        drawn_line(&scene, "Window commands").is_some(),
+        "the list is not grouped: {}",
+        frame_text(&scene)
+    );
+    assert!(
+        frame_text(&scene).contains("not bound"),
+        "the list says nothing about the commands no key reaches: {}",
+        frame_text(&scene)
+    );
+}
+
+#[test]
+fn the_list_of_things_to_run_says_nothing_about_what_is_not_bound() {
+    // The mode boundary, in one place. The launcher lists every command there
+    // is and none of the keymap's furniture: no heading, and no `not bound` on
+    // the forty rows that have no chord — which is the noise the sigil exists
+    // to keep off the fast path.
+    let mut harness = Harness::new(1);
+    harness.press("p", palette_chord(), "");
+    let scene = harness.frame();
+    let text = frame_text(&scene);
+
+    assert!(text.contains("New agent tab"), "{text}");
+    assert!(
+        drawn_line(&scene, "Window commands").is_none(),
+        "the launcher grew a heading: {text}"
+    );
+    assert!(
+        !text.contains("not bound"),
+        "the launcher started reporting what is not bound: {text}"
+    );
+}
+
+#[test]
+fn the_keys_are_grouped_by_the_plugin_that_registered_the_command() {
+    // Registration order, which is load order, which is the order the settings
+    // rail is already in. Asserted by where the headings landed rather than by
+    // what the frame says, because both names are also words in a row.
+    let mut harness = Harness::new(1);
+    open_keys(&mut harness, "");
+    let scene = harness.frame();
+
+    let window = drawn_line(&scene, "Window commands").expect("the first plugin's heading");
+    let tabs = drawn_line(&scene, "Tabs").expect("the second plugin's heading");
+    assert!(
+        window.y() < tabs.y(),
+        "the groups are not in load order: {window:?} then {tabs:?}"
+    );
+
+    let under = text_lines(&scene, |_| true)
+        .into_iter()
+        .find(|(at, line)| at.y() > tabs.y() && line.contains("crook/tabs/"))
+        .map(|(at, _)| at);
+    assert!(
+        under.is_some(),
+        "nothing the Tabs plugin registered is under its heading: {}",
+        frame_text(&scene)
+    );
+}
+
+#[test]
+fn the_plugins_that_registered_one_command_share_a_heading() {
+    // The fold: seven plugins register a single command each, and seven
+    // headings over seven rows would be a fence rather than a list. `Worktrees`
+    // is the test's own point — it is the name of a plugin *and* the title of
+    // the one command it registers, so a heading of its own would put the word
+    // on the frame twice.
+    let mut harness = Harness::new(1);
+    open_keys(&mut harness, "");
+    let scene = harness.frame();
+
+    assert!(
+        drawn_line(&scene, "Elsewhere").is_some(),
+        "the small plugins claimed no shared heading: {}",
+        frame_text(&scene)
+    );
+    assert_eq!(
+        drawn_lines(&scene, "Worktrees").len(),
+        1,
+        "`Worktrees` is drawn as a heading as well as a row: {}",
+        frame_text(&scene)
+    );
+}
+
+#[test]
+fn the_arrows_step_over_a_group_heading() {
+    // `close` matches two commands the window registered and two the tabs did,
+    // so the list is a group of two, a heading, and a group of two. One row is
+    // 34px and a heading is 28, and the selection moving by 62 is the heading
+    // being passed over rather than landed on.
+    let mut harness = Harness::new(1);
+    open_keys(&mut harness, "close");
+    let inside_a_group = palette_selected_row(&harness.frame()).min_y();
+
+    harness.press("down", Modifiers::default(), "");
+    let next = palette_selected_row(&harness.frame()).min_y();
+    assert_eq!(next - inside_a_group, 34.);
+
+    harness.press("down", Modifiers::default(), "");
+    let across = palette_selected_row(&harness.frame()).min_y();
+    assert_eq!(across - next, 34. + 28.);
+}
+
+#[test]
+fn a_heading_is_not_a_row_that_can_be_run() {
+    // Enter means one thing in both lists, and the row it acts on is the row
+    // the band is on. `shell` puts one command under `Plugins`, one under
+    // `Elsewhere` and two keys a pane eats under `In a pane`, so a single Down
+    // crosses a heading — and if the arrows had landed on it, Enter would be a
+    // no-op with nothing to show for it.
+    let mut harness = Harness::new(1);
+    open_keys(&mut harness, "shell");
+    harness.frame();
+
+    harness.press("down", Modifiers::default(), "");
+    let scene = harness.frame();
+    assert_eq!(palette_selected_title(&scene), "Settings: Shell");
+
+    harness.press("enter", Modifiers::default(), "");
+    let text = frame_text(&harness.frame());
+
+    assert_eq!(harness.settings_section(), "Shell", "{text}");
+    assert!(
+        text.contains("Start a login shell"),
+        "the row the band was on did not run: {text}"
+    );
+}
+
+#[test]
+fn the_arrows_step_over_a_key_a_pane_eats() {
+    // Navigationally a fact is a heading that happens to be 34px tall: there
+    // is nothing for Enter to mean on `Send the line to the shell`, so the
+    // arrows walk past it and wrap to the top of the list instead.
+    let mut harness = Harness::new(1);
+    open_keys(&mut harness, "shell");
+    let scene = harness.frame();
+    let first = palette_selected_title(&scene);
+    assert!(
+        frame_text(&scene).contains("Send the line to the shell"),
+        "there is no key a pane eats to step over: {}",
+        frame_text(&scene)
+    );
+
+    harness.press("down", Modifiers::default(), "");
+    harness.frame();
+    harness.press("down", Modifiers::default(), "");
+
+    assert_eq!(
+        palette_selected_title(&harness.frame()),
+        first,
+        "the selection landed in the keys a pane eats instead of wrapping"
+    );
+}
+
+#[test]
+fn every_chord_is_printed_and_not_only_the_first() {
+    // A launcher's row says whether there is a faster way; the keymap's row
+    // says what all of them are. Both caps on one line, asserted on that line
+    // rather than on the frame, because the frame holds every other row's
+    // chords too.
+    let mut harness = Harness::new(1);
+    harness.bind(r#"[{ "key": "ctrl+alt+n", "command": "crook/window/new-tab" }]"#);
+    open_keys(&mut harness, "new agent");
+    let scene = harness.frame();
+
+    let (_, row) = text_lines(&scene, |_| true)
+        .into_iter()
+        .find(|(_, line)| line.contains("crook/window/new-tab"))
+        .expect("the row for the command the binding names");
+    assert!(row.contains(shipped_chord("crook/window/new-tab")), "{row}");
+    assert!(row.contains("ctrl+alt+n"), "{row}");
+}
+
+#[test]
+#[cfg(not(target_os = "macos"))]
+fn one_key_that_prints_two_characters_is_one_chord() {
+    // `ctrl+shift+]` is bound under both spellings, because a keyboard reports
+    // the shifted character and Crook cannot know which one arrives. The
+    // settings page prints both, on purpose — it explains why a key does what
+    // it does. A row of the keymap is a list of keys, and that is one key.
+    let mut harness = Harness::new(1);
+    open_keys(&mut harness, "focus the next pane");
+    let scene = harness.frame();
+
+    let (_, row) = text_lines(&scene, |_| true)
+        .into_iter()
+        .find(|(_, line)| line.contains("crook/window/focus-next-pane"))
+        .expect("the row for the command the chord reaches");
+    assert!(row.contains("ctrl+shift+]"), "{row}");
+    assert!(
+        !frame_text(&scene).contains("ctrl+shift+}"),
+        "the shifted twin is printed as a second key: {}",
+        frame_text(&scene)
+    );
+}
+
+#[test]
+fn typing_a_chord_finds_what_it_runs() {
+    // The reverse lookup, and the half of «на какую кнопку забиндено» a list of
+    // titles cannot answer: press the keys into the box and be told what they
+    // do. It is why the chord text is in the haystack.
+    let mut harness = Harness::new(1);
+    open_keys(&mut harness, shipped_chord("crook/window/find"));
+    let text = frame_text(&harness.frame());
+
+    assert!(text.contains("Find in output"), "{text}");
+    assert!(
+        !text.contains("New agent tab"),
+        "the list did not narrow to what the chord reaches: {text}"
+    );
+}
+
+#[test]
+fn typing_unbound_narrows_to_what_has_no_key() {
+    // The list of things worth binding, which is a query rather than a filter
+    // control. `unbound` is not a word any row prints — the row says
+    // `not bound` — so the query is answered by what a row *lacks*.
+    let mut harness = Harness::new(1);
+    open_keys(&mut harness, "unbound");
+    let text = frame_text(&harness.frame());
+
+    assert!(text.contains("not bound"), "{text}");
+    assert!(
+        !text.contains("New agent tab"),
+        "a command with a key survived the query: {text}"
+    );
+    assert!(
+        !text.contains("No command matches that."),
+        "the query for the unbound matched nothing: {text}"
+    );
+}
+
+#[test]
+fn tab_turns_the_list_over_and_keeps_the_row_it_was_on() {
+    // The whole argument for a mode kept in the query rather than in a flag: a
+    // search survives the switch, and so does the row a person had walked to.
+    // The two lists put `Split to the left` at two different places — third in
+    // the launcher's alphabet, fifth in a group that puts the bound rows first
+    // — so the row is kept by name and not by index.
+    let mut harness = Harness::new(1);
+    harness.press("p", palette_chord(), "");
+    harness.frame();
+    harness.type_text("split");
+    harness.frame();
+    harness.press("down", Modifiers::default(), "");
+    harness.frame();
+    harness.press("down", Modifiers::default(), "");
+    assert_eq!(
+        palette_selected_title(&harness.frame()),
+        "Split to the left"
+    );
+
+    harness.press("tab", Modifiers::default(), "");
+    let scene = harness.frame();
+
+    assert_eq!(palette_selected_title(&scene), "Split to the left");
+    assert!(
+        drawn_line(&scene, "Window commands").is_some(),
+        "tab did not turn the card over: {}",
+        frame_text(&scene)
+    );
+}
+
+#[test]
+fn a_chord_the_window_owns_still_works_over_the_list_of_keys() {
+    // The claim grew a key — `tab`, for the switch — and this is the invariant
+    // that growing it must not have broken: the surface takes bare keys and
+    // nothing else, so everything in anybody's keybindings file keeps working
+    // over an open card.
+    let mut harness = Harness::new(1);
+    open_keys(&mut harness, "");
+    harness.frame();
+
+    harness.press("t", platform_chord(), "");
+
+    assert_eq!(harness.tab_ids().len(), 2);
+}
+
+#[test]
+fn typing_a_key_the_pane_eats_says_what_it_does() {
+    // The query the scope of this list was decided for. `ctrl+c` is bound to
+    // nothing and is the key people ask about most, because what it does
+    // belongs to the program in the pane rather than to a keybinding — and a
+    // list of keys that answered it with silence would be answering the wrong
+    // question well.
+    let mut harness = Harness::new(1);
+    open_keys(&mut harness, "ctrl+c");
+    let scene = harness.frame();
+    let text = frame_text(&scene);
+
+    assert!(text.contains("Interrupt, suspend, end the input"), "{text}");
+    assert!(
+        drawn_line(&scene, "In a pane").is_some(),
+        "the keys the pane answers to are not a block of their own: {text}"
+    );
+}
+
+#[test]
+fn a_key_the_pane_eats_is_not_a_row_that_can_be_run() {
+    // `sigint` is a keyword on that row and a word on no other, so the list is
+    // a heading and one fact and there is nothing for the keyboard to be on.
+    // Enter over it does what Enter over an empty list does: takes the card
+    // down and runs nothing.
+    let mut harness = Harness::new(1);
+    open_keys(&mut harness, "sigint");
+    let text = frame_text(&harness.frame());
+    assert!(text.contains("Interrupt, suspend, end the input"), "{text}");
+
+    harness.press("enter", Modifiers::default(), "");
+    let text = frame_text(&harness.frame());
+
+    assert_eq!(harness.pane_ids().len(), 1, "something ran: {text}");
+    assert_eq!(harness.tab_ids().len(), 1, "something ran: {text}");
+    assert!(!text.contains("esc to close"), "the card stayed up: {text}");
+}
+
+#[test]
+fn a_query_the_list_of_keys_cannot_answer_says_so_in_its_own_words() {
+    // The two lists fail differently because they hold different things. The
+    // launcher can only be short of a command; the list of keys can be short
+    // of a key, and telling somebody who typed a chord that no *command*
+    // matches answers a question they did not ask.
+    let mut harness = Harness::new(1);
+    open_keys(&mut harness, "zzzqqq");
+    let text = frame_text(&harness.frame());
+
+    assert!(text.contains("No key or command matches that."), "{text}");
+    assert!(
+        !text.contains("No command matches that."),
+        "the list of keys borrowed the launcher's sentence: {text}"
+    );
+}
+
+#[test]
+fn what_the_pane_eats_is_not_offered_as_something_to_run() {
+    // The mode boundary again, for the rows the addendum added. The launcher
+    // lists what can be run, and none of these can be: a list that offered
+    // `Interrupt, suspend, end the input` as a command would be offering a row
+    // Enter cannot act on.
+    let mut harness = Harness::new(1);
+    harness.press("p", palette_chord(), "");
+    harness.frame();
+    harness.type_text("ctrl+c");
+    let scene = harness.frame();
+    let text = frame_text(&scene);
+
+    assert!(text.contains("No command matches that."), "{text}");
+    assert!(
+        !text.contains("Interrupt, suspend, end the input"),
+        "the launcher offered a key the pane eats: {text}"
+    );
+    assert!(
+        drawn_line(&scene, "In a pane").is_none(),
+        "the launcher grew the keymap's last group: {text}"
+    );
+}
 
 #[test]
 fn the_settings_rail_lists_the_pages_the_plugins_contributed() {

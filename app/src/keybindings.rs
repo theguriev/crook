@@ -347,6 +347,45 @@ impl Keybindings {
         }
     }
 
+    /// Every rule that still reaches the command it names, in consult order.
+    ///
+    /// [`effective`](Self::effective) minus the rules a later, unconditional
+    /// rule has taken the chord out from under. Not deduped: two rules can
+    /// spell one chord — a default and a person's line restating it — and
+    /// which of those is in force is exactly the question a caller may be
+    /// asking. [`chords_for`](Self::chords_for) is this, narrowed to one
+    /// command and reduced to strings; a surface that wants every command's
+    /// keys at once walks the rules once through here instead of rebuilding
+    /// [`effective`](Self::effective) per command.
+    pub fn standing(&self) -> Vec<&Rule> {
+        let effective = self.effective();
+        let mut standing: Vec<&Rule> = Vec::new();
+
+        for (at, rule) in effective.iter().enumerate() {
+            // A chord a later rule takes unconditionally is a chord the
+            // command this rule names does not answer to any more, whatever
+            // this rule says. Somebody who has just put `ctrl+shift+d` on
+            // another command would otherwise find it printed on two rows, one
+            // of which is a lie — and it is a surface's job to say which.
+            //
+            // Unconditionally, because a rule with a `when` takes the chord
+            // only sometimes, and a row that went blank because of a clause
+            // that does not hold right now would be a different lie.
+            //
+            // Whether a chord was taken is a question about this rule alone
+            // and not about who is asking, which is why it is settled here
+            // once for every rule rather than once per command asked about.
+            let taken = effective[at + 1..].iter().any(|later| {
+                later.keys == rule.keys && later.when.is_none() && later.command != rule.command
+            });
+            if !taken {
+                standing.push(rule);
+            }
+        }
+
+        standing
+    }
+
     /// Every chord that reaches `command`, as a person would write them.
     ///
     /// For the settings page, which lists commands rather than chords. The
@@ -354,30 +393,17 @@ impl Keybindings {
     /// clause does not hold *while the settings page is open* would hide most
     /// of them.
     pub fn chords_for(&self, command: &ActionName) -> Vec<String> {
-        let effective = self.effective();
         let mut chords: Vec<String> = Vec::new();
 
-        for (at, rule) in effective.iter().enumerate() {
+        for rule in self.standing() {
             if &rule.command != command {
                 continue;
             }
-            // A chord a later rule takes unconditionally is a chord this
-            // command does not answer to any more, whatever the rule that
-            // wanted it says. Somebody who has just put `ctrl+shift+d` on
-            // another command would otherwise find it printed on two rows, one
-            // of which is a lie — and it is the page's job to say which.
-            //
-            // Unconditionally, because a rule with a `when` takes the chord
-            // only sometimes, and a row that went blank because of a clause
-            // that does not hold right now would be a different lie.
-            let taken = effective[at + 1..].iter().any(|later| {
-                later.keys == rule.keys && later.when.is_none() && later.command != rule.command
-            });
             let chord = rule.chord();
             // Two rules can reach the same command by the same chord — a
             // default and the person's own line restating it — and a row that
             // printed it twice would look like two ways to do one thing.
-            if !taken && !chords.contains(&chord) {
+            if !chords.contains(&chord) {
                 chords.push(chord);
             }
         }
@@ -908,6 +934,54 @@ pub fn format_chord(keystroke: &Keystroke) -> String {
     }
     chord.push_str(&keystroke.key);
     chord
+}
+
+/// The two characters one key prints, unshifted first, on a US layout.
+///
+/// Not a layout table and not trying to be: the eleven punctuation keys a
+/// chord table reaches for. It is here because a [`Keystroke`]'s key is the
+/// character the platform *reports*, with Shift already applied to it, which
+/// is why the shipped tables name `ctrl+shift+]` and `ctrl+shift+}` for one
+/// physical key. A surface that prints *keys* rather than rules folds the two
+/// back together with [`unshifted`] and [`has_twin`]; a layout this table does
+/// not know about leaves a pair uncollapsed, which over-reports a key rather
+/// than hiding one.
+///
+/// The settings page deliberately does not fold: its job is to explain why a
+/// key does what it does, and a rule that is genuinely in force must stay
+/// visible there.
+pub const SHIFTED_TWINS: &[(&str, &str)] = &[
+    ("`", "~"),
+    ("-", "_"),
+    ("=", "+"),
+    ("[", "{"),
+    ("]", "}"),
+    ("\\", "|"),
+    (";", ":"),
+    ("'", "\""),
+    (",", "<"),
+    (".", ">"),
+    ("/", "?"),
+];
+
+/// What `key` prints with Shift released, or `key` itself.
+pub fn unshifted(key: &str) -> &str {
+    SHIFTED_TWINS
+        .iter()
+        .find(|(_, shifted)| *shifted == key)
+        .map_or(key, |(bare, _)| bare)
+}
+
+/// Whether `key` is one of the two characters one key prints.
+///
+/// True of both halves, because the question a caller is asking is whether
+/// the Shift in front of this key is already spelled into the key itself —
+/// and on `]` it is as much as it is on `}`, since only one of the two can
+/// arrive with Shift held.
+pub fn has_twin(key: &str) -> bool {
+    SHIFTED_TWINS
+        .iter()
+        .any(|(bare, shifted)| *bare == key || *shifted == key)
 }
 
 /// The chords macOS opens with.

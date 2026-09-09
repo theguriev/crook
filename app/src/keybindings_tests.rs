@@ -318,6 +318,20 @@ const SHIFTED: &[(&str, &str)] = &[
 ];
 
 #[test]
+fn the_table_of_shifted_keys_is_the_one_the_test_checks_against() {
+    // `SHIFTED` is written out above rather than read from the production
+    // table, because an oracle that reads the thing it is checking is not one:
+    // a pair deleted from `SHIFTED_TWINS` would silently stop
+    // `a_shift_chord_on_a_punctuation_key_is_bound_under_both_spellings`
+    // demanding both spellings of it, and the chord it stopped demanding is
+    // the one that then ships dead.
+    //
+    // So the two are kept apart and made to agree here, in the one place a
+    // pair added to either has to be added to the other.
+    assert_eq!(SHIFTED, super::SHIFTED_TWINS);
+}
+
+#[test]
 fn a_shift_chord_on_a_punctuation_key_is_bound_under_both_spellings() {
     // **The bug this exists to make impossible.** A `Keystroke`'s key is the
     // character the platform *reports*, and Shift has already been applied to
@@ -1043,4 +1057,87 @@ fn a_conditional_rule_does_not_take_a_chord_off_the_row_that_owns_it() {
         keybindings.chords_for(&command("crook/window/split-right")),
         vec!["ctrl+shift+d"]
     );
+}
+
+#[test]
+fn the_chords_a_command_answers_to_are_the_rules_that_still_reach_it() {
+    // The pin on the refactor that lifted the shadow filter out of
+    // `chords_for` and into `standing`: the filter is about the rule and not
+    // about who is asking, so applying it once for every rule has to leave
+    // every row of the settings page spelled exactly as it was.
+    //
+    // The oracle is the body `chords_for` used to have, written out, because
+    // an oracle derived from `standing` would only say the two agree with each
+    // other. Both are checked against it, so neither can drift.
+    let was = |keybindings: &Keybindings, command: &ActionName| -> Vec<String> {
+        let effective = keybindings.effective();
+        let mut chords: Vec<String> = Vec::new();
+        for (at, rule) in effective.iter().enumerate() {
+            if &rule.command != command {
+                continue;
+            }
+            let taken = effective[at + 1..].iter().any(|later| {
+                later.keys == rule.keys && later.when.is_none() && later.command != rule.command
+            });
+            let chord = rule.chord();
+            if !taken && !chords.contains(&chord) {
+                chords.push(chord);
+            }
+        }
+        chords
+    };
+
+    // Both shipped tables, and a file that takes a chord off one command, adds
+    // a second chord to another and restates a third under a clause — because
+    // a table with no user layer shadows nothing, and the shadow is the whole
+    // of what moved.
+    let yours = written(
+        "standing",
+        r#"[
+            { "key": "ctrl+shift+d", "command": "crook/window/new-tab" },
+            { "key": "ctrl+shift+t", "command": "crook/window/new-tab" },
+            { "key": "ctrl+shift+f", "command": "crook/window/find", "when": "paneFocused" }
+        ]"#,
+    );
+
+    for keybindings in [
+        Keybindings::for_platform(Platform::Mac),
+        Keybindings::for_platform(Platform::Other),
+        yours,
+    ] {
+        let mut commands: Vec<&ActionName> = keybindings
+            .effective()
+            .into_iter()
+            .map(|rule| &rule.command)
+            .collect();
+        commands.sort();
+        commands.dedup();
+        assert!(!commands.is_empty(), "a table with no rules proves nothing");
+
+        for command in commands {
+            let wanted = was(&keybindings, command);
+            assert_eq!(keybindings.chords_for(command), wanted, "{command}");
+
+            let mut over_standing: Vec<String> = Vec::new();
+            for rule in keybindings.standing() {
+                let chord = rule.chord();
+                if &rule.command == command && !over_standing.contains(&chord) {
+                    over_standing.push(chord);
+                }
+            }
+            assert_eq!(over_standing, wanted, "{command}");
+        }
+    }
+}
+
+#[test]
+fn a_clause_names_each_of_its_keys_once() {
+    // `Vec::dedup` collapses neighbours and nothing else, so the row that has
+    // no room for the clause itself cannot be built out of it: `a && b && a`
+    // names three, and "it depends on a, b, a" describes a clause nobody
+    // wrote.
+    let clause = When::parse("a && b && a").expect("a clause that parses");
+
+    assert_eq!(clause.names(), vec!["a", "b", "a"]);
+    assert_eq!(clause.names_once(), vec!["a", "b"]);
 }

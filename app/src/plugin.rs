@@ -1083,6 +1083,21 @@ impl Host {
         &self.loaded
     }
 
+    /// What a plugin calls itself, for a heading over the things it
+    /// registered.
+    ///
+    /// The id when nothing is loaded under it, which is the ordinary case for
+    /// a keybinding naming a plugin this machine does not have: the surfaces
+    /// that group by owner group by [`PluginId`] and not by what loaded, so a
+    /// heading has to exist for an owner that did not.
+    pub fn name_of(&self, plugin: &PluginId) -> String {
+        self.loaded
+            .iter()
+            .find(|manifest| &manifest.id == plugin)
+            .map(|manifest| manifest.name.to_owned())
+            .unwrap_or_else(|| plugin.to_string())
+    }
+
     /// Every plugin that did not, and why.
     pub fn refused(&self) -> &[(PluginId, String)] {
         &self.refused
