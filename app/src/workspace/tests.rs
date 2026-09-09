@@ -10840,6 +10840,80 @@ mod shells {
             ));
             assert_eq!(None, selected(&harness, pane), "Escape let go of it");
         }
+        #[test]
+        fn a_block_command_acts_on_the_selected_block_with_no_menu_open() {
+            // The whole of why `block_target` exists. Every entry of the block
+            // menu used to read what it needed off the menu's own cache, so a
+            // chord for one of them was a chord that did nothing until a
+            // pointer had opened the menu first.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = three_commands(&mut harness) else {
+                return;
+            };
+            up(&mut harness);
+            let block = selected(&harness, pane).expect("a block is selected");
+            assert!(
+                harness
+                    .workspace
+                    .read(&harness.app, |workspace, _| !workspace
+                        .block_menu()
+                        .is_open()),
+                "no menu should be open"
+            );
+
+            let command = harness.workspace.read(&harness.app, |workspace, app| {
+                workspace
+                    .terminal_blocks(pane, app)
+                    .and_then(|blocks| {
+                        blocks
+                            .iter()
+                            .find(|finished| finished.id == block)
+                            .and_then(|finished| finished.command.clone())
+                    })
+                    .unwrap_or_default()
+            });
+            assert!(!command.is_empty(), "the block has no command line");
+
+            harness.run_command("crook/window/rerun-block");
+
+            assert!(
+                harness.field_text(pane).contains(&command),
+                "the composer holds {:?} rather than {command:?}",
+                harness.field_text(pane)
+            );
+        }
+
+        #[test]
+        fn paging_moves_the_list_and_the_ends_come_back_to_following_it() {
+            let mut harness = Harness::panel(1);
+            let Some(pane) = three_commands(&mut harness) else {
+                return;
+            };
+            harness.frame();
+
+            let scrollable = harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .pane_blocks(pane)
+                    .is_some_and(crate::pane_blocks::PaneBlocks::is_scrollable)
+            });
+            if !scrollable {
+                // Three echoes in a tall window fit on one screen. The rule
+                // still has to hold, and it is the one below.
+                harness.run_command("crook/window/page-up");
+            }
+
+            harness.run_command("crook/window/scroll-to-top");
+            harness.run_command("crook/window/scroll-to-bottom");
+
+            assert!(
+                harness
+                    .workspace
+                    .read(&harness.app, |workspace, _| workspace
+                        .pane_blocks(pane)
+                        .is_some_and(|view| !view.is_cut_off())),
+                "scroll-to-bottom left the list off its own end"
+            );
+        }
     }
 }
 
@@ -14051,4 +14125,285 @@ fn a_badge_is_drawn_on_the_corner_of_the_mark_it_belongs_to() {
         center(ring).x() > center(mark).x() && center(ring).y() > center(mark).y(),
         "the badge at {ring:?} is not on the corner of the mark at {mark:?}"
     );
+}
+
+/// Reaching the panes, the tabs and the block menu with nothing but the
+/// keyboard.
+///
+/// The window's commands are one table read three ways — the palette runs one,
+/// a chord names one, and the Keyboard Shortcuts page binds one — so these go
+/// in through `run_command`, which is the palette's path, and through
+/// `press_key`, which is the chord's. A command that declines is the case
+/// worth most of the cases here: `Workspace::command` answering `None` is what
+/// sends the keystroke on to the shell, and a chord that swallowed a key it
+/// could do nothing with would be a terminal that eats input.
+mod from_the_keyboard {
+    use super::*;
+
+    /// The active tab's panes, in render order.
+    fn panes(harness: &Harness) -> Vec<PaneId> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .active()
+                .expect("a tab is active")
+                .panes()
+                .iter()
+                .map(Pane::id)
+                .collect()
+        })
+    }
+
+    fn focused(harness: &Harness) -> PaneId {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .focused_pane_id()
+                .expect("a pane is focused")
+        })
+    }
+
+    fn active_tab(harness: &Harness) -> TabId {
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.tabs().active_id())
+    }
+
+    fn tabs_in_order(harness: &Harness) -> Vec<TabId> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tabs().iter().map(Tab::id).collect()
+        })
+    }
+
+    #[test]
+    fn the_focus_commands_step_along_the_split() {
+        let mut harness = Harness::panel(1);
+        harness.run_command("crook/window/split-right");
+        harness.run_command("crook/window/split-right");
+        let panes = panes(&harness);
+        assert_eq!(panes.len(), 3);
+        assert_eq!(focused(&harness), panes[2], "a split focuses what it made");
+
+        harness.run_command("crook/window/focus-pane-left");
+        assert_eq!(focused(&harness), panes[1]);
+        harness.run_command("crook/window/focus-pane-left");
+        assert_eq!(focused(&harness), panes[0]);
+        harness.run_command("crook/window/focus-pane-right");
+        assert_eq!(focused(&harness), panes[1]);
+    }
+
+    #[test]
+    fn a_focus_chord_across_the_axis_reaches_the_shell_instead() {
+        // The rule the whole pane family rests on. A row of panes has nothing
+        // above it, so the chord must decline rather than be swallowed —
+        // otherwise `ctrl+shift+up` would stop meaning anything in vim the
+        // moment somebody split a tab sideways.
+        let mut harness = Harness::panel(1);
+        harness.run_command("crook/window/split-right");
+
+        let modifiers =
+            if crate::input_keys::Platform::current() == crate::input_keys::Platform::Mac {
+                Modifiers {
+                    ctrl: true,
+                    shift: true,
+                    ..Default::default()
+                }
+            } else {
+                Modifiers {
+                    alt: true,
+                    ..Default::default()
+                }
+            };
+
+        assert!(
+            !harness.press_key("up", modifiers),
+            "a direction the split has no pane in was consumed"
+        );
+        assert!(
+            harness.press_key("left", modifiers),
+            "the direction it does have was not"
+        );
+    }
+
+    #[test]
+    fn nothing_in_the_pane_family_fires_on_a_tab_that_was_never_split() {
+        let mut harness = Harness::panel(1);
+        let alone = focused(&harness);
+
+        for command in [
+            "crook/window/focus-pane-left",
+            "crook/window/focus-pane-right",
+            "crook/window/focus-next-pane",
+            "crook/window/focus-previous-pane",
+            "crook/window/grow-pane",
+            "crook/window/shrink-pane",
+            "crook/window/even-panes",
+        ] {
+            harness.run_command(command);
+            assert_eq!(focused(&harness), alone, "{command}");
+        }
+    }
+
+    #[test]
+    fn cycling_comes_back_round_where_the_directions_stop() {
+        let mut harness = Harness::panel(1);
+        harness.run_command("crook/window/split-right");
+        let panes = panes(&harness);
+
+        harness.run_command("crook/window/focus-next-pane");
+        assert_eq!(focused(&harness), panes[0], "past the end is the start");
+        harness.run_command("crook/window/focus-previous-pane");
+        assert_eq!(focused(&harness), panes[1]);
+    }
+
+    #[test]
+    fn splitting_leftwards_puts_the_new_pane_in_front_of_the_old_one() {
+        // The half of the pair that had a model and no name until now.
+        let mut harness = Harness::panel(1);
+        let first = focused(&harness);
+
+        harness.run_command("crook/window/split-left");
+
+        let panes = panes(&harness);
+        assert_eq!(panes.len(), 2);
+        assert_eq!(panes[1], first, "the pane that was there moved along");
+        assert_eq!(focused(&harness), panes[0], "the new one has the keyboard");
+    }
+
+    #[test]
+    fn the_digits_pick_a_tab_by_its_place_in_the_strip() {
+        let mut harness = Harness::panel(4);
+        let tabs = tabs_in_order(&harness);
+
+        harness.run_command("crook/window/select-tab-1");
+        assert_eq!(active_tab(&harness), tabs[0]);
+        harness.run_command("crook/window/select-tab-3");
+        assert_eq!(active_tab(&harness), tabs[2]);
+        harness.run_command("crook/window/select-last-tab");
+        assert_eq!(active_tab(&harness), tabs[3]);
+    }
+
+    #[test]
+    fn a_digit_past_the_end_of_the_strip_reaches_the_shell() {
+        // Four tabs and a chord for the eighth. Every browser leaves that key
+        // to whatever is under it rather than selecting the last tab, because
+        // a person pressing it has counted and is wrong about something.
+        let mut harness = Harness::panel(4);
+        let before = active_tab(&harness);
+
+        harness.run_command("crook/window/select-tab-8");
+
+        assert_eq!(active_tab(&harness), before);
+    }
+
+    #[test]
+    fn the_block_commands_decline_at_the_prompt() {
+        // Nothing is selected until somebody steps off the prompt, and each of
+        // these is about *the* block. Consumed, they would take the copy chord
+        // away from a shell for a command nobody could aim.
+        let harness = Harness::panel(1);
+
+        for command in [
+            "crook/window/copy-block",
+            "crook/window/copy-block-command",
+            "crook/window/copy-block-output",
+            "crook/window/rerun-block",
+            "crook/window/open-block-menu",
+            "crook/window/scroll-to-block-top",
+        ] {
+            let action = ActionName::parse(command).expect("a literal that parses");
+            let resolved = harness.workspace.read(&harness.app, |workspace, _| {
+                crate::plugins::window::binding_for(&action)
+                    .and_then(|binding| workspace.command(binding))
+            });
+            assert!(resolved.is_none(), "{command} did not decline");
+        }
+    }
+
+    #[test]
+    fn every_settings_page_can_be_opened_by_name() {
+        // Registered by `Host::add_settings_page` rather than by each plugin,
+        // so this is also the check that a page a stranger's plugin adds gets
+        // one for free.
+        let mut harness = Harness::panel(1);
+        let commands: Vec<String> = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .host()
+                .commands()
+                .iter()
+                .map(|(_, action, _)| action.to_string())
+                .collect()
+        });
+
+        for page in ["appearance", "shell", "shortcuts", "about"] {
+            let expected = format!("crook/{page}/open-page");
+            assert!(
+                commands.contains(&expected),
+                "{expected} is not a command; the page list is {commands:?}"
+            );
+        }
+
+        harness.run_command("crook/shortcuts/open-page");
+        assert!(
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace
+                    .is_settings_page_open()),
+            "opening a page by name did not show the settings"
+        );
+    }
+
+    #[test]
+    fn the_tab_menu_can_be_opened_walked_and_run_without_a_pointer() {
+        let mut harness = Harness::panel(2);
+        assert!(harness.tab_menu_row().is_none());
+
+        harness.run_command("crook/tabs/open-menu");
+        assert!(harness.tab_menu_row().is_some(), "the menu did not open");
+        harness.frame();
+
+        // Down from nothing is the first row, and it is the pin entry —
+        // band 0, which is the top of the menu.
+        harness.dispatch_workspace_action(TabMenuAction::MoveSelection(1).into());
+        let first = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tab_context_menu().selected_action()
+        });
+        assert!(first.is_some(), "nothing was selected by the first arrow");
+
+        let pinned_before = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .active()
+                .expect("a tab is active")
+                .is_pinned()
+        });
+        harness.dispatch_workspace_action(TabMenuAction::RunSelected.into());
+        let pinned_after = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .active()
+                .expect("a tab is active")
+                .is_pinned()
+        });
+        assert_ne!(pinned_before, pinned_after, "Enter ran no entry");
+    }
+
+    #[test]
+    fn the_menus_selection_does_not_outlive_the_menu() {
+        // An action Enter could still find with nothing on screen would be a
+        // key that acts on a row nobody can see.
+        let mut harness = Harness::panel(1);
+        harness.run_command("crook/tabs/open-menu");
+        harness.frame();
+        harness.dispatch_workspace_action(TabMenuAction::MoveSelection(1).into());
+        assert!(harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tab_context_menu().selected_action().is_some()
+        }));
+
+        harness.dispatch_workspace_action(TabMenuAction::Close.into());
+
+        assert!(harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tab_context_menu().selected_action().is_none()
+        }));
+    }
 }

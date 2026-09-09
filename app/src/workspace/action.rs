@@ -207,6 +207,15 @@ pub enum TabMenuAction {
     },
     /// Take it down, and any submenu with it. What a press outside it sends.
     Close,
+    /// Step the keyboard's row through the menu by this many places.
+    ///
+    /// The menu is a list of things to do, so it can be walked — and it is the
+    /// entries themselves rather than this enum that say what each one does,
+    /// which is why running one is [`Self::RunSelected`] and not an arm per
+    /// row. See the doc on this enum.
+    MoveSelection(isize),
+    /// Do what pressing the row the keyboard is on would have done.
+    RunSelected,
 }
 
 impl From<TabMenuAction> for WorkspaceAction {

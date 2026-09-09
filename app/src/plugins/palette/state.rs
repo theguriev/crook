@@ -189,4 +189,12 @@ pub(super) struct Command {
     pub(super) action: ActionName,
     /// What it is called.
     pub(super) title: String,
+    /// The chord that reaches it, if one does.
+    ///
+    /// Read here rather than in the row that prints it, because the row is
+    /// handed a list and never sees the window. It is the *first* chord, since
+    /// a row is one line and the zoom answers to eight — and it is whatever is
+    /// in force now, so somebody who rebound a command reads their own chord
+    /// on the way to running it.
+    pub(super) chord: Option<String>,
 }

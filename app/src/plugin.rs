@@ -568,25 +568,45 @@ impl Host {
     ) -> PageId {
         let who = self.who();
         let key = format!("{who}/{entry}");
+        let title = title.into();
+        let heading = title.clone();
         let registration = self.pages.contribute(
             &who,
             SETTINGS_PAGE,
             EntryId::new(entry),
             order,
             SettingsPage {
-                title: title.into(),
+                title,
                 build: Box::new(build) as SettingsContribution,
             },
         );
-        self.kept.push((who, registration));
+        self.kept.push((who.clone(), registration));
 
-        match self.page_keys.iter().position(|known| *known == key) {
+        let page = match self.page_keys.iter().position(|known| *known == key) {
             Some(index) => PageId(index),
             None => {
                 self.page_keys.push(key);
                 PageId(self.page_keys.len() - 1)
             }
+        };
+
+        // Every page gets a command that opens it, here rather than in each of
+        // the plugins that add one — which is what makes it true of a page a
+        // stranger's plugin contributes as well as of the six in the binary.
+        // Without it the rail is a list of places only a pointer can go: the
+        // settings chord opens whichever page was open last, and there is no
+        // way to name the one you want.
+        if let Ok(action) = ActionName::parse(&format!("{who}/open-{entry}")) {
+            self.register_command(
+                action,
+                format!("Settings: {heading}"),
+                move |workspace, ctx| {
+                    workspace.open_settings_page(Some(page), ctx);
+                },
+            );
         }
+
+        page
     }
 
     /// Adds a section to the sidebar.

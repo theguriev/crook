@@ -143,7 +143,7 @@ fn row(
     state: MouseStateHandle,
     ui: FamilyId,
 ) -> Box<dyn Element> {
-    let line = Flex::row()
+    let mut line = Flex::row()
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
         .with_child(
@@ -151,7 +151,25 @@ fn row(
                 .with_color(theme().text_primary)
                 .finish(),
         )
-        .with_child(Expanded::new(1., Empty::new().finish()).finish())
+        .with_child(Expanded::new(1., Empty::new().finish()).finish());
+
+    // The chord, before the name and brighter than it: the name answers "what
+    // do I write in my keybindings file", and the chord answers "is there a
+    // faster way to do this again", which is the question somebody reading a
+    // list of things to do is actually asking.
+    if let Some(chord) = &command.chord {
+        line.add_child(
+            Container::new(
+                Text::new(chord.clone(), ui, 10.5)
+                    .with_color(theme().text_primary)
+                    .finish(),
+            )
+            .with_margin_right(10.)
+            .finish(),
+        );
+    }
+
+    let line = line
         // The name, which is what a person copies into their keybindings.
         .with_child(
             Text::new(command.action.to_string(), ui, 10.5)

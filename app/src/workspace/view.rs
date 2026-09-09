@@ -2257,6 +2257,19 @@ impl Workspace {
     fn apply_tab_menu(&mut self, action: TabMenuAction, ctx: &mut ViewContext<Self>) {
         match action {
             TabMenuAction::Open { tab, pane } => self.open_tab_context_menu(tab, pane, ctx),
+            TabMenuAction::MoveSelection(by) => {
+                if self.tab_context_menu.move_selection(by) {
+                    ctx.notify();
+                }
+            }
+            TabMenuAction::RunSelected => {
+                // The entry's own action, which is the one its press
+                // dispatches: there is exactly one path from a row to what it
+                // does, and the keyboard takes it rather than a copy.
+                if let Some(action) = self.tab_context_menu.selected_action() {
+                    self.handle_action(&action, ctx);
+                }
+            }
             TabMenuAction::Close => self.close_tab_context_menu(ctx),
         }
     }
@@ -4922,8 +4935,25 @@ impl Workspace {
         // changed their mind presses it twice, and each press undoes exactly
         // the gesture that came before it.
         if !self.tab_menu.is_open() {
-            return (self.tab_context_menu.is_open() && keystroke.key == "escape")
-                .then_some(TabMenuAction::Close.into());
+            if !self.tab_context_menu.is_open() {
+                return None;
+            }
+            // The menu itself can be walked. Not while a plugin's surface is
+            // up: the rename entry claims Enter and Escape through one, and
+            // its arrows belong to the field it turned the row into — a
+            // selection that moved under somebody editing a name would be the
+            // menu answering a key aimed at a caret.
+            if self.host.a_surface_is_up() {
+                return (keystroke.key == "escape").then_some(TabMenuAction::Close.into());
+            }
+            let action = match keystroke.key.as_str() {
+                "escape" => TabMenuAction::Close,
+                "up" => TabMenuAction::MoveSelection(-1),
+                "down" => TabMenuAction::MoveSelection(1),
+                "enter" => TabMenuAction::RunSelected,
+                _ => return None,
+            };
+            return Some(action.into());
         }
 
         let action = match (keystroke.key.as_str(), self.tab_menu.mode) {
