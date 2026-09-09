@@ -1,13 +1,22 @@
 name: Crook CI
 
+# Asked for, never automatic. A push and a pull request used to start this, and
+# every run they started failed in three seconds with no log — the account this
+# repository is under cannot pay for minutes, so the only thing an automatic
+# trigger produced was a red cross on every branch, on work whose real gate had
+# already been run by hand. A check that always fails is worse than no check:
+# it stops meaning anything, and the day one of these jobs fails for a reason
+# nobody would look.
+#
+# So the gate is the four commands in CONTRIBUTING.md, run locally before a
+# push, and this is here to be started from the Actions tab or with
+# `gh workflow run "Crook CI" --ref <branch>` on a day the minutes exist.
 on:
-  push:
-    branches: [master]
-  pull_request:
   workflow_dispatch:
 
 concurrency:
-  # Supersede in-flight runs for the same ref; the last push is the only one anyone reads.
+  # Supersede in-flight runs for the same ref; a second dispatch of the same
+  # branch means the first is no longer the one anyone is waiting on.
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
@@ -44,7 +53,7 @@ jobs:
 
       # Installs this platform's prerequisites and materializes the toolchain pinned in
       # rust-toolchain.toml. Running the real script here keeps it honest: a bootstrap that
-      # rots is discovered by CI rather than by the next contributor.
+      # rots is discovered by whoever dispatches this rather than by the next contributor.
       - name: Bootstrap
         shell: bash
         run: ./script/bootstrap

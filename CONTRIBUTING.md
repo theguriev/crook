@@ -2,8 +2,10 @@
 
 ## Before you push
 
-CI runs these four commands, in this order, on macOS, Linux and Windows. Run them locally and
-you will not be surprised:
+**These four commands are the gate.** Not "run them and CI will confirm it" — CI does not run
+by itself. `.github/workflows/ci.yml` is `workflow_dispatch` only, so nothing starts when you
+push or open a pull request, and a green branch is one somebody made green here. Run them, in
+this order:
 
 ```sh
 export PATH="$HOME/.cargo/bin:$PATH"
@@ -18,13 +20,29 @@ Clippy warnings are errors. `.clippy.toml` also bans `std::process::Command`, be
 Windows it flashes a console window unless the spawner sets `CREATE_NO_WINDOW` — invisible on
 macOS and Linux, and a shipping-blocker for a terminal. Use `crook::process::Command`.
 
-There is a fifth job, which compiles the workspace with the feature set a shipped build uses:
+There is a fifth check, which compiles the workspace with the feature set a shipped build uses:
 
 ```sh
 ./script/bundle --check-only
 ```
 
 Run it if you touch a `Cargo.toml`, a feature gate, or anything under `#[cfg(...)]`.
+
+## The workflow, when you want it
+
+The same five checks run on macOS, Linux and Windows as `Crook CI`, and they run when they are
+asked to:
+
+```sh
+gh workflow run "Crook CI" --ref <branch>
+```
+
+or the Run workflow button on the Actions tab. It is not on a push or a pull request on
+purpose: the account this repository is under has no minutes, so an automatic trigger put a
+red cross on every branch — including the ones that were merged — and a check that always
+fails is one nobody reads. The three platforms are what it is still worth asking for, since
+`crook::process::Command`, the path handling and the release feature set are the things four
+local commands on one machine cannot cover.
 
 If `cargo metadata --locked` fails, `Cargo.lock` is out of date with a manifest. Run
 `cargo check` and commit the updated lockfile.

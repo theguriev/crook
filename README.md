@@ -534,9 +534,10 @@ To produce a release binary:
 ./script/bundle --check-only   # type-check with release flags, build nothing
 ```
 
-`--check-only` is what CI runs on all three platforms. It compiles the workspace with the
-exact profile and feature set a shipped build uses, which catches the class of bug where a
-release-only feature combination does not compile — cheaply, and without producing artifacts.
+`--check-only` is the fifth check, and what the workflow runs on all three platforms when it
+is asked to. It compiles the workspace with the exact profile and feature set a shipped build
+uses, which catches the class of bug where a release-only feature combination does not
+compile — cheaply, and without producing artifacts.
 
 ## Repository layout
 
@@ -566,8 +567,10 @@ of the API crate instead.
 
 ## Checks
 
-Whatever you touch, these four commands are what CI runs, in this order, on all three
-platforms:
+Whatever you touch, these four commands are the gate, in this order. Nothing runs them for
+you: the workflow is `workflow_dispatch` only, so a push and a pull request start nothing, and
+a branch is as checked as whoever pushed it made it. `gh workflow run "Crook CI" --ref <branch>`
+asks for the same five on macOS, Linux and Windows.
 
 ```sh
 cargo fmt --all --check
