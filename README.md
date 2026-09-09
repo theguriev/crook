@@ -332,10 +332,10 @@ Eight features, and the page that configures them:
   keybinding" without being able to write a file itself.
 
 - **Everything the window does has a name, and most of it has a key.** The window registers
-  forty-nine commands of its own and ships chords for the twenty-eight somebody arrives
-  expecting; the rest are reached by name, from the palette or from a chord of your own. That
-  split is deliberate — a shipped chord is a key taken away from the shell in every pane,
-  forever, so it is spent on what is pressed often and not on what is done once a week.
+  forty-nine commands of its own and ships chords for thirty-five; the other fourteen are
+  reached by name, from the palette or from a chord of your own. That split is deliberate — a
+  shipped chord is a key taken away from the shell in every pane, forever, so it is spent on
+  what is pressed often and not on what is done once a week.
 
   | | macOS | Linux and Windows |
   |---|---|---|
