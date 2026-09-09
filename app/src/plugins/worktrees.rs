@@ -61,12 +61,13 @@ impl Plugin for Worktrees {
         // switched off, like everything else it registers.
         host.claim_field("branch", Workspace::worktree_menu_is_creating);
 
-        // Not a command, and this is the one entry in the menu that is not.
-        // The others *do* something and are worth a chord; this one opens a
-        // submenu, which is a thing to look at rather than a thing to run, and
-        // a palette row that answered "a popup is now open behind the palette"
-        // would be a row nobody could use.
-        let opens = host.register_action(action("menu"), |workspace, ctx| {
+        // A command like every other entry, and it was not always: the
+        // objection was that a palette row which opened a submenu would be
+        // opening it *behind* the palette. It would not — the palette takes
+        // itself down before it runs anything, on purpose — and until this was
+        // a command the worktree list was the one part of the window nothing
+        // but a secondary press could reach.
+        let opens = host.register_command(action("menu"), "Worktrees", |workspace, ctx| {
             let Some((tab, _)) = workspace.menu_target() else {
                 return;
             };

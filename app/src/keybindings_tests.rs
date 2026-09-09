@@ -207,19 +207,95 @@ fn every_shipped_binding_names_a_command_of_the_window() {
     }
 }
 
+/// Every command a person would report as broken if pressing its key did
+/// nothing.
+///
+/// This list used to be [`COMMANDS`](crate::plugins::window::COMMANDS) itself,
+/// and it stopped being it the day the window grew commands nobody expects a
+/// shipped chord for — colouring a tab, copying a block's branch, splitting
+/// leftwards. A shipped chord is a key taken away from the shell in every
+/// pane, forever, and most of these are better reached by name: the palette
+/// runs one, and the Keyboard Shortcuts page binds it to whatever a person
+/// likes. What has to hold is that the chords somebody arrives *expecting*
+/// are there, which is what this names.
+const MUST_HAVE_A_CHORD: &[&str] = &[
+    "new-tab",
+    "close-pane",
+    "split-right",
+    "split-down",
+    "previous-tab",
+    "next-tab",
+    "move-tab-left",
+    "move-tab-right",
+    "select-tab-1",
+    "select-last-tab",
+    "focus-pane-left",
+    "focus-pane-right",
+    "focus-pane-up",
+    "focus-pane-down",
+    "focus-next-pane",
+    "focus-previous-pane",
+    "search-tabs",
+    "find",
+    "select-block-up",
+    "select-block-down",
+    "page-up",
+    "page-down",
+    "scroll-to-top",
+    "scroll-to-bottom",
+    "open-settings",
+    "zoom-in",
+    "zoom-out",
+    "zoom-reset",
+];
+
 #[test]
-fn every_command_of_the_window_is_bound_on_both_platforms() {
-    // The other direction: a command with no chord is a feature reachable only
-    // through the palette, and each of these is one somebody expects a key for.
+fn the_commands_a_person_arrives_expecting_are_bound_on_both_platforms() {
     for platform in [Platform::Mac, Platform::Other] {
         let keybindings = Keybindings::for_platform(platform);
-        for (name, _, _) in crate::plugins::window::COMMANDS {
+        for name in MUST_HAVE_A_CHORD {
             let action = command(&format!("crook/window/{name}"));
             assert!(
                 !keybindings.chords_for(&action).is_empty(),
                 "{action} has no chord on {platform:?}"
             );
         }
+    }
+}
+
+#[test]
+fn nothing_in_that_list_has_gone_away() {
+    // The list above names commands by string, so a command that is renamed or
+    // dropped would quietly stop being checked rather than failing.
+    for name in MUST_HAVE_A_CHORD {
+        assert!(
+            crate::plugins::window::COMMANDS
+                .iter()
+                .any(|(command, _, _)| command == name),
+            "crook/window/{name} is in MUST_HAVE_A_CHORD and is not a command"
+        );
+    }
+}
+
+#[test]
+fn every_command_of_the_window_can_be_reached_without_a_chord() {
+    // The promise the unbound ones rest on. `register_command` is what puts a
+    // command in the palette and on the Keyboard Shortcuts page, so a command
+    // in this table that nothing registers would be one no keyboard can reach
+    // at all — neither by a chord, since it has none, nor by name.
+    let names: Vec<String> = crate::plugins::window::COMMANDS
+        .iter()
+        .map(|(name, _, _)| format!("crook/window/{name}"))
+        .collect();
+    for (at, name) in names.iter().enumerate() {
+        assert!(
+            !names[..at].contains(name),
+            "{name} is in the command table twice"
+        );
+        assert!(
+            crate::plugins::window::binding_for(&command(name)).is_some(),
+            "{name} is in the command table and resolves to no binding"
+        );
     }
 }
 

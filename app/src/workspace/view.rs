@@ -29,7 +29,7 @@ use crate::git::GitFacts;
 use crate::git_model::GitModel;
 use crate::input_keys::{Binding, Platform};
 use crate::keybindings::{Context, Keybindings, PendingSave, Recording, Resolution};
-use crate::pane_blocks::{PaneBlocks, ScrollCause};
+use crate::pane_blocks::{PAGE_OVERLAP, PaneBlocks, ScrollCause};
 use crate::pane_find::PaneFind;
 use crate::pane_link::PaneLink;
 use crate::pane_selection::PaneSelection;
@@ -328,6 +328,20 @@ impl BlockMenuState {
             state.lock().reset_interaction_state();
         }
     }
+}
+
+/// The facts about a block that are not the rows it printed.
+///
+/// Read out of the history on demand, so that a command about a block does not
+/// need the menu to have opened on it first. Owned rather than borrowed
+/// because the caller goes on to touch `&mut self`.
+struct BlockFacts {
+    /// The command line, when the shell said what it was.
+    command: Option<String>,
+    /// Where the shell was when the block opened, when it said.
+    directory: Option<std::path::PathBuf>,
+    /// Which of the block's rows the command's own output starts on.
+    output_from: Option<usize>,
 }
 
 /// Which options the command line put on screen without adopting them.
@@ -1420,6 +1434,30 @@ impl Workspace {
             .with("panelOpen", self.panel.open)
             .with("surfaceVisible", self.host.a_surface_is_up())
             .with("chordPending", !self.pending_keys.borrow().is_empty())
+            // The tab in front of a person is showing more than one pane, so
+            // the pane commands have somewhere to go. `paneFocused` above does
+            // not answer this — it is true for every window that has a tab.
+            .with(
+                "paneSplit",
+                self.tabs.active().is_some_and(|tab| tab.panes().is_split()),
+            )
+            // The keyboard has stepped off the prompt onto a block, which is
+            // what every command about *the* block needs to be in force.
+            .with("blockSelected", self.selected_block().is_some())
+            // The three popups. Each of them owns keys of its own while it is
+            // up, and a chord that would fight one has to be able to say so.
+            .with("findOpen", self.find_takes_keys())
+            .with("tabMenuOpen", self.tab_context_menu.is_open())
+            .with("blockMenuOpen", self.block_menu.is_open())
+            .with("worktreeMenuOpen", self.tab_menu.is_open())
+            .with("optionsMenuOpen", self.menu.open)
+    }
+
+    /// The block the keyboard is standing on in the focused pane, if it has
+    /// stepped off the prompt.
+    fn selected_block(&self) -> Option<BlockId> {
+        let pane = self.tabs.focused_pane_id()?;
+        self.pane_blocks(pane)?.selected()
     }
 
     /// The plugins, and everything they registered.
@@ -1860,10 +1898,7 @@ impl Workspace {
                 // Over the list of commands, never over a full-screen program:
                 // there the pane is one grid, the bar has nothing to search,
                 // and Ctrl-F is one of the program's own keys.
-                let is_blocks = self.terminal(pane, ctx).is_some_and(|(_, snapshot)| {
-                    pane_surface::of(&snapshot, Instant::now()).surface == Surface::Blocks
-                });
-                if !is_blocks {
+                if !self.draws_blocks(pane, ctx) {
                     return;
                 }
                 find.open();
@@ -2384,6 +2419,35 @@ impl Workspace {
             WorktreeAction::Create => self.create_worktree(ctx),
             WorktreeAction::AskRemove(index) => self.ask_about_removing(index, ctx),
             WorktreeAction::Remove { force } => self.remove_worktree(force, ctx),
+            WorktreeAction::MoveSelection(by) => {
+                if self.tab_menu.move_selection(by) {
+                    ctx.notify();
+                }
+            }
+            WorktreeAction::ShowSelected => {
+                if let Some(index) = self.tab_menu.selected {
+                    self.apply_worktree(WorktreeAction::Show(index), ctx);
+                }
+            }
+            WorktreeAction::AskRemoveSelected => {
+                // Only where the × would be. A pointer cannot ask about a
+                // checkout that is not free, because no × is drawn on it, and
+                // a key that could would open a question git is certain to
+                // refuse. Asked through `free_checkouts` rather than through a
+                // second reading of the same four conditions, which is the
+                // rule that file states: the × and the sweep mean one thing by
+                // "free" and so must this.
+                let free = super::tab_menu::free_checkouts(self);
+                let index = self.tab_menu.selected.filter(|index| {
+                    self.tab_menu
+                        .worktrees()
+                        .get(*index)
+                        .is_some_and(|worktree| free.iter().any(|(path, _)| *path == worktree.path))
+                });
+                if let Some(index) = index {
+                    self.apply_worktree(WorktreeAction::AskRemove(index), ctx);
+                }
+            }
             WorktreeAction::AskTidy => self.ask_about_tidying(ctx),
             WorktreeAction::Tidy => self.tidy_worktrees(ctx),
 
@@ -2435,6 +2499,10 @@ impl Workspace {
         self.tab_menu.tab = Some(tab);
         self.tab_menu.pane_directory = Some(directory.clone());
         self.tab_menu.mode = WorktreeMode::Listing;
+        // Nothing picked out until an arrow key asks for a row. A menu that
+        // opened with the first checkout lit would be one where Delete has a
+        // target nobody aimed.
+        self.tab_menu.selected = None;
         self.tab_menu.sweep = Sweep::Counting;
         self.tab_menu.contents = Contents::Reading;
         self.tab_menu.branches.clear();
@@ -2582,6 +2650,7 @@ impl Workspace {
 
         self.tab_menu.tab = None;
         self.tab_menu.mode = WorktreeMode::Listing;
+        self.tab_menu.selected = None;
         self.tab_menu.sweep = Sweep::Counting;
         self.tab_menu.contents = Contents::Reading;
         self.tab_menu.branches.clear();
@@ -2623,7 +2692,72 @@ impl Workspace {
                 }
             }
             BlockAction::CopySelection(pane) => self.copy_selected_block(pane, ctx),
+            BlockAction::Page { pane, down } => self.page_output(pane, down, ctx),
+            BlockAction::ScrollToEnd { pane, bottom } => {
+                self.scroll_output_to_end(pane, bottom, ctx);
+            }
         }
+    }
+
+    /// Whether a pane is drawing its output as a list of blocks.
+    ///
+    /// The other answer is one grid a full-screen program owns, and the two
+    /// scroll different things: the list has its own offset, and the grid has
+    /// the emulator's history behind it.
+    fn draws_blocks(&self, pane: PaneId, app: &AppContext) -> bool {
+        self.terminal(pane, app).is_some_and(|(_, snapshot)| {
+            pane_surface::of(&snapshot, Instant::now()).surface == Surface::Blocks
+        })
+    }
+
+    /// Scrolls a pane's output by a screenful.
+    ///
+    /// One gesture over the two surfaces, which is the split the wheel already
+    /// makes: a list of blocks moves its own offset, and a grid moves the
+    /// emulator's history. Nothing is sent to the program either way — the
+    /// chord carries a Shift, and a Shift over this pane has always meant
+    /// "Crook's own scrollback" rather than whatever is running.
+    fn page_output(&mut self, pane: PaneId, down: bool, ctx: &mut ViewContext<Self>) {
+        if self.draws_blocks(pane, ctx) {
+            if let Some(view) = self.pane_blocks(pane)
+                && view.apply(ScrollCause::Page { down })
+            {
+                ctx.notify();
+            }
+            return;
+        }
+
+        let Some((handle, snapshot)) = self.terminal(pane, ctx) else {
+            return;
+        };
+        // Positive is back into history, which is the sense the emulator and
+        // the wheel both use and the opposite of the list's.
+        let step = (snapshot.rows as f32 - PAGE_OVERLAP).max(1.) as i32;
+        handle.scroll_lines(if down { -step } else { step });
+        ctx.notify();
+    }
+
+    /// Takes a pane's output to the oldest thing it holds, or back to the
+    /// newest.
+    fn scroll_output_to_end(&mut self, pane: PaneId, bottom: bool, ctx: &mut ViewContext<Self>) {
+        if self.draws_blocks(pane, ctx) {
+            if let Some(view) = self.pane_blocks(pane)
+                && view.apply(ScrollCause::ToEnd { bottom })
+            {
+                ctx.notify();
+            }
+            return;
+        }
+
+        let Some((handle, _)) = self.terminal(pane, ctx) else {
+            return;
+        };
+        if bottom {
+            handle.scroll_to_bottom();
+        } else {
+            handle.scroll_to_top();
+        }
+        ctx.notify();
     }
 
     /// Steps a pane's block selection: `down` towards the prompt, otherwise
@@ -2795,6 +2929,35 @@ impl Workspace {
         ctx.notify();
     }
 
+    /// Which block a block command acts on.
+    ///
+    /// The menu's, while one is up, and otherwise the one the keyboard has
+    /// selected in the focused pane. That fallback is what makes every entry
+    /// of the block menu a chord as well as a row — the arrangement
+    /// [`Self::menu_target`] already gives a tab's menu — and it is the whole
+    /// of why those entries are not pointer-only.
+    fn block_target(&self) -> Option<(PaneId, BlockId)> {
+        if let Some(on) = self.block_menu.on {
+            return Some(on);
+        }
+        let pane = self.tabs.focused_pane_id()?;
+        Some((pane, self.pane_blocks(pane)?.selected()?))
+    }
+
+    /// The three facts about a block that are not its rows.
+    ///
+    /// `None` for a block the history no longer holds, which is a block
+    /// evicted between the keystroke and the action.
+    fn block_facts(&self, pane: PaneId, block: BlockId, app: &AppContext) -> Option<BlockFacts> {
+        let history = self.terminal_blocks(pane, app)?;
+        let found = history.iter().find(|finished| finished.id == block)?;
+        Some(BlockFacts {
+            command: found.command.clone(),
+            directory: found.working_directory.clone(),
+            output_from: found.output_from,
+        })
+    }
+
     /// Puts one of the block's facts on the clipboard.
     ///
     /// The two that are text out of the terminal go through the same region a
@@ -2804,9 +2967,16 @@ impl Workspace {
     /// folded line ends. The three that are facts *about* the block are copied
     /// as they were read when the menu opened.
     fn copy_block_part(&mut self, part: BlockPart, ctx: &mut ViewContext<Self>) {
-        let Some((pane, block)) = self.block_menu.on else {
+        let Some((pane, block)) = self.block_target() else {
             return;
         };
+
+        // Read off the block itself rather than off the menu's cache. The
+        // cache exists because the menu is *drawn* from it — a row that says
+        // "Copy the branch" has to know there is one before it is pressed —
+        // not because these are expensive to find, and a chord pressed with no
+        // menu up has to copy exactly what the row would have.
+        let facts = self.block_facts(pane, block, ctx);
 
         let text = match part {
             BlockPart::Whole => self.block_rows_text(pane, block, 0, ctx),
@@ -2814,17 +2984,26 @@ impl Workspace {
             // output starts — the row that would ask for it is drawn as one
             // that cannot be pressed, and this is the same answer from the
             // other side.
-            BlockPart::Output => self
-                .block_menu
-                .output_from
-                .and_then(|from| self.block_rows_text(pane, block, from, ctx)),
-            BlockPart::Command => self.block_menu.command.clone(),
-            BlockPart::Directory => self
-                .block_menu
-                .directory
+            BlockPart::Output => facts
                 .as_ref()
+                .and_then(|facts| facts.output_from)
+                .and_then(|from| self.block_rows_text(pane, block, from, ctx)),
+            BlockPart::Command => facts.and_then(|facts| facts.command),
+            BlockPart::Directory => facts
+                .and_then(|facts| facts.directory)
                 .map(|directory| directory.to_string_lossy().into_owned()),
-            BlockPart::Branch => self.block_menu.branch.clone(),
+            // The branch of the directory the *block* ran in. Taken from the
+            // menu while one is up, because it read it when it opened and a
+            // second walk could answer differently; worked out here otherwise,
+            // which is the same walk `open_block_menu` does.
+            BlockPart::Branch => match self.block_menu.on {
+                Some(_) => self.block_menu.branch.clone(),
+                None => facts
+                    .and_then(|facts| facts.directory)
+                    .as_deref()
+                    .and_then(crate::git::current_branch)
+                    .map(|head| head.label().to_owned()),
+            },
         };
         let Some(text) = text else {
             return;
@@ -2857,7 +3036,7 @@ impl Workspace {
     /// way would be a second answer to "how tall is a block", and the pane
     /// would jump to a row nobody asked for.
     fn scroll_to_block_edge(&mut self, edge: BlockEdge, ctx: &mut ViewContext<Self>) {
-        let Some((pane, block)) = self.block_menu.on else {
+        let Some((pane, block)) = self.block_target() else {
             return;
         };
         let (Some(view), Some(history)) = (self.pane_blocks(pane), self.terminal_blocks(pane, ctx))
@@ -2890,10 +3069,13 @@ impl Workspace {
     /// replacing the line would throw away a half-typed one. In the ordinary
     /// case the field is empty and the two are the same thing.
     fn rerun_block_command(&mut self, ctx: &mut ViewContext<Self>) {
-        let Some((pane, _)) = self.block_menu.on else {
+        let Some((pane, block)) = self.block_target() else {
             return;
         };
-        let Some(command) = self.block_menu.command.clone() else {
+        let Some(command) = self
+            .block_facts(pane, block, ctx)
+            .and_then(|facts| facts.command)
+        else {
             return;
         };
         self.type_into_input(pane, &command, ctx);
@@ -4595,6 +4777,75 @@ impl Workspace {
                     self.tabs.focused_pane_id()?,
                 )));
             }
+            // A direction across the group's axis has no pane in it, and
+            // neither has the end of a split. Both come back as `None`, which
+            // is what sends the keystroke on to the shell rather than
+            // swallowing it for a move that could not happen.
+            Binding::FocusPane(direction) => {
+                TabAction::FocusPane(self.tabs.active()?.panes().neighbour(direction)?)
+            }
+            Binding::CyclePane { forward } => {
+                let step = if forward { 1 } else { -1 };
+                TabAction::FocusPane(self.tabs.active()?.panes().cycled(step)?)
+            }
+            Binding::SplitLeft => TabAction::Split(Direction::Left),
+            Binding::SplitUp => TabAction::Split(Direction::Up),
+            // The three that mean nothing without a divider to move. They
+            // decline rather than doing nothing, so the chord goes to the
+            // shell on a tab that was never split.
+            Binding::GrowPane | Binding::ShrinkPane | Binding::EvenPanes
+                if !self.tabs.active().is_some_and(|tab| tab.panes().is_split()) =>
+            {
+                return None;
+            }
+            Binding::GrowPane => TabAction::NudgePane { grow: true },
+            Binding::ShrinkPane => TabAction::NudgePane { grow: false },
+            Binding::EvenPanes => TabAction::EvenPanes,
+            // Counting the strip, which is the order the panel draws and the
+            // order `next-tab` steps through. A number past the end declines.
+            Binding::SelectTab(index) => TabAction::Select(self.tabs.iter().nth(index)?.id()),
+            Binding::SelectLastTab => TabAction::Select(self.tabs.iter().last()?.id()),
+            Binding::Page { down } => {
+                return Some(WorkspaceAction::Block(BlockAction::Page {
+                    pane: self.tabs.focused_pane_id()?,
+                    down,
+                }));
+            }
+            Binding::ScrollToTop => {
+                return Some(WorkspaceAction::Block(BlockAction::ScrollToEnd {
+                    pane: self.tabs.focused_pane_id()?,
+                    bottom: false,
+                }));
+            }
+            Binding::ScrollToBottom => {
+                return Some(WorkspaceAction::Block(BlockAction::ScrollToEnd {
+                    pane: self.tabs.focused_pane_id()?,
+                    bottom: true,
+                }));
+            }
+            // The three that act on a block rather than on a pane. They ask
+            // for the target here rather than leaving it to the handler,
+            // because a chord pressed at the prompt with nothing selected has
+            // to reach the shell.
+            Binding::CopyBlock(part) => {
+                self.block_target()?;
+                return Some(WorkspaceAction::Block(BlockAction::Copy(part)));
+            }
+            Binding::RerunBlock => {
+                self.block_target()?;
+                return Some(WorkspaceAction::Block(BlockAction::Rerun));
+            }
+            Binding::OpenBlockMenu => {
+                let (pane, block) = self.block_target()?;
+                return Some(WorkspaceAction::Block(BlockAction::OpenMenu {
+                    pane,
+                    block,
+                }));
+            }
+            Binding::ScrollToBlock(edge) => {
+                self.block_target()?;
+                return Some(WorkspaceAction::Block(BlockAction::ScrollTo(edge)));
+            }
         };
 
         Some(WorkspaceAction::Tab(tab))
@@ -4678,6 +4929,20 @@ impl Workspace {
         let action = match (keystroke.key.as_str(), self.tab_menu.mode) {
             ("escape", WorktreeMode::Listing) => WorktreeAction::CloseMenu,
             ("escape", _) => WorktreeAction::Cancel,
+            // The list is the one mode with rows to walk. Enter opens the one
+            // the keyboard is on, and Delete offers to remove it — which is
+            // the pair every list of things in a desktop application answers
+            // to, and the two gestures the × and the row's own press were the
+            // only way to reach.
+            ("up", WorktreeMode::Listing) => WorktreeAction::MoveSelection(-1),
+            ("down", WorktreeMode::Listing) => WorktreeAction::MoveSelection(1),
+            ("enter", WorktreeMode::Listing) => WorktreeAction::ShowSelected,
+            ("delete" | "backspace", WorktreeMode::Listing) => WorktreeAction::AskRemoveSelected,
+            // "New worktree…" is the row under the list, and `n` is what it
+            // would be called for. Free here because the list has no field: in
+            // Creating it is a letter in a branch name, and this arm is not
+            // reached there.
+            ("n", WorktreeMode::Listing) => WorktreeAction::StartCreating,
             ("enter", WorktreeMode::Creating) => WorktreeAction::Create,
             ("enter", WorktreeMode::Removing { refused: false, .. }) => {
                 WorktreeAction::Remove { force: false }

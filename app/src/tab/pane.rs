@@ -112,6 +112,14 @@ pub struct Pane {
 /// The share a pane nobody has resized takes.
 pub const DEFAULT_FLEX: f32 = 1.;
 
+/// How much of a pair of panes one press of the resize chords moves.
+///
+/// A share of the two rather than a count of pixels, for the reason
+/// [`Pane::flex`] is one: only the layout knows how wide a pane came out, and
+/// a keyboard resize runs before any of it. Five per cent is small enough to
+/// aim with and large enough to be worth a keystroke.
+pub const RESIZE_STEP: f32 = 0.05;
+
 /// The smallest share a pane may be dragged down to.
 ///
 /// A divider that could take a pane to zero would make it disappear with no
@@ -415,6 +423,80 @@ impl PaneGroup {
             pane.flex = DEFAULT_FLEX;
         }
         PaneEffect::Changed
+    }
+
+    /// The pane next to the focused one in `direction`, if there is one.
+    ///
+    /// A group is a flat vector along one axis, so a direction *across* that
+    /// axis names nothing: "left" in a column of panes is not the pane above,
+    /// and a command that answered it with one would move the keyboard
+    /// somewhere nobody pointed. `None` is what lets the chord fall through to
+    /// the shell instead — the same bargain
+    /// [`Workspace::command`](crate::workspace::Workspace::command) makes
+    /// everywhere else.
+    pub fn neighbour(&self, direction: Direction) -> Option<PaneId> {
+        if direction.axis() != self.axis {
+            return None;
+        }
+        let index = self.index_of(self.focused)?;
+        let next = if direction.is_leading() {
+            index.checked_sub(1)?
+        } else {
+            index + 1
+        };
+        self.panes.get(next).map(Pane::id)
+    }
+
+    /// The pane `delta` places along from the focused one, wrapping round.
+    ///
+    /// Wrapping, unlike [`Self::neighbour`], because this is the "show me the
+    /// next one" gesture rather than a direction: a person cycling through two
+    /// panes with one chord expects the second press to come back, and a cycle
+    /// that stopped at the end would need a second chord to be useful.
+    pub fn cycled(&self, delta: isize) -> Option<PaneId> {
+        if !self.is_split() {
+            return None;
+        }
+        let len = self.panes.len() as isize;
+        let index = self.index_of(self.focused)? as isize;
+        let next = (index + delta).rem_euclid(len);
+        self.panes.get(next as usize).map(Pane::id)
+    }
+
+    /// The pane at `index` in render order.
+    pub fn at(&self, index: usize) -> Option<PaneId> {
+        self.panes.get(index).map(Pane::id)
+    }
+
+    /// Moves the divider beside the focused pane, giving it more room or less.
+    ///
+    /// The keyboard's half of [`Self::resize`], and it takes a *step* rather
+    /// than a share because a chord has no pointer position to derive one
+    /// from. Which divider it moves is decided the only way it can be: the one
+    /// after the focused pane, or — for the last pane, which has none — the
+    /// one before it. That asymmetry is what makes the last pane growable at
+    /// all.
+    pub fn nudge(&mut self, grow: bool) -> PaneEffect {
+        let Some(index) = self.index_of(self.focused) else {
+            return PaneEffect::Unchanged;
+        };
+        let (first, second) = if index + 1 < self.panes.len() {
+            (index, index + 1)
+        } else if index > 0 {
+            (index - 1, index)
+        } else {
+            return PaneEffect::Unchanged;
+        };
+
+        let total = self.panes[first].flex + self.panes[second].flex;
+        // Growing the *trailing* pane of the pair is shrinking the leading
+        // one, and `resize` only speaks in the leading one's share.
+        let towards_leading = grow == (first == index);
+        let step = RESIZE_STEP * if towards_leading { 1. } else { -1. };
+        let leading = (self.panes[first].flex / total + step).clamp(0., 1.);
+
+        let (before, after) = (self.panes[first].id(), self.panes[second].id());
+        self.resize(before, after, leading)
     }
 
     /// Focuses a pane.

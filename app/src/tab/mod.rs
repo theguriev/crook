@@ -575,6 +575,16 @@ pub enum TabAction {
     },
     /// Give every pane of the active tab an equal share again.
     EvenPanes,
+    /// Move the divider beside the active tab's focused pane by one step.
+    ///
+    /// The keyboard's [`Self::ResizePanes`], and it names no pane for the
+    /// reason [`Self::EvenPanes`] does not: a chord is pressed over the pane
+    /// that has the keyboard, and which divider that means is the group's own
+    /// question. See [`PaneGroup::nudge`].
+    NudgePane {
+        /// Give the focused pane more room, rather than less.
+        grow: bool,
+    },
 }
 
 /// What the shell must do after an action was applied.
@@ -1356,6 +1366,11 @@ impl TabStrip {
                 leading,
             } => match self.get_mut(self.active) {
                 Some(tab) => pane_effect(tab.panes_mut().resize(before, after, leading)),
+                None => TabEffect::Unchanged,
+            },
+
+            TabAction::NudgePane { grow } => match self.get_mut(self.active) {
+                Some(tab) => pane_effect(tab.panes_mut().nudge(grow)),
                 None => TabEffect::Unchanged,
             },
 

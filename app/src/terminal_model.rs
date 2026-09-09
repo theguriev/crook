@@ -1104,6 +1104,23 @@ impl TerminalHandle {
         self.drive(|terminal| terminal.scroll_lines(delta));
     }
 
+    /// Puts the viewport back on the live output.
+    pub fn scroll_to_bottom(&self) {
+        self.drive(Terminal::scroll_to_bottom);
+    }
+
+    /// Takes it to the oldest line the scrollback still holds.
+    ///
+    /// Asked of the emulator rather than computed from a delta, because how
+    /// far back "the top" is is exactly what the emulator knows and a caller
+    /// does not.
+    pub fn scroll_to_top(&self) {
+        self.drive(|terminal| {
+            let history = terminal.history_len();
+            terminal.scroll_lines(history as i32);
+        });
+    }
+
     /// Copies rows out of the grid into the store a finished block's rows live
     /// in, numbered from the oldest line of the scrollback.
     ///

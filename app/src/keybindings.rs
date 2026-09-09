@@ -953,6 +953,40 @@ pub const DEFAULTS_MAC: &[(&str, &str)] = &[
     ("cmd+_", "crook/window/zoom-out"),
     ("shift+cmd+_", "crook/window/zoom-out"),
     ("cmd+0", "crook/window/zoom-reset"),
+    // The tabs by position, which is every browser's arrangement and the one
+    // Terminal.app and iTerm2 took from them — the ninth key is the *last*
+    // tab rather than the ninth, because somebody with twenty tabs pressing it
+    // means the one at the end. Free of the field: the cmd branch of
+    // `chord_intent` names five letters and no digits.
+    ("cmd+1", "crook/window/select-tab-1"),
+    ("cmd+2", "crook/window/select-tab-2"),
+    ("cmd+3", "crook/window/select-tab-3"),
+    ("cmd+4", "crook/window/select-tab-4"),
+    ("cmd+5", "crook/window/select-tab-5"),
+    ("cmd+6", "crook/window/select-tab-6"),
+    ("cmd+7", "crook/window/select-tab-7"),
+    ("cmd+8", "crook/window/select-tab-8"),
+    ("cmd+9", "crook/window/select-last-tab"),
+    // Moving between the panes of a split. Not cmd+alt+arrow, which is
+    // iTerm2's and is spent here on the tabs and the block selection; ctrl is
+    // free on macOS *with a Shift*, because the field's emacs bindings are
+    // bare-ctrl and Mission Control's are bare-ctrl-arrow.
+    ("ctrl+shift+left", "crook/window/focus-pane-left"),
+    ("ctrl+shift+right", "crook/window/focus-pane-right"),
+    ("ctrl+shift+up", "crook/window/focus-pane-up"),
+    ("ctrl+shift+down", "crook/window/focus-pane-down"),
+    // iTerm2's own pair for the same gesture, and free: the cmd branch of
+    // `chord_intent` names letters, so the brackets are nobody's.
+    ("cmd+]", "crook/window/focus-next-pane"),
+    ("cmd+[", "crook/window/focus-previous-pane"),
+    // The scrollback, on the chord every terminal ever written uses for it.
+    // Shift has always been what takes the wheel and the keyboard back from
+    // whatever is running in the pane, which is why the bare page keys are
+    // left to the program.
+    ("shift+pageup", "crook/window/page-up"),
+    ("shift+pagedown", "crook/window/page-down"),
+    ("shift+cmd+pageup", "crook/window/scroll-to-top"),
+    ("shift+cmd+pagedown", "crook/window/scroll-to-bottom"),
 ];
 
 /// The chords Linux and Windows open with.
@@ -1002,6 +1036,39 @@ pub const DEFAULTS_OTHER: &[(&str, &str)] = &[
     ("ctrl+_", "crook/window/zoom-out"),
     ("ctrl+shift+_", "crook/window/zoom-out"),
     ("ctrl+0", "crook/window/zoom-reset"),
+    // Alt rather than the Ctrl-Shift the rest of this table takes, and that is
+    // not a lapse. `control_code` folds ctrl+shift+3, +4 and +8 to ESC, FS and
+    // DEL, so a ctrl+shift+digit family would take Escape away from vim; Alt
+    // is free of the field off macOS — `typed_intent` refuses to compose with
+    // it — and alt+digit is what GNOME Terminal, xfce4-terminal and Tilix
+    // already bind this to. GNOME Terminal mixes the two families exactly this
+    // way, ctrl+shift+t to open a tab and alt+2 to reach one.
+    ("alt+1", "crook/window/select-tab-1"),
+    ("alt+2", "crook/window/select-tab-2"),
+    ("alt+3", "crook/window/select-tab-3"),
+    ("alt+4", "crook/window/select-tab-4"),
+    ("alt+5", "crook/window/select-tab-5"),
+    ("alt+6", "crook/window/select-tab-6"),
+    ("alt+7", "crook/window/select-tab-7"),
+    ("alt+8", "crook/window/select-tab-8"),
+    ("alt+9", "crook/window/select-last-tab"),
+    // Windows Terminal's and Tilix's pane-focus chord. Not ctrl+shift+arrow,
+    // which is the field's own select-by-word off macOS.
+    ("alt+left", "crook/window/focus-pane-left"),
+    ("alt+right", "crook/window/focus-pane-right"),
+    ("alt+up", "crook/window/focus-pane-up"),
+    ("alt+down", "crook/window/focus-pane-down"),
+    ("ctrl+shift+]", "crook/window/focus-next-pane"),
+    ("ctrl+shift+[", "crook/window/focus-previous-pane"),
+    // The same two scrollback chords the Mac table takes, which is the one
+    // gesture xterm, GNOME Terminal, konsole, kitty and Windows Terminal all
+    // spell identically. The ends of the scrollback are on Alt because
+    // ctrl+home and ctrl+shift+home are both the field's off macOS, where
+    // `buffer_chord` is Ctrl.
+    ("shift+pageup", "crook/window/page-up"),
+    ("shift+pagedown", "crook/window/page-down"),
+    ("alt+home", "crook/window/scroll-to-top"),
+    ("alt+end", "crook/window/scroll-to-bottom"),
 ];
 
 #[cfg(test)]

@@ -275,6 +275,16 @@ pub(super) struct TabMenuState {
     pub(super) problem: Option<String>,
     /// Whether a git command is running for this menu right now.
     pub(super) working: bool,
+    /// The row the keyboard is standing on while the list is showing.
+    ///
+    /// `None` is the ordinary state — nothing is picked out, and the pointer
+    /// is the only thing lighting a row. The first arrow key lands on an end
+    /// of the list rather than on a row somebody would have to find, which is
+    /// how every list in this window that can be walked behaves.
+    ///
+    /// Only [`Mode::Listing`] reads it: the other three modes are one question
+    /// with two buttons, and Enter already answers them.
+    pub(super) selected: Option<usize>,
     /// One mouse state per control, made on the control's first frame.
     controls: std::cell::RefCell<HashMap<Control, MouseStateHandle>>,
 }
@@ -300,6 +310,29 @@ impl TabMenuState {
             Contents::Ready(worktrees) => worktrees,
             _ => &[],
         }
+    }
+
+    /// Steps the keyboard's row `by` places, or onto an end of the list from
+    /// nothing, and reports whether it moved.
+    ///
+    /// Clamped rather than wrapped: a list of checkouts is short and read top
+    /// to bottom, and an arrow that jumped from the last row back to the first
+    /// would be one a person pressing it twice cannot predict.
+    pub(super) fn move_selection(&mut self, by: isize) -> bool {
+        let count = self.worktrees().len();
+        if count == 0 {
+            return false;
+        }
+        let last = count as isize - 1;
+        let next = match self.selected {
+            Some(at) => (at as isize + by).clamp(0, last),
+            None if by < 0 => last,
+            None => 0,
+        };
+        let next = Some(next as usize);
+        let moved = self.selected != next;
+        self.selected = next;
+        moved
     }
 
     /// Forgets every hover and press the menu was holding.
@@ -468,8 +501,12 @@ fn worktree_row(
     // strip's close button is guarded exactly this way, and for exactly this
     // reason.
     let guard = remove.clone();
+    // The keyboard's row is lit exactly as the pointer's is, and carries the ×
+    // on the same terms: a person walking this list with the arrows has to be
+    // offered what a person hovering it is offered.
+    let picked = state.selected == Some(index);
     Hoverable::new(state.control(Control::Worktree(index)), move |mouse| {
-        let hovered = mouse.is_hovered();
+        let hovered = mouse.is_hovered() || picked;
 
         let mut line = Flex::row()
             .with_main_axis_size(MainAxisSize::Max)

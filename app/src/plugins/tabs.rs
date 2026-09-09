@@ -99,11 +99,11 @@ use crate::git::GitFacts;
 use crate::input_keys::Platform;
 use crate::plugin::{ActionId, BuildError, Host, Plugin, Showing};
 use crate::plugins::header::HEADER_LEFT;
-use crate::tab::{AgentStatus, PaneId, TabAction, TabColor, TabId, TabStrip};
+use crate::tab::{AgentStatus, PaneId, Tab, TabAction, TabColor, TabId, TabStrip};
 use crate::text_input::TextInput;
 use crate::theme::theme;
 use crate::workspace::tab_context_menu::{entry, field_entry, inert_entry, nothing, swatch_entry};
-use crate::workspace::{Workspace, WorkspaceAction, status_color};
+use crate::workspace::{OptionsAction, TabMenuAction, Workspace, WorkspaceAction, status_color};
 
 /// The mark at the head of a tab's row.
 pub const TAB_ROW_MARK: SlotId = SlotId::new("tab.row.mark");
@@ -350,7 +350,15 @@ impl Plugin for Tabs {
             let name = color.map_or("no-color".to_owned(), |color| {
                 format!("color-{}", color.name())
             });
-            host.register_action(action(&name), move |workspace, ctx| {
+            // A command rather than a bare action, like every other entry of
+            // this menu. Seven of them is more rows than the palette wants of
+            // any one plugin, and it is still the right trade: somebody who
+            // colours tabs has one colour they use, and a name is the only
+            // thing they can hang a chord off.
+            let title = color.map_or("Remove the tab's colour".to_owned(), |color| {
+                format!("Colour the tab {}", color.name())
+            });
+            host.register_command(action(&name), title, move |workspace, ctx| {
                 let Some((tab, _)) = workspace.menu_target() else {
                     return;
                 };
@@ -405,6 +413,56 @@ impl Plugin for Tabs {
             workspace.close_tab_context_menu(ctx);
             workspace.handle_action(&WorkspaceAction::Tab(TabAction::Close(tab)), ctx);
         });
+
+        // The menu itself, by name. Everything *in* it has been a command
+        // since this plugin was written, and the popup that holds them was the
+        // one thing only a secondary press could reach — so a person who never
+        // touches the pointer could run every entry and never see the list
+        // they belong to.
+        host.register_command(action("open-menu"), "Tab menu", |workspace, ctx| {
+            let Some((tab, pane)) = workspace.menu_target() else {
+                return;
+            };
+            workspace.handle_action(&TabMenuAction::Open { tab, pane }.into(), ctx);
+        });
+
+        // The panel's own menu, on the empty space under the tab list. Named
+        // for the same reason: it is the only way to reach "View as: Panes"
+        // and the four other options that are not on the settings page.
+        host.register_command(
+            action("view-options"),
+            "Tab panel view options",
+            |workspace, ctx| {
+                workspace.handle_action(&OptionsAction::TogglePopup.into(), ctx);
+            },
+        );
+
+        // The two things a *group* of tabs can be asked, which until now were
+        // the chevron and the × on its heading and nothing else. Both resolve
+        // the group from the tab the menu is on — or, with no menu, from the
+        // active tab — so "fold this away" means the group in front of you.
+        for (name, title, fold) in [
+            ("toggle-group", "Collapse or expand the tab's group", true),
+            ("close-group", "Close every tab in the group", false),
+        ] {
+            host.register_command(action(name), title, move |workspace, ctx| {
+                let Some((tab, _)) = workspace.menu_target() else {
+                    return;
+                };
+                let Some(group) = workspace.tabs().get(tab).and_then(Tab::group) else {
+                    // A tab that belongs to no group. Nothing to fold, and
+                    // nothing to close that `close-tab` does not already do.
+                    return;
+                };
+                workspace.close_tab_context_menu(ctx);
+                let action = if fold {
+                    TabAction::ToggleGroup(group)
+                } else {
+                    TabAction::CloseGroup(group)
+                };
+                workspace.handle_action(&WorkspaceAction::Tab(action), ctx);
+            });
+        }
 
         // The one command here that is about the strip rather than a row of
         // it: go to the next pane that is waiting for a person. A pane, not a
