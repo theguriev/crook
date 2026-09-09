@@ -179,6 +179,22 @@ impl When {
             }
         }
     }
+
+    /// Every context key this clause names, each once, in the order it names
+    /// them.
+    ///
+    /// What a row with no room for the clause itself prints. Not
+    /// [`names`](Self::names) with a [`Vec::dedup`] after it: that only
+    /// collapses neighbours, and `a && b && a` names three.
+    pub fn names_once(&self) -> Vec<&str> {
+        let mut once: Vec<&str> = Vec::new();
+        for name in self.names() {
+            if !once.contains(&name) {
+                once.push(name);
+            }
+        }
+        once
+    }
 }
 
 /// One piece of a clause.

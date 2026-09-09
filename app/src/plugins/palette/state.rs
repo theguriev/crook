@@ -11,11 +11,13 @@ use std::collections::HashMap;
 
 use crookui_core::elements::{MouseStateHandle, ScrollStateHandle};
 
-use crate::plugin::{ActionName, Showing};
+use crate::plugin::Showing;
 
 use crate::clipboard::Clipboard;
 use crate::text_input::TextInput;
 use crate::workspace::Fonts;
+
+use super::rows::{Mode, Rows};
 
 /// One clickable thing in the palette.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -90,6 +92,37 @@ impl Palette {
         self.scroll.lock().scroll_to_top();
     }
 
+    /// Puts it up on the list of keys, with `seed` in the box after the
+    /// sigil.
+    ///
+    /// The seed is what `--action "crook/palette/keys split"` sends through
+    /// [`Host::said`](crate::plugin::Host::said), which is how a row anywhere
+    /// else hands an argumentless action its subject — and the only way this
+    /// surface can be pictured with `--snapshot`.
+    pub(super) fn open_keys(&self, seed: &str) {
+        self.open();
+        self.query
+            .edit(|editor| editor.set_text(format!("{}{seed}", Mode::SIGIL)));
+    }
+
+    /// Puts the sigil on the front of the query, or takes it off.
+    ///
+    /// A text edit rather than a flag, which is the whole argument for keeping
+    /// the mode in the query: a search survives the switch, so `split` and
+    /// `?split` are one question asked of two lists. The caret lands at the
+    /// end, because `Editor::set_text` puts it there — caret arithmetic on a
+    /// keystroke that is about the list rather than about the text would be
+    /// buying very little.
+    pub(super) fn toggle_mode(&self) {
+        self.query.edit(|editor| {
+            let flipped = match editor.text().strip_prefix(Mode::SIGIL) {
+                Some(rest) => rest.to_owned(),
+                None => format!("{}{}", Mode::SIGIL, editor.text()),
+            };
+            editor.set_text(flipped);
+        });
+    }
+
     /// Takes it down.
     pub(super) fn close(&self) {
         self.open.set(false);
@@ -107,19 +140,23 @@ impl Palette {
         self.selected.get()
     }
 
-    /// Moves it, wrapping at both ends over a list of `len` rows.
+    /// Puts it on a line somebody else worked out, for the switch that keeps
+    /// the row a person was on when the list under it changed.
+    pub(super) fn select(&self, at: usize) {
+        self.selected.set(at);
+    }
+
+    /// Moves it, wrapping at both ends over the lines it may land on.
     ///
     /// Wrapping because the list is short and a person holding Down expects to
     /// come back to the top, which is what the Themes panel does with the same
-    /// keys.
-    pub(super) fn move_selection(&self, by: isize, len: usize) {
-        if len == 0 {
-            self.selected.set(0);
-            return;
+    /// keys. Which lines those are is [`Rows`]'s to say — a heading is stepped
+    /// over, and so is a key a pane eats — and a list with nothing to land on
+    /// leaves the selection alone rather than putting it on a heading.
+    pub(super) fn move_selection(&self, by: isize, rows: &Rows) {
+        if let Some(at) = rows.stepped(self.selected.get(), by) {
+            self.selected.set(at);
         }
-        let index = self.selected.get() as isize;
-        self.selected
-            .set((index + by).rem_euclid(len as isize) as usize);
     }
 
     /// Puts the selection somewhere that exists, given what is being shown.
@@ -129,9 +166,15 @@ impl Palette {
     /// first row is the best match for what was just typed and leaving the
     /// selection four rows down a list somebody is still typing is how a
     /// palette runs the wrong thing. A list that changed for any other reason
-    /// — a plugin disabled while the palette is up — only clamps, so the
-    /// selection stays where the person put it.
-    pub(super) fn settle(&self, query: &str, len: usize) {
+    /// — a plugin disabled while the palette is up — only settles, so the
+    /// selection stays near where the person put it.
+    ///
+    /// `query` is the *whole* of what has been typed, the mode sigil
+    /// included: turning the card over changes the list under the selection
+    /// exactly the way typing does, so it counts as a change. The row a person
+    /// was on is put back afterwards by name, by the handler that turned it —
+    /// see `crook/palette/mode`.
+    pub(super) fn settle(&self, query: &str, rows: &Rows) {
         let changed = {
             let mut last = self.last_query.borrow_mut();
             let changed = *last != query;
@@ -142,16 +185,17 @@ impl Palette {
         };
 
         if changed {
-            self.selected.set(0);
+            // The first *command*, not line zero, which in the list of keys is
+            // a heading. This is what keeps "open it, type three letters,
+            // press Enter" the three keystrokes it was before there were
+            // headings to step over.
+            self.selected.set(rows.first_command().unwrap_or(0));
             self.scroll.lock().scroll_to_top();
             return;
         }
 
-        if len == 0 {
-            self.selected.set(0);
-        } else if self.selected.get() >= len {
-            self.selected.set(len - 1);
-        }
+        self.selected
+            .set(rows.settled(self.selected.get()).unwrap_or(0));
     }
 
     /// The list's scroll position.
@@ -177,24 +221,4 @@ impl Palette {
             .or_default()
             .clone()
     }
-}
-
-/// One row: a command, and what to call it.
-pub(super) struct Command {
-    /// The name, printed on the right of the row.
-    ///
-    /// Because it is the only way a person finds out what to write in their
-    /// keybindings file, and because two plugins may reasonably both offer "Refresh" —
-    /// the name is what tells them apart.
-    pub(super) action: ActionName,
-    /// What it is called.
-    pub(super) title: String,
-    /// The chord that reaches it, if one does.
-    ///
-    /// Read here rather than in the row that prints it, because the row is
-    /// handed a list and never sees the window. It is the *first* chord, since
-    /// a row is one line and the zoom answers to eight — and it is whatever is
-    /// in force now, so somebody who rebound a command reads their own chord
-    /// on the way to running it.
-    pub(super) chord: Option<String>,
 }

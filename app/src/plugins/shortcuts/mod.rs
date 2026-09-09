@@ -54,6 +54,13 @@ use crate::workspace::{Fonts, SettingsAction, Workspace, WorkspaceAction};
 /// What the page is called, in the rail and to `--settings`.
 pub const PAGE_TITLE: &str = "Keyboard Shortcuts";
 
+/// What a command with no key says, on both surfaces that say it.
+///
+/// Shared rather than written twice, because the two surfaces are read one
+/// after the other by somebody working out what to bind, and two words for one
+/// state would read as two states.
+pub(crate) const NOT_BOUND: &str = "not bound";
+
 /// The plugin that owns the Keyboard Shortcuts page.
 pub struct Shortcuts;
 
@@ -152,7 +159,7 @@ fn commands(workspace: &Workspace) -> Vec<Category> {
             Some(at) => categories[at].entries.push(row),
             None => {
                 owners.push(owner);
-                categories.push(widgets::category(plugin_name(workspace, owner), vec![row]));
+                categories.push(widgets::category(host.name_of(owner), vec![row]));
             }
         }
     }
@@ -195,7 +202,7 @@ fn binding_row(
     // Every chord, not the first one: somebody asking "why did this fire"
     // needs to see the second one.
     let value = match chords.is_empty() {
-        true => "not bound".to_owned(),
+        true => NOT_BOUND.to_owned(),
         false => chords.join(", "),
     };
     let shown = match recording {
@@ -292,17 +299,6 @@ fn recorded(workspace: &Workspace, recording: &Recording) -> String {
     line
 }
 
-/// What a plugin calls itself, for a category heading.
-fn plugin_name(workspace: &Workspace, owner: &PluginId) -> String {
-    workspace
-        .host()
-        .loaded()
-        .iter()
-        .find(|manifest| &manifest.id == owner)
-        .map(|manifest| manifest.name.to_owned())
-        .unwrap_or_else(|| owner.to_string())
-}
-
 /// The rules out of the person's own file, printed back to them.
 ///
 /// `None` when there are none, so an untouched install is not given an empty
@@ -346,9 +342,7 @@ fn your_bindings(workspace: &Workspace) -> Option<Category> {
 /// The context keys a clause turns on, for a row that has no room for the
 /// clause itself.
 fn clause_text(clause: &keybindings::When) -> String {
-    let mut names = clause.names();
-    names.dedup();
-    format!("it depends on {}", names.join(", "))
+    format!("it depends on {}", clause.names_once().join(", "))
 }
 
 /// Where the file is, what goes in it, and what a `when` clause may name.
@@ -425,95 +419,145 @@ fn the_file(workspace: &Workspace) -> Category {
     widgets::category("Your own bindings", entries)
 }
 
+/// One key that belongs to the program in the pane rather than to a
+/// keybinding.
+///
+/// Two surfaces print these — this page, and the palette's list of keys — and
+/// a second copy of the table is how the two would come to disagree about what
+/// ctrl-c does. That is the same two-lists failure this module's own doc exists
+/// to describe, one step further in.
+pub(crate) struct PaneKey {
+    /// What the key does, in the words a row prints.
+    pub(crate) label: &'static str,
+    /// What a search should find the row by that the row does not say:
+    /// `sigint`, `ctrl-c` written with a hyphen, `yank`. Both surfaces search
+    /// them, which is what makes the two answer a query the same way.
+    pub(crate) keywords: &'static [&'static str],
+    /// The keys, ` / `-separated. Two entries differ by platform and the rest
+    /// do not; [`keys`](Self::keys) is what a caller wants and the fields
+    /// behind it are not.
+    mac: &'static str,
+    other: &'static str,
+}
+
+impl PaneKey {
+    /// The keys as this platform's user presses them.
+    pub(crate) fn keys(&self) -> &'static str {
+        match crate::input_keys::Platform::current() {
+            crate::input_keys::Platform::Mac => self.mac,
+            crate::input_keys::Platform::Other => self.other,
+        }
+    }
+}
+
+/// Every key a pane answers to, in the order both surfaces print them.
+///
+/// Not keybindings and never reachable from a keybindings file: what a pane
+/// does with a key belongs to the program in it, and the reason this table is
+/// on a page about chords at all is that a page which answered "what does this
+/// key do" with silence for the keys somebody presses most would be worse than
+/// no page.
+pub(crate) const PANE_KEYS: &[PaneKey] = &[
+    PaneKey {
+        label: "Send the line to the shell",
+        keywords: &["run", "execute", "submit", "return"],
+        mac: "enter",
+        other: "enter",
+    },
+    PaneKey {
+        label: "Lengthen it by a line",
+        keywords: &["multiline", "newline", "continue"],
+        mac: "shift+enter",
+        other: "shift+enter",
+    },
+    PaneKey {
+        label: "Walk this pane's history",
+        keywords: &["previous", "recall", "arrow"],
+        mac: "up / down",
+        other: "up / down",
+    },
+    PaneKey {
+        label: "Complete the word, and step through what the shell offered",
+        keywords: &["completion", "complete", "tab", "suggest"],
+        mac: "tab / shift+tab",
+        other: "tab / shift+tab",
+    },
+    PaneKey {
+        label: "Take the suggestion standing after the caret",
+        keywords: &["autosuggest", "ghost", "history", "completion", "accept"],
+        mac: "right / alt+right for one word",
+        other: "right / ctrl+right for one word",
+    },
+    PaneKey {
+        label: "Interrupt, suspend, end the input",
+        keywords: &["signal", "sigint", "ctrl-c", "ctrl-d", "ctrl-z"],
+        mac: "ctrl+c / ctrl+z / ctrl+d",
+        other: "ctrl+c / ctrl+z / ctrl+d",
+    },
+    PaneKey {
+        label: "Select a run of the output",
+        keywords: &["mouse", "drag", "highlight", "word", "line", "column"],
+        mac: "drag / double / triple click / alt+drag",
+        other: "drag / double / triple click / alt+drag",
+    },
+    PaneKey {
+        label: "Copy what is selected",
+        keywords: &["clipboard", "yank"],
+        mac: "cmd+c",
+        other: "ctrl+c or ctrl+shift+c",
+    },
+    PaneKey {
+        label: "Copy a whole command and its output",
+        keywords: &["clipboard", "block", "yank"],
+        mac: "hover it, then click",
+        other: "hover it, then click",
+    },
+];
+
 /// The keys that are the pane's, and cannot be bound to anything else.
+///
+/// The rows come from [`PANE_KEYS`]; the notes after them stay here, because
+/// they are prose for a settings page and have no place in a list of keys.
 fn in_a_pane(workspace: &Workspace) -> Category {
     let fonts = workspace.fonts();
     let ui = fonts.ui;
-    let key = |label: &str, keywords: &[&str], value: &str| {
-        widgets::fact(
-            Words::new(label.to_owned()).with_keywords(keywords),
-            value.to_owned(),
-            true,
-            fonts,
-        )
-    };
 
-    widgets::category(
-        "In a pane",
-        vec![
-            key(
-                "Send the line to the shell",
-                &["run", "execute", "submit", "return"],
-                "enter",
-            ),
-            key(
-                "Lengthen it by a line",
-                &["multiline", "newline", "continue"],
-                "shift+enter",
-            ),
-            key(
-                "Walk this pane's history",
-                &["previous", "recall", "arrow"],
-                "up / down",
-            ),
-            key(
-                "Complete the word, and step through what the shell offered",
-                &["completion", "complete", "tab", "suggest"],
-                "tab / shift+tab",
-            ),
-            key(
-                "Take the suggestion standing after the caret",
-                &["autosuggest", "ghost", "history", "completion", "accept"],
-                match crate::input_keys::Platform::current() {
-                    crate::input_keys::Platform::Mac => "right / alt+right for one word",
-                    crate::input_keys::Platform::Other => "right / ctrl+right for one word",
-                },
-            ),
-            key(
-                "Interrupt, suspend, end the input",
-                &["signal", "sigint", "ctrl-c", "ctrl-d", "ctrl-z"],
-                "ctrl+c / ctrl+z / ctrl+d",
-            ),
-            key(
-                "Select a run of the output",
-                &["mouse", "drag", "highlight", "word", "line", "column"],
-                "drag / double / triple click / alt+drag",
-            ),
-            key(
-                "Copy what is selected",
-                &["clipboard", "yank"],
-                match crate::input_keys::Platform::current() {
-                    crate::input_keys::Platform::Mac => "cmd+c",
-                    crate::input_keys::Platform::Other => "ctrl+c or ctrl+shift+c",
-                },
-            ),
-            key(
-                "Copy a whole command and its output",
-                &["clipboard", "block", "yank"],
-                "hover it, then click",
-            ),
-            widgets::note(
-                "None of these can be rebound, and that is the line the keybindings stop at: \
-                 what a pane does with a key belongs to the program in it. ctrl-c interrupts, \
-                 ctrl-d ends an input and ctrl-z suspends, and a keybinding that could take one \
-                 of those away would be one that breaks a terminal.",
-                ui,
-            ),
-            widgets::note(
-                "A selection in the output owns the copy chord for as long as it exists, and \
-                 copying lets go of it — which is the only sign a copy happened. That is what \
-                 settles ctrl-c off macOS, where the same key is also the interrupt: with \
-                 nothing selected it interrupts exactly as it always has, and because copying \
-                 releases the selection, the very next press does too.",
-                ui,
-            ),
-            widgets::note(
-                "The field goes away, and every key reaches the program instead, in three \
-                 cases: a full-screen program — vim, `top` — is up, the shell has reported a \
-                 command running for longer than a blink, or the output is being drawn as a \
-                 plain terminal because the shell reports no command boundaries at all.",
-                ui,
-            ),
-        ],
-    )
+    let mut entries: Vec<Entry> = PANE_KEYS
+        .iter()
+        .map(|key| {
+            widgets::fact(
+                Words::new(key.label.to_owned()).with_keywords(key.keywords),
+                key.keys().to_owned(),
+                true,
+                fonts,
+            )
+        })
+        .collect();
+
+    entries.extend([
+        widgets::note(
+            "None of these can be rebound, and that is the line the keybindings stop at: \
+             what a pane does with a key belongs to the program in it. ctrl-c interrupts, \
+             ctrl-d ends an input and ctrl-z suspends, and a keybinding that could take one \
+             of those away would be one that breaks a terminal.",
+            ui,
+        ),
+        widgets::note(
+            "A selection in the output owns the copy chord for as long as it exists, and \
+             copying lets go of it — which is the only sign a copy happened. That is what \
+             settles ctrl-c off macOS, where the same key is also the interrupt: with \
+             nothing selected it interrupts exactly as it always has, and because copying \
+             releases the selection, the very next press does too.",
+            ui,
+        ),
+        widgets::note(
+            "The field goes away, and every key reaches the program instead, in three \
+             cases: a full-screen program — vim, `top` — is up, the shell has reported a \
+             command running for longer than a blink, or the output is being drawn as a \
+             plain terminal because the shell reports no command boundaries at all.",
+            ui,
+        ),
+    ]);
+
+    widgets::category("In a pane", entries)
 }
