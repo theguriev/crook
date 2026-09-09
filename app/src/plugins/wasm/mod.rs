@@ -790,6 +790,11 @@ fn menu_group(
         let chrome = chrome.clone();
         block_menu::entry(
             item.label.clone(),
+            // A guest's row prints its chord on the same terms Crook's own do,
+            // and the name it is looked up by is the one the guest asked for —
+            // so a plugin whose action somebody bound is a plugin whose menu
+            // says so, with nothing on either side of the boundary told.
+            block_menu::chord_for(workspace, &format!("{who}/{}", item.action)),
             // An entry naming an action nothing answers to is drawn as a row
             // that cannot be pressed, for the reason a button whose action is
             // missing is drawn inert: a control that vanishes is harder to

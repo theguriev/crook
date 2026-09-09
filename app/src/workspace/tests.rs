@@ -3426,6 +3426,67 @@ fn the_menu_reads_the_repository_the_click_landed_on() {
 }
 
 #[test]
+fn the_worktree_list_is_walked_and_opened_with_the_keyboard() {
+    // The list was the deepest pointer-only thing in the window: opening a
+    // checkout was a press on a row, and the × that offers to remove one was
+    // drawn on hover, so neither had a key at all.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(scratch.path()) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+
+    let mut harness = Harness::seeded();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+
+    let tab = harness
+        .workspace
+        .read(&harness.app, |workspace, _| workspace.tabs().active_id());
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    harness.frame();
+
+    let selected = |harness: &Harness| {
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace.tab_menu().selected)
+    };
+    assert_eq!(selected(&harness), None, "the list opens with nothing lit");
+
+    // Down from nothing is the first row, and a clamped list stays on it.
+    assert!(harness.press_key("down", Modifiers::default()));
+    assert_eq!(selected(&harness), Some(0));
+    assert!(harness.press_key("up", Modifiers::default()));
+    assert_eq!(selected(&harness), Some(0), "the top is as far as up goes");
+
+    // The one checkout a fresh repository has is its main one, which is
+    // exactly the row the × is never drawn on — so Delete must not open a
+    // question git is certain to refuse.
+    assert!(harness.press_key("delete", Modifiers::default()));
+    assert!(
+        !harness.worktree_menu_is_confirming(),
+        "Delete asked about a checkout the × is not drawn on"
+    );
+
+    // Enter on the checkout this tab is already in brings it forward, which
+    // closes the menu the way the row's own press does.
+    assert!(harness.press_key("enter", Modifiers::default()));
+    assert!(
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| !workspace
+                .worktree_menu_is_open()),
+        "Enter left the menu standing"
+    );
+}
+
+#[test]
 fn a_tabs_menu_is_the_entries_its_plugins_put_in_it() {
     // The shell knows no entry by name, so this list is the whole of what a
     // tab's menu is — and it comes from two plugins rather than one, which is
