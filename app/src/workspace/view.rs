@@ -2961,6 +2961,20 @@ impl Workspace {
             .and_then(crate::git::current_branch)
             .map(|head| head.label().to_owned());
         self.block_menu.on = Some((pane, block));
+        // The corner the popup hangs off is written by the *paint* of the
+        // frame that draws the block's controls, so a menu opened from the
+        // keyboard on a block the pointer has never been over has no corner
+        // yet — and whatever the last hover left would put this menu on
+        // somebody else's block. Cleared, so the first frame uses `anchor`'s
+        // own fallback — the pane's top-right, where a block's controls are —
+        // and the paint at the end of it puts the real corner in for the next
+        // one. `PaintContext` cannot ask for that next frame, which is why
+        // this is a fallback rather than a fix.
+        if let Some(view) = self.pane_blocks(pane)
+            && view.hovered() != Some(block)
+        {
+            view.set_menu_at(None);
+        }
         self.block_menu.directory = directory;
         self.block_menu.command = command;
         self.block_menu.exit = exit;
