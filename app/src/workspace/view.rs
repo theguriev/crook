@@ -1406,10 +1406,16 @@ impl Workspace {
     /// one caller and it is a test — but a table that can be replaced is what
     /// "you changed the file, here it is" needs, and nothing about swapping it
     /// has to wait for that.
-    pub fn set_keybindings(&mut self, mut keybindings: Keybindings) {
+    ///
+    /// It repaints, and that is not housekeeping: a menu row and a palette row
+    /// each print the chord that reaches them, read live from this table, so a
+    /// reload that did not notify would leave every one of them printing the
+    /// chord that used to be there.
+    pub fn set_keybindings(&mut self, mut keybindings: Keybindings, ctx: &mut ViewContext<Self>) {
         keybindings.set_plugin_rules(self.host.suggested_rules());
         self.keybindings = keybindings;
         self.pending_keys.borrow_mut().clear();
+        ctx.notify();
     }
 
     /// What the window is doing, as the keys a `when` clause may name.

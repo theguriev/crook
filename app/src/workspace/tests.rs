@@ -769,7 +769,7 @@ impl Harness {
         let keybindings = crate::keybindings::Keybindings::load(&path);
         assert!(!keybindings.is_empty(), "nothing in {text:?} was a binding");
 
-        self.workspace_update(|workspace, _| workspace.set_keybindings(keybindings));
+        self.workspace_update(|workspace, ctx| workspace.set_keybindings(keybindings, ctx));
     }
 
     /// Turns the wheel over the middle of the settings card.
@@ -12050,7 +12050,7 @@ fn the_shortcuts_page_lists_what_a_plugin_registered_and_the_chord_that_reaches_
 fn keybindings_in(harness: &mut Harness, scratch: &Scratch) -> PathBuf {
     let path = scratch.path().join("keybindings.json");
     let keybindings = crate::keybindings::Keybindings::load(&path);
-    harness.workspace_update(|workspace, _| workspace.set_keybindings(keybindings));
+    harness.workspace_update(|workspace, ctx| workspace.set_keybindings(keybindings, ctx));
     path
 }
 
@@ -14386,6 +14386,48 @@ mod from_the_keyboard {
                 .is_pinned()
         });
         assert_ne!(pinned_before, pinned_after, "Enter ran no entry");
+    }
+
+    #[test]
+    fn a_menu_row_prints_the_chord_that_reaches_it() {
+        // The whole of why the chord is not passed in: the key a row is built
+        // with is the name of the action it runs, so a binding written this
+        // morning is on the row this afternoon with nothing told about it.
+        let mut harness = Harness::panel(1);
+        harness.run_command("crook/tabs/open-menu");
+        assert!(
+            !frame_text(&harness.frame()).contains("ctrl+alt+9"),
+            "the chord was printed before anything was bound to it"
+        );
+
+        harness.bind(r#"[{ "key": "ctrl+alt+9", "command": "crook/tabs/close-tab" }]"#);
+        let text = frame_text(&harness.frame());
+        assert!(
+            text.contains("ctrl+alt+9"),
+            "the menu does not print the chord it was given: {text}"
+        );
+    }
+
+    #[test]
+    fn a_palette_row_prints_the_chord_that_reaches_it() {
+        let mut harness = Harness::panel(1);
+        harness.run_command("crook/palette/open");
+
+        let text = frame_text(&harness.frame());
+        // Whichever platform this runs on, the chord for a new tab is shipped
+        // and the palette lists it.
+        let expected = match crate::input_keys::Platform::current() {
+            crate::input_keys::Platform::Mac => "cmd+t",
+            crate::input_keys::Platform::Other => "ctrl+shift+t",
+        };
+        assert!(
+            text.contains("New agent tab"),
+            "the palette did not open: {text}"
+        );
+        assert!(
+            text.contains(expected),
+            "the palette does not print {expected}: {text}"
+        );
     }
 
     #[test]
