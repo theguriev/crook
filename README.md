@@ -50,8 +50,8 @@ Eight features, and the page that configures them:
   [`docs/architecture.md`](docs/architecture.md) §3 for what is still unrun and what was checked
   instead of running it.
 - **Plugins, in two tiers, and the second one is not in the binary.** Everything Crook itself
-  does is a plugin on the registries a stranger's plugin uses — the header, the window's
-  thirteen commands, the command palette, every settings page — which is the only way to know
+  does is a plugin on the registries a stranger's plugin uses — the header, the window's own
+  commands, the command palette, every settings page — which is the only way to know
   the API is enough. Beside that native tier is a **sandboxed** one: a `.wasm` module in the
   plugins directory, run in an interpreter with no imports but a handful, with no filesystem,
   no network and no clock of its own. It *describes* what it wants drawn — text, a badge, a
@@ -317,7 +317,7 @@ Eight features, and the page that configures them:
 - **Keybindings**, in VSCode's format and with VSCode's rules, in
   `<config>/crook/keybindings.json`: a list of `{ "key", "command", "when" }` rules, the last
   matching rule wins, a `-` in front of a command takes it off a chord, and a key may be a
-  sequence like `"ctrl+k ctrl+s"`. A command is a name — the window's own thirteen are
+  sequence like `"ctrl+k ctrl+s"`. A command is a name — the window's own are
   `crook/window/*`, and a plugin's are its own — so anything reachable by name is bindable,
   including things this build has never heard of. What a *pane* does with a key is not in it:
   `ctrl-c` interrupts and `ctrl-d` ends an input, and a binding that could take one of those
@@ -331,14 +331,56 @@ Eight features, and the page that configures them:
   `crook/shortcuts/rebind`, which is how a plugin's own chip can offer "change this
   keybinding" without being able to write a file itself.
 
+- **Everything the window does has a name, and most of it has a key.** The window registers
+  forty-nine commands of its own and ships chords for the twenty-eight somebody arrives
+  expecting; the rest are reached by name, from the palette or from a chord of your own. That
+  split is deliberate — a shipped chord is a key taken away from the shell in every pane,
+  forever, so it is spent on what is pressed often and not on what is done once a week.
+
+  | | macOS | Linux and Windows |
+  |---|---|---|
+  | Tab by position, and the last one | `cmd-1`…`cmd-8`, `cmd-9` | `alt-1`…`alt-8`, `alt-9` |
+  | Move between the panes of a split | `ctrl-shift-←↑↓→` | `alt-←↑↓→` |
+  | The next pane, the previous one | `cmd-]`, `cmd-[` | `ctrl-shift-]`, `ctrl-shift-[` |
+  | Page the output | `shift-PageUp`, `shift-PageDown` | the same |
+  | The ends of the scrollback | `shift-cmd-PageUp`, `shift-cmd-PageDown` | `alt-Home`, `alt-End` |
+
+  Paging works over both surfaces, which is the split the wheel already makes: a pane drawing
+  a list of commands moves its own offset, and one a full-screen program has taken moves the
+  emulator's history. The bare page keys are left to the program — Shift has always been what
+  takes the scrollback back from whatever is running.
+
+  A chord that cannot do anything **declines**, and the keystroke goes on to the shell. There
+  is nothing above a row of panes, so `ctrl-shift-↑` over one still means whatever it means in
+  vim; a digit past the end of the strip selects nothing; and the commands about a block do
+  nothing at the prompt, where none is selected. A chord is never silently swallowed.
+
+  Without a chord, by name: `split-left` and `split-up`, `grow-pane`, `shrink-pane` and
+  `even-panes`, every entry of a block's menu (`copy-block-command`, `copy-block-output`,
+  `copy-block-directory`, `copy-block-branch`, `rerun-block`, `scroll-to-block-top`), every
+  entry of a tab's (`crook/tabs/pin-tab`, `close-tab`, `open-menu`, `view-options`,
+  `toggle-group`, `close-group`, the seven colours), the worktree list (`crook/worktrees/menu`)
+  and every settings page (`crook/appearance/open-page` and its five neighbours). The block
+  entries act on the block the menu is up on, or — with no menu — on the one the keyboard has
+  selected, so each of them is a chord as well as a row.
+
+- **The menus can be walked.** A tab's context menu opens with `crook/tabs/open-menu`, the
+  arrows move down it, Enter runs the row and Escape takes it down. The worktree list inside
+  it answers the same four, plus Delete to offer to remove the checkout the keyboard is on —
+  and only where the × would be drawn, so a key cannot ask about one git is certain to refuse.
+  Every row of both prints **the chord that reaches it**, right-aligned, and so does every row
+  of the command palette: neither is told one, because the key a row is built with is the name
+  of the action it runs, so what is printed is whatever is in force — including a chord you
+  rebound this morning.
+
 Everything else is out of scope on purpose. There is no telemetry, and OSC 8 hyperlinks are
 not read — though a URL a program *printed* is clickable, because the scan that finds one
 works the same on a finished block as on the live grid, which an OSC 8 carried on the grid
-alone would not. The keyboard steps through the blocks and selects one, and the composer types
-on the prompt's own line, but the blocks are still short of a few things: no pointer
-click-to-select a block, no sticky header for one taller than the window, and no
-jump-to-bottom button; [`docs/blocks.md`](docs/blocks.md) lists those and says what each would
-touch.
+alone would not. The keyboard steps through the blocks, selects one, pages the output and
+runs every entry of a block's menu by name, and the composer types on the prompt's own line,
+but the blocks are still short of a few things: no pointer click-to-select a block, no sticky
+header for one taller than the window, and no jump-to-bottom *button* — the chord for it
+exists; [`docs/blocks.md`](docs/blocks.md) lists those and says what each would touch.
 The terminal grid still reaches no clipboard of its own: the input field copies and pastes, an
 OSC 52 from the shell does not. The list of what is absent — and what adding each item would
 touch — is the last section of the architecture doc.

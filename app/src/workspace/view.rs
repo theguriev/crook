@@ -4704,7 +4704,7 @@ impl Workspace {
 
     /// What a command name does, right now.
     ///
-    /// The window's own thirteen go through [`Self::command`] rather than
+    /// The window's own go through [`Self::command`] rather than
     /// through the host, even though `crook/window` registers every one of
     /// them: those can *decline* — closing a pane when there is no focused
     /// one — and a chord that declines goes on to the shell. An action

@@ -443,7 +443,10 @@ Stage 1 of the port. These are absent on purpose, not overlooked:
   is still the text drag across the list.
 * **The sticky header.** A block taller than the window scrolls like any other content; there
   is nothing pinned to say which command you are inside.
-* **Jump-to-bottom.** No button when a block continues below the fold.
+* **Jump-to-bottom, as a button.** The keyboard has one — `crook/window/scroll-to-bottom`,
+  `shift-cmd-PageDown` and `alt-End` — and so does `page-up` / `page-down` and
+  `scroll-to-top`, over the block list and over a full-screen program's grid alike. What is
+  still absent is the *button* a pointer would press when a block continues below the fold.
 * **`clear` as a gap.** Ctrl-L does what the emulator does with it.
 * **Lazy reflow on a column change.** A harvested block keeps the width it was harvested at.
 * Share, bookmarks, block filters, and everything else that needs a block to

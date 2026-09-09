@@ -586,7 +586,7 @@ plugin any other way:
   native plugins and a declarative tree for sandboxed ones (§4).
 - `host.actions` — register a named action (`owner/name`) with a handler. Named actions are
   what the keybindings file, the palette and other plugins address; they replace "add a
-  variant to `WorkspaceAction`". The thirteen built-in bindings are named actions of
+  variant to `WorkspaceAction`". The built-in bindings are named actions of
   `crook/window`, bound by the shipped keybindings like anything else.
 - `host.settings` — register a schema under `plugins.<id>` in `settings.json`; the settings
   page renders it. The file already keeps unknown keys, so this is the one place a plugin can

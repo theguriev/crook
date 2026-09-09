@@ -48,7 +48,7 @@
 //! # What a command is
 //!
 //! An [`ActionName`] — `owner/plugin/action` — and there is no second kind.
-//! The window's own thirteen commands are `crook/window/*`, registered by the
+//! The window's own commands are `crook/window/*`, registered by the
 //! `crook/window` plugin like any other, which is what lets one table hold
 //! both and what lets the settings page list every bindable thing without
 //! being told any of them.
