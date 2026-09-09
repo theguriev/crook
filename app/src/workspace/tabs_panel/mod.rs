@@ -33,7 +33,7 @@
 //!
 //! | | `Panes` | `Tabs` |
 //! |---|---|---|
-//! | tab container | 8px inset, hairline separators, no gaps | no inset, no border, 4px gaps |
+//! | tab container | 8px inset, no border, no gaps | no inset, no border, 4px gaps |
 //! | group header | when the tab holds more than one pane | never |
 //! | list column | no padding, no spacing | `uniform(8).with_top(0)`, spacing 4 |
 //! | hover card | the row's own pane | every pane of the tab, one section each |
@@ -426,30 +426,28 @@ fn list(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
     }
 
     let blocks = blocks_of(workspace, rows);
-    let last = blocks.len().saturating_sub(1);
 
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
 
-    for (index, block) in blocks.into_iter().enumerate() {
-        let is_last = index == last;
+    for block in blocks {
         match block.group {
             Some(group) => {
-                column.add_child(group_block(workspace, group, &block.tabs, is_last, app));
+                column.add_child(group_block(workspace, group, &block.tabs, app));
             }
             None => {
                 for (tab, panes) in &block.tabs {
-                    column.add_child(tab_block(workspace, *tab, panes, None, is_last, app));
+                    column.add_child(tab_block(workspace, *tab, panes, None, app));
                 }
             }
         }
     }
 
     match granularity {
-        // No spacing and no padding: `Panes` separates tabs with hairlines
-        // rather than with gaps, and a gap here would show the panel's ground
-        // through every separator.
+        // No spacing and no padding: in `Panes` a tab is a block rather than
+        // a card, and the background a tab lights up with is what separates it
+        // from its neighbours.
         Granularity::Panes => column.finish(),
         Granularity::Tabs => Container::new(column.with_spacing(TABS_MODE_ITEM_SPACING).finish())
             .with_padding(Padding {
@@ -505,7 +503,6 @@ fn tab_block(
     tab: TabId,
     panes: &[PaneId],
     group: Option<GroupId>,
-    is_last: bool,
     app: &AppContext,
 ) -> Box<dyn Element> {
     let Some(chrome) = workspace.tab_chrome(tab) else {
@@ -514,14 +511,7 @@ fn tab_block(
     };
 
     let element = match workspace.options().granularity {
-        Granularity::Panes => panes_tab(
-            workspace,
-            tab,
-            panes,
-            group.is_none() && is_last,
-            group.is_some(),
-            app,
-        ),
+        Granularity::Panes => panes_tab(workspace, tab, panes, group.is_some(), app),
         Granularity::Tabs => tabs_tab(workspace, tab, panes, app),
     };
 
@@ -542,14 +532,13 @@ fn tab_block(
 ///
 /// The container is Warp's `render_grouped_tab_container`, with the members
 /// indented past it so that "these belong together" is said by the indent
-/// rather than by a colour. A member skips its own outer chrome — in `Panes`
-/// the hairlines that separate tabs — because the group is already providing
-/// it; that is Warp's `uses_outer_group_container = !in_tab_group && …`.
+/// rather than by a colour. A member skips its own outer chrome because the
+/// group is already providing it; that is Warp's
+/// `uses_outer_group_container = !in_tab_group && …`.
 fn group_block(
     workspace: &Workspace,
     group: GroupId,
     members: &[(TabId, Vec<PaneId>)],
-    is_last: bool,
     app: &AppContext,
 ) -> Box<dyn Element> {
     let Some(data) = workspace.tabs().group(group) else {
@@ -591,7 +580,7 @@ fn group_block(
             });
 
         for (tab, panes) in members {
-            rows.add_child(tab_block(workspace, *tab, panes, Some(group), false, app));
+            rows.add_child(tab_block(workspace, *tab, panes, Some(group), app));
         }
 
         column.add_child(
@@ -622,15 +611,9 @@ fn group_block(
         });
 
         match granularity {
-            // The chrome a tab wears in this mode, one level up: hairlines
-            // rather than a card, so the list still has no gaps in it.
-            Granularity::Panes => container
-                .with_border(
-                    Border::new(1.)
-                        .with_sides(true, false, is_last, false)
-                        .with_border_color(theme().overlay_1),
-                )
-                .finish(),
+            // The chrome a tab wears in this mode, one level up: a plain
+            // fill rather than a card, so the list still has no gaps in it.
+            Granularity::Panes => container.finish(),
             Granularity::Tabs => container
                 .with_corner_radius(CornerRadius::with_all(Radius::Pixels(GROUP_RADIUS)))
                 .finish(),
@@ -863,15 +846,13 @@ fn rows_by_tab(
 
 /// One tab in `Panes` granularity: a container around all of its rows.
 ///
-/// Warp's `uses_outer_group_container == true` branch. The hairline borders
-/// are what separate tabs — a top border on every one and a bottom border on
-/// the last — so the list has no gaps in it at all and a tab reads as a block
-/// rather than as a card.
+/// Warp's `uses_outer_group_container == true` branch. No border on any edge:
+/// the list has no gaps in it at all and a tab reads as a block rather than as
+/// a card, with the fill an active or hovered tab takes doing the separating.
 fn panes_tab(
     workspace: &Workspace,
     tab: TabId,
     panes: &[PaneId],
-    is_last: bool,
     in_group: bool,
     app: &AppContext,
 ) -> Box<dyn Element> {
@@ -942,11 +923,6 @@ fn panes_tab(
             } else {
                 Color::TRANSPARENT
             })
-            .with_border(
-                Border::new(1.)
-                    .with_sides(true, false, is_last, false)
-                    .with_border_color(theme().overlay_1),
-            )
             .finish()
     })
     // No click handler on purpose, and Warp's container has none either — it

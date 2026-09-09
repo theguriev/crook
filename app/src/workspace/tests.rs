@@ -5299,12 +5299,13 @@ fn panes_granularity_insets_and_separates_its_tabs_and_tabs_granularity_spaces_t
         .map(|two| two[1].min_y() - two[0].max_y())
         .collect();
 
-    // Panes: 8px of the tab's own bottom padding, a hairline, and 8px of the
-    // next tab's top padding — no gap in the list column at all.
+    // Panes: 8px of the tab's own bottom padding and 8px of the next tab's
+    // top padding — no border between them and no gap in the list column at
+    // all.
     for gap in &panes_gaps {
         assert!(
-            (*gap - 17.).abs() < 0.5,
-            "Panes put {gap} between two tabs, not 8 + 1 + 8"
+            (*gap - 16.).abs() < 0.5,
+            "Panes put {gap} between two tabs, not 8 + 8"
         );
     }
     // Tabs: the list column's own 4px spacing and nothing else.
