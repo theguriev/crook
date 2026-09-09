@@ -2171,6 +2171,15 @@ impl Workspace {
         // And the menu on a block, for exactly the same reason: it is drawn
         // inside the pane the section is about to cover.
         self.close_block_menu(ctx);
+        // And a tab's context menu, which is the third of them and the one
+        // that was missed. It is drawn by a *row* of the tab list — the one
+        // call to `tab_context_menu::render` is in `tabs_panel::row` — so a
+        // section covering the list stops it being painted while it goes on
+        // being open: a popup nobody can see, holding the keyboard away from
+        // every pane through `a_popup_is_open`, with Escape as the only way
+        // out and no reason to think of pressing it. Its submenu goes too,
+        // because `close_tab_context_menu` takes that down first.
+        self.close_tab_context_menu(ctx);
         // The sidebar and the window are both about to be replaced, so every
         // control the pointer was on is about to stop existing without ever
         // seeing a hover-out — and a field on the section being left must not
@@ -2300,11 +2309,41 @@ impl Workspace {
         {
             return;
         }
+        // And never on a row the panel is not drawing. The popup is built by
+        // the row it hangs off — `tabs_panel::row` is the one caller of
+        // `tab_context_menu::render` — so a menu opened on a tab whose section
+        // is covering the list, or whose group is folded away, is state
+        // nothing paints: a popup that takes the keyboard from every pane
+        // through `a_popup_is_open` and can only be left by an Escape nobody
+        // has a reason to press. A pointer cannot ask for that, because the
+        // press it asks with lands on the row; the palette can, and does.
+        if !self.panel_draws_row(pane) {
+            return;
+        }
         if self.tab_context_menu.pane == Some(pane) {
             self.close_tab_context_menu(ctx);
             return;
         }
         self.show_tab_context_menu(tab, pane, ctx);
+    }
+
+    /// Whether the tab panel is drawing a row for this pane right now.
+    ///
+    /// Two questions in one, because a popup anchored to a row needs both
+    /// answered the same way: the tab list has to be the section on screen,
+    /// and the pane has to be one of the rows that list builds — which a tab
+    /// inside a folded group is not.
+    ///
+    /// The search box is deliberately not asked. A filtered-out row is still a
+    /// row the list would draw if the query changed, and a menu opened on one
+    /// is the same menu; what matters here is whether the list exists at all.
+    pub(crate) fn panel_draws_row(&self, pane: PaneId) -> bool {
+        self.section.is_none()
+            && self
+                .tabs
+                .rows(self.options().granularity)
+                .into_iter()
+                .any(|(_, row)| row == pane)
     }
 
     /// Puts it up without the toggle.
@@ -4855,6 +4894,14 @@ impl Workspace {
                 return Some(WorkspaceAction::Block(BlockAction::Rerun));
             }
             Binding::OpenBlockMenu => {
+                // Availability asked here rather than left to the handler,
+                // which is where the other block commands ask their question
+                // too: `open_block_menu` refuses when nothing contributes an
+                // entry, and a chord already consumed by then would be one
+                // that does nothing and reaches no shell either.
+                if !self.block_menu_is_available() {
+                    return None;
+                }
                 let (pane, block) = self.block_target()?;
                 return Some(WorkspaceAction::Block(BlockAction::OpenMenu {
                     pane,
@@ -5409,6 +5456,14 @@ impl Workspace {
 
         match action {
             OptionsAction::TogglePopup => {
+                // Never open where nothing would draw it. The popup hangs off
+                // the empty space under the tab list, so a section covering
+                // the list leaves it invisible and modal — `show_section`
+                // closes it for exactly that reason, and this is the same
+                // rule asked before it opens rather than after.
+                if !self.menu.open && self.section.is_some() {
+                    return;
+                }
                 self.menu.open = !self.menu.open;
                 // The menu freezes the window under it, so a row that was
                 // hovered when it opened would never see its hover-out and

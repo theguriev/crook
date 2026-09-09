@@ -360,7 +360,7 @@ Eight features, and the page that configures them:
   `copy-block-directory`, `copy-block-branch`, `rerun-block`, `scroll-to-block-top`), every
   entry of a tab's (`crook/tabs/pin-tab`, `close-tab`, `open-menu`, `view-options`,
   `toggle-group`, `close-group`, the seven colours), the worktree list (`crook/worktrees/menu`)
-  and every settings page (`crook/appearance/open-page` and its five neighbours). The block
+  and every settings page (`crook/appearance/open-page` and its three neighbours). The block
   entries act on the block the menu is up on, or — with no menu — on the one the keyboard has
   selected, so each of them is a chord as well as a row.
 
@@ -368,10 +368,12 @@ Eight features, and the page that configures them:
   arrows move down it, Enter runs the row and Escape takes it down. The worktree list inside
   it answers the same four, plus Delete to offer to remove the checkout the keyboard is on —
   and only where the × would be drawn, so a key cannot ask about one git is certain to refuse.
-  Every row of both prints **the chord that reaches it**, right-aligned, and so does every row
-  of the command palette: neither is told one, because the key a row is built with is the name
-  of the action it runs, so what is printed is whatever is in force — including a chord you
-  rebound this morning.
+  A tab's menu, a block's menu and every row of the command palette print **the chord that
+  reaches** the entry, right-aligned. None of them is told one: the key a row is built with is
+  the name of the action it runs, so what is printed is whatever is in force — including a
+  chord you rebound this morning, and including a chord bound to something a sandboxed plugin
+  put in a block's menu. The worktree list is the one that prints none, because its rows are
+  numbered rather than named: there is no action for a chord to be looked up under.
 
 Everything else is out of scope on purpose. There is no telemetry, and OSC 8 hyperlinks are
 not read — though a URL a program *printed* is clickable, because the scan that finds one

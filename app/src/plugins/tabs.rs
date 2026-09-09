@@ -423,6 +423,12 @@ impl Plugin for Tabs {
             let Some((tab, pane)) = workspace.menu_target() else {
                 return;
             };
+            // The tabs first, because the popup is drawn by the row it hangs
+            // off: asked for from the palette with the settings on screen
+            // there would be nowhere to put it, and `open_tab_context_menu`
+            // would rightly refuse. Somebody asking for a tab's menu is asking
+            // to look at it.
+            workspace.handle_action(&WorkspaceAction::ShowSection(None), ctx);
             workspace.handle_action(&TabMenuAction::Open { tab, pane }.into(), ctx);
         });
 
@@ -433,6 +439,9 @@ impl Plugin for Tabs {
             action("view-options"),
             "Tab panel view options",
             |workspace, ctx| {
+                // The tabs first, for the reason "Tab menu" above needs them:
+                // this popup hangs off the empty space under the list.
+                workspace.handle_action(&WorkspaceAction::ShowSection(None), ctx);
                 workspace.handle_action(&OptionsAction::TogglePopup.into(), ctx);
             },
         );

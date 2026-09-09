@@ -590,12 +590,15 @@ impl Host {
             }
         };
 
-        // Every page gets a command that opens it, here rather than in each of
-        // the plugins that add one — which is what makes it true of a page a
-        // stranger's plugin contributes as well as of the six in the binary.
-        // Without it the rail is a list of places only a pointer can go: the
-        // settings chord opens whichever page was open last, and there is no
-        // way to name the one you want.
+        // Every page gets a command that opens it, here rather than four
+        // copies of the same four lines in the four plugins that add one —
+        // and, the day a page can be contributed from outside the binary, in
+        // no copies at all. Without it the rail is a list of places only a
+        // pointer can go: the settings chord opens whichever page was open
+        // last, and there is no way to name the one you want.
+        //
+        // This reserves `open-<entry>` in the plugin's own action namespace,
+        // which is why the name is built from the entry rather than fixed.
         if let Ok(action) = ActionName::parse(&format!("{who}/open-{entry}")) {
             self.register_command(
                 action,

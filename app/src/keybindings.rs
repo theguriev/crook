@@ -945,6 +945,7 @@ pub const DEFAULTS_MAC: &[(&str, &str)] = &[
     ("ctrl+cmd+right", "crook/window/move-tab-right"),
     ("cmd+=", "crook/window/zoom-in"),
     ("ctrl+shift+cmd+=", "crook/window/zoom-in"),
+    ("ctrl+shift+cmd++", "crook/window/zoom-in"),
     ("cmd++", "crook/window/zoom-in"),
     ("shift+cmd++", "crook/window/zoom-in"),
     ("shift+cmd+=", "crook/window/zoom-in"),
@@ -1058,8 +1059,15 @@ pub const DEFAULTS_OTHER: &[(&str, &str)] = &[
     ("alt+right", "crook/window/focus-pane-right"),
     ("alt+up", "crook/window/focus-pane-up"),
     ("alt+down", "crook/window/focus-pane-down"),
+    // Both spellings, for the reason the zoom pair below has both: the key a
+    // keystroke carries is the character the platform *reports*, which Shift
+    // has already been applied to — so Ctrl-Shift-] arrives as `}` on the
+    // layouts where that is what the key prints, and as `]` on the ones where
+    // it is not. A chord table matches the key exactly, so it has to name both.
     ("ctrl+shift+]", "crook/window/focus-next-pane"),
+    ("ctrl+shift+}", "crook/window/focus-next-pane"),
     ("ctrl+shift+[", "crook/window/focus-previous-pane"),
+    ("ctrl+shift+{", "crook/window/focus-previous-pane"),
     // The same two scrollback chords the Mac table takes, which is the one
     // gesture xterm, GNOME Terminal, konsole, kitty and Windows Terminal all
     // spell identically. The ends of the scrollback are on Alt because
