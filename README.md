@@ -51,6 +51,36 @@ every machine:
              --find-output tab --snapshot docs/images/find.png
 ```
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/theguriev/crook/main/script/install | sh
+```
+
+macOS on both architectures and Linux on x86_64. It reads the latest release, checks the archive
+against the `SHA256SUMS` published beside it, and puts the binary in `~/.local/bin`, or somewhere
+else with `--to`. Windows is a `.zip` on the [releases page](https://github.com/theguriev/crook/releases).
+
+**Prefer this to downloading the archive by hand on macOS**, for a reason worth knowing. The
+released binaries are signed ad-hoc rather than notarized — notarization needs a paid Developer
+ID — so a Mac refuses the first launch of one with *"Apple could not verify 'crook' is free of
+malware"*, offering only **Move to Trash** and **Done**. What Gatekeeper is reacting to there is
+not the signature but the `com.apple.quarantine` attribute, and the thing that sets that
+attribute is a *browser*. Nothing fetched by `curl` carries it, so the line above never raises
+the dialog.
+
+If you did download it by hand and are now looking at that dialog, press **Done** — not *Move to
+Trash* — and clear the attribute yourself:
+
+```sh
+xattr -dr com.apple.quarantine crook && ./crook
+```
+
+On macOS 15 and later that command, or **System Settings → Privacy & Security → Open Anyway**, is
+the whole of the way past it: the old right-click-and-Open shortcut was removed.
+
+To build it yourself instead, see [Prerequisites](#prerequisites) and [Build and run](#build-and-run).
+
 ## v1 scope
 
 Eight features, and the page that configures them:
@@ -610,7 +640,8 @@ crates/crook_terminal/   pty, emulator, and the snapshot the renderer draws     
 docs/architecture.md     the design, and the reasoning behind each divergence
 docs/blocks.md           the block surface: what draws it, and what it does not do yet
 docs/plugins.md          the two plugin tiers, and what each of them may do
-script/                  bootstrap, run, bundle, publish
+docs/images/             the README's screenshots, rendered by `--snapshot`
+script/                  bootstrap, run, bundle, install, publish
 ```
 
 Two crates are meant to leave this repository. A plugin is written outside it, by somebody with

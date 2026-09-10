@@ -153,38 +153,42 @@ jobs:
 
           ## Install
 
-          **macOS** — one archive per architecture: `aarch64` for Apple Silicon
-          (M1 and later), `x86_64` for Intel Macs. These binaries are signed
-          ad-hoc rather than notarized, so macOS quarantines them on download
-          and refuses the first launch. Clearing the quarantine flag is the
-          whole of the fix:
-
           ```sh
-          tar -xzf crook-*-aarch64-apple-darwin.tar.gz
-          cd crook-*-aarch64-apple-darwin
-          xattr -dr com.apple.quarantine crook
-          ./crook
+          curl -fsSL https://raw.githubusercontent.com/theguriev/crook/main/script/install | sh
           ```
 
-          **Linux** — built on Ubuntu 24.04, so it needs glibc 2.39 or newer.
-          The window is opened through X11 or Wayland and the GPU is reached
-          through Vulkan or GL, all of which are loaded at run time: on a
-          minimal system, install the runtime packages `./script/bootstrap`
-          lists, plus at least one font family.
+          Reads this release, checks the archive against the `SHA256SUMS` below, and installs to
+          `~/.local/bin` — or elsewhere with `--to`. macOS on both architectures, Linux on x86_64.
+
+          **On macOS, prefer that to downloading an archive by hand.** These binaries are signed
+          ad-hoc rather than notarized, which needs a paid Developer ID, so a Mac refuses the
+          first launch of a downloaded one with *"Apple could not verify 'crook' is free of
+          malware"* and offers only **Move to Trash** and **Done**. Gatekeeper is reacting to the
+          `com.apple.quarantine` attribute rather than to the signature, and a *browser* is what
+          sets that attribute — nothing `curl` fetches carries it, so the line above never raises
+          the dialog.
+
+          Already looking at that dialog? Press **Done**, not *Move to Trash*, then:
 
           ```sh
-          tar -xzf crook-*-x86_64-unknown-linux-gnu.tar.gz
-          cd crook-*-x86_64-unknown-linux-gnu
-          ./crook
+          xattr -dr com.apple.quarantine crook && ./crook
           ```
 
-          **Windows** — unzip and run `crook.exe`. Unsigned, so SmartScreen
-          shows "Windows protected your PC" on the first launch; the binary
-          runs from *More info → Run anyway*.
+          On macOS 15 and later that, or **System Settings → Privacy & Security → Open Anyway**,
+          is the only way past it; the old right-click-and-Open shortcut was removed.
+
+          ## By hand
+
+          `aarch64-apple-darwin` is Apple Silicon, `x86_64-apple-darwin` is an Intel Mac. The
+          Linux build is made on Ubuntu 24.04 and so wants glibc 2.39 or newer; its window and
+          GPU are reached through X11/Wayland and Vulkan/GL at run time, so a minimal system
+          needs the runtime packages `./script/bootstrap` lists and at least one font family.
+          Windows is a `.zip`: unzip it and run `crook.exe`. It is unsigned, so SmartScreen says
+          "Windows protected your PC" once, and *More info → Run anyway* starts it.
 
           ## Verifying a download
 
-          `SHA256SUMS` holds one line per archive.
+          `SHA256SUMS` holds one line per archive; the installer checks it for you.
 
           ```sh
           sha256sum -c SHA256SUMS --ignore-missing
