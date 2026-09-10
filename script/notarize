@@ -1,0 +1,105 @@
+#!/bin/sh
+#
+# Send a signed artifact to Apple, wait for the answer, and staple the ticket.
+#
+#   ./script/notarize dist/macos/Crook.app
+#   ./script/notarize dist/macos/crook-v0.1.0-macos.dmg
+#
+# Notarization is what removes the dialog. A Developer ID signature alone still
+# gets "Apple could not verify…" on a downloaded copy; the signature says who
+# built it, and notarization is Apple saying it scanned that exact build. What
+# is stapled afterwards is a ticket, so the check works with no network.
+#
+# Credentials come from the environment, an App Store Connect API key by
+# preference — it belongs to a team rather than to a person and does not break
+# when somebody turns on two-factor:
+#
+#   APPLE_API_KEY_ID     the key's ID
+#   APPLE_API_ISSUER_ID  the issuer UUID at the top of the Keys page
+#   APPLE_API_KEY_PATH   the AuthKey_XXXX.p8 file, which Apple lets you
+#                        download exactly once
+#
+# or, failing that, an Apple ID and an app-specific password:
+#
+#   APPLE_ID  APPLE_APP_PASSWORD  APPLE_TEAM_ID
+#
+# An .app cannot be submitted as a directory, so one is zipped first with
+# `ditto`, which is the only zip on a Mac that preserves a bundle's symlinks
+# and extended attributes. The ticket is stapled to the .app itself, never to
+# the zip, which is thrown away.
+
+set -eu
+
+cd "$(dirname "$0")/.."
+
+ARTIFACT="${1:-}"
+
+if [ -z "$ARTIFACT" ] || [ "$ARTIFACT" = -h ] || [ "$ARTIFACT" = --help ]; then
+  cat <<'EOF'
+Usage: ./script/notarize <path to .app or .dmg>
+
+Needs either APPLE_API_KEY_ID + APPLE_API_ISSUER_ID + APPLE_API_KEY_PATH,
+or APPLE_ID + APPLE_APP_PASSWORD + APPLE_TEAM_ID.
+EOF
+  [ -n "$ARTIFACT" ] && exit 0
+  exit 1
+fi
+
+[ -e "$ARTIFACT" ] || { echo "error: nothing at $ARTIFACT" >&2; exit 1; }
+[ "$(uname -s)" = Darwin ] || { echo "error: this needs macOS: xcrun notarytool" >&2; exit 1; }
+
+# Built once and reused by both calls below, so that the credential rules live
+# in one place rather than in each.
+if [ -n "${APPLE_API_KEY_ID:-}" ] && [ -n "${APPLE_API_ISSUER_ID:-}" ] && [ -n "${APPLE_API_KEY_PATH:-}" ]; then
+  [ -f "$APPLE_API_KEY_PATH" ] || { echo "error: no key file at $APPLE_API_KEY_PATH" >&2; exit 1; }
+  set -- --key "$APPLE_API_KEY_PATH" --key-id "$APPLE_API_KEY_ID" --issuer "$APPLE_API_ISSUER_ID"
+elif [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_APP_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+  set -- --apple-id "$APPLE_ID" --password "$APPLE_APP_PASSWORD" --team-id "$APPLE_TEAM_ID"
+else
+  echo "error: no notarization credentials in the environment." >&2
+  echo "       Set APPLE_API_KEY_ID, APPLE_API_ISSUER_ID and APPLE_API_KEY_PATH," >&2
+  echo "       or APPLE_ID, APPLE_APP_PASSWORD and APPLE_TEAM_ID." >&2
+  exit 1
+fi
+
+SUBMISSION="$ARTIFACT"
+CLEANUP=""
+
+case "$ARTIFACT" in
+  *.app)
+    SUBMISSION="$(dirname "$ARTIFACT")/$(basename "$ARTIFACT" .app)-notarize.zip"
+    CLEANUP="$SUBMISSION"
+    rm -f "$SUBMISSION"
+    echo "==> Zipping $ARTIFACT for submission"
+    ditto -c -k --keepParent "$ARTIFACT" "$SUBMISSION"
+    ;;
+esac
+
+# shellcheck disable=SC2064 # expanded now on purpose
+[ -z "$CLEANUP" ] || trap "rm -f '$CLEANUP'" EXIT INT TERM
+
+echo "==> Submitting $(basename "$SUBMISSION") — this waits on Apple"
+# --wait blocks until Apple has an answer, which is usually a minute or two but
+# has no upper bound worth relying on. A rejection prints an id; the reason for
+# it is only in the log, which is why that is fetched rather than left for
+# somebody to find the command for.
+if ! xcrun notarytool submit "$SUBMISSION" "$@" --wait --timeout 30m; then
+  echo "error: notarization failed. The last submission's log:" >&2
+  LAST="$(xcrun notarytool history "$@" 2>/dev/null |
+    sed -n 's/^ *id: *\([0-9a-f-]*\).*/\1/p' | head -n 1)"
+  [ -z "$LAST" ] || xcrun notarytool log "$LAST" "$@" >&2 || true
+  exit 1
+fi
+
+echo "==> Stapling the ticket to $ARTIFACT"
+xcrun stapler staple "$ARTIFACT"
+xcrun stapler validate "$ARTIFACT"
+
+# The last word, and the one that matters: this is the assessment Gatekeeper
+# itself makes when somebody double-clicks the thing.
+case "$ARTIFACT" in
+  *.app) spctl --assess --type execute --verbose=2 "$ARTIFACT" ;;
+  *.dmg) spctl --assess --type open --context context:primary-signature --verbose=2 "$ARTIFACT" ;;
+esac
+
+echo "==> $ARTIFACT is notarized and stapled"

@@ -1,0 +1,137 @@
+#!/bin/sh
+#
+# Wrap a macOS binary in a signed Crook.app.
+#
+#   ./script/macos-app --binary dist/macos/crook
+#   ./script/macos-app --binary crook-universal --identity "Developer ID Application: … (TEAMID)"
+#
+# The .dmg is `script/macos-dmg`, and deliberately a separate step: a ticket is
+# stapled to the .app *before* the image is built around it, so that a copy
+# dragged out of that image carries its own proof and launches on a Mac with no
+# network. Build the app, notarize it, staple it, and only then image it.
+#
+# Separate from `script/bundle` because its input is a *binary*, not a
+# checkout: the shipped app is one universal file `lipo` makes out of the two
+# architectures the release matrix builds separately, so the thing that wraps
+# it cannot be the thing that compiles it.
+#
+# Signing is what the whole exercise is for. A Developer ID signature plus the
+# hardened runtime is what `notarytool` will accept; without --identity, or
+# with no certificate on this machine, it falls back to an ad-hoc signature and
+# says so, which still produces a working .app for a local look — it is only
+# a *notarizable* one that needs the certificate.
+#
+# Nothing here notarizes. That needs the network and an App Store Connect key,
+# and it is `script/notarize`.
+
+set -eu
+
+cd "$(dirname "$0")/.."
+
+BINARY=""
+IDENTITY="${MACOS_SIGNING_IDENTITY:-}"
+OUT_DIR="dist/macos"
+# Reverse-DNS, and stable forever: macOS keys a saved window position, a
+# TCC permission and a Launch Services registration on this string, so
+# changing it makes every Mac treat the next release as a different program.
+BUNDLE_ID="${CROOK_BUNDLE_ID:-com.theguriev.crook}"
+
+usage() {
+  cat <<'EOF'
+Usage: ./script/macos-app --binary <path> [--identity <name>] [--out <directory>]
+
+  --binary <path>     The macOS executable to wrap. Required.
+  --identity <name>   Developer ID Application identity to sign with. Defaults
+                      to $MACOS_SIGNING_IDENTITY; ad-hoc when neither is set.
+  --out <directory>   Where Crook.app goes. Default: dist/macos.
+  -h, --help          Show this message.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --binary) [ $# -ge 2 ] || { echo "error: --binary needs a path" >&2; exit 1; }
+      BINARY=$2; shift 2 ;;
+    --binary=*) BINARY=${1#--binary=}; shift ;;
+    --identity) [ $# -ge 2 ] || { echo "error: --identity needs a name" >&2; exit 1; }
+      IDENTITY=$2; shift 2 ;;
+    --identity=*) IDENTITY=${1#--identity=}; shift ;;
+    --out) [ $# -ge 2 ] || { echo "error: --out needs a directory" >&2; exit 1; }
+      OUT_DIR=$2; shift 2 ;;
+    --out=*) OUT_DIR=${1#--out=}; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "error: unknown argument '$1'" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+[ -n "$BINARY" ] || { echo "error: --binary is required" >&2; usage >&2; exit 1; }
+[ -f "$BINARY" ] || { echo "error: no binary at $BINARY" >&2; exit 1; }
+[ "$(uname -s)" = Darwin ] || { echo "error: this needs macOS: codesign and hdiutil" >&2; exit 1; }
+
+export PATH="$HOME/.cargo/bin:$PATH"
+
+VERSION="$(cargo metadata --no-deps --format-version 1 |
+  sed -n 's/.*"name":"crook","version":"\([^"]*\)".*/\1/p')"
+[ -n "$VERSION" ] || { echo "error: could not read the crook version" >&2; exit 1; }
+
+APP="$OUT_DIR/Crook.app"
+rm -rf "$APP"
+mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+
+cp "$BINARY" "$APP/Contents/MacOS/crook"
+chmod 755 "$APP/Contents/MacOS/crook"
+
+# LSMinimumSystemVersion is 11.0 because that is the floor Rust's own
+# aarch64-apple-darwin target sets; claiming anything older would be a promise
+# the binary does not keep.
+cat > "$APP/Contents/Info.plist" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>crook</string>
+	<key>CFBundleIdentifier</key>
+	<string>$BUNDLE_ID</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>Crook</string>
+	<key>CFBundleDisplayName</key>
+	<string>Crook</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>$VERSION</string>
+	<key>CFBundleVersion</key>
+	<string>$VERSION</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>11.0</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSSupportsAutomaticGraphicsSwitching</key>
+	<true/>
+</dict>
+</plist>
+PLIST
+
+plutil -lint "$APP/Contents/Info.plist" >/dev/null
+
+# The hardened runtime is not optional: notarytool rejects anything without it.
+# A terminal spawns shells, which the hardened runtime allows — no entitlement
+# covers `posix_spawn` — and the plugins are wasm rather than dylibs, so
+# library validation has nothing to complain about either. If an entitlement
+# ever is needed, it goes here as --entitlements.
+if [ -n "$IDENTITY" ]; then
+  echo "==> Signing with $IDENTITY"
+  codesign --force --options runtime --timestamp \
+    --sign "$IDENTITY" "$APP"
+  codesign --verify --strict --verbose=2 "$APP"
+else
+  echo "==> No Developer ID identity; signing ad-hoc (this will NOT notarize)"
+  codesign --force --sign - "$APP"
+fi
+
+echo "==> $APP"

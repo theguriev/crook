@@ -1,0 +1,96 @@
+#!/bin/sh
+#
+# Put a Crook.app into a signed disk image.
+#
+#   ./script/macos-dmg --app dist/macos/Crook.app
+#
+# Run this *after* `script/notarize` has stapled the app, not before: the
+# ticket stapled to Crook.app travels inside the image, so an app dragged out
+# of it launches on a Mac that cannot reach Apple. An image built first and
+# stapled afterwards leaves the app inside it with nothing of its own.
+#
+# The image itself is signed here and notarized separately, because Gatekeeper
+# checks the thing a person double-clicks before it ever sees what is inside.
+
+set -eu
+
+cd "$(dirname "$0")/.."
+
+APP=""
+IDENTITY="${MACOS_SIGNING_IDENTITY:-}"
+OUT_DIR=""
+
+usage() {
+  cat <<'EOF'
+Usage: ./script/macos-dmg --app <path> [--identity <name>] [--out <directory>]
+
+  --app <path>       The Crook.app to image. Required.
+  --identity <name>  Developer ID Application identity to sign the image with.
+                     Defaults to $MACOS_SIGNING_IDENTITY; unsigned when unset.
+  --out <directory>  Where the .dmg goes. Default: beside the app.
+  -h, --help         Show this message.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --app) [ $# -ge 2 ] || { echo "error: --app needs a path" >&2; exit 1; }
+      APP=$2; shift 2 ;;
+    --app=*) APP=${1#--app=}; shift ;;
+    --identity) [ $# -ge 2 ] || { echo "error: --identity needs a name" >&2; exit 1; }
+      IDENTITY=$2; shift 2 ;;
+    --identity=*) IDENTITY=${1#--identity=}; shift ;;
+    --out) [ $# -ge 2 ] || { echo "error: --out needs a directory" >&2; exit 1; }
+      OUT_DIR=$2; shift 2 ;;
+    --out=*) OUT_DIR=${1#--out=}; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "error: unknown argument '$1'" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+[ -n "$APP" ] || { echo "error: --app is required" >&2; usage >&2; exit 1; }
+[ -d "$APP" ] || { echo "error: no app bundle at $APP" >&2; exit 1; }
+[ "$(uname -s)" = Darwin ] || { echo "error: this needs macOS: hdiutil and codesign" >&2; exit 1; }
+
+[ -n "$OUT_DIR" ] || OUT_DIR="$(dirname "$APP")"
+
+export PATH="$HOME/.cargo/bin:$PATH"
+
+VERSION="$(cargo metadata --no-deps --format-version 1 |
+  sed -n 's/.*"name":"crook","version":"\([^"]*\)".*/\1/p')"
+[ -n "$VERSION" ] || { echo "error: could not read the crook version" >&2; exit 1; }
+
+# Said out loud, because an unstapled app in an image is the one mistake this
+# whole ordering exists to prevent and it is invisible in the result.
+if xcrun stapler validate "$APP" >/dev/null 2>&1; then
+  echo "==> $APP carries a stapled ticket"
+else
+  echo "warning: $APP has no stapled ticket — run ./script/notarize on it first," >&2
+  echo "         or a copy dragged out of this image will need the network." >&2
+fi
+
+DMG="$OUT_DIR/crook-v$VERSION-macos.dmg"
+rm -f "$DMG"
+
+# A staging tree, so the mounted volume holds the app and a symlink to
+# /Applications and nothing else — the drag-here gesture every Mac user already
+# knows, with no background art to maintain.
+STAGE="$OUT_DIR/dmg-stage"
+rm -rf "$STAGE"
+mkdir -p "$STAGE"
+cp -R "$APP" "$STAGE/Crook.app"
+ln -s /Applications "$STAGE/Applications"
+
+echo "==> Building $DMG"
+hdiutil create -volname Crook -srcfolder "$STAGE" -ov -format UDZO -quiet "$DMG"
+rm -rf "$STAGE"
+
+if [ -n "$IDENTITY" ]; then
+  echo "==> Signing the image with $IDENTITY"
+  codesign --force --timestamp --sign "$IDENTITY" "$DMG"
+  codesign --verify --strict "$DMG"
+else
+  echo "==> No Developer ID identity; the image is unsigned"
+fi
+
+echo "==> $DMG"
