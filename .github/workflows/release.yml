@@ -1,0 +1,215 @@
+name: Release
+
+# Started by a tag, because a release is a thing somebody decides to make. Push
+# `v0.1.0` and this builds the four binaries and puts them on a release page
+# under that tag; nothing else in this repository creates one.
+#
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# workflow_dispatch is here for the rerun case: a matrix leg that failed on a
+# runner's bad day should not need a new version number to try again. It takes
+# the tag to build, and the tag has to exist.
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+      - "v[0-9]+.[0-9]+.[0-9]+-*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and release (e.g. v0.1.0)"
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # A shipped binary carries no debug info — the release profile strips it — so
+  # paying to generate it is pure build time.
+  RUSTFLAGS: -C debuginfo=none
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    timeout-minutes: 60
+    strategy:
+      # Every leg that can finish should: a Windows failure is no reason to
+      # throw away a macOS binary that took twenty minutes.
+      fail-fast: false
+      matrix:
+        include:
+          # GitHub's macOS runners are Apple Silicon, so arm64 is the native
+          # build and Intel is a cross-build from the same host — one SDK, one
+          # linker, one `rustup target add`. See script/bundle.
+          - name: macOS (Apple Silicon)
+            runner: macos-latest
+            target: aarch64-apple-darwin
+          - name: macOS (Intel)
+            runner: macos-latest
+            target: x86_64-apple-darwin
+          - name: Linux (x86_64)
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - name: Windows (x86_64)
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          # The tag, not the branch. On a tag push these are the same commit; on
+          # a dispatch they are not, and building main and calling it v0.1.0 is
+          # the one mistake a release workflow must not make.
+          ref: ${{ inputs.tag || github.ref }}
+
+      # Installs this platform's prerequisites and materializes the toolchain
+      # pinned in rust-toolchain.toml, the same script CI and a contributor run.
+      - name: Bootstrap
+        shell: bash
+        run: ./script/bootstrap
+
+      # rust-toolchain.toml asks for the minimal profile, which installs the
+      # host's target and no other. The Intel macOS leg needs the one it does
+      # not have; for the other three this is already satisfied and costs a
+      # second.
+      - name: Add the target
+        shell: bash
+        run: rustup target add ${{ matrix.target }}
+
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ matrix.target }}-cargo-release-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: ${{ matrix.target }}-cargo-release-
+
+      - name: ./script/bundle --archive
+        shell: bash
+        run: ./script/bundle --target ${{ matrix.target }} --archive
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: crook-${{ matrix.target }}
+          # The binary in dist/<platform>/ is the same bytes as the one inside
+          # the archive; only the archive and its checksum go up.
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Publish the release
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      # The only job here that writes anything, and the only reason the default
+      # read-only token is widened.
+      contents: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: dist
+          pattern: crook-*
+          # Four uploads, one directory: the archives are named for their target
+          # already, so there is nothing to keep apart.
+          merge-multiple: true
+
+      # A release page whose checksums are in four separate files is a page
+      # nobody checks. One file, one line per archive, in the order a person
+      # reads them.
+      - name: Collect the checksums
+        shell: bash
+        run: |
+          cd dist
+          cat ./*.sha256 | sort -k2 > SHA256SUMS
+          rm -f ./*.sha256
+          echo "--- SHA256SUMS ---"
+          cat SHA256SUMS
+
+      - name: Write the release notes
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          {
+            cat <<'NOTES'
+          A terminal whose unit of work is an agent.
+
+          ## Install
+
+          **macOS** — one archive per architecture: `aarch64` for Apple Silicon
+          (M1 and later), `x86_64` for Intel Macs. These binaries are signed
+          ad-hoc rather than notarized, so macOS quarantines them on download
+          and refuses the first launch. Clearing the quarantine flag is the
+          whole of the fix:
+
+          ```sh
+          tar -xzf crook-*-aarch64-apple-darwin.tar.gz
+          cd crook-*-aarch64-apple-darwin
+          xattr -dr com.apple.quarantine crook
+          ./crook
+          ```
+
+          **Linux** — built on Ubuntu 24.04, so it needs glibc 2.39 or newer.
+          The window is opened through X11 or Wayland and the GPU is reached
+          through Vulkan or GL, all of which are loaded at run time: on a
+          minimal system, install the runtime packages `./script/bootstrap`
+          lists, plus at least one font family.
+
+          ```sh
+          tar -xzf crook-*-x86_64-unknown-linux-gnu.tar.gz
+          cd crook-*-x86_64-unknown-linux-gnu
+          ./crook
+          ```
+
+          **Windows** — unzip and run `crook.exe`. Unsigned, so SmartScreen
+          shows "Windows protected your PC" on the first launch; the binary
+          runs from *More info → Run anyway*.
+
+          ## Verifying a download
+
+          `SHA256SUMS` holds one line per archive.
+
+          ```sh
+          sha256sum -c SHA256SUMS --ignore-missing
+          ```
+          NOTES
+            echo
+            echo "Built from \`$TAG\` by [\`release.yml\`](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/.github/workflows/release.yml)."
+          } > release-notes.md
+          cat release-notes.md
+
+      # `gh` is on the runner already, which is why no third-party release
+      # action is pinned here. --verify-tag refuses to invent a tag: a dispatch
+      # with a typo should fail rather than create `v0.10` out of nothing.
+      - name: Create the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "==> $TAG already has a release; replacing its assets"
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --title "$TAG" \
+              --notes-file release-notes.md \
+              --verify-tag
+          fi

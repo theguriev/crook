@@ -1,14 +1,28 @@
 #!/bin/sh
 #
-# Produce a release build of Crook for the host platform.
+# Produce a release build of Crook, for the host platform or for one named
+# target.
 #
-#   ./script/bundle                # build, into dist/<platform>/
-#   ./script/bundle --check-only   # type-check with release flags, build nothing
+#   ./script/bundle                       # build, into dist/<platform>/
+#   ./script/bundle --archive             # and an archive beside it, with a checksum
+#   ./script/bundle --target <triple>     # cross-build one target
+#   ./script/bundle --check-only          # type-check with release flags, build nothing
 #
 # --check-only is what CI runs on all three platforms. It compiles the workspace
 # with the exact profile and feature set a shipped build uses, which is the only
 # cheap way to catch a feature combination that compiles in debug and not in
 # release. It produces no artifacts.
+#
+# --target exists for exactly one job the release matrix has and a developer
+# does not: macOS ships two architectures and GitHub's macOS runners are all
+# Apple Silicon, so the Intel build is a cross-build from an arm64 host. Both
+# Apple targets are complete on that host — same SDK, same linker — so this is
+# a `rustup target add` away and needs none of the osxcross apparatus a
+# Linux-hosted macOS build would.
+#
+# --archive is what makes a release downloadable: one .tar.gz (.zip on Windows)
+# named for the version and the target triple, plus the SHA-256 a person can
+# check it against.
 #
 # TODO: replace the build path below with cargo-dist (https://opensource.axo.dev/cargo-dist/).
 # It generates the release matrix and emits .tar.gz / .zip / .msi / .dmg / .deb / .rpm from a
@@ -23,13 +37,18 @@ cd "$(dirname "$0")/.."
 export PATH="$HOME/.cargo/bin:$PATH"
 
 CHECK_ONLY=0
+ARCHIVE=0
+TARGET=""
 
 usage() {
   cat <<'EOF'
-Usage: ./script/bundle [--check-only]
+Usage: ./script/bundle [--target <triple>] [--archive] [--check-only]
 
-  --check-only   Type-check the workspace with release flags; produce no artifacts.
-  -h, --help     Show this message.
+  --target <triple>  Build for this target rather than the host's own.
+  --archive          Also write dist/crook-<version>-<triple>.tar.gz (.zip on
+                     Windows) and a .sha256 beside it.
+  --check-only       Type-check the workspace with release flags; produce no artifacts.
+  -h, --help         Show this message.
 EOF
 }
 
@@ -37,6 +56,19 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --check-only)
       CHECK_ONLY=1
+      shift
+      ;;
+    --archive)
+      ARCHIVE=1
+      shift
+      ;;
+    --target)
+      [ $# -ge 2 ] || { echo "error: --target needs a triple" >&2; exit 1; }
+      TARGET=$2
+      shift 2
+      ;;
+    --target=*)
+      TARGET=${1#--target=}
       shift
       ;;
     -h | --help)
@@ -51,31 +83,12 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-case "$(uname -s)" in
-  Darwin)
-    PLATFORM=macos
-    BIN_FILE=crook
-    ;;
-  Linux)
-    PLATFORM=linux
-    BIN_FILE=crook
-    ;;
-  MINGW* | MSYS* | CYGWIN*)
-    PLATFORM=windows
-    BIN_FILE=crook.exe
-    ;;
-  *)
-    echo "error: no bundle steps defined for $(uname -s)" >&2
-    exit 1
-    ;;
-esac
-
 # The one flag that distinguishes a shipped build: it detaches the console on
 # Windows. Package-qualified because the command below is workspace-wide.
 RELEASE_FEATURES="crook/release_bundle"
 
 if [ "$CHECK_ONLY" = 1 ]; then
-  echo "==> Type-checking $PLATFORM with release flags"
+  echo "==> Type-checking with release flags"
   exec cargo check \
     --locked \
     --workspace \
@@ -84,13 +97,62 @@ if [ "$CHECK_ONLY" = 1 ]; then
     --features "$RELEASE_FEATURES"
 fi
 
-echo "==> Building $PLATFORM release binary"
-cargo build \
-  --locked \
-  --release \
-  -p crook \
-  --bin crook \
-  --features "$RELEASE_FEATURES"
+# Name the host's own triple when none was asked for, so that everything below —
+# the archive name most of all — reads the same either way. `rustc -vV` is the
+# only thing that knows this reliably; `uname` cannot tell an arm64 Linux from
+# an armv7 one, and on macOS it reports the architecture of the shell rather
+# than of the toolchain.
+HOST_TARGET="$(rustc -vV | sed -n 's/^host: //p')"
+[ -n "$TARGET" ] || TARGET="$HOST_TARGET"
+
+# Platform and binary name come from the *target*, not from `uname`: a
+# cross-build's output is named for where it will run.
+case "$TARGET" in
+  *-apple-darwin)
+    PLATFORM=macos
+    BIN_FILE=crook
+    ARCHIVE_FORMAT=tar.gz
+    ;;
+  *-linux-*)
+    PLATFORM=linux
+    BIN_FILE=crook
+    ARCHIVE_FORMAT=tar.gz
+    ;;
+  *-windows-*)
+    PLATFORM=windows
+    BIN_FILE=crook.exe
+    ARCHIVE_FORMAT=zip
+    ;;
+  *)
+    echo "error: no bundle steps defined for target $TARGET" >&2
+    exit 1
+    ;;
+esac
+
+echo "==> Building $PLATFORM release binary for $TARGET"
+
+# --target is passed only when it differs from the host. Passing it always would
+# be tidier, but it moves the output to target/<triple>/ and defeats the shared
+# artifact cache for the ordinary case of a developer building for their own
+# machine.
+if [ "$TARGET" = "$HOST_TARGET" ]; then
+  cargo build \
+    --locked \
+    --release \
+    -p crook \
+    --bin crook \
+    --features "$RELEASE_FEATURES"
+  TARGET_SUBDIR="release"
+else
+  cargo build \
+    --locked \
+    --release \
+    --target "$TARGET" \
+    -p crook \
+    --bin crook \
+    --features "$RELEASE_FEATURES"
+  TARGET_SUBDIR="$TARGET/release"
+fi
 
 # `cargo build` honors CARGO_TARGET_DIR and a shared build.target-dir, so ask
 # Cargo where it put things rather than assuming ./target. The second sed undoes
@@ -98,7 +160,7 @@ cargo build \
 TARGET_DIR="$(cargo metadata --no-deps --format-version 1 |
   sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p' |
   sed 's|\\\\|/|g')"
-BUILT="$TARGET_DIR/release/$BIN_FILE"
+BUILT="$TARGET_DIR/$TARGET_SUBDIR/$BIN_FILE"
 
 if [ ! -f "$BUILT" ]; then
   echo "error: expected a binary at $BUILT" >&2
@@ -109,4 +171,80 @@ OUT_DIR="dist/$PLATFORM"
 mkdir -p "$OUT_DIR"
 cp "$BUILT" "$OUT_DIR/$BIN_FILE"
 
+# An arm64 macOS binary will not launch without a signature at all, and the
+# linker's own ad-hoc one is invalidated by anything that rewrites the file —
+# the copy above does not, but `strip` in the release profile runs before this
+# and a future step might not. Re-signing ad-hoc costs nothing and makes the
+# state explicit. It is not notarization: a downloaded archive still carries
+# com.apple.quarantine, which the release notes tell a person how to clear.
+if [ "$PLATFORM" = macos ] && command -v codesign >/dev/null 2>&1; then
+  echo "==> Ad-hoc signing $OUT_DIR/$BIN_FILE"
+  codesign --force --sign - "$OUT_DIR/$BIN_FILE"
+fi
+
 echo "==> $OUT_DIR/$BIN_FILE"
+
+[ "$ARCHIVE" = 1 ] || exit 0
+
+# The version in the archive name is the app's own, read from the manifest
+# rather than from the git tag: the tag is what a human typed and this is what
+# the binary will report.
+VERSION="$(cargo metadata --no-deps --format-version 1 |
+  sed -n 's/.*"name":"crook","version":"\([^"]*\)".*/\1/p')"
+
+if [ -z "$VERSION" ]; then
+  echo "error: could not read the crook package version from cargo metadata" >&2
+  exit 1
+fi
+
+STEM="crook-v$VERSION-$TARGET"
+ARCHIVE_PATH="dist/$STEM.$ARCHIVE_FORMAT"
+rm -f "$ARCHIVE_PATH"
+
+echo "==> Archiving $ARCHIVE_PATH"
+
+# Archived from a staging directory named for the release, so that unpacking
+# leaves a single labelled directory rather than a bare `crook` in whatever the
+# person's cwd happened to be. The licences travel with it: MIT for this tree,
+# ISC for the Lucide icon set it draws with.
+STAGE="dist/stage/$STEM"
+rm -rf "$STAGE"
+mkdir -p "$STAGE"
+cp "$OUT_DIR/$BIN_FILE" "$STAGE/$BIN_FILE"
+cp LICENSE-MIT LICENSE-ISC-lucide README.md "$STAGE/"
+
+case "$ARCHIVE_FORMAT" in
+  tar.gz)
+    # -C so the archive holds `<stem>/crook` and not `dist/stage/<stem>/crook`.
+    tar -czf "$ARCHIVE_PATH" -C dist/stage "$STEM"
+    ;;
+  zip)
+    # GitHub's Windows runners carry 7-Zip; Git Bash on a developer's machine
+    # may carry Info-ZIP instead, and PowerShell is the floor under both.
+    if command -v 7z >/dev/null 2>&1; then
+      (cd dist/stage && 7z a -tzip -bso0 -bsp0 "../$STEM.zip" "$STEM" >/dev/null)
+    elif command -v zip >/dev/null 2>&1; then
+      (cd dist/stage && zip -q -r "../$STEM.zip" "$STEM")
+    else
+      powershell -NoProfile -Command \
+        "Compress-Archive -Path 'dist/stage/$STEM' -DestinationPath '$ARCHIVE_PATH' -Force"
+    fi
+    ;;
+esac
+
+rm -rf "$STAGE"
+# ...and the staging root too, once the last target built has emptied it.
+rmdir dist/stage 2>/dev/null || true
+
+# One checksum file per archive, next to it, so a release page can be verified
+# a line at a time. macOS ships `shasum` and not `sha256sum`; Linux and Git Bash
+# ship the other.
+if command -v sha256sum >/dev/null 2>&1; then
+  (cd dist && sha256sum "$STEM.$ARCHIVE_FORMAT" > "$STEM.$ARCHIVE_FORMAT.sha256")
+elif command -v shasum >/dev/null 2>&1; then
+  (cd dist && shasum -a 256 "$STEM.$ARCHIVE_FORMAT" > "$STEM.$ARCHIVE_FORMAT.sha256")
+else
+  echo "warning: no sha256sum or shasum; wrote no checksum" >&2
+fi
+
+echo "==> $ARCHIVE_PATH"
