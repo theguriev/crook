@@ -57,6 +57,7 @@ fn entry(title: &str) -> Entry {
     Entry {
         action: ActionName::parse(&format!("crook/test/{}", slug(title))).ok(),
         title: title.to_owned(),
+        detail: None,
         chords: Vec::new(),
         note: None,
     }
@@ -78,7 +79,7 @@ fn heading() -> Row {
 }
 
 fn command(title: &str) -> Row {
-    Row::Command(entry(title), an_id())
+    Row::Command(entry(title), Target::plain(an_id()))
 }
 
 fn fact(title: &str) -> Row {
@@ -177,14 +178,36 @@ fn pane(label: &str) -> &'static PaneKey {
 }
 
 #[test]
-fn a_question_mark_at_the_front_asks_for_the_keys() {
+fn a_sigil_at_the_front_asks_for_one_list() {
     assert_eq!(Mode::of("?split"), (Mode::Keys, "split"));
     assert_eq!(Mode::of("?"), (Mode::Keys, ""));
-    assert_eq!(Mode::of(""), (Mode::Run, ""));
+    assert_eq!(Mode::of(">split"), (Mode::Commands, "split"));
+    assert_eq!(Mode::of("@crook"), (Mode::Tabs, "crook"));
+    assert_eq!(Mode::of("#theme"), (Mode::Settings, "theme"));
+    assert_eq!(Mode::of(""), (Mode::Everything, ""));
 
     // Only the first character, so that a query which happens to contain one
     // is still a query.
-    assert_eq!(Mode::of("split ?"), (Mode::Run, "split ?"));
+    assert_eq!(Mode::of("split ?"), (Mode::Everything, "split ?"));
+    assert_eq!(Mode::of("a > b"), (Mode::Everything, "a > b"));
+}
+
+#[test]
+fn tab_walks_the_lists_and_comes_back_to_the_first() {
+    // Five presses, five lists, and the search in the box survives every one
+    // of them: that is the whole argument for keeping the mode in the text.
+    let mut mode = Mode::Everything;
+    let mut seen = vec![mode.seeded("split")];
+    for _ in 0..Mode::ORDER.len() {
+        mode = mode.next();
+        seen.push(mode.seeded("split"));
+    }
+
+    assert_eq!(
+        seen,
+        vec!["split", "?split", ">split", "@split", "#split", "split"]
+    );
+    assert_eq!(mode, Mode::Everything);
 }
 
 #[test]
@@ -215,7 +238,7 @@ fn a_list_with_nothing_to_land_on_comes_back() {
     assert_eq!(all_headings.settled(0), None);
     assert_eq!(all_headings.first_command(), None);
 
-    let nothing = Rows::new(Mode::Run, Vec::new());
+    let nothing = Rows::new(Mode::Everything, Vec::new());
     assert_eq!(nothing.stepped(0, 1), None);
     assert_eq!(nothing.settled(0), None);
     assert!(nothing.is_empty());
@@ -262,13 +285,13 @@ fn arrowing_into_a_group_shows_the_heading_that_names_it() {
 fn a_flat_list_is_the_grouped_one_with_no_headings() {
     let window = owner("crook/window");
     let rows = Rows::new(
-        Mode::Run,
+        Mode::Commands,
         flat(vec![
-            (&window, entry("Split upwards"), an_id()),
-            (&window, entry("Even out the split"), an_id()),
-            (&window, entry("Split downwards"), an_id()),
-            (&window, entry("Close the pane"), an_id()),
-            (&window, entry("Find in output"), an_id()),
+            (&window, entry("Split upwards"), Target::plain(an_id())),
+            (&window, entry("Even out the split"), Target::plain(an_id())),
+            (&window, entry("Split downwards"), Target::plain(an_id())),
+            (&window, entry("Close the pane"), Target::plain(an_id())),
+            (&window, entry("Find in output"), Target::plain(an_id())),
         ]),
     );
 
@@ -387,10 +410,10 @@ fn a_group_of_one_or_two_commands_is_folded_into_the_last_one() {
         &host,
         &sizes,
         vec![
-            (&big, entry("Alpha"), an_id()),
-            (&small, entry("Beta"), an_id()),
-            (&big, entry("Gamma"), an_id()),
-            (&big, entry("Delta"), an_id()),
+            (&big, entry("Alpha"), Target::plain(an_id())),
+            (&small, entry("Beta"), Target::plain(an_id())),
+            (&big, entry("Gamma"), Target::plain(an_id())),
+            (&big, entry("Delta"), Target::plain(an_id())),
         ],
     );
 
@@ -424,10 +447,10 @@ fn a_group_puts_what_is_bound_first_and_then_the_alphabet() {
         &host,
         &sizes,
         vec![
-            (&window, entry("Zoom in"), an_id()),
-            (&window, bound("apply", "ctrl+a"), an_id()),
-            (&window, entry("apply twice"), an_id()),
-            (&tabs, entry("Next tab"), an_id()),
+            (&window, entry("Zoom in"), Target::plain(an_id())),
+            (&window, bound("apply", "ctrl+a"), Target::plain(an_id())),
+            (&window, entry("apply twice"), Target::plain(an_id())),
+            (&tabs, entry("Next tab"), Target::plain(an_id())),
         ],
     );
 

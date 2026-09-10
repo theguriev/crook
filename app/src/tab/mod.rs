@@ -55,6 +55,17 @@ impl TabId {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         Self(NEXT.fetch_add(1, Ordering::Relaxed))
     }
+
+    /// The number behind it, for the one thing that needs to write an id down.
+    ///
+    /// The command palette hands a row's subject to the action that runs it as
+    /// a string — see [`Host::say`](crate::plugin::Host::say) — so a row about
+    /// a tab has to be able to say which tab. There is deliberately no way
+    /// back: an id is minted by [`Self::next`] or it is a tab that exists,
+    /// and whoever printed one looks it up again by walking the strip.
+    pub fn as_u64(self) -> u64 {
+        self.0
+    }
 }
 
 /// What the agent behind a tab is doing.

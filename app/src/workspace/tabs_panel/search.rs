@@ -215,15 +215,26 @@ pub(super) fn keeps(
     };
 
     match granularity {
-        Granularity::Tabs => data
-            .panes()
-            .iter()
-            .any(|pane| matches(workspace, app, query, data, pane)),
+        Granularity::Tabs => whole(workspace, app, query, data),
         Granularity::Panes => data
             .panes()
             .get(pane)
             .is_some_and(|pane| matches(workspace, app, query, data, pane)),
     }
+}
+
+/// Whether a query is looking for a tab, taken as one thing.
+///
+/// Any of its panes answering is the tab answering, which is the rule a
+/// `Tabs` row is kept by and the rule Enter picks the top match by. It is
+/// `pub(crate)` because the command palette lists tabs too, and the one thing
+/// the two surfaces must not do is disagree about what typing two words means:
+/// a tab that the panel finds and the palette does not is a person who stops
+/// trusting both boxes.
+pub(crate) fn whole(workspace: &Workspace, app: &AppContext, query: &Query, tab: &Tab) -> bool {
+    tab.panes()
+        .iter()
+        .any(|pane| matches(workspace, app, query, tab, pane))
 }
 
 /// The tab Enter opens: the first one with anything in it that matches.
@@ -244,11 +255,7 @@ pub(crate) fn first_match(workspace: &Workspace, app: &AppContext) -> Option<Tab
     workspace
         .tabs()
         .iter()
-        .find(|tab| {
-            tab.panes()
-                .iter()
-                .any(|pane| matches(workspace, app, &query, tab, pane))
-        })
+        .find(|tab| whole(workspace, app, &query, tab))
         .map(Tab::id)
 }
 
