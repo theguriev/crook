@@ -35,8 +35,45 @@ permissions:
   contents: read
 
 jobs:
+  version:
+    name: The tag matches the manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      # script/bundle names its archives from the *manifest* version and the
+      # release is created under the *tag*, so a tag pushed without the version
+      # bump publishes crook-v0.1.0-*.tar.gz on a v0.1.1 page — and
+      # script/install, which builds the filename out of the tag, then asks for
+      # a file that is not there. Cheaper to fail here in twenty seconds than
+      # after four release builds.
+      - name: Compare them
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -eu
+          manifest=$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)
+          if [ -z "$manifest" ]; then
+            echo "::error::could not read version from [workspace.package] in Cargo.toml"
+            exit 1
+          fi
+          echo "tag=$TAG manifest=$manifest"
+          case "$TAG" in
+            "v$manifest") echo "They agree." ;;
+            *)
+              echo "::error::tag $TAG does not match the manifest version $manifest."
+              echo "::error::Set version = \"${TAG#v}\" under [workspace.package], run cargo metadata, and commit Cargo.lock."
+              exit 1
+              ;;
+          esac
+
   build:
     name: Build ${{ matrix.name }}
+    needs: version
     timeout-minutes: 60
     strategy:
       # Every leg that can finish should: a Windows failure is no reason to
