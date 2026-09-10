@@ -889,6 +889,7 @@ KEYS (macOS):
     cmd+w                      Close the focused pane, and its tab with the last one
     cmd+k                      Search the tabs
     alt+cmd+left/right         Select the previous/next tab
+    ctrl+tab / ctrl+shift+tab  The same step, on the chord browsers use
     ctrl+cmd+left/right        Move the active tab
     cmd+alt+up / cmd+alt+down   Select the block above / below, and copy it with cmd+c
     cmd+plus / cmd+minus       Make the terminal's text bigger / smaller
@@ -901,14 +902,16 @@ KEYS (Linux and Windows):
     ctrl+shift+w               Close the focused pane, and its tab with the last one
     ctrl+shift+k               Search the tabs
     ctrl+pageup/pagedown       Select the previous/next tab
+    ctrl+tab / ctrl+shift+tab  The same step, on the chord browsers use
     ctrl+shift+pageup/pagedown Move the active tab
     ctrl+plus / ctrl+minus     Make the terminal's text bigger / smaller
     ctrl+0                     Put the text back to its default size
 
     Control-Shift, because a bare ctrl-letter belongs to the program in the
     pane: ctrl-c interrupts it, ctrl-d ends its input and ctrl-w takes back a
-    word. The comma is not a letter the tty wants, which is why the settings
-    chord is the one entry here that keeps a bare Control.
+    word. Neither the comma nor Tab is a letter the tty wants — Tab is already
+    a control code, so ctrl-Tab has never had a spelling a terminal could send
+    — which is why those two are the entries here that keep a bare Control.
 
     Every one of these is a *default*. They are keybindings in VSCode's format
     and with VSCode's rules, so <config>/crook/keybindings.json overrides any
