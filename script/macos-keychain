@@ -19,7 +19,7 @@
 set -eu
 
 : "${MACOS_CERTIFICATE:?set MACOS_CERTIFICATE to the base64 of a .p12}"
-: "${MACOS_CERTIFICATE_PASSWORD:?set MACOS_CERTIFICATE_PASSWORD to that .p12's password}"
+: "${MACOS_CERTIFICATE_PASSWORD:?set MACOS_CERTIFICATE_PASSWORD to the password for that .p12}"
 
 [ "$(uname -s)" = Darwin ] || { echo "error: this needs macOS: the security(1) tool" >&2; exit 1; }
 
