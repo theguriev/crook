@@ -1015,6 +1015,15 @@ pub const DEFAULTS_MAC: &[(&str, &str)] = &[
     // cmd+alt+arrow is where a Mac browser keeps its tabs anyway.
     ("cmd+alt+left", "crook/window/previous-tab"),
     ("cmd+alt+right", "crook/window/next-tab"),
+    // The pair every browser puts the same step on, and the one a person
+    // reaches for without having read anything. It is bound identically on
+    // both platforms because it is the same gesture in both places, which no
+    // other tab chord here manages. Free of the field on macOS: the ctrl
+    // branch of `chord_intent` is the emacs bindings and those are letters,
+    // and `named_intent` gives Tab to the completion only while the
+    // modifiers are `plain`.
+    ("ctrl+tab", "crook/window/next-tab"),
+    ("ctrl+shift+tab", "crook/window/previous-tab"),
     ("ctrl+cmd+left", "crook/window/move-tab-left"),
     ("ctrl+cmd+right", "crook/window/move-tab-right"),
     ("cmd+=", "crook/window/zoom-in"),
@@ -1098,6 +1107,15 @@ pub const DEFAULTS_OTHER: &[(&str, &str)] = &[
     // and it leaves ctrl+shift+arrow to the field, where it selects by word.
     ("ctrl+pageup", "crook/window/previous-tab"),
     ("ctrl+pagedown", "crook/window/next-tab"),
+    // The browser pair, on both platforms — see the Mac table. A bare Control
+    // here, like the settings comma and the zoom keys, and for the reason
+    // those keep one: Tab is not a letter the tty has a code to spare. It is
+    // already a control code itself, so ctrl-Tab has never had a spelling a
+    // terminal could send, and the only program that can hear it is one that
+    // turned the kitty keyboard protocol on — which is what a
+    // `-crook/window/next-tab` line in `keybindings.json` gives it back.
+    ("ctrl+tab", "crook/window/next-tab"),
+    ("ctrl+shift+tab", "crook/window/previous-tab"),
     ("ctrl+shift+pageup", "crook/window/move-tab-left"),
     ("ctrl+shift+pagedown", "crook/window/move-tab-right"),
     // ctrl+minus does not collide with anything a shell wants: the C0 range

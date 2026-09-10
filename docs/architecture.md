@@ -1274,6 +1274,11 @@ The two platforms differ, and not by taste:
   `ctrl+pageup/pagedown`, which leaves `ctrl-shift-left/right` to the field, where it selects
   by word. Copy and undo are `ctrl-shift-c` and `ctrl-shift-z` for the same reason every
   terminal emulator on Linux arrived at.
+- **`ctrl-tab` and `ctrl-shift-tab` step through the tabs on both**, and are the one chord the
+  two tables spell identically. They can be: Tab is already a control code, so `ctrl-Tab` has
+  never had a spelling a terminal could send, and the only program that can hear it is one
+  that turned the kitty keyboard protocol on — which is a `-crook/window/next-tab` line away
+  from having it back.
 
 - **The two families that are not on either.** Tab-by-position is `cmd-1`…`cmd-9` on macOS
   and `alt-1`…`alt-9` off it — not `ctrl-shift-<digit>`, because `control_code` folds

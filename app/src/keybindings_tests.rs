@@ -182,6 +182,13 @@ fn the_shipped_table_binds_the_chords_each_platform_is_used_to() {
         (&other, "ctrl+shift+t", "crook/window/new-tab"),
         (&other, "ctrl+pagedown", "crook/window/next-tab"),
         (&other, "ctrl+,", "crook/window/open-settings"),
+        // The one chord the two tables spell the same way, which is the whole
+        // point of it: somebody who moves between the two machines presses it
+        // without thinking about which one they are on.
+        (&mac, "ctrl+tab", "crook/window/next-tab"),
+        (&mac, "ctrl+shift+tab", "crook/window/previous-tab"),
+        (&other, "ctrl+tab", "crook/window/next-tab"),
+        (&other, "ctrl+shift+tab", "crook/window/previous-tab"),
     ] {
         assert_eq!(
             meaning(keybindings, text),
