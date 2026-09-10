@@ -13,6 +13,44 @@ GPU renderer — while deliberately taking one backend instead of two, and no bu
 all. See [`docs/architecture.md`](docs/architecture.md) for what was inherited, what was
 dropped, and why.
 
+## What it looks like
+
+<img src="docs/images/tabs.png" alt="The tab panel: four agent sessions, each with a coloured status dot and the branch it is working on, one of them a group of two tabs" width="330" align="right">
+
+The panel down the left edge is the claim above, drawn: one row per agent, a dot saying whether
+it is running, waiting on an answer, finished or failed, and under the title the branch that
+work is happening on. Two rows that belong together fold into a group with a count — a tab and
+the worktree opened from it. The strip is the list of what is being worked on, so reading it is
+reading the state of the machine.
+
+<br clear="right">
+
+![Three finished commands, each in its own block with a rule between them, the last one showing the copy and menu controls that appear under the pointer](docs/images/blocks.png)
+
+The output is a transcript of blocks rather than one scrolling screen: a command, everything it
+printed, and a boundary. The pointer over a block brings up the two controls in its corner —
+copy the whole thing, or open its menu — and the block under the prompt is the one still open.
+
+![The find bar over a pane, reading "tab", counting three matches and highlighting them in the output where they are](docs/images/find.png)
+
+Find searches the blocks, not the screenful: every finished command and the open one at once,
+counted in the bar, the current match in the accent and the rest in amber. It is a search and
+not a filter, so the lines between the hits stay where they are.
+
+These are rendered by Crook itself rather than captured from a window — `--snapshot` draws one
+frame of the real view tree to a PNG, which is how a picture of the application is the same on
+every machine:
+
+```sh
+./script/run --snapshot docs/images/tabs.png            # then cropped to the panel
+./script/run --run 'git status --short --branch' \
+             --run 'git log --oneline -8' \
+             --run 'cargo test -p crook_plugin_api --quiet' \
+             --hover-block 2 --snapshot docs/images/blocks.png
+./script/run --run 'git log --oneline -12' \
+             --find-output tab --snapshot docs/images/find.png
+```
+
 ## v1 scope
 
 Eight features, and the page that configures them:
