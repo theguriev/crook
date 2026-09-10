@@ -71,6 +71,32 @@ jobs:
               ;;
           esac
 
+      # Both parsers, because they disagree. `#!/bin/sh` on a GitHub macOS
+      # runner is bash, and bash outside POSIX mode reads the word inside
+      # ${VAR:?message} as if it were quoted — so an apostrophe in that message
+      # opens a string that swallows the rest of the file. `sh -n` on a Linux
+      # box where /bin/sh is bash in POSIX mode parses it happily, which is how
+      # exactly that broke the v0.1.1 release: a syntax error nothing local
+      # could see, in a script that only ever runs on macOS.
+      - name: Every script parses
+        shell: bash
+        run: |
+          set -eu
+          failed=0
+          for file in script/*; do
+            [ -f "$file" ] || continue
+            head -1 "$file" | grep -q '^#!/bin/sh' || continue
+            for parser in sh bash; do
+              if ! "$parser" -n "$file"; then
+                echo "::error file=$file::$file is not valid under $parser -n"
+                failed=1
+              fi
+            done
+          done
+          [ "$failed" = 0 ] || exit 1
+          echo "Every script parses under both sh and bash."
+
+
   build:
     name: Build ${{ matrix.name }}
     needs: version
