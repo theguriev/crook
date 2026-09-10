@@ -1,0 +1,166 @@
+#!/bin/sh
+#
+# Install a released Crook binary.
+#
+#   curl -fsSL https://raw.githubusercontent.com/theguriev/crook/main/script/install | sh
+#   ./script/install --version v0.1.0 --to /usr/local/bin
+#
+# This exists because of one macOS detail. A binary that is signed ad-hoc
+# rather than notarized — which is as far as a release can go without a paid
+# Developer ID — is refused on first launch with "Apple could not verify
+# 'crook' is free of malware", and the only ways past that dialog are a
+# Terminal command or four clicks in System Settings.
+#
+# But the thing Gatekeeper is reacting to is not the signature. It is the
+# `com.apple.quarantine` attribute, and a *browser* is what sets it. Nothing
+# downloaded by curl carries it, so an install that never touches a browser
+# never raises the dialog at all. That is the whole reason to prefer this over
+# clicking the release page.
+#
+# The archive is checked against the SHA256SUMS published beside it before
+# anything is unpacked, because a download nobody verified is worse than the
+# dialog this avoids.
+
+set -eu
+
+REPO=theguriev/crook
+VERSION=latest
+DESTINATION=""
+
+usage() {
+  cat <<'EOF'
+Usage: ./script/install [--version <tag>] [--to <directory>]
+
+  --version <tag>  Release to install, such as v0.1.0. Default: the latest.
+  --to <directory> Where to put the binary. Default: ~/.local/bin, or
+                   /usr/local/bin when that is writable and the other is not.
+  -h, --help       Show this message.
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --version) [ $# -ge 2 ] || { echo "error: --version needs a tag" >&2; exit 1; }
+      VERSION=$2; shift 2 ;;
+    --version=*) VERSION=${1#--version=}; shift ;;
+    --to) [ $# -ge 2 ] || { echo "error: --to needs a directory" >&2; exit 1; }
+      DESTINATION=$2; shift 2 ;;
+    --to=*) DESTINATION=${1#--to=}; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "error: unknown argument '$1'" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+command -v curl >/dev/null 2>&1 || { echo "error: curl is required" >&2; exit 1; }
+command -v tar  >/dev/null 2>&1 || { echo "error: tar is required" >&2; exit 1; }
+
+# The target triple, spelled the way the release names its archives.
+case "$(uname -s)" in
+  Darwin) PLATFORM=apple-darwin ;;
+  Linux)  PLATFORM=unknown-linux-gnu ;;
+  *)
+    echo "error: no released archive for $(uname -s)." >&2
+    echo "       Windows is a .zip on the release page; unzip it by hand." >&2
+    exit 1
+    ;;
+esac
+
+case "$(uname -m)" in
+  arm64 | aarch64) ARCHITECTURE=aarch64 ;;
+  x86_64 | amd64)  ARCHITECTURE=x86_64 ;;
+  *) echo "error: no released archive for $(uname -m)" >&2; exit 1 ;;
+esac
+
+# Linux ships one architecture so far; saying so beats a 404 from GitHub.
+if [ "$PLATFORM" = unknown-linux-gnu ] && [ "$ARCHITECTURE" != x86_64 ]; then
+  echo "error: the Linux release is x86_64 only; build from source for $(uname -m)" >&2
+  exit 1
+fi
+
+TARGET="$ARCHITECTURE-$PLATFORM"
+
+# The tag. Asked of the API rather than parsed out of the /releases/latest
+# redirect, because a repository with no release at all should say so here
+# rather than download a file called "releases".
+if [ "$VERSION" = latest ]; then
+  VERSION=$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" |
+    sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n 1)
+  [ -n "$VERSION" ] || { echo "error: $REPO has no published release" >&2; exit 1; }
+fi
+
+STEM="crook-$VERSION-$TARGET"
+BASE="https://github.com/$REPO/releases/download/$VERSION"
+
+if [ -z "$DESTINATION" ]; then
+  DESTINATION="$HOME/.local/bin"
+  # /usr/local/bin only when it is already writable — asking for a password is
+  # not something a piped-in script should do behind somebody's back.
+  if [ ! -d "$DESTINATION" ] && [ -w /usr/local/bin ]; then
+    DESTINATION=/usr/local/bin
+  fi
+fi
+
+WORK=$(mktemp -d)
+# shellcheck disable=SC2064 # $WORK is expanded now on purpose
+trap "rm -rf '$WORK'" EXIT INT TERM
+
+echo "==> Downloading $STEM.tar.gz"
+curl -fsSL --proto '=https' --tlsv1.2 -o "$WORK/$STEM.tar.gz" "$BASE/$STEM.tar.gz" ||
+  { echo "error: no archive for $TARGET in $VERSION" >&2; exit 1; }
+curl -fsSL --proto '=https' --tlsv1.2 -o "$WORK/SHA256SUMS" "$BASE/SHA256SUMS" ||
+  { echo "error: $VERSION publishes no SHA256SUMS" >&2; exit 1; }
+
+echo "==> Checking it against SHA256SUMS"
+# macOS ships `shasum`, Linux ships `sha256sum`, and each prints the digest
+# first. Comparing that one field is the portable form of `-c`, whose flags
+# differ between the two.
+if command -v sha256sum >/dev/null 2>&1; then
+  GOT=$(sha256sum "$WORK/$STEM.tar.gz" | cut -d' ' -f1)
+elif command -v shasum >/dev/null 2>&1; then
+  GOT=$(shasum -a 256 "$WORK/$STEM.tar.gz" | cut -d' ' -f1)
+else
+  echo "error: neither sha256sum nor shasum is installed; refusing to install unverified" >&2
+  exit 1
+fi
+
+# The `*` a binary-mode line carries in front of the name is stripped, so that
+# the Windows entry's spelling does not change how this reads its own line.
+WANT=$(sed 's/[*]//' "$WORK/SHA256SUMS" | awk -v n="$STEM.tar.gz" '$2 == n { print $1 }')
+[ -n "$WANT" ] || { echo "error: SHA256SUMS has no line for $STEM.tar.gz" >&2; exit 1; }
+
+if [ "$GOT" != "$WANT" ]; then
+  echo "error: checksum mismatch for $STEM.tar.gz" >&2
+  echo "       published $WANT" >&2
+  echo "       download  $GOT" >&2
+  exit 1
+fi
+
+tar -xzf "$WORK/$STEM.tar.gz" -C "$WORK"
+[ -f "$WORK/$STEM/crook" ] || { echo "error: the archive holds no crook binary" >&2; exit 1; }
+
+mkdir -p "$DESTINATION"
+# Installed by rename-over rather than by writing in place, so that a running
+# Crook keeps the inode it started from instead of having its text overwritten.
+cp "$WORK/$STEM/crook" "$WORK/crook.new"
+chmod 755 "$WORK/crook.new"
+mv -f "$WORK/crook.new" "$DESTINATION/crook"
+
+# Belt and braces: nothing curl fetched is quarantined, but a copy that reached
+# this machine some other way might be, and clearing an attribute that is not
+# there costs nothing.
+if [ "$PLATFORM" = apple-darwin ] && command -v xattr >/dev/null 2>&1; then
+  xattr -d com.apple.quarantine "$DESTINATION/crook" 2>/dev/null || true
+fi
+
+echo "==> $DESTINATION/crook"
+
+case ":$PATH:" in
+  *":$DESTINATION:"*) echo "==> Run it with: crook" ;;
+  *)
+    echo
+    echo "$DESTINATION is not on your PATH. Either run it as $DESTINATION/crook,"
+    echo "or add this to your shell's profile:"
+    echo
+    echo "    export PATH=\"$DESTINATION:\$PATH\""
+    ;;
+esac

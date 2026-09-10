@@ -51,6 +51,41 @@ every machine:
              --find-output tab --snapshot docs/images/find.png
 ```
 
+## Install
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/theguriev/crook/main/script/install | sh
+```
+
+macOS on both architectures and Linux on x86_64. It reads the latest release, checks the archive
+against the `SHA256SUMS` published beside it, and puts the binary in `~/.local/bin`, or somewhere
+else with `--to`. Windows is a `.zip` on the [releases page](https://github.com/theguriev/crook/releases).
+
+### macOS, from the browser
+
+`crook-v<version>-macos.dmg` on the [releases page](https://github.com/theguriev/crook/releases)
+holds `Crook.app` — one universal build for Apple Silicon and Intel both. It is signed with a
+Developer ID, notarized, and the ticket is stapled to the app before the image is built around
+it, so it opens on a double click with no dialog and no network. Drag it to Applications.
+
+That is the difference notarization makes, and it is worth knowing what it fixes. A Mac
+quarantines anything a *browser* downloads, and on an unnotarized build the first launch is
+refused outright — *"Apple could not verify 'crook' is free of malware"*, offering only **Move to
+Trash** and **Done**. Releases before v0.1.1 were unnotarized and do that. If you are looking at
+that dialog now, press **Done** rather than *Move to Trash*, and clear the attribute yourself:
+
+```sh
+xattr -dr com.apple.quarantine crook && ./crook
+```
+
+On macOS 15 and later that command, or **System Settings → Privacy & Security → Open Anyway**, is
+the whole of the way past it: the old right-click-and-Open shortcut was removed.
+
+The `.tar.gz` archives hold the bare binary and are what `script/install` fetches. Nothing `curl`
+downloads is quarantined, which is why that path never needed the dialog in the first place.
+
+To build it yourself instead, see [Prerequisites](#prerequisites) and [Build and run](#build-and-run).
+
 ## v1 scope
 
 Eight features, and the page that configures them:
@@ -610,7 +645,9 @@ crates/crook_terminal/   pty, emulator, and the snapshot the renderer draws     
 docs/architecture.md     the design, and the reasoning behind each divergence
 docs/blocks.md           the block surface: what draws it, and what it does not do yet
 docs/plugins.md          the two plugin tiers, and what each of them may do
-script/                  bootstrap, run, bundle, publish
+docs/images/             the README's screenshots, rendered by `--snapshot`
+script/                  bootstrap, run, bundle, install, publish,
+                         and for macOS: macos-keychain, macos-app, notarize, macos-dmg
 ```
 
 Two crates are meant to leave this repository. A plugin is written outside it, by somebody with

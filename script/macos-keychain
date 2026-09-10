@@ -1,0 +1,65 @@
+#!/bin/sh
+#
+# Put a Developer ID certificate into a keychain `codesign` will find.
+#
+#   MACOS_CERTIFICATE=<base64 .p12> MACOS_CERTIFICATE_PASSWORD=<password> \
+#     ./script/macos-keychain
+#
+# Only ever run on a throwaway machine — a CI runner. It creates a keychain,
+# unlocks it and puts it in the search list, which is not a thing to do to a
+# laptop where the login keychain already holds the certificate and Keychain
+# Access is the way in.
+#
+# The awkward line is `set-key-partition-list`. Since macOS 10.12 an imported
+# key carries an access control list naming which programs may use it without
+# a GUI prompt, and a keychain that has just been created by a script has
+# nothing in that list — so `codesign` blocks forever on a dialog no CI runner
+# can answer. That call is what says "codesign may use this key unattended".
+
+set -eu
+
+: "${MACOS_CERTIFICATE:?set MACOS_CERTIFICATE to the base64 of a .p12}"
+: "${MACOS_CERTIFICATE_PASSWORD:?set MACOS_CERTIFICATE_PASSWORD to that .p12's password}"
+
+[ "$(uname -s)" = Darwin ] || { echo "error: this needs macOS: the security(1) tool" >&2; exit 1; }
+
+WORK="${RUNNER_TEMP:-$(mktemp -d)}"
+KEYCHAIN="$WORK/crook-signing.keychain-db"
+CERTIFICATE="$WORK/certificate.p12"
+
+# Random, and never printed: nothing needs to unlock this keychain after the
+# job that made it, so a password anybody could learn buys nothing.
+KEYCHAIN_PASSWORD="$(openssl rand -base64 24)"
+
+umask 077
+printf '%s' "$MACOS_CERTIFICATE" | base64 --decode > "$CERTIFICATE"
+# shellcheck disable=SC2064 # expanded now on purpose
+trap "rm -f '$CERTIFICATE'" EXIT INT TERM
+
+security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+# -lut 21600: do not lock on sleep, and time out after six hours, which
+# outlasts any job that has a timeout of one.
+security set-keychain-settings -lut 21600 "$KEYCHAIN"
+security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+
+security import "$CERTIFICATE" -k "$KEYCHAIN" \
+  -P "$MACOS_CERTIFICATE_PASSWORD" \
+  -T /usr/bin/codesign -T /usr/bin/security
+
+security set-key-partition-list \
+  -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+
+# The default search list still holds the login keychain; appending rather than
+# replacing it keeps anything else on the runner working.
+security list-keychain -d user -s "$KEYCHAIN" login.keychain-db
+
+echo "==> Identities now available to codesign:"
+security find-identity -v -p codesigning "$KEYCHAIN"
+
+# A keychain with no usable identity is a job that fails later, in codesign,
+# with a message about a missing identity rather than about the import.
+if ! security find-identity -v -p codesigning "$KEYCHAIN" | grep -q "Developer ID Application"; then
+  echo "error: no Developer ID Application identity was imported." >&2
+  echo "       The .p12 probably holds a certificate with no private key." >&2
+  exit 1
+fi

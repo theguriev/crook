@@ -35,8 +35,45 @@ permissions:
   contents: read
 
 jobs:
+  version:
+    name: The tag matches the manifest
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      # script/bundle names its archives from the *manifest* version and the
+      # release is created under the *tag*, so a tag pushed without the version
+      # bump publishes crook-v0.1.0-*.tar.gz on a v0.1.1 page — and
+      # script/install, which builds the filename out of the tag, then asks for
+      # a file that is not there. Cheaper to fail here in twenty seconds than
+      # after four release builds.
+      - name: Compare them
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -eu
+          manifest=$(sed -n '/^\[workspace\.package\]/,/^\[/ s/^version *= *"\([^"]*\)".*/\1/p' Cargo.toml | head -1)
+          if [ -z "$manifest" ]; then
+            echo "::error::could not read version from [workspace.package] in Cargo.toml"
+            exit 1
+          fi
+          echo "tag=$TAG manifest=$manifest"
+          case "$TAG" in
+            "v$manifest") echo "They agree." ;;
+            *)
+              echo "::error::tag $TAG does not match the manifest version $manifest."
+              echo "::error::Set version = \"${TAG#v}\" under [workspace.package], run cargo metadata, and commit Cargo.lock."
+              exit 1
+              ;;
+          esac
+
   build:
     name: Build ${{ matrix.name }}
+    needs: version
     timeout-minutes: 60
     strategy:
       # Every leg that can finish should: a Windows failure is no reason to
@@ -60,6 +97,10 @@ jobs:
             runner: windows-latest
             target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.runner }}
+    env:
+      # Mirrored into env because an `if:` reads the env context and not the
+      # secrets one; the value is only ever used to test for emptiness.
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
@@ -92,8 +133,20 @@ jobs:
           key: ${{ matrix.target }}-cargo-release-${{ hashFiles('**/Cargo.lock', 'rust-toolchain.toml') }}
           restore-keys: ${{ matrix.target }}-cargo-release-
 
+      # Without the secret this is skipped and script/bundle signs ad-hoc, which
+      # is what every release before there was a certificate shipped.
+      - name: Import the Developer ID certificate
+        if: runner.os == 'macOS' && env.MACOS_CERTIFICATE != ''
+        shell: bash
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: ./script/macos-keychain
+
       - name: ./script/bundle --archive
         shell: bash
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
         run: ./script/bundle --target ${{ matrix.target }} --archive
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -108,9 +161,114 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+
+  macos-app:
+    name: Notarized macOS app
+    needs: build
+    runs-on: macos-latest
+    timeout-minutes: 60
+    env:
+      MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+      MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: incoming
+          pattern: crook-*-apple-darwin
+          merge-multiple: true
+
+      # One binary for both Macs. A .app can hold a universal executable and a
+      # person downloading one should not have to know which machine they have,
+      # which is the whole reason this is a separate job: the two architectures
+      # are built by different matrix legs and `lipo` needs them together.
+      - name: Make the universal binary
+        shell: bash
+        run: |
+          set -eux
+          mkdir -p work
+          for archive in incoming/*-apple-darwin.tar.gz; do
+            tar -xzf "$archive" -C work
+          done
+          lipo -create -output work/crook-universal \
+            work/*aarch64-apple-darwin/crook \
+            work/*x86_64-apple-darwin/crook
+          lipo -info work/crook-universal
+          file work/crook-universal
+
+      - name: Import the Developer ID certificate
+        if: env.MACOS_CERTIFICATE != ''
+        shell: bash
+        env:
+          MACOS_CERTIFICATE: ${{ secrets.MACOS_CERTIFICATE }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: ./script/macos-keychain
+
+      - name: Build Crook.app
+        shell: bash
+        run: ./script/macos-app --binary work/crook-universal
+
+      # Written to a file rather than passed as a value, because notarytool
+      # takes a path and a heredoc keeps the key out of the process table.
+      - name: Write the App Store Connect key
+        if: env.MACOS_CERTIFICATE != ''
+        shell: bash
+        env:
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          umask 077
+          printf '%s' "$APPLE_API_KEY" | base64 --decode > "$RUNNER_TEMP/AuthKey.p8"
+
+      # Stapled to the .app before the image is built around it, so a copy
+      # dragged out of that image launches with no network.
+      - name: Notarize and staple Crook.app
+        if: env.MACOS_CERTIFICATE != ''
+        shell: bash
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          export APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          ./script/notarize dist/macos/Crook.app
+
+      - name: Build the disk image
+        shell: bash
+        run: ./script/macos-dmg --app dist/macos/Crook.app
+
+      - name: Notarize and staple the disk image
+        if: env.MACOS_CERTIFICATE != ''
+        shell: bash
+        env:
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+        run: |
+          export APPLE_API_KEY_PATH="$RUNNER_TEMP/AuthKey.p8"
+          ./script/notarize dist/macos/crook-*-macos.dmg
+
+      - name: Checksum it
+        shell: bash
+        run: |
+          cd dist/macos
+          for image in crook-*-macos.dmg; do
+            shasum -a 256 "$image" > "$image.sha256"
+          done
+          cat ./*.sha256
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: crook-macos-dmg
+          path: |
+            dist/macos/*.dmg
+            dist/macos/*.sha256
+          if-no-files-found: error
+          retention-days: 7
+
   release:
     name: Publish the release
-    needs: build
+    needs: [build, macos-app]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -153,38 +311,42 @@ jobs:
 
           ## Install
 
-          **macOS** — one archive per architecture: `aarch64` for Apple Silicon
-          (M1 and later), `x86_64` for Intel Macs. These binaries are signed
-          ad-hoc rather than notarized, so macOS quarantines them on download
-          and refuses the first launch. Clearing the quarantine flag is the
-          whole of the fix:
-
           ```sh
-          tar -xzf crook-*-aarch64-apple-darwin.tar.gz
-          cd crook-*-aarch64-apple-darwin
-          xattr -dr com.apple.quarantine crook
-          ./crook
+          curl -fsSL https://raw.githubusercontent.com/theguriev/crook/main/script/install | sh
           ```
 
-          **Linux** — built on Ubuntu 24.04, so it needs glibc 2.39 or newer.
-          The window is opened through X11 or Wayland and the GPU is reached
-          through Vulkan or GL, all of which are loaded at run time: on a
-          minimal system, install the runtime packages `./script/bootstrap`
-          lists, plus at least one font family.
+          Reads this release, checks the archive against the `SHA256SUMS` below, and installs to
+          `~/.local/bin` — or elsewhere with `--to`. macOS on both architectures, Linux on x86_64.
+
+          **On macOS, prefer that to downloading an archive by hand.** These binaries are signed
+          ad-hoc rather than notarized, which needs a paid Developer ID, so a Mac refuses the
+          first launch of a downloaded one with *"Apple could not verify 'crook' is free of
+          malware"* and offers only **Move to Trash** and **Done**. Gatekeeper is reacting to the
+          `com.apple.quarantine` attribute rather than to the signature, and a *browser* is what
+          sets that attribute — nothing `curl` fetches carries it, so the line above never raises
+          the dialog.
+
+          Already looking at that dialog? Press **Done**, not *Move to Trash*, then:
 
           ```sh
-          tar -xzf crook-*-x86_64-unknown-linux-gnu.tar.gz
-          cd crook-*-x86_64-unknown-linux-gnu
-          ./crook
+          xattr -dr com.apple.quarantine crook && ./crook
           ```
 
-          **Windows** — unzip and run `crook.exe`. Unsigned, so SmartScreen
-          shows "Windows protected your PC" on the first launch; the binary
-          runs from *More info → Run anyway*.
+          On macOS 15 and later that, or **System Settings → Privacy & Security → Open Anyway**,
+          is the only way past it; the old right-click-and-Open shortcut was removed.
+
+          ## By hand
+
+          `aarch64-apple-darwin` is Apple Silicon, `x86_64-apple-darwin` is an Intel Mac. The
+          Linux build is made on Ubuntu 24.04 and so wants glibc 2.39 or newer; its window and
+          GPU are reached through X11/Wayland and Vulkan/GL at run time, so a minimal system
+          needs the runtime packages `./script/bootstrap` lists and at least one font family.
+          Windows is a `.zip`: unzip it and run `crook.exe`. It is unsigned, so SmartScreen says
+          "Windows protected your PC" once, and *More info → Run anyway* starts it.
 
           ## Verifying a download
 
-          `SHA256SUMS` holds one line per archive.
+          `SHA256SUMS` holds one line per archive; the installer checks it for you.
 
           ```sh
           sha256sum -c SHA256SUMS --ignore-missing

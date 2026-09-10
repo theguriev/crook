@@ -174,12 +174,24 @@ cp "$BUILT" "$OUT_DIR/$BIN_FILE"
 # An arm64 macOS binary will not launch without a signature at all, and the
 # linker's own ad-hoc one is invalidated by anything that rewrites the file —
 # the copy above does not, but `strip` in the release profile runs before this
-# and a future step might not. Re-signing ad-hoc costs nothing and makes the
-# state explicit. It is not notarization: a downloaded archive still carries
-# com.apple.quarantine, which the release notes tell a person how to clear.
+# and a future step might not. Re-signing makes the state explicit either way.
+#
+# With a Developer ID in $MACOS_SIGNING_IDENTITY it is a real signature, under
+# the hardened runtime, which is what says who built this. Without one it is
+# ad-hoc, which says nothing but still launches. Neither is notarization: what
+# a person downloads through a *browser* is quarantined whatever it is signed
+# with, and the answer to that is the notarized .dmg — see script/macos-app.
+# This archive is what `script/install` fetches with curl, which never
+# quarantines anything.
 if [ "$PLATFORM" = macos ] && command -v codesign >/dev/null 2>&1; then
-  echo "==> Ad-hoc signing $OUT_DIR/$BIN_FILE"
-  codesign --force --sign - "$OUT_DIR/$BIN_FILE"
+  if [ -n "${MACOS_SIGNING_IDENTITY:-}" ]; then
+    echo "==> Signing $OUT_DIR/$BIN_FILE with $MACOS_SIGNING_IDENTITY"
+    codesign --force --options runtime --timestamp \
+      --sign "$MACOS_SIGNING_IDENTITY" "$OUT_DIR/$BIN_FILE"
+  else
+    echo "==> Ad-hoc signing $OUT_DIR/$BIN_FILE"
+    codesign --force --sign - "$OUT_DIR/$BIN_FILE"
+  fi
 fi
 
 echo "==> $OUT_DIR/$BIN_FILE"
