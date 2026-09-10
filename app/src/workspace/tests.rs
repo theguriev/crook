@@ -12561,6 +12561,10 @@ fn close_chord() -> Modifiers {
     tab_chord()
 }
 
+/// What the palette's field says while nothing has been typed, which is how a
+/// test tells an open card from a closed one.
+const PALETTE_PLACEHOLDER: &str = "Search commands, tabs and settings";
+
 /// The chord `crook/palette` asks for: the one every editor uses, plus the
 /// Shift that keeps Crook's chords off a bare Ctrl-letter away from macOS.
 fn palette_chord() -> Modifiers {
@@ -12577,13 +12581,13 @@ fn the_palette_opens_on_the_chord_a_plugin_asked_for() {
     // A chord no `input_keys` table knows about, reaching a surface no
     // `Workspace` field holds. Both halves are the plugin's.
     let mut harness = Harness::new(1);
-    assert!(!frame_text(&harness.frame()).contains("Run a command"));
+    assert!(!frame_text(&harness.frame()).contains(PALETTE_PLACEHOLDER));
 
     harness.press("p", palette_chord(), "");
     let text = frame_text(&harness.frame());
 
     assert!(
-        text.contains("Run a command"),
+        text.contains(PALETTE_PLACEHOLDER),
         "the palette did not come up: {text}"
     );
     // Every command `crook/window` registered, listed by its title and by the
@@ -12635,7 +12639,7 @@ fn a_query_that_matches_nothing_says_so_rather_than_showing_everything() {
     harness.type_text("zzzz");
     let text = frame_text(&harness.frame());
 
-    assert!(text.contains("No command matches that."), "{text}");
+    assert!(text.contains("Nothing matches that."), "{text}");
     assert!(!text.contains("New agent tab"), "{text}");
 }
 
@@ -12657,7 +12661,7 @@ fn enter_runs_what_is_selected_and_takes_the_palette_down() {
         "the command did not run: {text}"
     );
     assert!(
-        !text.contains("Run a command"),
+        !text.contains(PALETTE_PLACEHOLDER),
         "the palette stayed up: {text}"
     );
 }
@@ -12705,7 +12709,7 @@ fn escape_takes_the_palette_down_and_gives_the_keyboard_back() {
     harness.press("escape", Modifiers::default(), "");
     let text = frame_text(&harness.frame());
 
-    assert!(!text.contains("Run a command"), "{text}");
+    assert!(!text.contains(PALETTE_PLACEHOLDER), "{text}");
     assert!(takes_keys(&harness), "the pane never got the keyboard back");
 }
 
@@ -13165,6 +13169,140 @@ fn a_query_the_list_of_keys_cannot_answer_says_so_in_its_own_words() {
     );
 }
 
+/// Opens the palette and types `query` into it.
+///
+/// Through the chord and then the field, because that is the entry path a
+/// person has: every list is reached by a sigil typed into the one box.
+fn open_palette(harness: &mut Harness, query: &str) {
+    harness.press("p", palette_chord(), "");
+    harness.frame();
+    harness.type_text(query);
+}
+
+#[test]
+fn each_kind_of_answer_gets_a_heading_when_there_is_another_kind() {
+    // The rule the everything list is built on: a heading is drawn when there
+    // is something to tell apart. `agent` is answered by a command and by a
+    // tab, so both blocks are named; `split` is answered by commands alone,
+    // and naming the only list there is would be a fence rather than a label.
+    let mut harness = Harness::new(2);
+    open_palette(&mut harness, "agent");
+    let scene = harness.frame();
+
+    assert!(
+        drawn_line(&scene, "Commands").is_some(),
+        "the commands were not named: {}",
+        frame_text(&scene)
+    );
+    assert!(
+        drawn_line(&scene, "Tabs").is_some(),
+        "the tabs were not named: {}",
+        frame_text(&scene)
+    );
+    assert!(drawn_line(&scene, "New agent tab").is_some());
+
+    harness.press("escape", Modifiers::default(), "");
+    harness.frame();
+    open_palette(&mut harness, "minimise");
+    let scene = harness.frame();
+
+    assert!(drawn_line(&scene, "Minimise the window").is_some());
+    assert!(
+        drawn_line(&scene, "Commands").is_none(),
+        "a list of nothing but commands grew a heading: {}",
+        frame_text(&scene)
+    );
+}
+
+#[test]
+fn enter_on_a_tab_goes_to_that_tab() {
+    // A row that is not a command at all: it carries an action and the tab it
+    // is about, and Enter says the one before running the other.
+    let mut harness = Harness::new(3);
+    let tabs = harness.tab_ids();
+    assert_eq!(harness.active_id(), tabs[2]);
+
+    open_palette(&mut harness, "@agent 1");
+    let scene = harness.frame();
+    assert!(
+        drawn_line(&scene, "New agent tab").is_none(),
+        "the sigil did not narrow the card to the tabs: {}",
+        frame_text(&scene)
+    );
+
+    harness.press("enter", Modifiers::default(), "");
+    let text = frame_text(&harness.frame());
+
+    assert_eq!(harness.active_id(), tabs[0], "{text}");
+    assert!(!text.contains(PALETTE_PLACEHOLDER), "{text}");
+}
+
+#[test]
+fn the_tab_a_person_is_in_says_so() {
+    let mut harness = Harness::new(2);
+    open_palette(&mut harness, "@");
+    let text = frame_text(&harness.frame());
+
+    // Counted in the frame rather than looked for as a line of its own: a
+    // note is set beside the words it is about, on their baseline.
+    assert_eq!(
+        text.matches("you are here").count(),
+        1,
+        "one row is the tab on screen, and only one: {text}"
+    );
+}
+
+#[test]
+fn a_settings_row_opens_the_page_it_lives_on() {
+    // The third kind of row, and the one that has somewhere to arrive: a page
+    // is thirty rows tall, so the row's own words go into the rail's box on
+    // the way — which is what puts the row a person asked for on screen.
+    let mut harness = Harness::new(1);
+    open_palette(&mut harness, "login shell");
+    let scene = harness.frame();
+    assert!(
+        drawn_line(&scene, "Start a login shell").is_some(),
+        "the settings were not searched: {}",
+        frame_text(&scene)
+    );
+
+    harness.press("enter", Modifiers::default(), "");
+    let scene = harness.frame();
+    let text = frame_text(&scene);
+
+    assert!(!text.contains(PALETTE_PLACEHOLDER), "{text}");
+    assert!(
+        drawn_line(&scene, "Start a login shell").is_some(),
+        "the page it lives on is not on screen: {text}"
+    );
+    assert_eq!(
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace
+                .settings_search_text()),
+        "Start a login shell",
+        "the row's own words are what put it on screen: {text}"
+    );
+}
+
+#[test]
+fn a_command_is_not_answered_twice_over() {
+    // Every command is also a row of the Keyboard Shortcuts page, and that
+    // page is one of the settings. Listing it here would answer `split` with
+    // the same five titles twice — which teaches a person that half of what
+    // the palette says is noise.
+    let mut harness = Harness::new(1);
+    open_palette(&mut harness, "split");
+    let scene = harness.frame();
+
+    assert_eq!(
+        drawn_lines(&scene, "Split to the right").len(),
+        1,
+        "{}",
+        frame_text(&scene)
+    );
+}
+
 #[test]
 fn what_the_pane_eats_is_not_offered_as_something_to_run() {
     // The mode boundary again, for the rows the addendum added. The launcher
@@ -13178,7 +13316,7 @@ fn what_the_pane_eats_is_not_offered_as_something_to_run() {
     let scene = harness.frame();
     let text = frame_text(&scene);
 
-    assert!(text.contains("No command matches that."), "{text}");
+    assert!(text.contains("Nothing matches that."), "{text}");
     assert!(
         !text.contains("Interrupt, suspend, end the input"),
         "the launcher offered a key the pane eats: {text}"

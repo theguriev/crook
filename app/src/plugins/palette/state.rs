@@ -11,13 +11,28 @@ use std::collections::HashMap;
 
 use crookui_core::elements::{MouseStateHandle, ScrollStateHandle};
 
-use crate::plugin::Showing;
+use crate::plugin::{ActionId, Showing, Voice};
 
 use crate::clipboard::Clipboard;
 use crate::text_input::TextInput;
 use crate::workspace::Fonts;
 
 use super::rows::{Mode, Rows};
+
+/// The two actions the rows that are not commands run.
+///
+/// Resolved once, when the plugin builds, rather than looked up by name on
+/// every frame: `showing` runs on every keystroke and every arrow, and an
+/// `ActionName` is a string that would be parsed and searched for each time.
+#[derive(Copy, Clone)]
+pub(super) struct Goto {
+    /// Makes a tab the active one, told which through
+    /// [`Host::say`](crate::plugin::Host::say).
+    pub(super) tab: ActionId,
+    /// Opens the settings at the page a row lives on, with the row's own words
+    /// in the rail's box so that the row is on screen when it arrives.
+    pub(super) setting: ActionId,
+}
 
 /// One clickable thing in the palette.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
@@ -54,11 +69,24 @@ pub(super) struct Palette {
     last_query: RefCell<String>,
     clipboard: Clipboard,
     fonts: Fonts,
+    /// What a row leaves for the action it is about to run.
+    ///
+    /// Held here because the thing that says it is often a *click handler*,
+    /// which holds no workspace and no host — only what it captured. See
+    /// [`Voice`].
+    voice: Voice,
+    goto: Goto,
 }
 
 impl Palette {
     /// A palette that is not showing.
-    pub(super) fn new(showing: Showing, clipboard: Clipboard, fonts: Fonts) -> Self {
+    pub(super) fn new(
+        showing: Showing,
+        clipboard: Clipboard,
+        fonts: Fonts,
+        voice: Voice,
+        goto: Goto,
+    ) -> Self {
         Self {
             open: Cell::new(false),
             showing,
@@ -69,7 +97,19 @@ impl Palette {
             last_query: RefCell::new(String::new()),
             clipboard,
             fonts,
+            voice,
+            goto,
         }
+    }
+
+    /// The two actions the rows that are not commands run.
+    pub(super) fn goto(&self) -> Goto {
+        self.goto
+    }
+
+    /// The handle a row uses to tell the action it runs what it is about.
+    pub(super) fn voice(&self) -> Voice {
+        self.voice.clone()
     }
 
     /// Whether it is up.
@@ -92,34 +132,31 @@ impl Palette {
         self.scroll.lock().scroll_to_top();
     }
 
-    /// Puts it up on the list of keys, with `seed` in the box after the
-    /// sigil.
+    /// Puts it up on one of the lists, with `seed` in the box after the sigil.
     ///
     /// The seed is what `--action "crook/palette/keys split"` sends through
     /// [`Host::said`](crate::plugin::Host::said), which is how a row anywhere
-    /// else hands an argumentless action its subject — and the only way this
-    /// surface can be pictured with `--snapshot`.
-    pub(super) fn open_keys(&self, seed: &str) {
+    /// else hands an argumentless action its subject — and the only way these
+    /// surfaces can be pictured with `--snapshot`.
+    pub(super) fn open_in(&self, mode: Mode, seed: &str) {
         self.open();
-        self.query
-            .edit(|editor| editor.set_text(format!("{}{seed}", Mode::SIGIL)));
+        self.query.edit(|editor| editor.set_text(mode.seeded(seed)));
     }
 
-    /// Puts the sigil on the front of the query, or takes it off.
+    /// Puts the next list's sigil on the front of the query, in place of
+    /// whichever one is there.
     ///
     /// A text edit rather than a flag, which is the whole argument for keeping
-    /// the mode in the query: a search survives the switch, so `split` and
-    /// `?split` are one question asked of two lists. The caret lands at the
-    /// end, because `Editor::set_text` puts it there — caret arithmetic on a
-    /// keystroke that is about the list rather than about the text would be
-    /// buying very little.
-    pub(super) fn toggle_mode(&self) {
+    /// the mode in the query: a search survives the switch, so `split`,
+    /// `>split` and `?split` are one question asked of three lists. The caret
+    /// lands at the end, because `Editor::set_text` puts it there — caret
+    /// arithmetic on a keystroke that is about the list rather than about the
+    /// text would be buying very little.
+    pub(super) fn next_mode(&self) {
         self.query.edit(|editor| {
-            let flipped = match editor.text().strip_prefix(Mode::SIGIL) {
-                Some(rest) => rest.to_owned(),
-                None => format!("{}{}", Mode::SIGIL, editor.text()),
-            };
-            editor.set_text(flipped);
+            let (mode, rest) = Mode::of(editor.text());
+            let turned = mode.next().seeded(rest);
+            editor.set_text(turned);
         });
     }
 

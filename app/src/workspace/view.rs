@@ -5132,7 +5132,7 @@ impl Workspace {
     }
 
     /// The home directory every row abbreviates its path against.
-    pub(super) fn home(&self) -> Option<&Path> {
+    pub(crate) fn home(&self) -> Option<&Path> {
         self.home.as_deref()
     }
 

@@ -12,14 +12,14 @@
 //! the whole window — a row with a spacer on each side, which is what puts the
 //! card in the middle at any width. See `WINDOW_OVERLAY`.
 //!
-//! # Two lists, one card
+//! # Five lists, one card
 //!
 //! The card draws whatever [`super::rows`] worked out and decides none of it.
 //! What it does decide comes out of one `match` on [`Rows::mode`]: the field's
 //! icon, how tall the list may be, and the line at the bottom. Everything else
-//! is one implementation read twice — Run mode is the list of keys with the
-//! headings and the second cap taken out of it, not a second card — which is
-//! what keeps the launcher's hot path the thing that shipped.
+//! is one implementation read five times — the list of commands is the list of
+//! keys with the headings and the second cap taken out of it, not a second
+//! card — which is what keeps the launcher's hot path the thing that shipped.
 //!
 //! # Nothing that is not a row may look like one
 //!
@@ -37,12 +37,12 @@ use crookui_core::prelude::*;
 
 use crook_plugin::ActionName;
 
-use crate::plugin::ActionId;
+use crate::plugin::Voice;
 use crate::plugins::shortcuts::NOT_BOUND;
 use crate::theme::theme;
 use crate::workspace::{Fonts, TextField, WorkspaceAction};
 
-use super::rows::{Entry, Mode, Row, Rows};
+use super::rows::{Entry, Mode, Row, Rows, Target};
 use super::state::{Control, Palette};
 
 /// How wide the card is.
@@ -78,20 +78,20 @@ pub(super) const ROW_HEIGHT: f32 = 34.;
 /// one height and scrolled to at another: one constant, read by both.
 pub(super) const GROUP_HEIGHT: f32 = 28.;
 
-/// How tall the list of things to run may grow.
+/// How tall a list with no headings in it may grow.
 ///
 /// Nine rows, which is what shipped. The list is as tall as it needs to be up
 /// to that, so a palette with three commands in it is a small card rather than
 /// a tall one with a hole in the bottom.
-const RUN_LIST_HEIGHT: f32 = ROW_HEIGHT * 9.;
+const FLAT_LIST_HEIGHT: f32 = ROW_HEIGHT * 9.;
 
-/// How tall the list of keys may grow.
+/// How tall a list with headings in it may grow.
 ///
 /// Twelve rows, or nine rows and three headings: a grouped list has to show
 /// enough of a group for the grouping to be visible at all. The card comes to
 /// `408 + 2 (border) + 20 (padding) + 26 (field) + 10 + 10 + 13 (hint) ≈ 489`,
 /// and `TOP + 489 = 585` fits the 640px window a snapshot opens.
-const KEYS_LIST_HEIGHT: f32 = ROW_HEIGHT * 12.;
+const GROUPED_LIST_HEIGHT: f32 = ROW_HEIGHT * 12.;
 
 /// How tall this mode's list may grow, which is the window a row has to be
 /// inside of.
@@ -108,8 +108,11 @@ const KEYS_LIST_HEIGHT: f32 = ROW_HEIGHT * 12.;
 /// returns — in a window where the card is already clipped.
 pub(super) fn list_height(mode: Mode) -> f32 {
     match mode {
-        Mode::Run => RUN_LIST_HEIGHT,
-        Mode::Keys => KEYS_LIST_HEIGHT,
+        // The two that carry headings, and the one that is simply long: the
+        // settings are forty rows of switches, and nine of them is a window on
+        // a list rather than a list.
+        Mode::Everything | Mode::Settings | Mode::Keys => GROUPED_LIST_HEIGHT,
+        Mode::Commands | Mode::Tabs => FLAT_LIST_HEIGHT,
     }
 }
 
@@ -118,20 +121,26 @@ const PADDING: f32 = 10.;
 
 /// What the field says while nothing has been typed.
 ///
-/// Never seen in the list of keys, whose field always holds at least the
-/// sigil, so it stays the launcher's word.
-const PLACEHOLDER: &str = "Run a command";
+/// Seen in the everything list alone — every other list's field holds at least
+/// its sigil — so it is the sentence that says what the surface is *for*, and
+/// the only place the three lists behind it are named in prose.
+const PLACEHOLDER: &str = "Search commands, tabs and settings";
 
-/// What the launcher says when a query answers to nothing.
-const NOTHING_RUN: &str = "No command matches that.";
-
-/// The same sentence for the list of keys, which is not a list of commands.
+/// What a list says when a query answers to nothing.
 ///
-/// A person who typed `?ctrl+c` asked about a key; telling them no *command*
-/// matches would answer a question they did not ask, and would be wrong twice
-/// over on a list that also holds the bindings naming nothing and the keys a
-/// pane eats.
-const NOTHING_KEYS: &str = "No key or command matches that.";
+/// One sentence per list, because a person who typed `?ctrl+c` asked about a
+/// key: telling them no *command* matches would answer a question they did not
+/// ask, and would be wrong twice over on a list that also holds the bindings
+/// naming nothing and the keys a pane eats.
+fn nothing(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Everything => "Nothing matches that.",
+        Mode::Commands => "No command matches that.",
+        Mode::Tabs => "No tab matches that.",
+        Mode::Settings => "No setting matches that.",
+        Mode::Keys => "No key or command matches that.",
+    }
+}
 
 /// How many keys a command's row prints before it counts the rest.
 ///
@@ -179,10 +188,15 @@ pub(super) fn render(palette: &Palette, rows: &Rows) -> Box<dyn Element> {
                     PLACEHOLDER,
                 )
                 // The whole of the mode indicator on screen, and it costs one
-                // `match`: the icon set's own word for this glyph is "a chord:
-                // what one key would do".
+                // `match`. Two of them are the sigil that asked for the list
+                // drawn as a picture — a chevron for `>`, a keyboard for the
+                // keys — which is what ties the character in the box to the
+                // list under it without a word of explanation.
                 .with_icon(match mode {
-                    Mode::Run => Lucide::Search,
+                    Mode::Everything => Lucide::Search,
+                    Mode::Commands => Lucide::ChevronRight,
+                    Mode::Tabs => Lucide::LayoutGrid,
+                    Mode::Settings => Lucide::Settings,
                     Mode::Keys => Lucide::Keyboard,
                 })
                 .finish(),
@@ -194,16 +208,9 @@ pub(super) fn render(palette: &Palette, rows: &Rows) -> Box<dyn Element> {
     if rows.is_empty() {
         column.add_child(
             Container::new(
-                Text::new(
-                    match mode {
-                        Mode::Run => NOTHING_RUN,
-                        Mode::Keys => NOTHING_KEYS,
-                    },
-                    fonts.ui,
-                    12.,
-                )
-                .with_color(theme().text_muted)
-                .finish(),
+                Text::new(nothing(mode), fonts.ui, 12.)
+                    .with_color(theme().text_muted)
+                    .finish(),
             )
             .with_uniform_padding(8.)
             .finish(),
@@ -215,9 +222,10 @@ pub(super) fn render(palette: &Palette, rows: &Rows) -> Box<dyn Element> {
         for (index, row) in rows.rows().iter().enumerate() {
             lines.add_child(match row {
                 Row::Group(name) => heading(name, fonts.ui),
-                Row::Command(entry, id) => command(
+                Row::Command(entry, target) => command(
                     entry,
-                    *id,
+                    target,
+                    palette.voice(),
                     index == palette.selected(),
                     palette.control(Control::Row(index)),
                     mode,
@@ -295,15 +303,23 @@ fn heading(name: &str, ui: FamilyId) -> Box<dyn Element> {
 }
 
 /// One command: the only line the keyboard lands on and the pointer runs.
+///
+/// The click is the palette's Enter with a pointer: what the row is about is
+/// said, and then the action runs — one dispatch, in the order
+/// [`Voice`](crate::plugin::Voice) is written for, because an action is applied
+/// after the whole tree has seen the press.
 fn command(
     entry: &Entry,
-    id: ActionId,
+    target: &Target,
+    voice: Voice,
     selected: bool,
     state: MouseStateHandle,
     mode: Mode,
     fonts: Fonts,
 ) -> Box<dyn Element> {
     let line = line(entry, mode, fonts);
+    let action = target.action;
+    let subject = target.subject.clone();
 
     ConstrainedBox::new(
         Hoverable::new(state, move |mouse| {
@@ -324,7 +340,12 @@ fn command(
                 })
                 .finish()
         })
-        .on_click(move |_, ctx, _| ctx.dispatch_typed_action(WorkspaceAction::Run(id)))
+        .on_click(move |_, ctx, _| {
+            if let Some(subject) = &subject {
+                voice.say(subject.clone());
+            }
+            ctx.dispatch_typed_action(WorkspaceAction::Run(action));
+        })
         .finish(),
     )
     .with_height(ROW_HEIGHT)
@@ -365,7 +386,7 @@ fn line(entry: &Entry, mode: Mode, fonts: Fonts) -> Box<dyn Element> {
     // I write in my keybindings file", and the keys answer "is there a faster
     // way to do this again", which is the question somebody reading a list of
     // things to do is actually asking.
-    let named = name_column(entry);
+    let named = trailing(entry);
     if let Some(cluster) = cluster(entry, mode, fonts) {
         let cluster = Container::new(cluster);
         line.add_child(match named.is_some() {
@@ -385,13 +406,20 @@ fn line(entry: &Entry, mode: Mode, fonts: Fonts) -> Box<dyn Element> {
     line.finish()
 }
 
-/// The action name, when it says something the title does not.
+/// What is written down the right-hand side of a row.
+///
+/// A row's own detail when it has one — where a tab is working, the page a
+/// settings row is on — and otherwise the action name, which is the only way a
+/// person finds out what to write in their keybindings file.
 ///
 /// Nothing for a key the pane eats, which has no name because no keybindings
 /// file can reach it; and nothing for a binding on a plain action, whose title
 /// *is* its name — the same string twice on one row is not a column, it is a
 /// stutter.
-fn name_column(entry: &Entry) -> Option<&str> {
+fn trailing(entry: &Entry) -> Option<&str> {
+    if let Some(detail) = entry.detail.as_deref() {
+        return Some(detail);
+    }
     entry
         .action
         .as_ref()
@@ -454,7 +482,7 @@ fn cluster(entry: &Entry, mode: Mode, fonts: Fonts) -> Option<Box<dyn Element>> 
         // shape* is what lets the eye sort bound from unbound in the keymap
         // without reading either. The word is `shortcuts::NOT_BOUND`, shared
         // with the Keyboard Shortcuts page: two surfaces, one word.
-        if mode == Mode::Run {
+        if mode != Mode::Keys {
             return None;
         }
         return Some(
@@ -472,10 +500,10 @@ fn cluster(entry: &Entry, mode: Mode, fonts: Fonts) -> Option<Box<dyn Element>> 
     let eaten = entry.action.is_none();
     let shown = match (eaten, mode) {
         (true, _) => entry.chords.len(),
+        (false, Mode::Keys) => CHORDS_SHOWN,
         // One, as it shipped: a launcher's row says whether there is a faster
         // way, not how many.
-        (false, Mode::Run) => 1,
-        (false, Mode::Keys) => CHORDS_SHOWN,
+        (false, _) => 1,
     };
 
     let mut cluster = Flex::row()
@@ -573,22 +601,21 @@ fn cap(text: &str, monospace: FamilyId) -> Box<dyn Element> {
 
 /// The line at the bottom that says what the keys do.
 ///
-/// It is also where the second list is advertised, on every single open, which
-/// is a discovery mechanism no chord and no settings page can claim. The
-/// arrows stay in the ui family: `fonts.monospace` is the user's *terminal*
-/// font, and a programming font without U+2191 would put tofu in the one line
-/// whose job is to teach the keys.
+/// It is also where the *next* list is advertised, on every single open, which
+/// is a discovery mechanism no chord and no settings page can claim: a person
+/// who presses Tab four times has seen all five lists and the sigil that
+/// reaches each, without a word of documentation. Naming only the next one
+/// keeps the line one line — four sigils spelled out here would be a syntax
+/// lesson under a search box.
+///
+/// The arrows stay in the ui family: `fonts.monospace` is the user's
+/// *terminal* font, and a programming font without U+2191 would put tofu in
+/// the one line whose job is to teach the keys.
 fn hint(mode: Mode, ui: FamilyId) -> Box<dyn Element> {
-    let text = match mode {
-        Mode::Run => {
-            "\u{2191}\u{2193} to move \u{00b7} enter to run \u{00b7} ? for the keys \
-             \u{00b7} esc to close"
-        }
-        Mode::Keys => {
-            "\u{2191}\u{2193} to move \u{00b7} enter to run \u{00b7} tab for the commands \
-             \u{00b7} esc to close"
-        }
-    };
+    let text = format!(
+        "\u{2191}\u{2193} to move \u{00b7} enter to run \u{00b7} tab for {} \u{00b7} esc to close",
+        mode.next().label()
+    );
 
     Container::new(
         Text::new(text, ui, SECONDARY_SIZE)

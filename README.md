@@ -375,17 +375,25 @@ Eight features, and the page that configures them:
   put in a block's menu. The worktree list is the one that prints none, because its rows are
   numbered rather than named: there is no action for a chord to be looked up under.
 
-  The palette answers a second question, in the same box. A query that starts with `?` turns
-  it from a list of what you can run into a list of **what is bound to what**: every command
-  under the plugin that registered it, the ones no chord reaches marked `not bound`, then
-  `Other bindings` for the chords in your file that name something which is not a command,
-  and `In a pane` for the keys the program in the pane eats — `ctrl-c`, `ctrl-d`, the ones a
-  binding could only break. `tab` turns the card over without retyping the query, and
-  `crook/palette/keys` opens it straight. It spends no chord of its own: a key pressed once a
-  fortnight is not worth one taken from every shell, and a sigil costs nothing. The rows that
-  cannot be run — a key a pane eats, a line naming a command this build has never heard of,
-  which says `nothing answers to this` — are stepped over by the arrows, because Enter has to
-  mean one thing.
+  **The palette is the one box for all of it.** The chord opens the commands, the tabs that
+  are open and the rows of the settings together, each block under a heading of its own — a
+  heading appears when there is a second kind of answer to tell it apart from, so a query only
+  the commands answer is the flat launcher it has always been. A tab's row says what its row
+  in the sidebar says and where it is working, and Enter goes there; a settings row says which
+  page and category it lives on, and Enter opens that page with the row's own words in the
+  rail's search box, which is what puts a row somewhere in the middle of a long page on screen.
+
+  A sigil at the front narrows the box to one list, and `tab` walks between them without
+  retyping the query: `>` the commands, `@` the tabs, `#` the settings, and `?` **what is
+  bound to what** — every command under the plugin that registered it, the ones no chord
+  reaches marked `not bound`, then `Other bindings` for the chords in your file that name
+  something which is not a command, and `In a pane` for the keys the program in the pane eats
+  — `ctrl-c`, `ctrl-d`, the ones a binding could only break. `crook/palette/keys`,
+  `crook/palette/tabs` and `crook/palette/settings` open each straight. None spends a chord of
+  its own: a key pressed once a fortnight is not worth one taken from every shell, and a sigil
+  costs nothing. The rows that cannot be run — a key a pane eats, a line naming a command this
+  build has never heard of, which says `nothing answers to this` — are stepped over by the
+  arrows, because Enter has to mean one thing.
 
 Everything else is out of scope on purpose. There is no telemetry, and OSC 8 hyperlinks are
 not read — though a URL a program *printed* is clickable, because the scan that finds one

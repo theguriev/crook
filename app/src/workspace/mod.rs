@@ -37,7 +37,7 @@ pub(crate) mod settings_page;
 pub(crate) mod tab_context_menu;
 mod tab_menu;
 mod tab_options_menu;
-mod tabs_panel;
+pub(crate) mod tabs_panel;
 mod terminal_element;
 mod text_field;
 mod theme_panel;
