@@ -57,6 +57,7 @@ pub mod pane_link;
 pub mod pane_selection;
 pub mod pane_split;
 pub mod pane_surface;
+pub mod pirate;
 pub mod platform_insets;
 pub mod plugin;
 pub mod plugins;
@@ -273,6 +274,12 @@ struct Overrides {
     /// Implies `worktrees`, and is the other half of `creating_worktree`: the
     /// menu has four faces and a picture of one of them needs a way in.
     tidying_worktrees: bool,
+    /// Start with that menu part way through removing them, staged.
+    ///
+    /// Implies `worktrees`. The one face of the menu a real run cannot hold
+    /// still for a picture — it is over as soon as git is — and the one with
+    /// the pirate in it, so it is staged: nothing is deleted for a screenshot.
+    sweeping_worktrees: bool,
     /// Start in this theme rather than the saved one.
     ///
     /// Applied straight to the palette rather than through
@@ -601,6 +608,10 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 overrides.worktrees = true;
                 overrides.tidying_worktrees = true;
             }
+            "--sweep-worktrees" => {
+                overrides.worktrees = true;
+                overrides.sweeping_worktrees = true;
+            }
             "--new-theme" => {
                 overrides.themes = true;
                 overrides.creating = true;
@@ -843,6 +854,8 @@ OPTIONS:
     --new-worktree     Start with that menu making a worktree
     --tidy-worktrees   Start with that menu asking about removing every checkout
                        nothing is working in
+    --sweep-worktrees  Start with that menu part way through removing them, staged:
+                       the pirate is drawn and nothing is deleted
     --themes           Start with the Themes panel open
     --new-theme        Start with the Themes panel making a theme
     --hover            Start with the first row's detail card up
@@ -1031,7 +1044,11 @@ THE INPUT FIELD:
 /// `pane_surface::LONG_RUNNING` — fifty milliseconds — rather than by a poll
 /// interval, so what it can cost a save queued behind it is a fiftieth of a
 /// second rather than the fifteen a plugin's poll could. Sizing the pool for a
-/// pane count is not possible; keeping the wait short is.
+/// pane count is not possible; keeping the wait short is. The worktree menu's
+/// bite — `Workspace::keep_chomping`, which moves the pirate while that menu
+/// waits on git — is the same shape and is left out for the same reason: one
+/// chain at most, a frame of `pirate::FRAME` at a time, and only while a git
+/// command is running for the menu.
 ///
 /// **The test at the bottom of this file cannot check this number.** It builds
 /// its scenario out of the constant itself, so it proves what
@@ -1182,6 +1199,9 @@ fn apply_overrides(
         }
         if overrides.tidying_worktrees {
             workspace.start_tidying_worktrees(ctx);
+        }
+        if overrides.sweeping_worktrees {
+            workspace.stage_sweeping_worktrees(ctx);
         }
     }
 }

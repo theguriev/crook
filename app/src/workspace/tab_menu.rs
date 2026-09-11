@@ -52,6 +52,25 @@
 //! question opens saying it is looking, the same way the menu itself opens
 //! saying it is reading.
 //!
+//! # A wait is the pirate eating it
+//!
+//! Every face here that is waiting on git says so with the pirate chewing —
+//! see [`busy_line`] — and where the wait is a list of checkouts he stands in
+//! a row of pellets, one per checkout, having eaten the ones dealt with. The
+//! sweep used to be one background task and one sentence, "Working…", for as
+//! long as six `git worktree remove` calls took, and a removal deletes
+//! whatever was built in the checkout: with a `target/` in each that is
+//! minutes of a sentence that does not move, which is what a hang looks like.
+//! Now each look and each removal is a step of its own that lands on its own,
+//! so the face can say which one is taking the time — and Stop can mean what
+//! it says. The one in flight finishes going, because a kill halfway through
+//! deleting a directory leaves a checkout neither there nor gone; the ones
+//! behind it are spared.
+//!
+//! The mouth moves on a chain of the workspace's own, which runs only while
+//! [`TabMenuState::is_busy`] and ends when nothing is. A list nobody is
+//! waiting on has no timer under it, which is the rule the whole window keeps.
+//!
 //! The branches of one repository stay together because of that second half.
 //! A [group](crate::tab::TabGroup) is the repository and its tabs are its
 //! checkouts: the panel folds them under one heading — which is made the
@@ -158,17 +177,34 @@ pub(super) enum Mode {
     Tidying,
     /// Asking about removing the one at this index, and saying what is in it.
     ///
-    /// `local` is `None` until the count comes back, and `refused` is set once
-    /// git has declined over local work — which is what turns the button into
-    /// the one that deletes it anyway.
+    /// `refused` is set once git has declined over local work — which is what
+    /// turns the button into the one that deletes it anyway.
     Removing {
         /// Which worktree, by its index in [`TabMenuState::worktrees`].
         index: usize,
         /// What is in it, once counted.
-        local: Option<Local>,
+        local: Looked,
         /// Whether git has already refused once.
         refused: bool,
     },
+}
+
+/// What a look inside one checkout found, or that it has not come back yet.
+///
+/// Three states and not `Option<Local>`, because the face draws the pirate
+/// chewing while the count is out and has to stop when it comes back — and
+/// a count that *failed* comes back too. `None` for both would leave him
+/// chewing at a checkout git could not be asked about until the person gave
+/// up on him.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub(super) enum Looked {
+    /// `git status` is still out.
+    #[default]
+    NotYet,
+    /// What it said.
+    Found(Local),
+    /// It could not be asked, or refused; the log has why.
+    Unknown,
 }
 
 /// What the menu knows about the repository it is open on.
@@ -183,16 +219,26 @@ pub(super) enum Contents {
     Failed(String),
 }
 
-/// What a tidy-up would do, once every free checkout has been looked in.
+/// What a tidy-up would do, once every free checkout has been looked in, and
+/// then how far it has got doing it.
 ///
-/// Two states and not three: there is no "failed". A checkout git could not
+/// Two of the three states are progress rather than a verdict, and both carry
+/// a count because both are drawn as one: the pirate at his place in a row of
+/// pellets, one per checkout. There is no "failed". A checkout git could not
 /// be asked about is kept with the ones holding work, because the only thing
-/// this face may do with a checkout it does not understand is leave it alone.
-#[derive(Clone, Debug, Default)]
+/// this face may do with a checkout it does not understand is leave it alone;
+/// and a checkout git would not remove is counted and logged rather than
+/// stopping the ones after it.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Sweep {
-    /// Each free checkout is being counted, which is a `git status` apiece.
-    #[default]
-    Counting,
+    /// Each free checkout is being looked in, which is a `git status` apiece,
+    /// one after another.
+    Counting {
+        /// How many have answered.
+        looked: usize,
+        /// How many there are.
+        of: usize,
+    },
     /// What the button would take, and what it would not.
     Ready {
         /// The checkouts that would go, in the order the list has them.
@@ -200,10 +246,36 @@ pub(super) enum Sweep {
         /// The branches of the ones being left alone.
         kept: Vec<String>,
     },
+    /// The button has been pressed and the checkouts are going, one at a time.
+    Removing {
+        /// How many `git worktree remove` has finished with, refused or not.
+        done: usize,
+        /// How many were going.
+        of: usize,
+        /// The branch of the one under the knife right now.
+        current: Option<String>,
+        /// Whether Stop has been pressed: the one in flight finishes, because
+        /// a kill halfway through deleting a directory leaves a checkout that
+        /// is neither there nor gone, and nothing after it starts.
+        stopping: bool,
+    },
+}
+
+impl Default for Sweep {
+    fn default() -> Self {
+        Self::Counting { looked: 0, of: 0 }
+    }
+}
+
+impl Sweep {
+    /// Whether git is being waited on.
+    pub(super) fn is_working(&self) -> bool {
+        !matches!(self, Self::Ready { .. })
+    }
 }
 
 /// One checkout a tidy-up would remove.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Going {
     /// Where it is, which is what `git worktree remove` is given.
     pub(super) path: PathBuf,
@@ -273,8 +345,30 @@ pub(super) struct TabMenuState {
     pub(super) sweep: Sweep,
     /// What git said about the last thing that was asked of it, if it refused.
     pub(super) problem: Option<String>,
-    /// Whether a git command is running for this menu right now.
+    /// Whether a git command is running for the creator or the confirmation
+    /// right now. The sweep keeps its own, inside [`Sweep`], because its
+    /// running state has a count in it.
     pub(super) working: bool,
+    /// Which question the menu is on, counted up every time it changes.
+    ///
+    /// Every answer git gives lands through `ctx.spawn` on a menu that has
+    /// had time to move on: taken down, opened on another tab, walked back to
+    /// the list, opened on the same question a second time. An answer carries
+    /// the epoch it was asked under and is dropped on the floor unless the
+    /// menu is still there — one number to compare rather than a tab, a mode
+    /// and a sweep state to compare separately, which is what the sweep used
+    /// to do and is what a stepwise chain cannot do, since every step of it
+    /// lands into the same state the last one left.
+    pub(super) epoch: u64,
+    /// How many frames into the bite the pirate is.
+    ///
+    /// Counted up by the chain in `Workspace::keep_chomping` while
+    /// [`Self::is_busy`], and put back to a shut mouth when it stops. Never
+    /// read for anything but which frame to draw.
+    pub(super) chomp: usize,
+    /// Whether that chain is running, so that a second thing becoming busy
+    /// while the first still is does not start a second one.
+    pub(super) chomping: bool,
     /// The row the keyboard is standing on while the list is showing.
     ///
     /// `None` is the ordinary state — nothing is picked out, and the pointer
@@ -293,6 +387,36 @@ impl TabMenuState {
     /// Whether the menu is up.
     pub(super) fn is_open(&self) -> bool {
         self.tab.is_some()
+    }
+
+    /// Whether the face on screen is waiting on git, which is when the
+    /// pirate chews.
+    ///
+    /// One predicate for all four faces, so that the chain that moves his
+    /// mouth has one question to ask and the faces cannot disagree with it
+    /// about whether he should be moving.
+    pub(super) fn is_busy(&self) -> bool {
+        if !self.is_open() {
+            return false;
+        }
+        if self.working || matches!(self.contents, Contents::Reading) {
+            return true;
+        }
+        match self.mode {
+            Mode::Tidying => self.sweep.is_working(),
+            Mode::Removing { local, .. } => local == Looked::NotYet,
+            Mode::Listing | Mode::Creating => false,
+        }
+    }
+
+    /// Moves on to the next question, and says which one that is.
+    ///
+    /// Called by everything that changes what the menu is asking, before it
+    /// asks git anything for the new question; an answer to the old one that
+    /// lands afterwards compares its epoch with this and goes nowhere.
+    pub(super) fn next_epoch(&mut self) -> u64 {
+        self.epoch = self.epoch.wrapping_add(1);
+        self.epoch
     }
 
     /// The mouse state for one control.
@@ -360,7 +484,7 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
             index,
             local,
             refused,
-        } => confirmation(workspace, index, local.as_ref(), refused, ui),
+        } => confirmation(workspace, index, local, refused, ui),
     };
 
     ConstrainedBox::new(
@@ -391,7 +515,9 @@ fn listing(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
         ));
 
     match &state.contents {
-        Contents::Reading => column.add_child(note("Reading the repository…", ui)),
+        Contents::Reading => {
+            column.add_child(busy_line(state, "Reading the repository…", None, ui));
+        }
         Contents::Failed(problem) => column.add_child(note(problem.as_str(), ui)),
         Contents::Ready(worktrees) => {
             for (index, worktree) in worktrees.iter().enumerate() {
@@ -766,6 +892,13 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
     if let Some(problem) = &state.problem {
         column.add_child(note(problem.as_str(), ui));
     }
+    // Under the path rather than in the button, which used to say "Working…"
+    // in the accent as though it could still be pressed. What is being waited
+    // on is a whole working tree being written, and on a large repository
+    // that is genuinely tens of seconds.
+    if state.working {
+        column.add_child(busy_line(state, "Checking it out…", None, ui));
+    }
 
     column.add_child(buttons(
         workspace,
@@ -799,10 +932,36 @@ fn tidying(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
         // Every candidate is a `git status`, so the question is on screen
         // before it can be answered — the same order the list itself opens in,
         // and for the same reason: a popup that appeared once git had finished
-        // would be a gesture that does nothing for half a second.
-        Sweep::Counting => {
-            column.add_child(note("Looking in each of them…", ui));
+        // would be a gesture that does nothing for half a second. The pirate
+        // stands at how far through the list the looking has got.
+        Sweep::Counting { looked, of } => {
+            column.add_child(busy_line(
+                state,
+                &format!("Looking in {} of {of}…", (looked + 1).min(*of)),
+                Some((*looked, *of)),
+                ui,
+            ));
             column.add_child(buttons(workspace, "Remove", None, ui));
+            return column.finish();
+        }
+        // Pressed, and going. Each checkout is a `git worktree remove` that
+        // deletes a directory tree, and a tree with a build in it takes as
+        // long as it takes — so the face says which one is going and how many
+        // are behind it, and offers to stop after it rather than nothing.
+        Sweep::Removing {
+            done,
+            of,
+            current,
+            stopping,
+        } => {
+            let nth = (done + 1).min(*of);
+            let sentence = match (stopping, current) {
+                (true, _) => "Stopping after this one…".to_owned(),
+                (false, Some(branch)) => format!("Removing {nth} of {of}: {branch}…"),
+                (false, None) => format!("Removing {nth} of {of}…"),
+            };
+            column.add_child(busy_line(state, &sentence, Some((*done, *of)), ui));
+            column.add_child(buttons(workspace, &format!("Remove {of}"), None, ui));
             return column.finish();
         }
         Sweep::Ready { going, kept } => (going, kept),
@@ -879,7 +1038,7 @@ fn named(branches: &[String]) -> String {
 fn confirmation(
     workspace: &Workspace,
     index: usize,
-    local: Option<&Local>,
+    local: Looked,
     refused: bool,
     ui: FamilyId,
 ) -> Box<dyn Element> {
@@ -903,8 +1062,16 @@ fn confirmation(
         // destructive button should not have to know git to know that.
         .with_child(note("The branch is kept. Only the checkout goes.", ui));
 
-    if let Some(local) = local.filter(|local| !local.is_empty()) {
-        column.add_child(note(local_summary(local), ui));
+    match local {
+        // The count is one `git status`, and on a checkout with a fat build
+        // directory it is the first thing here that takes long enough to see.
+        Looked::NotYet if !state.working => {
+            column.add_child(busy_line(state, "Looking in it…", None, ui));
+        }
+        Looked::Found(local) if !local.is_empty() => {
+            column.add_child(note(local_summary(&local), ui));
+        }
+        Looked::NotYet | Looked::Found(_) | Looked::Unknown => {}
     }
 
     // The other two faces show what git said; this one showed nothing, so
@@ -913,6 +1080,9 @@ fn confirmation(
     // the dialog exactly as it was.
     if let Some(problem) = &state.problem {
         column.add_child(note(problem.as_str(), ui));
+    }
+    if state.working {
+        column.add_child(busy_line(state, "Removing it…", None, ui));
     }
 
     let label = if refused { "Remove anyway" } else { "Remove" };
@@ -945,7 +1115,16 @@ fn local_summary(local: &Local) -> String {
 /// `action` is `None` for a face whose button has nothing to do yet — one
 /// still counting, or one that found nothing it may remove. It is drawn
 /// without a click handler rather than with one that returns early, which is
-/// the rule every other disabled control in this application follows.
+/// the rule every other disabled control in this application follows — and
+/// the rule this pair used to break while git was running: the button said
+/// "Working…" in the accent, answered the pointer, and did nothing when
+/// pressed. It is inert now, in the quiet ground, and the line above it is
+/// what says something is happening.
+///
+/// Cancel is the one control that stays live through a wait, because it is
+/// the way out of one. During a sweep it is *Stop*, which is Cancel with the
+/// one difference the face cannot hide: the checkout under the knife
+/// finishes going, and it is the ones after it that are spared.
 fn buttons(
     workspace: &Workspace,
     label: &str,
@@ -953,7 +1132,17 @@ fn buttons(
     ui: FamilyId,
 ) -> Box<dyn Element> {
     let state = workspace.tab_menu();
-    let working = state.working;
+
+    let (cancel, cancels) = match &state.sweep {
+        Sweep::Removing { stopping: true, .. } if state.mode == Mode::Tidying => {
+            ("Stopping…", None)
+        }
+        Sweep::Removing { .. } if state.mode == Mode::Tidying => {
+            ("Stop", Some(WorktreeAction::Cancel))
+        }
+        _ => ("Cancel", Some(WorktreeAction::Cancel)),
+    };
+    let action = action.filter(|_| !state.working);
 
     Container::new(
         Flex::row()
@@ -963,26 +1152,14 @@ fn buttons(
             .with_child(
                 Expanded::new(
                     1.,
-                    button(
-                        state.control(Control::Cancel),
-                        "Cancel",
-                        false,
-                        Some(WorktreeAction::Cancel),
-                        ui,
-                    ),
+                    button(state.control(Control::Cancel), cancel, false, cancels, ui),
                 )
                 .finish(),
             )
             .with_child(
                 Expanded::new(
                     1.,
-                    button(
-                        state.control(Control::Confirm),
-                        if working { "Working…" } else { label },
-                        true,
-                        action,
-                        ui,
-                    ),
+                    button(state.control(Control::Confirm), label, true, action, ui),
                 )
                 .finish(),
             )
@@ -1107,6 +1284,122 @@ fn header(title: impl Into<std::borrow::Cow<'static, str>>, ui: FamilyId) -> Box
     .with_horizontal_padding(ROW_INSET)
     .with_margin_bottom(6.)
     .with_margin_top(2.)
+    .finish()
+}
+
+/// How big the pirate is drawn in the popup: a little over the 10.5pt line
+/// beside him. The artwork is a disc that fills its box edge to edge, where a
+/// glyph of the same nominal size sits inside its ascent and descent, so a
+/// pirate at the label size would tower over the label.
+const PIRATE_SIZE: f32 = 13.;
+
+/// A pellet's diameter, and the distance from one to the next.
+const PELLET: f32 = 4.;
+/// See [`PELLET`].
+const PELLET_PITCH: f32 = 9.;
+
+/// How many pellets a trail draws at most.
+///
+/// Sixteen fit beside the pirate inside the popup's width with room to spare;
+/// past that the trail is scaled, so that a sweep over forty checkouts is
+/// still a pirate moving along a row rather than a row running off the edge.
+const PELLETS: usize = 16;
+
+/// A wait, drawn as the pirate chewing through it.
+///
+/// `trail` is `(done, of)` where the wait is a list of checkouts: he stands
+/// after the ones dealt with, which are gone, and before the ones still to
+/// come, which are pellets. Without it he chews beside the sentence, which is
+/// the same sign a spinner would be with a face on it.
+///
+/// The frame is [`TabMenuState::chomp`], which the workspace's chain moves
+/// while [`TabMenuState::is_busy`]; this only draws whichever frame that is.
+fn busy_line(
+    state: &TabMenuState,
+    text: &str,
+    trail: Option<(usize, usize)>,
+    ui: FamilyId,
+) -> Box<dyn Element> {
+    let pirate = crate::pirate::mark(crate::pirate::chomp_at(state.chomp), false, PIRATE_SIZE);
+    // Broken to the popup's width the way a note is, because the sentence
+    // names a branch and a branch can be long.
+    let mut sentence = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Start);
+    for line in super::wrap(text, 36) {
+        sentence.add_child(
+            Text::new(line, ui, PATH_SIZE)
+                .with_color(theme().text_muted)
+                .with_line_height_ratio(1.4)
+                .finish(),
+        );
+    }
+    let sentence = sentence.finish();
+
+    let body: Box<dyn Element> = match trail {
+        None => Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(6.)
+            .with_child(pirate)
+            .with_child(sentence)
+            .finish(),
+        Some((done, of)) => Flex::column()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Start)
+            .with_child(trail_row(pirate, done, of))
+            .with_child(Container::new(sentence).with_margin_top(3.).finish())
+            .finish(),
+    };
+
+    Container::new(body)
+        .with_horizontal_padding(ROW_INSET)
+        .with_margin_bottom(4.)
+        .finish()
+}
+
+/// The pirate at his place along a row of `of` pellets, `done` of which he
+/// has eaten.
+///
+/// The eaten ones are left as faint places rather than dropped, so he moves
+/// right along a row that stays where it was — a row that shrank from the left
+/// would have him standing still while the pellets came to him — and so the
+/// row is as long as the list from the first frame to the last, which is what
+/// lets "how far" be read off it at all.
+fn trail_row(pirate: Box<dyn Element>, done: usize, of: usize) -> Box<dyn Element> {
+    let shown = of.min(PELLETS);
+    // Scaled when there are more than fit, and never shown as finished until
+    // it is: `done * shown / of` rounds down, so the last pellet stays ahead
+    // of him until the last checkout has gone.
+    let eaten = if of == 0 { 0 } else { done * shown / of };
+
+    let mut row = Flex::row()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center);
+    for _ in 0..eaten {
+        row.add_child(pellet(theme().border));
+    }
+    row.add_child(pirate);
+    for _ in eaten..shown {
+        row.add_child(pellet(theme().text_muted));
+    }
+    row.finish()
+}
+
+/// One pellet, in its pitch.
+fn pellet(color: Color) -> Box<dyn Element> {
+    Container::new(
+        ConstrainedBox::new(
+            Container::new(Empty::new().finish())
+                .with_background_color(color)
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(PELLET / 2.)))
+                .finish(),
+        )
+        .with_width(PELLET)
+        .with_height(PELLET)
+        .finish(),
+    )
+    .with_horizontal_padding((PELLET_PITCH - PELLET) / 2.)
     .finish()
 }
 

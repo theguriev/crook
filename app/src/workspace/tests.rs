@@ -603,6 +603,31 @@ impl Harness {
             .read(&self.app, |workspace, _| workspace.worktrees_going())
     }
 
+    /// How far the sweep has got, while it is looking or removing.
+    fn worktrees_swept(&self) -> Option<(usize, usize)> {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.worktrees_swept())
+    }
+
+    /// Whether the sweep is finishing the one in flight and no more.
+    fn worktree_sweep_is_stopping(&self) -> bool {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.worktree_sweep_is_stopping()
+        })
+    }
+
+    /// Whether the menu is waiting on git.
+    fn worktree_menu_is_busy(&self) -> bool {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.worktree_menu_is_busy())
+    }
+
+    /// How far into his bite the pirate is.
+    fn worktree_menu_chomp(&self) -> usize {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.worktree_menu_chomp())
+    }
+
     /// Whether the menu is making a worktree.
     fn worktree_menu_is_creating(&self) -> bool {
         self.workspace.read(&self.app, |workspace, _| {
@@ -4428,6 +4453,9 @@ fn tidying_up_takes_the_free_checkouts_and_leaves_the_work_alone() {
         harness.worktree_menu_is_tidying(),
         "the row did not open its question"
     );
+    // The question opens saying how many it is looking in, before any of
+    // them has answered.
+    assert_eq!(harness.worktrees_swept(), Some((0, 3)));
     harness.wait_for("the checkouts to be looked in", |harness| {
         harness.worktrees_going().is_some()
     });
@@ -4438,11 +4466,19 @@ fn tidying_up_takes_the_free_checkouts_and_leaves_the_work_alone() {
     );
 
     harness.dispatch_worktree(WorktreeAction::Tidy);
+    // And the button opens the removal saying how many are going, so that
+    // the face has a count to move the pirate along from the first frame.
+    assert_eq!(harness.worktrees_swept(), Some((0, 2)));
     harness.wait_for("the free checkouts to go", |_| {
         crate::git::worktree::list(&repository)
             .map(|worktrees| worktrees.len() == 2)
             .unwrap_or(false)
     });
+    // Back on the list, freshly read, with nothing in flight.
+    harness.wait_for("the list to be read again", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    assert_eq!(harness.worktrees_swept(), None);
 
     assert!(
         !free[0].exists() && !free[2].exists(),
@@ -4456,6 +4492,135 @@ fn tidying_up_takes_the_free_checkouts_and_leaves_the_work_alone() {
     assert!(
         left.iter().any(|worktree| worktree.path == free[1]),
         "git no longer knows about the checkout that was kept: {left:?}"
+    );
+}
+
+#[test]
+fn stop_spares_the_checkouts_after_the_one_in_flight() {
+    // Six checkouts with a build in each is minutes of `git worktree remove`,
+    // and the way out of that is a Stop that means it: the one git is
+    // deleting finishes — a kill halfway through leaves a checkout neither
+    // there nor gone — and nothing after it starts. Pressed before the first
+    // has landed, so exactly one goes.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let tab = harness.active_id();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    let mut free: Vec<PathBuf> = Vec::new();
+    for _ in 0..3 {
+        let made = spare_checkout(&mut harness, tab, &store, &free);
+        free.push(made);
+    }
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("every checkout to be read", |harness| {
+        harness.worktrees_listed() == Some(4)
+    });
+    harness.dispatch_worktree(WorktreeAction::AskTidy);
+    harness.wait_for("the checkouts to be looked in", |harness| {
+        harness.worktrees_going() == Some(3)
+    });
+
+    harness.dispatch_worktree(WorktreeAction::Tidy);
+    // Escape, which is Cancel, which during a sweep is Stop. Dispatched
+    // before the queue is pumped, so the first removal has not landed yet
+    // whether or not git has finished it.
+    harness.dispatch_worktree(WorktreeAction::Cancel);
+    assert!(
+        harness.worktree_sweep_is_stopping(),
+        "Cancel during a sweep walked back to a list that is about to be wrong"
+    );
+    assert!(
+        harness.worktree_menu_is_tidying(),
+        "the face was taken down with a removal still in flight"
+    );
+
+    harness.wait_for(
+        "the sweep to stop and the list to be read again",
+        |harness| harness.worktrees_listed().is_some() && !harness.worktree_menu_is_tidying(),
+    );
+    let left = crate::git::worktree::list(&repository).expect("the repository still lists");
+    assert_eq!(
+        left.len(),
+        3,
+        "the stop did not spare the two behind the one in flight: {left:?}"
+    );
+    assert!(
+        !free[0].exists(),
+        "the checkout in flight was not let finish"
+    );
+    assert!(
+        free[1].is_dir() && free[2].is_dir(),
+        "a checkout after the stop was removed"
+    );
+    assert!(
+        worktree_menu_says(&harness.frame(), "Stopped after 1 of 3"),
+        "the list does not say where the sweep stopped"
+    );
+}
+
+#[test]
+fn the_pirate_chews_while_git_is_out_and_rests_when_it_is_back() {
+    // The indicator is the pirate, and the pirate has to move: a frame that
+    // does not change for as long as git takes is exactly the hang the
+    // indicator exists to distinguish itself from. And he has to stop, because
+    // a chain still ticking under a list nobody is waiting on is an idle
+    // heartbeat, which this window does not have.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    assert!(
+        harness.worktree_menu_is_busy(),
+        "a menu that has not read the repository yet is not waiting on anything"
+    );
+    // Long enough for the bite to have moved whether or not git has answered:
+    // the read is milliseconds and the frame is a tenth of a second, so this
+    // is what proves the chain runs on its own clock rather than on git's.
+    harness.settle_for(std::time::Duration::from_secs(2), |harness| {
+        harness.worktree_menu_chomp() > 0
+    });
+    let moved = harness.worktree_menu_chomp() > 0 || !harness.worktree_menu_is_busy();
+    assert!(moved, "the pirate stood still while git was out");
+
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    assert!(!harness.worktree_menu_is_busy());
+    harness.wait_for("the bite to end on a whole face", |harness| {
+        harness.worktree_menu_chomp() == 0
+    });
+    // And it stays there: nothing is re-arming him.
+    harness.settle(crate::pirate::FRAME * 3);
+    assert_eq!(
+        harness.worktree_menu_chomp(),
+        0,
+        "the pirate chews at nothing"
     );
 }
 

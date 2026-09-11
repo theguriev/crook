@@ -27,7 +27,7 @@ use std::cell::{Cell, RefCell};
 use crookui_core::elements::{Margin, Padding, Paragraph};
 use crookui_core::fonts::{FamilyId, Properties, Weight};
 use crookui_core::geometry::Color;
-use crookui_core::icons::{Art, Chomp};
+use crookui_core::icons::Chomp;
 use crookui_core::prelude::*;
 
 use crook_plugin_api::{Gap, Node, Size, Tone};
@@ -204,15 +204,6 @@ const PANEL_OFFSET: f32 = 6.;
 /// same nominal size is a stroke inside two units of margin, so matching the
 /// numbers would draw a pirate that towered over everything else in the row.
 const PIRATE_SIZE: f32 = 15.;
-
-/// The pirate's yellow, and the black of the patch and the strap.
-///
-/// Constants rather than theme roles: this is a piece of artwork, like a logo,
-/// and a pirate whose face took the palette's cast would stop being the mark
-/// people recognise. The one thing the theme decides is what a *stale* pirate
-/// looks like — see [`pirate`].
-const PIRATE_FACE: Color = Color::hex(0xf9d949);
-const PIRATE_INK: Color = Color::hex(0x151515);
 
 /// The mouse state a plugin's controls keep between frames.
 ///
@@ -597,40 +588,13 @@ fn chomp_named(name: &str) -> Option<Chomp> {
 
 /// The pirate, at one frame of his bite.
 ///
-/// Two layers rather than one: a rasterized mark is a coverage mask and a mask
-/// has one colour, so the yellow head and the black on it are drawn one over
-/// the other. Neither is meaningful alone.
-///
-/// [`Tone::Muted`] greys the **face** and leaves the ink alone; every other
-/// tone leaves both the colours they were drawn in. That is the one thing a
-/// plugin gets to say about a mark, and greying the face is what says a
-/// reading is stale — a picture that stayed bright beside a greyed-out number
-/// would be the loudest thing in the row insisting it is current.
-///
-/// The ink stays dark, and the reason is what a two-layer mask is. The ink is
-/// the eyepatch, the strap and the grin, drawn *on* the face; painting both in
-/// one colour does not produce a grey pirate, it produces a plain disc with
-/// nothing on it, because there is nothing left to tell the layers apart. That
-/// shipped, and what it looked like on somebody's screen was a grey circle.
+/// [`Tone::Muted`] greys the face and leaves the ink alone; every other tone
+/// leaves both the colours they were drawn in. That is the one thing a plugin
+/// gets to say about a mark, and greying the face is what says a reading is
+/// stale. The drawing itself — and why the ink is never greyed — is
+/// [`crate::pirate::mark`], which the worktree menu shares.
 fn pirate(chomp: Chomp, tone: Tone, scale: Scale) -> Box<dyn Element> {
-    let face = match tone {
-        Tone::Muted => theme().text_muted,
-        _ => PIRATE_FACE,
-    };
-    let ink = PIRATE_INK;
-
-    Stack::new()
-        .with_child(
-            Icon::new(Art::PirateFace(chomp), scale.art)
-                .with_color(face)
-                .finish(),
-        )
-        .with_child(
-            Icon::new(Art::PirateInk(chomp), scale.art)
-                .with_color(ink)
-                .finish(),
-        )
-        .finish()
+    crate::pirate::mark(chomp, tone == Tone::Muted, scale.art)
 }
 
 /// Something to press, drawn as one.
