@@ -1035,7 +1035,10 @@ THE INPUT FIELD:
 /// twenty-second timeout the request carries. What that costs a save queued
 /// behind it is that timeout at the very worst, which is the same argument the
 /// long-running timer below makes with a smaller number — not a worker held
-/// for as long as a window is open.
+/// for as long as a window is open. "Update all" does not change that: the
+/// downloads it asks for are a queue the model drains one task at a time,
+/// each completion starting the next, so a queued update is still one task
+/// and never a worker per plugin.
 ///
 /// The number is a count of *chains*, never of panes. That is why the child
 /// check is one task for the whole terminal model rather than one per session:
@@ -2325,6 +2328,12 @@ fn with_dev_plugin(
         Ok((plugin, bytes)) => {
             let named = crate::plugin::Plugin::manifest(&plugin).id.clone();
             log::info!("{named} from {} ({bytes} bytes)", module.display());
+            // The copy already installed under the same name gives way, on
+            // the first frame as it would on the first rebuild: `Host::carry`
+            // replaces by id, and a window that opened with both would draw
+            // the chip twice and list the plugin twice until the watcher
+            // fired. What is installed is what the person is replacing.
+            plugins.retain(|carried| crate::plugin::Plugin::manifest(carried.as_ref()).id != named);
             // Which plugin this turned out to be, so that a rebuild renaming
             // it can take the old one out rather than leaving it loaded under
             // a name its source no longer has.
@@ -3136,6 +3145,43 @@ mod tests {
                  registry)"
             ),
             "{line}"
+        );
+    }
+
+    #[test]
+    fn the_plugin_being_written_replaces_the_installed_copy_of_itself() {
+        // `crook --dev-plugin .` on a plugin that is also installed: the
+        // window used to open carrying both, drawing the chip twice and
+        // listing the plugin twice until the watcher's first rebuild
+        // replaced one by id. It opens with the one being written.
+        use crate::plugins::wasm::tests::{Scratch, install, wasm, wasm_at};
+
+        let installed = Scratch::new("dev-replaces");
+        install(
+            installed.path(),
+            "eugen.probe",
+            &wasm("eugen/probe", "header.right", 10),
+        );
+        let building = Scratch::new("dev-replaces-build");
+        let module = building.path().join("plugin.wasm");
+        std::fs::write(&module, wasm_at("eugen/probe", "0.2.0")).expect("the module writes");
+
+        let plugins = with_dev_plugin(
+            crate::plugins::wasm::installed(installed.path()),
+            Some(&module),
+        )
+        .expect("the module opens");
+
+        let probes: Vec<&str> = plugins
+            .iter()
+            .map(|plugin| plugin.manifest())
+            .filter(|manifest| manifest.id.as_str() == "eugen/probe")
+            .map(|manifest| manifest.version)
+            .collect();
+        assert_eq!(
+            probes,
+            ["0.2.0"],
+            "one probe, and it is the one being written"
         );
     }
 

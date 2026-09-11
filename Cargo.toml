@@ -37,6 +37,11 @@ anyhow = "1.0"
 arboard = { version = "3.6", default-features = false }
 async-executor = "1.14"
 async-task = "4.7"
+# The icon a registry lists beside a plugin is a PNG written into JSON, and
+# base64 is the one way to put bytes in a string that every registry, reader
+# and language agrees on. 0.22 is what `ureq` already resolves, so it costs
+# the graph nothing.
+base64 = "0.22"
 blocking = "1.7"
 bytemuck = { version = "1.25", features = ["derive"] }
 # A time zone is a table that ships with an operating system, and the standard

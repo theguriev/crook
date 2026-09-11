@@ -20,6 +20,16 @@
 //! written and carried by the workspace, by the same code that does it for a
 //! module somebody copied in by hand, and what a plugin may then do is
 //! answered on its card in Plugins like every other plugin's.
+//!
+//! # What the rest of the window hears
+//!
+//! The Plugins page says on a plugin's own card that the registry is ahead
+//! of it, and offers Update there. It has no handle to the model and reads
+//! no file on the render path: the store's observer hands the workspace a
+//! [`Heard`](index::Heard) whenever the model's answer changes, and the
+//! card's Update and Show in Store are this plugin's own actions, run *about*
+//! a plugin — `crook/store/update`, `crook/store/show` — looked up by name
+//! there, and drawn dead with a line while this plugin is switched off.
 
 pub mod cache;
 pub mod fetch;
@@ -36,12 +46,14 @@ use crookui_core::prelude::*;
 
 use crook_plugin::{ActionName, Manifest, PluginId, Tier};
 
+use crate::editor::Editor;
 use crate::plugin::{BuildError, Host, Plugin};
 use crate::workspace::Workspace;
 
 use cache::Cache;
+use index::{Change, change};
 use model::StoreModel;
-use state::StoreState;
+pub(crate) use state::StoreState;
 
 /// The section this store is the sidebar of, and the name its field is
 /// registered under.
@@ -54,14 +66,46 @@ pub struct Store {
     /// What the section has selected and where its answers come from, shared
     /// with the closures that draw it and the handlers that act on it.
     state: Rc<StoreState>,
+    /// Where the copy of the index is, or `None` on a machine with nowhere
+    /// to keep one. Kept rather than taken: a plugin is built again every
+    /// time it is switched back on, and each build makes a model of its own.
+    cache: Option<Cache>,
+    /// How a test answers a module fetch, instead of the network.
+    #[cfg(test)]
+    fetch: Option<model::Fetcher>,
 }
 
 impl Store {
-    /// One, knowing nothing yet.
+    /// One, knowing nothing yet, reading the copy of the index this machine
+    /// keeps.
     pub fn new() -> Self {
+        Self::with_cache(Cache::user())
+    }
+
+    /// One reading `cache`, which is how a test gives a window a store that
+    /// reads a scratch directory rather than the real list of whoever is
+    /// running the tests.
+    pub fn with_cache(cache: Option<Cache>) -> Self {
         Self {
             state: Rc::new(StoreState::new()),
+            cache,
+            #[cfg(test)]
+            fetch: None,
         }
+    }
+
+    /// The same, answering every module fetch with `fetch`.
+    #[cfg(test)]
+    pub(crate) fn fetching(mut self, fetch: model::Fetcher) -> Self {
+        self.fetch = Some(fetch);
+        self
+    }
+
+    /// What the section shares with its handlers, for a test to read the
+    /// model through once the window is up.
+    #[cfg(test)]
+    pub(crate) fn state(&self) -> Rc<StoreState> {
+        self.state.clone()
     }
 }
 
@@ -81,8 +125,18 @@ impl Plugin for Store {
         host: &mut Host,
         ctx: &mut ViewContext<Workspace>,
     ) -> Result<(), BuildError> {
-        let model = ctx.add_model(|_| StoreModel::new(Cache::user()));
+        let cache = self.cache.clone();
+        let model = ctx.add_model(|_| StoreModel::new(cache));
+        #[cfg(test)]
+        if let Some(fetch) = self.fetch.clone() {
+            model.update(ctx, |model, _| model.fetch_with(fetch));
+        }
         self.state.attach(model.clone());
+        // The faces on the rows, off the thread that is about to draw them.
+        // Nothing is announced here: what the window heard at its opening
+        // was read off the same cache, and the observer below hands over
+        // what changes.
+        model.update(ctx, |model, ctx| model.remember_icons(ctx));
 
         // The bridge a model-backed feature needs, and here it carries the one
         // thing a model cannot do: a module that has finished downloading has
@@ -95,7 +149,7 @@ impl Plugin for Store {
                     Ok(bytes) => bytes,
                     Err(why) => {
                         model.update(ctx, |model, ctx| {
-                            model.complain(Some(&plugin), format!("did not arrive: {why}"), ctx);
+                            model.complain(Some(&plugin), model::did_not_arrive(&why), ctx);
                         });
                         continue;
                     }
@@ -166,6 +220,13 @@ impl Plugin for Store {
                     }
                 });
             }
+
+            // Whatever changed, the rest of the window hears the answer as
+            // it now stands: the offers after a look, and which plugins are
+            // being fetched or waiting to be. The Plugins page draws from
+            // this and from nothing the store holds.
+            let heard = model.read(ctx, |model, _| model.heard());
+            workspace.hear(heard);
             ctx.notify();
         });
 
@@ -210,8 +271,153 @@ impl Plugin for Store {
             remove(&removing, workspace, ctx);
         });
 
+        // The four the Plugins page reaches this plugin by, each about a
+        // plugin the press names — a card there has a row for "the registry
+        // is ahead" and a button for it, and the fetching is this plugin's.
+        // `update-all` is about nothing in particular: it takes what the
+        // workspace says is behind. Plain actions, all four, for the reason
+        // `install` is one — none of them belongs in a palette.
+        let showing = self.state.clone();
+        host.register_action(action("show"), move |workspace, ctx| {
+            let Some(plugin) = subject(workspace, "show") else {
+                return;
+            };
+            show(&showing, workspace, &plugin, ctx);
+        });
+
+        let updating = self.state.clone();
+        host.register_action(action("update"), move |workspace, ctx| {
+            let Some(plugin) = subject(workspace, "update") else {
+                return;
+            };
+            update(&updating, workspace, &plugin, ctx);
+        });
+
+        let everything = self.state.clone();
+        host.register_action(action("update-all"), move |workspace, ctx| {
+            let Some(model) = everything.model() else {
+                return;
+            };
+            let wanted = workspace.updates();
+            model.update(ctx, |model, ctx| model.update_all(wanted, ctx));
+        });
+
+        let looking = self.state.clone();
+        host.register_action(action("look-inside"), move |workspace, ctx| {
+            let Some(plugin) = subject(workspace, "look-inside") else {
+                return;
+            };
+            look_inside(&looking, workspace, &plugin, ctx);
+        });
+
         Ok(())
     }
+}
+
+/// Which plugin the action being run is about, or nothing with a line.
+///
+/// Taken from what the press said, the way the Plugins page's actions take
+/// it: a chord says nothing, and an action that guessed would fetch whatever
+/// card happened to be showing.
+fn subject(workspace: &Workspace, verb: &str) -> Option<PluginId> {
+    let said = workspace.host().said();
+    match PluginId::parse(&said) {
+        Ok(plugin) => Some(plugin),
+        Err(why) => {
+            log::warn!("crook/store/{verb} was run about {said:?}, which is not a plugin: {why}");
+            None
+        }
+    }
+}
+
+/// Turns the card to `plugin`, and the sidebar to the store if it is showing
+/// something else.
+///
+/// Selected by id rather than through the field: a person pressing "Show in
+/// Store" on a plugin's card is asking for that plugin's row, whatever was
+/// typed into the store's field last. So the field is emptied — the card is
+/// resolved against the rows the field lets through, and a row it hides is
+/// a card about the first row it does not. Leaving a section empties its
+/// field already; this is the store being asked for a row while it is
+/// showing, which a plugin allowed to run this action can do.
+fn show(
+    state: &Rc<StoreState>,
+    workspace: &mut Workspace,
+    plugin: &PluginId,
+    ctx: &mut ViewContext<Workspace>,
+) {
+    let (_, field) = workspace.field(SECTION, FIELD);
+    field.edit(Editor::clear);
+    state.select(plugin.as_str());
+    let section = workspace.host().sidebar_section_id(SECTION);
+    if section.is_some() && workspace.showing_section() != section {
+        workspace.show_section(section, ctx);
+    }
+    ctx.notify();
+}
+
+/// Fetches the release the registry offers in place of what `plugin` is
+/// running — and only when there is one.
+///
+/// Checked at the press rather than trusted to the button: this is reachable
+/// by name, and "update" run about a plugin the registry is not ahead of
+/// would otherwise download the version already here, or one older than it.
+fn update(
+    state: &Rc<StoreState>,
+    workspace: &Workspace,
+    plugin: &PluginId,
+    ctx: &mut ViewContext<Workspace>,
+) {
+    let Some(model) = state.model() else {
+        return;
+    };
+    let heard = workspace.heard();
+    let Some(offer) = heard.offer(plugin) else {
+        log::warn!("crook/store/update was run about {plugin}, which the registry does not list");
+        return;
+    };
+    let installed = section::installed_version(workspace, plugin);
+    let withdrawn = workspace.withdrawn(plugin).is_some();
+    match change(offer, installed.as_deref(), withdrawn) {
+        Change::Update(release) | Change::Replace(release) => {
+            model.update(ctx, |model, ctx| model.download(plugin, &release, ctx));
+        }
+        Change::Install(_) | Change::Current | Change::Nothing => {
+            log::warn!(
+                "crook/store/update was run about {plugin}, which the registry is not ahead of"
+            );
+        }
+    }
+}
+
+/// Decodes the pictures inside `plugin`'s module, fetching the module when
+/// it is not on this machine.
+///
+/// The module already here is preferred when it carries any: its pictures
+/// are what is installed, and they cost no request. Else the offered
+/// release is fetched, which is the one gesture in the store that downloads
+/// something without installing it — the card says so beside the button.
+fn look_inside(
+    state: &Rc<StoreState>,
+    workspace: &Workspace,
+    plugin: &PluginId,
+    ctx: &mut ViewContext<Workspace>,
+) {
+    let Some(model) = state.model() else {
+        return;
+    };
+    let carried = workspace
+        .host()
+        .pictures_of(plugin)
+        .filter(|pictures| pictures.count() > 0)
+        .map(|pictures| pictures.previews.clone());
+    let release = workspace
+        .heard()
+        .offer(plugin)
+        .and_then(|offer| offer.release.clone());
+    model.update(ctx, |model, ctx| {
+        model.look_inside(plugin, release.as_ref(), carried, ctx);
+    });
 }
 
 /// Downloads whatever the card is about.
@@ -265,9 +471,11 @@ fn remove(state: &Rc<StoreState>, workspace: &mut Workspace, ctx: &mut ViewConte
 
 /// What one of this plugin's actions is called.
 ///
-/// Reachable from the Plugins page, which offers Update and Show in Store on
-/// a plugin's own card and looks the store's actions up by name to do it: a
-/// store switched off is a row drawn dead there, not a missing button.
+/// `crook/store/look`, `install`, `remove`, `show`, `update`, `update-all`,
+/// `look-inside`. Reachable from the Plugins page, which offers Update and
+/// Show in Store on a plugin's own card and looks the store's actions up by
+/// name to do it: a store switched off is a row drawn dead there, not a
+/// missing button.
 pub(crate) fn action(verb: &str) -> ActionName {
     ActionName::parse(&format!("crook/store/{verb}")).expect("a name built from a literal")
 }

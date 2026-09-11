@@ -65,8 +65,10 @@ crook_plugin_api::preview!(1, "../../../assets/header.png", "The chip in the hea
 
 They go in as custom sections of the `.wasm` — bytes the interpreter never maps, so they cost
 no memory and no fuel, and they travel with the module wherever it goes. The icon is the face
-beside the plugin's name on the Plugins page and in the Store; the previews are what "Show
-pictures" on its card opens. An icon is a square PNG, 32 to 256 pixels a side (128 is the size
+beside the plugin's name on the Plugins page and in the Store — the registry copies it into
+its list, so a row has its face before anything is fetched; the previews are what "Show
+pictures" on its card opens, and what "Fetch pictures" on a Store card fetches the module to
+open for a plugin not yet installed. An icon is a square PNG, 32 to 256 pixels a side (128 is the size
 to draw one at) and at most 32 KiB; a preview is a PNG of at most 512 KiB and at most 2048
 pixels a side, captured at 2x, with a caption of at most 80 characters if it has one. The
 numbers are in [`pictures`], and `crook-plugin-info plugin.wasm` checks a built module against

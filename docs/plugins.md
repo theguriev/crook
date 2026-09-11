@@ -58,9 +58,10 @@ description of something that was never built.
   - The **Plugins page** is a list beside a card, which is VS Code's shape: a field and every
     plugin this Crook has — in the box or installed as a file — on the left, and on the right
     whatever the list has selected: what it is, where it came from, what it puts on screen,
-    what it can be asked to do, what it has asked to be allowed, and the switch. It is a page
-    that *draws itself* (`Host::add_settings_view`) rather than a column of settings rows,
-    which is what a master–detail layout needs and what a `Vec<Category>` cannot describe.
+    what it can be asked to do, what it has asked to be allowed, and the switch. It is a
+    section of the sidebar that *draws itself* (`Host::add_sidebar_section`, both halves at
+    once) rather than a column of settings rows, which is what a master–detail layout needs
+    and what a `Vec<Category>` cannot describe.
   - The switches on it work: `Host::enable` is the other
     half of `unload`, `Plugin::ready` is a second pass so a page can offer a switch per
     plugin, and `disabled_plugins` in `settings.json` is where the answer is kept. A plugin
@@ -456,8 +457,8 @@ description of something that was never built.
   mechanism working rather than failing: `crook_run` grew an argument and `Render` grew the
   entry, and a host that guessed which shape a module meant would be a host decoding one that
   means something else now. Every plugin in the store is rebuilt against the new vocabulary —
-  the API crate is vendored into each of them, so "rebuilt" is a copy of one directory and a
-  `cargo build`.
+  the API crate is on crates.io and each of them depends on it by version, so "rebuilt" is a
+  one-line bump and a `cargo build`.
 
 ## 0. What was asked for, and what it means
 
@@ -854,6 +855,14 @@ table above — the licence, the repository, the platforms, the default keybindi
 schema — is the *store's*, and arrives with the store in Phase 3. A plugin installed by hand
 today has no store and needs none.
 
+One store-facing fact has since moved *into* the module, and it is the first: what the plugin
+looks like. Its icon and its screenshots are custom sections of the `.wasm`
+(`crook_plugin_api::icon!`, `preview!`), outside the wire — the manifest did not change and
+the ABI did not bump — read by the host beside the manifest when the module opens, and by the
+registry's copy of the same reader when it builds. They travel with the module rather than
+with the store's entry for it for the reason a plugin is one file: what says what a plugin
+*is* goes wherever the plugin goes, and a plugin installed by hand has its face too.
+
 ### Where a plugin gets the vocabulary
 
 `crook_plugin_api` is a crate to depend on rather than a file to copy, and that is the first
@@ -893,13 +902,22 @@ nothing else rather than guessing at a manifest encoded against a shape it does 
 `./script/publish` is what uploads them, in that order: the checks CI runs, then `cargo
 publish`, then a tag on the commit the version was built from. It is not a CI job because publishing is the one
 irreversible act in this tree — crates.io yanks a version and never deletes one — and because
-it needs a token nothing else here has. Until the first upload happens the five copies stay
-where they are; what changed is that removing them is now a one-line edit per plugin rather
-than a decision.
+it needs a token nothing else here has. The first upload has happened: every plugin depends on
+`crook_plugin_api = "0.8"` from crates.io, the copies are gone, and the registry installs
+`crook_wasm` by version to read what it builds.
 
 ## 6. The store
 
-**What the store distributes: `.wasm`, and only `.wasm`.** An installed plugin lives in
+**What the store distributes: `.wasm`, and only `.wasm`.** The pictures are inside it too:
+a plugin's icon and its screenshots are custom sections of the module, which the sandbox never
+maps — no memory, no fuel — so they cost the plugin nothing to carry, and a file beside the
+module would have been a second file to keep in step and one the registry could not read out
+of what it built. What that costs is that seeing a plugin's pictures before installing it is
+fetching the plugin: the one new gesture in the store, **Fetch pictures**, downloads the same
+module Install would (and says so, with the size, beside the button), reads the pictures out
+of it, and keeps the bytes so that an Install afterwards is no second download. An installed
+plugin's pictures come out of the module already on the machine and cost no request. An
+installed plugin lives in
 `<data>/crook/plugins/<owner>.<name>/<version>/plugin.wasm` — one directory per plugin because
 `owner/name` is two path components and a plugin's home is one, and one directory per version
 inside it. Disabling stops loading it; uninstalling deletes the plugin's whole directory, which
@@ -996,9 +1014,15 @@ Five decisions are in that shape:
 **The fetch is the first request Crook makes of its own**, and every other byte this application
 has sent belonged to a plugin under a capability somebody granted by host name. So: nothing is
 sent that identifies anybody — a `GET` and an `If-None-Match` carrying a tag the registry itself
-wrote, no account, no machine id, no version, no list of what is installed; nothing is fetched
-until somebody opens the store, not at launch and not on a timer; and a failed fetch is the
-cached list with a line saying how old it is, never an empty page. The cache lives under the
+wrote, a `User-Agent` that says `crook` and no version, no account, no machine id, no list of
+what is installed; nothing is fetched until somebody opens the store, not at launch and not on
+a timer; and a failed fetch is the cached list with a line saying how old it is, never an empty
+page. There are still two requests in kind and each is one press: the `GET` of the index, and
+the `GET` of one artifact — Install, Update, Update all one module at a time, and **Fetch
+pictures**, which is that same artifact `GET` for a plugin not yet installed. An artifact is
+fetched only from the directory the index itself is in, and a list that points elsewhere is
+refused before a socket opens: a poisoned index must not be able to send a request to a host of
+its choosing. The cache lives under the
 *data* directory beside the plugins rather than under the cache directory, because it is not
 only a speed-up: it is the only record of which versions have been **withdrawn**, and that has
 to survive a spring clean and a launch with no network. An index that cannot be read withdraws

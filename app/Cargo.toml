@@ -39,6 +39,8 @@ crookui_core.workspace = true
 
 anyhow.workspace = true
 arboard.workspace = true
+# The icon the registry's list carries for each plugin, decoded off the pool.
+base64.workspace = true
 # What tells a sandboxed plugin which day is which. See the workspace manifest.
 chrono.workspace = true
 # The settings file lives in the platform's configuration directory.
