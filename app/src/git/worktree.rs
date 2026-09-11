@@ -62,7 +62,7 @@ static GIT_MISSING: AtomicBool = AtomicBool::new(false);
 /// restart the app to clear.
 const READ_TIMEOUT: Duration = Duration::from_secs(10);
 
-/// How long [`add`] and [`remove`] may take.
+/// How long [`add`] may take.
 ///
 /// Twelve times the read budget, for one reason: `add` writes out a whole
 /// working tree. On a large repository on a slow disk that is genuinely tens of
@@ -71,6 +71,20 @@ const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// half-written directory *and* a registered worktree — strictly worse than
 /// having waited.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// How long [`remove`] may take.
+///
+/// Longer again, because what a removal does is delete a directory tree and
+/// the tree is as big as whatever was built in it — a `target/` of forty
+/// gigabytes is an afternoon's work on this machine's own checkouts, and an
+/// `rm` of that on a spinning disk is minutes, not the two the write budget
+/// allows. Killing git halfway through it is the worst of every outcome: the
+/// files are half gone, the worktree is still registered, and `git status`
+/// on what is left reports every deleted file as a modification, so the sweep
+/// that tried to tidy it away will from then on refuse to touch it. Fifteen
+/// minutes is not a performance budget either; it is where a removal that has
+/// not finished has stopped being one.
+const DELETE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
 /// How long the deadline is checked at [`EAGER_POLL`] before it drops to
 /// [`LAZY_POLL`].
@@ -559,7 +573,7 @@ pub fn remove(repository: &Path, path: &Path, force: bool) -> Result<(), Error> 
     args.push(OsStr::new("--"));
     args.push(path.as_os_str());
 
-    let finished = run(repository, &args, Intent::Write)?;
+    let finished = run(repository, &args, Intent::Delete)?;
     if finished.success {
         return Ok(());
     }
@@ -1016,8 +1030,12 @@ fn checked_out_at(repository: &Path, branch: &str) -> Option<PathBuf> {
 enum Intent {
     /// `worktree list`, `status`: answers a question and changes nothing.
     Read,
-    /// `worktree add`, `worktree remove`: writes the repository.
+    /// `worktree add`: writes the repository.
     Write,
+    /// `worktree remove`: writes the repository, and deletes a directory tree
+    /// first, which is the one thing here whose honest duration has no bound
+    /// a number can promise. See [`DELETE_TIMEOUT`].
+    Delete,
 }
 
 impl Intent {
@@ -1026,6 +1044,7 @@ impl Intent {
         match self {
             Self::Read => READ_TIMEOUT,
             Self::Write => write_timeout(),
+            Self::Delete => DELETE_TIMEOUT,
         }
     }
 }

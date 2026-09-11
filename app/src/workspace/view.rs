@@ -61,7 +61,7 @@ use super::action::{
 use super::block_list::block_text;
 use super::settings_page::SettingsState;
 use super::tab_context_menu::TabContextMenuState;
-use super::tab_menu::{Contents, Going, Mode as WorktreeMode, Sweep, TabMenuState};
+use super::tab_menu::{Contents, Going, Looked, Mode as WorktreeMode, Sweep, TabMenuState};
 use super::tabs_panel::drag::{Carried, PanelDrag};
 use super::tabs_panel::geometry::RowGeometry;
 use super::tabs_panel::search::SearchState;
@@ -1066,8 +1066,39 @@ impl Workspace {
     pub fn worktrees_going(&self) -> Option<usize> {
         match &self.tab_menu.sweep {
             Sweep::Ready { going, .. } => Some(going.len()),
-            Sweep::Counting => None,
+            Sweep::Counting { .. } | Sweep::Removing { .. } => None,
         }
+    }
+
+    /// How far the sweep has got — `(done, of)` — while it is looking in the
+    /// checkouts or removing them, and `None` when it is doing neither. For a
+    /// test, which is how the trail is checked without counting pellets.
+    pub fn worktrees_swept(&self) -> Option<(usize, usize)> {
+        if self.tab_menu.mode != WorktreeMode::Tidying {
+            return None;
+        }
+        match &self.tab_menu.sweep {
+            Sweep::Counting { looked, of } => Some((*looked, *of)),
+            Sweep::Removing { done, of, .. } => Some((*done, *of)),
+            Sweep::Ready { .. } => None,
+        }
+    }
+
+    /// Whether the sweep has been told to stop and is finishing the checkout
+    /// in flight. For a test.
+    pub fn worktree_sweep_is_stopping(&self) -> bool {
+        matches!(self.tab_menu.sweep, Sweep::Removing { stopping: true, .. })
+    }
+
+    /// Whether the menu is waiting on git, which is when the pirate chews.
+    /// For a test.
+    pub fn worktree_menu_is_busy(&self) -> bool {
+        self.tab_menu.is_busy()
+    }
+
+    /// How many frames into his bite the pirate is. For a test.
+    pub fn worktree_menu_chomp(&self) -> usize {
+        self.tab_menu.chomp
     }
 
     /// Whether the confirmation has already been refused once, which is what
@@ -2510,6 +2541,26 @@ impl Workspace {
             WorktreeAction::Tidy => self.tidy_worktrees(ctx),
 
             WorktreeAction::Cancel => {
+                // A sweep that is removing is not walked back to the list,
+                // because the list would be wrong: some of what it showed is
+                // gone and one more is going. It is told to stop after the
+                // one in flight, and the chain re-reads the list when that
+                // one has gone. See `remove_next`.
+                if self.tab_menu.mode == WorktreeMode::Tidying
+                    && let Sweep::Removing { stopping, .. } = &mut self.tab_menu.sweep
+                {
+                    if !*stopping {
+                        *stopping = true;
+                        self.tab_menu.forget_hover_state();
+                        ctx.notify();
+                    }
+                    return;
+                }
+
+                // A new question, so that whatever the old one was still
+                // waiting on — a count, a look inside each checkout — lands
+                // nowhere and, for the chains, asks git for nothing more.
+                self.tab_menu.next_epoch();
                 self.tab_menu.mode = WorktreeMode::Listing;
                 self.tab_menu.problem = None;
                 self.tab_menu.forget_hover_state();
@@ -2554,6 +2605,7 @@ impl Workspace {
             self.show_tab_context_menu(tab, row, ctx);
         }
 
+        let epoch = self.tab_menu.next_epoch();
         self.tab_menu.tab = Some(tab);
         self.tab_menu.pane_directory = Some(directory.clone());
         self.tab_menu.mode = WorktreeMode::Listing;
@@ -2561,7 +2613,7 @@ impl Workspace {
         // opened with the first checkout lit would be one where Delete has a
         // target nobody aimed.
         self.tab_menu.selected = None;
-        self.tab_menu.sweep = Sweep::Counting;
+        self.tab_menu.sweep = Sweep::default();
         self.tab_menu.contents = Contents::Reading;
         self.tab_menu.branches.clear();
         self.tab_menu.problem = None;
@@ -2569,6 +2621,7 @@ impl Workspace {
         self.tab_menu.store = self.worktrees_directory.clone();
         self.tab_menu.forget_hover_state();
         self.sync_input_keys();
+        self.start_chomping(ctx);
         ctx.notify();
 
         let reading = ctx.background().spawn(async move {
@@ -2586,9 +2639,9 @@ impl Workspace {
 
         ctx.spawn(reading, move |workspace, listed, ctx| {
             // The menu may have been taken down, or opened on another tab,
-            // while git was being asked. The answer belongs to the tab it was
-            // asked for and to no other.
-            if workspace.tab_menu.tab != Some(tab) {
+            // while git was being asked. The answer belongs to the question
+            // it was asked for and to no other.
+            if workspace.tab_menu.epoch != epoch {
                 return;
             }
             workspace.tab_menu.contents = match listed {
@@ -2693,8 +2746,38 @@ impl Workspace {
             }
         }
 
+        self.tab_menu.next_epoch();
         self.tab_menu.mode = WorktreeMode::Tidying;
         self.tab_menu.sweep = Sweep::Ready { going, kept };
+        self.tab_menu.problem = None;
+        self.tab_menu.forget_hover_state();
+        ctx.notify();
+    }
+
+    /// Puts it into its sweep part way through, for a run that was asked to
+    /// start there.
+    ///
+    /// Staged, and only here: the face is on screen for exactly as long as
+    /// git takes and a snapshot cannot catch it, so the numbers are invented
+    /// — six going, two gone, the third under the knife, mouth wide — and
+    /// nothing is deleted for a picture. The branch named is a real one when
+    /// the repository has a free checkout, so that the line reads as it would.
+    pub fn stage_sweeping_worktrees(&mut self, ctx: &mut ViewContext<Self>) {
+        let current = super::tab_menu::free_checkouts(self)
+            .into_iter()
+            .next()
+            .map(|(_, label)| label)
+            .unwrap_or_else(|| "worktree/amber-anchor-0155".to_owned());
+
+        self.tab_menu.next_epoch();
+        self.tab_menu.mode = WorktreeMode::Tidying;
+        self.tab_menu.sweep = Sweep::Removing {
+            done: 2,
+            of: 6,
+            current: Some(current),
+            stopping: false,
+        };
+        self.tab_menu.chomp = 2;
         self.tab_menu.problem = None;
         self.tab_menu.forget_hover_state();
         ctx.notify();
@@ -2706,17 +2789,65 @@ impl Workspace {
             return;
         }
 
+        self.tab_menu.next_epoch();
         self.tab_menu.tab = None;
         self.tab_menu.mode = WorktreeMode::Listing;
         self.tab_menu.selected = None;
-        self.tab_menu.sweep = Sweep::Counting;
+        self.tab_menu.sweep = Sweep::default();
         self.tab_menu.contents = Contents::Reading;
         self.tab_menu.branches.clear();
         self.tab_menu.problem = None;
         self.tab_menu.working = false;
+        self.tab_menu.chomp = 0;
         self.tab_menu.forget_hover_state();
         self.sync_input_keys();
         ctx.notify();
+    }
+
+    /// Starts the pirate chewing, unless he already is or there is nothing
+    /// to chew on.
+    ///
+    /// Called by everything that puts the menu into a wait. The chain it
+    /// starts runs for as long as [`TabMenuState::is_busy`] says so and then
+    /// ends, so there is one chain at most and none at all while the menu is
+    /// showing a list nobody is waiting on — which is how the window's rule
+    /// against idle ticks survives an animation.
+    fn start_chomping(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.tab_menu.chomping || !self.tab_menu.is_busy() {
+            return;
+        }
+        self.tab_menu.chomping = true;
+        self.keep_chomping(ctx);
+    }
+
+    /// Waits out one frame of the bite and draws the next, while there is
+    /// something to wait on.
+    ///
+    /// A chain rather than a timer, like the caret's blink — the next frame is
+    /// asked for by the previous one landing, so there is exactly one wait
+    /// outstanding and nothing to cancel. Unlike the blink it is not counted
+    /// in `PARKED_WORKERS`: it parks a worker for a frame at a time and only
+    /// while a git command is running for this menu, which is a wait bounded
+    /// by a tenth of a second rather than by how long a window stays open.
+    fn keep_chomping(&self, ctx: &mut ViewContext<Self>) {
+        let waiting = ctx
+            .background()
+            .spawn(async { std::thread::sleep(crate::pirate::FRAME) });
+
+        ctx.spawn(waiting, |workspace, (), ctx| {
+            if workspace.tab_menu.is_busy() {
+                workspace.tab_menu.chomp += 1;
+                ctx.notify();
+                workspace.keep_chomping(ctx);
+                return;
+            }
+            // Over, and back to a whole face for whatever wait comes next.
+            // The frame is not drawn anywhere once nothing is busy, so this
+            // is bookkeeping rather than a repaint.
+            workspace.tab_menu.chomping = false;
+            workspace.tab_menu.chomp = 0;
+        })
+        .detach();
     }
 
     /// Everything the menu on a block does.
@@ -3180,6 +3311,7 @@ impl Workspace {
 
         self.tab_menu.working = true;
         self.tab_menu.problem = None;
+        self.start_chomping(ctx);
         ctx.notify();
 
         let opened_on = self.tab_menu.tab;
@@ -3234,31 +3366,37 @@ impl Workspace {
         };
         let path = worktree.path.clone();
 
+        let epoch = self.tab_menu.next_epoch();
         self.tab_menu.mode = WorktreeMode::Removing {
             index,
-            local: None,
+            local: Looked::NotYet,
             refused: false,
         };
         self.tab_menu.problem = None;
         self.tab_menu.forget_hover_state();
+        self.start_chomping(ctx);
         ctx.notify();
 
-        let counting = ctx
-            .background()
-            .spawn(async move { crate::git::worktree::local_work(&path) });
+        let counting = ctx.background().spawn({
+            let path = path.clone();
+            async move { crate::git::worktree::local_work(&path) }
+        });
 
         ctx.spawn(counting, move |workspace, counted, ctx| {
             // Only into the question that asked it. A count that arrived after
             // the person had gone back to the list would put a line under a
             // heading that is no longer there.
-            if let WorktreeMode::Removing {
-                index: asking,
-                local,
-                ..
-            } = &mut workspace.tab_menu.mode
-                && *asking == index
-            {
-                *local = counted.ok();
+            if workspace.tab_menu.epoch != epoch {
+                return;
+            }
+            if let WorktreeMode::Removing { local, .. } = &mut workspace.tab_menu.mode {
+                *local = match counted {
+                    Ok(local) => Looked::Found(local),
+                    Err(problem) => {
+                        log::warn!("could not look in {}: {problem}", path.display());
+                        Looked::Unknown
+                    }
+                };
                 ctx.notify();
             }
         })
@@ -3278,54 +3416,72 @@ impl Workspace {
             return;
         }
 
+        let epoch = self.tab_menu.next_epoch();
         self.tab_menu.mode = WorktreeMode::Tidying;
-        self.tab_menu.sweep = Sweep::Counting;
+        self.tab_menu.sweep = Sweep::Counting {
+            looked: 0,
+            of: free.len(),
+        };
         self.tab_menu.problem = None;
         self.tab_menu.forget_hover_state();
+        self.start_chomping(ctx);
         ctx.notify();
 
-        let opened_on = self.tab_menu.tab;
-        let counting = ctx.background().spawn(async move {
-            free.into_iter()
-                .map(|(path, label)| {
-                    let local = crate::git::worktree::local_work(&path);
-                    (path, label, local.ok())
-                })
-                .collect::<Vec<_>>()
+        self.look_in_next(free.into(), Vec::new(), Vec::new(), epoch, ctx);
+    }
+
+    /// Looks in the next free checkout, and then the one after it.
+    ///
+    /// One `git status` per step rather than all of them in one background
+    /// task, so that each answer lands on its own and the face can say how
+    /// many have come back. Six of them used to be one wait with one sentence
+    /// over it, and a sentence that does not change for as long as six
+    /// `git status` calls take is what a hang looks like.
+    ///
+    /// A step that lands on a menu that has moved on asks git for nothing
+    /// more: the person walked back to the list, or opened the sweep again,
+    /// and the answers would go nowhere.
+    fn look_in_next(
+        &mut self,
+        mut remaining: std::collections::VecDeque<(PathBuf, String)>,
+        mut going: Vec<Going>,
+        mut kept: Vec<String>,
+        epoch: u64,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some((path, label)) = remaining.pop_front() else {
+            self.tab_menu.sweep = Sweep::Ready { going, kept };
+            ctx.notify();
+            return;
+        };
+
+        let looking = ctx.background().spawn({
+            let path = path.clone();
+            async move { crate::git::worktree::local_work(&path) }
         });
 
-        ctx.spawn(counting, move |workspace, counted, ctx| {
-            // Only into the question that asked it, and only while it is
-            // still waiting for one. Six `git status` calls is long enough for
-            // the menu to have been taken down, opened on another tab, or
-            // walked back to the list — and long enough for a second sweep to
-            // have been opened and answered, which is the one case where
-            // landing this would replace a fresh count with a stale one.
-            if workspace.tab_menu.tab != opened_on
-                || workspace.tab_menu.mode != WorktreeMode::Tidying
-                || !matches!(workspace.tab_menu.sweep, Sweep::Counting)
-            {
+        ctx.spawn(looking, move |workspace, local, ctx| {
+            if workspace.tab_menu.epoch != epoch {
                 return;
             }
-
-            let mut going = Vec::new();
-            let mut kept = Vec::new();
-            for (path, label, local) in counted {
-                match local {
-                    // Modified or untracked files are what `git worktree
-                    // remove` refuses over, so a checkout holding either is one
-                    // this face leaves alone rather than one it offers to
-                    // force past — see the module's header. A checkout git
-                    // would not answer about at all is kept for the same
-                    // reason, one step further out.
-                    Some(local) if !local.blocks_removal() => {
-                        going.push(Going { path, label, local });
-                    }
-                    _ => kept.push(label),
+            match local {
+                // Modified or untracked files are what `git worktree remove`
+                // refuses over, so a checkout holding either is one this face
+                // leaves alone rather than one it offers to force past — see
+                // the module's header. A checkout git would not answer about
+                // at all is kept for the same reason, one step further out.
+                Ok(local) if !local.blocks_removal() => going.push(Going { path, label, local }),
+                Ok(_) => kept.push(label),
+                Err(problem) => {
+                    log::warn!("could not look in {}: {problem}", path.display());
+                    kept.push(label);
                 }
             }
-            workspace.tab_menu.sweep = Sweep::Ready { going, kept };
-            ctx.notify();
+            if let Sweep::Counting { looked, .. } = &mut workspace.tab_menu.sweep {
+                *looked += 1;
+                ctx.notify();
+            }
+            workspace.look_in_next(remaining, going, kept, epoch, ctx);
         })
         .detach();
     }
@@ -3334,65 +3490,126 @@ impl Workspace {
     ///
     /// Sequential rather than at once, because `git worktree remove` writes
     /// the same `.git/worktrees` directory every time and two of them racing
-    /// over it is a repository somebody has to repair by hand. Six subprocesses
-    /// one after another is a moment, and it happens on the pool.
+    /// over it is a repository somebody has to repair by hand. And one
+    /// background task per checkout rather than one for the lot, so that each
+    /// removal lands on its own: the face moves the pirate along one pellet,
+    /// names the next branch, and — if Stop has been pressed in the meantime
+    /// — asks git for nothing more.
     fn tidy_worktrees(&mut self, ctx: &mut ViewContext<Self>) {
         let Sweep::Ready { going, .. } = &self.tab_menu.sweep else {
             return;
         };
-        if self.tab_menu.working || going.is_empty() {
+        if going.is_empty() {
             return;
         }
         let Some(repository) = self.tab_menu.pane_directory.clone() else {
             return;
         };
-        let paths: Vec<PathBuf> = going.iter().map(|going| going.path.clone()).collect();
+        let remaining: std::collections::VecDeque<Going> = going.iter().cloned().collect();
 
-        self.tab_menu.working = true;
+        let epoch = self.tab_menu.next_epoch();
+        self.tab_menu.sweep = Sweep::Removing {
+            done: 0,
+            of: remaining.len(),
+            current: remaining.front().map(|going| going.label.clone()),
+            stopping: false,
+        };
         self.tab_menu.problem = None;
+        self.tab_menu.forget_hover_state();
+        self.start_chomping(ctx);
         ctx.notify();
 
-        let opened_on = self.tab_menu.tab;
-        let removed = ctx.background().spawn(async move {
-            let mut refused = 0;
-            for path in paths {
-                // Never forced, and one refusal does not stop the others: a
-                // checkout somebody started working in between the counting
-                // and the button is a checkout to leave standing, not a reason
-                // to abandon the five that are finished.
-                if let Err(problem) = crate::git::worktree::remove(&repository, &path, false) {
-                    log::warn!("{} was not removed: {problem}", path.display());
-                    refused += 1;
-                }
-            }
-            refused
-        });
+        self.remove_next(repository, remaining, 0, epoch, ctx);
+    }
 
-        ctx.spawn(removed, move |workspace, refused, ctx| {
-            if workspace.tab_menu.tab != opened_on {
+    /// Removes the next checkout of a sweep, and then the one after it.
+    ///
+    /// `refused` counts the ones git would not let go. Never forced, and one
+    /// refusal does not stop the others: a checkout somebody started working
+    /// in between the counting and the button is a checkout to leave
+    /// standing, not a reason to abandon the five that are finished.
+    ///
+    /// The chain runs to the end whether or not the menu is still up — the
+    /// removals were asked for, and closing a popup is not a way of asking
+    /// for them back — with one exception: the face's own Stop, which is the
+    /// one gesture that means exactly that. What the chain never does is
+    /// write into a menu that has moved on to another question.
+    fn remove_next(
+        &mut self,
+        repository: PathBuf,
+        mut remaining: std::collections::VecDeque<Going>,
+        refused: usize,
+        epoch: u64,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let answering = self.tab_menu.epoch == epoch;
+        let stopped =
+            answering && matches!(self.tab_menu.sweep, Sweep::Removing { stopping: true, .. });
+
+        let next = if stopped { None } else { remaining.pop_front() };
+        let Some(going) = next else {
+            if !answering {
                 return;
             }
-            workspace.tab_menu.working = false;
+            let (done, of) = match self.tab_menu.sweep {
+                Sweep::Removing { done, of, .. } => (done, of),
+                _ => (0, 0),
+            };
 
             // Back to the list, which has to be read again: the things it was
             // listing are gone. What is left is git's answer rather than this
             // handler's arithmetic, which is the only one that cannot be wrong.
-            if let Some(tab) = workspace.tab_menu.tab {
-                workspace.tab_menu.tab = None;
-                workspace.open_tab_menu(tab, ctx);
+            if let Some(tab) = self.tab_menu.tab {
+                self.tab_menu.tab = None;
+                self.open_tab_menu(tab, ctx);
             }
 
             // Said after the list has been asked for, because opening the menu
             // clears the line — and said as a count rather than as git's own
             // words, which are about one checkout and there were several. The
             // log has each of them.
-            if refused > 0 {
-                workspace.tab_menu.problem = Some(match refused {
-                    1 => "One checkout would not go; the log says why.".to_owned(),
-                    refused => format!("{refused} checkouts would not go; the log says why."),
-                });
+            let mut sentences = Vec::new();
+            if stopped {
+                sentences.push(format!("Stopped after {done} of {of}."));
+            }
+            match refused {
+                0 => {}
+                1 => sentences.push("One checkout would not go; the log says why.".to_owned()),
+                refused => {
+                    sentences.push(format!(
+                        "{refused} checkouts would not go; the log says why."
+                    ));
+                }
+            }
+            if !sentences.is_empty() {
+                self.tab_menu.problem = Some(sentences.join(" "));
                 ctx.notify();
             }
+            return;
+        };
+
+        let removing = ctx.background().spawn({
+            let repository = repository.clone();
+            let path = going.path.clone();
+            async move { crate::git::worktree::remove(&repository, &path, false) }
+        });
+
+        ctx.spawn(removing, move |workspace, removed, ctx| {
+            let refused = match removed {
+                Ok(()) => refused,
+                Err(problem) => {
+                    log::warn!("{} was not removed: {problem}", going.path.display());
+                    refused + 1
+                }
+            };
+            if workspace.tab_menu.epoch == epoch
+                && let Sweep::Removing { done, current, .. } = &mut workspace.tab_menu.sweep
+            {
+                *done += 1;
+                *current = remaining.front().map(|going| going.label.clone());
+                ctx.notify();
+            }
+            workspace.remove_next(repository, remaining, refused, epoch, ctx);
         })
         .detach();
     }
@@ -3415,6 +3632,7 @@ impl Workspace {
 
         self.tab_menu.working = true;
         self.tab_menu.problem = None;
+        self.start_chomping(ctx);
         ctx.notify();
 
         let asked_about = index;

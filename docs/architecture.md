@@ -963,9 +963,25 @@ looking, then names the branches a press would really take. The row that opens i
 where there is nothing free, which is the same promise the menu itself makes by not opening
 outside a repository.
 
+**A wait is drawn as the pirate eating it.** Every face of the menu that is waiting on git —
+the list being read, a checkout being looked in, six of them being looked in, six of them being
+deleted — draws the pirate chewing, and where the wait is a list he stands in a row of pellets,
+one per checkout, having eaten the ones dealt with. A sentence that does not move for as long
+as `git worktree remove` takes to delete a `target/` is what a hang looks like, and it was the
+whole of what the sweep used to show; the pellets say *which* checkout is taking its time. The
+sweep runs one background task per checkout rather than one for the lot, so that each answer
+lands on its own — which is what lets the pirate move, and what lets Stop mean something: the
+checkout under the knife finishes going (a kill halfway through a delete leaves one neither
+there nor gone) and the ones behind it are spared. The chain that moves his mouth parks a pool
+worker for a frame at a time and only while something is running; there is no timer under a
+list nobody is waiting on. `app/src/pirate.rs` is the artwork both he and the usage chip's
+plugin draw from.
+
 `app/src/git/worktree.rs` is the whole of the git side — list, add, remove, and a count of what
-is loose in a checkout — with a timeout on every call, two reader threads per call so a
-repository with a fat `target/` cannot deadlock a pipe, and an error type whose variants are
+is loose in a checkout — with a timeout on every call (a removal's is the long one, because it
+deletes whatever was built in the checkout and a kill halfway through leaves a worktree the
+sweep will never touch again), two reader threads per call so a repository with a fat
+`target/` cannot deadlock a pipe, and an error type whose variants are
 the things a UI can offer to do about them.
 
 ### The agent says what it is doing
