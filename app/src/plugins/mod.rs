@@ -27,6 +27,7 @@ pub mod blocks;
 pub mod header;
 mod palette;
 pub mod pane;
+pub mod pictures;
 mod plugins_page;
 pub mod settings;
 mod shell;

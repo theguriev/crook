@@ -131,6 +131,33 @@ pub(crate) fn wasm_at(id: &str, version: &str) -> Vec<u8> {
 
 /// The same, saying whatever `manifest` says.
 pub(crate) fn wasm_saying(manifest: &Manifest, slot: &str, order: i32) -> Vec<u8> {
+    wasm_carrying(manifest, slot, order, &[])
+}
+
+/// The same, carrying `sections` as custom sections — the way a module
+/// carries its icon and its previews.
+///
+/// `(@custom …)` is the text format's own spelling for one, and the
+/// assembler places it after the last standard section, where a linker puts
+/// them too.
+pub(crate) fn wasm_carrying(
+    manifest: &Manifest,
+    slot: &str,
+    order: i32,
+    sections: &[(&str, &[u8])],
+) -> Vec<u8> {
+    let mut text = module_text(manifest, slot, order);
+    let body = text.pop();
+    assert_eq!(body, Some(')'), "the module text ends in its own paren");
+    for (name, data) in sections {
+        text.push_str(&format!("\n(@custom {name:?} \"{}\")", escaped(data)));
+    }
+    text.push(')');
+    wat::parse_str(&text).expect("the test module should assemble")
+}
+
+/// The text of the test module, before it is assembled.
+fn module_text(manifest: &Manifest, slot: &str, order: i32) -> String {
     let manifest = to_bytes(manifest).expect("a manifest should encode");
     let tree = to_bytes(&tree()).expect("a tree should encode");
     let tree_at = 16 + manifest.len() as u32;
@@ -180,8 +207,7 @@ pub(crate) fn wasm_saying(manifest: &Manifest, slot: &str, order: i32) -> Vec<u8
         slot_len = slot.len(),
         abi = crook_plugin_api::ABI_VERSION,
     );
-
-    wat::parse_str(&text).expect("the test module should assemble")
+    text
 }
 
 /// What a plugin contributing to a block's menu puts there, and what it copies

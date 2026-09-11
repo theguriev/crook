@@ -150,12 +150,41 @@ impl Harness {
     /// The same, with some of them withdrawn by the registry — which the
     /// window is told about rather than reading, so that a test can say it
     /// without a store, a network or a file.
+    ///
+    /// With no plugins directory: a window opened this way installs nothing
+    /// and removes nothing, and says so. The `sandboxed` tests, which do
+    /// both, open theirs on a scratch.
     fn with_withdrawn(
         tabs: usize,
         settings: Settings,
         plugins: Vec<Box<dyn crate::plugin::Plugin>>,
         withdrawn: std::collections::BTreeMap<String, String>,
     ) -> Self {
+        Self::with_opening(
+            tabs,
+            Opening {
+                settings,
+                channel: Channel::Dev,
+                plugins,
+                withdrawn,
+                heard: Default::default(),
+                plugins_directory: None,
+            },
+        )
+    }
+
+    /// The whole of it: a window opened with exactly this — which is how a
+    /// test says what the registry offers, the way the Store would tell the
+    /// window, without a store, a network or a file, and where the plugins
+    /// that are files live, which is never the directory of whoever is
+    /// running the tests.
+    fn with_opening(tabs: usize, opening: Opening) -> Self {
+        assert!(
+            opening.plugins_directory.as_deref().is_none_or(
+                |directory| Some(directory) != crate::plugins::wasm::directory().as_deref()
+            ),
+            "a test opened a window on the plugins directory of whoever is running it"
+        );
         let queue = LocalQueue::new();
         // Two, not one, and for the reason `crate::PARKED_WORKERS` exists: a
         // task that waits on a timer holds its worker for the whole cycle, so
@@ -184,21 +213,8 @@ impl Harness {
         // text out with none: a cell is half the font size, and a character is
         // its own glyph id.
         let cell_font = CellFont::headless(CELL_FONT_SIZE);
-        let (window_id, workspace) = app.add_window(|ctx| {
-            Workspace::new(
-                fonts,
-                cell_font,
-                Opening {
-                    settings,
-                    channel: Channel::Dev,
-                    plugins,
-                    withdrawn,
-                },
-                quit,
-                window.clone(),
-                ctx,
-            )
-        });
+        let (window_id, workspace) = app
+            .add_window(|ctx| Workspace::new(fonts, cell_font, opening, quit, window.clone(), ctx));
 
         let mut harness = Self {
             queue,
@@ -669,6 +685,20 @@ impl Harness {
         self.dispatch_workspace_action(WorkspaceAction::Run(id));
     }
 
+    /// Runs a named action *about* something — which is what a button on a
+    /// card does, and `--action "name subject"` on the command line.
+    fn run_about(&mut self, name: &str, subject: &str) {
+        let action = ActionName::parse(name).expect("a literal that parses");
+        let (id, subject) = self.workspace.read(&self.app, |workspace, _| {
+            let id = workspace
+                .host()
+                .action(&action)
+                .unwrap_or_else(|| panic!("nothing is registered as {name}"));
+            (id, workspace.subject(subject))
+        });
+        self.dispatch_workspace_action(WorkspaceAction::RunAbout(id, subject));
+    }
+
     /// What a tab is called, whatever its panes are called.
     fn tab_name(&self, tab: TabId) -> String {
         self.workspace.read(&self.app, |workspace, _| {
@@ -769,14 +799,36 @@ impl Harness {
             .next()
             .expect("the Plugins section has a field of its own");
 
-        let row = text_lines(&scene, |at| {
+        // The row's name, or the name with the word a row may end in — the
+        // version an update would bring, "installed" — run on after it: the
+        // two share a baseline, so they are one line to `text_lines`.
+        let lines = text_lines(&scene, |at| {
             at.x() >= column.min_x() && at.x() <= column.max_x()
-        })
-        .into_iter()
-        .find(|(_, line)| line.trim() == name)
-        .unwrap_or_else(|| panic!("no row in the plugin list says {name:?}"));
+        });
+        let row = lines
+            .iter()
+            .find(|(_, line)| line.trim() == name)
+            .or_else(|| lines.iter().find(|(_, line)| line.trim().starts_with(name)))
+            .unwrap_or_else(|| panic!("no row in the plugin list says {name:?}"));
 
         self.click(row.0 + vec2f(4., 4.), MouseButton::Left);
+        self.frame();
+    }
+
+    /// Presses the button on the page beside the list that says `label`.
+    ///
+    /// By its text, found where it was drawn, the way [`click_plugin`] finds
+    /// a row: a card's buttons have no fixed places either. The word's own
+    /// first glyph rather than the line's, because a button shares its line
+    /// with the label at the other end of the row — "On this machine" and
+    /// "Remove" are one line to [`page_line`], and pressing where that line
+    /// starts presses the label.
+    ///
+    /// [`click_plugin`]: Self::click_plugin
+    fn click_page_button(&mut self, label: &str) {
+        let scene = self.frame();
+        let at = page_word(&scene, label);
+        self.click(at + vec2f(4., 4.), MouseButton::Left);
         self.frame();
     }
 
@@ -6815,6 +6867,35 @@ fn page_line(scene: &Scene, phrase: &str) -> (Vector2F, String) {
         .find(|(_, line)| line.contains(phrase))
         .unwrap_or_else(|| panic!("no line on the page says {phrase:?}: {}", frame_text(scene)));
     (at + vec2f(4., 4.), line)
+}
+
+/// Where the first glyph of `word` is, on the first line of the page that
+/// says it.
+fn page_word(scene: &Scene, word: &str) -> Vector2F {
+    let pane = settings_pane_box(scene);
+    let mut rows: HashMap<i32, Vec<(f32, char)>> = HashMap::new();
+    for glyph in scene.layers().flat_map(|layer| layer.glyphs.iter()) {
+        let Some(character) = char::from_u32(glyph.glyph_key.glyph_id) else {
+            continue;
+        };
+        if !pane.contains_point(glyph.position) {
+            continue;
+        }
+        rows.entry(glyph.position.y().round() as i32)
+            .or_default()
+            .push((glyph.position.x(), character));
+    }
+    let mut lines: Vec<(i32, Vec<(f32, char)>)> = rows.into_iter().collect();
+    lines.sort_by_key(|(y, _)| *y);
+    for (y, mut glyphs) in lines {
+        glyphs.sort_by(|left, right| left.0.total_cmp(&right.0));
+        let text: String = glyphs.iter().map(|(_, character)| *character).collect();
+        if let Some(offset) = text.find(word) {
+            let index = text[..offset].chars().count();
+            return vec2f(glyphs[index].0, y as f32);
+        }
+    }
+    panic!("no line on the page says {word:?}: {}", frame_text(scene));
 }
 
 /// The colour the line of the page that says `phrase` is set in.
@@ -13541,15 +13622,659 @@ fn a_settings_page_can_be_reached_by_the_name_on_its_rail_row() {
 
 mod sandboxed {
     use super::*;
-    use crate::plugins::wasm::tests::{Scratch, install, manifest, wasm, wasm_saying};
+    use crate::picture::tests::{header_only, icon_png, preview_png};
+    use crate::plugins::wasm::tests::{
+        Scratch, install, manifest, wasm, wasm_carrying, wasm_saying,
+    };
+    use crate::workspace::settings_page::widgets;
     use crook_plugin_api::Capability;
 
-    /// A harness whose plugins are the ones in the box plus whatever is in a
-    /// scratch directory.
-    fn harness(scratch: &Scratch) -> Harness {
+    /// A window opened on a scratch directory: its plugins are the ones in
+    /// the box plus whatever is installed there, and it is also where the
+    /// window installs to and removes from, so a test that does either does
+    /// it to the scratch. `withdrawn` and `heard` are what the registry
+    /// says, the way the window would read it off the cached index.
+    fn opening(
+        scratch: &Scratch,
+        withdrawn: std::collections::BTreeMap<String, String>,
+        heard: crate::plugins::store::index::Heard,
+    ) -> Opening {
         let mut plugins = crate::plugins::defaults();
         plugins.extend(crate::plugins::wasm::installed(scratch.path()));
-        Harness::with_plugins(1, Settings::ephemeral(), plugins)
+        Opening {
+            settings: Settings::ephemeral(),
+            channel: Channel::Dev,
+            plugins,
+            withdrawn,
+            heard,
+            plugins_directory: Some(scratch.path().to_path_buf()),
+        }
+    }
+
+    /// A harness on a scratch directory, with the registry saying nothing.
+    fn harness(scratch: &Scratch) -> Harness {
+        Harness::with_opening(1, opening(scratch, Default::default(), Default::default()))
+    }
+
+    /// Every picture the frame draws, as the box each lands in.
+    fn images(scene: &Scene) -> Vec<RectF> {
+        scene
+            .layers()
+            .flat_map(|layer| layer.images.iter())
+            .map(|image| image.bounds)
+            .collect()
+    }
+
+    /// The rooms the card holds for pictures that have not landed: box fill,
+    /// square-cornered, unbordered, between the card's edges — which is none
+    /// of the answer boxes (rounded), the hovered rows (in the list) or the
+    /// field (bordered). Unclipped, as [`images`] is, because the card
+    /// scrolls and a room below the window's foot is still a room.
+    fn reserved(scene: &Scene) -> Vec<RectF> {
+        let pane = settings_pane_box(scene);
+        scene
+            .layers()
+            .flat_map(|layer| layer.rects.iter())
+            .filter(|rect| {
+                rect.background == Fill::Solid(theme().overlay_1)
+                    && rect.corner_radius == CornerRadius::default()
+                    && rect.border.width == 0.
+            })
+            .map(|rect| rect.bounds)
+            .filter(|bounds| bounds.min_x() >= pane.min_x() && bounds.max_x() <= pane.max_x())
+            .collect()
+    }
+
+    /// The plugin every test here is about.
+    fn probe() -> crook_plugin::PluginId {
+        crook_plugin::PluginId::parse("eugen/probe").expect("a literal that parses")
+    }
+
+    /// Whether the sidebar's list has a row reading `name`.
+    fn listed(scene: &Scene, name: &str) -> bool {
+        let column = settings_field_boxes(scene)
+            .into_iter()
+            .next()
+            .expect("the Plugins section has a field of its own");
+        text_lines(scene, |at| {
+            at.x() >= column.min_x() && at.x() <= column.max_x()
+        })
+        .into_iter()
+        .any(|(_, line)| line.trim() == name)
+    }
+
+    #[test]
+    fn a_plugin_installed_while_the_window_is_open_has_a_row_a_switch_and_an_allow() {
+        // What installing from the store comes to on this page. The row, the
+        // switch and Allow are one action each for the whole page, run about
+        // the plugin, and the switch is registered again for the new list —
+        // so a plugin that arrived after `load` is one somebody can click on,
+        // switch, and answer for, rather than a row that does nothing until a
+        // restart.
+        let scratch = Scratch::new("arrived");
+        let mut harness = harness(&scratch);
+        let module = wasm("eugen/probe", "header.right", 10);
+        harness.workspace_update(|workspace, ctx| {
+            workspace
+                .install_plugin(&module, |_| Ok(()), ctx)
+                .expect("it should install");
+        });
+        assert!(
+            scratch.path().join("eugen.probe").is_dir(),
+            "the module was not written where the window installs to"
+        );
+
+        harness.show_plugins();
+        harness.click_plugin("Probe");
+        let scene = harness.frame();
+        assert!(
+            says(&scene, "Installed, sandboxed"),
+            "{}",
+            frame_text(&scene)
+        );
+
+        // Allow writes the plugin's keys.
+        harness.click_page_button("Allow");
+        let granted = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.settings().granted_to("eugen/probe").to_vec()
+        });
+        assert_eq!(granted, ["tabs.read"]);
+
+        // And the switch is live: it takes the plugin out.
+        let switch = settings_switch_boxes(&harness.frame())[0];
+        harness.click(center(switch), MouseButton::Left);
+        harness.frame();
+        let loaded = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.host().is_loaded(&probe())
+        });
+        assert!(
+            !loaded,
+            "the switch on a plugin that arrived mid-session is dead"
+        );
+    }
+
+    #[test]
+    fn allowing_after_an_update_writes_what_the_new_version_asks_for() {
+        // The bug this page's actions were rewritten around. Allow used to
+        // capture the capability list when the page loaded, so after an
+        // update that asked for more it wrote the old list — and the card
+        // went on saying "asking for more than you allowed" forever. What is
+        // written now is read off the manifest at the press.
+        let scratch = Scratch::new("escalated");
+        install(
+            scratch.path(),
+            "eugen.probe",
+            &wasm("eugen/probe", "header.right", 10),
+        );
+        let mut harness = harness(&scratch);
+        harness.workspace_update(|workspace, ctx| {
+            workspace.set_plugin_granted(&probe(), vec![String::from("tabs.read")], ctx);
+        });
+
+        let mut newer = manifest("eugen/probe");
+        newer.version = String::from("0.2.0");
+        newer.capabilities = vec![
+            Capability::ReadTabs,
+            Capability::Network(vec![String::from("example.com")]),
+        ];
+        let module = wasm_saying(&newer, "header.right", 10);
+        harness.workspace_update(|workspace, ctx| {
+            workspace
+                .install_plugin(&module, |_| Ok(()), ctx)
+                .expect("the update should install");
+        });
+
+        harness.show_plugins();
+        harness.click_plugin("Probe");
+        let scene = harness.frame();
+        assert!(
+            says(&scene, "It is asking for more than you allowed"),
+            "{}",
+            frame_text(&scene)
+        );
+
+        harness.click_page_button("Allow");
+
+        let granted = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.settings().granted_to("eugen/probe").to_vec()
+        });
+        assert_eq!(granted, ["tabs.read", "net:example.com"]);
+        assert!(
+            says(&harness.frame(), "What it is allowed to do"),
+            "the card still says the plugin is asking for more"
+        );
+    }
+
+    #[test]
+    fn remove_on_the_card_takes_the_plugin_off_this_machine() {
+        // Directory, grant, switch, row, palette command: all of it goes,
+        // because a plugin that was removed is one somebody is done with. The
+        // card falls back to the first row, the way it does for anything the
+        // list no longer has.
+        let scratch = Scratch::new("removed");
+        install(
+            scratch.path(),
+            "eugen.probe",
+            &wasm("eugen/probe", "header.right", 10),
+        );
+        let mut harness = harness(&scratch);
+        harness.workspace_update(|workspace, ctx| {
+            workspace.set_plugin_granted(&probe(), vec![String::from("tabs.read")], ctx);
+            workspace.toggle_plugin(&probe(), ctx);
+        });
+        harness.show_plugins();
+        harness.click_plugin("Probe");
+        assert!(says(&harness.frame(), "On this machine"));
+
+        harness.click_page_button("Remove");
+
+        assert!(
+            !scratch.path().join("eugen.probe").exists(),
+            "the plugin's directory is still there"
+        );
+        let scene = harness.frame();
+        assert!(!listed(&scene, "Probe"), "the row is still in the list");
+        harness.workspace.read(&harness.app, |workspace, _| {
+            assert!(workspace.settings().granted_to("eugen/probe").is_empty());
+            assert!(workspace.settings().disabled_plugins().is_empty());
+            let toggle = ActionName::parse("crook/plugins/toggle-eugen-probe").expect("a literal");
+            assert!(
+                !workspace
+                    .host()
+                    .commands()
+                    .iter()
+                    .any(|(_, name, _)| *name == toggle),
+                "the palette still offers a switch for a plugin that is gone"
+            );
+            assert!(workspace.host().action(&toggle).is_none());
+        });
+        // The first row is Window's, and the card followed the list.
+        assert!(says(&scene, "crook/window"), "{}", frame_text(&scene));
+    }
+
+    #[test]
+    fn a_module_with_an_icon_draws_it_in_its_row_and_before_its_title() {
+        // The face travels inside the module, and it is drawn twice: twelve
+        // pixels tall in the list, and eighteen beside the name at the top of
+        // the card — the one picture the page draws without being asked.
+        let scratch = Scratch::new("icon");
+        let icon = icon_png(64);
+        install(
+            scratch.path(),
+            "eugen.probe",
+            &wasm_carrying(
+                &manifest("eugen/probe"),
+                "header.right",
+                10,
+                &[("crook.icon", &icon)],
+            ),
+        );
+        let mut harness = harness(&scratch);
+        harness.show_plugins();
+
+        let scene = harness.frame();
+        let panel = panel_box(&scene);
+        let in_rows: Vec<RectF> = images(&scene)
+            .into_iter()
+            .filter(|bounds| bounds.max_x() <= panel.max_x())
+            .collect();
+        assert_eq!(in_rows.len(), 1, "one plugin carries an icon");
+        assert!(
+            (in_rows[0].height() - widgets::ROW_ICON).abs() < 0.5,
+            "a row's icon is {} tall",
+            in_rows[0].height()
+        );
+        // A row with an icon is the same height as every other row.
+        let rows = settings_rail_boxes(&scene);
+        assert!(
+            rows.iter()
+                .all(|row| (row.height() - rows[0].height()).abs() < 0.5),
+            "the rows are not one height: {rows:?}"
+        );
+
+        harness.click_plugin("Probe");
+        let scene = harness.frame();
+        let pane = settings_pane_box(&scene);
+        let (title, _) = page_line(&scene, "Probe");
+        let mark = images(&scene)
+            .into_iter()
+            .find(|bounds| pane.contains_point(center(*bounds)))
+            .expect("the card draws the icon before its title");
+        assert!(
+            (mark.height() - widgets::TITLE_MARK).abs() < 0.5,
+            "the title's mark is {} tall",
+            mark.height()
+        );
+        assert!(mark.max_x() < title.x(), "the mark is not before the title");
+        assert!(
+            mark.min_y() < title.y() && title.y() < mark.max_y() + 4.,
+            "the mark at {mark:?} is not on the title's line at {title:?}"
+        );
+    }
+
+    #[test]
+    fn a_module_with_previews_offers_them_and_draws_them_on_a_press() {
+        // Counted on the card and decoded only when asked: six screenshots
+        // are megabytes of pixels, and a card is drawn for every plugin
+        // somebody scrolls past. What lands is drawn at its captured size
+        // halved, held to the card's measure, with the caption under it.
+        let scratch = Scratch::new("previews");
+        let wide = preview_png(1200, 200);
+        let tall = preview_png(400, 300);
+        install(
+            scratch.path(),
+            "eugen.probe",
+            &wasm_carrying(
+                &manifest("eugen/probe"),
+                "header.right",
+                10,
+                &[
+                    ("crook.preview.1", &wide),
+                    ("crook.caption.1", b"The chip in the header"),
+                    ("crook.preview.2", &tall),
+                ],
+            ),
+        );
+        let mut harness = harness(&scratch);
+        harness.show_plugins();
+        harness.click_plugin("Probe");
+        let scene = harness.frame();
+        assert!(says(&scene, "2 pictures inside"), "{}", frame_text(&scene));
+        assert!(says(&scene, "Show pictures"));
+        assert!(
+            images(&scene).is_empty(),
+            "nothing is drawn before the press"
+        );
+
+        harness.click_page_button("Show pictures");
+        // Nothing has pumped the queue, so this is the frame between the
+        // press and the landing: the button is dead and says so, and the
+        // room for each picture is drawn in the box fill.
+        let waiting = harness.frame();
+        assert!(says(&waiting, "Opening"), "{}", frame_text(&waiting));
+        let reserved = reserved(&waiting);
+        assert_eq!(reserved.len(), 2, "one room per picture: {reserved:?}");
+
+        harness.wait_for("the previews to be decoded", |harness| {
+            images(&harness.frame()).len() == 2
+        });
+
+        let scene = harness.frame();
+        let pane = settings_pane_box(&scene);
+        let drawn = images(&scene);
+        // The wide one is 600 logical and the card is 560, so it was fitted
+        // — and the room reserved for it was fitted the same way, or the
+        // caption and everything under it would have moved when it landed.
+        assert_eq!(
+            reserved, drawn,
+            "the pictures did not land in the rooms reserved for them"
+        );
+        // Between the card's edges; the second may be below the window's
+        // foot, where the card scrolls to.
+        assert!(
+            drawn
+                .iter()
+                .all(|bounds| bounds.min_x() >= pane.min_x() && bounds.max_x() <= pane.max_x()),
+            "a preview was drawn outside the card: {drawn:?}"
+        );
+        assert!(
+            drawn.iter().all(|bounds| bounds.width() <= 560.),
+            "a preview is wider than the card's measure: {drawn:?}"
+        );
+        // The second is the captured size halved: 200 by 150.
+        assert!(
+            drawn
+                .iter()
+                .any(|bounds| (bounds.width() - 200.).abs() < 0.5
+                    && (bounds.height() - 150.).abs() < 0.5),
+            "no preview is drawn at half its captured size: {drawn:?}"
+        );
+        assert!(
+            says(&scene, "The chip in the header"),
+            "the caption is missing"
+        );
+        assert!(
+            !says(&scene, "Opening"),
+            "the button still says the pictures are being opened"
+        );
+    }
+
+    #[test]
+    fn a_preview_that_will_not_decode_does_not_shift_the_others_onto_its_size() {
+        // The module's reader stops at the header, so a corrupt preview is
+        // counted, offered, and only found out on the press. The picture
+        // after it is drawn at its own captured size — 200 by 150 — and not
+        // stretched into the 600-by-100 the missing one was captured at.
+        let scratch = Scratch::new("corrupt-preview");
+        let corrupt = header_only(1200, 200);
+        let good = preview_png(400, 300);
+        install(
+            scratch.path(),
+            "eugen.probe",
+            &wasm_carrying(
+                &manifest("eugen/probe"),
+                "header.right",
+                10,
+                &[
+                    ("crook.preview.1", &corrupt),
+                    ("crook.caption.1", b"The one that is missing"),
+                    ("crook.preview.2", &good),
+                    ("crook.caption.2", b"The one that is there"),
+                ],
+            ),
+        );
+        let mut harness = harness(&scratch);
+        harness.show_plugins();
+        harness.click_plugin("Probe");
+        assert!(says(&harness.frame(), "2 pictures inside"));
+
+        harness.click_page_button("Show pictures");
+        harness.wait_for("the previews to be decoded", |harness| {
+            !says(&harness.frame(), "Opening")
+        });
+
+        let scene = harness.frame();
+        let drawn = images(&scene);
+        assert_eq!(
+            drawn.len(),
+            1,
+            "the corrupt picture is one fewer: {drawn:?}"
+        );
+        assert!(
+            (drawn[0].width() - 200.).abs() < 0.5 && (drawn[0].height() - 150.).abs() < 0.5,
+            "the picture that decoded is not at its own size: {drawn:?}"
+        );
+        assert!(
+            says(&scene, "The one that is there"),
+            "{}",
+            frame_text(&scene)
+        );
+        assert!(
+            !says(&scene, "The one that is missing"),
+            "the missing picture's caption was drawn under the other one"
+        );
+    }
+
+    #[test]
+    fn a_dev_plugin_is_not_something_remove_could_take_off_the_machine() {
+        // The module somebody is writing runs from wherever it was built and
+        // is not in the plugins directory, so the card offers no Remove for
+        // it: a Remove that deleted a directory the plugin was never in would
+        // delete nothing and say it had.
+        let scratch = Scratch::new("dev");
+        let mut opening = opening(&scratch, Default::default(), Default::default());
+        opening.plugins.push(Box::new(
+            crate::plugins::wasm::opened(&wasm("eugen/probe", "header.right", 10))
+                .expect("it should open"),
+        ));
+        let mut harness = Harness::with_opening(1, opening);
+        harness.show_plugins();
+        harness.click_plugin("Probe");
+
+        let scene = harness.frame();
+        assert!(says(&scene, "Installed, sandboxed"));
+        assert!(!says(&scene, "On this machine"), "{}", frame_text(&scene));
+        assert!(!says(&scene, "Remove"), "{}", frame_text(&scene));
+
+        // And a Remove named by hand from the command line is refused on the
+        // card, which has no box for the refusal to sit in but a switch, so
+        // it sits under the switch.
+        harness.run_about("crook/plugins/remove", "eugen/probe");
+        let scene = harness.frame();
+        assert!(
+            says(
+                &scene,
+                "Probe was not removed: is not installed on this machine"
+            ),
+            "{}",
+            frame_text(&scene)
+        );
+        let switch = answer_boxes(&scene)[0];
+        let (refusal, _) = page_line(&scene, "was not removed");
+        assert!(
+            refusal.y() > switch.max_y(),
+            "the refusal at {refusal:?} is not under the switch's box {switch:?}"
+        );
+        assert_eq!(
+            page_line_color(&scene, "was not removed"),
+            theme().usage_critical,
+            "a refusal is a warning"
+        );
+    }
+
+    /// What the registry says about the probe, for a test: one row offering
+    /// `version`, which asks to reach `example.com`.
+    fn registry_offering(version: &str) -> crate::plugins::store::index::Heard {
+        let index = crate::plugins::store::index::parse(
+            format!(
+                r#"{{"schema": 1, "plugins": [
+                 {{"id": "eugen/probe", "name": "Probe", "description": "d",
+                  "versions": [{{"version": "{version}", "abi": 8, "url": "https://x.invalid/p.wasm",
+                                "sha256": "aa", "capabilities": ["net:example.com"],
+                                "asks": ["Reach example.com"]}}]}}]}}"#
+            )
+            .as_bytes(),
+        )
+        .expect("the test index parses");
+        crate::plugins::store::index::Heard {
+            offers: crate::plugins::store::index::offers(&index),
+            busy: Vec::new(),
+        }
+    }
+
+    /// The probe's card, with the registry saying `heard` and the probe's
+    /// version withdrawn for `withdrawn`, if it is.
+    fn card_hearing(
+        name: &str,
+        heard: crate::plugins::store::index::Heard,
+        withdrawn: Option<&str>,
+    ) -> (Scratch, Harness) {
+        let scratch = Scratch::new(name);
+        install(
+            scratch.path(),
+            "eugen.probe",
+            &wasm("eugen/probe", "header.right", 10),
+        );
+        let withdrawn = withdrawn
+            .map(|why| [(String::from("eugen/probe"), why.to_owned())].into())
+            .unwrap_or_default();
+        let mut harness = Harness::with_opening(1, opening(&scratch, withdrawn, heard));
+        harness.show_plugins();
+        harness.click_plugin("Probe");
+        (scratch, harness)
+    }
+
+    /// The line of the list that names the probe, with whatever word ends it.
+    fn probe_row(scene: &Scene) -> String {
+        let column = settings_field_boxes(scene)
+            .into_iter()
+            .next()
+            .expect("the Plugins section has a field of its own");
+        // The name and the word after it are set in two sizes and can sit
+        // on two baselines, so the row is read by its y rather than as one
+        // line: everything in the column within a row's height of the name.
+        let lines = text_lines(scene, |at| {
+            at.x() >= column.min_x() && at.x() <= column.max_x()
+        });
+        let (at, _) = lines
+            .iter()
+            .find(|(_, line)| line.trim().starts_with("Probe"))
+            .expect("the list has a row for the probe");
+        lines
+            .iter()
+            .filter(|(other, _)| (other.y() - at.y()).abs() < 8.)
+            .map(|(_, line)| line.trim())
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    #[test]
+    fn a_card_says_when_the_registry_is_ahead_and_what_the_update_would_ask() {
+        // Before anybody has opened the Store: the row ends in the version
+        // an update would bring, and the card's box says the registry has a
+        // newer one, offers it, and — since the new version asks for a host
+        // nothing here has allowed — says so above the button, with the ask.
+        let (_scratch, mut harness) = card_hearing("ahead", registry_offering("0.2.0"), None);
+        let scene = harness.frame();
+        let text = frame_text(&scene);
+
+        assert!(says(&scene, "A newer version is in the registry"), "{text}");
+        assert!(says(&scene, "Version 0.1.0"), "{text}");
+        assert!(says(&scene, "Update to 0.2.0"), "{text}");
+        assert!(
+            says(&scene, "It asks for more than you have allowed"),
+            "{text}"
+        );
+        assert!(says(&scene, "Reach example.com"), "{text}");
+        assert!(says(&scene, "In the registry"), "{text}");
+        assert!(says(&scene, "Show in Store"), "{text}");
+        assert!(says(&scene, "On this machine"), "{text}");
+        assert!(
+            probe_row(&scene).contains("0.2.0"),
+            "the row does not end in the version: {:?}",
+            probe_row(&scene)
+        );
+
+        // And once the ask is within the grant, the box says that instead.
+        harness.workspace_update(|workspace, ctx| {
+            workspace.set_plugin_granted(
+                &probe(),
+                vec![String::from("tabs.read"), String::from("net:example.com")],
+                ctx,
+            );
+        });
+        let scene = harness.frame();
+        assert!(
+            says(&scene, "0.2.0 asks for nothing you have not allowed."),
+            "{}",
+            frame_text(&scene)
+        );
+    }
+
+    #[test]
+    fn a_registry_that_is_behind_offers_no_update() {
+        // The state a yank leaves behind, and the state a person on a
+        // development build is in: the newest the registry has is older than
+        // what is running, and that is not an update. The row ends in
+        // nothing, and the box offers the Store and Remove and no more.
+        let (_scratch, mut harness) = card_hearing("behind", registry_offering("0.0.9"), None);
+        let scene = harness.frame();
+        let text = frame_text(&scene);
+
+        assert!(!says(&scene, "Update to"), "{text}");
+        assert!(!says(&scene, "newer version"), "{text}");
+        assert!(says(&scene, "Show in Store"), "{text}");
+        assert!(says(&scene, "On this machine"), "{text}");
+        assert_eq!(probe_row(&scene), "Probe");
+    }
+
+    #[test]
+    fn a_version_taken_back_is_offered_its_replacement_whatever_its_number() {
+        // The case a comparison gets wrong. 0.0.9 is older than the 0.1.0
+        // that is running, and it is still what the card offers: the running
+        // one was withdrawn, and "the registry is behind you" would be a card
+        // telling somebody to stay on a version somebody took back.
+        let (_scratch, mut harness) = card_hearing(
+            "replaced",
+            registry_offering("0.0.9"),
+            Some("it read the wrong file"),
+        );
+        let scene = harness.frame();
+        let text = frame_text(&scene);
+
+        assert!(says(&scene, "The registry has a replacement"), "{text}");
+        assert!(says(&scene, "Install 0.0.9"), "{text}");
+        assert!(says(&scene, "Taken back: it read the wrong file"), "{text}");
+        assert!(
+            probe_row(&scene).contains("0.0.9"),
+            "the row does not end in the replacement: {:?}",
+            probe_row(&scene)
+        );
+        // The note over the switch points at that box, and not at the Store:
+        // one card, one place to go for one thing.
+        assert!(says(&scene, "The box under this one"), "{text}");
+        assert!(!says(&scene, "Remove there"), "{text}");
+        let (note, _) = page_line(&scene, "The box under this one");
+        let (replacement, _) = page_line(&scene, "The registry has a replacement");
+        assert!(
+            note.y() < replacement.y(),
+            "the note at {note:?} is not over the box it points at, at {replacement:?}"
+        );
+    }
+
+    #[test]
+    fn a_chord_bound_to_allow_grants_nothing() {
+        // A chord says nothing about which plugin it means, and an action
+        // that guessed — the card that happens to be showing, say — would be
+        // a way to allow something unread. It logs and does nothing.
+        let (_scratch, mut harness) = probe_card("chord");
+        harness.run_command("crook/plugins/allow");
+
+        let granted = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.settings().granted_to("eugen/probe").to_vec()
+        });
+        assert!(granted.is_empty(), "a chord allowed {granted:?}");
+        assert!(says(&harness.frame(), "Not allowed"));
     }
 
     #[test]
@@ -13565,7 +14290,7 @@ mod sandboxed {
         let scratch = Scratch::new("draws");
         install(
             scratch.path(),
-            "probe",
+            "eugen.probe",
             &wasm("eugen/probe", "header.right", -1),
         );
         let mut harness = harness(&scratch);
@@ -13592,7 +14317,7 @@ mod sandboxed {
         let scratch = Scratch::new("pane-chips");
         install(
             scratch.path(),
-            "probe",
+            "eugen.probe",
             &wasm("eugen/probe", "pane.chips", 10),
         );
         let mut harness = harness(&scratch);
@@ -13620,16 +14345,15 @@ mod sandboxed {
         let scratch = Scratch::new("withdrawn");
         install(
             scratch.path(),
-            "probe",
+            "eugen.probe",
             &wasm("eugen/probe", "header.right", 10),
         );
-        let mut plugins = crate::plugins::defaults();
-        plugins.extend(crate::plugins::wasm::installed(scratch.path()));
         let withdrawn = std::collections::BTreeMap::from([(
             String::from("eugen/probe"),
             String::from("it read a file it had no business reading"),
         )]);
-        let mut harness = Harness::with_withdrawn(1, Settings::ephemeral(), plugins, withdrawn);
+        let mut harness =
+            Harness::with_opening(1, opening(&scratch, withdrawn, Default::default()));
 
         // Not running: what it contributes to the header is not on screen.
         assert!(
@@ -13675,7 +14399,7 @@ mod sandboxed {
         let scratch = Scratch::new("listed");
         install(
             scratch.path(),
-            "probe",
+            "eugen.probe",
             &wasm("eugen/probe", "header.right", 10),
         );
         let mut harness = harness(&scratch);
@@ -13701,7 +14425,7 @@ mod sandboxed {
         let scratch = Scratch::new(name);
         install(
             scratch.path(),
-            "probe",
+            "eugen.probe",
             &wasm("eugen/probe", "header.right", 10),
         );
         let mut harness = harness(&scratch);
@@ -13746,11 +14470,15 @@ mod sandboxed {
         let scene = harness.frame();
 
         let boxes = answer_boxes(&scene);
-        assert_eq!(boxes.len(), 2, "the switch's box and the terms' box");
+        assert_eq!(
+            boxes.len(),
+            3,
+            "the switch's box, the machine's box and the terms' box"
+        );
         let (enabled_label, _) = page_line(&scene, "Enabled");
         let (answer_label, _) = page_line(&scene, "Not allowed");
         let enabled = boxes[0];
-        let asked = boxes[1];
+        let asked = boxes[2];
         assert!(enabled.contains_point(enabled_label));
         assert!(asked.contains_point(answer_label));
 
@@ -13793,7 +14521,7 @@ mod sandboxed {
         let scratch = Scratch::new("allowed");
         install(
             scratch.path(),
-            "probe",
+            "eugen.probe",
             &wasm("eugen/probe", "header.right", 10),
         );
         let mut harness = harness(&scratch);
@@ -13838,7 +14566,7 @@ mod sandboxed {
         let scratch = Scratch::new("wrapped");
         install(
             scratch.path(),
-            "probe",
+            "eugen.probe",
             &wasm_saying(&asking, "header.right", 10),
         );
         let mut harness = harness(&scratch);
@@ -13912,7 +14640,7 @@ mod sandboxed {
         let scratch = Scratch::new("escalated");
         install(
             scratch.path(),
-            "probe",
+            "eugen.probe",
             &wasm_saying(&asking, "header.right", 10),
         );
         let mut harness = harness(&scratch);
@@ -13959,7 +14687,7 @@ mod sandboxed {
         let scratch = Scratch::new("stalled");
         install(
             scratch.path(),
-            "probe",
+            "eugen.probe",
             &wasm("eugen/probe", "plugins.card.status", 10),
         );
         let mut harness = harness(&scratch);
@@ -14004,7 +14732,7 @@ mod sandboxed {
         let scratch = Scratch::new("counted");
         install(
             scratch.path(),
-            "probe",
+            "eugen.probe",
             &wasm("eugen/probe", "plugins.card.status", 10),
         );
         let mut harness = harness(&scratch);
@@ -14032,7 +14760,7 @@ mod sandboxed {
         let scratch = Scratch::new("listed-in-full");
         install(
             scratch.path(),
-            "probe",
+            "eugen.probe",
             &wasm("eugen/probe", "header.right", 10),
         );
         let mut harness = harness(&scratch);
@@ -14060,7 +14788,7 @@ mod sandboxed {
         let scratch = Scratch::new("dismissed");
         install(
             scratch.path(),
-            "probe",
+            "eugen.probe",
             &crate::plugins::wasm::tests::wasm_with_a_panel(
                 "eugen/probe",
                 "plugins.card.status",
@@ -14103,7 +14831,7 @@ mod sandboxed {
         let scratch = Scratch::new("action");
         install(
             scratch.path(),
-            "probe",
+            "eugen.probe",
             &wasm("eugen/probe", "header.right", 10),
         );
         let mut harness = harness(&scratch);
@@ -14128,7 +14856,7 @@ mod sandboxed {
         let scratch = Scratch::new("corner");
         install(
             scratch.path(),
-            "probe",
+            "eugen.probe",
             &wasm("eugen/probe", "header.right", 0),
         );
         let mut harness = harness(&scratch);
@@ -14171,7 +14899,7 @@ mod sandboxed {
         let scratch = Scratch::new("unknown-slot");
         install(
             scratch.path(),
-            "probe",
+            "eugen.probe",
             &wasm("eugen/probe", "somewhere.else", 0),
         );
         let mut harness = harness(&scratch);
@@ -14200,6 +14928,55 @@ mod plugins_page {
         let mut harness = Harness::new(1);
         harness.show_plugins();
         harness
+    }
+
+    #[test]
+    fn a_native_plugin_has_no_box_about_this_machine() {
+        // A native plugin is the binary: it is not in a registry, it is not
+        // a file in the plugins directory, and the About page is what says
+        // whether the binary is behind. Its card has the switch and nothing
+        // that could update or remove it.
+        let mut harness = harness();
+        let scene = harness.frame();
+
+        assert!(says(&scene, "crook/window"), "{}", frame_text(&scene));
+        assert_eq!(answer_boxes(&scene).len(), 1, "the switch's box, alone");
+        assert!(!says(&scene, "On this machine"));
+        assert!(!says(&scene, "In the registry"));
+        assert!(!says(&scene, "Remove"));
+    }
+
+    #[test]
+    fn a_remove_named_by_hand_for_a_native_plugin_is_refused_on_its_card() {
+        // The card never offers Remove for one of Crook's own, so this is
+        // the command line naming it. Nothing is removed, and the card says
+        // so under its switch — the one box a native card has — rather than
+        // in a log line nobody reads.
+        let mut harness = harness();
+        harness.run_about("crook/plugins/remove", "crook/window");
+
+        let scene = harness.frame();
+        assert!(
+            says(&scene, "was not removed: is one of Crook's own"),
+            "{}",
+            frame_text(&scene)
+        );
+        let boxes = answer_boxes(&scene);
+        assert_eq!(boxes.len(), 1, "the refusal conjured a box");
+        let (refusal, _) = page_line(&scene, "was not removed");
+        assert!(
+            refusal.y() > boxes[0].max_y(),
+            "the refusal is not under the switch"
+        );
+        assert_eq!(
+            page_line_color(&scene, "was not removed"),
+            theme().usage_critical
+        );
+
+        // And it is about the plugin it was about: another card does not
+        // carry it.
+        harness.click_plugin("Tabs");
+        assert!(!says(&harness.frame(), "was not removed"));
     }
 
     #[test]

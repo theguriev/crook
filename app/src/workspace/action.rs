@@ -90,6 +90,18 @@ pub enum WorkspaceAction {
     /// because this enum is `Copy` and a name is a `String`; the host resolves
     /// one to the other. See [`ActionId`](crate::plugin::ActionId).
     Run(ActionId),
+    /// Run a named action *about* something: a row of a list, a plugin on a
+    /// card.
+    ///
+    /// The same dispatch as [`Run`](Self::Run), with one thing said first.
+    /// An action takes no argument — a chord has nothing to say — and what a
+    /// pressed row has to say is left with the host for the handler to take,
+    /// which is what `Host::say` is. This is that gesture as an action, so
+    /// that a button on a card can carry it the way it carries every other
+    /// one: through `Command`, with no second way for a control to learn to
+    /// be clicked. The subject is interned, because the enum is `Copy` and a
+    /// plugin's id is a `String`. See [`Subject`].
+    RunAbout(ActionId, Subject),
     /// The first half of a chord sequence was pressed, and the window is
     /// waiting for the rest of it.
     ///
@@ -108,6 +120,16 @@ pub enum WorkspaceAction {
     /// is. See [`crate::completion`].
     Complete(PaneId),
 }
+
+/// Something an action is about, as something `Copy`.
+///
+/// The same trick [`SectionId`](crate::plugin::SectionId) plays: the
+/// workspace keeps every subject ever handed out, in order, and this is the
+/// index. Interned once per distinct text and never forgotten, which is what
+/// makes it safe to carry across frames — a card drawn on Tuesday still says
+/// the same plugin on Wednesday.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Subject(pub(super) usize);
 
 /// What the search box above the tabs does.
 ///

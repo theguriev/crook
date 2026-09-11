@@ -45,6 +45,15 @@ fn with_host_and_context(test: impl FnOnce(&mut Host, &mut ViewContext<Workspace
 
 /// The whole of it: an app, a window, and a host built inside a real context.
 fn with_context(disabled: &[String], test: impl FnOnce(&mut Host, &mut ViewContext<Workspace>)) {
+    with_plugins(plugins::defaults(), disabled, test);
+}
+
+/// The same, loading `plugins` rather than the ones in the box.
+fn with_plugins(
+    plugins: Vec<Box<dyn Plugin>>,
+    disabled: &[String],
+    test: impl FnOnce(&mut Host, &mut ViewContext<Workspace>),
+) {
     let queue = LocalQueue::new();
     let mut app = App::new(queue.foreground(), Arc::new(Background::new(2)));
 
@@ -64,6 +73,8 @@ fn with_context(disabled: &[String], test: impl FnOnce(&mut Host, &mut ViewConte
                 channel: Channel::Dev,
                 plugins: plugins::defaults(),
                 withdrawn: BTreeMap::new(),
+                heard: Default::default(),
+                plugins_directory: None,
             },
             quit,
             Rc::new(Recorder::default()),
@@ -72,8 +83,151 @@ fn with_context(disabled: &[String], test: impl FnOnce(&mut Host, &mut ViewConte
     });
 
     workspace.update(&mut app, |_, ctx| {
-        let mut host = load(plugins::defaults(), disabled, BTreeMap::new(), fonts, ctx);
+        let mut host = load(plugins, disabled, BTreeMap::new(), fonts, ctx);
         test(&mut host, ctx);
+    });
+}
+
+/// A plugin that counts how often its `ready` runs, and can be told to fail
+/// it.
+struct Counter {
+    readied: Rc<Cell<usize>>,
+    fails: bool,
+}
+
+impl Plugin for Counter {
+    fn manifest(&self) -> &'static Manifest {
+        static MANIFEST: std::sync::OnceLock<Manifest> = std::sync::OnceLock::new();
+        MANIFEST.get_or_init(|| Manifest {
+            schema: Manifest::SCHEMA,
+            id: PluginId::parse("eugen/counter").expect("a literal that parses"),
+            name: "Counter",
+            description: "A plugin that counts its second passes.",
+            version: "0.1.0",
+            tier: crook_plugin::Tier::Native,
+            capabilities: &[],
+        })
+    }
+
+    fn build(&mut self, _: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
+        Ok(())
+    }
+
+    fn ready(&mut self, _: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
+        self.readied.set(self.readied.get() + 1);
+        match self.fails {
+            true => Err(String::from("it declined its second pass")),
+            false => Ok(()),
+        }
+    }
+}
+
+/// The plugin a test carries in, and its id.
+fn arrival() -> (crate::plugins::wasm::WasmPlugin, PluginId) {
+    let wasm = crate::plugins::wasm::tests::wasm("eugen/arrival", "header.right", 0);
+    let plugin = crate::plugins::wasm::opened(&wasm).expect("it should open");
+    let id = crate::plugin::Plugin::manifest(&plugin).id.clone();
+    (plugin, id)
+}
+
+#[test]
+fn a_plugin_arriving_runs_every_ready_again_whether_or_not_it_runs() {
+    // What a `ready` registers is about the list of plugins — one switch
+    // per plugin — so the list changing makes every plugin's answer stale,
+    // not only the arrival's. Carried and not run is still a row on the
+    // page, and a row is a switch somebody's `ready` registers.
+    let readied = Rc::new(Cell::new(0));
+    let mut plugins = plugins::defaults();
+    plugins.push(Box::new(Counter {
+        readied: readied.clone(),
+        fails: false,
+    }));
+    with_plugins(plugins, &[], |host, ctx| {
+        assert_eq!(readied.get(), 1, "one pass at load");
+
+        let (plugin, _) = arrival();
+        host.carry(Box::new(plugin), true, ctx);
+        assert_eq!(readied.get(), 2, "carried and run");
+
+        let (plugin, _) = arrival();
+        host.carry(Box::new(plugin), false, ctx);
+        assert_eq!(readied.get(), 3, "carried and not run is still a change");
+
+        // And none of that was a second registration refused as taken: the
+        // ready-time registrations go out as a set before they are made
+        // again.
+        let complaints: Vec<String> = host
+            .audit()
+            .into_iter()
+            .map(|complaint| complaint.to_string())
+            .collect();
+        assert!(complaints.is_empty(), "{complaints:#?}");
+    });
+}
+
+#[test]
+fn forgetting_a_plugin_takes_the_switch_the_page_offered_for_it_away() {
+    // The palette used to go on listing "Turn the Probe plugin on or off"
+    // for a plugin whose file had been deleted, because the switch was the
+    // Plugins page's registration and only the plugin's own went out with
+    // it. Forgetting runs every `ready` again, for the list as it is now.
+    with_host_and_context(|host, ctx| {
+        let (plugin, id) = arrival();
+        let toggle = ActionName::parse("crook/plugins/toggle-eugen-arrival").expect("a literal");
+        host.carry(Box::new(plugin), true, ctx);
+        assert!(
+            host.action(&toggle).is_some(),
+            "the page offers no switch for the plugin that arrived"
+        );
+        assert!(host.commands().iter().any(|(_, name, _)| *name == toggle));
+
+        host.forget(&id, ctx);
+
+        assert!(
+            host.action(&toggle).is_none(),
+            "a switch for a plugin that is gone still answers"
+        );
+        assert!(
+            !host.commands().iter().any(|(_, name, _)| *name == toggle),
+            "the palette still lists a switch for a plugin that is gone"
+        );
+        // And the switches for everything else are still there.
+        let window = ActionName::parse("crook/plugins/toggle-crook-window").expect("a literal");
+        assert!(host.action(&window).is_some());
+        assert!(host.audit().is_empty(), "{:?}", host.audit());
+    });
+}
+
+#[test]
+fn a_ready_that_fails_unloads_only_its_own_plugin() {
+    // The same rule `build` follows: a plugin that gave up halfway through
+    // its second step has left half a surface, and it goes — and nothing
+    // else does, because nothing else did anything wrong.
+    let readied = Rc::new(Cell::new(0));
+    let mut plugins = plugins::defaults();
+    plugins.push(Box::new(Counter {
+        readied,
+        fails: true,
+    }));
+    with_plugins(plugins, &[], |host, ctx| {
+        let counter = PluginId::parse("eugen/counter").expect("a literal that parses");
+        let palette = PluginId::parse("crook/palette").expect("a literal that parses");
+        assert!(!host.is_loaded(&counter));
+        assert!(host.is_loaded(&palette));
+        assert!(host.refused().iter().any(|(id, _)| *id == counter));
+
+        // Running every `ready` again does not refuse it twice: it is not
+        // loaded, so it is not asked.
+        let (plugin, _) = arrival();
+        host.carry(Box::new(plugin), true, ctx);
+        assert_eq!(
+            host.refused()
+                .iter()
+                .filter(|(id, _)| *id == counter)
+                .count(),
+            1
+        );
+        assert!(host.is_loaded(&palette));
     });
 }
 
@@ -141,6 +295,8 @@ fn a_plugin_that_is_switched_off_stops_being_told_things() {
                 channel: Channel::Dev,
                 plugins: plugins::defaults(),
                 withdrawn: BTreeMap::new(),
+                heard: Default::default(),
+                plugins_directory: None,
             },
             quit,
             Rc::new(Recorder::default()),
@@ -216,7 +372,7 @@ fn a_plugin_that_arrives_after_everything_else_is_running_before_the_next_frame(
         // Forgetting is what uninstalling does, and it is not the switch: a
         // plugin whose file has been deleted must not be left on the list of
         // things that can be switched back on.
-        host.forget(&id);
+        host.forget(&id, ctx);
         assert!(!host.is_loaded(&id));
         assert_eq!(host.available().len(), carried);
         assert!(

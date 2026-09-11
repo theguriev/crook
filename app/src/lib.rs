@@ -57,6 +57,7 @@ pub mod pane_link;
 pub mod pane_selection;
 pub mod pane_split;
 pub mod pane_surface;
+pub mod picture;
 pub mod pirate;
 pub mod platform_insets;
 pub mod plugin;
@@ -811,7 +812,8 @@ OPTIONS:
                        Remove an installed plugin by `owner/name`, with whatever
                        it was allowed to do, and exit
     --plugins          List the plugins installed as files: name, version and
-                       which file each is running from
+                       which file each is running from, and what the registry's
+                       copy on this machine says about that version
     --dev-plugin <PATH>
                        Run the plugin you are writing, from wherever you built
                        it, and run it again every time you build it. Takes a
@@ -821,7 +823,9 @@ OPTIONS:
                        Draw a fixed plugin surface, read from a JSON file of
                        slot names to the shapes a plugin describes, so a
                        picture of what a plugin puts on screen is the same on
-                       every machine
+                       every machine. A top-level `icon` names a PNG beside
+                       the file, for a picture of the Plugins page with a face
+                       on a row
     --snapshot <PATH>  Render one frame of the real view tree to a PNG and exit
     --frames <N>       Draw N frames, then exit; for running unattended
     --run <COMMAND>    Type COMMAND into the first pane's input field at startup,
@@ -1345,6 +1349,20 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
         )?,
         overrides.dev_plugin.as_deref(),
     )?;
+    // With the plugins and not otherwise, which is the same rule the plugins
+    // themselves follow: a picture of the application is the same everywhere,
+    // and one that includes this machine's plugins already includes whatever
+    // this machine knows about them — a withdrawn one among them, what the
+    // registry offers in place of what is installed, and the directory they
+    // are installed in, so that a `--dev-plugin` alone is a window that
+    // could not remove a real one by the same name.
+    let (withdrawn, heard, plugins_directory) = match overrides.with_plugins {
+        true => {
+            let (withdrawn, heard) = registry_at_startup();
+            (withdrawn, heard, crate::plugins::wasm::directory())
+        }
+        false => Default::default(),
+    };
     let (window_id, workspace) = app.add_window(|ctx| {
         Workspace::new(
             fonts,
@@ -1353,15 +1371,9 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
                 settings,
                 channel: Channel::Dev,
                 plugins,
-                // With the plugins and not otherwise, which is the same rule
-                // the plugins themselves follow: a picture of the application
-                // is the same everywhere, and one that includes this machine's
-                // plugins already includes whatever this machine knows about
-                // them — a withdrawn one among them.
-                withdrawn: match overrides.with_plugins {
-                    true => withdrawn_plugins(),
-                    false => std::collections::BTreeMap::new(),
-                },
+                withdrawn,
+                heard,
+                plugins_directory,
             },
             quit,
             Rc::new(Detached),
@@ -2166,30 +2178,75 @@ fn forget_plugin(id: &crook_plugin::PluginId) -> Result<()> {
 /// The ones in the binary are not on this list. It answers the two questions a
 /// person has before they uninstall or report something — which version am I
 /// running, and which file is it — and both of those are only questions for a
-/// plugin that came from outside.
+/// plugin that came from outside. After the file, whatever the registry's copy
+/// on this machine has to say about that version: that it is behind, or that
+/// it was taken back.
 fn installed_plugins_text() -> String {
     let Some(directory) = crate::plugins::wasm::directory() else {
         return String::from("this machine has no data directory to install plugins into");
     };
 
-    let settings = Settings::for_user();
-    let installed = crate::plugins::wasm::installed(&directory);
+    installed_plugins_in(
+        &directory,
+        &Settings::for_user(),
+        crate::plugins::store::cache::Cache::user(),
+    )
+}
+
+/// The same, out of a named plugins directory against a named copy of the
+/// index — which is what lets a test say what the line says.
+fn installed_plugins_in(
+    directory: &std::path::Path,
+    settings: &Settings,
+    cache: Option<crate::plugins::store::cache::Cache>,
+) -> String {
+    let installed = crate::plugins::wasm::installed(directory);
     if installed.is_empty() {
         return format!("no plugins installed in {}", directory.display());
     }
+
+    let index = cache
+        .and_then(|cache| cache.read())
+        .map(|cached| cached.index);
+    let heard = heard_from(index.as_ref());
 
     let mut lines = Vec::with_capacity(installed.len());
     for plugin in &installed {
         let manifest = crate::plugin::Plugin::manifest(plugin.as_ref());
         let id = manifest.id.as_str();
-        let off = match settings.disabled_plugins().iter().any(|name| name == id) {
-            true => "  (switched off)",
-            false => "",
-        };
-        let module = crate::plugins::wasm::module(&manifest.id)
+        let module = crate::plugins::wasm::module_in(directory, &manifest.id)
             .map(|path| path.display().to_string())
             .unwrap_or_default();
-        lines.push(format!("{id}  {}  {module}{off}", manifest.version));
+
+        // Each fact in its own parentheses, and each only when it is so: a
+        // plugin can be switched off and behind at once, and a line that
+        // said one of those in place of the other would be a line somebody
+        // acted on wrongly.
+        let mut said = Vec::new();
+        if settings.disabled_plugins().iter().any(|name| name == id) {
+            said.push(String::from("(switched off)"));
+        }
+        let withdrawn = index.as_ref().and_then(|index| {
+            crate::plugins::store::index::withdrawn(index, &manifest.id, manifest.version)
+        });
+        if let Some(why) = &withdrawn {
+            said.push(format!("(withdrawn: {why})"));
+        }
+        if let Some(offer) = heard.offer(&manifest.id) {
+            use crate::plugins::store::index::{Change, change};
+            if let Change::Update(release) | Change::Replace(release) =
+                change(offer, Some(manifest.version), withdrawn.is_some())
+            {
+                said.push(format!("({} in the registry)", release.version));
+            }
+        }
+
+        let mut line = format!("{id}  {}  {module}", manifest.version);
+        for fact in said {
+            line.push_str("  ");
+            line.push_str(&fact);
+        }
+        lines.push(line);
     }
     lines.join("\n")
 }
@@ -2281,28 +2338,32 @@ fn with_dev_plugin(
     Ok(plugins)
 }
 
-/// Which installed plugins the registry has withdrawn, and why.
+/// What the registry's copy on this machine says: which installed plugins it
+/// has withdrawn and why, and everything it offers.
 ///
 /// Read off the store's copy of the index — the file the Store section keeps
 /// beside the plugins — rather than over the network, because a yank has to be
 /// honoured on a machine that is offline and on the launch after the registry
 /// said so. Nothing here fetches anything, and an index that is missing or
-/// unreadable withdraws nothing: a list that cannot be read is never a reason
-/// to stop running something somebody installed.
+/// unreadable withdraws nothing and offers nothing: a list that cannot be read
+/// is never a reason to stop running something somebody installed.
 ///
 /// A version is what is withdrawn rather than a plugin, so the answer is about
 /// the version on this machine: somebody running the one before the bad one
-/// keeps running it.
-fn withdrawn_plugins() -> std::collections::BTreeMap<String, String> {
-    let Some(index) = crate::plugins::store::cache::Cache::user()
+/// keeps running it. The offers are what the Plugins page compares that
+/// version against, so a card can say "a newer one is in the registry" before
+/// anybody has opened the Store.
+fn registry_at_startup() -> (
+    std::collections::BTreeMap<String, String>,
+    crate::plugins::store::index::Heard,
+) {
+    let index = crate::plugins::store::cache::Cache::user()
         .and_then(|cache| cache.read())
-        .map(|cached| cached.index)
-    else {
-        return std::collections::BTreeMap::new();
-    };
+        .map(|cached| cached.index);
+    let heard = heard_from(index.as_ref());
 
-    let Some(directory) = crate::plugins::wasm::directory() else {
-        return std::collections::BTreeMap::new();
+    let (Some(index), Some(directory)) = (index, crate::plugins::wasm::directory()) else {
+        return (std::collections::BTreeMap::new(), heard);
     };
 
     let mut withdrawn = std::collections::BTreeMap::new();
@@ -2314,7 +2375,20 @@ fn withdrawn_plugins() -> std::collections::BTreeMap<String, String> {
             withdrawn.insert(manifest.id.to_string(), why);
         }
     }
-    withdrawn
+    (withdrawn, heard)
+}
+
+/// What an index on disk offers, as the Plugins page hears it — with the
+/// store doing nothing yet, because nothing has been pressed.
+fn heard_from(
+    index: Option<&crate::plugins::store::index::Index>,
+) -> crate::plugins::store::index::Heard {
+    crate::plugins::store::index::Heard {
+        offers: index
+            .map(crate::plugins::store::index::offers)
+            .unwrap_or_default(),
+        busy: Vec::new(),
+    }
 }
 
 impl Shell {
@@ -2349,6 +2423,7 @@ impl Shell {
             log::warn!("{why:#}");
             everything_installed()
         });
+        let (withdrawn, heard) = registry_at_startup();
         let (window_id, workspace) = app.add_window(|ctx| {
             Workspace::new(
                 fonts,
@@ -2357,7 +2432,9 @@ impl Shell {
                     settings,
                     channel: launch.channel,
                     plugins,
-                    withdrawn: withdrawn_plugins(),
+                    withdrawn,
+                    heard,
+                    plugins_directory: crate::plugins::wasm::directory(),
                 },
                 quit,
                 window.clone(),
@@ -2997,6 +3074,69 @@ mod tests {
     fn help_and_version_answer_before_anything_is_opened() {
         assert_eq!(parse(&["--help"]).expect("valid"), Startup::Answered);
         assert_eq!(parse(&["-V"]).expect("valid"), Startup::Answered);
+    }
+
+    #[test]
+    fn plugins_says_what_the_registry_thinks_of_each_installed_version() {
+        // The two questions a person has before reporting or updating
+        // something: which version am I running, and is it the one the
+        // registry has. From the copy on disk, so it is answered offline —
+        // and from nothing when there is no copy.
+        use crate::plugins::store::cache::Cache;
+        use crate::plugins::wasm::tests::{Scratch, install, wasm};
+
+        let plugins = Scratch::new("plugins-text");
+        install(
+            plugins.path(),
+            "eugen.probe",
+            &wasm("eugen/probe", "header.right", 10),
+        );
+        let settings = Settings::ephemeral();
+
+        let empty = Scratch::new("plugins-text-empty");
+        let line = installed_plugins_in(plugins.path(), &settings, Some(Cache::at(empty.path())));
+        assert!(line.starts_with("eugen/probe  0.1.0  "), "{line}");
+        assert!(line.ends_with("plugin.wasm"), "{line}");
+
+        let ahead = Scratch::new("plugins-text-ahead");
+        Cache::at(ahead.path())
+            .write(
+                br#"{"schema": 1, "plugins": [
+                     {"id": "eugen/probe", "name": "Probe", "description": "d",
+                      "versions": [{"version": "0.4.0", "abi": 8, "url": "https://x.invalid/p.wasm",
+                                    "sha256": "aa"}]}]}"#,
+                None,
+            )
+            .expect("the scratch index writes");
+        let line = installed_plugins_in(plugins.path(), &settings, Some(Cache::at(ahead.path())));
+        assert!(
+            line.ends_with("plugin.wasm  (0.4.0 in the registry)"),
+            "{line}"
+        );
+
+        // And a withdrawn version says so as well as what replaces it, after
+        // the switched-off word when both apply.
+        let mut off = Settings::ephemeral();
+        off.set_plugin_disabled("eugen/probe", true);
+        Cache::at(ahead.path())
+            .write(
+                br#"{"schema": 1, "plugins": [
+                     {"id": "eugen/probe", "name": "Probe", "description": "d",
+                      "versions": [{"version": "0.1.0", "abi": 8, "url": "https://x.invalid/a.wasm",
+                                    "sha256": "aa", "yanked": "it read the wrong file"},
+                                   {"version": "0.0.9", "abi": 8, "url": "https://x.invalid/b.wasm",
+                                    "sha256": "bb"}]}]}"#,
+                None,
+            )
+            .expect("the scratch index writes");
+        let line = installed_plugins_in(plugins.path(), &off, Some(Cache::at(ahead.path())));
+        assert!(
+            line.ends_with(
+                "plugin.wasm  (switched off)  (withdrawn: it read the wrong file)  (0.0.9 in the \
+                 registry)"
+            ),
+            "{line}"
+        );
     }
 
     #[test]

@@ -163,7 +163,7 @@ fn uninstalling_takes_the_whole_plugin_and_not_one_version_of_it() {
     into(scratch.path(), &written(&scratch, "0.3.0")).expect("it should install");
     let id = PluginId::parse("eugen/probe").expect("a literal that parses");
 
-    let removed = from(scratch.path(), &id).expect("it should uninstall");
+    let removed = uninstall_from(scratch.path(), &id).expect("it should uninstall");
 
     assert_eq!(removed, scratch.path().join("eugen.probe"));
     assert!(!removed.exists());
@@ -174,7 +174,7 @@ fn uninstalling_something_that_is_not_installed_says_so() {
     let scratch = Scratch::new("uninstall-missing");
     let id = PluginId::parse("eugen/probe").expect("a literal that parses");
 
-    let refusal = from(scratch.path(), &id).expect_err("there is nothing to remove");
+    let refusal = uninstall_from(scratch.path(), &id).expect_err("there is nothing to remove");
 
     assert!(refusal.contains("not installed"), "{refusal}");
 }

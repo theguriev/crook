@@ -36,7 +36,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crook_plugin::PluginId;
+use crook_plugin::{Manifest, PluginId};
 
 use crate::plugin::Plugin as _;
 use crate::settings::atomic_write;
@@ -50,18 +50,6 @@ pub fn install(path: &Path) -> Result<PathBuf, String> {
     into(&root, path)
 }
 
-/// Installs bytes somebody already has, and answers where they went.
-///
-/// What the store installs, and it never writes the download to a file first:
-/// a temporary file is a temporary file somebody has to remember to remove,
-/// and the bytes that were checked are the bytes that should be installed —
-/// the same reason [`into`] reads the file once.
-pub fn installed_bytes(bytes: &[u8]) -> Result<PathBuf, String> {
-    let root = directory()
-        .ok_or_else(|| String::from("this machine has no data directory to install into"))?;
-    write(&root, bytes)
-}
-
 /// The same, into a named plugins directory.
 pub(super) fn into(root: &Path, path: &Path) -> Result<PathBuf, String> {
     // Read once, and checked as the bytes that will be *written* rather than
@@ -70,13 +58,21 @@ pub(super) fn into(root: &Path, path: &Path) -> Result<PathBuf, String> {
     // itself and lands as the half that was there when the first read
     // happened, which is the outcome reading before writing exists to prevent.
     let bytes = fs::read(path).map_err(|why| format!("could not be read: {why}"))?;
-    write(root, &bytes)
+    let plugin = opened(&bytes)?;
+    write(root, &bytes, plugin.manifest())
 }
 
-/// Checks bytes and writes them where the loader will find them.
-pub(super) fn write(root: &Path, bytes: &[u8]) -> Result<PathBuf, String> {
-    let plugin = opened(bytes)?;
-    let manifest = plugin.manifest();
+/// Writes a module somebody has already opened where the loader will find it.
+///
+/// What the store installs, and it never writes the download to a file first:
+/// a temporary file is a temporary file somebody has to remember to remove,
+/// and the bytes that were checked are the bytes that should be installed —
+/// the same reason [`into`] reads the file once. The manifest arrives with
+/// the bytes rather than being read out of them again, because opening a
+/// module *runs* it: the caller has already paid for that once to check what
+/// it was installing, and a second instantiation would leak a second copy of
+/// the manifest for as long as the process lives.
+pub fn write(root: &Path, bytes: &[u8], manifest: &Manifest) -> Result<PathBuf, String> {
     let version = version_folder(manifest.version)?;
 
     let home = root.join(folder(&manifest.id));
@@ -166,11 +162,15 @@ fn same_file(left: &Path, right: &Path) -> bool {
 pub fn uninstall(id: &PluginId) -> Result<PathBuf, String> {
     let root = directory()
         .ok_or_else(|| String::from("this machine has no data directory to uninstall from"))?;
-    from(&root, id)
+    uninstall_from(&root, id)
 }
 
 /// The same, out of a named plugins directory.
-pub(super) fn from(root: &Path, id: &PluginId) -> Result<PathBuf, String> {
+///
+/// Public because the window carries the directory it installs into rather
+/// than asking for it each time — so that a test can point it at a scratch
+/// directory — and removing has to go from the same place installing went to.
+pub fn uninstall_from(root: &Path, id: &PluginId) -> Result<PathBuf, String> {
     let home = root.join(folder(id));
     if !home.is_dir() {
         return Err(format!("{id} is not installed"));
@@ -192,6 +192,11 @@ pub fn home(id: &PluginId) -> Option<PathBuf> {
 /// one whose directory has nothing in it a version can be read out of.
 pub fn module(id: &PluginId) -> Option<PathBuf> {
     newest_module(&home(id)?)
+}
+
+/// The same, out of a named plugins directory.
+pub fn module_in(root: &Path, id: &PluginId) -> Option<PathBuf> {
+    newest_module(&root.join(folder(id)))
 }
 
 /// What a plugin's directory is called.
