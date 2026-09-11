@@ -30,7 +30,6 @@ fn offer(release: Option<Release>) -> Offer {
         description: "d".into(),
         repository: String::new(),
         license: String::new(),
-        icon: None,
         release,
         newest_anywhere: None,
         withdrawn: None,
@@ -156,7 +155,10 @@ fn a_plugin_this_build_cannot_run_says_which_build_could() {
 #[test]
 fn a_plugin_that_was_taken_back_says_why_rather_than_which_crook() {
     // Every version withdrawn, so there is nothing to offer: the reason is
-    // the label, and not the ABI of a version nobody may install.
+    // the label, and not the ABI of a version nobody may install — and the
+    // button and the row say the same, rather than "Not for this build" and
+    // "newer Crook" beside a label about a withdrawal, which is a card
+    // contradicting its own row.
     let mut withdrawn = offer(None);
     withdrawn.withdrawn = Some(String::from("it read the wrong file"));
 
@@ -166,9 +168,16 @@ fn a_plugin_that_was_taken_back_says_why_rather_than_which_crook() {
             Some("0.9.0"),
             Some("it read the wrong file"),
             None
+        ),
+        (
+            "Taken back: it read the wrong file".into(),
+            "Nothing offered".into(),
+            Press::Nothing
         )
-        .0,
-        "Taken back: it read the wrong file"
+    );
+    assert_eq!(
+        standing(&withdrawn, Some("0.9.0"), true).as_deref(),
+        Some("taken back")
     );
 }
 
@@ -201,12 +210,11 @@ fn a_sentence_is_drawn_on_the_card_it_is_about_and_nowhere_else() {
     let probe = PluginId::parse("eugen/probe").expect("a literal that parses");
     let other = PluginId::parse("eugen/other").expect("a literal that parses");
     let known = Known {
-        offers: Vec::new(),
+        heard: Heard::default(),
         looking: false,
         fetched: None,
         problem: None,
         said: Some((Some(probe.clone()), String::from("is installed"))),
-        busy: Vec::new(),
         icons: Icons::new(),
         looking_inside: None,
         looked_inside: None,

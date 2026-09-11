@@ -54,6 +54,16 @@ fn with_plugins(
     disabled: &[String],
     test: impl FnOnce(&mut Host, &mut ViewContext<Workspace>),
 ) {
+    with_plugins_and_store(plugins, disabled, |_, host, ctx| test(host, ctx));
+}
+
+/// The same, handing the test the state of the store the host built —
+/// the one way to reach its model.
+fn with_plugins_and_store(
+    mut plugins: Vec<Box<dyn Plugin>>,
+    disabled: &[String],
+    test: impl FnOnce(Rc<plugins::store::StoreState>, &mut Host, &mut ViewContext<Workspace>),
+) {
     let queue = LocalQueue::new();
     let mut app = App::new(queue.foreground(), Arc::new(Background::new(2)));
 
@@ -64,18 +74,15 @@ fn with_plugins(
         monospace: FamilyId(0),
     };
 
+    // Two stores are built here — the window's and the host under test's —
+    // and neither may be the one in the box, which reads the list of
+    // whoever is running the tests and decodes its faces on the pool.
+    let store = hermetic_store(&mut plugins);
     let (_, workspace) = app.add_window(|ctx| {
         Workspace::new(
             fonts,
             CellFont::headless(CELL_FONT_SIZE),
-            Opening {
-                settings: Settings::ephemeral(),
-                channel: Channel::Dev,
-                plugins: plugins::defaults(),
-                withdrawn: BTreeMap::new(),
-                heard: Default::default(),
-                plugins_directory: None,
-            },
+            opening(),
             quit,
             Rc::new(Recorder::default()),
             ctx,
@@ -84,7 +91,46 @@ fn with_plugins(
 
     workspace.update(&mut app, |_, ctx| {
         let mut host = load(plugins, disabled, BTreeMap::new(), fonts, ctx);
-        test(&mut host, ctx);
+        test(store, &mut host, ctx);
+    });
+}
+
+/// What a window here opens with: the plugins in the box, with the store
+/// among them one that has read nothing.
+fn opening() -> Opening {
+    let mut plugins = plugins::defaults();
+    hermetic_store(&mut plugins);
+    Opening {
+        settings: Settings::ephemeral(),
+        channel: Channel::Dev,
+        plugins,
+        withdrawn: BTreeMap::new(),
+        heard: Default::default(),
+        plugins_directory: None,
+    }
+}
+
+/// Puts a store that has read nothing and reaches no network where the one
+/// in the box was, and hands back its state.
+fn hermetic_store(plugins: &mut [Box<dyn Plugin>]) -> Rc<plugins::store::StoreState> {
+    plugins::store::hermetic(
+        plugins,
+        None,
+        Arc::new(|_| Err(String::from("a test reaches no network"))),
+    )
+    .expect("the store is among the plugins in the box")
+}
+
+#[test]
+fn a_host_a_test_loads_carries_a_store_that_has_read_nothing() {
+    // Every host built here, not only the window's: the store in the box
+    // reads the list of whoever is running the tests, twice over, and
+    // decodes whatever faces that list carries on the pool.
+    with_plugins_and_store(plugins::defaults(), &[], |store, _, ctx| {
+        let model = store.model().expect("the store has built");
+        let (offers, fetched) = model.read(ctx, |model, _| (model.offers().len(), model.fetched()));
+        assert_eq!(offers, 0, "the store read somebody's list");
+        assert_eq!(fetched, None);
     });
 }
 
@@ -290,14 +336,7 @@ fn a_plugin_that_is_switched_off_stops_being_told_things() {
         Workspace::new(
             fonts,
             CellFont::headless(CELL_FONT_SIZE),
-            Opening {
-                settings: Settings::ephemeral(),
-                channel: Channel::Dev,
-                plugins: plugins::defaults(),
-                withdrawn: BTreeMap::new(),
-                heard: Default::default(),
-                plugins_directory: None,
-            },
+            opening(),
             quit,
             Rc::new(Recorder::default()),
             ctx,

@@ -472,15 +472,60 @@ fn the_section_names_a_reader_looks_for_are_the_ones_the_macros_write() {
     // a `#[link_section]` is readable here rather than pasted together; the
     // reader composes the same names from these constants. The two cannot be
     // compared through the macro on a host build — the section is gated on
-    // wasm — so the composition is pinned to the literals by hand.
-    assert_eq!(pictures::ICON_SECTION, "crook.icon");
-    assert_eq!(
-        alloc::format!("{}1", pictures::PREVIEW_SECTION_PREFIX),
-        "crook.preview.1"
+    // wasm — so the source is read instead: each arm's literal is looked
+    // for in the text of the macro, which is what catches `crook.preview.4`
+    // under the arm for 5.
+    let source = include_str!("lib.rs");
+    let icon = source
+        .split("macro_rules! icon")
+        .nth(1)
+        .expect("the icon macro is in the crate root");
+    assert!(
+        icon.contains(&alloc::format!(
+            "link_section = \"{}\"",
+            pictures::ICON_SECTION
+        )),
+        "the icon macro does not write {}",
+        pictures::ICON_SECTION
     );
-    assert_eq!(
-        alloc::format!("{}6", pictures::CAPTION_SECTION_PREFIX),
-        "crook.caption.6"
+
+    let preview = source
+        .split("macro_rules! preview")
+        .nth(1)
+        .expect("the preview macro is in the crate root");
+    for n in 1..=pictures::MAX_PREVIEWS {
+        let arm = preview
+            .split(&alloc::format!("({n}, $path:literal)"))
+            .nth(1)
+            .unwrap_or_else(|| panic!("no arm for preview {n}"));
+        // The arm's own body, up to the next arm: the section it names has
+        // to be this number's, and the caption arm's the same.
+        let body: alloc::string::String = arm.chars().take(200).collect();
+        assert!(
+            body.contains(&alloc::format!(
+                "link_section = \"{}{n}\"",
+                pictures::PREVIEW_SECTION_PREFIX
+            )),
+            "the arm for preview {n} writes another section: {body}"
+        );
+        let captioned = preview
+            .split(&alloc::format!("({n}, $path:literal, $caption:literal)"))
+            .nth(1)
+            .unwrap_or_else(|| panic!("no captioned arm for preview {n}"));
+        let body: alloc::string::String = captioned.chars().take(250).collect();
+        assert!(
+            body.contains(&alloc::format!(
+                "link_section = \"{}{n}\"",
+                pictures::CAPTION_SECTION_PREFIX
+            )),
+            "the captioned arm for preview {n} writes another section: {body}"
+        );
+    }
+    assert!(
+        !preview.contains(&alloc::format!(
+            "({}, $path:literal)",
+            pictures::MAX_PREVIEWS + 1
+        )),
+        "the macro has an arm past MAX_PREVIEWS"
     );
-    assert_eq!(pictures::MAX_PREVIEWS, 6);
 }

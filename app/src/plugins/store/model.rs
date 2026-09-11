@@ -47,7 +47,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use base64::Engine as _;
-use crookui_core::image::Bitmap;
+use crookui_core::image::{Bitmap, resample};
 use crookui_core::prelude::*;
 
 use crook_plugin::PluginId;
@@ -70,6 +70,33 @@ pub type Fetcher = Arc<dyn Fn(&Release) -> Result<Vec<u8>, String> + Send + Sync
 
 /// The icons the list carries, decoded, by `owner/name`.
 pub type Icons = BTreeMap<String, Arc<Bitmap>>;
+
+/// The most characters an icon in the list may run to before it is decoded:
+/// [`MAX_ICON_BYTES`] as base64, which is the line the registry's own check
+/// draws. A list that arrived some other way is held to the same line, so
+/// that a row is never a reason to decode a picture of any size a stranger
+/// chose.
+///
+/// [`MAX_ICON_BYTES`]: crook_plugin_api::pictures::MAX_ICON_BYTES
+const MOST_ICON_CHARS: usize = crook_plugin_api::pictures::MAX_ICON_BYTES.div_ceil(3) * 4;
+
+/// The edge a face is held at once decoded.
+///
+/// A face is drawn twelve and eighteen logical pixels tall, which is under
+/// sixty-four device pixels at every scale a display reports, and the
+/// renderer resamples to the drawn size from whatever is held. A 256-pixel
+/// source is a quarter of a megabyte per row, held for the whole session on
+/// the thread that draws, for a list a registry can make thousands of rows
+/// long; shrunk here, on the pool, each is sixteen kilobytes.
+const ICON_HELD_EDGE: u32 = 64;
+
+/// The most the list's faces may add up to, in held pixels.
+///
+/// A thousand faces at [`ICON_HELD_EDGE`]. Past it the rest of the rows go
+/// faceless with a line in the log, rather than a hostile list costing a
+/// gigabyte for as long as the window is open — on every launch, once it is
+/// cached.
+const ICONS_BUDGET: usize = 16 << 20;
 
 /// A module somebody looked inside: its pictures, and the bytes they came in.
 ///
@@ -234,11 +261,8 @@ impl StoreModel {
             .map(|(about, said)| (about.as_ref(), said.as_str()))
     }
 
-    /// What the store says, for every surface that is not the store.
-    ///
-    /// A snapshot: the Plugins page holds one and reads it on every frame,
-    /// and the store hands over a fresh one whenever its answer changes.
-    pub fn heard(&self) -> Heard {
+    /// Which plugins are being fetched, and which are waiting their turn.
+    pub fn busy(&self) -> Vec<(PluginId, Busy)> {
         let mut busy: Vec<(PluginId, Busy)> = self
             .downloading
             .iter()
@@ -249,9 +273,18 @@ impl StoreModel {
                 .iter()
                 .map(|(plugin, _)| (plugin.clone(), Busy::Waiting)),
         );
+        busy
+    }
+
+    /// What the store says, for every surface that is not the store.
+    ///
+    /// A snapshot: the Plugins page holds one and reads it on every frame,
+    /// the store's own section reads one per frame it draws, and the store
+    /// hands the window a fresh one whenever its answer changes.
+    pub fn heard(&self) -> Heard {
         Heard {
             offers: self.offers(),
-            busy,
+            busy: self.busy(),
         }
     }
 
@@ -313,7 +346,7 @@ impl StoreModel {
                                     String::from("this machine has nowhere to keep the list")
                                 })?;
                                 let index = cache.write(&bytes, etag.as_deref())?;
-                                let icons = decoded_icons(&listed_icons(&index));
+                                let icons = decoded_icons(&listed_icons(&index), ICONS_BUDGET);
                                 Ok(Some((index, etag, icons)))
                             }
                         }
@@ -357,7 +390,7 @@ impl StoreModel {
 
         let decoding = ctx
             .background()
-            .spawn(async move { decoded_icons(&listed) });
+            .spawn(async move { decoded_icons(&listed, ICONS_BUDGET) });
         ctx.spawn(decoding, |model, icons, ctx| {
             // A look that landed first has the newer list's faces, and this
             // is the older list's: what it holds already wins.
@@ -520,14 +553,25 @@ impl StoreModel {
                             Some(bytes) => bytes,
                             None => fetch(&release).map_err(|why| did_not_arrive(&why))?,
                         };
-                        let raw = crook_wasm::Pictures::read_bytes(&bytes)
-                            .map_err(|why| format!("carries a picture Crook cannot draw: {why}"))?;
-                        let carried = Pictures::from_module(raw, &named);
+                        // A picture past the rule is a line and no pictures,
+                        // not a failure: the module arrived and was checked,
+                        // and it is the module Install would fetch — so the
+                        // bytes are kept, and Install afterwards costs no
+                        // second download, as the card promised. The host
+                        // keeps such a module and runs it faceless for the
+                        // same reason.
+                        let previews = match crook_wasm::Pictures::read_bytes(&bytes) {
+                            Ok(raw) => Pictures::previews_from(raw.previews),
+                            Err(why) => {
+                                log::warn!("{named} carries a picture Crook cannot draw: {why}");
+                                Vec::new()
+                            }
+                        };
                         Ok(LookedInside {
                             plugin: named,
                             sha256: release.sha256.trim().to_owned(),
                             bytes,
-                            pictures: Pictures::decode_previews(&carried.previews),
+                            pictures: Pictures::decode_previews(&previews),
                         })
                     })
                     .await
@@ -564,28 +608,59 @@ fn listed_icons(index: &Index) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Those icons as pixels. Pool work: a list is forty PNGs.
+/// Those icons as pixels, held to [`ICON_HELD_EDGE`] each and `budget`
+/// together. Pool work: a list is forty PNGs.
 ///
 /// One that will not decode is a line in the log and a row with no face,
 /// for the reason the host keeps a plugin whose icon it cannot draw: the
-/// list is still the list.
-fn decoded_icons(listed: &[(String, String)]) -> Icons {
-    listed
-        .iter()
-        .filter_map(|(id, icon)| {
-            let decoded = base64::engine::general_purpose::STANDARD
-                .decode(icon)
-                .map_err(|why| format!("is not base64: {why}"))
-                .and_then(|png| picture::decode(&png, Limits::ICON));
-            match decoded {
-                Ok(bitmap) => Some((id.clone(), Arc::new(bitmap))),
-                Err(why) => {
-                    log::warn!("the index lists an icon for {id} that Crook cannot draw: it {why}");
-                    None
-                }
+/// list is still the list. Past the budget the rest are faces nobody gets,
+/// said once, which is the answer to a list that is not a list but a way of
+/// making this machine hold a gigabyte.
+fn decoded_icons(listed: &[(String, String)], budget: usize) -> Icons {
+    let mut held = 0;
+    let mut icons = Icons::new();
+    for (index, (id, icon)) in listed.iter().enumerate() {
+        if held >= budget {
+            log::warn!(
+                "the index lists {} icons and Crook holds the first {index}; the rest have no face",
+                listed.len()
+            );
+            break;
+        }
+        if icon.len() > MOST_ICON_CHARS {
+            log::warn!(
+                "the index lists an icon for {id} that Crook cannot draw: it is {} characters and \
+                 an icon is at most {MOST_ICON_CHARS}",
+                icon.len()
+            );
+            continue;
+        }
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(icon)
+            .map_err(|why| format!("is not base64: {why}"))
+            .and_then(|png| picture::decode(&png, Limits::ICON));
+        match decoded {
+            Ok(bitmap) => {
+                let face = held_face(bitmap);
+                held += face.canvas().pixels.len();
+                icons.insert(id.clone(), Arc::new(face));
             }
-        })
-        .collect()
+            Err(why) => {
+                log::warn!("the index lists an icon for {id} that Crook cannot draw: it {why}");
+            }
+        }
+    }
+    icons
+}
+
+/// `icon`, no bigger than [`ICON_HELD_EDGE`] a side.
+fn held_face(icon: Bitmap) -> Bitmap {
+    let (width, height) = icon.size();
+    if width <= ICON_HELD_EDGE && height <= ICON_HELD_EDGE {
+        return icon;
+    }
+    // Square, because `Limits::ICON` refused anything else before decoding.
+    resample(&icon, ICON_HELD_EDGE, ICON_HELD_EDGE)
 }
 
 #[cfg(test)]

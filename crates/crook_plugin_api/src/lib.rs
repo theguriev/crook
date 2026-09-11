@@ -256,6 +256,11 @@ pub enum Capability {
     /// that may ask for `crook/shortcuts/rebind` is a plugin that can offer
     /// "change this keybinding" on its own chip; a plugin that may run any
     /// command by name is a plugin that can close the window.
+    ///
+    /// Never one a person answers on a card — allowing, removing,
+    /// installing, updating — which the host refuses by name whatever was
+    /// granted, and refuses to install a module that asks for: a plugin
+    /// that could run Allow about itself would be answering its own card.
     RunCommands(Vec<String>),
     /// See what Crook can be asked to do, and which keys reach it.
     ///

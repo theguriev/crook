@@ -56,7 +56,6 @@ use crookui_core::prelude::*;
 
 use crook_plugin::{EntryId, Manifest, PluginId, SlotId, Slots, Tier};
 
-use crate::plugin::ActionName;
 use crate::plugins::store;
 use crate::plugins::store::index::{Busy, Change, Release, change};
 use crate::workspace::settings_page::search::Words;
@@ -332,13 +331,29 @@ fn switch(workspace: &Workspace, manifest: &Manifest, on: bool, ui: FamilyId) ->
 
     // Above everything else that could be wrong with a plugin, because this
     // is the one that is somebody else's news rather than this machine's
-    // trouble.
+    // trouble. Where to go next is said from what the box under this one
+    // will actually hold: a replacement the registry offers, or only
+    // Remove — a sentence sending somebody to an Install that is not there
+    // is a sentence they scan the card for.
     if let Some(why) = withdrawn {
         question = Some(("Withdrawn from the registry", Tone::Warning));
         body.push(widgets::note_text(why, ui));
+        let replaced = workspace.heard().offer(&manifest.id).is_some_and(|offer| {
+            change(offer, Some(manifest.version), true)
+                .fetchable()
+                .is_some()
+        });
+        let next = match (workspace.is_installed(&manifest.id), replaced) {
+            (true, true) => {
+                " The box under this one has what the registry offers instead, and Remove."
+            }
+            (true, false) => {
+                " Nothing is offered in its place yet; the box under this one has Remove."
+            }
+            (false, _) => "",
+        };
         body.push(widgets::note_text(
-            "This version is not being offered any more, so it is not running. The box under \
-             this one has what the registry offers instead, and Remove.",
+            &format!("This version is not being offered any more, so it is not running.{next}"),
             ui,
         ));
     }
@@ -447,7 +462,7 @@ fn permissions(
         ),
     };
 
-    let command = run_about(workspace, about(verb), &manifest.id);
+    let command = workspace.run_about(&about(verb), manifest.id.as_str());
     let live = command.is_some();
     let control = widgets::text_button(
         label,
@@ -469,15 +484,6 @@ fn permissions(
     )
 }
 
-/// `name`, run about this plugin — or `None`, drawn dead, while nothing
-/// answers to the name.
-fn run_about(workspace: &Workspace, name: ActionName, plugin: &PluginId) -> Command {
-    workspace
-        .host()
-        .action(&name)
-        .map(|id| WorkspaceAction::RunAbout(id, workspace.subject(plugin.as_str())))
-}
-
 /// The box about this machine and the registry: the version here, the
 /// version there, and what can be done about either.
 ///
@@ -490,7 +496,9 @@ fn run_about(workspace: &Workspace, name: ActionName, plugin: &PluginId) -> Comm
 /// The heading and the body are there only when there is news: a newer
 /// version, or a replacement for one taken back. A box that opened with
 /// "Nothing newer" on every card would be a heading nobody reads by the
-/// third card.
+/// third card. The footnote is composed from the rows that are there, for
+/// the same reason: a sentence about updating under a box with no update in
+/// it is a sentence about a control that is not on the card.
 fn machine(workspace: &Workspace, manifest: &Manifest, ui: FamilyId) -> Option<Boxed> {
     if manifest.tier != Tier::Wasm {
         return None;
@@ -500,11 +508,21 @@ fn machine(workspace: &Workspace, manifest: &Manifest, ui: FamilyId) -> Option<B
     let offer = heard.offer(&manifest.id);
     let withdrawn = workspace.withdrawn(&manifest.id);
     let installed = workspace.is_installed(&manifest.id);
-    let standing = offer.map(|offer| change(offer, Some(manifest.version), withdrawn.is_some()));
+    let busy = heard.busy(&manifest.id);
+    // An update only for a plugin that is a file, which is the rule
+    // `Workspace::updates` counts by: a module being run from where it was
+    // built is not one an update could be written over — the Store would
+    // install a copy into the plugins directory, under a plugin the next
+    // build carries back over it — and a card offering what the count at
+    // the foot of the list leaves out would be two answers to one question.
+    let standing = offer
+        .filter(|_| installed)
+        .map(|offer| change(offer, Some(manifest.version), withdrawn.is_some()));
 
     let mut question = None;
-    let mut body: Vec<Box<dyn Element>> = Vec::new();
-    let mut foot: Vec<Box<dyn Element>> = Vec::new();
+    let mut body = Vec::new();
+    let mut foot = Vec::new();
+    let mut mechanism = Vec::new();
 
     if let Some(Change::Update(release) | Change::Replace(release)) = &standing {
         let replacing = matches!(standing, Some(Change::Replace(_)));
@@ -522,13 +540,13 @@ fn machine(workspace: &Workspace, manifest: &Manifest, ui: FamilyId) -> Option<B
         // dead button saying so, and a Store switched off is a dead button
         // with the reason under the row, since the card cannot fetch on its
         // own.
-        let fetching = run_about(workspace, store::action("update"), &manifest.id);
-        let (label, control): (String, Command) = match (heard.busy(&manifest.id), fetching) {
+        let fetching = workspace.run_about(&store::action("update"), manifest.id.as_str());
+        let (label, control) = match (busy, fetching) {
             (Some(Busy::Downloading), _) => (String::from("Getting it\u{2026}"), None),
             (Some(Busy::Waiting), _) => (String::from("Waiting\u{2026}"), None),
             (None, command) => (verb_for(replacing, release), command),
         };
-        if heard.busy(&manifest.id).is_none() && control.is_none() {
+        if busy.is_none() && control.is_none() {
             body.push(widgets::note_text(
                 "The Store is switched off, and it is what fetches.",
                 ui,
@@ -552,10 +570,19 @@ fn machine(workspace: &Workspace, manifest: &Manifest, ui: FamilyId) -> Option<B
             ),
             ui,
         ));
+        mechanism.push(match replacing {
+            true => {
+                "Installing the replacement keeps what you allowed, and a version that asks for \
+                 more says so above."
+            }
+            false => {
+                "Updating keeps what you allowed, and a version that asks for more says so above."
+            }
+        });
     }
 
     if offer.is_some() {
-        let command = run_about(workspace, store::action("show"), &manifest.id);
+        let command = workspace.run_about(&store::action("show"), manifest.id.as_str());
         let live = command.is_some();
         foot.push(widgets::answer_row(
             "In the registry",
@@ -573,7 +600,14 @@ fn machine(workspace: &Workspace, manifest: &Manifest, ui: FamilyId) -> Option<B
     }
 
     if installed {
-        let command = run_about(workspace, about("remove"), &manifest.id);
+        // Dead while the Store is fetching this plugin: a removal that
+        // landed between the press and the download would delete the
+        // directory and forget the plugin, and the download landing would
+        // install and run it again — a press that appears to have done
+        // nothing.
+        let command = workspace
+            .run_about(&about("remove"), manifest.id.as_str())
+            .filter(|_| busy.is_none());
         let live = command.is_some();
         foot.push(widgets::answer_row(
             "On this machine",
@@ -588,20 +622,18 @@ fn machine(workspace: &Workspace, manifest: &Manifest, ui: FamilyId) -> Option<B
             ),
             ui,
         ));
+        mechanism.push("Removing takes it off this machine along with what you allowed.");
     }
 
     if foot.is_empty() {
         return None;
     }
 
-    Some(
-        Boxed::plain(widgets::asked(question, body, foot, ui)).with_footnote(widgets::footnote(
-            "Updating keeps what you allowed, and a version that asks for more says so above. \
-             Removing takes it off this machine along with the answer.",
-            Tone::Plain,
-            ui,
-        )),
-    )
+    let boxed = Boxed::plain(widgets::asked(question, body, foot, ui));
+    Some(match mechanism.is_empty() {
+        true => boxed,
+        false => boxed.with_footnote(widgets::footnote(&mechanism.join(" "), Tone::Plain, ui)),
+    })
 }
 
 /// What the update button says.
@@ -612,39 +644,69 @@ fn verb_for(replacing: bool, release: &Release) -> String {
     }
 }
 
-/// What the offered release asks for beyond what is allowed, as the body of
-/// the update box.
+/// What the offered release asks for, as the body of the update box.
 ///
-/// One sentence when its keys are within the grant; otherwise the sentence
-/// that says so and the list it will ask about, marked open. The whole list
-/// rather than the new lines only, because the index carries the sentences
-/// and the keys as two lists that do not pair up line for line — which
-/// lines are new is worked out from the module itself once it has landed,
-/// and the card says so.
+/// Decided from the grant and the running version together, because the
+/// grant alone answers wrong for the ordinary plugin: nothing is allowed
+/// yet, so every ask reads as "more than you have allowed" — the same list
+/// the box under this one is about to say again with the same open dots —
+/// and promises lines marked new that the card will not mark, since a grant
+/// of nothing marks nothing. So a release asking nothing says so; one asking
+/// no more than the running version does says the card asks again; and only
+/// one asking past both the grant and what runs today is an escalation, with
+/// the whole list under it. The whole list rather than the new lines only,
+/// because the index carries the sentences and the keys as two lists that
+/// do not pair up line for line — which lines are new is worked out from
+/// the module itself once it has landed, and the card says so.
 fn asks_beyond(
     workspace: &Workspace,
     manifest: &Manifest,
     release: &Release,
     ui: FamilyId,
 ) -> Vec<Box<dyn Element>> {
-    let granted = workspace.settings().granted_to(manifest.id.as_str());
-    let within = release
-        .capabilities
-        .iter()
-        .all(|key| granted.iter().any(|had| had == key));
-
-    if within {
+    let version = &release.version;
+    if release.capabilities.is_empty() {
         return vec![widgets::note_text(
-            &format!("{} asks for nothing you have not allowed.", release.version),
+            &format!("{version} asks for nothing."),
             ui,
         )];
     }
 
-    let mut body = vec![widgets::note_text(
-        "It asks for more than you have allowed; after the update its card says what, marked \
-         new, and refuses it until you allow it.",
-        ui,
-    )];
+    let granted = workspace.settings().granted_to(manifest.id.as_str());
+    let running = wanted(manifest);
+    let within = |keys: &[String]| release.capabilities.iter().all(|key| keys.contains(key));
+
+    if within(granted) {
+        return vec![widgets::note_text(
+            &format!("{version} asks for nothing you have not allowed."),
+            ui,
+        )];
+    }
+    if within(&running) {
+        let sentence = match granted.is_empty() {
+            true => format!(
+                "{version} asks for what this version asks for, and none of it is allowed yet \
+                 \u{2014} its card asks again after the update."
+            ),
+            false => format!(
+                "{version} asks for what this version asks for; the box under this one says \
+                 where that stands."
+            ),
+        };
+        return vec![widgets::note_text(&sentence, ui)];
+    }
+
+    let sentence = match granted.is_empty() {
+        true => {
+            "It asks for more than this version does, and none of it is allowed yet; after the \
+             update its card asks for the whole list, and refuses it until you allow it."
+        }
+        false => {
+            "It asks for more than you have allowed; after the update its card says what, \
+             marked new, and refuses it until you allow it."
+        }
+    };
+    let mut body = vec![widgets::note_text(sentence, ui)];
     body.extend(
         release
             .asks
@@ -659,9 +721,10 @@ fn asks_beyond(
 /// Absent for a plugin that carries none, which is most of them. The row
 /// says how many there are and offers to show them; while they are being
 /// decoded it is dead and says so, and the room each will take is drawn in
-/// the box fill so nothing under them moves when they land. Decoded on a
-/// press rather than with the card, because a card is drawn for every
-/// plugin somebody scrolls past and a preview is up to four million pixels.
+/// the box fill so nothing under them moves when they land; once they have,
+/// it is dead and says that. Decoded on a press rather than with the card,
+/// because a card is drawn for every plugin somebody scrolls past and a
+/// preview is up to four million pixels.
 fn pictures(
     workspace: &Workspace,
     manifest: &Manifest,
@@ -675,63 +738,39 @@ fn pictures(
     }
 
     let opening = state.is_opening(&manifest.id);
-    let shown = state.pictures_of(&manifest.id);
-    let label = match count {
-        1 => String::from("1 picture inside"),
-        count => format!("{count} pictures inside"),
+    let shown = state.shown(&manifest.id);
+    let looking = match (opening, shown.is_some()) {
+        (true, _) => widgets::Looking::Opening,
+        (false, true) => widgets::Looking::Shown,
+        (false, false) => widgets::Looking::Show,
     };
-    let (button, command) = match opening {
-        true => ("Opening\u{2026}", None),
-        false => (
-            "Show pictures",
-            run_about(workspace, about("pictures"), &manifest.id),
-        ),
-    };
-    let live = command.is_some();
-    let control = widgets::text_button(
-        button,
-        command,
-        workspace
-            .settings_page()
-            .control(named(&format!("plugins.pictures.{}", manifest.id))),
-        ui,
-    );
-
-    let mut rows = vec![
-        widgets::row(
-            Words::new(label).with_keywords(&["picture", "preview", "screenshot"]),
-            live,
-            control,
-            ui,
-        )
-        .element,
-    ];
-
     // The logical size comes from the header the module carried, not from
     // the pixels held now: `decode_preview` keeps a picture to a thousand
     // pixels, and one it shrank must still be drawn at the size it was
     // captured to be drawn at.
-    match shown {
-        Some(pictures) => rows.extend(pictures.into_iter().map(|picture| {
-            widgets::preview(
-                Some(&picture.bitmap),
-                widgets::preview_size(picture.width, picture.height),
-                picture.caption.as_deref(),
-                ui,
-            )
-        })),
-        None if opening => rows.extend(carried.previews.iter().map(|preview| {
-            widgets::preview(
-                None,
-                widgets::preview_size(preview.width, preview.height),
-                preview.caption.as_deref(),
-                ui,
-            )
-        })),
-        None => {}
-    }
+    let rooms: Vec<(u32, u32, Option<&str>)> = match opening {
+        true => carried
+            .previews
+            .iter()
+            .map(|preview| (preview.width, preview.height, preview.caption.as_deref()))
+            .collect(),
+        false => Vec::new(),
+    };
 
-    Some(section("What it looks like", rows, ui))
+    Some(widgets::pictures_category(
+        widgets::Looks {
+            count,
+            looking,
+            command: workspace.run_about(&about("pictures"), manifest.id.as_str()),
+            control: workspace
+                .settings_page()
+                .control(named(&format!("plugins.pictures.{}", manifest.id))),
+            shown: shown.as_deref(),
+            rooms: &rooms,
+            note: None,
+        },
+        ui,
+    ))
 }
 
 /// The paragraph under the box, where the mechanism is said out loud.

@@ -156,6 +156,67 @@ pub(crate) fn wasm_carrying(
     wat::parse_str(&text).expect("the test module should assemble")
 }
 
+/// The same as [`wasm_saying`], and its one action raises `request` when it
+/// is run.
+///
+/// What a test about the boundary needs: a guest that, pressed, asks the
+/// host for something — and the host's answer is whatever the host does
+/// about it, which is the thing being tested.
+pub(crate) fn wasm_asking(
+    manifest: &Manifest,
+    slot: &str,
+    order: i32,
+    request: &Request,
+) -> Vec<u8> {
+    let request = to_bytes(request).expect("a request should encode");
+    // Between the tree and the strings, which `module_text` lays out at 16
+    // and 4096.
+    let request_at = 2048;
+    let manifest_bytes = to_bytes(manifest).expect("a manifest should encode");
+    let tree_bytes = to_bytes(&tree()).expect("a tree should encode");
+    assert!(
+        16 + manifest_bytes.len() + tree_bytes.len() <= request_at
+            && request_at + request.len() <= 4096,
+        "the request does not fit between the tree and the strings"
+    );
+    // With somewhere for the answer to land: a guest that asks and exports
+    // no `crook_deliver` is one the host does nothing for.
+    let mut text = module_text(manifest, slot, order);
+    assert_eq!(
+        text.pop(),
+        Some(')'),
+        "the module text ends in its own paren"
+    );
+    text.push_str(
+        "\n            (func (export \"crook_deliver\") (param i32 i32 i32) (result i32) \
+         (i32.const 0)))",
+    );
+    let text = text
+        .replace(
+            "(memory (export \"memory\") 1)",
+            &format!(
+                "(import \"crook\" \"request\" (func $request (param i32 i32) (result i32)))\n            \
+                 (memory (export \"memory\") 1)\n            \
+                 (data (i32.const {request_at}) \"{}\")",
+                escaped(&request)
+            ),
+        )
+        .replace(
+            "(func (export \"crook_run\") (param i32 i32 i32 i32) (result i32) (i32.const 0))",
+            &format!(
+                "(func (export \"crook_run\") (param i32 i32 i32 i32) (result i32)\n              \
+                 (drop (call $request (i32.const {request_at}) (i32.const {})))\n              \
+                 (i32.const 0))",
+                request.len()
+            ),
+        );
+    assert!(
+        text.contains("$request"),
+        "the module text changed under this helper"
+    );
+    wat::parse_str(&text).expect("the test module should assemble")
+}
+
 /// The text of the test module, before it is assembled.
 fn module_text(manifest: &Manifest, slot: &str, order: i32) -> String {
     let manifest = to_bytes(manifest).expect("a manifest should encode");
@@ -448,6 +509,52 @@ fn a_module_in_the_plugins_directory_is_found_and_read() {
     assert_eq!(manifest.id.to_string(), "eugen/probe");
     assert_eq!(manifest.name, "Probe");
     assert_eq!(manifest.tier, Tier::Wasm);
+}
+
+#[test]
+fn a_picture_past_the_rule_is_a_line_and_a_faceless_plugin_and_never_a_refusal() {
+    // The policy `opened` states: the module opened, and it is the
+    // registry's job to refuse a build over its icon. A module installed by
+    // hand or built before the rule — a non-square icon, a preview wider
+    // than a side may be — is built and listed with no picture, and the
+    // whole set goes: the reader's answer is one sentence about the module,
+    // not one per picture, so a bad preview takes a good icon with it.
+    use crate::picture::tests::{icon_png, preview_png};
+
+    let plugin = opened(&wasm_carrying(
+        &manifest("eugen/probe"),
+        "header.right",
+        0,
+        &[("crook.icon", &preview_png(300, 200))],
+    ))
+    .expect("a bad icon is not a refusal");
+    let pictures = plugin
+        .pictures()
+        .expect("a module answers for its pictures");
+    assert!(pictures.icon.is_none());
+    assert_eq!(pictures.count(), 0);
+
+    let plugin = opened(&wasm_carrying(
+        &manifest("eugen/probe"),
+        "header.right",
+        0,
+        &[
+            ("crook.icon", &icon_png(64)),
+            (
+                "crook.preview.1",
+                &crate::picture::tests::header_only(4000, 100),
+            ),
+        ],
+    ))
+    .expect("a bad preview is not a refusal");
+    let pictures = plugin
+        .pictures()
+        .expect("a module answers for its pictures");
+    assert!(
+        pictures.icon.is_none(),
+        "the icon outlived a preview past the rule"
+    );
+    assert_eq!(pictures.count(), 0);
 }
 
 #[test]

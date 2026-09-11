@@ -37,7 +37,11 @@ are none. The pictures themselves are custom sections of the module, put there w
 plugins can draw a face on every row without a request per row. A picture that breaks the
 rule in `crook_plugin_api::pictures` — an icon that is not square, a preview past 512 KiB — is
 exit 1 with a sentence saying which and what is wrong, because a registry is where a bad
-picture is refused; a host runs the plugin and draws it without one.
+picture is refused; a host runs the plugin and draws it without one. The reader checks the
+header and the chunk names, not the pixels: this crate carries no decoder, so a PNG that is the
+right size and shape but will not decode — a truncated `IDAT`, a wrong CRC — passes here and
+becomes a line in the host's log and no picture. `crook --dev-plugin` on the built module draws
+the card and logs the drop, which is where an author finds that out before shipping.
 
 Exit code **0** read it, **2** the module speaks another ABI — its number is the whole of the
 answer, because the manifest below it is encoded against a shape this reader does not have —

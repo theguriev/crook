@@ -34,8 +34,12 @@ pub(super) struct PluginsState {
     ///
     /// Drawn on that plugin's card and on no other, the way the Store keeps
     /// a sentence with the row it is about: a line drawn on whatever card
-    /// happens to be showing is a line about the wrong thing.
-    said: RefCell<Option<(String, String, bool)>>,
+    /// happens to be showing is a line about the wrong thing. About no
+    /// plugin — `None` — for the one outcome that leaves no card to draw it
+    /// on: a removal that worked, whose plugin is gone from the list. That
+    /// one is drawn under the list, which is what lost a row, and stands
+    /// until the next row is chosen.
+    said: RefCell<Option<(Option<String>, String, bool)>>,
     /// Which plugin's previews are being decoded right now, if any.
     opening: RefCell<Option<String>>,
     /// The previews somebody asked to see, decoded, with their captions —
@@ -55,8 +59,15 @@ impl PluginsState {
     }
 
     /// Chooses one.
+    ///
+    /// And lets go of the line under the list, if a removal left one: a
+    /// row chosen is the person moving on, and the sentence has been read.
     pub(super) fn select(&self, plugin: &PluginId) {
         *self.selected.borrow_mut() = Some(plugin.to_string());
+        let mut said = self.said.borrow_mut();
+        if said.as_ref().is_some_and(|(about, _, _)| about.is_none()) {
+            *said = None;
+        }
     }
 
     /// Which plugin the card is about, resolved against what the list shows.
@@ -77,9 +88,10 @@ impl PluginsState {
         chosen.or_else(|| showing.first().map(|manifest| manifest.id.clone()))
     }
 
-    /// Writes down what a press came to, about `plugin`.
-    pub(super) fn say(&self, plugin: &PluginId, sentence: String, wrong: bool) {
-        *self.said.borrow_mut() = Some((plugin.to_string(), sentence, wrong));
+    /// Writes down what a press came to, about `plugin` — or about no
+    /// plugin the list still has, for a removal that worked.
+    pub(super) fn say(&self, plugin: Option<&PluginId>, sentence: String, wrong: bool) {
+        *self.said.borrow_mut() = Some((plugin.map(ToString::to_string), sentence, wrong));
     }
 
     /// The sentence to draw on `plugin`'s card, and whether it is a warning,
@@ -88,8 +100,18 @@ impl PluginsState {
         self.said
             .borrow()
             .as_ref()
-            .filter(|(about, _, _)| about == plugin.as_str())
+            .filter(|(about, _, _)| about.as_deref() == Some(plugin.as_str()))
             .map(|(_, sentence, wrong)| (sentence.clone(), *wrong))
+    }
+
+    /// The sentence to draw under the list, if the last press was about a
+    /// plugin the list no longer has.
+    pub(super) fn said_of_nobody(&self) -> Option<String> {
+        self.said
+            .borrow()
+            .as_ref()
+            .filter(|(about, _, _)| about.is_none())
+            .map(|(_, sentence, _)| sentence.clone())
     }
 
     /// Marks `plugin`'s previews as being decoded.
@@ -118,8 +140,10 @@ impl PluginsState {
         *self.pictures.borrow_mut() = Some((plugin.to_string(), pictures));
     }
 
-    /// The decoded previews of `plugin`, if they are the ones held.
-    pub(super) fn pictures_of(&self, plugin: &PluginId) -> Option<Decoded> {
+    /// The decoded previews of `plugin`, if they are the ones held — what
+    /// the card shows, as against what the module carries, which is the
+    /// host's `pictures_of`.
+    pub(super) fn shown(&self, plugin: &PluginId) -> Option<Decoded> {
         self.pictures
             .borrow()
             .as_ref()

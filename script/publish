@@ -73,6 +73,12 @@ for crate in $CRATES; do
   cargo clippy --locked -p "$crate" --all-targets -- -D warnings
   cargo test --locked -p "$crate"
 done
+# The arm of `icon!` and `preview!` a plugin actually builds is gated on
+# wasm32, and nothing above compiles it: a host build tests the constants
+# and the caption copy, and a typo in a `#[link_section]` attribute would
+# ship. Checked for the target every plugin is built for, before the upload.
+rustup target add wasm32-unknown-unknown
+cargo check --locked -p crook_plugin_api --tests --target wasm32-unknown-unknown
 
 for crate in $CRATES; do
   version=$(cargo metadata --locked --format-version=1 --no-deps \

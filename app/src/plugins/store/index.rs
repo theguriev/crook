@@ -68,6 +68,10 @@ pub struct Listed {
     /// second thing to ask for, and nothing about which rows a person looked
     /// at leaves the machine. `None` for a plugin built before there were
     /// pictures, which is what every version published so far was.
+    ///
+    /// Not carried onto the [`Offer`], which is rebuilt and cloned on every
+    /// frame: the store's model decodes it once, off the list, and the rows
+    /// draw the pixels.
     #[serde(default)]
     pub icon: Option<String>,
     /// Newest last is not assumed: versions are compared rather than trusted
@@ -155,8 +159,6 @@ pub struct Offer {
     pub repository: String,
     /// SPDX.
     pub license: String,
-    /// The icon the list carries for it, still base64. See [`Listed::icon`].
-    pub icon: Option<String>,
     /// The newest version this build can run, if there is one.
     pub release: Option<Release>,
     /// The newest version there is at all, whatever it speaks.
@@ -218,7 +220,6 @@ pub fn offers(index: &Index) -> Vec<Offer> {
                 description: listed.description.clone(),
                 repository: listed.repository.clone(),
                 license: listed.license.clone(),
-                icon: listed.icon.clone(),
                 // Only when there is nothing left to offer: a plugin whose
                 // newest version was withdrawn and whose one before it still
                 // stands is a plugin somebody can install, and the yank is
@@ -264,6 +265,21 @@ pub enum Change {
     Nothing,
 }
 
+impl Change {
+    /// The release worth fetching, if there is one: an update, or the
+    /// replacement for a version taken back.
+    ///
+    /// The one question every surface asks of a change — the row's trailing
+    /// word, the count at the foot of the list, the `--plugins` line — and
+    /// the answer that must not differ between them.
+    pub fn fetchable(&self) -> Option<&Release> {
+        match self {
+            Self::Update(release) | Self::Replace(release) => Some(release),
+            Self::Install(_) | Self::Current | Self::Nothing => None,
+        }
+    }
+}
+
 /// What `offer` comes to for a machine holding `installed`.
 ///
 /// `installed` is the module's own version, which is the one the Plugins
@@ -306,6 +322,16 @@ pub struct Heard {
 }
 
 impl Heard {
+    /// What `index` offers, with the store doing nothing yet — which is what
+    /// a window hears at its opening, off the copy on disk, before anything
+    /// has been pressed.
+    pub fn offered(index: Option<&Index>) -> Self {
+        Self {
+            offers: index.map(offers).unwrap_or_default(),
+            busy: Vec::new(),
+        }
+    }
+
     /// The registry's row for one plugin, if it has one.
     pub fn offer(&self, id: &PluginId) -> Option<&Offer> {
         self.offers.iter().find(|offer| offer.id == *id)
@@ -335,10 +361,10 @@ pub fn updates<'a>(
         .into_iter()
         .filter_map(|(id, version, withdrawn)| {
             let offer = heard.offer(id)?;
-            match change(offer, Some(version), withdrawn) {
-                Change::Update(release) | Change::Replace(release) => Some((id.clone(), release)),
-                Change::Install(_) | Change::Current | Change::Nothing => None,
-            }
+            let release = change(offer, Some(version), withdrawn)
+                .fetchable()
+                .cloned()?;
+            Some((id.clone(), release))
         })
         .collect()
 }

@@ -61,6 +61,7 @@ use crookui_core::image::Bitmap;
 use crookui_core::prelude::*;
 
 use super::search::{Query, Words};
+use crate::plugins::pictures::Picture;
 use crate::theme::theme;
 
 use super::super::action::WorkspaceAction;
@@ -1007,6 +1008,114 @@ pub(crate) fn preview(
     Container::new(column.finish())
         .with_margin_bottom(ROW_SPACING)
         .finish()
+}
+
+/// What the button of a card's "What it looks like" row is doing.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum Looking {
+    /// The pictures are on this machine and a press decodes them.
+    Show,
+    /// Seeing them means fetching the module they are in; a press does.
+    Fetch,
+    /// Being decoded: the button is dead and says so.
+    Opening,
+    /// Being fetched: the same.
+    Fetching,
+    /// Decoded and on the card, under the row. The button is dead, because
+    /// a live button whose press changes nothing reads as broken, and a
+    /// second press would spend a decode for nothing.
+    Shown,
+}
+
+/// What a card's "What it looks like" category is drawn from.
+pub(crate) struct Looks<'a> {
+    /// How many pictures the module carries, which is what the row says.
+    pub count: usize,
+    /// What the button is doing.
+    pub looking: Looking,
+    /// What pressing it does, while it is live.
+    pub command: Command,
+    /// The button's own hover state.
+    pub control: MouseStateHandle,
+    /// The pictures, once decoded. Once they are here the button goes dead,
+    /// and one the pool could not decode is counted against `count` on the
+    /// row, so the row and the pictures under it never disagree in silence.
+    pub shown: Option<&'a [Picture]>,
+    /// The room to hold while the pictures are on their way — the sizes the
+    /// header said, with their captions — so nothing under them moves when
+    /// they land. Empty when nothing is on its way.
+    pub rooms: &'a [(u32, u32, Option<&'a str>)],
+    /// A line under the row for what a press costs, said before it.
+    pub note: Option<&'a str>,
+}
+
+/// The "What it looks like" category of a card: how many pictures the
+/// module carries and the button that shows them, then either the pictures,
+/// the room for them, or nothing.
+///
+/// One function for both cards, because the row, the button, the rooms and
+/// the figures are one mechanism and the Store's card and a plugin's are
+/// read one after the other.
+pub(crate) fn pictures_category(looks: Looks<'_>, ui: FamilyId) -> Box<dyn Element> {
+    let Looks {
+        count,
+        looking,
+        command,
+        control,
+        shown,
+        rooms,
+        note,
+    } = looks;
+    let noun = match count {
+        1 => "picture",
+        _ => "pictures",
+    };
+    let label = match shown {
+        Some(shown) if shown.len() < count => {
+            format!("{} of {count} {noun} could be drawn", shown.len())
+        }
+        _ => format!("{count} {noun} inside"),
+    };
+    let (button, command) = match looking {
+        Looking::Show => (format!("Show {noun}"), command),
+        Looking::Fetch => (format!("Fetch {noun}"), command),
+        Looking::Opening => (String::from("Opening\u{2026}"), None),
+        Looking::Fetching => (String::from("Fetching\u{2026}"), None),
+        Looking::Shown => (String::from("Shown"), None),
+    };
+    let live = command.is_some();
+
+    let mut rows = vec![
+        row(
+            Words::new(label).with_keywords(&["picture", "preview", "screenshot"]),
+            live,
+            text_button(button, command, control, ui),
+            ui,
+        )
+        .element,
+    ];
+    if let Some(note) = note {
+        rows.push(self::note(note, ui).element);
+    }
+
+    // Each picture at the size it was captured at, halved and held to the
+    // card — from the header the module or the index carried, never from
+    // the pixels held now, which were kept to a thousand a side.
+    match shown {
+        Some(pictures) => rows.extend(pictures.iter().map(|picture| {
+            preview(
+                Some(&picture.bitmap),
+                preview_size(picture.width, picture.height),
+                picture.caption.as_deref(),
+                ui,
+            )
+        })),
+        None => rows.extend(rooms.iter().map(|(width, height, caption)| {
+            preview(None, preview_size(*width, *height), *caption, ui)
+        })),
+    }
+
+    category_element("What it looks like", false, rows, ui)
 }
 
 /// The foot of a list that has updates to offer: how many, and the one button

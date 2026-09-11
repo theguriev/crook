@@ -96,21 +96,10 @@ impl TextLayoutSystem for StubShaper {
     }
 }
 
-/// Where the store is among `plugins`, if it is.
-fn store_among(plugins: &[Box<dyn crate::plugin::Plugin>]) -> Option<usize> {
-    plugins
-        .iter()
-        .position(|plugin| plugin.manifest().id.as_str() == "crook/store")
-}
-
-/// A store reading `cache`, or nothing, and answering every module fetch
-/// with a refusal: nothing a test opens reaches a network, and what a test
-/// can see is the frame between a press and the answer.
-fn store_reading(
-    cache: Option<crate::plugins::store::cache::Cache>,
-) -> crate::plugins::store::Store {
-    crate::plugins::store::Store::with_cache(cache)
-        .fetching(Arc::new(|_| Err(String::from("a test reaches no network"))))
+/// The fetcher most tests want: a refusal, so what a test can see is the
+/// frame between a press and the answer.
+fn no_network() -> crate::plugins::store::model::Fetcher {
+    Arc::new(|_| Err(String::from("a test reaches no network")))
 }
 
 struct Harness {
@@ -198,23 +187,26 @@ impl Harness {
     /// startup.
     fn with_store(
         tabs: usize,
+        opening: Opening,
+        cache: crate::plugins::store::cache::Cache,
+    ) -> Self {
+        Self::with_store_fetching(tabs, opening, cache, no_network())
+    }
+
+    /// The same, with the store answering every module fetch with `fetch`
+    /// — which is how a test lets a download land, and everything after a
+    /// landing run, with no socket opened.
+    fn with_store_fetching(
+        tabs: usize,
         mut opening: Opening,
         cache: crate::plugins::store::cache::Cache,
+        fetch: crate::plugins::store::model::Fetcher,
     ) -> Self {
         use crate::plugins::store::index;
 
-        opening.heard = index::Heard {
-            offers: cache
-                .read()
-                .map(|cached| index::offers(&cached.index))
-                .unwrap_or_default(),
-            busy: Vec::new(),
-        };
-        let at = store_among(&opening.plugins)
+        opening.heard = index::Heard::offered(cache.read().as_ref().map(|cached| &cached.index));
+        let state = crate::plugins::store::hermetic(&mut opening.plugins, Some(cache), fetch)
             .expect("the store is among the plugins the window opens with");
-        let store = store_reading(Some(cache));
-        let state = store.state();
-        opening.plugins[at] = Box::new(store);
 
         let mut harness = Self::opened(tabs, opening);
         harness.store = Some(state);
@@ -234,12 +226,7 @@ impl Harness {
     /// store this window carries has read nothing; a test that wants a
     /// registry opens with [`Self::with_store`].
     fn with_opening(tabs: usize, mut opening: Opening) -> Self {
-        let mut state = None;
-        if let Some(at) = store_among(&opening.plugins) {
-            let store = store_reading(None);
-            state = Some(store.state());
-            opening.plugins[at] = Box::new(store);
-        }
+        let state = crate::plugins::store::hermetic(&mut opening.plugins, None, no_network());
 
         let mut harness = Self::opened(tabs, opening);
         harness.store = state;
@@ -887,12 +874,23 @@ impl Harness {
 
     /// Which plugin the store is downloading, straight from its model.
     fn store_downloading(&self) -> Option<crook_plugin::PluginId> {
-        let state = self
-            .store
-            .as_ref()
-            .expect("the window was opened with a store of its own");
-        let model = state.model().expect("the store has built");
+        let model = self.store_model().expect("the store has built");
         model.read(&self.app, |model, _| model.downloading().cloned())
+    }
+
+    /// The plugins waiting behind the download in flight, in order.
+    fn store_queued(&self) -> Vec<crook_plugin::PluginId> {
+        let model = self.store_model().expect("the store has built");
+        model.read(&self.app, |model, _| model.queued())
+    }
+
+    /// The store's model, or `None` while the store has not built — which
+    /// is what a store switched off comes to.
+    fn store_model(&self) -> Option<ModelHandle<crate::plugins::store::model::StoreModel>> {
+        self.store
+            .as_ref()
+            .expect("the window was opened with a store of its own")
+            .model()
     }
 
     /// Presses the button in the sidebar that says `label` — the one under
@@ -13718,7 +13716,7 @@ mod sandboxed {
     use super::*;
     use crate::picture::tests::{header_only, icon_png, preview_png};
     use crate::plugins::wasm::tests::{
-        Scratch, install, manifest, wasm, wasm_carrying, wasm_saying,
+        Scratch, install, manifest, wasm, wasm_asking, wasm_at, wasm_carrying, wasm_saying,
     };
     use crate::workspace::settings_page::widgets;
     use crook_plugin_api::Capability;
@@ -13900,6 +13898,102 @@ mod sandboxed {
     }
 
     #[test]
+    fn a_plugin_granted_allow_cannot_allow_itself() {
+        // The escalation `Request::Run` would otherwise be. Allow resolves
+        // the subject and the list at the press, so a guest holding
+        // `run:crook/plugins/allow` that names its own id would be granted
+        // whatever its newest version asks for — the network, here — with
+        // nobody reading the card. The host refuses a guest every action a
+        // person answers, by name, and the grant is what it was.
+        //
+        // The module is on disk before the window opens, because a store
+        // refuses to install one that asks for an answer (the test after
+        // this one); what is on disk from before that rule is loaded and
+        // run, and this is the door that has to stay shut for it.
+        let scratch = Scratch::new("self-allow");
+        let allow = String::from("crook/plugins/allow");
+        let request = crook_plugin_api::Request::Run {
+            name: allow.clone(),
+            argument: String::from("eugen/probe"),
+        };
+        // The version that asks for more than the grant — the network — so
+        // the card is escalated and the new line refused until a person
+        // allows it.
+        let mut escalating = manifest("eugen/probe");
+        escalating.version = String::from("0.2.0");
+        escalating.capabilities = vec![
+            Capability::RunCommands(vec![allow.clone()]),
+            Capability::Network(vec![String::from("evil.example")]),
+        ];
+        install(
+            scratch.path(),
+            "eugen.probe",
+            &wasm_asking(&escalating, "header.right", 10, &request),
+        );
+        let granted = vec![format!("run:{allow}")];
+        let mut opening = opening(&scratch, Default::default(), Default::default());
+        opening.settings.set_granted("eugen/probe", granted.clone());
+        let mut harness = Harness::with_opening(1, opening);
+        harness.show_plugins();
+        harness.click_plugin("Probe");
+        assert!(says(
+            &harness.frame(),
+            "It is asking for more than you allowed"
+        ));
+
+        // The guest, pressed, asks the host to run Allow about itself. The
+        // request is served by the observer on the frames after the press;
+        // a refusal lands nothing to wait for, so the queue is given the
+        // turns a served request would have taken.
+        harness.run_command("eugen/probe/poke");
+        for _ in 0..4 {
+            harness.queue.run_until_parked();
+            harness.frame();
+        }
+
+        let now = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.settings().granted_to("eugen/probe").to_vec()
+        });
+        assert_eq!(now, granted, "the plugin allowed itself the network");
+        assert!(
+            says(&harness.frame(), "It is asking for more than you allowed"),
+            "{}",
+            frame_text(&harness.frame())
+        );
+    }
+
+    #[test]
+    fn a_module_asking_to_run_an_answer_is_not_installed() {
+        // The same door from the other side: the card never asks "Use
+        // Crook's own crook/plugins/allow" with an Allow under it, because a
+        // module that wants it is refused before it is written, with the
+        // reason.
+        let scratch = Scratch::new("asks-an-answer");
+        let mut asking = manifest("eugen/probe");
+        asking.capabilities = vec![Capability::RunCommands(vec![String::from(
+            "crook/store/install",
+        )])];
+        let mut harness = harness(&scratch);
+        let mut outcome = Ok(());
+        harness.workspace_update(|workspace, ctx| {
+            outcome = workspace
+                .install_plugin(&wasm_saying(&asking, "header.right", 10), |_| Ok(()), ctx)
+                .map(|_| ());
+        });
+        assert_eq!(
+            outcome,
+            Err(String::from(
+                "it asks to run crook/store/install, which is answered by a person, on the \
+                 card, and never by a plugin"
+            ))
+        );
+        assert!(
+            !scratch.path().join("eugen.probe").exists(),
+            "the module was written anyway"
+        );
+    }
+
+    #[test]
     fn remove_on_the_card_takes_the_plugin_off_this_machine() {
         // Directory, grant, switch, row, palette command: all of it goes,
         // because a plugin that was removed is one somebody is done with. The
@@ -13928,6 +14022,25 @@ mod sandboxed {
         );
         let scene = harness.frame();
         assert!(!listed(&scene, "Probe"), "the row is still in the list");
+        // Said under the list, which is what lost a row — the card has
+        // moved to another plugin's and must not say it there — and let go
+        // of when the next row is chosen.
+        assert!(
+            says(
+                &scene,
+                "Probe is off this machine, and so is what it was allowed to do."
+            ),
+            "{}",
+            frame_text(&scene)
+        );
+        let panel = panel_box(&scene);
+        assert!(
+            text_lines(&scene, |at| at.x() < panel.max_x())
+                .iter()
+                .any(|(_, line)| line.contains("Probe is off this machine")),
+            "the sentence is not under the list: {}",
+            frame_text(&scene)
+        );
         harness.workspace.read(&harness.app, |workspace, _| {
             assert!(workspace.settings().granted_to("eugen/probe").is_empty());
             assert!(workspace.settings().disabled_plugins().is_empty());
@@ -13944,6 +14057,12 @@ mod sandboxed {
         });
         // The first row is Window's, and the card followed the list.
         assert!(says(&scene, "crook/window"), "{}", frame_text(&scene));
+
+        harness.click_plugin("Plugins");
+        assert!(
+            !says(&harness.frame(), "is off this machine"),
+            "the sentence outlived the next choice"
+        );
     }
 
     #[test]
@@ -14003,6 +14122,42 @@ mod sandboxed {
         assert!(
             mark.min_y() < title.y() && title.y() < mark.max_y() + 4.,
             "the mark at {mark:?} is not on the title's line at {title:?}"
+        );
+    }
+
+    #[test]
+    fn a_fixture_with_an_icon_draws_it_in_its_row_like_a_module_does() {
+        // The one route a picture of the Plugins page with a face on a row
+        // takes on a machine with none of the six plugins: `--plugin-fixture`
+        // names a PNG beside itself, and the row draws it at the row's own
+        // size through the same path a module's face takes.
+        let scratch = Scratch::new("fixture-face");
+        std::fs::write(scratch.path().join("face.png"), icon_png(32))
+            .expect("the icon should be writable");
+        let path = scratch.path().join("fixture.json");
+        std::fs::write(
+            &path,
+            r#"{"icon": "face.png", "header.right": {"Text": {"text": "62%", "size": "Small", "tone": "Primary"}}}"#,
+        )
+        .expect("the fixture should be writable");
+        let mut opening = opening(&scratch, Default::default(), Default::default());
+        opening.plugins.push(Box::new(
+            crate::plugins::wasm::fixture::Fixture::read(&path).expect("it should read"),
+        ));
+        let mut harness = Harness::with_opening(1, opening);
+        harness.show_plugins();
+
+        let scene = harness.frame();
+        let panel = panel_box(&scene);
+        let in_rows: Vec<RectF> = images(&scene)
+            .into_iter()
+            .filter(|bounds| bounds.max_x() <= panel.max_x())
+            .collect();
+        assert_eq!(in_rows.len(), 1, "the fixture's face is in its row");
+        assert!(
+            (in_rows[0].height() - widgets::ROW_ICON).abs() < 0.5,
+            "a row's icon is {} tall",
+            in_rows[0].height()
         );
     }
 
@@ -14091,6 +14246,10 @@ mod sandboxed {
             !says(&scene, "Opening"),
             "the button still says the pictures are being opened"
         );
+        // And it is not live either: the pictures are on the card, and a
+        // press that changed nothing would read as broken.
+        assert!(says(&scene, "Shown"), "{}", frame_text(&scene));
+        assert!(!says(&scene, "Show pictures"), "{}", frame_text(&scene));
     }
 
     #[test]
@@ -14147,6 +14306,13 @@ mod sandboxed {
             !says(&scene, "The one that is missing"),
             "the missing picture's caption was drawn under the other one"
         );
+        // The row says so, rather than "2 pictures inside" above one
+        // picture with no word about the other.
+        assert!(
+            says(&scene, "1 of 2 pictures could be drawn"),
+            "{}",
+            frame_text(&scene)
+        );
     }
 
     #[test]
@@ -14155,8 +14321,14 @@ mod sandboxed {
         // is not in the plugins directory, so the card offers no Remove for
         // it: a Remove that deleted a directory the plugin was never in would
         // delete nothing and say it had.
+        //
+        // Nor is it something an update could be written over, however far
+        // ahead the registry is: the Store would install a copy into the
+        // plugins directory, and the next build would carry the dev copy
+        // back over it. So neither the count at the foot of the list nor the
+        // card offers one — the card still shows the row in the Store.
         let scratch = Scratch::new("dev");
-        let mut opening = opening(&scratch, Default::default(), Default::default());
+        let mut opening = opening(&scratch, Default::default(), registry_offering("0.2.0"));
         opening.plugins.push(Box::new(
             crate::plugins::wasm::opened(&wasm("eugen/probe", "header.right", 10))
                 .expect("it should open"),
@@ -14169,6 +14341,24 @@ mod sandboxed {
         assert!(says(&scene, "Installed, sandboxed"));
         assert!(!says(&scene, "On this machine"), "{}", frame_text(&scene));
         assert!(!says(&scene, "Remove"), "{}", frame_text(&scene));
+        assert!(!says(&scene, "Update to"), "{}", frame_text(&scene));
+        assert!(
+            !says(&scene, "update in the registry"),
+            "{}",
+            frame_text(&scene)
+        );
+        assert!(says(&scene, "Show in Store"), "{}", frame_text(&scene));
+        assert_eq!(
+            probe_row(&scene),
+            "Probe",
+            "the row ends in the offered version"
+        );
+        harness.workspace.read(&harness.app, |workspace, _| {
+            assert!(
+                workspace.updates().is_empty(),
+                "a dev plugin counts as an update"
+            );
+        });
 
         // And a Remove named by hand from the command line is refused on the
         // card, which has no box for the refusal to sit in but a switch, so
@@ -14194,6 +14384,38 @@ mod sandboxed {
             theme().usage_critical,
             "a refusal is a warning"
         );
+    }
+
+    #[test]
+    fn a_native_plugin_the_registry_lists_is_neither_an_update_nor_offered_one() {
+        // A registry row naming one of Crook's own — a mistake, or a
+        // stranger's index. The binary is updated by the About page's own
+        // sentence: the count skips it and its card has no machine box.
+        let index = crate::plugins::store::index::parse(
+            br#"{"schema": 1, "plugins": [
+             {"id": "crook/window", "name": "Window", "description": "d",
+              "versions": [{"version": "99.0.0", "abi": 8, "url": "https://x.invalid/w.wasm",
+                            "sha256": "aa"}]}]}"#,
+        )
+        .expect("the test index parses");
+        let heard = crate::plugins::store::index::Heard::offered(Some(&index));
+        let scratch = Scratch::new("native-offered");
+        let mut harness = Harness::with_opening(1, opening(&scratch, Default::default(), heard));
+        harness.show_plugins();
+        harness.click_plugin("Window");
+
+        let scene = harness.frame();
+        let text = frame_text(&scene);
+        assert!(says(&scene, "crook/window"), "{text}");
+        assert!(!says(&scene, "Update to"), "{text}");
+        assert!(!says(&scene, "Show in Store"), "{text}");
+        assert!(!says(&scene, "update in the registry"), "{text}");
+        harness.workspace.read(&harness.app, |workspace, _| {
+            assert!(
+                workspace.updates().is_empty(),
+                "a native counts as an update"
+            );
+        });
     }
 
     /// What the registry says about the probe, for a test: one row offering
@@ -14275,19 +14497,39 @@ mod sandboxed {
         assert!(says(&scene, "A newer version is in the registry"), "{text}");
         assert!(says(&scene, "Version 0.1.0"), "{text}");
         assert!(says(&scene, "Update to 0.2.0"), "{text}");
+        // Nothing is allowed yet, so nothing after the update will be marked
+        // new — and the sentence must not promise it. What is true is that
+        // 0.2.0 asks past what 0.1.0 asks, and the list says what.
         assert!(
-            says(&scene, "It asks for more than you have allowed"),
+            says(&scene, "It asks for more than this version does"),
             "{text}"
         );
+        assert!(!says(&scene, "marked new"), "{text}");
         assert!(says(&scene, "Reach example.com"), "{text}");
         assert!(says(&scene, "In the registry"), "{text}");
         assert!(says(&scene, "Show in Store"), "{text}");
         assert!(says(&scene, "On this machine"), "{text}");
+        // The footnote is about the rows that are there: both of them.
+        assert!(says(&scene, "Updating keeps what you allowed"), "{text}");
+        assert!(says(&scene, "Removing takes it off this machine"), "{text}");
         assert!(
             probe_row(&scene).contains("0.2.0"),
             "the row does not end in the version: {:?}",
             probe_row(&scene)
         );
+
+        // Allowed what runs today and no more: the update asks past the
+        // grant, and after it the new line will be marked.
+        harness.workspace_update(|workspace, ctx| {
+            workspace.set_plugin_granted(&probe(), vec![String::from("tabs.read")], ctx);
+        });
+        let scene = harness.frame();
+        let text = frame_text(&scene);
+        assert!(
+            says(&scene, "It asks for more than you have allowed"),
+            "{text}"
+        );
+        assert!(says(&scene, "marked new"), "{text}");
 
         // And once the ask is within the grant, the box says that instead.
         harness.workspace_update(|workspace, ctx| {
@@ -14300,6 +14542,58 @@ mod sandboxed {
         let scene = harness.frame();
         assert!(
             says(&scene, "0.2.0 asks for nothing you have not allowed."),
+            "{}",
+            frame_text(&scene)
+        );
+    }
+
+    #[test]
+    fn an_update_asking_what_the_running_version_asks_is_not_an_escalation() {
+        // The ordinary update: the same capability list as the version that
+        // is running, and nothing allowed yet. The box used to call it "more
+        // than you have allowed", list the asks with open dots, and promise
+        // lines marked new — directly above the permissions box saying the
+        // same list again. It says the one true thing instead, and lists
+        // nothing.
+        let mut heard = registry_offering("0.2.0");
+        let release = heard.offers[0]
+            .release
+            .as_mut()
+            .expect("the probe is offered");
+        release.capabilities = vec![String::from("tabs.read")];
+        release.asks = vec![String::from("See what your tabs are called")];
+        let (_scratch, mut harness) = card_hearing("same-asks", heard, None);
+        let scene = harness.frame();
+        let text = frame_text(&scene);
+
+        assert!(
+            says(&scene, "0.2.0 asks for what this version asks for"),
+            "{text}"
+        );
+        assert!(says(&scene, "none of it is allowed yet"), "{text}");
+        assert!(!says(&scene, "It asks for more"), "{text}");
+        // The ask is on the card once — in the permissions box — not twice.
+        assert_eq!(
+            page_lines(&scene)
+                .iter()
+                .filter(|(_, line)| line.contains("See what your tabs are called"))
+                .count(),
+            1,
+            "{text}"
+        );
+
+        // And a release asking nothing at all says that, in those words.
+        let mut heard = registry_offering("0.3.0");
+        let release = heard.offers[0]
+            .release
+            .as_mut()
+            .expect("the probe is offered");
+        release.capabilities.clear();
+        release.asks.clear();
+        let (_scratch, mut harness) = card_hearing("asks-nothing", heard, None);
+        let scene = harness.frame();
+        assert!(
+            says(&scene, "0.3.0 asks for nothing."),
             "{}",
             frame_text(&scene)
         );
@@ -14354,6 +14648,64 @@ mod sandboxed {
             note.y() < replacement.y(),
             "the note at {note:?} is not over the box it points at, at {replacement:?}"
         );
+    }
+
+    #[test]
+    fn a_version_taken_back_with_nothing_in_its_place_says_so() {
+        // The only version there is was withdrawn. The note over the switch
+        // must not send anybody to a replacement that is not there: the box
+        // under it has Show in Store and Remove, and the note says which.
+        let index = crate::plugins::store::index::parse(
+            br#"{"schema": 1, "plugins": [
+             {"id": "eugen/probe", "name": "Probe", "description": "d",
+              "versions": [{"version": "0.1.0", "abi": 8, "url": "https://x.invalid/p.wasm",
+                            "sha256": "aa", "yanked": "it played the wrong sound"}]}]}"#,
+        )
+        .expect("the test index parses");
+        let heard = crate::plugins::store::index::Heard::offered(Some(&index));
+        let (_scratch, mut harness) =
+            card_hearing("nothing-instead", heard, Some("it played the wrong sound"));
+        let scene = harness.frame();
+        let text = frame_text(&scene);
+
+        assert!(says(&scene, "Withdrawn from the registry"), "{text}");
+        assert!(
+            says(&scene, "Nothing is offered in its place yet"),
+            "{text}"
+        );
+        assert!(!says(&scene, "what the registry offers instead"), "{text}");
+        assert!(!says(&scene, "Install 0.1.0"), "{text}");
+        assert!(!says(&scene, "replacement"), "{text}");
+        assert!(says(&scene, "Show in Store"), "{text}");
+        assert!(says(&scene, "Remove"), "{text}");
+        // A box with Remove and no update has a footnote about removing and
+        // not one about updating.
+        assert!(says(&scene, "Removing takes it off this machine"), "{text}");
+        assert!(!says(&scene, "Updating keeps"), "{text}");
+    }
+
+    #[test]
+    fn a_subject_already_interned_is_found_without_a_scan() {
+        // The Store interns one subject per row on every frame it is showing,
+        // and a registry can list twenty thousand rows: a lookup that scanned
+        // everything ever said would make each of those frames cost the
+        // square of the list — measured at a third of a second per frame in
+        // release. Twenty thousand lookups is a few milliseconds through a
+        // map, and hundreds of them even on a slow machine, which is what
+        // the bound allows.
+        let harness = Harness::new(1);
+        let names: Vec<String> = (0..20_000).map(|n| format!("owner/plugin-{n}")).collect();
+        harness.workspace.read(&harness.app, |workspace, _| {
+            let first: Vec<_> = names.iter().map(|name| workspace.subject(name)).collect();
+            let started = std::time::Instant::now();
+            let again: Vec<_> = names.iter().map(|name| workspace.subject(name)).collect();
+            let took = started.elapsed();
+            assert_eq!(first, again, "the same text is the same subject");
+            assert!(
+                took < std::time::Duration::from_millis(500),
+                "twenty thousand lookups took {took:?}"
+            );
+        });
     }
 
     #[test]
@@ -15199,6 +15551,7 @@ mod sandboxed {
             let text = frame_text(&scene);
             assert!(says(&scene, "A newer version is in the registry"), "{text}");
             assert!(says(&scene, "Update to 0.2.0"), "{text}");
+            assert!(!says(&scene, "The Store is switched off"), "{text}");
             assert!(says(&scene, "1 update in the registry"), "{text}");
             assert!(says(&scene, "Update all"), "{text}");
             assert_eq!(harness.store_downloading(), None);
@@ -15211,6 +15564,21 @@ mod sandboxed {
                 .read(&harness.app, |workspace, _| workspace.heard().clone());
             assert_eq!(heard.busy(&probe()), Some(Busy::Downloading));
             assert!(says(&scene, "Getting it"), "{}", frame_text(&scene));
+            // Remove is dead while the fetch is in flight: a removal that
+            // landed under it would be undone by the download landing.
+            assert_eq!(
+                page_line_color(&scene, "On this machine"),
+                theme().text_muted,
+                "Remove is live under a download: {}",
+                frame_text(&scene)
+            );
+            // And so is this list's own Update all, since everything it
+            // counts is already on its way.
+            harness.click_sidebar_button("Update all");
+            assert!(
+                harness.store_queued().is_empty(),
+                "a dead button queued a second fetch"
+            );
 
             // The Store says the same of the same plugin, and its own
             // update-all is dead while everything is already on its way.
@@ -15220,6 +15588,220 @@ mod sandboxed {
             assert!(says(&scene, "Downloading"), "{text}");
             assert!(says(&scene, "Getting it"), "{text}");
             assert!(says(&scene, "1 update in the registry"), "{text}");
+            harness.click_sidebar_button("Update all");
+            assert!(
+                harness.store_queued().is_empty(),
+                "a dead button queued a second fetch"
+            );
+            assert_eq!(harness.store_downloading(), Some(probe()));
+        }
+
+        #[test]
+        fn the_update_button_on_the_plugins_card_is_the_stores_fetch() {
+            // The one control the page was asked for, pressed where it was
+            // asked for: the card's own Update runs the Store's action about
+            // this plugin, and the Store starts fetching it.
+            let plugins = Scratch::new("plugins-update");
+            let index = Scratch::new("plugins-update-index");
+            install(
+                plugins.path(),
+                "eugen.probe",
+                &wasm("eugen/probe", "header.right", 10),
+            );
+            let cache = listing(&index, "0.2.0", ("", ""));
+            let mut harness = Harness::with_store(
+                1,
+                opening(&plugins, Default::default(), Default::default()),
+                cache,
+            );
+            harness.show_plugins();
+            harness.click_plugin("Probe");
+            assert_eq!(harness.store_downloading(), None);
+
+            harness.click_page_button("Update to 0.2.0");
+            assert_eq!(harness.store_downloading(), Some(probe()));
+            assert!(says(&harness.frame(), "Getting it"));
+        }
+
+        #[test]
+        fn with_the_store_switched_off_the_card_says_so_and_the_list_counts_nothing() {
+            // The card still says the registry is ahead, because that is
+            // true of the plugin; what it cannot do is fetch, and the button
+            // is dead with the reason under the row. The list's foot offers
+            // nothing: a count is worth a line only beside a way to act on
+            // it.
+            let plugins = Scratch::new("store-off");
+            let index = Scratch::new("store-off-index");
+            install(
+                plugins.path(),
+                "eugen.probe",
+                &wasm("eugen/probe", "header.right", 10),
+            );
+            let cache = listing(&index, "0.2.0", ("", ""));
+            let mut opening = opening(&plugins, Default::default(), Default::default());
+            opening.settings.set_plugin_disabled("crook/store", true);
+            let mut harness = Harness::with_store(1, opening, cache);
+            harness.show_plugins();
+            harness.click_plugin("Probe");
+            let scene = harness.frame();
+            let text = frame_text(&scene);
+
+            assert!(says(&scene, "A newer version is in the registry"), "{text}");
+            assert!(says(&scene, "Update to 0.2.0"), "{text}");
+            assert!(
+                says(&scene, "The Store is switched off, and it is what fetches."),
+                "{text}"
+            );
+            assert!(!says(&scene, "update in the registry"), "{text}");
+            assert!(!says(&scene, "Update all"), "{text}");
+            // The Store's row is still a fact about the plugin; the button
+            // to it is as dead as the update.
+            assert!(says(&scene, "Show in Store"), "{text}");
+            assert_eq!(
+                page_line_color(&scene, "In the registry"),
+                theme().text_muted
+            );
+            assert_eq!(page_line_color(&scene, "Version 0.1.0"), theme().text_muted);
+
+            harness.click_page_button("Update to 0.2.0");
+            assert!(
+                harness.store_model().is_none(),
+                "a store switched off has a model"
+            );
+        }
+
+        #[test]
+        fn an_update_lands_is_installed_and_runs_and_the_next_in_the_queue_starts() {
+            // The whole path the feature is for, through the pool: the
+            // fetcher answers with the module the index promised, the
+            // completion lands it, the observer checks, writes and carries
+            // it, the switch is registered again for the new version, the
+            // grant is kept — and the completion is what starts the next
+            // download waiting behind it.
+            let plugins = Scratch::new("store-lands");
+            let index = Scratch::new("store-lands-index");
+            install(
+                plugins.path(),
+                "eugen.probe",
+                &wasm("eugen/probe", "header.right", 10),
+            );
+            let mut other = manifest("eugen/other");
+            other.name = String::from("Other");
+            install(
+                plugins.path(),
+                "eugen.other",
+                &wasm_saying(&other, "header.right", 11),
+            );
+            let newer_probe = wasm_at("eugen/probe", "0.2.0");
+            other.version = String::from("0.2.0");
+            let newer_other = wasm_saying(&other, "header.right", 11);
+            let row = |id: &str, name: &str, module: &[u8]| {
+                format!(
+                    r#"{{"id": "{id}", "name": "{name}", "description": "d",
+                     "versions": [{{"version": "0.2.0", "abi": 8,
+                                   "url": "{}{}-0.2.0.wasm",
+                                   "sha256": "{}", "bytes": {},
+                                   "capabilities": ["tabs.read"],
+                                   "asks": ["See what your tabs are called"]}}]}}"#,
+                    crate::plugins::store::fetch::assets_prefix(),
+                    id.replace('/', "."),
+                    crate::plugins::store::fetch::sha256_hex(module),
+                    module.len()
+                )
+            };
+            let cache = Cache::at(index.path());
+            cache
+                .write(
+                    format!(
+                        r#"{{"schema": 1, "plugins": [{}, {}]}}"#,
+                        row("eugen/probe", "Probe", &newer_probe),
+                        row("eugen/other", "Other", &newer_other)
+                    )
+                    .as_bytes(),
+                    None,
+                )
+                .expect("the test index parses");
+
+            // Answered by URL, and checked the way the real fetch checks
+            // what arrived against what the list promised.
+            let modules: Vec<(String, Vec<u8>)> = vec![
+                (String::from("eugen.probe-0.2.0.wasm"), newer_probe),
+                (String::from("eugen.other-0.2.0.wasm"), newer_other),
+            ];
+            let fetch: crate::plugins::store::model::Fetcher = Arc::new(move |release| {
+                let (_, module) = modules
+                    .iter()
+                    .find(|(name, _)| release.url.ends_with(name.as_str()))
+                    .ok_or_else(|| format!("nothing is served at {}", release.url))?;
+                crate::plugins::store::fetch::checked(module.clone(), release)
+            });
+            let mut opening = opening(&plugins, Default::default(), Default::default());
+            opening
+                .settings
+                .set_granted("eugen/probe", vec![String::from("tabs.read")]);
+            let mut harness = Harness::with_store_fetching(1, opening, cache, fetch);
+            harness.show_plugins();
+            harness.click_plugin("Probe");
+            let scene = harness.frame();
+            assert!(
+                says(&scene, "2 updates in the registry"),
+                "{}",
+                frame_text(&scene)
+            );
+            assert!(says(&scene, "Update to 0.2.0"), "{}", frame_text(&scene));
+
+            harness.click_sidebar_button("Update all");
+            assert!(harness.store_downloading().is_some());
+            assert_eq!(
+                harness.store_queued().len(),
+                1,
+                "one in flight, one waiting"
+            );
+
+            harness.wait_for("both updates to land", |harness| {
+                harness.frame();
+                harness.store_downloading().is_none()
+                    && plugins
+                        .path()
+                        .join("eugen.other/0.2.0/plugin.wasm")
+                        .is_file()
+            });
+            harness.wait_for("the window to draw the new version", |harness| {
+                says(&harness.frame(), "0.2.0")
+            });
+
+            assert!(
+                plugins
+                    .path()
+                    .join("eugen.probe/0.2.0/plugin.wasm")
+                    .is_file()
+            );
+            assert!(harness.store_queued().is_empty());
+            let scene = harness.frame();
+            let text = frame_text(&scene);
+            assert!(says(&scene, "eugen/probe \u{b7} 0.2.0"), "{text}");
+            assert!(!says(&scene, "Update to 0.2.0"), "{text}");
+            assert!(!says(&scene, "update in the registry"), "{text}");
+            assert!(!says(&scene, "updates in the registry"), "{text}");
+            harness.workspace.read(&harness.app, |workspace, _| {
+                assert_eq!(
+                    workspace.settings().granted_to("eugen/probe"),
+                    ["tabs.read"],
+                    "the grant did not survive the update"
+                );
+                assert!(workspace.host().is_loaded(&probe()), "0.2.0 is not running");
+                let toggle =
+                    ActionName::parse("crook/plugins/toggle-eugen-probe").expect("a literal");
+                assert!(
+                    workspace.host().action(&toggle).is_some(),
+                    "the switch was not registered again for the new version"
+                );
+                let other = crook_plugin::PluginId::parse("eugen/other").expect("a literal");
+                assert!(
+                    workspace.host().is_loaded(&other),
+                    "0.2.0 of the other is not running"
+                );
+            });
         }
 
         #[test]
@@ -15448,10 +16030,19 @@ mod sandboxed {
             let scene = harness.frame();
             let text = frame_text(&scene);
             assert!(says(&scene, "1 picture inside"), "{text}");
-            assert!(says(&scene, "Show pictures"), "{text}");
+            assert!(says(&scene, "Show picture"), "{text}");
+            assert!(
+                !says(&scene, "Show pictures"),
+                "one picture, one word: {text}"
+            );
             assert!(!says(&scene, "fetching the plugin itself"), "{text}");
+            assert!(
+                !says(&scene, "the version on this machine"),
+                "the registry offers the version that is running, so its pictures are its \
+                 own: {text}"
+            );
 
-            harness.click_page_button("Show pictures");
+            harness.click_page_button("Show picture");
             assert!(says(&harness.frame(), "Opening"));
             harness.wait_for("the picture to be decoded", |harness| {
                 let scene = harness.frame();
@@ -15479,6 +16070,96 @@ mod sandboxed {
                 frame_text(&scene)
             );
             assert_eq!(harness.store_downloading(), None);
+            // Landed: the button says so and is dead, since a press would
+            // change nothing but spend a decode.
+            assert!(says(&scene, "Shown"), "{}", frame_text(&scene));
+            assert!(!says(&scene, "Show picture"), "{}", frame_text(&scene));
+        }
+
+        #[test]
+        fn the_pictures_of_the_version_here_are_named_when_the_card_offers_another() {
+            // The card offers 0.2.0 and the pictures are 0.1.0's, out of the
+            // module on this machine: somebody deciding on the update is
+            // told which version they are looking at, and how many the
+            // offered one lists. The note under the fetch names the verb
+            // the card's own button uses.
+            let plugins = Scratch::new("store-old-pictures");
+            let index = Scratch::new("store-old-pictures-index");
+            install(
+                plugins.path(),
+                "eugen.probe",
+                &wasm_carrying(
+                    &manifest("eugen/probe"),
+                    "header.right",
+                    10,
+                    &[("crook.preview.1", &preview_png(400, 300))],
+                ),
+            );
+            let cache = listing(
+                &index,
+                "0.2.0",
+                (
+                    "",
+                    r#""previews": [{"width": 640, "height": 128}, {"width": 400, "height": 300}],"#,
+                ),
+            );
+            let mut harness = Harness::with_store(
+                1,
+                opening(&plugins, Default::default(), Default::default()),
+                cache,
+            );
+            harness.show_section(STORE);
+            let scene = harness.frame();
+            let text = frame_text(&scene);
+            assert!(says(&scene, "Update to 0.2.0"), "{text}");
+            assert!(says(&scene, "1 picture inside"), "{text}");
+            assert!(
+                says(
+                    &scene,
+                    "The pictures of 0.1.0, the version on this machine; 0.2.0 lists 2."
+                ),
+                "{text}"
+            );
+        }
+
+        #[test]
+        fn a_list_of_sizes_past_the_rule_is_held_to_it_before_a_room_is_laid_out() {
+            // The index is a mirror, and a mirror somebody else wrote: seven
+            // sizes where a module may carry six, and sizes no picture can
+            // have, are held to the module's own rule before the card lays
+            // out a room for each — or a hostile list is three thousand
+            // rooms a frame for as long as the fetch takes.
+            let plugins = Scratch::new("store-many-sizes");
+            let index = Scratch::new("store-many-sizes-index");
+            let sizes: Vec<String> = std::iter::once(String::from(
+                r#"{"width": 4294967295, "height": 0}, {"width": 0, "height": 4294967295}"#,
+            ))
+            .chain((0..7).map(|_| String::from(r#"{"width": 400, "height": 300}"#)))
+            .collect();
+            let cache = listing(
+                &index,
+                "1.0.0",
+                ("", &format!(r#""previews": [{}],"#, sizes.join(", "))),
+            );
+            let mut harness = Harness::with_store(
+                1,
+                opening(&plugins, Default::default(), Default::default()),
+                cache,
+            );
+            harness.show_section(STORE);
+            let scene = harness.frame();
+            let text = frame_text(&scene);
+            assert!(says(&scene, "6 pictures inside"), "{text}");
+            assert!(says(&scene, "the same file Install fetches"), "{text}");
+
+            harness.click_page_button("Fetch pictures");
+            let waiting = harness.frame();
+            assert_eq!(
+                reserved(&waiting).len(),
+                6,
+                "a room per picture the rule allows: {}",
+                frame_text(&waiting)
+            );
         }
     }
 }

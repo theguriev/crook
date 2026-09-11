@@ -135,8 +135,8 @@ fn the_pictures_a_registry_lists_are_read_and_their_absence_is_not_a_hole() {
     )
     .expect("it should parse");
 
+    assert_eq!(index.plugins[0].icon.as_deref(), Some("aGk="));
     let offered = offers(&index);
-    assert_eq!(offered[0].icon.as_deref(), Some("aGk="));
     assert_eq!(
         offered[0].release.as_ref().unwrap().previews,
         [PreviewSize {
@@ -148,7 +148,14 @@ fn the_pictures_a_registry_lists_are_read_and_their_absence_is_not_a_hole() {
     let without = parse(ONE.as_bytes()).expect("it should parse");
     assert_eq!(without.plugins[0].icon, None);
     assert!(without.plugins[0].versions[0].previews.is_empty());
-    assert_eq!(offers(&without)[0].icon, None);
+    assert!(
+        offers(&without)[0]
+            .release
+            .as_ref()
+            .unwrap()
+            .previews
+            .is_empty()
+    );
 }
 
 /// An offer of `release`, or of nothing, for the tests about what it means.
@@ -159,7 +166,6 @@ fn offered(release: Option<&str>) -> Offer {
         description: String::from("d"),
         repository: String::new(),
         license: String::new(),
-        icon: None,
         release: release.map(|version| Release {
             version: version.to_owned(),
             abi: 8,
