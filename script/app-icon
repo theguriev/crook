@@ -1,0 +1,60 @@
+#!/bin/sh
+#
+# Render the macOS app icon into the .iconset `iconutil` turns into a .icns.
+#
+#   ./script/app-icon
+#
+# Needs rsvg-convert, which is not a build prerequisite and deliberately not in
+# script/bootstrap: this runs when the artwork changes, which is rarely, and
+# its output is committed. A release build reads the PNGs and never this.
+#
+# The ten sizes are the ones `iconutil` insists on, and their names are the
+# ones it matches — @2x is the same pixel count as the next size up, drawn
+# again rather than scaled, because a glyph rasterized at its target size has
+# sharper edges than one resampled into it.
+#
+# assets/icon-macos.svg composes assets/pirate.svg for Apple's grid: a 1024
+# canvas, an 824 rounded rect inset in it, and the face inside that. Other
+# platforms want their own composition rather than this one — Windows has
+# square corners and its own margins — which is why the file says macos.
+
+set -eu
+
+cd "$(dirname "$0")/.."
+
+command -v rsvg-convert >/dev/null 2>&1 || {
+  echo "error: rsvg-convert is needed to render the icon." >&2
+  echo "       Debian: apt-get install librsvg2-bin   Arch: pacman -S librsvg" >&2
+  echo "       macOS:  brew install librsvg" >&2
+  exit 1
+}
+
+SOURCE=assets/icon-macos.svg
+ICONSET=assets/Crook.iconset
+
+[ -f "$SOURCE" ] || { echo "error: no $SOURCE" >&2; exit 1; }
+
+rm -rf "$ICONSET"
+mkdir -p "$ICONSET"
+
+# base:name pairs — the pixel size, and what iconutil calls a file of that size.
+for entry in \
+  16:icon_16x16 \
+  32:icon_16x16@2x \
+  32:icon_32x32 \
+  64:icon_32x32@2x \
+  128:icon_128x128 \
+  256:icon_128x128@2x \
+  256:icon_256x256 \
+  512:icon_256x256@2x \
+  512:icon_512x512 \
+  1024:icon_512x512@2x
+do
+  size=${entry%%:*}
+  name=${entry#*:}
+  rsvg-convert -w "$size" -h "$size" "$SOURCE" -o "$ICONSET/$name.png"
+  printf '%-22s %sx%s\n' "$name.png" "$size" "$size"
+done
+
+echo "==> $ICONSET"
+echo "    script/macos-app turns this into Crook.icns with iconutil."

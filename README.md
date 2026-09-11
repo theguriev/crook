@@ -646,7 +646,9 @@ docs/architecture.md     the design, and the reasoning behind each divergence
 docs/blocks.md           the block surface: what draws it, and what it does not do yet
 docs/plugins.md          the two plugin tiers, and what each of them may do
 docs/images/             the README's screenshots, rendered by `--snapshot`
-script/                  bootstrap, run, bundle, install, publish,
+assets/                  the app icon: pirate.svg, composed for Apple's grid
+                         in icon-macos.svg, rendered into Crook.iconset
+script/                  bootstrap, run, bundle, install, publish, app-icon,
                          and for macOS: macos-keychain, macos-app, notarize, macos-dmg
 ```
 
