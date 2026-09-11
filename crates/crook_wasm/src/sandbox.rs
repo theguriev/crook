@@ -7,6 +7,7 @@ use crook_plugin_api::{ABI_VERSION, Answer, Event, Manifest, Node, Registered, R
 use wasmi::{Caller, Engine, Instance, Linker, Memory, Module, Store, TypedFunc};
 
 use crate::host::Registry;
+use crate::pictures::Pictures;
 use crate::{exports, imports, unpack};
 
 /// How many instructions one call may take.
@@ -195,6 +196,30 @@ impl Sandbox {
     /// wasm is not asked for its ABI version, and one built for another
     /// version is not asked for its manifest.
     pub fn open(wasm: &[u8], fuel: Fuel) -> Result<(Self, Manifest), Problem> {
+        let (sandbox, manifest, _) = Self::instantiated(wasm, fuel)?;
+        Ok((sandbox, manifest))
+    }
+
+    /// [`Sandbox::open`], and the pictures the module carries.
+    ///
+    /// The pictures are read off the parsed module, not out of the running
+    /// one — a custom section is never in the guest's memory — and a picture
+    /// past the rule is the third element's `Err`, with the sentence, rather
+    /// than a [`Problem`]: the plugin opened, its manifest is good, and
+    /// whether a module with a bad icon is refused (a registry) or run
+    /// without it (a host) is the caller's to decide. [`Pictures::read_bytes`]
+    /// is the same read with no instantiation at all.
+    pub fn open_with_pictures(
+        wasm: &[u8],
+        fuel: Fuel,
+    ) -> Result<(Self, Manifest, Result<Pictures, String>), Problem> {
+        let (sandbox, manifest, module) = Self::instantiated(wasm, fuel)?;
+        Ok((sandbox, manifest, Pictures::read(&module)))
+    }
+
+    /// The whole of opening, with the parsed module kept for whoever wants
+    /// what is in it besides code.
+    fn instantiated(wasm: &[u8], fuel: Fuel) -> Result<(Self, Manifest, Module), Problem> {
         let mut config = wasmi::Config::default();
         config.consume_fuel(true);
         let engine = Engine::new(&config);
@@ -272,7 +297,7 @@ impl Sandbox {
             )));
         }
 
-        Ok((sandbox, manifest))
+        Ok((sandbox, manifest, module))
     }
 
     /// Runs the plugin's `build`, and hands back everything it registered.

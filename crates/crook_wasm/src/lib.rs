@@ -60,11 +60,22 @@
 //!
 //! Measured rather than assumed, and asserted in
 //! `a_plugin_may_do_real_work_without_taking_the_host_stack_with_it`.
+//!
+//! # What a module carries besides code
+//!
+//! A plugin's icon and previews are custom sections of the `.wasm`, read off
+//! the parsed module by [`Pictures`] before anything runs and never mapped
+//! into the guest. [`Sandbox::open_with_pictures`] hands them back beside the
+//! manifest; a picture that breaks the rule is a sentence, not a
+//! [`Problem`], because the module still opens and what to do about a plugin
+//! with a bad icon is the caller's policy.
 
 mod host;
+mod pictures;
 mod sandbox;
 
 pub use host::Registry;
+pub use pictures::{Pictures, Preview, is_apng, png_size};
 pub use sandbox::{Fuel, Problem, Sandbox};
 
 /// The names a guest may import, and what each is for.

@@ -6,12 +6,13 @@
 //! ```
 //!
 //! A registry has to describe an artifact it has just built — the id, the
-//! version, the ABI it speaks and what it asks to be allowed to do — and every
-//! one of those is *inside* the module rather than beside it, readable only by
-//! instantiating it and calling two exports. That read is [`crook_wasm`], and
-//! a second implementation of it somewhere else is a second thing to keep in
-//! step with the host that decides whether a plugin loads at all. So the
-//! registry runs the host's own reader, from the crate the host links.
+//! version, the ABI it speaks, what it asks to be allowed to do, and what it
+//! looks like — and every one of those is *inside* the module rather than
+//! beside it, readable only by instantiating it and calling two exports, or
+//! by reading its custom sections. That read is [`crook_wasm`], and a second
+//! implementation of it somewhere else is a second thing to keep in step with
+//! the host that decides whether a plugin loads at all. So the registry runs
+//! the host's own reader, from the crate the host links.
 //!
 //! # What the exit code says
 //!
@@ -21,19 +22,26 @@
 //!   reader does not have, so answering with any of it would be a guess. An
 //!   index built by the reader of one ABI can therefore *notice* an artifact
 //!   for another rather than treating it as broken.
-//! * **1** — not a plugin, or not readable.
+//! * **1** — not a plugin, or not readable, or carrying a picture that breaks
+//!   the rule in [`crook_plugin_api::pictures`]. The module in the last case
+//!   is a plugin a host would run without the picture; a registry is the
+//!   place to refuse it instead, while its author is still looking, and the
+//!   sentence on stderr says which picture and what is wrong with it.
 //!
 //! # The JSON, and why it is written by hand
 //!
-//! Six fields and two lists of strings. A serialiser would be a dependency
-//! this crate does not otherwise have, in a library every plugin host links,
-//! for one printer nothing else needs — and `serde_json` behind a feature is a
-//! target `cargo clippy --all-targets` does not build, which is a binary
-//! nobody's CI compiles.
+//! Six fields, two lists of strings, a list of sizes and, when the module
+//! carries one, its icon as base64 — so that the Store's list of plugins,
+//! which is the index, draws a face on every row without a request per row.
+//! A serialiser would be a dependency this crate does not otherwise have, in
+//! a library every plugin host links, for one printer nothing else needs —
+//! and `serde_json` behind a feature is a target `cargo clippy --all-targets`
+//! does not build, which is a binary nobody's CI compiles. Base64 is a few
+//! lines, for the same reason.
 
 use std::process::ExitCode;
 
-use crook_wasm::{Fuel, Problem, Sandbox};
+use crook_wasm::{Fuel, Pictures, Problem, Sandbox};
 
 fn main() -> ExitCode {
     let mut arguments = std::env::args().skip(1);
@@ -81,11 +89,18 @@ struct Answered {
 
 /// Reads one module.
 fn read(bytes: &[u8]) -> Answered {
-    match Sandbox::open(bytes, Fuel::default()) {
-        Ok((_, manifest)) => Answered {
-            line: Some(described(&manifest)),
+    match Sandbox::open_with_pictures(bytes, Fuel::default()) {
+        Ok((_, manifest, Ok(pictures))) => Answered {
+            line: Some(described(&manifest, &pictures)),
             problem: None,
             code: 0,
+        },
+        // A host would run this plugin and log the sentence; a registry is
+        // where it is refused, because here its author is reading.
+        Ok((_, _, Err(sentence))) => Answered {
+            line: None,
+            problem: Some(format!("carries a picture Crook would drop: {sentence}")),
+            code: 1,
         },
         // Not an error the way the one below is: the artifact is fine and this
         // reader is the wrong one for it. Say which one it wants, on stdout,
@@ -106,8 +121,16 @@ fn read(bytes: &[u8]) -> Answered {
     }
 }
 
-/// One line of JSON describing `manifest`.
-fn described(manifest: &crook_plugin_api::Manifest) -> String {
+/// One line of JSON describing `manifest` and the `pictures` beside it.
+///
+/// The icon goes on the line whole, because the index is what the Store
+/// lists from and a row wants its face with the list; the previews go on it
+/// as sizes only, because they are drawn from the module itself and what the
+/// index needs is room to reserve for them. `icon` is absent rather than
+/// `null` when there is none, so an index built by the reader before this
+/// one and one built by this reader say the same thing about a plugin with
+/// no icon.
+fn described(manifest: &crook_plugin_api::Manifest, pictures: &Pictures) -> String {
     let capabilities: Vec<String> = manifest
         .capabilities
         .iter()
@@ -118,10 +141,25 @@ fn described(manifest: &crook_plugin_api::Manifest) -> String {
         .iter()
         .map(|capability| capability.sentence())
         .collect();
+    let icon = pictures
+        .icon
+        .as_deref()
+        .map(|png| format!(",\"icon\":\"{}\"", base64(png)))
+        .unwrap_or_default();
+    let previews: Vec<String> = pictures
+        .previews
+        .iter()
+        .map(|preview| {
+            format!(
+                "{{\"width\":{},\"height\":{}}}",
+                preview.width, preview.height
+            )
+        })
+        .collect();
 
     format!(
         "{{\"abi\":{},\"id\":{},\"name\":{},\"description\":{},\"version\":{},\
-         \"capabilities\":{},\"asks\":{}}}",
+         \"capabilities\":{},\"asks\":{}{icon},\"previews\":[{}]}}",
         manifest.abi,
         quoted(&manifest.id),
         quoted(&manifest.name),
@@ -129,7 +167,35 @@ fn described(manifest: &crook_plugin_api::Manifest) -> String {
         quoted(&manifest.version),
         listed(&capabilities),
         listed(&asks),
+        previews.join(","),
     )
+}
+
+/// `bytes` as base64, the standard alphabet with padding (RFC 4648 §4).
+///
+/// Written here rather than depended on, for the reason the JSON is: one
+/// encoder for one key, in a crate every plugin host links. The alphabet is
+/// the one every decoder assumes when none is named, and the padding is what
+/// lets a decoder check the length before it reads.
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for group in bytes.chunks(3) {
+        let packed = group.iter().enumerate().fold(0u32, |packed, (at, byte)| {
+            packed | u32::from(*byte) << (16 - 8 * at)
+        });
+        // Four sextets, of which a short final group fills the first two or
+        // three; the rest is padding.
+        for place in 0..4 {
+            if place <= group.len() {
+                let sextet = (packed >> (18 - 6 * place)) & 0x3f;
+                out.push(char::from(ALPHABET[sextet as usize]));
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
 }
 
 /// `text` as a JSON string, escaped.
