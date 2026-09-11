@@ -183,6 +183,36 @@ pub struct AgentSession {
     pub pull_request: Option<String>,
 }
 
+/// Where a session starts when nobody named a directory.
+///
+/// `current_dir` is the honest answer whenever Crook was started from a shell:
+/// a new tab opens where the last one was. It is the wrong answer exactly once,
+/// and on the platform it matters most — a macOS app opened from the Dock, the
+/// Finder or Spotlight is launched by LaunchServices with `/` as its working
+/// directory, and nothing in the process can tell that apart from somebody
+/// having genuinely run `cd /` first.
+///
+/// So `/` becomes the home directory, which is where Terminal.app, iTerm2 and
+/// every other Mac terminal opens. The cost is that `cd / && crook` starts in
+/// `~` instead of `/`; the thing it buys is that a tab in a Dock-launched
+/// Crook no longer says it is working in the root of the disk.
+fn starting_directory() -> Option<PathBuf> {
+    resolve_starting_directory(std::env::current_dir().ok(), std::env::home_dir())
+}
+
+/// The rule itself, with both of its inputs handed in so it can be tested.
+///
+/// A root directory has no parent, which is the whole of the test: `/` on Unix
+/// and `C:\` on Windows both answer `None` there, and neither is a place
+/// somebody meant to start working in.
+fn resolve_starting_directory(here: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+    let here = here?;
+    if here.parent().is_none() {
+        return home.or(Some(here));
+    }
+    Some(here)
+}
+
 impl AgentSession {
     /// A fresh idle session named `title`, working where Crook is.
     pub fn new(title: impl Into<String>) -> Self {
@@ -192,7 +222,7 @@ impl AgentSession {
             custom_title: None,
             status: AgentStatus::default(),
             attention: false,
-            working_directory: std::env::current_dir().ok(),
+            working_directory: starting_directory(),
             pull_request: None,
         }
     }
@@ -1517,5 +1547,46 @@ fn pane_effect(effect: PaneEffect) -> TabEffect {
     match effect {
         PaneEffect::Changed => TabEffect::Changed,
         PaneEffect::Unchanged | PaneEffect::GroupEmptied => TabEffect::Unchanged,
+    }
+}
+
+#[cfg(test)]
+mod starting_directory_tests {
+    use super::*;
+
+    /// The bug: a macOS app opened from the Dock is launched by LaunchServices
+    /// with `/` as its working directory, so every tab recorded the root of
+    /// the disk and said so for the rest of its life.
+    #[test]
+    fn the_root_of_the_disk_is_not_where_anybody_works() {
+        assert_eq!(
+            resolve_starting_directory(
+                Some(PathBuf::from("/")),
+                Some(PathBuf::from("/Users/eugen")),
+            ),
+            Some(PathBuf::from("/Users/eugen")),
+        );
+    }
+
+    /// Started from a shell, which is every launch that is not the Dock: a new
+    /// tab opens where the last one was, and this must not touch that.
+    #[test]
+    fn a_real_directory_is_left_alone() {
+        let here = PathBuf::from("/Users/eugen/work/connectly-frontend");
+        assert_eq!(
+            resolve_starting_directory(Some(here.clone()), Some(PathBuf::from("/Users/eugen"))),
+            Some(here),
+        );
+    }
+
+    /// A machine with no readable home is not a reason to have no directory at
+    /// all; the root is still better than nothing to start a shell in.
+    #[test]
+    fn the_root_survives_when_there_is_no_home() {
+        assert_eq!(
+            resolve_starting_directory(Some(PathBuf::from("/")), None),
+            Some(PathBuf::from("/")),
+        );
+        assert_eq!(resolve_starting_directory(None, None), None);
     }
 }

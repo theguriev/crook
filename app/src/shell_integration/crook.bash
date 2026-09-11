@@ -25,6 +25,11 @@ CROOK_SHELL_INTEGRATION=1
 
 __crook_mark() { builtin printf '\e]133;%s\a' "$1"; }
 
+# Where the shell is, reported the way every terminal reads it: OSC 7. See the
+# zsh integration for why nothing else tells Crook, and why the authority is
+# left empty and only `%` escaped.
+__crook_cwd() { builtin printf '\e]7;file://%s\a' "${PWD//\%/%25}"; }
+
 # Completion, which is the one thing the marks cannot do: they are an
 # announcement, and this is a question with an answer.
 #
@@ -165,6 +170,7 @@ __crook_precmd() {
 	__crook_history=$entered
 	__crook_ran=''
 	__crook_prompted=1
+	__crook_cwd
 	# Hand the status on unchanged. This runs first in PROMPT_COMMAND, and
 	# whatever the user already had there is entitled to the same $? it saw
 	# before Crook inserted itself in front of it.

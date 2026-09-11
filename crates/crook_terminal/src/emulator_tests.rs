@@ -386,6 +386,52 @@ fn test_working_directory_urls_are_parsed() {
     // A URL with no path at all says nothing useful.
     assert_eq!(None, parse_working_directory(b"file://host"));
     assert_eq!(None, parse_working_directory(b""));
+
+    // The exact bytes Crook's own shell integration writes, captured from a
+    // real bash: an empty authority, and `%` in a directory name escaped so it
+    // is not read as the start of an escape. Both halves of the round trip are
+    // in this repository, and this is the seam between them.
+    assert_eq!(
+        Some(PathBuf::from("/tmp")),
+        parse_working_directory(b"file:///tmp")
+    );
+    assert_eq!(
+        Some(PathBuf::from("/Users/eugen/work/connectly-frontend")),
+        parse_working_directory(b"file:///Users/eugen/work/connectly-frontend")
+    );
+    assert_eq!(
+        Some(PathBuf::from("/tmp/weird%dir")),
+        parse_working_directory(b"file:///tmp/weird%25dir")
+    );
+}
+
+/// Every integration reports the directory, and reports it the same way.
+///
+/// The bug this pins: Crook parsed OSC 7 and no shell it set up ever sent one,
+/// so a tab printed the directory it was made in for the rest of its life —
+/// through every `cd`, and from `/` when macOS launched the app from the Dock.
+#[test]
+fn test_every_shell_integration_reports_its_working_directory() {
+    for (shell, snippet) in [
+        (
+            "zsh",
+            include_str!("../../../app/src/shell_integration/crook.zsh"),
+        ),
+        (
+            "bash",
+            include_str!("../../../app/src/shell_integration/crook.bash"),
+        ),
+        (
+            "fish",
+            include_str!("../../../app/src/shell_integration/crook.fish"),
+        ),
+    ] {
+        assert!(
+            snippet.contains("\\e]7;file://"),
+            "the {shell} integration sends no OSC 7, so nothing will ever \
+             correct a tab's directory after a cd"
+        );
+    }
 }
 
 #[test]

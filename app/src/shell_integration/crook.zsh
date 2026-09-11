@@ -22,6 +22,22 @@ CROOK_SHELL_INTEGRATION=1
 
 __crook_mark() { builtin printf '\e]133;%s\a' "$1" }
 
+# Where the shell is, reported the way every terminal reads it: OSC 7.
+#
+# Nothing else tells Crook. A tab records a directory when it is made and would
+# keep printing that one forever — after any `cd`, and after `Crook.app` is
+# opened from the Dock, where macOS hands a GUI process `/` as its working
+# directory and the tab would say so while the shell sat somewhere else.
+#
+# The authority is left empty — `file:///path`, not `file://host/path` —
+# because the host is ignored at the other end and asking for it would mean a
+# `hostname` call on every prompt.
+#
+# Only `%` is escaped. It is the one byte the reader could mistake for the
+# start of an escape it should decode; everything else survives the round trip
+# as itself, spaces included.
+__crook_cwd() { builtin printf '\e]7;file://%s\a' "${PWD//\%/%25}" }
+
 # Completion, which is the one thing the marks cannot do: they are an
 # announcement, and this is a question with an answer.
 #
@@ -131,6 +147,7 @@ __crook_precmd() {
 	fi
 	__crook_ran=''
 	__crook_prompted=1
+	__crook_cwd
 }
 
 # Prepended rather than appended, and filtered first so a second source cannot
