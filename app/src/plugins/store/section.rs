@@ -4,7 +4,9 @@
 //! The same two halves every section of the sidebar has, in the same frames —
 //! a field over a list, and a title over a card — because a plugin that has
 //! not been installed yet is not a different kind of thing from one that has,
-//! and a store that looked like a different application would be one.
+//! and a store that looked like a different application would be one. The
+//! rows are the Plugins list's rows, drawn by the same function: a face in a
+//! box before the name, and one word after it.
 //!
 //! # What a row is allowed to say
 //!
@@ -20,27 +22,32 @@
 //! Opening the section reads the copy on disk and asks the network nothing.
 //! The button at the foot is the request, and its line above says how old the
 //! answer it is showing is — so an offline machine shows last week's list with
-//! "checked 6 days ago" under it rather than an empty page.
+//! "checked 6 days ago" under it rather than an empty page. The one other
+//! button here that fetches is "Fetch pictures", and it says beside itself
+//! that it fetches the plugin: the pictures are inside the module, so seeing
+//! them before installing is downloading the same file Install would.
 
-use std::cmp::Ordering;
 use std::rc::Rc;
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use crookui_core::elements::Paragraph;
 use crookui_core::fonts::FamilyId;
+use crookui_core::image::Bitmap;
 use crookui_core::prelude::*;
 
 use crook_plugin::PluginId;
 
+use crate::plugins::pictures::{Decoded, Preview};
 use crate::theme::theme;
 use crate::workspace::section;
 use crate::workspace::settings_page::search::{Query, Words};
-use crate::workspace::settings_page::widgets::{Mark, Tone};
+use crate::workspace::settings_page::widgets::{Command, Mark, Tone};
 use crate::workspace::settings_page::{named, widgets};
 use crate::workspace::{SettingsAction, TextField, Workspace, WorkspaceAction};
 
-use super::super::wasm::version;
-use super::index::Offer;
+use super::index::{Busy, Change, Offer, change};
+use super::model::Icons;
 use super::state::StoreState;
 use super::{FIELD, SECTION, action};
 
@@ -68,7 +75,25 @@ struct Known {
     problem: Option<(Option<PluginId>, String)>,
     /// The same for what went right.
     said: Option<(Option<PluginId>, String)>,
-    downloading: Option<PluginId>,
+    /// Which plugins are being fetched, and which are waiting their turn.
+    busy: Vec<(PluginId, Busy)>,
+    /// The faces the list carries, as far as they have been decoded.
+    icons: Icons,
+    /// Which plugin's module is being looked inside, if any.
+    looking_inside: Option<PluginId>,
+    /// The last module somebody looked inside, and what was in it.
+    looked_inside: Option<Looked>,
+}
+
+/// The pictures out of one module, as the card draws them.
+struct Looked {
+    /// Whose they are.
+    plugin: PluginId,
+    /// Whether the module was fetched to get them — in which case its bytes
+    /// are held and Install needs no second download.
+    fetched: bool,
+    /// The pictures, each at the size it was captured at.
+    pictures: Decoded,
 }
 
 impl Known {
@@ -95,6 +120,22 @@ impl Known {
             (None, Some((None, said))) => Some((said.as_str(), false)),
             _ => None,
         }
+    }
+
+    /// What the store is doing about `plugin`, if anything.
+    fn busy(&self, plugin: &PluginId) -> Option<Busy> {
+        self.busy
+            .iter()
+            .find(|(busy, _)| busy == plugin)
+            .map(|(_, what)| *what)
+    }
+
+    /// The pictures out of `plugin`'s module, if that is the module somebody
+    /// last looked inside.
+    fn looked(&self, plugin: &PluginId) -> Option<&Looked> {
+        self.looked_inside
+            .as_ref()
+            .filter(|looked| looked.plugin == *plugin)
     }
 }
 
@@ -148,12 +189,19 @@ pub(super) fn render(
         said: model
             .said()
             .map(|(about, said)| (about.cloned(), said.to_owned())),
-        downloading: model.downloading().cloned(),
+        busy: model.heard().busy,
+        icons: model.icons().clone(),
+        looking_inside: model.looking_inside().cloned(),
+        looked_inside: model.looked_inside().map(|looked| Looked {
+            plugin: looked.plugin.clone(),
+            fetched: !looked.bytes.is_empty(),
+            pictures: looked.pictures.clone(),
+        }),
     });
 
     let matching = matching(workspace, &known.offers);
     let selected = state.showing(&matching);
-    let list = list(workspace, state, &known, &matching, selected.as_ref(), ui);
+    let list = list(workspace, &known, &matching, selected.as_ref(), ui);
 
     let Some(showing) = selected
         .as_ref()
@@ -174,11 +222,18 @@ pub(super) fn render(
         );
     };
 
+    // The face beside the name, for a plugin that has one. Nothing for one
+    // that does not, for the reason the Plugins page draws nothing: a title
+    // indented past an empty box would be a title saying a picture was
+    // missing.
+    let mark = icon(workspace, &known, &showing.id)
+        .map(|icon| widgets::picture_box(Some(icon), widgets::TITLE_MARK));
+
     (
         list,
         section::content(
             &showing.name,
-            None,
+            mark,
             card(workspace, &known, showing, ui),
             workspace.settings_page().scroll_named(CARD_SCROLL),
             ui,
@@ -186,10 +241,29 @@ pub(super) fn render(
     )
 }
 
+/// The face the list has for `plugin`, or the one inside the module already
+/// on this machine.
+///
+/// The list's first: it is the face of the version the registry offers,
+/// which is what a store is showing. The installed module's is the answer
+/// for a plugin the registry lists with no face yet — a version published
+/// before there were pictures — running from a build that has one.
+fn icon<'a>(
+    workspace: &'a Workspace,
+    known: &'a Known,
+    plugin: &PluginId,
+) -> Option<&'a Arc<Bitmap>> {
+    known.icons.get(plugin.as_str()).or_else(|| {
+        workspace
+            .host()
+            .pictures_of(plugin)
+            .and_then(|pictures| pictures.icon.as_ref())
+    })
+}
+
 /// The sidebar half.
 fn list(
     workspace: &Workspace,
-    state: &Rc<StoreState>,
     known: &Known,
     matching: &[Offer],
     selected: Option<&PluginId>,
@@ -226,7 +300,7 @@ fn list(
         for offer in matching {
             rows.add_child(row(
                 workspace,
-                state,
+                known,
                 offer,
                 selected == Some(&offer.id),
                 ui,
@@ -243,78 +317,53 @@ fn list(
     )
 }
 
-/// One row: what it is called, and one word about where it stands.
+/// One row: its face, what it is called, and one word about where it stands.
 ///
-/// Its own rather than [`section::row`], because a row here has a second thing
-/// to say and because what a press does is *choose*, which is not a named
-/// action: there is one action per plugin on the Plugins page because the set
-/// is known when that page loads, and the set here arrives over a network. A
-/// selection is not a command either way — a palette row that silently changed
-/// what a card is about would be a palette row nobody could see the effect of.
+/// [`section::row`]'s, which is the Plugins list's row, so the two lists are
+/// one list to the eye. A press is the store's own `show` action run about
+/// this plugin — the same gesture "Show in Store" on the plugin's card makes
+/// — so choosing a row and being sent to it are one path.
 fn row(
     workspace: &Workspace,
-    state: &Rc<StoreState>,
+    known: &Known,
     offer: &Offer,
     selected: bool,
     ui: FamilyId,
 ) -> Box<dyn Element> {
-    let mouse = workspace
+    let state = workspace
         .settings_page()
         .control(named(&format!("store.row.{}", offer.id)));
-    let label = offer.name.clone();
-    let standing = standing(workspace, offer);
-    let installed = installed_version(workspace, &offer.id).is_some();
+    let installed = installed_version(workspace, &offer.id);
+    let command = workspace
+        .host()
+        .action(&action("show"))
+        .map(|show| WorkspaceAction::RunAbout(show, workspace.subject(offer.id.as_str())));
 
-    let state = state.clone();
-    let key = offer.id.to_string();
-    Hoverable::new(mouse, move |mouse| {
-        let background = if selected {
-            theme().overlay_3
-        } else if mouse.is_hovered() {
-            theme().overlay_1
-        } else {
-            Color::TRANSPARENT
-        };
-
-        let line = Flex::row()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            // The name takes what is left rather than what it wants: a
-            // registry is a list of names strangers chose, and one long enough
-            // would otherwise push the word after it off the row and out of
-            // the panel.
-            .with_child(
-                Expanded::new(
-                    1.,
-                    Text::new(label.clone(), ui, widgets::LABEL_SIZE)
-                        .with_color(if installed {
-                            theme().text_primary
-                        } else {
-                            theme().text_muted
-                        })
-                        .finish(),
-                )
-                .finish(),
-            )
-            .with_child(
-                Text::new(standing.clone(), ui, widgets::DESCRIPTION_SIZE)
-                    .with_color(theme().text_muted)
-                    .finish(),
-            )
-            .finish();
-
-        Container::new(line)
-            .with_padding(section::ROW_PADDING)
-            .with_background_color(background)
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(section::ROW_RADIUS)))
-            .with_margin_bottom(section::ROW_GAP)
-            .finish()
-    })
-    .on_click(move |_, ctx, _| {
-        state.select(&key);
-        ctx.notify();
-    })
-    .finish()
+    section::row(
+        section::Row {
+            label: offer.name.clone(),
+            leading: Some(widgets::picture_box(
+                icon(workspace, known, &offer.id),
+                widgets::ROW_ICON,
+            )),
+            trailing: standing(
+                offer,
+                installed.as_deref(),
+                workspace.withdrawn(&offer.id).is_some(),
+            ),
+            selected,
+            // Lit for what is on this machine, whatever the pointer is doing,
+            // for the reason the Plugins list lights what is running: the
+            // list is scanned for what one already has.
+            emphasis: match installed.is_some() {
+                true => section::Emphasis::Lit,
+                false => section::Emphasis::Dim,
+            },
+            state,
+            command,
+        },
+        ui,
+    )
 }
 
 /// The card: everything worth reading before pressing Install.
@@ -325,6 +374,13 @@ fn card(workspace: &Workspace, known: &Known, offer: &Offer, ui: FamilyId) -> Bo
         .with_child(facts(workspace, offer, ui))
         .with_child(widgets::description(&offer.description, ui))
         .with_child(decision(workspace, known, offer, ui));
+
+    // Between the decision and where it comes from: what it looks like is
+    // the next thing a person deciding wants, and the one that was on the
+    // plugin's own card a moment ago if they came from there.
+    if let Some(category) = looks(workspace, known, offer, ui) {
+        column.add_child(category);
+    }
 
     if !offer.repository.is_empty() {
         column.add_child(headed(
@@ -370,25 +426,30 @@ fn facts(workspace: &Workspace, offer: &Offer, ui: FamilyId) -> Box<dyn Element>
 /// reach Install without their eye crossing the list, and the hollow dots are
 /// the ones they will meet again on the plugin's card once it has arrived.
 fn decision(workspace: &Workspace, known: &Known, offer: &Offer, ui: FamilyId) -> Box<dyn Element> {
-    let busy = known.downloading.as_ref() == Some(&offer.id);
     let installed = installed_version(workspace, &offer.id);
-    let (label, live): (String, bool) = match (&offer.release, &installed) {
-        _ if busy => (String::from("Getting it\u{2026}"), false),
-        (None, _) => (String::from("Not for this build"), false),
-        (Some(release), Some(installed)) if *installed == release.version => {
-            (String::from("Installed"), false)
-        }
-        (Some(release), Some(_)) => (format!("Update to {}", release.version), true),
-        (Some(_), None) => (String::from("Install"), true),
-    };
+    let decided = decided(
+        offer,
+        installed.as_deref(),
+        workspace.withdrawn(&offer.id),
+        known.busy(&offer.id),
+    );
 
-    let command = match live {
-        true => workspace
+    // Install is about whatever the card is about, resolved the way the
+    // card was; an update is about this plugin by name, which is the same
+    // action the plugin's own card runs. Either way the press names what it
+    // fetches.
+    let command: Command = match decided.press {
+        Press::Nothing => None,
+        Press::Install => workspace
             .host()
             .action(&action("install"))
             .map(WorkspaceAction::Run),
-        false => None,
+        Press::Update => workspace
+            .host()
+            .action(&action("update"))
+            .map(|update| WorkspaceAction::RunAbout(update, workspace.subject(offer.id.as_str()))),
     };
+    let live = command.is_some();
 
     // What the plugin will ask for, above the button that fetches it. Nothing
     // at all for a plugin this build cannot run: there is no release to read
@@ -415,10 +476,10 @@ fn decision(workspace: &Workspace, known: &Known, offer: &Offer, ui: FamilyId) -
     };
 
     let mut foot = vec![widgets::answer_row(
-        standing_label(offer, installed.as_deref(), busy),
+        decided.label,
         live,
         widgets::text_button(
-            label,
+            decided.button,
             command,
             workspace
                 .settings_page()
@@ -430,8 +491,10 @@ fn decision(workspace: &Workspace, known: &Known, offer: &Offer, ui: FamilyId) -
 
     // Under the install rather than in a box of its own: it is the same
     // decision, answered the other way, and a person looking for it is
-    // looking at this box.
-    if installed.is_some() {
+    // looking at this box. Asked of the directory rather than of the
+    // version above, as the plugin's own card asks: a module running from
+    // where it was built is not one a Remove could take off the machine.
+    if workspace.is_installed(&offer.id) {
         foot.push(widgets::answer_row(
             "On this machine",
             true,
@@ -495,6 +558,238 @@ fn decision(workspace: &Workspace, known: &Known, offer: &Offer, ui: FamilyId) -
         .finish()
 }
 
+/// What pressing the card's one button does.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Press {
+    /// Nothing: the button is drawn dead, and its label says why.
+    Nothing,
+    /// Fetches whatever the card is about, for a plugin not on this machine.
+    Install,
+    /// Fetches the release offered in place of the version on this machine —
+    /// newer, or the replacement for one taken back.
+    Update,
+}
+
+/// The one button on the card, and the label beside it.
+#[derive(Debug, PartialEq, Eq)]
+struct Decided {
+    /// What the row says, which is where the plugin stands.
+    label: String,
+    /// What the button says.
+    button: String,
+    /// What pressing it does.
+    press: Press,
+}
+
+/// What the card's button and its label come to, for `offer` on a machine
+/// holding `installed` — withdrawn for `withdrawn`, if it was — while the
+/// store is `busy` about it.
+///
+/// Every answer goes through [`change`], which is what keeps the button and
+/// the label from disagreeing: a person on a withdrawn 0.10.0 offered 0.9.0
+/// is offered a replacement and not an update, and a registry that is
+/// merely behind offers nothing.
+fn decided(
+    offer: &Offer,
+    installed: Option<&str>,
+    withdrawn: Option<&str>,
+    busy: Option<Busy>,
+) -> Decided {
+    let (label, button, press) = match busy {
+        Some(Busy::Downloading) => (
+            String::from("Downloading"),
+            String::from("Getting it\u{2026}"),
+            Press::Nothing,
+        ),
+        Some(Busy::Waiting) => (
+            String::from("Waiting"),
+            String::from("Waiting\u{2026}"),
+            Press::Nothing,
+        ),
+        None => match change(offer, installed, withdrawn.is_some()) {
+            Change::Nothing => (
+                match (&offer.withdrawn, &offer.newest_anywhere) {
+                    (Some(why), _) => format!("Taken back: {why}"),
+                    (None, Some(newest)) => format!("Built for plugin API {}", newest.abi),
+                    (None, None) => String::from("Nothing built yet"),
+                },
+                String::from("Not for this build"),
+                Press::Nothing,
+            ),
+            Change::Install(release) => (
+                format!("Version {}", release.version),
+                String::from("Install"),
+                Press::Install,
+            ),
+            Change::Update(release) => (
+                format!(
+                    "{} installed, {} out",
+                    installed.unwrap_or_default(),
+                    release.version
+                ),
+                format!("Update to {}", release.version),
+                Press::Update,
+            ),
+            Change::Replace(release) => (
+                format!("Taken back: {}", withdrawn.unwrap_or_default()),
+                format!("Install {}", release.version),
+                Press::Update,
+            ),
+            Change::Current => (
+                format!("Version {}", installed.unwrap_or_default()),
+                String::from("Installed"),
+                Press::Nothing,
+            ),
+        },
+    };
+    Decided {
+        label,
+        button,
+        press,
+    }
+}
+
+/// The word a row ends in, or nothing for a plugin that is simply there to
+/// be installed.
+fn standing(offer: &Offer, installed: Option<&str>, withdrawn: bool) -> Option<String> {
+    match change(offer, installed, withdrawn) {
+        Change::Nothing => Some(String::from("newer Crook")),
+        Change::Current => Some(String::from("installed")),
+        Change::Update(release) | Change::Replace(release) => Some(release.version),
+        Change::Install(_) => None,
+    }
+}
+
+/// What it looks like: the previews inside the module, opened by a press —
+/// and fetched by one, for a plugin not on this machine.
+///
+/// Absent when neither the offered release nor the module already here
+/// carries any. The row says how many there are; the button says "Show" when
+/// the pictures are on this machine — in the installed module, or in the
+/// bytes a previous look fetched — and "Fetch" when seeing them means
+/// fetching the plugin, with the note under it saying exactly that, and how
+/// much. While the pictures are on their way the button is dead and the room
+/// each will take is drawn in the box fill, at the size the index or the
+/// module said, so nothing under them moves when they land.
+fn looks(
+    workspace: &Workspace,
+    known: &Known,
+    offer: &Offer,
+    ui: FamilyId,
+) -> Option<Box<dyn Element>> {
+    let carried: Option<&[Preview]> = workspace
+        .host()
+        .pictures_of(&offer.id)
+        .filter(|pictures| pictures.count() > 0)
+        .map(|pictures| pictures.previews.as_slice());
+    let sizes: Vec<(u32, u32, Option<&str>)> = match carried {
+        Some(previews) => previews
+            .iter()
+            .map(|preview| (preview.width, preview.height, preview.caption.as_deref()))
+            .collect(),
+        None => offer
+            .release
+            .iter()
+            .flat_map(|release| release.previews.iter())
+            .map(|size| (size.width, size.height, None))
+            .collect(),
+    };
+    if sizes.is_empty() {
+        return None;
+    }
+
+    let looked = known.looked(&offer.id);
+    let held = carried.is_some() || looked.is_some_and(|looked| looked.fetched);
+    let opening = known.looking_inside.as_ref() == Some(&offer.id);
+    let label = match sizes.len() {
+        1 => String::from("1 picture inside"),
+        count => format!("{count} pictures inside"),
+    };
+    let (button, command): (&str, Command) = match (opening, held) {
+        (true, true) => ("Opening\u{2026}", None),
+        (true, false) => ("Fetching\u{2026}", None),
+        (false, true) => ("Show pictures", look_inside(workspace, &offer.id)),
+        (false, false) => ("Fetch pictures", look_inside(workspace, &offer.id)),
+    };
+    let live = command.is_some();
+    let control = widgets::text_button(
+        button,
+        command,
+        workspace
+            .settings_page()
+            .control(named(&format!("store.pictures.{}", offer.id))),
+        ui,
+    );
+
+    let mut rows = vec![
+        widgets::row(
+            Words::new(label).with_keywords(&["picture", "preview", "screenshot"]),
+            live,
+            control,
+            ui,
+        )
+        .element,
+    ];
+
+    // Said before the press and not after: this is the one button in the
+    // store that downloads something without installing it, and what it
+    // costs — the plugin itself — is the thing to know before pressing.
+    if !held {
+        let size = offer
+            .release
+            .as_ref()
+            .map(|release| release.bytes)
+            .filter(|bytes| *bytes > 0)
+            .map(|bytes| format!("{} KB, ", (bytes / 1000).max(1)))
+            .unwrap_or_default();
+        rows.push(
+            widgets::note(
+                &format!(
+                    "Seeing them is fetching the plugin itself \u{2014} {size}the same file \
+                     Install fetches \u{2014} and nothing about you goes with it. Install \
+                     afterwards needs no second download."
+                ),
+                ui,
+            )
+            .element,
+        );
+    }
+
+    // Each picture at the size it was captured at, halved and held to the
+    // card — from the header the module or the index carried, never from
+    // the pixels held now, which were kept to a thousand a side.
+    match looked {
+        Some(looked) => rows.extend(looked.pictures.iter().map(|picture| {
+            widgets::preview(
+                Some(&picture.bitmap),
+                widgets::preview_size(picture.width, picture.height),
+                picture.caption.as_deref(),
+                ui,
+            )
+        })),
+        None if opening => rows.extend(sizes.iter().map(|(width, height, caption)| {
+            widgets::preview(None, widgets::preview_size(*width, *height), *caption, ui)
+        })),
+        None => {}
+    }
+
+    Some(widgets::category_element(
+        "What it looks like",
+        false,
+        rows,
+        ui,
+    ))
+}
+
+/// The store's `look-inside`, run about `plugin` — or `None` while nothing
+/// answers to the name.
+fn look_inside(workspace: &Workspace, plugin: &PluginId) -> Command {
+    workspace
+        .host()
+        .action(&action("look-inside"))
+        .map(|look| WorkspaceAction::RunAbout(look, workspace.subject(plugin.as_str())))
+}
+
 /// A heading with lines under it, in the settings' own shape.
 fn headed(title: &str, rows: Vec<widgets::Entry>, ui: FamilyId) -> Box<dyn Element> {
     widgets::category_element(
@@ -505,7 +800,9 @@ fn headed(title: &str, rows: Vec<widgets::Entry>, ui: FamilyId) -> Box<dyn Eleme
     )
 }
 
-/// The foot of the list: the one request this application makes of its own.
+/// The foot of the list: the one request this application makes of its own —
+/// and, when the registry is ahead of something installed, the one that
+/// takes every update at once.
 fn footer(workspace: &Workspace, known: &Known, ui: FamilyId) -> Box<dyn Element> {
     let label = match known.looking {
         true => "Looking\u{2026}",
@@ -528,7 +825,7 @@ fn footer(workspace: &Workspace, known: &Known, ui: FamilyId) -> Box<dyn Element
         None => (age(known), theme().text_muted),
     };
 
-    Flex::column()
+    let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
         .with_child(
@@ -546,8 +843,32 @@ fn footer(workspace: &Workspace, known: &Known, ui: FamilyId) -> Box<dyn Element
             command,
             workspace.settings_page().control(named("store.look")),
             ui,
-        ))
-        .finish()
+        ));
+
+    // Under the look, because it is what a look is for: the count is of
+    // installed plugins the list is ahead of, and the button takes them one
+    // module at a time. Dead while every one of them is already on its way.
+    let updates = workspace.updates();
+    if !updates.is_empty() {
+        let waiting = updates
+            .iter()
+            .all(|(plugin, _)| known.busy(plugin).is_some());
+        let command = match waiting {
+            true => None,
+            false => workspace
+                .host()
+                .action(&action("update-all"))
+                .map(WorkspaceAction::Run),
+        };
+        column.add_child(widgets::update_all_footer(
+            updates.len(),
+            command,
+            workspace.settings_page().control(named("store.update-all")),
+            ui,
+        ));
+    }
+
+    column.finish()
 }
 
 /// The card drawn when the list has nothing in it.
@@ -620,40 +941,6 @@ pub(super) fn ago(seconds: u64) -> String {
     match count {
         1 => format!("1 {unit} ago"),
         count => format!("{count} {unit}s ago"),
-    }
-}
-
-/// The word a row ends in.
-fn standing(workspace: &Workspace, offer: &Offer) -> String {
-    let installed = installed_version(workspace, &offer.id);
-    match (&offer.release, installed) {
-        (None, _) => String::from("newer Crook"),
-        (Some(release), Some(installed)) if installed == release.version => {
-            String::from("installed")
-        }
-        (Some(release), Some(_)) => release.version.clone(),
-        (Some(_), None) => String::new(),
-    }
-}
-
-/// The label beside the button, which says what the button answers.
-fn standing_label(offer: &Offer, installed: Option<&str>, busy: bool) -> String {
-    if busy {
-        return String::from("Downloading");
-    }
-    if let Some(why) = &offer.withdrawn {
-        return format!("Taken back: {why}");
-    }
-    match (&offer.release, installed) {
-        (None, _) => match &offer.newest_anywhere {
-            Some(newest) => format!("Built for plugin API {}", newest.abi),
-            None => String::from("Nothing built yet"),
-        },
-        (Some(release), Some(installed)) => match version::compare(&release.version, installed) {
-            Ordering::Greater => format!("{installed} installed, {} out", release.version),
-            _ => format!("Version {installed}"),
-        },
-        (Some(release), None) => format!("Version {}", release.version),
     }
 }
 

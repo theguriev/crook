@@ -15,7 +15,10 @@ use super::index::Offer;
 use super::model::StoreModel;
 
 /// The section's own state.
-pub(super) struct StoreState {
+///
+/// Visible to the crate for one reason: a test that opened a window with a
+/// store of its own needs the model to read what the store is doing.
+pub(crate) struct StoreState {
     /// Which row the card is about, by `owner/name`.
     ///
     /// A key rather than an index, for the reason the Plugins page keeps one:
@@ -45,7 +48,7 @@ impl StoreState {
     }
 
     /// The model, for whoever has a context to read or update it with.
-    pub(super) fn model(&self) -> Option<ModelHandle<StoreModel>> {
+    pub(crate) fn model(&self) -> Option<ModelHandle<StoreModel>> {
         self.model.borrow().clone()
     }
 

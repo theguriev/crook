@@ -75,6 +75,59 @@ fn a_version_with_no_size_in_the_index_is_checked_by_its_hash_alone() {
 }
 
 #[test]
+fn an_artifact_is_fetched_from_beside_the_index_and_from_nowhere_else() {
+    // A poisoned index could otherwise send a download to any host on the
+    // internet, and the request would tell that host which plugin somebody
+    // wanted. The rule is on the URL the index gave, and it is the directory
+    // the index itself is in — which is where the registry has always
+    // written every artifact.
+    let prefix = assets_prefix();
+    assert_eq!(
+        prefix,
+        "https://github.com/theguriev/crook-plugins/releases/download/index/"
+    );
+
+    from_the_registry(&format!("{prefix}theguriev.pirate-0.3.0.wasm")).expect("beside the index");
+
+    for elsewhere in [
+        String::from("https://example.com/theguriev.pirate-0.3.0.wasm"),
+        format!("{prefix}nested/pirate.wasm"),
+        format!("{prefix}pirate.wasm?token=abc"),
+        format!("{prefix}pirate.wasm#fragment"),
+        prefix.replacen("https://", "http://", 1) + "pirate.wasm",
+        prefix.to_owned(),
+    ] {
+        let refusal = from_the_registry(&elsewhere).expect_err(&elsewhere);
+        assert!(refusal.contains("not the registry"), "{refusal}");
+    }
+
+    // And the module fetch is where the rule is applied, before any request
+    // is made: a release pointing elsewhere is refused with no socket opened.
+    let mut release = release();
+    release.url = String::from("https://example.com/p.wasm");
+    let refusal = module(&agent(), &release).expect_err("a URL off the registry");
+    assert!(refusal.contains("not the registry"), "{refusal}");
+}
+
+#[test]
+fn the_agent_follows_few_redirects_and_names_no_version() {
+    // Three redirects: one is what a GitHub release asset costs, and ten is a
+    // request that can be walked across ten hosts. And a bare name, because
+    // the library's default would send its own version with every request —
+    // which the README promises nothing here does.
+    let agent = agent();
+    let config = agent.config();
+
+    assert_eq!(config.max_redirects(), 3);
+    assert!(
+        matches!(config.user_agent(), ureq::config::AutoHeaderValue::Provided(name) if name.as_str() == "crook"),
+        "{:?}",
+        config.user_agent()
+    );
+    assert!(config.https_only());
+}
+
+#[test]
 #[ignore = "reaches the real registry over the network"]
 fn the_registry_answers_with_a_list_this_build_can_read() {
     // Run with `cargo test -p crook -- --ignored the_registry`. Not part of

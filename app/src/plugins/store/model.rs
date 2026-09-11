@@ -1,9 +1,10 @@
-//! What the store knows, and the two things it does off the drawing thread.
+//! What the store knows, and the slow things it does off the drawing thread.
 //!
-//! A model rather than a field on the plugin, because both of the things it
-//! does — reading an index over the network, and downloading a module — are
-//! blocking work that must not happen inside `render`, and because what
-//! arrives has to be able to repaint the window when it lands.
+//! A model rather than a field on the plugin, because everything it does —
+//! reading an index over the network, downloading a module, decoding the
+//! pictures in one — is blocking work that must not happen inside `render`,
+//! and because what arrives has to be able to repaint the window when it
+//! lands.
 //!
 //! # Nothing here starts by itself
 //!
@@ -16,7 +17,10 @@
 //!
 //! What it does do at startup is read the copy already on disk, which is a few
 //! kilobytes and no network at all — so the list is there, with its age
-//! written on it, on a machine that has never been online since.
+//! written on it, on a machine that has never been online since. The icons in
+//! that copy are decoded on the pool, not here: a model is made while the
+//! window is being built, and forty PNGs on the foreground would be forty
+//! PNGs between a person and their first frame.
 //!
 //! # A download lands here and is installed by somebody else
 //!
@@ -26,17 +30,64 @@
 //! the section's observer drains it, exactly as a sandboxed plugin's requests
 //! are drained by the observer in `plugins::wasm`.
 //!
+//! # One at a time, and the rest wait
+//!
+//! Downloads are one fetch at a time — two at once would be two workers held
+//! on a pool sized for the chains that park on it, for no gain a person could
+//! see — and a second press queues behind the first rather than being refused
+//! with a sentence: "update all" is that queue, drained one module at a time
+//! by each completion starting the next. A queued update is still one task
+//! at a time, which is what keeps the store off the list of chains that park
+//! a worker.
+//!
 //! [`landed`]: StoreModel::landed
 
+use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 use std::time::SystemTime;
 
+use base64::Engine as _;
+use crookui_core::image::Bitmap;
 use crookui_core::prelude::*;
 
 use crook_plugin::PluginId;
 
+use crate::picture::{self, Limits};
+use crate::plugins::pictures::{Decoded, Pictures, Preview};
+
 use super::cache::Cache;
 use super::fetch::{self, Fetched};
-use super::index::{Index, Offer, Release, offers};
+use super::index::{Busy, Heard, Index, Offer, Release, offers};
+
+/// How a module's bytes are got, checked against the release that named them.
+///
+/// A function rather than a call, so that a test can answer with a module it
+/// assembled and never opens a socket. The one the application uses is
+/// [`fetch::module`] — the origin rule, the size ceiling and the hash check
+/// are inside it — and every download and every look inside a module goes
+/// through whichever this is.
+pub type Fetcher = Arc<dyn Fn(&Release) -> Result<Vec<u8>, String> + Send + Sync>;
+
+/// The icons the list carries, decoded, by `owner/name`.
+pub type Icons = BTreeMap<String, Arc<Bitmap>>;
+
+/// A module somebody looked inside: its pictures, and the bytes they came in.
+///
+/// The bytes are kept because they are the module Install would fetch: a
+/// person who looked at the pictures and then pressed Install has already
+/// downloaded it, and a second GET for the same hash would be the store
+/// spending their bandwidth to prove a point. Empty when the pictures came
+/// out of the module already on this machine, which needed no fetch.
+pub struct LookedInside {
+    /// Which plugin's module this is.
+    pub plugin: PluginId,
+    /// What the index said the module hashes to, which is what was checked.
+    pub sha256: String,
+    /// The module as it arrived, or nothing when it was not fetched.
+    pub bytes: Vec<u8>,
+    /// Its previews, decoded, each at the size it was captured at.
+    pub pictures: Decoded,
+}
 
 /// Everything this machine knows about the registry.
 pub struct StoreModel {
@@ -53,8 +104,12 @@ pub struct StoreModel {
     ///
     /// One at a time: two downloads at once would be two workers held on a
     /// pool sized for the chains that park on it, for no gain a person could
-    /// see — the second press is a second later.
+    /// see. What is asked for while this is busy goes into
+    /// [`pending`](Self::pending).
     downloading: Option<PluginId>,
+    /// The downloads waiting for the one in flight, in the order they were
+    /// asked for.
+    pending: VecDeque<(PluginId, Release)>,
     /// What went wrong last, and which plugin it was about.
     ///
     /// The id is what keeps a sentence attached to the row it is about: a
@@ -68,6 +123,16 @@ pub struct StoreModel {
     /// What the last install or removal came to, and which plugin it was
     /// about. See [`problem`](Self::problem).
     said: Option<(Option<PluginId>, String)>,
+    /// The icons the list carries, decoded on the pool and landed here.
+    icons: Icons,
+    /// Which plugin's module is being looked inside, if any.
+    looking_inside: Option<PluginId>,
+    /// The last module somebody looked inside. One at a time: a card of six
+    /// previews is megabytes of pixels, and the card that is showing is the
+    /// one they were asked for.
+    looked_inside: Option<LookedInside>,
+    /// How a module's bytes are got.
+    fetch: Fetcher,
 }
 
 impl Entity for StoreModel {
@@ -79,7 +144,8 @@ impl StoreModel {
     ///
     /// The cache is handed in rather than found here, so that a test can hand
     /// it a directory of its own — a model that read the person's real one
-    /// would be a test whose answer depends on what they installed.
+    /// would be a test whose answer depends on what they installed. Nothing
+    /// is decoded here: see [`remember_icons`](Self::remember_icons).
     pub fn new(cache: Option<Cache>) -> Self {
         let cached = cache.and_then(|cache| cache.read());
         Self {
@@ -88,10 +154,21 @@ impl StoreModel {
             fetched: cached.as_ref().and_then(|cached| cached.fetched),
             looking: false,
             downloading: None,
+            pending: VecDeque::new(),
             problem: None,
             landed: Vec::new(),
             said: None,
+            icons: Icons::new(),
+            looking_inside: None,
+            looked_inside: None,
+            fetch: Arc::new(|release| fetch::module(&fetch::agent(), release)),
         }
+    }
+
+    /// Answers every module fetch with `fetch` instead of the network.
+    #[cfg(test)]
+    pub(crate) fn fetch_with(&mut self, fetch: Fetcher) {
+        self.fetch = fetch;
     }
 
     /// Every plugin the registry has, as this build can offer them.
@@ -120,6 +197,29 @@ impl StoreModel {
         self.downloading.as_ref()
     }
 
+    /// The plugins waiting to be downloaded, in order.
+    pub fn queued(&self) -> Vec<PluginId> {
+        self.pending
+            .iter()
+            .map(|(plugin, _)| plugin.clone())
+            .collect()
+    }
+
+    /// The icons the list carries, as far as they have been decoded.
+    pub fn icons(&self) -> &Icons {
+        &self.icons
+    }
+
+    /// Which plugin's module is being looked inside, if any.
+    pub fn looking_inside(&self) -> Option<&PluginId> {
+        self.looking_inside.as_ref()
+    }
+
+    /// The last module somebody looked inside, with its pictures.
+    pub fn looked_inside(&self) -> Option<&LookedInside> {
+        self.looked_inside.as_ref()
+    }
+
     /// What went wrong, if the last thing that happened went wrong.
     pub fn problem(&self) -> Option<(Option<&PluginId>, &str)> {
         self.problem
@@ -132,6 +232,27 @@ impl StoreModel {
         self.said
             .as_ref()
             .map(|(about, said)| (about.as_ref(), said.as_str()))
+    }
+
+    /// What the store says, for every surface that is not the store.
+    ///
+    /// A snapshot: the Plugins page holds one and reads it on every frame,
+    /// and the store hands over a fresh one whenever its answer changes.
+    pub fn heard(&self) -> Heard {
+        let mut busy: Vec<(PluginId, Busy)> = self
+            .downloading
+            .iter()
+            .map(|plugin| (plugin.clone(), Busy::Downloading))
+            .collect();
+        busy.extend(
+            self.pending
+                .iter()
+                .map(|(plugin, _)| (plugin.clone(), Busy::Waiting)),
+        );
+        Heard {
+            offers: self.offers(),
+            busy,
+        }
     }
 
     /// Says something about a plugin, and clears whatever went wrong before.
@@ -161,7 +282,9 @@ impl StoreModel {
     /// Asks the registry what it has, sending back the tag it last gave.
     ///
     /// The one request Crook makes of its own, and it is made here because
-    /// somebody pressed something.
+    /// somebody pressed something. A new list's icons are decoded in the same
+    /// task, on the pool, so the rows have their faces the frame the list
+    /// changes; a list that has not changed keeps the icons already held.
     pub fn look(&mut self, ctx: &mut ModelContext<Self>) {
         if self.looking {
             return;
@@ -190,19 +313,21 @@ impl StoreModel {
                                     String::from("this machine has nowhere to keep the list")
                                 })?;
                                 let index = cache.write(&bytes, etag.as_deref())?;
-                                Ok(Some((index, etag)))
+                                let icons = decoded_icons(&listed_icons(&index));
+                                Ok(Some((index, etag, icons)))
                             }
                         }
                     })
                     .await
             },
-            |model, outcome: Result<Option<(Index, Option<String>)>, String>, ctx| {
+            |model, outcome: Result<Option<(Index, Option<String>, Icons)>, String>, ctx| {
                 model.looking = false;
                 match outcome {
-                    Ok(Some((index, etag))) => {
+                    Ok(Some((index, etag, icons))) => {
                         model.known = Some(index);
                         model.etag = etag;
                         model.fetched = Some(SystemTime::now());
+                        model.icons = icons;
                     }
                     // A registry that has published nothing since is the
                     // ordinary answer, and it still moves the clock: what the
@@ -217,47 +342,110 @@ impl StoreModel {
         .detach();
     }
 
-    /// Downloads one release, checks it is the one the index named, and leaves
-    /// it for the observer to install.
-    pub fn download(&mut self, plugin: &PluginId, release: &Release, ctx: &mut ModelContext<Self>) {
-        // One at a time: two downloads at once are two workers held on a pool
-        // sized for the chains that park on it, for no gain anybody can see.
-        // Said out loud rather than dropped, because a button that does
-        // nothing and explains nothing is a button somebody presses again.
-        if let Some(already) = self.downloading.clone() {
-            self.complain(
-                Some(plugin),
-                format!("is waiting: {already} is being downloaded first."),
-                ctx,
-            );
+    /// Decodes the icons of the list already held, on the pool.
+    ///
+    /// Called once the model is attached, and never from `new`: the model is
+    /// made while the window is being built, and a face beside every name is
+    /// worth nothing to a person still waiting for the first frame. Nothing is
+    /// spawned for a list with no icons in it, which is every list published
+    /// before there were pictures.
+    pub fn remember_icons(&mut self, ctx: &mut ModelContext<Self>) {
+        let listed = self.known.as_ref().map(listed_icons).unwrap_or_default();
+        if listed.is_empty() {
             return;
         }
-        self.downloading = Some(plugin.clone());
+
+        let decoding = ctx
+            .background()
+            .spawn(async move { decoded_icons(&listed) });
+        ctx.spawn(decoding, |model, icons, ctx| {
+            // A look that landed first has the newer list's faces, and this
+            // is the older list's: what it holds already wins.
+            for (id, icon) in icons {
+                model.icons.entry(id).or_insert(icon);
+            }
+            ctx.notify();
+        })
+        .detach();
+    }
+
+    /// Downloads one release, checks it is the one the index named, and leaves
+    /// it for the observer to install — or queues it behind the download in
+    /// flight.
+    ///
+    /// A release somebody has already looked inside is not fetched again:
+    /// the bytes are here, checked against the same hash, and they are handed
+    /// over as if they had just arrived.
+    pub fn download(&mut self, plugin: &PluginId, release: &Release, ctx: &mut ModelContext<Self>) {
+        let already = self.downloading.as_ref() == Some(plugin)
+            || self.pending.iter().any(|(queued, _)| queued == plugin);
+        if already {
+            return;
+        }
         self.problem = None;
         self.said = None;
-        ctx.notify();
 
-        let plugin = plugin.clone();
+        let held = self.looked_inside.as_ref().filter(|looked| {
+            looked.plugin == *plugin
+                && !looked.bytes.is_empty()
+                && looked.sha256.eq_ignore_ascii_case(release.sha256.trim())
+        });
+        if let Some(looked) = held {
+            self.landed
+                .push((plugin.clone(), release.clone(), Ok(looked.bytes.clone())));
+            ctx.notify();
+            return;
+        }
+
+        match self.downloading {
+            Some(_) => self.pending.push_back((plugin.clone(), release.clone())),
+            None => self.start(plugin.clone(), release.clone(), ctx),
+        }
+        ctx.notify();
+    }
+
+    /// Downloads every release handed over that is not already on its way.
+    pub fn update_all(&mut self, wanted: Vec<(PluginId, Release)>, ctx: &mut ModelContext<Self>) {
+        for (plugin, release) in wanted {
+            self.download(&plugin, &release, ctx);
+        }
+    }
+
+    /// Starts one fetch, which nothing else may be doing at the time.
+    fn start(&mut self, plugin: PluginId, release: Release, ctx: &mut ModelContext<Self>) {
+        self.downloading = Some(plugin.clone());
+
         let promised = release.clone();
-        let release = release.clone();
+        let fetch = self.fetch.clone();
         let background = ctx.background().clone();
         ctx.spawn(
             async move {
-                let arrived = background
-                    .spawn(async move {
-                        let agent = fetch::agent();
-                        fetch::module(&agent, &release)
-                    })
-                    .await;
+                let arrived = background.spawn(async move { fetch(&release) }).await;
                 (plugin, promised, arrived)
             },
-            |model, (plugin, release, arrived), ctx| {
-                model.downloading = None;
-                model.landed.push((plugin, release, arrived));
-                ctx.notify();
-            },
+            |model, (plugin, release, arrived), ctx| model.arrived(plugin, release, arrived, ctx),
         )
         .detach();
+    }
+
+    /// What a finished fetch does: leaves what came for the observer, and
+    /// starts the next one waiting.
+    ///
+    /// Reachable on its own so a test can finish a download without a
+    /// network, and see the queue move.
+    pub(crate) fn arrived(
+        &mut self,
+        plugin: PluginId,
+        release: Release,
+        arrived: Result<Vec<u8>, String>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        self.downloading = None;
+        self.landed.push((plugin, release, arrived));
+        if let Some((plugin, release)) = self.pending.pop_front() {
+            self.start(plugin, release, ctx);
+        }
+        ctx.notify();
     }
 
     /// Takes whatever has finished downloading.
@@ -268,6 +456,136 @@ impl StoreModel {
     pub fn landed(&mut self) -> Vec<(PluginId, Release, Result<Vec<u8>, String>)> {
         std::mem::take(&mut self.landed)
     }
+
+    /// Decodes the pictures inside a plugin's module, fetching the module if
+    /// it is not already on this machine.
+    ///
+    /// `installed` is the previews of the module already here, when there is
+    /// one that carries any: those are decoded and nothing is fetched. Else
+    /// the offered release is fetched — the same file, through the same
+    /// checks, as Install would fetch — and its pictures are read out of it;
+    /// the bytes are kept so that an Install afterwards costs no second
+    /// download. One look at a time, and a second press while one is in
+    /// flight does nothing: the button is dead while it is.
+    pub fn look_inside(
+        &mut self,
+        plugin: &PluginId,
+        release: Option<&Release>,
+        installed: Option<Vec<Preview>>,
+        ctx: &mut ModelContext<Self>,
+    ) {
+        if self.looking_inside.is_some() {
+            return;
+        }
+        let (release, previews) = match (installed, release) {
+            (Some(previews), _) => (None, previews),
+            (None, Some(release)) => (Some(release.clone()), Vec::new()),
+            (None, None) => {
+                self.complain(Some(plugin), "has no pictures to show", ctx);
+                return;
+            }
+        };
+        // The module a previous look fetched, when it is the same one: a
+        // second press draws the pictures again and costs no second GET.
+        let held = self
+            .looked_inside
+            .as_ref()
+            .filter(|looked| looked.plugin == *plugin && !looked.bytes.is_empty())
+            .filter(|looked| {
+                release.as_ref().is_some_and(|release| {
+                    looked.sha256.eq_ignore_ascii_case(release.sha256.trim())
+                })
+            })
+            .map(|looked| looked.bytes.clone());
+        self.looking_inside = Some(plugin.clone());
+        self.problem = None;
+        ctx.notify();
+
+        let named = plugin.clone();
+        let fetch = self.fetch.clone();
+        let background = ctx.background().clone();
+        ctx.spawn(
+            async move {
+                background
+                    .spawn(async move {
+                        let Some(release) = release else {
+                            return Ok(LookedInside {
+                                plugin: named,
+                                sha256: String::new(),
+                                bytes: Vec::new(),
+                                pictures: Pictures::decode_previews(&previews),
+                            });
+                        };
+                        let bytes = match held {
+                            Some(bytes) => bytes,
+                            None => fetch(&release).map_err(|why| did_not_arrive(&why))?,
+                        };
+                        let raw = crook_wasm::Pictures::read_bytes(&bytes)
+                            .map_err(|why| format!("carries a picture Crook cannot draw: {why}"))?;
+                        let carried = Pictures::from_module(raw, &named);
+                        Ok(LookedInside {
+                            plugin: named,
+                            sha256: release.sha256.trim().to_owned(),
+                            bytes,
+                            pictures: Pictures::decode_previews(&carried.previews),
+                        })
+                    })
+                    .await
+            },
+            |model, outcome: Result<LookedInside, String>, ctx| {
+                let plugin = model.looking_inside.take();
+                match outcome {
+                    Ok(looked) => model.looked_inside = Some(looked),
+                    Err(why) => model.problem = Some((plugin, why)),
+                }
+                ctx.notify();
+            },
+        )
+        .detach();
+    }
+}
+
+/// What the card says of a module the fetch did not bring.
+///
+/// One sentence for both things a module is fetched for, installing and
+/// looking inside: it is the same GET through the same checks, and a
+/// refusal that read "http status: 404" on one card and "did not arrive:
+/// http status: 404" on the other would be two stores.
+pub(super) fn did_not_arrive(why: &str) -> String {
+    format!("did not arrive: {why}")
+}
+
+/// Every icon the list carries, still base64, by `owner/name`.
+fn listed_icons(index: &Index) -> Vec<(String, String)> {
+    index
+        .plugins
+        .iter()
+        .filter_map(|listed| Some((listed.id.clone(), listed.icon.clone()?)))
+        .collect()
+}
+
+/// Those icons as pixels. Pool work: a list is forty PNGs.
+///
+/// One that will not decode is a line in the log and a row with no face,
+/// for the reason the host keeps a plugin whose icon it cannot draw: the
+/// list is still the list.
+fn decoded_icons(listed: &[(String, String)]) -> Icons {
+    listed
+        .iter()
+        .filter_map(|(id, icon)| {
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(icon)
+                .map_err(|why| format!("is not base64: {why}"))
+                .and_then(|png| picture::decode(&png, Limits::ICON));
+            match decoded {
+                Ok(bitmap) => Some((id.clone(), Arc::new(bitmap))),
+                Err(why) => {
+                    log::warn!("the index lists an icon for {id} that Crook cannot draw: it {why}");
+                    None
+                }
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

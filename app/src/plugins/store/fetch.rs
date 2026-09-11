@@ -53,9 +53,29 @@ const INDEX_LIMIT: u64 = 4 << 20;
 
 /// The most a module may be.
 ///
-/// The largest plugin anybody has written is 670KB. Eight megabytes is far
-/// past that and far short of a download nobody chose.
+/// The largest plugin anybody has written is 670KB, and its pictures ride
+/// inside it — an icon of at most 32 KiB and up to six previews of at most
+/// 512 KiB each, which is three megabytes on top of the code at the very
+/// worst. Eight megabytes is past that and far short of a download nobody
+/// chose.
 const MODULE_LIMIT: u64 = 8 << 20;
+
+/// How many redirects a request may follow.
+///
+/// One is what a GitHub release asset costs — a `302` from `github.com` to
+/// `objects.githubusercontent.com` — and three is room for a registry host
+/// that redirects to its storage through one more hop. Ten, which is the
+/// library's default, is a request that can be walked across ten hosts by an
+/// index somebody tampered with.
+const MAX_REDIRECTS: u32 = 3;
+
+/// What every request says it is.
+///
+/// Bare, with no version: the README promises that nothing identifying goes
+/// with a request, and the library's default names its own version with every
+/// call — which is not Crook's, and is still a fact about this machine that
+/// nobody asked to send.
+const USER_AGENT: &str = "crook";
 
 /// What a fetch of the index came back with.
 pub enum Fetched {
@@ -79,8 +99,46 @@ pub fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .https_only(true)
         .timeout_global(Some(TIMEOUT))
+        .max_redirects(MAX_REDIRECTS)
+        .user_agent(USER_AGENT)
         .build()
         .new_agent()
+}
+
+/// Where every artifact the registry publishes is served from: the index's
+/// own directory, up to and including its last `/`.
+///
+/// The registry writes every artifact beside the index — the same release,
+/// the same run — so an artifact URL that starts anywhere else is not one the
+/// registry wrote. Somebody running a registry of their own changes
+/// [`INDEX_URL`] and gets the matching rule for free.
+pub fn assets_prefix() -> &'static str {
+    let end = INDEX_URL
+        .rfind('/')
+        .expect("the index URL is a literal with a path");
+    &INDEX_URL[..=end]
+}
+
+/// Whether `url` names an artifact beside the index and nothing else.
+///
+/// The check is on the URL the index gave, before the request: what a
+/// redirect leads to is the registry host's business, and the rule here is
+/// about what an index can *send Crook to ask*. A poisoned index could
+/// otherwise point a download at any host on the internet, and the request
+/// would tell that host which plugin somebody wanted. Exactly one path
+/// segment after the prefix, and no query or fragment, because a URL with
+/// either is one the registry never writes and one that could carry
+/// something through.
+fn from_the_registry(url: &str) -> Result<(), String> {
+    let beside_the_index = url
+        .strip_prefix(assets_prefix())
+        .is_some_and(|name| !name.is_empty() && !name.contains(['/', '?', '#']));
+    match beside_the_index {
+        true => Ok(()),
+        false => Err(String::from(
+            "is served from somewhere that is not the registry",
+        )),
+    }
 }
 
 /// Asks the registry for the index, sending back the tag it last gave.
@@ -120,7 +178,12 @@ pub fn index(agent: &ureq::Agent, url: &str, etag: Option<&str>) -> Result<Fetch
 }
 
 /// Downloads one artifact and checks it is the one the index named.
+///
+/// The only request that fetches a module, whether to install it or to look
+/// at the pictures inside it, so the origin rule and the size ceiling are
+/// applied here and nowhere else.
 pub fn module(agent: &ureq::Agent, release: &Release) -> Result<Vec<u8>, String> {
+    from_the_registry(&release.url)?;
     let mut response = agent
         .get(&release.url)
         .call()

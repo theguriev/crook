@@ -34,6 +34,10 @@ const INDEX_FILE: &str = "index.json";
 const ETAG_FILE: &str = "index.etag";
 
 /// Where this machine keeps what it knows about the registry.
+///
+/// A path and nothing else, so the store can hand one to every model it
+/// builds — a plugin is built again every time it is switched back on.
+#[derive(Clone)]
 pub struct Cache {
     directory: PathBuf,
 }

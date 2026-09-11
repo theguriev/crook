@@ -96,6 +96,23 @@ impl TextLayoutSystem for StubShaper {
     }
 }
 
+/// Where the store is among `plugins`, if it is.
+fn store_among(plugins: &[Box<dyn crate::plugin::Plugin>]) -> Option<usize> {
+    plugins
+        .iter()
+        .position(|plugin| plugin.manifest().id.as_str() == "crook/store")
+}
+
+/// A store reading `cache`, or nothing, and answering every module fetch
+/// with a refusal: nothing a test opens reaches a network, and what a test
+/// can see is the frame between a press and the answer.
+fn store_reading(
+    cache: Option<crate::plugins::store::cache::Cache>,
+) -> crate::plugins::store::Store {
+    crate::plugins::store::Store::with_cache(cache)
+        .fetching(Arc::new(|_| Err(String::from("a test reaches no network"))))
+}
+
 struct Harness {
     /// The queue standing in for the event loop. Kept, rather than dropped into
     /// the executor, because a terminal's output comes home on it: a test with
@@ -110,6 +127,9 @@ struct Harness {
     /// was asked. A drag leaves no mark on a frame, so this is the only thing
     /// that can be looked at afterwards.
     window: Rc<Recorder>,
+    /// The store's own state, when the window carries a store — the only
+    /// way a test reaches the store's model.
+    store: Option<Rc<crate::plugins::store::StoreState>>,
 }
 
 impl Harness {
@@ -173,12 +193,61 @@ impl Harness {
         )
     }
 
+    /// The same, with a Store reading `cache` and the window hearing that
+    /// cache at the opening, the way a real window hears the cached index at
+    /// startup.
+    fn with_store(
+        tabs: usize,
+        mut opening: Opening,
+        cache: crate::plugins::store::cache::Cache,
+    ) -> Self {
+        use crate::plugins::store::index;
+
+        opening.heard = index::Heard {
+            offers: cache
+                .read()
+                .map(|cached| index::offers(&cached.index))
+                .unwrap_or_default(),
+            busy: Vec::new(),
+        };
+        let at = store_among(&opening.plugins)
+            .expect("the store is among the plugins the window opens with");
+        let store = store_reading(Some(cache));
+        let state = store.state();
+        opening.plugins[at] = Box::new(store);
+
+        let mut harness = Self::opened(tabs, opening);
+        harness.store = Some(state);
+        harness
+    }
+
     /// The whole of it: a window opened with exactly this — which is how a
     /// test says what the registry offers, the way the Store would tell the
-    /// window, without a store, a network or a file, and where the plugins
-    /// that are files live, which is never the directory of whoever is
-    /// running the tests.
-    fn with_opening(tabs: usize, opening: Opening) -> Self {
+    /// window, without a network or a file, and where the plugins that are
+    /// files live, which is never the directory of whoever is running the
+    /// tests.
+    ///
+    /// Exactly this but for the store. The one in the box reads the real
+    /// list of whoever is running the tests, and the first time its model
+    /// spoke — a face decoded off that list, a download landing — the
+    /// window would hear their offers in place of what the test said. The
+    /// store this window carries has read nothing; a test that wants a
+    /// registry opens with [`Self::with_store`].
+    fn with_opening(tabs: usize, mut opening: Opening) -> Self {
+        let mut state = None;
+        if let Some(at) = store_among(&opening.plugins) {
+            let store = store_reading(None);
+            state = Some(store.state());
+            opening.plugins[at] = Box::new(store);
+        }
+
+        let mut harness = Self::opened(tabs, opening);
+        harness.store = state;
+        harness
+    }
+
+    /// A window opened with `opening` as it stands, store and all.
+    fn opened(tabs: usize, opening: Opening) -> Self {
         assert!(
             opening.plugins_directory.as_deref().is_none_or(
                 |directory| Some(directory) != crate::plugins::wasm::directory().as_deref()
@@ -224,6 +293,7 @@ impl Harness {
             workspace,
             quit_requests,
             window,
+            store: None,
         };
 
         for _ in 1..tabs {
@@ -812,6 +882,26 @@ impl Harness {
             .unwrap_or_else(|| panic!("no row in the plugin list says {name:?}"));
 
         self.click(row.0 + vec2f(4., 4.), MouseButton::Left);
+        self.frame();
+    }
+
+    /// Which plugin the store is downloading, straight from its model.
+    fn store_downloading(&self) -> Option<crook_plugin::PluginId> {
+        let state = self
+            .store
+            .as_ref()
+            .expect("the window was opened with a store of its own");
+        let model = state.model().expect("the store has built");
+        model.read(&self.app, |model, _| model.downloading().cloned())
+    }
+
+    /// Presses the button in the sidebar that says `label` — the one under
+    /// a section's list, where the Store's look and both lists' update-all
+    /// are.
+    fn click_sidebar_button(&mut self, label: &str) {
+        let scene = self.frame();
+        let at = word_in(&scene, panel_box(&scene), label);
+        self.click(at + vec2f(4., 4.), MouseButton::Left);
         self.frame();
     }
 
@@ -6872,13 +6962,17 @@ fn page_line(scene: &Scene, phrase: &str) -> (Vector2F, String) {
 /// Where the first glyph of `word` is, on the first line of the page that
 /// says it.
 fn page_word(scene: &Scene, word: &str) -> Vector2F {
-    let pane = settings_pane_box(scene);
+    word_in(scene, settings_pane_box(scene), word)
+}
+
+/// The same, on the first line inside `bounds` that says it.
+fn word_in(scene: &Scene, bounds: RectF, word: &str) -> Vector2F {
     let mut rows: HashMap<i32, Vec<(f32, char)>> = HashMap::new();
     for glyph in scene.layers().flat_map(|layer| layer.glyphs.iter()) {
         let Some(character) = char::from_u32(glyph.glyph_key.glyph_id) else {
             continue;
         };
-        if !pane.contains_point(glyph.position) {
+        if !bounds.contains_point(glyph.position) {
             continue;
         }
         rows.entry(glyph.position.y().round() as i32)
@@ -6895,7 +6989,7 @@ fn page_word(scene: &Scene, word: &str) -> Vector2F {
             return vec2f(glyphs[index].0, y as f32);
         }
     }
-    panic!("no line on the page says {word:?}: {}", frame_text(scene));
+    panic!("no line in {bounds:?} says {word:?}: {}", frame_text(scene));
 }
 
 /// The colour the line of the page that says `phrase` is set in.
@@ -14917,6 +15011,476 @@ mod sandboxed {
             "the plugin was thrown away over one contribution"
         );
     }
+
+    /// The Store, opened on a scratch index: what its rows and its card say
+    /// about the plugins on this machine, and what a press there does.
+    mod store_section {
+        use super::*;
+        use crate::plugins::store::cache::Cache;
+        use crate::plugins::store::index::Busy;
+
+        /// The Store's key on the sidebar.
+        const STORE: &str = "crook/store/section";
+
+        /// A registry listing the probe at `version`, asking to reach
+        /// `example.com`, with the `extra` fields on the plugin's row and
+        /// the version's — an icon, previews, a size — written into the
+        /// scratch cache.
+        fn listing(scratch: &Scratch, version: &str, extra: (&str, &str)) -> Cache {
+            let (on_the_plugin, on_the_version) = extra;
+            let cache = Cache::at(scratch.path());
+            cache
+                .write(
+                    format!(
+                        r#"{{"schema": 1, "plugins": [
+                         {{"id": "eugen/probe", "name": "Probe", "description": "d",
+                          "repository": "https://example.com/probe", {on_the_plugin}
+                          "versions": [{{"version": "{version}", "abi": 8,
+                                        "url": "https://github.com/theguriev/crook-plugins/releases/download/index/eugen.probe-{version}.wasm",
+                                        "sha256": "aa", {on_the_version}
+                                        "capabilities": ["net:example.com"],
+                                        "asks": ["Reach example.com"]}}]}}]}}"#
+                    )
+                    .as_bytes(),
+                    None,
+                )
+                .expect("the test index parses");
+            cache
+        }
+
+        /// The rooms and pictures inside the panel — the list's — rather
+        /// than the card's.
+        fn in_panel(scene: &Scene, boxes: Vec<RectF>) -> Vec<RectF> {
+            let panel = panel_box(scene);
+            boxes
+                .into_iter()
+                .filter(|bounds| bounds.max_x() <= panel.max_x())
+                .collect()
+        }
+
+        #[test]
+        fn a_row_with_a_face_in_the_list_draws_it_twelve_pixels_tall() {
+            // The face rides in the list as base64 and is decoded on the
+            // pool: nothing in the row before it lands, then the icon in
+            // the row's box at the row's own size, and the rows one height.
+            let plugins = Scratch::new("store-face");
+            let index = Scratch::new("store-face-index");
+            let icon = {
+                use base64::Engine as _;
+                base64::engine::general_purpose::STANDARD.encode(icon_png(64))
+            };
+            let cache = listing(&index, "1.0.0", (&format!(r#""icon": "{icon}","#), ""));
+            let mut harness = Harness::with_store(
+                1,
+                opening(&plugins, Default::default(), Default::default()),
+                cache,
+            );
+            harness.show_section(STORE);
+
+            harness.wait_for("the icon to be decoded", |harness| {
+                !in_panel(&harness.frame(), images(&harness.frame())).is_empty()
+            });
+            let scene = harness.frame();
+            let in_rows = in_panel(&scene, images(&scene));
+            assert_eq!(in_rows.len(), 1, "one plugin carries a face");
+            assert!(
+                (in_rows[0].height() - widgets::ROW_ICON).abs() < 0.5,
+                "a row's icon is {} tall",
+                in_rows[0].height()
+            );
+            let rows = settings_rail_boxes(&scene);
+            assert!(
+                rows.iter()
+                    .all(|row| (row.height() - rows[0].height()).abs() < 0.5),
+                "the rows are not one height: {rows:?}"
+            );
+
+            // And the same face, eighteen pixels tall, before the card's
+            // title.
+            let pane = settings_pane_box(&scene);
+            let mark = images(&scene)
+                .into_iter()
+                .find(|bounds| pane.contains_point(center(*bounds)))
+                .expect("the card draws the icon before its title");
+            assert!((mark.height() - widgets::TITLE_MARK).abs() < 0.5);
+        }
+
+        #[test]
+        fn a_version_taken_back_is_offered_its_replacement_on_the_store_card_too() {
+            // The same answer the plugin's own card gives, from the same
+            // `change`: the row ends in the replacement, the label says why
+            // the running one was taken back, and the button is live — a
+            // press starts the fetch, which the card says on the next frame.
+            let plugins = Scratch::new("store-replaced");
+            let index = Scratch::new("store-replaced-index");
+            install(
+                plugins.path(),
+                "eugen.probe",
+                &wasm("eugen/probe", "header.right", 10),
+            );
+            let cache = listing(&index, "0.0.9", ("", ""));
+            let withdrawn = [(
+                String::from("eugen/probe"),
+                String::from("it read the wrong file"),
+            )]
+            .into();
+            let mut harness =
+                Harness::with_store(1, opening(&plugins, withdrawn, Default::default()), cache);
+            harness.show_section(STORE);
+            harness.click_plugin("Probe");
+            let scene = harness.frame();
+            let text = frame_text(&scene);
+
+            assert!(says(&scene, "Taken back: it read the wrong file"), "{text}");
+            assert!(says(&scene, "Install 0.0.9"), "{text}");
+            assert!(!says(&scene, "Installed"), "{text}");
+            assert!(
+                probe_row(&scene).contains("0.0.9"),
+                "the row does not end in the replacement: {:?}",
+                probe_row(&scene)
+            );
+
+            harness.click_page_button("Install 0.0.9");
+            let scene = harness.frame();
+            assert_eq!(harness.store_downloading(), Some(probe()));
+            assert!(says(&scene, "Getting it"), "{}", frame_text(&scene));
+            assert!(says(&scene, "Downloading"), "{}", frame_text(&scene));
+        }
+
+        #[test]
+        fn a_registry_that_is_behind_offers_no_update_on_the_store_card() {
+            let plugins = Scratch::new("store-behind");
+            let index = Scratch::new("store-behind-index");
+            install(
+                plugins.path(),
+                "eugen.probe",
+                &wasm("eugen/probe", "header.right", 10),
+            );
+            let cache = listing(&index, "0.0.9", ("", ""));
+            let mut harness = Harness::with_store(
+                1,
+                opening(&plugins, Default::default(), Default::default()),
+                cache,
+            );
+            harness.show_section(STORE);
+            let scene = harness.frame();
+            let text = frame_text(&scene);
+
+            assert!(says(&scene, "Version 0.1.0"), "{text}");
+            assert!(says(&scene, "Installed"), "{text}");
+            assert!(!says(&scene, "Update to"), "{text}");
+            assert!(!says(&scene, "Install 0.0.9"), "{text}");
+            assert!(says(&scene, "On this machine"), "{text}");
+            assert!(!says(&scene, "update in the registry"), "{text}");
+        }
+
+        #[test]
+        fn update_all_takes_every_update_the_registry_has_one_module_at_a_time() {
+            // Plan test (6): the Plugins list's foot counts the updates and
+            // offers them all, the card offers the one, and pressing either
+            // is the store's own fetch — one in flight, the rest waiting,
+            // and every surface hearing it on the next frame.
+            let plugins = Scratch::new("store-update-all");
+            let index = Scratch::new("store-update-all-index");
+            install(
+                plugins.path(),
+                "eugen.probe",
+                &wasm("eugen/probe", "header.right", 10),
+            );
+            let cache = listing(&index, "0.2.0", ("", ""));
+            let mut harness = Harness::with_store(
+                1,
+                opening(&plugins, Default::default(), Default::default()),
+                cache,
+            );
+            harness.show_plugins();
+            harness.click_plugin("Probe");
+            let scene = harness.frame();
+            let text = frame_text(&scene);
+            assert!(says(&scene, "A newer version is in the registry"), "{text}");
+            assert!(says(&scene, "Update to 0.2.0"), "{text}");
+            assert!(says(&scene, "1 update in the registry"), "{text}");
+            assert!(says(&scene, "Update all"), "{text}");
+            assert_eq!(harness.store_downloading(), None);
+
+            harness.click_sidebar_button("Update all");
+            assert_eq!(harness.store_downloading(), Some(probe()));
+            let scene = harness.frame();
+            let heard = harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.heard().clone());
+            assert_eq!(heard.busy(&probe()), Some(Busy::Downloading));
+            assert!(says(&scene, "Getting it"), "{}", frame_text(&scene));
+
+            // The Store says the same of the same plugin, and its own
+            // update-all is dead while everything is already on its way.
+            harness.show_section(STORE);
+            let scene = harness.frame();
+            let text = frame_text(&scene);
+            assert!(says(&scene, "Downloading"), "{text}");
+            assert!(says(&scene, "Getting it"), "{text}");
+            assert!(says(&scene, "1 update in the registry"), "{text}");
+        }
+
+        #[test]
+        fn the_update_button_on_the_store_card_is_the_same_fetch() {
+            let plugins = Scratch::new("store-update");
+            let index = Scratch::new("store-update-index");
+            install(
+                plugins.path(),
+                "eugen.probe",
+                &wasm("eugen/probe", "header.right", 10),
+            );
+            let cache = listing(&index, "0.2.0", ("", ""));
+            let mut harness = Harness::with_store(
+                1,
+                opening(&plugins, Default::default(), Default::default()),
+                cache,
+            );
+            harness.show_section(STORE);
+            harness.click_plugin("Probe");
+            let scene = harness.frame();
+            let text = frame_text(&scene);
+            assert!(says(&scene, "0.1.0 installed, 0.2.0 out"), "{text}");
+            assert!(says(&scene, "Update to 0.2.0"), "{text}");
+
+            harness.click_page_button("Update to 0.2.0");
+            assert_eq!(harness.store_downloading(), Some(probe()));
+            assert!(says(&harness.frame(), "Getting it"));
+        }
+
+        #[test]
+        fn fetching_the_pictures_of_a_plugin_not_here_says_what_it_costs_and_holds_their_room() {
+            // The one button in the store that downloads without installing.
+            // Before the press the note says it is the plugin itself being
+            // fetched, and how big; after it the button is dead and the room
+            // for each picture is drawn at the size the index gave, halved.
+            let plugins = Scratch::new("store-fetch-pictures");
+            let index = Scratch::new("store-fetch-pictures-index");
+            let cache = listing(
+                &index,
+                "1.0.0",
+                (
+                    "",
+                    r#""bytes": 367410, "previews": [{"width": 640, "height": 128}, {"width": 400, "height": 300}],"#,
+                ),
+            );
+            let mut harness = Harness::with_store(
+                1,
+                opening(&plugins, Default::default(), Default::default()),
+                cache,
+            );
+            harness.show_section(STORE);
+            let scene = harness.frame();
+            let text = frame_text(&scene);
+            assert!(says(&scene, "What it looks like"), "{text}");
+            assert!(says(&scene, "2 pictures inside"), "{text}");
+            assert!(says(&scene, "Fetch pictures"), "{text}");
+            assert!(
+                says(&scene, "Seeing them is fetching the plugin itself — 367 KB"),
+                "{text}"
+            );
+            assert!(
+                reserved(&scene).is_empty(),
+                "nothing is reserved before the press"
+            );
+
+            harness.click_page_button("Fetch pictures");
+            let waiting = harness.frame();
+            assert!(says(&waiting, "Fetching"), "{}", frame_text(&waiting));
+            assert!(
+                !says(&waiting, "Fetch pictures"),
+                "{}",
+                frame_text(&waiting)
+            );
+            let mut rooms = reserved(&waiting);
+            rooms.sort_by(|left, right| left.min_y().total_cmp(&right.min_y()));
+            assert_eq!(rooms.len(), 2, "one room per picture: {rooms:?}");
+            assert!(
+                (rooms[0].width() - 320.).abs() < 0.5 && (rooms[0].height() - 64.).abs() < 0.5,
+                "the first room is not the capture halved: {:?}",
+                rooms[0]
+            );
+            assert!(
+                (rooms[1].width() - 200.).abs() < 0.5 && (rooms[1].height() - 150.).abs() < 0.5,
+                "the second room is not the capture halved: {:?}",
+                rooms[1]
+            );
+            assert_eq!(
+                harness.store_downloading(),
+                None,
+                "looking is not installing"
+            );
+
+            // And a fetch that brings nothing says so in the sentence a
+            // download that brings nothing says it in, under the plugin's
+            // name — not the fetch's own words after the name, which read as
+            // "Probe http status: 404" — with the button live again.
+            harness.wait_for("the refusal to land", |harness| {
+                says(&harness.frame(), "did not arrive")
+            });
+            let scene = harness.frame();
+            let text = frame_text(&scene);
+            assert!(
+                says(&scene, "Probe did not arrive: a test reaches no network"),
+                "{text}"
+            );
+            assert!(says(&scene, "Fetch pictures"), "{text}");
+            assert!(!says(&scene, "Fetching"), "{text}");
+            assert!(reserved(&scene).is_empty(), "the rooms outlived the fetch");
+        }
+
+        #[test]
+        fn show_in_store_turns_the_card_to_the_plugin_named_whatever_the_field_says() {
+            // The card is resolved against the rows the field lets through,
+            // and a row the field hides is a card about the first row it
+            // does not. Asked for the probe while the field hides it, the
+            // store empties the field and turns to the probe — whether the
+            // asking is a plugin running the action while the store is
+            // showing, or a person pressing Show in Store on the Plugins
+            // page, which leaves the store's field behind on the way.
+            let plugins = Scratch::new("store-show");
+            let index = Scratch::new("store-show-index");
+            install(
+                plugins.path(),
+                "eugen.probe",
+                &wasm("eugen/probe", "header.right", 10),
+            );
+            let cache = Cache::at(index.path());
+            cache
+                .write(
+                    br#"{"schema": 1, "plugins": [
+                     {"id": "eugen/probe", "name": "Probe", "description": "d",
+                      "repository": "https://example.com/probe",
+                      "versions": [{"version": "0.1.0", "abi": 8,
+                                    "url": "https://github.com/theguriev/crook-plugins/releases/download/index/eugen.probe-0.1.0.wasm",
+                                    "sha256": "aa"}]},
+                     {"id": "eugen/zebra", "name": "Zebra", "description": "d",
+                      "repository": "https://example.com/zebra",
+                      "versions": [{"version": "1.0.0", "abi": 8,
+                                    "url": "https://github.com/theguriev/crook-plugins/releases/download/index/eugen.zebra-1.0.0.wasm",
+                                    "sha256": "aa"}]}]}"#,
+                    None,
+                )
+                .expect("the test index parses");
+            let mut harness = Harness::with_store(
+                1,
+                opening(&plugins, Default::default(), Default::default()),
+                cache,
+            );
+
+            harness.show_section(STORE);
+            harness.click_section_field();
+            harness.type_text("zebra");
+            let scene = harness.frame();
+            assert!(says(&scene, "eugen/zebra"), "{}", frame_text(&scene));
+            assert!(!says(&scene, "eugen/probe"), "{}", frame_text(&scene));
+
+            harness.run_about("crook/store/show", "eugen/probe");
+            let scene = harness.frame();
+            let text = frame_text(&scene);
+            assert!(says(&scene, "eugen/probe"), "{text}");
+            assert!(!says(&scene, "eugen/zebra"), "{text}");
+            assert!(says(&scene, "Zebra"), "the field was not emptied: {text}");
+
+            harness.click_section_field();
+            harness.type_text("zebra");
+            assert!(!says(&harness.frame(), "eugen/probe"));
+            harness.show_plugins();
+            harness.click_plugin("Probe");
+            harness.click_page_button("Show in Store");
+            let scene = harness.frame();
+            let text = frame_text(&scene);
+            assert!(says(&scene, "eugen/probe"), "{text}");
+            assert!(!says(&scene, "eugen/zebra"), "{text}");
+            assert!(says(&scene, "Zebra"), "the field was not emptied: {text}");
+        }
+
+        #[test]
+        fn a_window_a_test_opens_carries_a_store_that_has_read_nothing() {
+            // Every harness, not only one opened with a store: the one in
+            // the box reads the list of whoever is running the tests, and
+            // the first face decoded off it would have the window hearing
+            // their offers in place of what the test said.
+            let mut harness = Harness::new(1);
+            let state = harness.store.clone().expect("the window carries a store");
+            let model = state.model().expect("the store has built");
+            let (offers, fetched) = model.read(&harness.app, |model, _| {
+                (model.offers().len(), model.fetched())
+            });
+            assert_eq!(offers, 0, "the store read somebody's list");
+            assert_eq!(fetched, None);
+
+            harness.show_section(STORE);
+            let scene = harness.frame();
+            assert!(says(&scene, "Nothing here yet"), "{}", frame_text(&scene));
+            assert!(says(&scene, "Never looked"), "{}", frame_text(&scene));
+        }
+
+        #[test]
+        fn the_pictures_of_a_plugin_already_here_are_shown_from_its_own_module() {
+            // Installed, and the module carries previews: no note about
+            // fetching, "Show" rather than "Fetch", and the pictures drawn
+            // out of the module on this machine once the pool has decoded
+            // them.
+            let plugins = Scratch::new("store-show-pictures");
+            let index = Scratch::new("store-show-pictures-index");
+            install(
+                plugins.path(),
+                "eugen.probe",
+                &wasm_carrying(
+                    &manifest("eugen/probe"),
+                    "header.right",
+                    10,
+                    &[
+                        ("crook.preview.1", &preview_png(400, 300)),
+                        ("crook.caption.1", b"The chip in the header"),
+                    ],
+                ),
+            );
+            let cache = listing(&index, "0.1.0", ("", ""));
+            let mut harness = Harness::with_store(
+                1,
+                opening(&plugins, Default::default(), Default::default()),
+                cache,
+            );
+            harness.show_section(STORE);
+            let scene = harness.frame();
+            let text = frame_text(&scene);
+            assert!(says(&scene, "1 picture inside"), "{text}");
+            assert!(says(&scene, "Show pictures"), "{text}");
+            assert!(!says(&scene, "fetching the plugin itself"), "{text}");
+
+            harness.click_page_button("Show pictures");
+            assert!(says(&harness.frame(), "Opening"));
+            harness.wait_for("the picture to be decoded", |harness| {
+                let scene = harness.frame();
+                let pane = settings_pane_box(&scene);
+                images(&scene)
+                    .into_iter()
+                    .any(|bounds| pane.contains_point(center(bounds)))
+            });
+            let scene = harness.frame();
+            let pane = settings_pane_box(&scene);
+            let drawn: Vec<RectF> = images(&scene)
+                .into_iter()
+                .filter(|bounds| pane.contains_point(center(*bounds)))
+                .collect();
+            assert!(
+                drawn
+                    .iter()
+                    .any(|bounds| (bounds.width() - 200.).abs() < 0.5
+                        && (bounds.height() - 150.).abs() < 0.5),
+                "no picture is drawn at half its captured size: {drawn:?}"
+            );
+            assert!(
+                says(&scene, "The chip in the header"),
+                "{}",
+                frame_text(&scene)
+            );
+            assert_eq!(harness.store_downloading(), None);
+        }
+    }
 }
 
 /// The Plugins page: a list on the left, a card on the right.
@@ -15251,34 +15815,60 @@ mod section_layout {
     fn both_sections_draw_their_lists_the_same_way() {
         // Rows inset by ten pixels and rows inset by eight, one list that
         // scrolled and one that could not. They are one row now, and this is
-        // what says so without a picture.
-        let mut harness = Harness::new(1);
+        // what says so without a picture — for the Store's list too, which
+        // used to draw a row of its own with a face's worth of room missing.
+        let scratch = Scratch::new();
+        let cache = crate::plugins::store::cache::Cache::at(scratch.path().join("store"));
+        cache
+            .write(
+                br#"{"schema": 1, "plugins": [{"id": "eugen/probe", "name": "Probe", "description": "d",
+                     "versions": [{"version": "1.0.0", "abi": 8, "url": "https://x.invalid/p.wasm", "sha256": "aa"}]}]}"#,
+                None,
+            )
+            .expect("the test index parses");
+        let mut harness = Harness::with_store(
+            1,
+            Opening {
+                settings: Settings::ephemeral(),
+                channel: Channel::Dev,
+                plugins: crate::plugins::defaults(),
+                withdrawn: Default::default(),
+                heard: Default::default(),
+                plugins_directory: None,
+            },
+            cache,
+        );
         harness.open_settings_page();
         let rail = settings_rail_boxes(&harness.frame());
         harness.show_plugins();
         let list = settings_rail_boxes(&harness.frame());
+        harness.show_section("crook/store/section");
+        let store = settings_rail_boxes(&harness.frame());
 
         let rail = *rail.first().expect("the settings rail has rows");
         let list = *list.first().expect("the plugins list has rows");
+        let store = *store.first().expect("the store's list has rows");
 
-        assert!(
-            (rail.height() - list.height()).abs() < 0.5,
-            "a rail row is {} tall and a list row {}",
-            rail.height(),
-            list.height()
-        );
-        assert!(
-            (rail.min_x() - list.min_x()).abs() < 0.5,
-            "a rail row starts at {} and a list row at {}",
-            rail.min_x(),
-            list.min_x()
-        );
-        assert!(
-            (rail.min_y() - list.min_y()).abs() < 0.5,
-            "the first rail row is at {} and the first list row at {}",
-            rail.min_y(),
-            list.min_y()
-        );
+        for (what, row) in [("a list row", list), ("a store row", store)] {
+            assert!(
+                (rail.height() - row.height()).abs() < 0.5,
+                "a rail row is {} tall and {what} {}",
+                rail.height(),
+                row.height()
+            );
+            assert!(
+                (rail.min_x() - row.min_x()).abs() < 0.5,
+                "a rail row starts at {} and {what} at {}",
+                rail.min_x(),
+                row.min_x()
+            );
+            assert!(
+                (rail.min_y() - row.min_y()).abs() < 0.5,
+                "the first rail row is at {} and the first {what} at {}",
+                rail.min_y(),
+                row.min_y()
+            );
+        }
     }
 
     #[test]

@@ -172,10 +172,15 @@ Eight features, and the page that configures them:
   registry's list — [github.com/theguriev/crook-plugins](https://github.com/theguriev/crook-plugins),
   which builds every plugin from source and publishes one static `index.json`. Nothing is
   fetched until you press *Look for plugins*: no account, no machine id, no list of what you
-  have, and a machine that is offline shows the last list it read with its age under it.
+  have — the request says `crook` and not even which version — and a machine that is offline
+  shows the last list it read with its age under it.
   Pressing **Install** downloads one file, checks it hashes to what the list said, checks the
   module's own manifest against what the list promised — an index is a mirror and never the
-  authority — and then *runs it*, in the window that is already open. A version the registry
+  authority — and then *runs it*, in the window that is already open. Every press is one
+  request: **Update**, **Update all** (one module at a time), and **Fetch pictures** — a
+  plugin's screenshots are inside its module, so seeing them before installing is fetching
+  the same file Install would, which the card says beside the button, and Install afterwards
+  needs no second download. A version the registry
   **withdraws** stops running at the next launch, with the sentence whoever withdrew it wrote on
   its card; that is read off the list already on this machine, so it holds offline, and a list
   that cannot be read withdraws nothing. Installing is still not
