@@ -29,6 +29,16 @@ and begin
         printf '\e]133;%s\a' $argv[1]
     end
 
+    # Where the shell is, reported the way every terminal reads it: OSC 7. See
+    # the zsh integration for why nothing else tells Crook, and why the
+    # authority is left empty and only `%` escaped.
+    #
+    # Fired on the variable rather than on the prompt, which is fish's own way
+    # of saying it and costs nothing on a prompt where nothing moved.
+    function __crook_cwd --on-variable PWD --on-event fish_prompt
+        printf '\e]7;file://%s\a' (string replace --all '%' '%25' -- $PWD)
+    end
+
     function __crook_preexec --on-event fish_preexec
         __crook_mark C
     end
