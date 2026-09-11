@@ -81,6 +81,23 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BINARY" "$APP/Contents/MacOS/crook"
 chmod 755 "$APP/Contents/MacOS/crook"
 
+# The icon, compiled from the committed .iconset. `iconutil` ships with macOS,
+# so nothing here needs a rasterizer — the PNGs were rendered by
+# ./script/app-icon when the artwork last changed and are in the tree. This
+# runs before codesign because the signature covers Contents/Resources: an
+# icon added afterwards breaks it.
+ICONSET=assets/Crook.iconset
+if [ -d "$ICONSET" ]; then
+  echo "==> Compiling $ICONSET"
+  iconutil --convert icns "$ICONSET" --output "$APP/Contents/Resources/Crook.icns"
+  ICON_KEY='	<key>CFBundleIconFile</key>
+	<string>Crook</string>
+'
+else
+  echo "warning: no $ICONSET; the app will get the generic Dock icon" >&2
+  ICON_KEY=""
+fi
+
 # LSMinimumSystemVersion is 11.0 because that is the floor Rust's own
 # aarch64-apple-darwin target sets; claiming anything older would be a promise
 # the binary does not keep.
@@ -95,7 +112,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
 	<string>crook</string>
 	<key>CFBundleIdentifier</key>
 	<string>$BUNDLE_ID</string>
-	<key>CFBundleInfoDictionaryVersion</key>
+${ICON_KEY}	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>Crook</string>
