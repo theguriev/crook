@@ -54,6 +54,24 @@ fn render() -> Node {
 }
 ```
 
+## Pictures
+
+A plugin can carry its own icon, and up to six screenshots, inside the module:
+
+```rust,ignore
+crook_plugin_api::icon!("../../../assets/icon.png");
+crook_plugin_api::preview!(1, "../../../assets/header.png", "The chip in the header");
+```
+
+They go in as custom sections of the `.wasm` — bytes the interpreter never maps, so they cost
+no memory and no fuel, and they travel with the module wherever it goes. The icon is the face
+beside the plugin's name on the Plugins page and in the Store; the previews are what "Show
+pictures" on its card opens. An icon is a square PNG, 32 to 256 pixels a side (128 is the size
+to draw one at) and at most 32 KiB; a preview is a PNG of at most 512 KiB and at most 2048
+pixels a side, captured at 2x, with a caption of at most 80 characters if it has one. The
+numbers are in [`pictures`], and `crook-plugin-info plugin.wasm` checks a built module against
+them. Both macros need `0.8.1` or later, which `"0.8"` resolves to.
+
 The exports a module has to have, the imports it is given, and the shape of a registration are
 documented on the items in this crate. Working plugins to read:
 [crook-emoji](https://github.com/theguriev/crook-emoji) (asks for nothing),
@@ -67,3 +85,4 @@ Install one with `crook --install-plugin <path>`, or list it in
 [`ABI_VERSION`]: https://docs.rs/crook_plugin_api/latest/crook_plugin_api/constant.ABI_VERSION.html
 [`Capability`]: https://docs.rs/crook_plugin_api/latest/crook_plugin_api/enum.Capability.html
 [`Request`]: https://docs.rs/crook_plugin_api/latest/crook_plugin_api/enum.Request.html
+[`pictures`]: https://docs.rs/crook_plugin_api/latest/crook_plugin_api/pictures/index.html

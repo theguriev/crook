@@ -5,8 +5,11 @@ authors.workspace = true
 edition.workspace = true
 # `0.<abi>.<patch>`, the same rule `crook_plugin_api` follows and for the same
 # reason: this crate *is* the ABI check, so a release of it speaks exactly one
-# version of that vocabulary and says which in its own version number.
-version = "0.8.0"
+# version of that vocabulary and says which in its own version number. `0.8.1`
+# is the reader that also says what pictures a module carries, which is why
+# the registry pins `^0.8` rather than a patch: the ABI is the same and the
+# JSON gained two keys.
+version = "0.8.1"
 # Published for one job outside this repository. A registry that builds a
 # plugin from source has to say what it built — the id, the version, the ABI
 # and what it asks to be allowed — and every one of those is inside the module,

@@ -415,6 +415,8 @@ fn the_crate_version_names_the_abi() {
     // That equivalence is the whole of a plugin author's compatibility story,
     // and it holds only while these two numbers are bumped together — so the
     // one that is easy to forget is asserted here rather than remembered.
+    // The patch is free: 0.8.1 added the picture macros and moved nothing on
+    // the wire, which is the kind of release that may happen again.
     let minor = env!("CARGO_PKG_VERSION")
         .split('.')
         .nth(1)
@@ -431,4 +433,54 @@ fn the_crate_version_names_the_abi() {
         "the crate is at 0.{minor} and the ABI is {ABI_VERSION}: bump the version in \
          crates/crook_plugin_api/Cargo.toml with the constant"
     );
+}
+
+// The macros, expanded on the host. The README stands in for a PNG: what is
+// being asserted is that a path resolves against the file the macro is
+// *written in* and that the bytes come through — the rules about what the
+// bytes have to be are the reader's, in `crook_wasm`.
+crate::icon!("../README.md");
+crate::preview!(3, "../README.md", "abc");
+crate::preview!(6, "../README.md");
+
+#[test]
+fn a_picture_named_from_the_calling_file_is_in_the_static() {
+    // `include_bytes!` inside an exported macro resolves against the file
+    // that invoked the macro, not against this crate's own `lib.rs` — which
+    // is what lets a plugin write `../../../assets/icon.png` and reach its
+    // repository root. Off wasm the static is in no section at all, so this
+    // is also the proof that a plugin's `cargo test` on a laptop still links.
+    assert!(CROOK_ICON.starts_with(b"# crook_plugin_api"));
+    assert_eq!(CROOK_PREVIEW_3, CROOK_ICON);
+    assert_eq!(CROOK_PREVIEW_6, CROOK_ICON);
+}
+
+#[test]
+fn a_caption_is_its_own_bytes_exactly() {
+    // A string literal is a reference and a `#[link_section]` static has to
+    // be an array, so the caption is copied into one by length at compile
+    // time. Exactly its bytes: no terminator, no length prefix, nothing the
+    // reader would have to know to strip.
+    assert_eq!(CROOK_CAPTION_3, *b"abc");
+    assert_eq!(pictures::caption_bytes::<0>(""), [0u8; 0]);
+    assert_eq!(pictures::caption_bytes::<7>("héllo!"), *"héllo!".as_bytes());
+}
+
+#[test]
+fn the_section_names_a_reader_looks_for_are_the_ones_the_macros_write() {
+    // The macros spell every section out as a literal, so that what lands in
+    // a `#[link_section]` is readable here rather than pasted together; the
+    // reader composes the same names from these constants. The two cannot be
+    // compared through the macro on a host build — the section is gated on
+    // wasm — so the composition is pinned to the literals by hand.
+    assert_eq!(pictures::ICON_SECTION, "crook.icon");
+    assert_eq!(
+        alloc::format!("{}1", pictures::PREVIEW_SECTION_PREFIX),
+        "crook.preview.1"
+    );
+    assert_eq!(
+        alloc::format!("{}6", pictures::CAPTION_SECTION_PREFIX),
+        "crook.caption.6"
+    );
+    assert_eq!(pictures::MAX_PREVIEWS, 6);
 }

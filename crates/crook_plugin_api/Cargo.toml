@@ -10,8 +10,11 @@ edition.workspace = true
 # accepts one ABI and refuses every other by name, so a dependency range wider
 # than that would be a plugin that compiles and is then turned away at load.
 # `tests.rs` asserts the coupling rather than trusting whoever bumps one of
-# the two numbers to remember the other.
-version = "0.8.0"
+# the two numbers to remember the other. The patch is what moves for anything
+# that leaves the wire alone: `0.8.1` is the release with `icon!` and
+# `preview!`, which put pictures in a custom section of the module and not in
+# the manifest, so every plugin built against `0.8.0` still loads.
+version = "0.8.1"
 # The one crate in this workspace that is published. A plugin is written
 # outside this repository, by somebody who has no copy of the terminal, and
 # every plugin written so far has had to *vendor* this file to do it — which

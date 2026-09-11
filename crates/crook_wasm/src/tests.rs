@@ -9,6 +9,10 @@
 use std::time::Duration;
 
 use super::*;
+use crook_plugin_api::pictures::{
+    CAPTION_SECTION_PREFIX, ICON_SECTION, MAX_CAPTION_CHARS, MAX_ICON_BYTES, MAX_PREVIEW_BYTES,
+    PREVIEW_SECTION_PREFIX,
+};
 use crook_plugin_api::{
     ABI_VERSION, Answer, Capability, Manifest, Method, Node, Render, Request, Size, Subject,
     TabFacts, Tone, to_bytes,
@@ -911,4 +915,388 @@ fn the_crate_version_names_the_abi_it_reads() {
         "the sandbox is at 0.{minor} and reads ABI {ABI_VERSION}: bump the version in \
          crates/crook_wasm/Cargo.toml with the constant"
     );
+}
+
+/// A PNG that is all header: the signature, an IHDR saying `width`×`height`,
+/// whatever `chunks` are asked for, and an IEND.
+///
+/// No pixels and no checksums, because nothing in this crate decodes a PNG
+/// or checks a CRC — the rule is about a size read off a header and a chunk
+/// name, and a picture that is nothing but those is the picture that proves
+/// only those are read.
+fn png_with(width: u32, height: u32, chunks: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
+    let mut png = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&width.to_be_bytes());
+    ihdr.extend_from_slice(&height.to_be_bytes());
+    // Bit depth 8, colour type 6 (RGBA), the three methods at zero.
+    ihdr.extend_from_slice(&[8, 6, 0, 0, 0]);
+    for (name, data) in std::iter::once((b"IHDR", ihdr.as_slice())).chain(chunks.iter().copied()) {
+        png.extend_from_slice(&(data.len() as u32).to_be_bytes());
+        png.extend_from_slice(name);
+        png.extend_from_slice(data);
+        png.extend_from_slice(&[0; 4]);
+    }
+    png.extend_from_slice(&[0, 0, 0, 0, b'I', b'E', b'N', b'D', 0, 0, 0, 0]);
+    png
+}
+
+/// A header-only PNG of `width`×`height`.
+fn png(width: u32, height: u32) -> Vec<u8> {
+    png_with(width, height, &[])
+}
+
+/// The same, padded with a text chunk to at least `bytes`.
+fn png_of_at_least(width: u32, height: u32, bytes: usize) -> Vec<u8> {
+    png_with(width, height, &[(b"tEXt", &vec![b'x'; bytes])])
+}
+
+/// An APNG: an `acTL` chunk between the header and the data.
+fn apng(width: u32, height: u32) -> Vec<u8> {
+    png_with(
+        width,
+        height,
+        &[(b"acTL", &[0, 0, 0, 2, 0, 0, 0, 0]), (b"IDAT", &[])],
+    )
+}
+
+/// `sections` as custom sections at the end of `body`.
+///
+/// `(@custom …)` is the text format's own spelling for one, and the
+/// assembler places it after the last standard section — where a linker puts
+/// them too.
+fn with_sections(body: &str, sections: &[(&str, &[u8])]) -> String {
+    let mut text = String::from(body);
+    for (name, data) in sections {
+        text.push_str(&format!("\n(@custom {name:?} \"{}\")", escaped(data)));
+    }
+    text
+}
+
+/// A well-behaved module carrying `sections`.
+fn carrying(sections: &[(&str, &[u8])]) -> Vec<u8> {
+    module(
+        &with_sections(&with_strings(WELL_BEHAVED), sections),
+        ABI_VERSION,
+    )
+}
+
+/// The sentence a module carrying `sections` is refused with.
+fn refused_for(sections: &[(&str, &[u8])]) -> String {
+    let (_, _, pictures) =
+        Sandbox::open_with_pictures(&carrying(sections), Fuel::default()).expect("it should open");
+    pictures.expect_err("the picture should have been refused")
+}
+
+#[test]
+fn a_module_with_no_pictures_carries_none_and_that_is_not_a_problem() {
+    // Every plugin built before the rule existed: six modules on the
+    // registry today with no custom sections at all, `name` and `producers`
+    // included. What they read as is nothing, and nothing is `Ok`.
+    let (_, manifest, pictures) =
+        Sandbox::open_with_pictures(&well_behaved(), Fuel::default()).expect("it should open");
+
+    assert_eq!(manifest, self::manifest());
+    assert_eq!(pictures, Ok(Pictures::default()));
+    assert!(
+        Pictures::read_bytes(&well_behaved())
+            .expect("it should read")
+            .is_empty()
+    );
+}
+
+#[test]
+fn the_pictures_a_module_carries_come_back_in_order_with_their_captions() {
+    // Previews are numbered, and the number is the order they are shown in
+    // whatever order the linker wrote the sections — here the second before
+    // the first. A gap is not a gap: one and three are two previews.
+    let icon = png(128, 128);
+    let second = png(560, 1010);
+    let first = png(640, 128);
+    let third = png(900, 300);
+    let wasm = carrying(&[
+        ("crook.preview.3", &third),
+        ("crook.caption.1", b"The chip in the header"),
+        ("crook.preview.2", &second),
+        ("name", b"somebody else's section"),
+        ("crook.icon", &icon),
+        ("crook.preview.1", &first),
+    ]);
+
+    let (_, manifest, pictures) =
+        Sandbox::open_with_pictures(&wasm, Fuel::default()).expect("it should open");
+    let pictures = pictures.expect("every picture is inside the rule");
+
+    assert_eq!(manifest, self::manifest());
+    assert_eq!(pictures.icon.as_deref(), Some(icon.as_slice()));
+    assert_eq!(
+        pictures.previews,
+        vec![
+            Preview {
+                png: first,
+                width: 640,
+                height: 128,
+                caption: Some("The chip in the header".into()),
+            },
+            Preview {
+                png: second,
+                width: 560,
+                height: 1010,
+                caption: None,
+            },
+            Preview {
+                png: third,
+                width: 900,
+                height: 300,
+                caption: None,
+            },
+        ]
+    );
+    assert!(!pictures.is_empty());
+    // The read that needs no instantiation says the same.
+    assert_eq!(Pictures::read_bytes(&wasm), Ok(pictures));
+}
+
+#[test]
+fn opening_without_asking_for_pictures_still_answers_with_the_manifest() {
+    // The signature every loader already calls, unchanged: a module with
+    // pictures in it opens exactly as one without, and the pictures are
+    // simply not handed back.
+    let (mut sandbox, manifest) =
+        open(&carrying(&[("crook.icon", &png(64, 64))])).expect("it should open");
+
+    assert_eq!(manifest, self::manifest());
+    sandbox.build().expect("and it still builds");
+}
+
+#[test]
+fn a_bad_picture_is_a_sentence_and_not_a_refusal_to_open() {
+    // The line between the two policies. The module is a good plugin with a
+    // bad icon: it opens, its manifest is read, and whether that is a
+    // refused build or a plugin drawn without its face is decided above this
+    // crate.
+    let (mut sandbox, manifest, pictures) =
+        Sandbox::open_with_pictures(&carrying(&[("crook.icon", b"not a png")]), Fuel::default())
+            .expect("the module itself is fine");
+
+    assert_eq!(manifest, self::manifest());
+    assert_eq!(pictures, Err("crook.icon is not a PNG".into()));
+    sandbox.build().expect("and it builds");
+}
+
+#[test]
+fn every_way_an_icon_can_break_the_rule_is_one_sentence() {
+    // Verbatim, because these are what a CI log shows a plugin author and
+    // what a host logs: each names the section, what was measured, and the
+    // rule it broke, in that order.
+    assert_eq!(
+        refused_for(&[(ICON_SECTION, b"\x89PNG\r\n\x1a\nnot an IHDR")]),
+        "crook.icon is not a PNG"
+    );
+    assert_eq!(
+        refused_for(&[(ICON_SECTION, &png(300, 200))]),
+        "crook.icon is 300×200 and an icon is square"
+    );
+    assert_eq!(
+        refused_for(&[(ICON_SECTION, &png(512, 512))]),
+        "crook.icon is 512 px a side and an icon is 32 to 256"
+    );
+    assert_eq!(
+        refused_for(&[(ICON_SECTION, &png(16, 16))]),
+        "crook.icon is 16 px a side and an icon is 32 to 256"
+    );
+    assert_eq!(
+        refused_for(&[(ICON_SECTION, &png_of_at_least(128, 128, 40 * 1024))]),
+        "crook.icon is 41 KiB and the limit is 32 KiB"
+    );
+    // One byte over is still over, and is not described with the limit's
+    // own number.
+    assert_eq!(
+        refused_for(&[(
+            ICON_SECTION,
+            &png_of_at_least(128, 128, MAX_ICON_BYTES - 32)
+        )]),
+        "crook.icon is 33 KiB and the limit is 32 KiB"
+    );
+    assert_eq!(
+        refused_for(&[(ICON_SECTION, &apng(128, 128))]),
+        "crook.icon is animated, and an icon holds still"
+    );
+    assert_eq!(
+        refused_for(&[(ICON_SECTION, &png(64, 64)), (ICON_SECTION, &png(64, 64))]),
+        "crook.icon is in the module twice"
+    );
+}
+
+#[test]
+fn every_way_a_preview_can_break_the_rule_is_one_sentence() {
+    assert_eq!(
+        refused_for(&[("crook.preview.2", b"GIF89a")]),
+        "crook.preview.2 is not a PNG"
+    );
+    assert_eq!(
+        refused_for(&[("crook.preview.2", &png_of_at_least(640, 128, 700 * 1024))]),
+        "crook.preview.2 is 701 KiB and the limit is 512 KiB"
+    );
+    assert_eq!(
+        refused_for(&[(
+            "crook.preview.2",
+            &png_of_at_least(640, 128, MAX_PREVIEW_BYTES)
+        )]),
+        "crook.preview.2 is 513 KiB and the limit is 512 KiB"
+    );
+    assert_eq!(
+        refused_for(&[("crook.preview.3", &png(2500, 900))]),
+        "crook.preview.3 is 2500×900 and a side is at most 2048"
+    );
+    assert_eq!(
+        refused_for(&[("crook.preview.3", &png(900, 2049))]),
+        "crook.preview.3 is 900×2049 and a side is at most 2048"
+    );
+    assert_eq!(
+        refused_for(&[("crook.preview.1", &apng(640, 128))]),
+        "crook.preview.1 is animated, and a preview holds still"
+    );
+    for name in [
+        "crook.preview.x",
+        "crook.preview.7",
+        "crook.preview.0",
+        "crook.preview.01",
+    ] {
+        assert_eq!(
+            refused_for(&[(name, &png(640, 128))]),
+            format!("{name} is not a number from 1 to 6")
+        );
+    }
+    assert_eq!(
+        refused_for(&[
+            ("crook.preview.1", &png(640, 128)),
+            ("crook.preview.1", &png(640, 128))
+        ]),
+        "crook.preview.1 is in the module twice"
+    );
+    // The edge itself is inside the rule.
+    let (_, _, pictures) = Sandbox::open_with_pictures(
+        &carrying(&[("crook.preview.6", &png(2048, 2048))]),
+        Fuel::default(),
+    )
+    .expect("it should open");
+    assert_eq!(pictures.expect("2048 is allowed").previews[0].width, 2048);
+}
+
+#[test]
+fn every_way_a_caption_can_break_the_rule_is_one_sentence() {
+    let picture = png(640, 128);
+    let long = "x".repeat(MAX_CAPTION_CHARS + 11);
+    assert_eq!(
+        refused_for(&[
+            ("crook.preview.2", &picture),
+            ("crook.caption.2", long.as_bytes())
+        ]),
+        "crook.caption.2 is 91 characters and a caption is at most 80"
+    );
+    // Characters, not bytes: eighty of a two-byte letter is eighty.
+    let (_, _, pictures) = Sandbox::open_with_pictures(
+        &carrying(&[
+            ("crook.preview.2", &picture),
+            ("crook.caption.2", "é".repeat(MAX_CAPTION_CHARS).as_bytes()),
+        ]),
+        Fuel::default(),
+    )
+    .expect("it should open");
+    assert_eq!(
+        pictures.expect("eighty characters is allowed").previews[0]
+            .caption
+            .as_deref()
+            .map(str::len),
+        Some(2 * MAX_CAPTION_CHARS)
+    );
+    assert_eq!(
+        refused_for(&[("crook.caption.2", b"The chip in the header")]),
+        "crook.caption.2 names no picture"
+    );
+    assert_eq!(
+        refused_for(&[
+            ("crook.preview.2", &picture),
+            ("crook.caption.2", b"\xff\xfe")
+        ]),
+        "crook.caption.2 is not text"
+    );
+    assert_eq!(
+        refused_for(&[
+            ("crook.preview.2", &picture),
+            ("crook.caption.2", b"one\ntwo")
+        ]),
+        "crook.caption.2 is not one line"
+    );
+    assert_eq!(
+        refused_for(&[("crook.preview.2", &picture), ("crook.caption.9", b"nine")]),
+        "crook.caption.9 is not a number from 1 to 6"
+    );
+    assert_eq!(
+        refused_for(&[
+            ("crook.preview.2", &picture),
+            ("crook.caption.2", b"one"),
+            ("crook.caption.2", b"two")
+        ]),
+        "crook.caption.2 is in the module twice"
+    );
+    // An empty caption is no caption.
+    let (_, _, pictures) = Sandbox::open_with_pictures(
+        &carrying(&[("crook.preview.2", &picture), ("crook.caption.2", b"")]),
+        Fuel::default(),
+    )
+    .expect("it should open");
+    assert_eq!(
+        pictures
+            .expect("nothing under a picture is allowed")
+            .previews[0]
+            .caption,
+        None
+    );
+    // The sentences are built from the same names the macros write.
+    assert_eq!(format!("{PREVIEW_SECTION_PREFIX}2"), "crook.preview.2");
+    assert_eq!(format!("{CAPTION_SECTION_PREFIX}2"), "crook.caption.2");
+}
+
+#[test]
+fn a_size_is_read_off_the_header_and_nothing_else() {
+    assert_eq!(png_size(&png(640, 128)), Some((640, 128)));
+    assert_eq!(png_size(&png(1, 1)), Some((1, 1)));
+    // Not a PNG: the wrong signature, a first chunk that is not IHDR, too
+    // short to hold one, or a side of zero, which the specification forbids.
+    assert_eq!(png_size(b"GIF89a"), None);
+    assert_eq!(png_size(&png(640, 128)[..20]), None);
+    let mut wrong_chunk = png(640, 128);
+    wrong_chunk[12..16].copy_from_slice(b"tEXt");
+    assert_eq!(png_size(&wrong_chunk), None);
+    assert_eq!(png_size(&png(0, 128)), None);
+    assert_eq!(png_size(&png(640, 0)), None);
+}
+
+#[test]
+fn an_animation_is_a_chunk_name_before_the_first_image_data() {
+    assert!(is_apng(&apng(64, 64)));
+    assert!(!is_apng(&png(64, 64)));
+    // Where the specification says it may not be: after the data. Nothing
+    // would play it, so nothing here refuses it.
+    assert!(!is_apng(&png_with(
+        64,
+        64,
+        &[(b"IDAT", &[]), (b"acTL", &[0; 8])]
+    )));
+    // A chunk claiming more bytes than there are is a walk that stops, not
+    // one that reads past the end.
+    let mut truncated = apng(64, 64);
+    truncated[8..12].copy_from_slice(&u32::MAX.to_be_bytes());
+    assert!(!is_apng(&truncated));
+    assert!(!is_apng(b"\x89PNG\r\n\x1a\n\0\0"));
+    assert!(!is_apng(b""));
+}
+
+#[test]
+fn something_that_is_not_a_module_has_no_pictures_to_read() {
+    let why = Pictures::read_bytes(b"this is not a plugin").expect_err("it is not a module");
+
+    assert!(why.starts_with("not a WebAssembly module"), "{why}");
 }
