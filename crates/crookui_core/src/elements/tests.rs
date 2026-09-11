@@ -17,6 +17,7 @@ use crate::event::{Event, Modifiers, MouseButton, ScrollDelta};
 use crate::fonts::{FamilyId, FontId, LineStyle, StyleAndFont};
 use crate::geometry::{Color, RectF, Vector2F, vec2f};
 use crate::icons::{Lucide, Mark};
+use crate::image::Bitmap;
 use crate::platform::TextLayoutSystem;
 use crate::presenter::Presenter;
 use crate::scene::{Border, Rect, Scene};
@@ -424,6 +425,92 @@ fn an_icon_squeezed_by_its_parent_is_centred_rather_than_stretched() {
     assert_eq!(
         icon.icon_key.size, 10.,
         "and the mask is rasterized at the size it is drawn at"
+    );
+}
+
+/// A one-pixel picture: the element never looks at the pixels, only at the
+/// logical size it was given.
+fn picture() -> Arc<Bitmap> {
+    Arc::new(Bitmap::rgba8(1, 1, vec![255; 4]).expect("one pixel is a bitmap"))
+}
+
+/// Every image in the frame, bottom layer first.
+fn images(scene: &Scene) -> Vec<crate::scene::Image> {
+    scene
+        .layers()
+        .flat_map(|layer| layer.images.iter())
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn an_image_asked_how_big_it_would_like_to_be_answers_its_logical_size() {
+    // A row measures its children against an infinite main axis, and the
+    // picture's answer must be finite or the flex has nothing to place.
+    let mut harness = Harness::new(|_| {
+        Flex::row()
+            .with_child(Image::new(picture(), vec2f(500., 340.)).finish())
+            .with_child(marker(10., 10.))
+            .finish()
+    });
+
+    let scene = harness.build_scene(vec2f(1000., 600.));
+
+    assert_eq!(
+        images(&scene)[0].bounds,
+        RectF::new(Vector2F::zero(), vec2f(500., 340.))
+    );
+    assert_eq!(
+        rects(&scene)[0].bounds.origin(),
+        vec2f(500., 0.),
+        "and the next child is placed after the whole picture"
+    );
+}
+
+#[test]
+fn an_image_too_wide_for_its_box_shrinks_keeping_its_shape() {
+    let mut harness = Harness::new(|_| {
+        ConstrainedBox::new(Image::new(picture(), vec2f(500., 340.)).finish())
+            .with_max_width(300.)
+            .finish()
+    });
+
+    let scene = harness.build_scene(vec2f(1000., 600.));
+
+    assert_eq!(
+        images(&scene)[0].bounds,
+        RectF::new(Vector2F::zero(), vec2f(300., 204.)),
+        "300 of 500 is three fifths, and three fifths of 340 is 204"
+    );
+}
+
+#[test]
+fn an_image_in_a_stretched_box_keeps_its_own_size_inside_it() {
+    // A fixed width wider than the picture is a stretched constraint: the
+    // element must answer with the box's width, because a size outside the
+    // constraint is a broken protocol, and must still paint the picture at
+    // its own size rather than stretched to the box.
+    let mut harness = Harness::new(|_| {
+        Flex::row()
+            .with_child(
+                ConstrainedBox::new(Image::new(picture(), vec2f(100., 50.)).finish())
+                    .with_width(400.)
+                    .finish(),
+            )
+            .with_child(marker(10., 10.))
+            .finish()
+    });
+
+    let scene = harness.build_scene(vec2f(1000., 600.));
+
+    assert_eq!(
+        images(&scene)[0].bounds,
+        RectF::new(Vector2F::zero(), vec2f(100., 50.))
+    );
+    assert_eq!(
+        rects(&scene)[0].bounds.origin(),
+        vec2f(400., 0.),
+        "the box took the width it was given"
     );
 }
 

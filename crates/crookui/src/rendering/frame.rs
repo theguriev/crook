@@ -64,6 +64,10 @@ impl Renderer {
             let mut rect_state = rect::PerFrameState::default();
             let mut glyph_state = glyph::PerFrameState::default();
 
+            // Before any layer is walked, so nothing this frame places is
+            // dropped by this frame.
+            glyph_pipeline.sweep_images();
+
             let layers = scene
                 .layers()
                 .map(|layer| LayerState {
@@ -212,9 +216,9 @@ impl Frame<'_> {
                 None => set_scissor_rect(&mut render_pass, target_bounds),
             }
 
-            // Fixed order within a layer: text is always drawn over the
-            // rectangles of its own layer, including the background and
-            // underline rects a styled run emits.
+            // Fixed order within a layer: pictures and text are always drawn
+            // over the rectangles of their own layer, including the background
+            // and underline rects a styled run emits, and text over pictures.
             if let Some(rect_state) = &state.rect {
                 self.rect_pipeline
                     .draw(&mut render_pass, rect_state, &self.rect_state);

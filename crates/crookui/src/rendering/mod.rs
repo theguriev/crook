@@ -11,8 +11,10 @@
 //!
 //! Everything is an instanced unit quad. Rounded corners, gradients and borders
 //! are fragment-shader SDF math over `[0,1]²`; glyphs are the same quad
-//! sampling an atlas. There is no tessellation, no path rasterizer and no depth
-//! buffer — z order is layer order, painter's algorithm.
+//! sampling an atlas, and so are pictures, resampled on the CPU to the size
+//! they are drawn at and kept in atlases of their own. There is no
+//! tessellation, no path rasterizer and no depth buffer — z order is layer
+//! order, painter's algorithm.
 //!
 //! # Where things live
 //!
@@ -20,8 +22,8 @@
 //!   uniform and unit-quad buffers every pipeline shares.
 //! * `rect` and `glyph` — the two pipelines, each owning its shader module, its
 //!   instance layout and its per-frame buffer.
-//! * `glyph_cache` and [`atlas`] — where a rasterized glyph goes and how it is
-//!   found again.
+//! * `glyph_cache` and [`atlas`] — where a rasterized glyph or a picture goes
+//!   and how it is found again.
 //! * `frame` — the two passes above.
 //! * [`offscreen`] — the same renderer with a texture instead of a window,
 //!   which is how it is verified without a display.

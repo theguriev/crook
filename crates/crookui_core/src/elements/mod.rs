@@ -1,9 +1,10 @@
-//! The element library: thirteen primitives that a tab bar, a chip, a menu and a
-//! settings page are built from.
+//! The element library: fourteen primitives that a tab bar, a chip, a menu and
+//! a settings page are built from.
 //!
 //! Each is either pure layout ([`Flex`], [`Align`], [`ConstrainedBox`],
-//! [`Empty`], [`Clipped`], [`Stack`]), pure content ([`Text`], [`Icon`]), pure
-//! interaction ([`Hoverable`], [`Dismiss`]), pure delegation ([`ChildView`]) —
+//! [`Empty`], [`Clipped`], [`Stack`]), pure content ([`Text`], [`Icon`],
+//! [`Image`]), pure interaction ([`Hoverable`], [`Dismiss`]), pure delegation
+//! ([`ChildView`]) —
 //! or one of the two that draw something of their own: [`Container`], which is
 //! a box, and [`Scrollable`], which is a clip that moves and a thumb saying how
 //! far.
@@ -20,6 +21,7 @@ mod empty;
 pub mod flex;
 mod hoverable;
 mod icon;
+mod image;
 mod paragraph;
 mod scrollable;
 pub mod stack;
@@ -41,6 +43,7 @@ pub use flex::{
 };
 pub use hoverable::{Hoverable, MouseState, MouseStateHandle};
 pub use icon::Icon;
+pub use image::Image;
 pub use paragraph::Paragraph;
 pub use scrollable::{ScrollState, ScrollStateHandle, Scrollable};
 pub use stack::{AnchorTo, Corner, Stack};

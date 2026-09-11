@@ -198,12 +198,16 @@ fn physical_size(logical: Vector2F, scale_factor: f32) -> (u32, u32) {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use anyhow::{Result, bail};
     use crookui_core::fonts::{
         FamilyId, FontId, GlyphId, GlyphKey, Metrics, RasterBounds, RasterizedGlyph,
         SubpixelAlignment,
     };
     use crookui_core::geometry::{Color, RectF, vec2f};
+    use crookui_core::icons::{IconKey, Lucide};
+    use crookui_core::image::Bitmap;
     use crookui_core::scene::Radius;
 
     use super::*;
@@ -308,6 +312,12 @@ mod tests {
         pixels[start..start + 4].try_into().expect("four channels")
     }
 
+    /// A `width` × `height` picture of one colour, straight alpha.
+    fn solid(width: u32, height: u32, color: [u8; 4]) -> Arc<Bitmap> {
+        let pixels = color.repeat((width * height) as usize);
+        Arc::new(Bitmap::rgba8(width, height, pixels).expect("a solid is a bitmap"))
+    }
+
     #[test]
     fn a_rect_scene_renders_to_the_pixels_it_describes() {
         let mut scene = Scene::new(1.);
@@ -402,6 +412,173 @@ mod tests {
             a.abs_diff(128) <= 1,
             "alpha should survive unchanged, got {a}"
         );
+    }
+
+    #[test]
+    fn a_picture_reads_back_the_exact_bytes_it_was_decoded_from() {
+        // Four different opaque texels, drawn one to a device pixel. Exact
+        // bytes settle two things at once: that a picture goes through the
+        // shader untouched — no tint, no contrast curve — and that the whole
+        // path is straight alpha, since an opaque texel is the same in either
+        // convention and a fifth, translucent one is checked separately.
+        let texels = [
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [0, 0, 255, 255],
+            [10, 20, 30, 255],
+        ];
+        let bitmap =
+            Arc::new(Bitmap::rgba8(2, 2, texels.concat()).expect("four texels are a bitmap"));
+        let mut scene = Scene::new(1.);
+        scene.draw_image(bitmap, RectF::new(Vector2F::zero(), vec2f(2., 2.)));
+
+        let Ok((pixels, width, height)) = render_scene_to_rgba(&scene, vec2f(2., 2.), &NoFonts)
+        else {
+            log::warn!("skipping the picture test: no usable GPU adapter");
+            return;
+        };
+
+        assert_eq!((width, height), (2, 2));
+        assert_eq!(pixel(&pixels, width, 0, 0), texels[0]);
+        assert_eq!(pixel(&pixels, width, 1, 0), texels[1]);
+        assert_eq!(pixel(&pixels, width, 0, 1), texels[2]);
+        assert_eq!(pixel(&pixels, width, 1, 1), texels[3]);
+    }
+
+    #[test]
+    fn a_translucent_texel_lands_blended_over_the_clear() {
+        let mut scene = Scene::new(1.);
+        scene.draw_image(
+            solid(1, 1, [255, 0, 0, 128]),
+            RectF::new(Vector2F::zero(), vec2f(1., 1.)),
+        );
+
+        let Ok((pixels, width, _)) = render_scene_to_rgba(&scene, vec2f(1., 1.), &NoFonts) else {
+            log::warn!("skipping the translucent picture test: no usable GPU adapter");
+            return;
+        };
+
+        // The same arithmetic as a translucent rect: the texel is emitted
+        // straight and blended over the transparent clear, so red comes back
+        // scaled by its alpha. Were the pipeline premultiplied, or the texel
+        // taken for one, this would read 255 or 64 instead.
+        let [r, g, b, a] = pixel(&pixels, width, 0, 0);
+        assert!(
+            r.abs_diff(128) <= 1,
+            "red should be 255 * (128/255), got {r}"
+        );
+        assert_eq!((g, b), (0, 0));
+        assert!(
+            a.abs_diff(128) <= 1,
+            "alpha should survive unchanged, got {a}"
+        );
+    }
+
+    #[test]
+    fn a_picture_draws_under_the_glyphs_of_its_own_layer() {
+        // A red picture and a white glyph in one layer, the glyph inside the
+        // picture's box: the glyph wins where they overlap, because a caption
+        // over a picture is text to be read.
+        let mut scene = Scene::new(1.);
+        scene.draw_glyph(vec2f(10., 20.), 1, FontId(0), 10., Color::WHITE);
+        scene.draw_image(
+            solid(12, 12, [255, 0, 0, 255]),
+            RectF::new(vec2f(8., 10.), vec2f(12., 12.)),
+        );
+
+        let Ok((pixels, width, _)) = render_scene_to_rgba(&scene, vec2f(40., 40.), &SolidGlyphs)
+        else {
+            log::warn!("skipping the picture order test: no usable GPU adapter");
+            return;
+        };
+
+        assert_eq!(
+            pixel(&pixels, width, 14, 16),
+            [255, 255, 255, 255],
+            "inside the glyph, the glyph is on top however late it was drawn"
+        );
+        assert_eq!(
+            pixel(&pixels, width, 9, 11),
+            [255, 0, 0, 255],
+            "beside it, the picture shows"
+        );
+        assert_eq!(
+            pixel(&pixels, width, 4, 4),
+            [0, 0, 0, 0],
+            "and outside both is the clear"
+        );
+    }
+
+    #[test]
+    fn a_picture_wider_than_an_atlas_is_drawn_at_its_full_width() {
+        // A 560-logical preview on a 2x display is 1120 device pixels, past
+        // the atlas edge. The region is placed at the ceiling and the quad is
+        // still the drawn size, so the picture's right edge is where it was
+        // asked to be and not where the atlas ran out.
+        let bitmap = Arc::new(
+            Bitmap::rgba8(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).expect("two texels"),
+        );
+        let mut scene = Scene::new(1.);
+        scene.draw_image(bitmap, RectF::new(Vector2F::zero(), vec2f(1120., 4.)));
+
+        let Ok((pixels, width, _)) = render_scene_to_rgba(&scene, vec2f(1130., 4.), &NoFonts)
+        else {
+            log::warn!("skipping the wide picture test: no usable GPU adapter");
+            return;
+        };
+
+        assert_eq!(pixel(&pixels, width, 0, 1), [255, 0, 0, 255]);
+        assert_eq!(
+            pixel(&pixels, width, 1119, 1),
+            [0, 0, 255, 255],
+            "the last drawn column is the picture's right edge"
+        );
+        assert_eq!(
+            pixel(&pixels, width, 1125, 1),
+            [0, 0, 0, 0],
+            "and past 1120 there is nothing"
+        );
+    }
+
+    #[test]
+    fn pictures_past_the_image_budget_leave_the_glyphs_and_icons_untouched() {
+        // A frame of one glyph, one icon and one picture, rendered before and
+        // after enough pictures to trip the sweep: byte-identical, because the
+        // sweep empties the image atlases and only them, and the picture on
+        // screen is simply placed again.
+        let mut golden = Scene::new(1.);
+        golden.draw_glyph(vec2f(2., 10.), 1, FontId(0), 10., Color::WHITE);
+        golden.draw_icon(
+            IconKey::new(Lucide::X, 12.),
+            RectF::new(vec2f(12., 2.), vec2f(12., 12.)),
+            Color::rgb(0, 255, 0),
+        );
+        golden.draw_image(
+            solid(3, 3, [0, 0, 255, 255]),
+            RectF::new(vec2f(26., 2.), vec2f(6., 6.)),
+        );
+
+        let Ok(mut offscreen) = Offscreen::new((40, 20)) else {
+            log::warn!("skipping the image sweep test: no usable GPU adapter");
+            return;
+        };
+        let before = offscreen.render(&golden, &SolidGlyphs).unwrap();
+        assert_eq!(pixel(&before, 40, 28, 4), [0, 0, 255, 255]);
+        assert_eq!(pixel(&before, 40, 4, 6), [255, 255, 255, 255]);
+
+        // Nine distinct pictures, each 600 square in device pixels: one to
+        // an image atlas, which is one past the budget.
+        let mut flood = Scene::new(1.);
+        for _ in 0..9 {
+            flood.draw_image(
+                solid(2, 2, [255, 255, 0, 255]),
+                RectF::new(Vector2F::zero(), vec2f(600., 600.)),
+            );
+        }
+        offscreen.render(&flood, &SolidGlyphs).unwrap();
+
+        let after = offscreen.render(&golden, &SolidGlyphs).unwrap();
+        assert_eq!(after, before);
     }
 
     #[test]
