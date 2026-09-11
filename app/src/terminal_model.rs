@@ -1025,6 +1025,29 @@ impl TerminalHandle {
         })
     }
 
+    /// Puts pasted text into the shell, returning whether it was written.
+    ///
+    /// Not `send_key` with the text as keystrokes: [`Terminal::paste`] wraps
+    /// it in the bracketed-paste markers when the program has asked for them,
+    /// which is how an editor tells a paste from typing and stops
+    /// auto-indenting it — and strips the two bytes that could end the bracket
+    /// early and run the rest.
+    ///
+    /// Scrolled to the bottom first, for the same reason typing is: text put
+    /// into a program somebody has scrolled away from would land out of sight.
+    pub fn paste(&self, text: &str) -> bool {
+        self.drive(|terminal| {
+            terminal.scroll_to_bottom();
+            match terminal.paste(text) {
+                Ok(()) => true,
+                Err(error) => {
+                    log::debug!("could not paste into a shell: {error}");
+                    false
+                }
+            }
+        })
+    }
+
     /// Which mouse reports the program in this pane has asked for.
     ///
     /// The one question a pointer gesture asks before it does anything: with

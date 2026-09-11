@@ -375,8 +375,12 @@ impl CommandInput {
                 false
             }
             // The grid beside this element owns both: the interrupt's key and
-            // the selection the copy chord is asking for.
-            Route::CopyOutput | Route::Raw | Route::Ignored => false,
+            // the selection the copy chord is asking for. `PasteToShell` is
+            // here for exhaustiveness and nothing else — it is only ever
+            // returned for a pane with no composer, and this element *is* the
+            // composer, so a route that says the program owns the keyboard
+            // cannot reach it.
+            Route::CopyOutput | Route::PasteToShell | Route::Raw | Route::Ignored => false,
         }
     }
 

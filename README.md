@@ -476,8 +476,9 @@ runs every entry of a block's menu by name, and the composer types on the prompt
 but the blocks are still short of a few things: no pointer click-to-select a block, no sticky
 header for one taller than the window, and no jump-to-bottom *button* — the chord for it
 exists; [`docs/blocks.md`](docs/blocks.md) lists those and says what each would touch.
-The terminal grid still reaches no clipboard of its own: the input field copies and pastes, an
-OSC 52 from the shell does not. The list of what is absent — and what adding each item would
+What the grid reaches of the clipboard is what a person asks for: a selection copies, and the
+paste chord puts the clipboard into the program as a bracketed paste. What it does not reach is
+the clipboard a *program* asks for — an OSC 52 from the shell is still ignored. The list of what is absent — and what adding each item would
 touch — is the last section of the architecture doc.
 
 ## Which files your shell reads

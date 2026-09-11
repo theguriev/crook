@@ -65,7 +65,6 @@ pub enum Typed {
 pub struct Mouse {
     pane: PaneId,
     gesture: PaneSelection,
-    clipboard: Clipboard,
     cells: Cells,
 }
 
@@ -99,9 +98,16 @@ pub struct Output {
     /// end of input on an empty line, and a delete over a written one.
     input: Option<TextInput>,
 
-    /// The pointer gesture that selects text out of this output, and where a
-    /// copy of it goes.
+    /// The pointer gesture that selects text out of this output.
     mouse: Option<Mouse>,
+
+    /// The system clipboard, when this output is attached to one.
+    ///
+    /// Not the mouse's, though a copy is the gesture that made one necessary:
+    /// pasting into a full-screen program is done with no pointer anywhere
+    /// near it, and a clipboard reachable only through a selection would make
+    /// the paste chord depend on whether anything had ever been selected.
+    clipboard: Option<Clipboard>,
 }
 
 impl Output {
@@ -113,6 +119,7 @@ impl Output {
             keys: Keys::None,
             input: None,
             mouse: None,
+            clipboard: None,
         }
     }
 
@@ -147,9 +154,9 @@ impl Output {
         self.mouse = Some(Mouse {
             pane,
             gesture,
-            clipboard,
             cells,
         });
+        self.clipboard = Some(clipboard);
         self
     }
 
@@ -240,6 +247,23 @@ impl Output {
                 Typed::Ignored
             };
         }
+        // The program owns the keyboard, so this is the only way the clipboard
+        // reaches it.
+        if route == Route::PasteToShell {
+            let pasted = self
+                .clipboard
+                .as_ref()
+                .and_then(Clipboard::read)
+                .is_some_and(|text| !text.is_empty() && handle.paste(&text));
+            return if pasted {
+                Typed::SentToPty
+            } else {
+                // Taken all the same. The chord meant "paste", and letting it
+                // fall through would hand the program a `SYN` nobody typed.
+                log::debug!("nothing was pasted into the shell");
+                Typed::Handled
+            };
+        }
         // **Typing releases the selection**, whichever half of the pane the
         // key belongs to: a line going into the composer under a highlight
         // nobody is aiming at any more is the same stale highlight as one left
@@ -286,12 +310,13 @@ impl Output {
     /// not happen costs a highlight and a line in the log; one that disarmed
     /// the interrupt would cost the pane.
     fn copy_selection(&self, ctx: &mut EventContext) -> bool {
-        let Some(mouse) = self.mouse.as_ref() else {
+        if self.mouse.is_none() {
             return false;
-        };
+        }
         if !self
             .selected_text()
-            .is_some_and(|copied| mouse.clipboard.write(&copied))
+            .zip(self.clipboard.as_ref())
+            .is_some_and(|(copied, clipboard)| clipboard.write(&copied))
         {
             log::warn!("the selection could not be put on the clipboard; letting go of it anyway");
         }
@@ -365,10 +390,10 @@ impl Output {
     /// What a block's copy control hands over. Nothing is released: a copy
     /// aimed at one block is not a copy of whatever the pointer had selected.
     pub fn copy(&self, text: &str) -> bool {
-        let Some(mouse) = self.mouse.as_ref() else {
+        let Some(clipboard) = self.clipboard.as_ref() else {
             return false;
         };
-        if mouse.clipboard.write(text) {
+        if clipboard.write(text) {
             return true;
         }
         log::warn!("a block could not be put on the clipboard");
