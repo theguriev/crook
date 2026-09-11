@@ -2211,7 +2211,7 @@ fn installed_plugins_in(
     let index = cache
         .and_then(|cache| cache.read())
         .map(|cached| cached.index);
-    let heard = heard_from(index.as_ref());
+    let heard = crate::plugins::store::index::Heard::offered(index.as_ref());
 
     let mut lines = Vec::with_capacity(installed.len());
     for plugin in &installed {
@@ -2236,9 +2236,9 @@ fn installed_plugins_in(
             said.push(format!("(withdrawn: {why})"));
         }
         if let Some(offer) = heard.offer(&manifest.id) {
-            use crate::plugins::store::index::{Change, change};
-            if let Change::Update(release) | Change::Replace(release) =
-                change(offer, Some(manifest.version), withdrawn.is_some())
+            use crate::plugins::store::index::change;
+            if let Some(release) =
+                change(offer, Some(manifest.version), withdrawn.is_some()).fetchable()
             {
                 said.push(format!("({} in the registry)", release.version));
             }
@@ -2369,7 +2369,7 @@ fn registry_at_startup() -> (
     let index = crate::plugins::store::cache::Cache::user()
         .and_then(|cache| cache.read())
         .map(|cached| cached.index);
-    let heard = heard_from(index.as_ref());
+    let heard = crate::plugins::store::index::Heard::offered(index.as_ref());
 
     let (Some(index), Some(directory)) = (index, crate::plugins::wasm::directory()) else {
         return (std::collections::BTreeMap::new(), heard);
@@ -2385,19 +2385,6 @@ fn registry_at_startup() -> (
         }
     }
     (withdrawn, heard)
-}
-
-/// What an index on disk offers, as the Plugins page hears it — with the
-/// store doing nothing yet, because nothing has been pressed.
-fn heard_from(
-    index: Option<&crate::plugins::store::index::Index>,
-) -> crate::plugins::store::index::Heard {
-    crate::plugins::store::index::Heard {
-        offers: index
-            .map(crate::plugins::store::index::offers)
-            .unwrap_or_default(),
-        busy: Vec::new(),
-    }
 }
 
 impl Shell {

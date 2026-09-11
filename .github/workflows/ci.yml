@@ -92,6 +92,18 @@ jobs:
         shell: bash
         run: cargo test --locked --workspace
 
+      # The half of `crook_plugin_api` a host build never compiles: the
+      # `#[link_section]` arms of `icon!` and `preview!` are gated on wasm32,
+      # and they are the whole of the crate a plugin author builds against.
+      # Checked, not run — there is nothing to run them on — so that a
+      # change to the attribute's syntax fails here rather than in every
+      # plugin's build after the crate is published.
+      - name: cargo check (wasm32)
+        shell: bash
+        run: |
+          rustup target add wasm32-unknown-unknown
+          cargo check --locked -p crook_plugin_api --tests --target wasm32-unknown-unknown
+
   release-flags:
     name: Release flags (${{ matrix.name }})
     # Type-checks the workspace with the profile and feature set a shipped build uses. A

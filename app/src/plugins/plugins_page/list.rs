@@ -14,19 +14,21 @@
 //! The rule is the one a person can predict with no focus ring to look at:
 //! **the last field pressed is the one being typed into.**
 
+use crookui_core::elements::Paragraph;
 use crookui_core::fonts::FamilyId;
 use crookui_core::prelude::*;
 
 use crook_plugin::{Manifest, PluginId};
 
 use crate::plugins::store;
-use crate::plugins::store::index::{Change, change};
+use crate::plugins::store::index::change;
 use crate::theme::theme;
 use crate::workspace::section;
 use crate::workspace::settings_page::search::{Query, Words};
 use crate::workspace::settings_page::{named, widgets};
 use crate::workspace::{SettingsAction, TextField, Workspace, WorkspaceAction};
 
+use super::state::PluginsState;
 use super::{about, tier_words};
 
 /// What the field says while nothing has been typed.
@@ -59,6 +61,7 @@ pub(super) fn render(
     workspace: &Workspace,
     matching: &[&'static Manifest],
     showing: Option<&PluginId>,
+    state: &PluginsState,
 ) -> Box<dyn Element> {
     let settings = workspace.settings_page();
     let ui = workspace.fonts().ui;
@@ -107,10 +110,34 @@ pub(super) fn render(
     // A footer only when there is something for it to say. The build line
     // under the settings rail says which build this is, and a second copy of
     // it under a list of what the build is made of would be the same sentence
-    // twice; what this list has to say at its foot is how many of its rows
-    // the registry is ahead of — and only while the Store, which is what
-    // fetches, is there to ask.
-    let footer = updates_footer(workspace, ui);
+    // twice; what this list has to say at its foot is what became of the
+    // row it just lost, and how many of its rows the registry is ahead of
+    // — the latter only while the Store, which is what fetches, is there to
+    // ask.
+    let mut footer = Vec::new();
+    if let Some(sentence) = state.said_of_nobody() {
+        footer.push(
+            Container::new(
+                Paragraph::new(sentence, ui, widgets::DESCRIPTION_SIZE)
+                    .with_color(theme().text_muted)
+                    .with_line_height_ratio(1.4)
+                    .finish(),
+            )
+            .with_uniform_padding(8.)
+            .finish(),
+        );
+    }
+    footer.extend(updates_footer(workspace, ui));
+    let footer = match footer.is_empty() {
+        true => None,
+        false => Some(
+            Flex::column()
+                .with_main_axis_size(MainAxisSize::Min)
+                .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                .with_children(footer)
+                .finish(),
+        ),
+    };
     section::sidebar(field, list, settings.scroll_named(LIST_SCROLL), footer)
 }
 
@@ -119,15 +146,20 @@ pub(super) fn render(
 /// Nothing rather than a dead button when the Store is switched off: the
 /// count is worth a line only beside a way to act on it, and the Store's own
 /// action is what acts. A plugin's card still says its version is behind.
+/// Dead while every one of them is already on its way, as the Store's own
+/// is: the two buttons answer one state.
 fn updates_footer(workspace: &Workspace, ui: FamilyId) -> Option<Box<dyn Element>> {
     let update_all = workspace.host().action(&store::action("update-all"))?;
     let updates = workspace.updates();
     if updates.is_empty() {
         return None;
     }
+    let waiting = updates
+        .iter()
+        .all(|(plugin, _)| workspace.heard().busy(plugin).is_some());
     Some(widgets::update_all_footer(
         updates.len(),
-        Some(WorkspaceAction::Run(update_all)),
+        (!waiting).then_some(WorkspaceAction::Run(update_all)),
         workspace
             .settings_page()
             .control(named("plugins.update-all")),
@@ -166,9 +198,7 @@ fn row(
         .control(named(&format!("plugins.row.{}", manifest.id)));
     // One action for every row, run about this one. `None` only while this
     // page is not loaded, which is a page nobody can be looking at.
-    let command = host
-        .action(&about("show"))
-        .map(|show| WorkspaceAction::RunAbout(show, workspace.subject(manifest.id.as_str())));
+    let command = workspace.run_about(&about("show"), manifest.id.as_str());
 
     // The dot, then the icon in a box the same size on every row, so the
     // names line up whether or not a plugin brought a face. A native plugin
@@ -190,17 +220,22 @@ fn row(
 
     // The version an update would bring, and only that: a row is scanned for
     // what is running and, now, for what is behind. "installed" would be
-    // every row, and "current" is what the absence of a word says.
-    let trailing = workspace.heard().offer(&manifest.id).and_then(|offer| {
-        match change(
-            offer,
-            Some(manifest.version),
-            workspace.withdrawn(&manifest.id).is_some(),
-        ) {
-            Change::Update(release) | Change::Replace(release) => Some(release.version),
-            Change::Install(_) | Change::Current | Change::Nothing => None,
-        }
-    });
+    // every row, and "current" is what the absence of a word says. Only for
+    // a plugin that is a file, which is what the card and the count at the
+    // foot offer an update for.
+    let trailing = workspace
+        .heard()
+        .offer(&manifest.id)
+        .filter(|_| workspace.is_installed(&manifest.id))
+        .and_then(|offer| {
+            change(
+                offer,
+                Some(manifest.version),
+                workspace.withdrawn(&manifest.id).is_some(),
+            )
+            .fetchable()
+            .map(|release| release.version.clone())
+        });
 
     section::row(
         section::Row {

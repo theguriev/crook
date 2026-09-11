@@ -509,15 +509,16 @@ pub struct Opening {
     /// over a fresh one whenever its answer changes — see [`Workspace::hear`].
     pub heard: Heard,
     /// Where the plugins that are files live: installing writes there,
-    /// removing deletes there, and "is it installed" is asked there.
+    /// removing deletes there, and "is it installed" is asked there once, at
+    /// the opening, for every plugin the window carries.
     ///
     /// Handed in rather than looked up, for the reason the plugins are: a
     /// window that found the directory for itself would be one every test
-    /// reads the data directory of whoever runs it through — on the render
-    /// path, per frame — and one a test could uninstall a real plugin
-    /// through. `None` is a window that has no such place, and says so
-    /// rather than guessing: a test, a picture of the application drawn
-    /// without this machine's plugins, a machine with no data directory.
+    /// reads the data directory of whoever runs it through, and one a test
+    /// could uninstall a real plugin through. `None` is a window that has
+    /// no such place, and says so rather than guessing: a test, a picture
+    /// of the application drawn without this machine's plugins, a machine
+    /// with no data directory.
     pub plugins_directory: Option<PathBuf>,
 }
 
@@ -687,7 +688,7 @@ pub struct Workspace {
     /// handed to a button on one frame has to mean the same thing on the frame
     /// the button is pressed, and one that moved would be a Remove that
     /// removed something else.
-    subjects: std::cell::RefCell<Vec<String>>,
+    subjects: std::cell::RefCell<Subjects>,
     /// Where the plugins that are files live, as the window was opened with.
     ///
     /// See [`Opening::plugins_directory`]: installing writes a module there,
@@ -696,6 +697,17 @@ pub struct Workspace {
     /// `None` where there is no such place, and both say so rather than
     /// guessing.
     plugins_directory: Option<PathBuf>,
+    /// Which of the carried plugins are files in that directory, by
+    /// `owner/name`.
+    ///
+    /// Answered from here rather than from the directory, because the
+    /// question is asked on the render path — once per row of the Plugins
+    /// list, once per card, and for every sandboxed plugin on every frame
+    /// either list is showing — and a `read_dir` per row per frame is a
+    /// frame that depends on the disk rather than on what the window was
+    /// told. Filled once at the opening, and kept in step by the two
+    /// operations that change the answer: installing and removing.
+    installed: std::collections::BTreeSet<String>,
     /// The context menu a tab's secondary press opens, and what it is on.
     tab_context_menu: TabContextMenuState,
     /// The worktree menu, which is one entry of that one.
@@ -852,6 +864,20 @@ impl Workspace {
         // person's own answer and not the registry's — see `Workspace::withdrawn`.
         let mut off: Vec<String> = settings.disabled_plugins().to_vec();
         off.extend(withdrawn.keys().cloned());
+        // Asked of the directory once, here, for every sandboxed plugin the
+        // window carries: the one somebody is writing runs from wherever
+        // `cargo build` put it and is not in there.
+        let installed = plugins
+            .iter()
+            .map(|plugin| plugin.manifest())
+            .filter(|manifest| manifest.tier == crook_plugin::Tier::Wasm)
+            .filter(|manifest| {
+                plugins_directory.as_deref().is_some_and(|root| {
+                    crate::plugins::wasm::module_in(root, &manifest.id).is_some()
+                })
+            })
+            .map(|manifest| manifest.id.to_string())
+            .collect();
         let host = crate::plugin::load(plugins, &off, settings.plugin_grants().clone(), fonts, ctx);
 
         let options = settings.tab_options();
@@ -904,8 +930,9 @@ impl Workspace {
             host,
             withdrawn,
             heard,
-            subjects: std::cell::RefCell::new(Vec::new()),
+            subjects: std::cell::RefCell::new(Subjects::default()),
             plugins_directory,
+            installed,
             tab_context_menu: TabContextMenuState::default(),
             tab_menu: TabMenuState::default(),
             block_menu: BlockMenuState::default(),
@@ -1270,6 +1297,7 @@ impl Workspace {
         // window and put a stranger's module where it was — the one thing a
         // store must never be able to do, and one comparison to refuse.
         self.refuse_a_builtin(manifest)?;
+        self.refuse_an_answer(manifest)?;
 
         // What the module says about itself against what the list that
         // offered it said, before a byte is written. An index is a mirror and
@@ -1284,6 +1312,7 @@ impl Workspace {
             .as_deref()
             .ok_or_else(|| String::from("this machine has no data directory to install into"))?;
         crate::plugins::wasm::write(root, bytes, manifest)?;
+        self.installed.insert(manifest.id.to_string());
         self.run_module(plugin, ctx)
     }
 
@@ -1299,7 +1328,9 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) -> Result<&'static crook_plugin::Manifest, String> {
         let plugin = crate::plugins::wasm::opened(bytes)?;
-        self.refuse_a_builtin(crate::plugin::Plugin::manifest(&plugin))?;
+        let manifest = crate::plugin::Plugin::manifest(&plugin);
+        self.refuse_a_builtin(manifest)?;
+        self.refuse_an_answer(manifest)?;
         self.run_module(plugin, ctx)
     }
 
@@ -1319,6 +1350,36 @@ impl Workspace {
                 manifest.id
             )),
             false => Ok(()),
+        }
+    }
+
+    /// A module that asks to run nothing a person answers, or the reason it
+    /// cannot be carried.
+    ///
+    /// The host refuses such a run when a guest asks for it, whatever the
+    /// grant says; this keeps the card from ever asking. A module that
+    /// wants `run:crook/plugins/allow` would otherwise be installed and
+    /// listed with "Use Crook's own crook/plugins/allow" and an Allow button
+    /// under it, for a thing no answer could ever let it do.
+    fn refuse_an_answer(&self, manifest: &'static crook_plugin::Manifest) -> Result<(), String> {
+        let answer = manifest
+            .capabilities
+            .iter()
+            .filter_map(|capability| match capability {
+                crook_plugin_api::Capability::RunCommands(names) => Some(names),
+                _ => None,
+            })
+            .flatten()
+            .find(|name| {
+                ActionName::parse(name).is_ok_and(|name| self.host.answered_by_a_person(&name))
+            });
+
+        match answer {
+            Some(name) => Err(format!(
+                "it asks to run {name}, which is answered by a person, on the card, and never \
+                 by a plugin"
+            )),
+            None => Ok(()),
         }
     }
 
@@ -1420,6 +1481,7 @@ impl Workspace {
             .as_deref()
             .ok_or_else(|| String::from("this machine has no data directory to uninstall from"))?;
         crate::plugins::wasm::uninstall_from(root, plugin)?;
+        self.installed.remove(plugin.as_str());
 
         // Forgotten rather than kept, which is the difference between a plugin
         // that is missing and one that was removed: a plugin can fail to load
@@ -1462,15 +1524,14 @@ impl Workspace {
 
     /// Whether this plugin is on this machine as a file.
     ///
-    /// Asked of the directory rather than of the manifest's tier, because a
-    /// sandboxed plugin is not always installed: the one somebody is writing
-    /// runs from wherever `cargo build` put it, and a Remove that deleted a
-    /// directory it was never in would delete nothing and say it had.
+    /// Asked of what the window was told rather than of the manifest's tier,
+    /// because a sandboxed plugin is not always installed: the one somebody
+    /// is writing runs from wherever `cargo build` put it, and a Remove that
+    /// deleted a directory it was never in would delete nothing and say it
+    /// had. See [`installed`](Self::installed) for why it is not asked of
+    /// the directory either.
     pub fn is_installed(&self, plugin: &PluginId) -> bool {
-        self.plugins_directory
-            .as_deref()
-            .and_then(|root| crate::plugins::wasm::module_in(root, plugin))
-            .is_some()
+        self.installed.contains(plugin.as_str())
     }
 
     /// Every installed plugin the registry is ahead of, with the release to
@@ -1502,14 +1563,20 @@ impl Workspace {
     /// Interned: the same text is the same subject however many frames ask,
     /// and the list only grows. See [`Subject`].
     pub fn subject(&self, text: &str) -> Subject {
-        let mut subjects = self.subjects.borrow_mut();
-        match subjects.iter().position(|known| known == text) {
-            Some(index) => Subject(index),
-            None => {
-                subjects.push(text.to_owned());
-                Subject(subjects.len() - 1)
-            }
-        }
+        self.subjects.borrow_mut().intern(text)
+    }
+
+    /// `name`, run about `about` — or `None`, for a control drawn dead,
+    /// while nothing answers to the name.
+    ///
+    /// The one way a control learns to carry [`WorkspaceAction::RunAbout`],
+    /// as `Command` is the one way it learns to be pressed: a row of the
+    /// Plugins list, a row of the Store, and every button on either card
+    /// are built from this.
+    pub fn run_about(&self, name: &ActionName, about: &str) -> Option<WorkspaceAction> {
+        self.host
+            .action(name)
+            .map(|id| WorkspaceAction::RunAbout(id, self.subject(about)))
     }
 
     pub fn run_action(&mut self, id: ActionId, ctx: &mut ViewContext<Self>) {
@@ -6633,7 +6700,7 @@ impl TypedActionView for Workspace {
                 // was ever interned for cannot arrive — the enum is built
                 // from `subject` — but a lookup that missed would run the
                 // action about nothing, which is what a chord does.
-                let said = self.subjects.borrow().get(subject.0).cloned();
+                let said = self.subjects.borrow().text_of(subject);
                 if let Some(said) = said {
                     self.host.say(said);
                 }
@@ -6647,5 +6714,36 @@ impl TypedActionView for Workspace {
             // same reason and is swallowed the same way.
             WorkspaceAction::Chord => {}
         }
+    }
+}
+
+/// Everything an action has been run about, interned. See
+/// [`Workspace::subject`].
+///
+/// The list is what a [`Subject`] indexes into and the map is how a text
+/// finds its place in it: the Store interns one subject per row per frame,
+/// and a scan of everything ever said would make a frame of a long list
+/// cost the square of its length.
+#[derive(Default)]
+struct Subjects {
+    said: Vec<String>,
+    places: HashMap<String, Subject>,
+}
+
+impl Subjects {
+    /// The subject for `text`, minted the first time it is asked for.
+    fn intern(&mut self, text: &str) -> Subject {
+        if let Some(subject) = self.places.get(text) {
+            return *subject;
+        }
+        let subject = Subject(self.said.len());
+        self.said.push(text.to_owned());
+        self.places.insert(text.to_owned(), subject);
+        subject
+    }
+
+    /// What `subject` stands for.
+    fn text_of(&self, subject: Subject) -> Option<String> {
+        self.said.get(subject.0).cloned()
     }
 }

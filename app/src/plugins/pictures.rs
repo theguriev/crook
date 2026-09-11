@@ -88,8 +88,20 @@ impl Pictures {
                     None
                 }
             });
-        let previews = raw
-            .previews
+        Self {
+            icon,
+            previews: Self::previews_from(raw.previews),
+        }
+    }
+
+    /// A module's previews as they travel, still encoded.
+    ///
+    /// Apart from [`from_module`](Self::from_module) for the Store's look
+    /// inside a module it fetched, which wants the previews and not the
+    /// icon — the face on its row comes from the list — and must not spend
+    /// a decode, and possibly a line in the log, on a picture it discards.
+    pub fn previews_from(previews: Vec<crook_wasm::Preview>) -> Vec<Preview> {
+        previews
             .into_iter()
             .map(|preview| Preview {
                 png: Arc::new(preview.png),
@@ -97,8 +109,7 @@ impl Pictures {
                 height: preview.height,
                 caption: preview.caption,
             })
-            .collect();
-        Self { icon, previews }
+            .collect()
     }
 
     /// How many pictures there are to look at.

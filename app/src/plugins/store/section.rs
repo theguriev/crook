@@ -38,15 +38,15 @@ use crookui_core::prelude::*;
 
 use crook_plugin::PluginId;
 
-use crate::plugins::pictures::{Decoded, Preview};
+use crate::plugins::pictures::Decoded;
 use crate::theme::theme;
 use crate::workspace::section;
 use crate::workspace::settings_page::search::{Query, Words};
-use crate::workspace::settings_page::widgets::{Command, Mark, Tone};
+use crate::workspace::settings_page::widgets::{Mark, Tone};
 use crate::workspace::settings_page::{named, widgets};
 use crate::workspace::{SettingsAction, TextField, Workspace, WorkspaceAction};
 
-use super::index::{Busy, Change, Offer, change};
+use super::index::{Busy, Change, Heard, Offer, change};
 use super::model::Icons;
 use super::state::StoreState;
 use super::{FIELD, SECTION, action};
@@ -67,7 +67,9 @@ const CARD_SCROLL: &str = "store.card";
 /// was fetched between two of them would be a card about a row the list no
 /// longer has.
 struct Known {
-    offers: Vec<Offer>,
+    /// The offers and what is being fetched — the same snapshot the rest of
+    /// the window hears, read here straight off the model.
+    heard: Heard,
     looking: bool,
     fetched: Option<SystemTime>,
     /// What went wrong, and which plugin it was about — `None` for the
@@ -75,8 +77,6 @@ struct Known {
     problem: Option<(Option<PluginId>, String)>,
     /// The same for what went right.
     said: Option<(Option<PluginId>, String)>,
-    /// Which plugins are being fetched, and which are waiting their turn.
-    busy: Vec<(PluginId, Busy)>,
     /// The faces the list carries, as far as they have been decoded.
     icons: Icons,
     /// Which plugin's module is being looked inside, if any.
@@ -120,14 +120,6 @@ impl Known {
             (None, Some((None, said))) => Some((said.as_str(), false)),
             _ => None,
         }
-    }
-
-    /// What the store is doing about `plugin`, if anything.
-    fn busy(&self, plugin: &PluginId) -> Option<Busy> {
-        self.busy
-            .iter()
-            .find(|(busy, _)| busy == plugin)
-            .map(|(_, what)| *what)
     }
 
     /// The pictures out of `plugin`'s module, if that is the module somebody
@@ -180,7 +172,7 @@ pub(super) fn render(
     };
 
     let known = model.read(app, |model, _| Known {
-        offers: model.offers(),
+        heard: model.heard(),
         looking: model.looking(),
         fetched: model.fetched(),
         problem: model
@@ -189,7 +181,6 @@ pub(super) fn render(
         said: model
             .said()
             .map(|(about, said)| (about.cloned(), said.to_owned())),
-        busy: model.heard().busy,
         icons: model.icons().clone(),
         looking_inside: model.looking_inside().cloned(),
         looked_inside: model.looked_inside().map(|looked| Looked {
@@ -199,7 +190,7 @@ pub(super) fn render(
         }),
     });
 
-    let matching = matching(workspace, &known.offers);
+    let matching = matching(workspace, &known.heard.offers);
     let selected = state.showing(&matching);
     let list = list(workspace, &known, &matching, selected.as_ref(), ui);
 
@@ -334,10 +325,7 @@ fn row(
         .settings_page()
         .control(named(&format!("store.row.{}", offer.id)));
     let installed = installed_version(workspace, &offer.id);
-    let command = workspace
-        .host()
-        .action(&action("show"))
-        .map(|show| WorkspaceAction::RunAbout(show, workspace.subject(offer.id.as_str())));
+    let command = workspace.run_about(&action("show"), offer.id.as_str());
 
     section::row(
         section::Row {
@@ -431,23 +419,20 @@ fn decision(workspace: &Workspace, known: &Known, offer: &Offer, ui: FamilyId) -
         offer,
         installed.as_deref(),
         workspace.withdrawn(&offer.id),
-        known.busy(&offer.id),
+        known.heard.busy(&offer.id),
     );
 
     // Install is about whatever the card is about, resolved the way the
     // card was; an update is about this plugin by name, which is the same
     // action the plugin's own card runs. Either way the press names what it
     // fetches.
-    let command: Command = match decided.press {
+    let command = match decided.press {
         Press::Nothing => None,
         Press::Install => workspace
             .host()
             .action(&action("install"))
             .map(WorkspaceAction::Run),
-        Press::Update => workspace
-            .host()
-            .action(&action("update"))
-            .map(|update| WorkspaceAction::RunAbout(update, workspace.subject(offer.id.as_str()))),
+        Press::Update => workspace.run_about(&action("update"), offer.id.as_str()),
     };
     let live = command.is_some();
 
@@ -607,15 +592,26 @@ fn decided(
             Press::Nothing,
         ),
         None => match change(offer, installed, withdrawn.is_some()) {
-            Change::Nothing => (
-                match (&offer.withdrawn, &offer.newest_anywhere) {
-                    (Some(why), _) => format!("Taken back: {why}"),
-                    (None, Some(newest)) => format!("Built for plugin API {}", newest.abi),
-                    (None, None) => String::from("Nothing built yet"),
-                },
-                String::from("Not for this build"),
-                Press::Nothing,
-            ),
+            // Two reasons there is nothing, and the button says which: a
+            // withdrawal is the registry's doing and a newer Crook would not
+            // change it.
+            Change::Nothing => match (&offer.withdrawn, &offer.newest_anywhere) {
+                (Some(why), _) => (
+                    format!("Taken back: {why}"),
+                    String::from("Nothing offered"),
+                    Press::Nothing,
+                ),
+                (None, Some(newest)) => (
+                    format!("Built for plugin API {}", newest.abi),
+                    String::from("Not for this build"),
+                    Press::Nothing,
+                ),
+                (None, None) => (
+                    String::from("Nothing built yet"),
+                    String::from("Not for this build"),
+                    Press::Nothing,
+                ),
+            },
             Change::Install(release) => (
                 format!("Version {}", release.version),
                 String::from("Install"),
@@ -653,6 +649,10 @@ fn decided(
 /// be installed.
 fn standing(offer: &Offer, installed: Option<&str>, withdrawn: bool) -> Option<String> {
     match change(offer, installed, withdrawn) {
+        // Taken back, and nothing in its place: what the row's card says,
+        // and not "newer Crook", which would be a row saying this build is
+        // the reason.
+        Change::Nothing if offer.withdrawn.is_some() => Some(String::from("taken back")),
         Change::Nothing => Some(String::from("newer Crook")),
         Change::Current => Some(String::from("installed")),
         Change::Update(release) | Change::Replace(release) => Some(release.version),
@@ -670,14 +670,26 @@ fn standing(offer: &Offer, installed: Option<&str>, withdrawn: bool) -> Option<S
 /// fetching the plugin, with the note under it saying exactly that, and how
 /// much. While the pictures are on their way the button is dead and the room
 /// each will take is drawn in the box fill, at the size the index or the
-/// module said, so nothing under them moves when they land.
+/// module said, so nothing under them moves when they land; once they have,
+/// it is dead and says so.
+///
+/// The index's list of sizes is held to the rule the module's reader holds
+/// a module to — at most [`MAX_PREVIEWS`] of them, each within
+/// [`MAX_PREVIEW_EDGE`] — before a room is laid out for any of them. The
+/// registry's own check refuses a row past it, and a list that arrived some
+/// other way must not be a way of laying out three thousand rooms a frame.
+///
+/// [`MAX_PREVIEWS`]: crook_plugin_api::pictures::MAX_PREVIEWS
+/// [`MAX_PREVIEW_EDGE`]: crook_plugin_api::pictures::MAX_PREVIEW_EDGE
 fn looks(
     workspace: &Workspace,
     known: &Known,
     offer: &Offer,
     ui: FamilyId,
 ) -> Option<Box<dyn Element>> {
-    let carried: Option<&[Preview]> = workspace
+    use crook_plugin_api::pictures::{MAX_PREVIEW_EDGE, MAX_PREVIEWS};
+
+    let carried = workspace
         .host()
         .pictures_of(&offer.id)
         .filter(|pictures| pictures.count() > 0)
@@ -691,6 +703,11 @@ fn looks(
             .release
             .iter()
             .flat_map(|release| release.previews.iter())
+            .filter(|size| {
+                (1..=MAX_PREVIEW_EDGE).contains(&size.width)
+                    && (1..=MAX_PREVIEW_EDGE).contains(&size.height)
+            })
+            .take(MAX_PREVIEWS)
             .map(|size| (size.width, size.height, None))
             .collect(),
     };
@@ -701,40 +718,30 @@ fn looks(
     let looked = known.looked(&offer.id);
     let held = carried.is_some() || looked.is_some_and(|looked| looked.fetched);
     let opening = known.looking_inside.as_ref() == Some(&offer.id);
-    let label = match sizes.len() {
-        1 => String::from("1 picture inside"),
-        count => format!("{count} pictures inside"),
+    let looking = match (opening, held, looked.is_some()) {
+        (true, true, _) => widgets::Looking::Opening,
+        (true, false, _) => widgets::Looking::Fetching,
+        (false, _, true) => widgets::Looking::Shown,
+        (false, true, false) => widgets::Looking::Show,
+        (false, false, false) => widgets::Looking::Fetch,
     };
-    let (button, command): (&str, Command) = match (opening, held) {
-        (true, true) => ("Opening\u{2026}", None),
-        (true, false) => ("Fetching\u{2026}", None),
-        (false, true) => ("Show pictures", look_inside(workspace, &offer.id)),
-        (false, false) => ("Fetch pictures", look_inside(workspace, &offer.id)),
-    };
-    let live = command.is_some();
-    let control = widgets::text_button(
-        button,
-        command,
-        workspace
-            .settings_page()
-            .control(named(&format!("store.pictures.{}", offer.id))),
-        ui,
-    );
 
-    let mut rows = vec![
-        widgets::row(
-            Words::new(label).with_keywords(&["picture", "preview", "screenshot"]),
-            live,
-            control,
-            ui,
-        )
-        .element,
-    ];
-
-    // Said before the press and not after: this is the one button in the
-    // store that downloads something without installing it, and what it
-    // costs — the plugin itself — is the thing to know before pressing.
+    // The verb the card's own button uses, so the note names a control that
+    // is on the card: for a plugin already here the button says Update.
+    let installed = installed_version(workspace, &offer.id);
+    let fetching = change(
+        offer,
+        installed.as_deref(),
+        workspace.withdrawn(&offer.id).is_some(),
+    )
+    .fetchable()
+    .map(|release| release.version.clone());
+    let mut note = None;
     if !held {
+        // Said before the press and not after: this is the one button in
+        // the store that downloads something without installing it, and
+        // what it costs — the plugin itself — is the thing to know before
+        // pressing.
         let size = offer
             .release
             .as_ref()
@@ -742,52 +749,53 @@ fn looks(
             .filter(|bytes| *bytes > 0)
             .map(|bytes| format!("{} KB, ", (bytes / 1000).max(1)))
             .unwrap_or_default();
-        rows.push(
-            widgets::note(
-                &format!(
-                    "Seeing them is fetching the plugin itself \u{2014} {size}the same file \
-                     Install fetches \u{2014} and nothing about you goes with it. Install \
-                     afterwards needs no second download."
-                ),
-                ui,
-            )
-            .element,
-        );
+        let (verb, doing) = match fetching {
+            Some(_) => ("Update", "Updating"),
+            None => ("Install", "Installing"),
+        };
+        note = Some(format!(
+            "Seeing them is fetching the plugin itself \u{2014} {size}the same file {verb} \
+             fetches \u{2014} and nothing about you goes with it. {doing} afterwards needs no \
+             second download."
+        ));
+    } else if let (Some(_), Some(offered)) = (carried, fetching) {
+        // The pictures are the installed version's and the card is offering
+        // another: said, so that somebody deciding on the update knows
+        // which version they are looking at.
+        let installed = installed.unwrap_or_default();
+        let listed = offer
+            .release
+            .as_ref()
+            .map_or(0, |release| release.previews.len());
+        note = Some(match listed {
+            0 => format!("The pictures of {installed}, the version on this machine."),
+            1 => format!(
+                "The pictures of {installed}, the version on this machine; {offered} lists 1."
+            ),
+            listed => format!(
+                "The pictures of {installed}, the version on this machine; {offered} lists \
+                 {listed}."
+            ),
+        });
     }
 
-    // Each picture at the size it was captured at, halved and held to the
-    // card — from the header the module or the index carried, never from
-    // the pixels held now, which were kept to a thousand a side.
-    match looked {
-        Some(looked) => rows.extend(looked.pictures.iter().map(|picture| {
-            widgets::preview(
-                Some(&picture.bitmap),
-                widgets::preview_size(picture.width, picture.height),
-                picture.caption.as_deref(),
-                ui,
-            )
-        })),
-        None if opening => rows.extend(sizes.iter().map(|(width, height, caption)| {
-            widgets::preview(None, widgets::preview_size(*width, *height), *caption, ui)
-        })),
-        None => {}
-    }
-
-    Some(widgets::category_element(
-        "What it looks like",
-        false,
-        rows,
+    Some(widgets::pictures_category(
+        widgets::Looks {
+            count: sizes.len(),
+            looking,
+            command: workspace.run_about(&action("look-inside"), offer.id.as_str()),
+            control: workspace
+                .settings_page()
+                .control(named(&format!("store.pictures.{}", offer.id))),
+            shown: looked.map(|looked| looked.pictures.as_slice()),
+            rooms: match opening {
+                true => &sizes,
+                false => &[],
+            },
+            note: note.as_deref(),
+        },
         ui,
     ))
-}
-
-/// The store's `look-inside`, run about `plugin` — or `None` while nothing
-/// answers to the name.
-fn look_inside(workspace: &Workspace, plugin: &PluginId) -> Command {
-    workspace
-        .host()
-        .action(&action("look-inside"))
-        .map(|look| WorkspaceAction::RunAbout(look, workspace.subject(plugin.as_str())))
 }
 
 /// A heading with lines under it, in the settings' own shape.
@@ -852,7 +860,7 @@ fn footer(workspace: &Workspace, known: &Known, ui: FamilyId) -> Box<dyn Element
     if !updates.is_empty() {
         let waiting = updates
             .iter()
-            .all(|(plugin, _)| known.busy(plugin).is_some());
+            .all(|(plugin, _)| known.heard.busy(plugin).is_some());
         let command = match waiting {
             true => None,
             false => workspace
@@ -876,7 +884,7 @@ fn footer(workspace: &Workspace, known: &Known, ui: FamilyId) -> Box<dyn Element
 /// Not the sentence the list is showing: two copies of one line, side by side,
 /// read as a mistake. This one says what the *page* is for.
 fn nothing_chosen(known: &Known, ui: FamilyId) -> Box<dyn Element> {
-    let line = match (known.offers.is_empty(), known.looking) {
+    let line = match (known.heard.offers.is_empty(), known.looking) {
         (_, true) => "Reading the list the registry publishes.",
         (true, false) => {
             "Every plugin the registry has built, with what each one will ask to be allowed to \
@@ -898,7 +906,7 @@ fn nothing_chosen(known: &Known, ui: FamilyId) -> Box<dyn Element> {
 
 /// Why the list is empty, which is not always the same reason.
 fn nothing_to_show(known: &Known) -> &'static str {
-    match (known.offers.is_empty(), known.looking) {
+    match (known.heard.offers.is_empty(), known.looking) {
         (_, true) => "Looking\u{2026}",
         (true, false) => {
             "Nothing here yet. \"Look for plugins\" reads the registry's list \u{2014} one file, \

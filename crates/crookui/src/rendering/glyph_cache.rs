@@ -63,7 +63,7 @@ pub fn image_region(drawn: (u32, u32)) -> (u32, u32) {
         return drawn;
     }
     let factor = MAX_IMAGE_SIDE as f32 / longest as f32;
-    let side = |pixels: u32| match pixels {
+    let side = |pixels| match pixels {
         0 => 0,
         _ => ((pixels as f32 * factor).round() as u32).clamp(1, MAX_IMAGE_SIDE),
     };

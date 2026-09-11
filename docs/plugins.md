@@ -433,8 +433,10 @@ description of something that was never built.
     thing to ask for than `ReadFiles` and is what a directory picker actually needs;
     `TypeCommands` names exact templates with one `{}` in each — the shape of the command is
     the person's and only the hole is the plugin's, and the host fills and **quotes** it, so a
-    branch called `; rm -rf ~` stays a branch name; `RunCommands` names exact commands; and
-    `ReadCommands` is the command list and its chords.
+    branch called `; rm -rf ~` stays a branch name; `RunCommands` names exact commands — never
+    one a person answers on a card, since a plugin granted `crook/plugins/allow` could run it
+    about itself, so those are refused by name whatever was granted and a module asking for
+    one is not installed; and `ReadCommands` is the command list and its chords.
   - **A request that changes something happens only because somebody pressed something.** The
     four calls that can raise one are a build, a tick, a delivery and an action, and `Type` and
     `Run` are taken from the last of those alone. It is not a refusal — nothing about the grant
@@ -1073,7 +1075,7 @@ is not a different kind of thing from one that has.
   `disabled_plugins`: that list is a person's own answer and this is the registry's, and a
   person who reads "switched off" should be able to tell which of the two said so. The row
   stays on the Plugins page with the registry's sentence on its card, the switch is drawn dead,
-  and what to do about it — update, or remove — is in the Store.
+  and the box under it offers the registry's replacement and Remove; the Store shows the same.
 
 - **`--dev-plugin <path>` is the plugin somebody is *writing*.** It takes a `.wasm` or the
   directory it was built in, runs it from wherever `cargo build` put it, and runs it again every

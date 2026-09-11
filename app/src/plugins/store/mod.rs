@@ -51,7 +51,7 @@ use crate::plugin::{BuildError, Host, Plugin};
 use crate::workspace::Workspace;
 
 use cache::Cache;
-use index::{Change, change};
+use index::change;
 use model::StoreModel;
 pub(crate) use state::StoreState;
 
@@ -113,6 +113,29 @@ impl Default for Store {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Replaces the store among `plugins` with one reading `cache` and answering
+/// every module fetch with `fetch`, and hands back its state — or `None`
+/// when there is no store among them.
+///
+/// For every window a test opens, whichever harness opens it: the store in
+/// the box reads the real list of whoever is running the tests, and decodes
+/// its faces on the pool, and the first time it spoke the window would hear
+/// their offers in place of what the test said.
+#[cfg(test)]
+pub(crate) fn hermetic(
+    plugins: &mut [Box<dyn Plugin>],
+    cache: Option<Cache>,
+    fetch: model::Fetcher,
+) -> Option<Rc<StoreState>> {
+    let at = plugins
+        .iter()
+        .position(|plugin| plugin.manifest().id.as_str() == "crook/store")?;
+    let store = Store::with_cache(cache).fetching(fetch);
+    let state = store.state();
+    plugins[at] = Box::new(store);
+    Some(state)
 }
 
 impl Plugin for Store {
@@ -251,7 +274,9 @@ impl Plugin for Store {
         // for. Installing and removing are not — a palette row that installed
         // something would be an install nobody saw the capability list of,
         // which is exactly the door the Plugins page refuses to open for
-        // allowing.
+        // allowing. And they are *answers*, which shuts the same door on a
+        // sandboxed plugin: granted `run:crook/store/install`, it could
+        // otherwise fetch and carry a module nobody chose.
         let looking = model.clone();
         host.register_command(
             action("look"),
@@ -262,12 +287,12 @@ impl Plugin for Store {
         );
 
         let installing = self.state.clone();
-        host.register_action(action("install"), move |workspace, ctx| {
+        host.register_answer(action("install"), move |workspace, ctx| {
             install(&installing, workspace, ctx);
         });
 
         let removing = self.state.clone();
-        host.register_action(action("remove"), move |workspace, ctx| {
+        host.register_answer(action("remove"), move |workspace, ctx| {
             remove(&removing, workspace, ctx);
         });
 
@@ -275,26 +300,28 @@ impl Plugin for Store {
         // plugin the press names — a card there has a row for "the registry
         // is ahead" and a button for it, and the fetching is this plugin's.
         // `update-all` is about nothing in particular: it takes what the
-        // workspace says is behind. Plain actions, all four, for the reason
-        // `install` is one — none of them belongs in a palette.
+        // workspace says is behind. None of the four belongs in a palette,
+        // for the reason `install` does not; and the three that fetch are
+        // answers, for the reason `install` is one. `show` is not: turning
+        // the page to a row is nothing a person would mind a plugin doing.
         let showing = self.state.clone();
         host.register_action(action("show"), move |workspace, ctx| {
-            let Some(plugin) = subject(workspace, "show") else {
+            let Some(plugin) = workspace.host().said_plugin(&action("show")) else {
                 return;
             };
             show(&showing, workspace, &plugin, ctx);
         });
 
         let updating = self.state.clone();
-        host.register_action(action("update"), move |workspace, ctx| {
-            let Some(plugin) = subject(workspace, "update") else {
+        host.register_answer(action("update"), move |workspace, ctx| {
+            let Some(plugin) = workspace.host().said_plugin(&action("update")) else {
                 return;
             };
             update(&updating, workspace, &plugin, ctx);
         });
 
         let everything = self.state.clone();
-        host.register_action(action("update-all"), move |workspace, ctx| {
+        host.register_answer(action("update-all"), move |workspace, ctx| {
             let Some(model) = everything.model() else {
                 return;
             };
@@ -303,30 +330,14 @@ impl Plugin for Store {
         });
 
         let looking = self.state.clone();
-        host.register_action(action("look-inside"), move |workspace, ctx| {
-            let Some(plugin) = subject(workspace, "look-inside") else {
+        host.register_answer(action("look-inside"), move |workspace, ctx| {
+            let Some(plugin) = workspace.host().said_plugin(&action("look-inside")) else {
                 return;
             };
             look_inside(&looking, workspace, &plugin, ctx);
         });
 
         Ok(())
-    }
-}
-
-/// Which plugin the action being run is about, or nothing with a line.
-///
-/// Taken from what the press said, the way the Plugins page's actions take
-/// it: a chord says nothing, and an action that guessed would fetch whatever
-/// card happened to be showing.
-fn subject(workspace: &Workspace, verb: &str) -> Option<PluginId> {
-    let said = workspace.host().said();
-    match PluginId::parse(&said) {
-        Ok(plugin) => Some(plugin),
-        Err(why) => {
-            log::warn!("crook/store/{verb} was run about {said:?}, which is not a plugin: {why}");
-            None
-        }
     }
 }
 
@@ -378,11 +389,11 @@ fn update(
     };
     let installed = section::installed_version(workspace, plugin);
     let withdrawn = workspace.withdrawn(plugin).is_some();
-    match change(offer, installed.as_deref(), withdrawn) {
-        Change::Update(release) | Change::Replace(release) => {
-            model.update(ctx, |model, ctx| model.download(plugin, &release, ctx));
+    match change(offer, installed.as_deref(), withdrawn).fetchable() {
+        Some(release) => {
+            model.update(ctx, |model, ctx| model.download(plugin, release, ctx));
         }
-        Change::Install(_) | Change::Current | Change::Nothing => {
+        None => {
             log::warn!(
                 "crook/store/update was run about {plugin}, which the registry is not ahead of"
             );

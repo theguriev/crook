@@ -607,6 +607,17 @@ fn serve(workspace: &mut Workspace, request: &Request, ctx: &mut ViewContext<Wor
             let Ok(name) = ActionName::parse(name) else {
                 return Answer::Failed(format!("{name:?} is not the name of a command"));
             };
+            // Before the grant is even consulted, because the grant is the
+            // problem: a plugin granted `run:crook/plugins/allow` could
+            // otherwise run it about itself, with the argument naming which
+            // plugin, and be allowed everything its next version asks for
+            // with nobody reading the card. What a person answers on a
+            // card is answered there and nowhere else.
+            if workspace.host().answered_by_a_person(&name) {
+                return Answer::Failed(format!(
+                    "{name} is answered by a person, on the card, and never by a plugin"
+                ));
+            }
             let Some(id) = workspace.host().action(&name) else {
                 return Answer::Failed(format!("{name} is not something this Crook can do"));
             };

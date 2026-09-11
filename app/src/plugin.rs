@@ -281,6 +281,20 @@ pub struct Host {
     /// registry, not its name out of here — which is what makes the id safe to
     /// hold on to.
     action_names: Vec<ActionName>,
+    /// The actions among those that are answers: a person's, on a card,
+    /// and never a plugin's to run.
+    ///
+    /// A sandboxed plugin may be granted `run:<name>` for any of Crook's
+    /// own actions and hand it an argument, which is how a chip offers
+    /// "rebind this". Allow, Remove, Install and the rest are answers to a
+    /// question a card asked — the whole card, read — and a plugin that
+    /// could run one *about itself* would be a plugin answering its own
+    /// card: allowed the list its next version asks for, with nobody
+    /// reading it. So they are marked at registration and refused by name
+    /// when a guest asks, whoever the guest was granted. Appended to and
+    /// never removed from, as [`Host::action_names`] is: what a name means
+    /// does not change when the page that registered it is switched off.
+    answers: Vec<ActionName>,
     /// The actions that are meant to be *offered*, with what to call them.
     ///
     /// Every action is reachable by name; a command is one a person should be
@@ -411,6 +425,7 @@ impl Host {
             section_keys: Vec::new(),
             actions: Actions::new(),
             action_names: Vec::new(),
+            answers: Vec::new(),
             commands: Vec::new(),
             suggested: Vec::new(),
             surfaces: Vec::new(),
@@ -473,6 +488,26 @@ impl Host {
     /// is not handed what somebody clicked before it.
     pub fn said(&self) -> String {
         self.said.taken()
+    }
+
+    /// Which plugin `action`, being run now, is about — or nothing, with a
+    /// line.
+    ///
+    /// The one rule for an action run *about* a plugin, which is what every
+    /// button on a plugin's card and every row of both lists run. Taken from
+    /// what the press said, so an action reached by a chord — which says
+    /// nothing — logs and does nothing rather than acting on whatever card
+    /// happens to be showing: a chord that allowed something would be a way
+    /// to allow it unread.
+    pub fn said_plugin(&self, action: &ActionName) -> Option<PluginId> {
+        let said = self.said();
+        match PluginId::parse(&said) {
+            Ok(plugin) => Some(plugin),
+            Err(why) => {
+                log::warn!("{action} was run about {said:?}, which is not a plugin: {why}");
+                None
+            }
+        }
     }
 
     /// The plugin whose registrations are being made.
@@ -790,6 +825,32 @@ impl Host {
             .contributors(SETTINGS_PAGE)
             .into_iter()
             .position(|(owner, entry)| format!("{owner}/{entry}") == key)
+    }
+
+    /// Registers an action that is a person's answer, and never a plugin's
+    /// to run.
+    ///
+    /// Everything [`register_action`](Self::register_action) does, and the
+    /// name is marked so that a sandboxed plugin asking to run it —
+    /// `Request::Run`, under a `run:<name>` grant — is refused with a
+    /// sentence rather than served. For the actions a card answers a
+    /// question with: allowing, removing, installing, updating. See
+    /// [`Host::answers`].
+    pub fn register_answer(
+        &mut self,
+        action: ActionName,
+        handler: impl Fn(&mut Workspace, &mut ViewContext<Workspace>) + 'static,
+    ) -> ActionId {
+        if !self.answers.contains(&action) {
+            self.answers.push(action.clone());
+        }
+        self.register_action(action, handler)
+    }
+
+    /// Whether `action` is one a person answers on a card, which a plugin
+    /// is never handed however it was granted.
+    pub fn answered_by_a_person(&self, action: &ActionName) -> bool {
+        self.answers.contains(action)
     }
 
     /// Registers an action *and* offers it under a title.

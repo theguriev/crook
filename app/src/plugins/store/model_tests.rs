@@ -425,3 +425,103 @@ fn the_icons_the_list_carries_are_decoded_on_the_pool_and_not_before() {
         assert!(!icons.contains_key("eugen/broken"));
     });
 }
+
+#[test]
+fn a_face_is_held_small_and_a_list_of_faces_is_held_to_a_budget() {
+    // What keeps a hostile list from costing a gigabyte for the session: a
+    // face decoded at the largest size the rule allows is shrunk to the
+    // largest size anything draws, a string past the registry's own cap is
+    // never decoded, and past the budget the rest of the rows go faceless.
+    let encoded = |png: Vec<u8>| base64::engine::general_purpose::STANDARD.encode(png);
+    let large = encoded(icon_png(256));
+    let small = encoded(icon_png(32));
+    let too_long = "A".repeat(MOST_ICON_CHARS + 1);
+
+    let icons = decoded_icons(
+        &[
+            (String::from("eugen/large"), large),
+            (String::from("eugen/long"), too_long),
+        ],
+        ICONS_BUDGET,
+    );
+    assert_eq!(
+        icons["eugen/large"].size(),
+        (ICON_HELD_EDGE, ICON_HELD_EDGE),
+        "a large face is held at the size it is drawn"
+    );
+    assert!(
+        !icons.contains_key("eugen/long"),
+        "a string past the cap was decoded"
+    );
+
+    // Five faces of four kilobytes each, and room for three.
+    let listed: Vec<(String, String)> = (0..5)
+        .map(|n| (format!("eugen/face-{n}"), small.clone()))
+        .collect();
+    let icons = decoded_icons(&listed, 3 * 32 * 32 * 4);
+    assert_eq!(icons.len(), 3, "the budget was not the budget: {icons:?}");
+    assert!(icons.contains_key("eugen/face-0"));
+    assert!(icons.contains_key("eugen/face-2"));
+    assert!(!icons.contains_key("eugen/face-3"));
+}
+
+#[test]
+fn a_module_whose_picture_is_past_the_rule_is_still_the_module_install_would_fetch() {
+    // The reader refuses a non-square icon, and the look must not throw the
+    // module away with the picture: the bytes were fetched and checked, the
+    // card promised Install would need no second download, and the host
+    // runs such a module faceless rather than refusing it. So the look
+    // lands with no pictures, and the download after it asks the network
+    // nothing.
+    let (queue, mut app) = app();
+    let module = wasm_carrying(
+        &manifest("eugen/probe"),
+        "header.right",
+        10,
+        &[
+            ("crook.icon", &preview_png(300, 200)),
+            ("crook.preview.1", &preview_png(400, 300)),
+        ],
+    );
+    let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let model = app.update(|ctx| {
+        ctx.add_model(|_| {
+            let mut model = StoreModel::new(None);
+            model.fetch_with(answering(module.clone(), asked.clone()));
+            model
+        })
+    });
+    let offered = release("1.0.0", &module);
+
+    app.update(|ctx| {
+        model.update(ctx, |model, ctx| {
+            model.look_inside(&probe(), Some(&offered), None, ctx);
+        });
+    });
+    deliver(&queue, &app, "the look never landed", |app| {
+        app.read(|ctx| model.as_ref(ctx).looking_inside().is_none())
+    });
+
+    app.read(|ctx| {
+        let model = model.as_ref(ctx);
+        assert_eq!(
+            model.problem(),
+            None,
+            "a picture past the rule is not a failure"
+        );
+        let looked = model.looked_inside().expect("the module landed");
+        assert_eq!(
+            looked.bytes, module,
+            "the module was thrown away with its picture"
+        );
+        assert!(looked.pictures.is_empty());
+    });
+    app.update(|ctx| {
+        model.update(ctx, |model, ctx| {
+            model.download(&probe(), &offered, ctx);
+            assert_eq!(model.downloading(), None, "the module was fetched again");
+            assert_eq!(model.landed().len(), 1);
+        });
+    });
+    assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+}

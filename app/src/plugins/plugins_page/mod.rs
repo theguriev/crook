@@ -60,7 +60,9 @@
 //! surface that shows the whole list of what is being agreed to — which is why
 //! `allow` and `revoke` are plain actions and not commands. A palette entry
 //! called "Allow the CI plugin" would be a way to allow something without ever
-//! reading it.
+//! reading it. And they are registered as *answers*, so a sandboxed plugin
+//! granted `run:crook/plugins/allow` is refused it by name: run about its own
+//! id, it would be the same door.
 //!
 //! # Updating and removing are answered here too
 //!
@@ -189,18 +191,27 @@ impl Plugin for Plugins {
 /// everything else at the press: the capability list Allow writes is read
 /// off the manifest the host carries *now*, so an update that asked for more
 /// is allowed what it asks for and not what its predecessor did.
+///
+/// Allow, Revoke and Remove are registered as *answers*, which is what keeps
+/// "resolved at the press" from being a door: a sandboxed plugin granted
+/// `run:crook/plugins/allow` names the subject itself when it runs, and one
+/// that named its own id would be allowed whatever its newest version asks
+/// for. The host refuses a guest those three by name, whatever it was
+/// granted. Show and the pictures stay plain actions — a plugin that turned
+/// the page to a card, or opened its own previews, has done nothing a person
+/// would not.
 fn subject_actions(host: &mut Host, state: &Rc<PluginsState>) {
     let showing = state.clone();
     host.register_action(about("show"), move |workspace, ctx| {
-        let Some(plugin) = subject(workspace, "show") else {
+        let Some(plugin) = workspace.host().said_plugin(&about("show")) else {
             return;
         };
         showing.select(&plugin);
         ctx.notify();
     });
 
-    host.register_action(about("allow"), |workspace, ctx| {
-        let Some(plugin) = subject(workspace, "allow") else {
+    host.register_answer(about("allow"), |workspace, ctx| {
+        let Some(plugin) = workspace.host().said_plugin(&about("allow")) else {
             return;
         };
         // The whole declared list, every time: this is the answer to a card
@@ -221,16 +232,16 @@ fn subject_actions(host: &mut Host, state: &Rc<PluginsState>) {
         workspace.set_plugin_granted(&plugin, keys, ctx);
     });
 
-    host.register_action(about("revoke"), |workspace, ctx| {
-        let Some(plugin) = subject(workspace, "revoke") else {
+    host.register_answer(about("revoke"), |workspace, ctx| {
+        let Some(plugin) = workspace.host().said_plugin(&about("revoke")) else {
             return;
         };
         workspace.set_plugin_granted(&plugin, Vec::new(), ctx);
     });
 
     let removing = state.clone();
-    host.register_action(about("remove"), move |workspace, ctx| {
-        let Some(plugin) = subject(workspace, "remove") else {
+    host.register_answer(about("remove"), move |workspace, ctx| {
+        let Some(plugin) = workspace.host().said_plugin(&about("remove")) else {
             return;
         };
         // The card never offers Remove for either of these, so reaching here
@@ -238,12 +249,13 @@ fn subject_actions(host: &mut Host, state: &Rc<PluginsState>) {
         // subject where a chord cannot — and it is refused with a sentence
         // on the card, under the switch, rather than a directory that was
         // never there reported as removed.
-        let native = workspace
+        let carried = workspace
             .host()
             .available()
             .iter()
-            .any(|manifest| manifest.id == plugin && manifest.tier == Tier::Native);
-        let outcome = if native {
+            .find(|manifest| manifest.id == plugin)
+            .map(|manifest| (manifest.name, manifest.tier == Tier::Native));
+        let outcome = if carried.is_some_and(|(_, native)| native) {
             Err(String::from("is one of Crook's own, and cannot be removed"))
         } else if !workspace.is_installed(&plugin) {
             Err(String::from(
@@ -252,20 +264,26 @@ fn subject_actions(host: &mut Host, state: &Rc<PluginsState>) {
         } else {
             workspace.remove_plugin(&plugin, ctx)
         };
+        // A removal that worked has no card to say so on — the row is gone
+        // and the card has moved to another plugin's — so it is said about
+        // nobody, by name, and drawn under the list that lost the row.
         match outcome {
             Ok(()) => removing.say(
-                &plugin,
-                String::from("is off this machine, and so is what it was allowed to do."),
+                None,
+                format!(
+                    "{} is off this machine, and so is what it was allowed to do.",
+                    carried.map_or(plugin.as_str(), |(name, _)| name)
+                ),
                 false,
             ),
-            Err(why) => removing.say(&plugin, format!("was not removed: {why}"), true),
+            Err(why) => removing.say(Some(&plugin), format!("was not removed: {why}"), true),
         }
         ctx.notify();
     });
 
     let opening = state.clone();
     host.register_action(about("pictures"), move |workspace, ctx| {
-        let Some(plugin) = subject(workspace, "pictures") else {
+        let Some(plugin) = workspace.host().said_plugin(&about("pictures")) else {
             return;
         };
         let previews = workspace
@@ -295,23 +313,6 @@ fn subject_actions(host: &mut Host, state: &Rc<PluginsState>) {
     });
 }
 
-/// Which plugin the action being run is about, or nothing with a line.
-///
-/// Taken from what the press said, so an action reached by a chord — which
-/// says nothing — logs and does nothing rather than acting on whatever card
-/// happens to be showing: a chord that allowed something would be a way to
-/// allow it unread.
-fn subject(workspace: &Workspace, verb: &str) -> Option<PluginId> {
-    let said = workspace.host().said();
-    match PluginId::parse(&said) {
-        Ok(plugin) => Some(plugin),
-        Err(why) => {
-            log::warn!("crook/plugins/{verb} was run about {said:?}, which is not a plugin: {why}");
-            None
-        }
-    }
-}
-
 /// The section: the list in the sidebar, and what it has selected beside it.
 ///
 /// The list is worked out once and handed to both halves, because the card is
@@ -338,7 +339,7 @@ fn page(
             .copied()
     });
 
-    let list = list::render(workspace, &matching, selected.as_ref());
+    let list = list::render(workspace, &matching, selected.as_ref(), state);
     // Unreachable while any plugin is loaded, and this page is one.
     let Some(manifest) = showing else {
         return (list, Empty::new().finish());
@@ -368,7 +369,7 @@ fn page(
 /// What one of this page's actions about a plugin is called.
 ///
 /// `crook/plugins/show`, `crook/plugins/remove`: one name per verb, and which
-/// plugin it is about is said at the press. See [`subject`].
+/// plugin it is about is said at the press. See [`Host::said_plugin`].
 pub(super) fn about(verb: &str) -> ActionName {
     ActionName::parse(&format!("crook/plugins/{verb}"))
         .expect("a name built from a verb that already parsed")
