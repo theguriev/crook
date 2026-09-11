@@ -12,6 +12,7 @@ fn release() -> Release {
         capabilities: Vec::new(),
         asks: Vec::new(),
         yanked: None,
+        previews: Vec::new(),
     }
 }
 

@@ -264,7 +264,11 @@ fn remove(state: &Rc<StoreState>, workspace: &mut Workspace, ctx: &mut ViewConte
 }
 
 /// What one of this plugin's actions is called.
-pub(super) fn action(verb: &str) -> ActionName {
+///
+/// Reachable from the Plugins page, which offers Update and Show in Store on
+/// a plugin's own card and looks the store's actions up by name to do it: a
+/// store switched off is a row drawn dead there, not a missing button.
+pub(crate) fn action(verb: &str) -> ActionName {
     ActionName::parse(&format!("crook/store/{verb}")).expect("a name built from a literal")
 }
 

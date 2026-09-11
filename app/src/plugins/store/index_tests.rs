@@ -122,6 +122,140 @@ fn a_field_this_build_has_never_heard_of_is_not_a_broken_index() {
 }
 
 #[test]
+fn the_pictures_a_registry_lists_are_read_and_their_absence_is_not_a_hole() {
+    // An icon rides in the list as base64 so a face beside every name costs
+    // no request; a version's previews ride as sizes so a card can reserve
+    // the room. Neither was there before, and an index without them is the
+    // index every Crook read yesterday.
+    let index = parse(
+        br#"{"schema": 1, "plugins": [
+             {"id": "eugen/probe", "name": "Probe", "description": "d", "icon": "aGk=",
+              "versions": [{"version": "1.0.0", "abi": 8, "url": "https://x.invalid/p.wasm",
+                            "sha256": "aa", "previews": [{"width": 640, "height": 128}]}]}]}"#,
+    )
+    .expect("it should parse");
+
+    let offered = offers(&index);
+    assert_eq!(offered[0].icon.as_deref(), Some("aGk="));
+    assert_eq!(
+        offered[0].release.as_ref().unwrap().previews,
+        [PreviewSize {
+            width: 640,
+            height: 128
+        }]
+    );
+
+    let without = parse(ONE.as_bytes()).expect("it should parse");
+    assert_eq!(without.plugins[0].icon, None);
+    assert!(without.plugins[0].versions[0].previews.is_empty());
+    assert_eq!(offers(&without)[0].icon, None);
+}
+
+/// An offer of `release`, or of nothing, for the tests about what it means.
+fn offered(release: Option<&str>) -> Offer {
+    Offer {
+        id: PluginId::parse("eugen/probe").expect("a literal that parses"),
+        name: String::from("Probe"),
+        description: String::from("d"),
+        repository: String::new(),
+        license: String::new(),
+        icon: None,
+        release: release.map(|version| Release {
+            version: version.to_owned(),
+            abi: 8,
+            url: String::from("https://x.invalid/p.wasm"),
+            sha256: String::from("aa"),
+            bytes: 0,
+            capabilities: Vec::new(),
+            asks: Vec::new(),
+            yanked: None,
+            previews: Vec::new(),
+        }),
+        newest_anywhere: None,
+        withdrawn: None,
+    }
+}
+
+#[test]
+fn what_an_offer_means_depends_on_what_is_installed_and_whether_it_was_taken_back() {
+    // The case a comparison gets wrong: a person on a withdrawn 0.10.0 is
+    // offered 0.9.0, which is older, and it is still the version they should
+    // be on — the registry took theirs back.
+    let offer = offered(Some("0.9.0"));
+    assert_eq!(change(&offer, Some("0.10.0"), false), Change::Current);
+    assert!(matches!(
+        change(&offer, Some("0.10.0"), true),
+        Change::Replace(release) if release.version == "0.9.0"
+    ));
+
+    // A pre-release is older than the release it precedes.
+    let offer = offered(Some("1.0.0"));
+    assert!(matches!(
+        change(&offer, Some("1.0.0-rc.1"), false),
+        Change::Update(release) if release.version == "1.0.0"
+    ));
+    assert_eq!(change(&offer, Some("1.0.0"), false), Change::Current);
+    assert!(matches!(
+        change(&offer, None, false),
+        Change::Install(release) if release.version == "1.0.0"
+    ));
+
+    // And nothing built for this vocabulary is nothing, installed or not.
+    let offer = offered(None);
+    assert_eq!(change(&offer, Some("1.0.0"), false), Change::Nothing);
+    assert_eq!(change(&offer, None, false), Change::Nothing);
+}
+
+#[test]
+fn the_updates_are_the_installed_plugins_the_registry_is_ahead_of() {
+    // Natives never reach this — the caller hands over what is installed as a
+    // file — and a plugin at the registry's version is not an update, nor is
+    // one the registry has never heard of.
+    let mut ahead = offered(Some("2.0.0"));
+    let mut behind = offered(Some("1.0.0"));
+    behind.id = PluginId::parse("eugen/behind").expect("a literal that parses");
+    let mut replaced = offered(Some("0.9.0"));
+    replaced.id = PluginId::parse("eugen/replaced").expect("a literal that parses");
+    ahead.name = String::from("Ahead");
+    let heard = Heard {
+        offers: vec![ahead.clone(), behind.clone(), replaced.clone()],
+        busy: Vec::new(),
+    };
+    let unknown = PluginId::parse("eugen/unknown").expect("a literal that parses");
+
+    let updates = updates(
+        &heard,
+        [
+            (&ahead.id, "1.0.0", false),
+            (&behind.id, "1.0.0", false),
+            (&replaced.id, "0.10.0", true),
+            (&unknown, "1.0.0", false),
+        ],
+    );
+
+    let named: Vec<(String, String)> = updates
+        .iter()
+        .map(|(id, release)| (id.to_string(), release.version.clone()))
+        .collect();
+    assert_eq!(
+        named,
+        [
+            (String::from("eugen/probe"), String::from("2.0.0")),
+            (String::from("eugen/replaced"), String::from("0.9.0")),
+        ]
+    );
+
+    // What the store is doing is looked up by id, and nothing for the rest.
+    let heard = Heard {
+        offers: Vec::new(),
+        busy: vec![(ahead.id.clone(), Busy::Downloading)],
+    };
+    assert_eq!(heard.busy(&ahead.id), Some(Busy::Downloading));
+    assert_eq!(heard.busy(&behind.id), None);
+    assert_eq!(heard.offer(&ahead.id), None);
+}
+
+#[test]
 fn a_row_whose_name_is_not_one_is_dropped_rather_than_shown() {
     // Nothing can be granted under a name that is not a name, so a row
     // carrying one is a row whose install could never be allowed anything.
@@ -161,6 +295,7 @@ fn a_module_that_is_not_what_the_list_promised_is_refused() {
         capabilities: vec![String::from("cwd.read")],
         asks: Vec::new(),
         yanked: None,
+        previews: Vec::new(),
     };
     let manifest = crook_plugin::Manifest {
         schema: crook_plugin::Manifest::SCHEMA,

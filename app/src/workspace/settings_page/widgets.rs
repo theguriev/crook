@@ -30,7 +30,11 @@
 //! signal colour rather than a note that happens to be red. They are here
 //! rather than on either card because the Store's card and a plugin's are
 //! read one after the other, and two boxes differing by a couple of pixels
-//! would read as two mechanisms.
+//! would read as two mechanisms. And the **pictures** a plugin carries: the
+//! box its icon sits in beside its name, at the two sizes a name is set in,
+//! and the figure a preview is drawn as on its card — with the room reserved
+//! for one that has not been decoded yet, so the page does not jump when it
+//! lands.
 //!
 //! No dropdown and no text input: both need a popup or a caret, and Crook has
 //! neither. Where Warp uses a dropdown for a short list, the choice row says
@@ -49,8 +53,11 @@
 //! unusable, and a settings page that silently omitted the switch you came
 //! looking for would send you to the file.
 
+use std::sync::Arc;
+
 use crookui_core::elements::{MouseStateHandle, Padding, Paragraph};
 use crookui_core::fonts::{FamilyId, Properties, Weight};
+use crookui_core::image::Bitmap;
 use crookui_core::prelude::*;
 
 use super::search::{Query, Words};
@@ -133,6 +140,36 @@ const HEADING_GAP: f32 = 10.;
 /// The dot that says whether something is running.
 const DOT: f32 = 6.;
 
+/// The edge of a plugin's icon on a row of a list.
+///
+/// The body size, which is what a row's label is set in and what a chip
+/// already draws a Lucide mark at: a row is 14.4 tall inside its padding, and
+/// a mark taller than its line would make the plugins list a different list
+/// from the settings rail beside it.
+pub(crate) const ROW_ICON: f32 = 12.;
+
+/// The edge of a plugin's icon beside its name at the top of its card.
+///
+/// Under the title's own 19.2-pixel line, so the line the title sits on is
+/// the line it sat on before there was a mark beside it.
+pub(crate) const TITLE_MARK: f32 = 18.;
+
+/// The tallest a preview is drawn, in logical pixels.
+///
+/// A screenshot of a panel can be taller than the window it is drawn in, and
+/// a card that scrolled through one picture for two screens would be a card
+/// about the picture. Width is the card's own measure and needs no number
+/// here.
+pub(crate) const PREVIEW_MAX_HEIGHT: f32 = 480.;
+
+/// What a preview's pixel count is divided by to get its logical size.
+///
+/// Previews are captured at 2x — `--snapshot` renders at that scale, and so
+/// does every display a screenshot is worth taking on — so a 640-pixel-wide
+/// capture is 320 logical pixels of interface, and drawing it at 640 would be
+/// drawing the interface twice its size.
+pub(crate) const PREVIEW_CAPTURE_SCALE: f32 = 2.;
+
 /// What a control does when it is clicked, and whether it can be.
 ///
 /// `None` is the disabled state, and it carries no action precisely so that a
@@ -208,19 +245,39 @@ pub(crate) struct Category {
     pub(crate) entries: Vec<Entry>,
 }
 
-/// A page's heading.
-pub(crate) fn page_title(title: &str, ui: FamilyId) -> Box<dyn Element> {
-    Container::new(
-        Text::new(title.to_owned(), ui, TITLE_SIZE)
-            .with_color(theme().text_primary)
-            .with_style(Properties {
-                weight: Weight::Semibold,
-                ..Properties::default()
-            })
+/// A page's heading, with a mark before it where the page has one.
+///
+/// The mark is centred on the title's line and the title is not moved by it:
+/// a plugin's icon is [`TITLE_MARK`] tall under a line of 19.2, and the gap
+/// between the two is the gap a row keeps between its dot and its label.
+pub(crate) fn page_title(
+    title: &str,
+    mark: Option<Box<dyn Element>>,
+    ui: FamilyId,
+) -> Box<dyn Element> {
+    let text = Text::new(title.to_owned(), ui, TITLE_SIZE)
+        .with_color(theme().text_primary)
+        .with_style(Properties {
+            weight: Weight::Semibold,
+            ..Properties::default()
+        })
+        .finish();
+
+    let line = match mark {
+        Some(mark) => Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_child(
+                Container::new(mark)
+                    .with_margin_right(super::super::section::LEADING_GAP)
+                    .finish(),
+            )
+            .with_child(text)
             .finish(),
-    )
-    .with_margin_bottom(16.)
-    .finish()
+        None => text,
+    };
+
+    Container::new(line).with_margin_bottom(16.).finish()
 }
 
 /// A heading and the rows under it, gathered.
@@ -871,6 +928,120 @@ pub(crate) fn state_dot(on: bool) -> Box<dyn Element> {
     .with_width(DOT)
     .with_height(DOT)
     .finish()
+}
+
+/// The place a plugin's icon goes, `edge` square, holding the icon or nothing.
+///
+/// A box of the same size whether or not there is a picture, so that every
+/// label in a list starts at the same x: the rows of a list are read down,
+/// and a name that stepped left on the rows with no icon would be a list
+/// with two columns of names. An empty box is empty — no placeholder mark,
+/// no dot — because "this plugin has no picture" is the ordinary state of
+/// every native plugin and is not a thing to draw a symbol for.
+pub(crate) fn picture_box(bitmap: Option<&Arc<Bitmap>>, edge: f32) -> Box<dyn Element> {
+    let inside = match bitmap {
+        Some(bitmap) => Image::new(bitmap.clone(), vec2f(edge, edge)).finish(),
+        None => Empty::new().finish(),
+    };
+    ConstrainedBox::new(inside)
+        .with_width(edge)
+        .with_height(edge)
+        .finish()
+}
+
+/// How big a preview of `width`×`height` captured pixels is drawn.
+///
+/// Halved, because it was captured at [`PREVIEW_CAPTURE_SCALE`]; then held
+/// to [`PREVIEW_MAX_HEIGHT`] with its shape kept. Width is left to the card,
+/// which shrinks a picture to its measure the way it wraps a sentence to it.
+pub(crate) fn preview_size(width: u32, height: u32) -> Vector2F {
+    let logical = vec2f(width as f32, height as f32).scale(1. / PREVIEW_CAPTURE_SCALE);
+    if logical.y() <= PREVIEW_MAX_HEIGHT || logical.y() <= 0. {
+        return logical;
+    }
+    logical.scale(PREVIEW_MAX_HEIGHT / logical.y())
+}
+
+/// One preview on a card: the picture, or the room for it, with its caption.
+///
+/// `None` draws the picture's room in the box fill, so a card whose pictures
+/// are still being decoded on the pool is laid out as the card it is about
+/// to be — nothing under the pictures moves when they land. The room is the
+/// picture's own element with no pixels in it, and not a box of the
+/// picture's size, because a box in a column narrower than the picture
+/// keeps its height where the picture keeps its shape, and the card would
+/// jump by the difference. No border on it, because an `overlay_1` box with
+/// a border is what the tests press as a text field. The caption is set the
+/// way a description is, under the picture it describes and closer to it
+/// than the next picture is.
+pub(crate) fn preview(
+    bitmap: Option<&Arc<Bitmap>>,
+    logical: Vector2F,
+    caption: Option<&str>,
+    ui: FamilyId,
+) -> Box<dyn Element> {
+    let figure = match bitmap {
+        Some(bitmap) => Image::new(bitmap.clone(), logical).finish(),
+        None => Container::new(Image::room(logical).finish())
+            .with_background_color(theme().overlay_1)
+            .finish(),
+    };
+
+    let mut column = Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Start)
+        .with_child(figure);
+    if let Some(caption) = caption {
+        column.add_child(
+            Container::new(
+                Paragraph::new(caption.to_owned(), ui, DESCRIPTION_SIZE)
+                    .with_color(theme().text_muted)
+                    .with_line_height_ratio(1.45)
+                    .finish(),
+            )
+            .with_margin_top(FOOTNOTE_GAP)
+            .finish(),
+        );
+    }
+
+    Container::new(column.finish())
+        .with_margin_bottom(ROW_SPACING)
+        .finish()
+}
+
+/// The foot of a list that has updates to offer: how many, and the one button
+/// that takes them all.
+///
+/// Under the list rather than on a card, because it is about the list — the
+/// count is of rows — and a fact about a list that scrolled out of sight would
+/// be one nobody could rely on finding. The button is drawn dead while the
+/// store cannot fetch, with the count still said: what there is to do does
+/// not depend on whether it can be done from here.
+pub(crate) fn update_all_footer(
+    count: usize,
+    command: Command,
+    state: MouseStateHandle,
+    ui: FamilyId,
+) -> Box<dyn Element> {
+    let line = match count {
+        1 => String::from("1 update in the registry"),
+        count => format!("{count} updates in the registry"),
+    };
+
+    Flex::column()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_child(
+            Container::new(
+                Text::new(line, ui, DESCRIPTION_SIZE)
+                    .with_color(theme().text_muted)
+                    .finish(),
+            )
+            .with_uniform_padding(8.)
+            .finish(),
+        )
+        .with_child(text_button("Update all", command, state, ui))
+        .finish()
 }
 
 /// The line under a card's title: the state the thing is in, and the facts

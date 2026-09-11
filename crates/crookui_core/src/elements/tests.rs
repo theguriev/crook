@@ -515,6 +515,32 @@ fn an_image_in_a_stretched_box_keeps_its_own_size_inside_it() {
 }
 
 #[test]
+fn the_room_for_a_picture_is_the_box_the_picture_lands_in() {
+    // What a card reserves while the pixels are decoded has to be the box
+    // the picture takes when it lands, or everything under it moves. A
+    // fixed box is not: in a column narrower than the picture it clamps its
+    // width and keeps its height. The room shrinks by the picture's rule.
+    let mut harness = Harness::new(|_| {
+        ConstrainedBox::new(
+            Container::new(Image::room(vec2f(500., 340.)).finish())
+                .with_background_color(Color::WHITE)
+                .finish(),
+        )
+        .with_max_width(300.)
+        .finish()
+    });
+
+    let scene = harness.build_scene(vec2f(1000., 600.));
+
+    assert_eq!(
+        rects(&scene)[0].bounds,
+        RectF::new(Vector2F::zero(), vec2f(300., 204.)),
+        "the ground is painted at the size the picture would be"
+    );
+    assert!(images(&scene).is_empty(), "the room draws no picture");
+}
+
+#[test]
 fn a_press_and_release_inside_a_hoverable_dispatches_its_action() {
     let mut harness = Harness::new(|view| {
         Hoverable::new(view.mouse.clone(), |_| marker(50., 20.))

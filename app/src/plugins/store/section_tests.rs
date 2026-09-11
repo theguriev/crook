@@ -18,6 +18,7 @@ fn release(version: &str) -> Release {
         capabilities: Vec::new(),
         asks: Vec::new(),
         yanked: None,
+        previews: Vec::new(),
     }
 }
 
@@ -28,6 +29,7 @@ fn offer(release: Option<Release>) -> Offer {
         description: "d".into(),
         repository: String::new(),
         license: String::new(),
+        icon: None,
         release,
         newest_anywhere: None,
         withdrawn: None,

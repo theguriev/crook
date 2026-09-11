@@ -27,13 +27,26 @@
 //!
 //! # Everything a click does is a named action
 //!
-//! Selecting a row and flipping a switch are both actions —
-//! `crook/plugins/show-crook-usage` and `crook/plugins/toggle-crook-usage` —
-//! registered one per plugin in [`Plugin::ready`], because a page that offers
-//! something per plugin cannot know how many that is until they have all
-//! arrived. The switches are *commands*, so they are in the palette; the
-//! selections are not, because a list of things to do should not be a list of
-//! rows to look at.
+//! Selecting a row, allowing, revoking, removing, opening the pictures — each
+//! is one action for the whole page, `crook/plugins/show`,
+//! `crook/plugins/allow` and so on, registered once in [`Plugin::build`] and
+//! run *about* a plugin: the button says which one through the host, the way
+//! a picker's row does, and the handler takes what was said. One action per
+//! verb rather than one per plugin, because the list changes while the window
+//! is open — a module lands from the Store, a plugin is removed — and an
+//! action captured per plugin at load time went on writing the capability
+//! list of the version it was captured against, after an update had replaced
+//! it. Whatever a press needs is resolved at the press, against the plugin as
+//! it is then.
+//!
+//! The switches are the one thing still registered per plugin,
+//! `crook/plugins/toggle-crook-usage`, in [`Plugin::ready`] — and run again
+//! whenever the list changes, which is what `ready` is for. They are
+//! *commands*, so they are in the palette under the plugin's name, and a
+//! palette row has no way to say what it is about. The rest are not commands,
+//! because a list of things to do should not be a list of rows to look at,
+//! and a palette entry called "Remove the CI plugin" would be a way to remove
+//! something without reading its card.
 //!
 //! Two switches are drawn inert, and [`HOLDS_THE_PAGE`] says which and why: a
 //! switch that removes the switch is a one-way door whose way back is editing
@@ -45,9 +58,19 @@
 //! asking is not being granted: until a person answers, every request it makes
 //! is refused. The card is where the answer is given, because it is the only
 //! surface that shows the whole list of what is being agreed to — which is why
-//! `allow-` and `revoke-` are plain actions and not commands. A palette entry
+//! `allow` and `revoke` are plain actions and not commands. A palette entry
 //! called "Allow the CI plugin" would be a way to allow something without ever
 //! reading it.
+//!
+//! # Updating and removing are answered here too
+//!
+//! A plugin's card is where a person looks for what is true of the plugin,
+//! and "the registry has a newer one" and "take it off this machine" are
+//! true of the plugin rather than of the Store. So the card offers both. The
+//! fetching is still the Store's — the card runs the Store's own action about
+//! this plugin, and is drawn dead while the Store is switched off — and what
+//! the registry offers reaches the page as a snapshot the Store hands over,
+//! never as a file read on the render path.
 
 mod card;
 mod list;
@@ -61,8 +84,10 @@ use crook_plugin::{Manifest, PluginId, Tier};
 use crook_plugin_api::Capability;
 
 use crate::plugin::{ActionName, BuildError, Cardinality, Host, Plugin, SlotId};
+use crate::plugins::pictures::Pictures;
 use crate::workspace::Workspace;
 use crate::workspace::section;
+use crate::workspace::settings_page::widgets;
 
 use state::PluginsState;
 
@@ -132,43 +157,18 @@ impl Plugin for Plugins {
         );
 
         picker_keys(host);
+        subject_actions(host, &self.state);
         Ok(())
     }
 
     fn ready(&mut self, host: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
-        // One pair of actions per plugin, and only now: `available` is not
-        // filled in until every plugin has built.
+        // One switch per plugin, and only now: `available` is not filled in
+        // until every plugin has built — and this runs again whenever it
+        // changes, so the palette offers a switch for exactly the plugins
+        // there are.
         let carried: Vec<&'static Manifest> = host.available().to_vec();
         for manifest in carried {
             let plugin = manifest.id.clone();
-
-            let state = self.state.clone();
-            let chosen = plugin.clone();
-            host.register_action(action("show", &plugin), move |_, ctx| {
-                state.select(&chosen);
-                ctx.notify();
-            });
-
-            // Registered only for a plugin that asked for something, so that
-            // a name exists exactly where a control does. Every native plugin
-            // asks for nothing and gets neither.
-            if !manifest.capabilities.is_empty() {
-                let keys = wanted(manifest);
-                let allowing = plugin.clone();
-                host.register_action(action("allow", &plugin), move |workspace, ctx| {
-                    // The whole declared list, every time: this is the answer
-                    // to a card that showed all of it, and it is also what
-                    // prunes a key for something the plugin no longer asks
-                    // for.
-                    workspace.set_plugin_granted(&allowing, keys.clone(), ctx);
-                });
-
-                let revoking = plugin.clone();
-                host.register_action(action("revoke", &plugin), move |workspace, ctx| {
-                    workspace.set_plugin_granted(&revoking, Vec::new(), ctx);
-                });
-            }
-
             if HOLDS_THE_PAGE.contains(&plugin.as_str()) {
                 continue;
             }
@@ -179,6 +179,136 @@ impl Plugin for Plugins {
             );
         }
         Ok(())
+    }
+}
+
+/// The five things a card can be asked to do about a plugin, each one action
+/// for the whole page.
+///
+/// Each handler starts by asking which plugin it is about, and resolves
+/// everything else at the press: the capability list Allow writes is read
+/// off the manifest the host carries *now*, so an update that asked for more
+/// is allowed what it asks for and not what its predecessor did.
+fn subject_actions(host: &mut Host, state: &Rc<PluginsState>) {
+    let showing = state.clone();
+    host.register_action(about("show"), move |workspace, ctx| {
+        let Some(plugin) = subject(workspace, "show") else {
+            return;
+        };
+        showing.select(&plugin);
+        ctx.notify();
+    });
+
+    host.register_action(about("allow"), |workspace, ctx| {
+        let Some(plugin) = subject(workspace, "allow") else {
+            return;
+        };
+        // The whole declared list, every time: this is the answer to a card
+        // that showed all of it, and it is also what prunes a key for
+        // something the plugin no longer asks for.
+        let Some(keys) = workspace
+            .host()
+            .available()
+            .iter()
+            .find(|manifest| manifest.id == plugin)
+            .map(|manifest| wanted(manifest))
+        else {
+            log::warn!(
+                "{plugin} is not a plugin this window carries, so there is nothing to allow"
+            );
+            return;
+        };
+        workspace.set_plugin_granted(&plugin, keys, ctx);
+    });
+
+    host.register_action(about("revoke"), |workspace, ctx| {
+        let Some(plugin) = subject(workspace, "revoke") else {
+            return;
+        };
+        workspace.set_plugin_granted(&plugin, Vec::new(), ctx);
+    });
+
+    let removing = state.clone();
+    host.register_action(about("remove"), move |workspace, ctx| {
+        let Some(plugin) = subject(workspace, "remove") else {
+            return;
+        };
+        // The card never offers Remove for either of these, so reaching here
+        // is the command line naming a plugin by hand — `--action` says a
+        // subject where a chord cannot — and it is refused with a sentence
+        // on the card, under the switch, rather than a directory that was
+        // never there reported as removed.
+        let native = workspace
+            .host()
+            .available()
+            .iter()
+            .any(|manifest| manifest.id == plugin && manifest.tier == Tier::Native);
+        let outcome = if native {
+            Err(String::from("is one of Crook's own, and cannot be removed"))
+        } else if !workspace.is_installed(&plugin) {
+            Err(String::from(
+                "is not installed on this machine, so there is nothing to remove",
+            ))
+        } else {
+            workspace.remove_plugin(&plugin, ctx)
+        };
+        match outcome {
+            Ok(()) => removing.say(
+                &plugin,
+                String::from("is off this machine, and so is what it was allowed to do."),
+                false,
+            ),
+            Err(why) => removing.say(&plugin, format!("was not removed: {why}"), true),
+        }
+        ctx.notify();
+    });
+
+    let opening = state.clone();
+    host.register_action(about("pictures"), move |workspace, ctx| {
+        let Some(plugin) = subject(workspace, "pictures") else {
+            return;
+        };
+        let previews = workspace
+            .host()
+            .pictures_of(&plugin)
+            .map(|pictures| pictures.previews.clone())
+            .unwrap_or_default();
+        if previews.is_empty() {
+            return;
+        }
+
+        // Decoded on the pool, because six screenshots are megabytes of
+        // pixels and the thread that draws must not wait for them; the card
+        // draws their reserved sizes until they land. The bytes are already
+        // shared, so nothing is copied to get there.
+        opening.opening(&plugin);
+        let decoding = ctx
+            .background()
+            .spawn(async move { Pictures::decode_previews(&previews) });
+        let landing = opening.clone();
+        ctx.spawn(decoding, move |_, decoded, ctx| {
+            landing.landed(&plugin, decoded);
+            ctx.notify();
+        })
+        .detach();
+        ctx.notify();
+    });
+}
+
+/// Which plugin the action being run is about, or nothing with a line.
+///
+/// Taken from what the press said, so an action reached by a chord — which
+/// says nothing — logs and does nothing rather than acting on whatever card
+/// happens to be showing: a chord that allowed something would be a way to
+/// allow it unread.
+fn subject(workspace: &Workspace, verb: &str) -> Option<PluginId> {
+    let said = workspace.host().said();
+    match PluginId::parse(&said) {
+        Ok(plugin) => Some(plugin),
+        Err(why) => {
+            log::warn!("crook/plugins/{verb} was run about {said:?}, which is not a plugin: {why}");
+            None
+        }
     }
 }
 
@@ -214,22 +344,41 @@ fn page(
         return (list, Empty::new().finish());
     };
 
+    // The icon beside the name, for a plugin that carries one. Nothing for
+    // one that does not: a title indented past an empty box would be a title
+    // saying a picture was missing, and most plugins have none to miss.
+    let mark = workspace
+        .host()
+        .pictures_of(&manifest.id)
+        .and_then(|pictures| pictures.icon.as_ref())
+        .map(|icon| widgets::picture_box(Some(icon), widgets::TITLE_MARK));
+
     (
         list,
         section::content(
             manifest.name,
-            card::render(workspace, app, manifest),
+            mark,
+            card::render(workspace, app, manifest, state),
             workspace.settings_page().scroll_named(CARD_SCROLL),
             workspace.fonts().ui,
         ),
     )
 }
 
-/// What one of this page's per-plugin actions is called.
+/// What one of this page's actions about a plugin is called.
+///
+/// `crook/plugins/show`, `crook/plugins/remove`: one name per verb, and which
+/// plugin it is about is said at the press. See [`subject`].
+pub(super) fn about(verb: &str) -> ActionName {
+    ActionName::parse(&format!("crook/plugins/{verb}"))
+        .expect("a name built from a verb that already parsed")
+}
+
+/// What one of this page's per-plugin commands is called.
 ///
 /// `owner/name` has a slash in it and an action name has exactly three parts,
 /// so the plugin's own separator becomes a dash: `crook/usage` is toggled by
-/// `crook/plugins/toggle-crook-usage` and shown by `…/show-crook-usage`.
+/// `crook/plugins/toggle-crook-usage`.
 pub(super) fn action(verb: &str, plugin: &PluginId) -> ActionName {
     ActionName::parse(&format!(
         "crook/plugins/{verb}-{}-{}",

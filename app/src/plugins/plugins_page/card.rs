@@ -28,28 +28,46 @@
 //! of boxes, then past the first rule on the lists — which is the order the
 //! questions are asked in. Is it on, what did I agree to, what does it do.
 //!
-//! # There is room here for a picture
+//! # The pictures are the plugin's own
 //!
-//! Deliberately: a plugin from a store will want one, and the shape of this
-//! card is the one that has room for it at the top of the body, under the name
-//! and above the facts, without anything else moving. Nothing carries an image
-//! yet — a native plugin's manifest is a `&'static str` per field and a
-//! sandboxed one's has no picture in it — so there is nothing to draw and this
-//! says so rather than reserving a grey rectangle for a future release.
+//! Two of them. The icon is beside the name in the title — the frame draws
+//! it, from the same box a row of the list draws it in, so the face beside a
+//! name is one face — and the previews are a category of their own, "What it
+//! looks like", opened by a press rather than decoded for every card somebody
+//! scrolls past. Both come out of the module itself, read beside the manifest
+//! when it opened: nothing is fetched to draw them, and a plugin that carries
+//! none has no title mark and no category rather than a grey rectangle where
+//! a picture would go.
+//!
+//! # What the registry says, on the card that is about the plugin
+//!
+//! A box after the switch, for a plugin that is a file on this machine: the
+//! version the registry has and the one that is running, Update where the
+//! registry is ahead, Show in Store where there is a row to show, and Remove.
+//! Updating is the Store's to do — the row runs the Store's own action about
+//! this plugin, and is dead while the Store is off — but it is asked for
+//! here, because "is there a newer one" is a question about the plugin, and
+//! the plugin's card is where somebody looks for the answer.
+
+use std::rc::Rc;
 
 use crookui_core::fonts::FamilyId;
 use crookui_core::prelude::*;
 
-use crook_plugin::{EntryId, Manifest, PluginId, SlotId, Slots};
+use crook_plugin::{EntryId, Manifest, PluginId, SlotId, Slots, Tier};
 
+use crate::plugin::ActionName;
+use crate::plugins::store;
+use crate::plugins::store::index::{Busy, Change, Release, change};
 use crate::workspace::settings_page::search::Words;
 use crate::workspace::settings_page::widgets::{Command, Mark, Tone};
 use crate::workspace::settings_page::{named, widgets};
 use crate::workspace::{Workspace, WorkspaceAction};
 
+use super::state::PluginsState;
 use super::{
-    HOLDS_THE_PAGE, PLUGIN_CARD, Stance, action, covered, elsewhere, only_by_name, stalled, stance,
-    tier_words, wanted,
+    HOLDS_THE_PAGE, PLUGIN_CARD, Stance, about, action, covered, elsewhere, only_by_name, stalled,
+    stance, tier_words, wanted,
 };
 
 /// The gap under a box, before the next one.
@@ -64,6 +82,7 @@ pub(super) fn render(
     workspace: &Workspace,
     app: &AppContext,
     manifest: &'static Manifest,
+    state: &Rc<PluginsState>,
 ) -> Box<dyn Element> {
     let ui = workspace.fonts().ui;
     let on = workspace.host().is_loaded(&manifest.id);
@@ -80,6 +99,28 @@ pub(super) fn render(
     // meet the question before the controls that depend on the answer, and
     // the note under those controls says "the answer is above".
     let mut boxes = vec![Boxed::plain(switch(workspace, manifest, on, ui))];
+    // Then what the registry says and what this machine holds, before the
+    // grant: a version that is behind is news, and the box says whether
+    // taking the update would ask for more than the box under it allows.
+    if let Some(block) = machine(workspace, manifest, ui) {
+        boxes.push(block);
+    }
+    // What the last press about *this* plugin came to, under the box it
+    // was pressed in when there is one and under the switch when there is
+    // not — a Remove refused for a plugin whose card never offered it was
+    // run from the command line naming the plugin by hand, and the refusal
+    // has to land on a card that has no machine box. Only this plugin's,
+    // for the reason the Store keeps a sentence with its row: a removal
+    // that failed is news on the card of the plugin that is still there.
+    if let Some((sentence, wrong)) = state.said_about(&manifest.id) {
+        let tone = match wrong {
+            true => Tone::Warning,
+            false => Tone::Plain,
+        };
+        let said = widgets::footnote(&format!("{} {sentence}", manifest.name), tone, ui);
+        let under = boxes.pop().expect("the switch's box is always there");
+        boxes.push(under.with_footnote(said));
+    }
     if let Some(block) = permissions(workspace, manifest, on, ui) {
         boxes.push(block);
     }
@@ -107,6 +148,13 @@ pub(super) fn render(
                 .with_margin_bottom(gap)
                 .finish(),
         );
+    }
+
+    // What it looks like comes first among the categories: it is the one a
+    // person who has just installed something scrolls for, and the one that
+    // was on the Store card a moment ago.
+    if let Some(category) = pictures(workspace, manifest, state, ui) {
+        column.add_child(category);
     }
 
     // Before the list of slots rather than after everything, because every
@@ -146,7 +194,7 @@ pub(super) fn render(
                 )
             })
             .collect();
-        column.add_child(section("What it puts on screen", rows, ui));
+        column.add_child(listed("What it puts on screen", rows, ui));
     }
 
     let (commands, unoffered) = offers(workspace, &manifest.id);
@@ -204,7 +252,7 @@ pub(super) fn render(
             }
             rows
         };
-        column.add_child(section("What it can be asked to do", rows, ui));
+        column.add_child(listed("What it can be asked to do", rows, ui));
     }
 
     column.finish()
@@ -227,6 +275,20 @@ impl Boxed {
         Self {
             element,
             explained: false,
+        }
+    }
+
+    /// The same box with `footnote` under it — after whatever explanation it
+    /// already ends in.
+    fn with_footnote(self, footnote: Box<dyn Element>) -> Self {
+        Self {
+            element: Flex::column()
+                .with_main_axis_size(MainAxisSize::Min)
+                .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+                .with_child(self.element)
+                .with_child(footnote)
+                .finish(),
+            explained: true,
         }
     }
 }
@@ -275,8 +337,8 @@ fn switch(workspace: &Workspace, manifest: &Manifest, on: bool, ui: FamilyId) ->
         question = Some(("Withdrawn from the registry", Tone::Warning));
         body.push(widgets::note_text(why, ui));
         body.push(widgets::note_text(
-            "This version is not being offered any more, so it is not running. The Store has \
-             whatever replaced it, and Remove there takes this one off.",
+            "This version is not being offered any more, so it is not running. The box under \
+             this one has what the registry offers instead, and Remove.",
             ui,
         ));
     }
@@ -385,10 +447,7 @@ fn permissions(
         ),
     };
 
-    let command = workspace
-        .host()
-        .action(&action(verb, &manifest.id))
-        .map(WorkspaceAction::Run);
+    let command = run_about(workspace, about(verb), &manifest.id);
     let live = command.is_some();
     let control = widgets::text_button(
         label,
@@ -399,22 +458,280 @@ fn permissions(
         ui,
     );
 
-    let element = Flex::column()
-        .with_main_axis_size(MainAxisSize::Min)
-        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_child(widgets::asked(
+    Some(
+        Boxed::plain(widgets::asked(
             Some((title, Tone::Plain)),
             items,
             vec![widgets::answer_row(state, live, control, ui)],
             ui,
         ))
-        .with_child(widgets::footnote(explanation(stance, on), Tone::Plain, ui))
-        .finish();
+        .with_footnote(widgets::footnote(explanation(stance, on), Tone::Plain, ui)),
+    )
+}
 
-    Some(Boxed {
-        element,
-        explained: true,
-    })
+/// `name`, run about this plugin — or `None`, drawn dead, while nothing
+/// answers to the name.
+fn run_about(workspace: &Workspace, name: ActionName, plugin: &PluginId) -> Command {
+    workspace
+        .host()
+        .action(&name)
+        .map(|id| WorkspaceAction::RunAbout(id, workspace.subject(plugin.as_str())))
+}
+
+/// The box about this machine and the registry: the version here, the
+/// version there, and what can be done about either.
+///
+/// Only for a plugin that is a file — a native plugin is the binary, and the
+/// binary is updated by the About page's own sentence — and only when at
+/// least one row applies: a module being run from where it was built, with
+/// no registry row and nothing installed, has nothing for the box to say.
+///
+/// Update goes first and Remove last, in the order of how much each undoes.
+/// The heading and the body are there only when there is news: a newer
+/// version, or a replacement for one taken back. A box that opened with
+/// "Nothing newer" on every card would be a heading nobody reads by the
+/// third card.
+fn machine(workspace: &Workspace, manifest: &Manifest, ui: FamilyId) -> Option<Boxed> {
+    if manifest.tier != Tier::Wasm {
+        return None;
+    }
+
+    let heard = workspace.heard();
+    let offer = heard.offer(&manifest.id);
+    let withdrawn = workspace.withdrawn(&manifest.id);
+    let installed = workspace.is_installed(&manifest.id);
+    let standing = offer.map(|offer| change(offer, Some(manifest.version), withdrawn.is_some()));
+
+    let mut question = None;
+    let mut body: Vec<Box<dyn Element>> = Vec::new();
+    let mut foot: Vec<Box<dyn Element>> = Vec::new();
+
+    if let Some(Change::Update(release) | Change::Replace(release)) = &standing {
+        let replacing = matches!(standing, Some(Change::Replace(_)));
+        question = Some((
+            match replacing {
+                true => "The registry has a replacement",
+                false => "A newer version is in the registry",
+            },
+            Tone::Plain,
+        ));
+        body.extend(asks_beyond(workspace, manifest, release, ui));
+
+        // What the button says depends on what the Store is doing about it
+        // and on whether the Store is there at all: a fetch in flight is a
+        // dead button saying so, and a Store switched off is a dead button
+        // with the reason under the row, since the card cannot fetch on its
+        // own.
+        let fetching = run_about(workspace, store::action("update"), &manifest.id);
+        let (label, control): (String, Command) = match (heard.busy(&manifest.id), fetching) {
+            (Some(Busy::Downloading), _) => (String::from("Getting it\u{2026}"), None),
+            (Some(Busy::Waiting), _) => (String::from("Waiting\u{2026}"), None),
+            (None, command) => (verb_for(replacing, release), command),
+        };
+        if heard.busy(&manifest.id).is_none() && control.is_none() {
+            body.push(widgets::note_text(
+                "The Store is switched off, and it is what fetches.",
+                ui,
+            ));
+        }
+        let live = control.is_some();
+        let said = match withdrawn {
+            Some(why) => format!("Taken back: {why}"),
+            None => format!("Version {}", manifest.version),
+        };
+        foot.push(widgets::answer_row(
+            said,
+            live,
+            widgets::text_button(
+                label,
+                control,
+                workspace
+                    .settings_page()
+                    .control(named(&format!("plugins.update.{}", manifest.id))),
+                ui,
+            ),
+            ui,
+        ));
+    }
+
+    if offer.is_some() {
+        let command = run_about(workspace, store::action("show"), &manifest.id);
+        let live = command.is_some();
+        foot.push(widgets::answer_row(
+            "In the registry",
+            live,
+            widgets::text_button(
+                "Show in Store",
+                command,
+                workspace
+                    .settings_page()
+                    .control(named(&format!("plugins.store.{}", manifest.id))),
+                ui,
+            ),
+            ui,
+        ));
+    }
+
+    if installed {
+        let command = run_about(workspace, about("remove"), &manifest.id);
+        let live = command.is_some();
+        foot.push(widgets::answer_row(
+            "On this machine",
+            live,
+            widgets::text_button(
+                "Remove",
+                command,
+                workspace
+                    .settings_page()
+                    .control(named(&format!("plugins.remove.{}", manifest.id))),
+                ui,
+            ),
+            ui,
+        ));
+    }
+
+    if foot.is_empty() {
+        return None;
+    }
+
+    Some(
+        Boxed::plain(widgets::asked(question, body, foot, ui)).with_footnote(widgets::footnote(
+            "Updating keeps what you allowed, and a version that asks for more says so above. \
+             Removing takes it off this machine along with the answer.",
+            Tone::Plain,
+            ui,
+        )),
+    )
+}
+
+/// What the update button says.
+fn verb_for(replacing: bool, release: &Release) -> String {
+    match replacing {
+        true => format!("Install {}", release.version),
+        false => format!("Update to {}", release.version),
+    }
+}
+
+/// What the offered release asks for beyond what is allowed, as the body of
+/// the update box.
+///
+/// One sentence when its keys are within the grant; otherwise the sentence
+/// that says so and the list it will ask about, marked open. The whole list
+/// rather than the new lines only, because the index carries the sentences
+/// and the keys as two lists that do not pair up line for line — which
+/// lines are new is worked out from the module itself once it has landed,
+/// and the card says so.
+fn asks_beyond(
+    workspace: &Workspace,
+    manifest: &Manifest,
+    release: &Release,
+    ui: FamilyId,
+) -> Vec<Box<dyn Element>> {
+    let granted = workspace.settings().granted_to(manifest.id.as_str());
+    let within = release
+        .capabilities
+        .iter()
+        .all(|key| granted.iter().any(|had| had == key));
+
+    if within {
+        return vec![widgets::note_text(
+            &format!("{} asks for nothing you have not allowed.", release.version),
+            ui,
+        )];
+    }
+
+    let mut body = vec![widgets::note_text(
+        "It asks for more than you have allowed; after the update its card says what, marked \
+         new, and refuses it until you allow it.",
+        ui,
+    )];
+    body.extend(
+        release
+            .asks
+            .iter()
+            .map(|ask| widgets::item(ask, Mark::Open, ui)),
+    );
+    body
+}
+
+/// What it looks like: the previews the module carries, opened by a press.
+///
+/// Absent for a plugin that carries none, which is most of them. The row
+/// says how many there are and offers to show them; while they are being
+/// decoded it is dead and says so, and the room each will take is drawn in
+/// the box fill so nothing under them moves when they land. Decoded on a
+/// press rather than with the card, because a card is drawn for every
+/// plugin somebody scrolls past and a preview is up to four million pixels.
+fn pictures(
+    workspace: &Workspace,
+    manifest: &Manifest,
+    state: &Rc<PluginsState>,
+    ui: FamilyId,
+) -> Option<Box<dyn Element>> {
+    let carried = workspace.host().pictures_of(&manifest.id)?;
+    let count = carried.count();
+    if count == 0 {
+        return None;
+    }
+
+    let opening = state.is_opening(&manifest.id);
+    let shown = state.pictures_of(&manifest.id);
+    let label = match count {
+        1 => String::from("1 picture inside"),
+        count => format!("{count} pictures inside"),
+    };
+    let (button, command) = match opening {
+        true => ("Opening\u{2026}", None),
+        false => (
+            "Show pictures",
+            run_about(workspace, about("pictures"), &manifest.id),
+        ),
+    };
+    let live = command.is_some();
+    let control = widgets::text_button(
+        button,
+        command,
+        workspace
+            .settings_page()
+            .control(named(&format!("plugins.pictures.{}", manifest.id))),
+        ui,
+    );
+
+    let mut rows = vec![
+        widgets::row(
+            Words::new(label).with_keywords(&["picture", "preview", "screenshot"]),
+            live,
+            control,
+            ui,
+        )
+        .element,
+    ];
+
+    // The logical size comes from the header the module carried, not from
+    // the pixels held now: `decode_preview` keeps a picture to a thousand
+    // pixels, and one it shrank must still be drawn at the size it was
+    // captured to be drawn at.
+    match shown {
+        Some(pictures) => rows.extend(pictures.into_iter().map(|picture| {
+            widgets::preview(
+                Some(&picture.bitmap),
+                widgets::preview_size(picture.width, picture.height),
+                picture.caption.as_deref(),
+                ui,
+            )
+        })),
+        None if opening => rows.extend(carried.previews.iter().map(|preview| {
+            widgets::preview(
+                None,
+                widgets::preview_size(preview.width, preview.height),
+                preview.caption.as_deref(),
+                ui,
+            )
+        })),
+        None => {}
+    }
+
+    Some(section("What it looks like", rows, ui))
 }
 
 /// The paragraph under the box, where the mechanism is said out loud.
@@ -469,13 +786,13 @@ fn explanation(stance: Stance, on: bool) -> &'static str {
 /// same rule above it. Never `first`: the facts, the description and the switch
 /// are always above it, so there is always something for the rule to separate
 /// this from.
-fn section(title: &str, rows: Vec<widgets::Entry>, ui: FamilyId) -> Box<dyn Element> {
-    widgets::category_element(
-        title,
-        false,
-        rows.into_iter().map(|row| row.element).collect(),
-        ui,
-    )
+fn section(title: &str, rows: Vec<Box<dyn Element>>, ui: FamilyId) -> Box<dyn Element> {
+    widgets::category_element(title, false, rows, ui)
+}
+
+/// The same, over a category's entries.
+fn listed(title: &str, rows: Vec<widgets::Entry>, ui: FamilyId) -> Box<dyn Element> {
+    section(title, rows.into_iter().map(|row| row.element).collect(), ui)
 }
 
 /// Everything the audit has to say about this plugin.

@@ -22,6 +22,8 @@
 //! What is refused is a `schema` this build does not know, which is the one
 //! change that means the shapes below have stopped being what they are.
 
+use std::cmp::Ordering;
+
 use serde::{Deserialize, Serialize};
 
 use crook_plugin::PluginId;
@@ -58,10 +60,32 @@ pub struct Listed {
     /// SPDX, as the registry checked it.
     #[serde(default)]
     pub license: String,
+    /// The plugin's icon as the registry read it out of the newest module,
+    /// as base64 of the PNG.
+    ///
+    /// In the list rather than fetched per row, so that a face beside every
+    /// name costs the one request the list already is: the registry has no
+    /// second thing to ask for, and nothing about which rows a person looked
+    /// at leaves the machine. `None` for a plugin built before there were
+    /// pictures, which is what every version published so far was.
+    #[serde(default)]
+    pub icon: Option<String>,
     /// Newest last is not assumed: versions are compared rather than trusted
     /// to be in an order.
     #[serde(default)]
     pub versions: Vec<Release>,
+}
+
+/// How big one of a version's previews is, in pixels as captured.
+///
+/// The size and nothing else: the pixels are inside the module, and what a
+/// card needs before it has them is the room to reserve.
+#[derive(Copy, Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PreviewSize {
+    /// Pixels across, as captured.
+    pub width: u32,
+    /// Pixels down, as captured.
+    pub height: u32,
 }
 
 /// One built artifact.
@@ -100,6 +124,10 @@ pub struct Release {
     /// leaves a person with nothing to decide with.
     #[serde(default)]
     pub yanked: Option<String>,
+    /// The sizes of the previews inside the module, in the order it numbers
+    /// them. Empty for a version built before there were pictures.
+    #[serde(default)]
+    pub previews: Vec<PreviewSize>,
 }
 
 /// Reads an index, or says why it is not one.
@@ -127,6 +155,8 @@ pub struct Offer {
     pub repository: String,
     /// SPDX.
     pub license: String,
+    /// The icon the list carries for it, still base64. See [`Listed::icon`].
+    pub icon: Option<String>,
     /// The newest version this build can run, if there is one.
     pub release: Option<Release>,
     /// The newest version there is at all, whatever it speaks.
@@ -188,6 +218,7 @@ pub fn offers(index: &Index) -> Vec<Offer> {
                 description: listed.description.clone(),
                 repository: listed.repository.clone(),
                 license: listed.license.clone(),
+                icon: listed.icon.clone(),
                 // Only when there is nothing left to offer: a plugin whose
                 // newest version was withdrawn and whose one before it still
                 // stands is a plugin somebody can install, and the yank is
@@ -207,6 +238,109 @@ pub fn offers(index: &Index) -> Vec<Offer> {
     // list nobody can find anything in twice.
     offers.sort_by(|left, right| left.name.cmp(&right.name).then(left.id.cmp(&right.id)));
     offers
+}
+
+/// What the registry's offer means for what is on this machine.
+///
+/// Five answers rather than a comparison, because two of them look the same
+/// to a comparison and are not: a person on a withdrawn 0.10.0 offered 0.9.0
+/// is being offered a *replacement*, and "the registry is behind you" — which
+/// is what comparing the two versions says — would be a card telling them to
+/// stay on a version somebody took back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Change {
+    /// Not on this machine, and this is what installing would bring.
+    Install(Release),
+    /// On this machine, and the registry is ahead of it.
+    Update(Release),
+    /// On this machine, taken back, and this is what the registry offers
+    /// instead — older, newer, it does not matter: the one that is running
+    /// is the one that must not be.
+    Replace(Release),
+    /// On this machine, and there is nothing newer.
+    Current,
+    /// Nothing this build can run — a plugin built for another vocabulary,
+    /// or one with nothing built at all.
+    Nothing,
+}
+
+/// What `offer` comes to for a machine holding `installed`.
+///
+/// `installed` is the module's own version, which is the one the Plugins
+/// page prints, and `withdrawn` is whether *that* version was taken back —
+/// which the index answers through [`withdrawn`], and which is not the same
+/// question as whether the offer has a withdrawal to report.
+pub fn change(offer: &Offer, installed: Option<&str>, withdrawn: bool) -> Change {
+    match (installed, &offer.release) {
+        (None, Some(release)) => Change::Install(release.clone()),
+        (_, None) => Change::Nothing,
+        (Some(_), Some(release)) if withdrawn => Change::Replace(release.clone()),
+        (Some(installed), Some(release)) => match version::compare(&release.version, installed) {
+            Ordering::Greater => Change::Update(release.clone()),
+            _ => Change::Current,
+        },
+    }
+}
+
+/// What the store is doing about a plugin right now.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Busy {
+    /// Its module is being fetched.
+    Downloading,
+    /// It is queued behind one that is.
+    Waiting,
+}
+
+/// What the store last said, for surfaces that are not the store.
+///
+/// The Plugins page has no handle to the store's model and must not read the
+/// index off disk on every frame; what it has is this, handed over whenever
+/// the store's answer changes. A snapshot rather than a handle, so that the
+/// page reads one consistent answer per frame.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Heard {
+    /// Every plugin the registry offers, as [`offers`] works them out.
+    pub offers: Vec<Offer>,
+    /// Which plugins the store is fetching or about to.
+    pub busy: Vec<(PluginId, Busy)>,
+}
+
+impl Heard {
+    /// The registry's row for one plugin, if it has one.
+    pub fn offer(&self, id: &PluginId) -> Option<&Offer> {
+        self.offers.iter().find(|offer| offer.id == *id)
+    }
+
+    /// What the store is doing about one plugin, if anything.
+    pub fn busy(&self, id: &PluginId) -> Option<Busy> {
+        self.busy
+            .iter()
+            .find(|(busy, _)| busy == id)
+            .map(|(_, what)| *what)
+    }
+}
+
+/// Every installed plugin the registry is ahead of, or whose version was
+/// taken back with a replacement offered — each with the release to fetch.
+///
+/// `installed` is the id, the running version and whether that version was
+/// withdrawn, for every plugin that is on this machine as a file: the natives
+/// are never in a registry, and a module being run from wherever it was built
+/// is not one an update could be written over.
+pub fn updates<'a>(
+    heard: &Heard,
+    installed: impl IntoIterator<Item = (&'a PluginId, &'a str, bool)>,
+) -> Vec<(PluginId, Release)> {
+    installed
+        .into_iter()
+        .filter_map(|(id, version, withdrawn)| {
+            let offer = heard.offer(id)?;
+            match change(offer, Some(version), withdrawn) {
+                Change::Update(release) | Change::Replace(release) => Some((id.clone(), release)),
+                Change::Install(_) | Change::Current | Change::Nothing => None,
+            }
+        })
+        .collect()
 }
 
 /// Why an installed plugin should not be run.

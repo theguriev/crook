@@ -150,6 +150,12 @@ pub(crate) struct Row {
     /// plugins list's running dot. Nothing reserves room for it, so a list
     /// without one is not indented by the space it would have taken.
     pub(crate) leading: Option<Box<dyn Element>>,
+    /// One word at the end of the row, where the section has one to say —
+    /// the version an update would bring, the word "installed". Muted and
+    /// smaller than the label, the way a description is, and the label gives
+    /// way to it: a name a stranger chose can be as long as it likes, and
+    /// the word after it is the fact the row is scanned for.
+    pub(crate) trailing: Option<String>,
     /// Whether this is the row the page beside the list is about.
     ///
     /// The fill is always the selection's; only the label is [`Emphasis`]'s.
@@ -210,6 +216,7 @@ pub(crate) fn row(row: Row, ui: FamilyId) -> Box<dyn Element> {
     let Row {
         label,
         leading,
+        trailing,
         selected,
         emphasis,
         state,
@@ -243,15 +250,28 @@ pub(crate) fn row(row: Row, ui: FamilyId) -> Box<dyn Element> {
         if let Some(leading) = leading {
             line.add_child(leading);
         }
-        line.add_child(
-            Container::new(
-                Text::new(label, ui, widgets::LABEL_SIZE)
-                    .with_color(color)
-                    .finish(),
-            )
-            .with_margin_left(if indented { LEADING_GAP } else { 0. })
-            .finish(),
-        );
+        let name = Container::new(
+            Text::new(label, ui, widgets::LABEL_SIZE)
+                .with_color(color)
+                .finish(),
+        )
+        .with_margin_left(if indented { LEADING_GAP } else { 0. })
+        .finish();
+        match trailing {
+            // The name takes what is left rather than what it wants, so the
+            // word after it stays on the row: a flex measures an inflexible
+            // child free along its axis, and a long name would otherwise push
+            // the word out of the panel.
+            Some(trailing) => {
+                line.add_child(Expanded::new(1., name).finish());
+                line.add_child(
+                    Text::new(trailing, ui, widgets::DESCRIPTION_SIZE)
+                        .with_color(theme().text_muted)
+                        .finish(),
+                );
+            }
+            None => line.add_child(name),
+        }
 
         Container::new(line.finish())
             .with_padding(ROW_PADDING)
@@ -275,8 +295,13 @@ pub(crate) fn row(row: Row, ui: FamilyId) -> Box<dyn Element> {
 /// tall should not have to be scrolled to find out what it is a page of — and
 /// it is held to the same measure as the page, so the two line up rather than
 /// the heading sitting over the middle of what it names.
+///
+/// `mark` goes before the title, where a section has one: a plugin's icon
+/// beside its name. The settings have none and pass `None`, and the title
+/// then starts where it always did.
 pub(crate) fn content(
     title: &str,
+    mark: Option<Box<dyn Element>>,
     body: Box<dyn Element>,
     scroll: ScrollStateHandle,
     ui: FamilyId,
@@ -284,7 +309,7 @@ pub(crate) fn content(
     let column = Flex::column()
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_child(measured(widgets::page_title(title, ui)))
+        .with_child(measured(widgets::page_title(title, mark, ui)))
         .with_child(
             Expanded::new(
                 1.,

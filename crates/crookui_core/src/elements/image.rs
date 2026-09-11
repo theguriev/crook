@@ -26,8 +26,14 @@ use crate::presenter::{EventContext, LayoutContext, PaintContext};
 /// wrapped in a [`Container`](super::Container) or a
 /// [`Hoverable`](super::Hoverable) when it should be clicked, like an
 /// [`Icon`](super::Icon).
+///
+/// The same element, with no bitmap yet, is the [room](Self::room) a picture
+/// will take: laid out by the one rule, so a card that reserves the space
+/// while the pixels are decoded reserves exactly the box the picture lands
+/// in. A fixed box would not — it clamps its width to the column and keeps
+/// its height, and the picture that replaces it keeps its shape instead.
 pub struct Image {
-    bitmap: Arc<Bitmap>,
+    bitmap: Option<Arc<Bitmap>>,
     logical: Vector2F,
     fitted: Option<Vector2F>,
     size: Option<Vector2F>,
@@ -38,7 +44,22 @@ impl Image {
     /// `bitmap` drawn `logical` pixels wide and tall, or as large as fits.
     pub fn new(bitmap: Arc<Bitmap>, logical: Vector2F) -> Self {
         Self {
-            bitmap,
+            bitmap: Some(bitmap),
+            logical,
+            fitted: None,
+            size: None,
+            origin: None,
+        }
+    }
+
+    /// The room a picture `logical` pixels wide and tall will take, drawing
+    /// nothing.
+    ///
+    /// A [`Container`](super::Container) around it paints whatever ground
+    /// the room should show, at the size the picture will be.
+    pub fn room(logical: Vector2F) -> Self {
+        Self {
+            bitmap: None,
             logical,
             fitted: None,
             size: None,
@@ -85,8 +106,10 @@ impl Element for Image {
 
         // Top-left of the box, not centred: a figure sits on the measure's
         // left edge like every line of text above and below it.
-        ctx.scene
-            .draw_image(self.bitmap.clone(), RectF::new(origin, fitted));
+        if let Some(bitmap) = &self.bitmap {
+            ctx.scene
+                .draw_image(bitmap.clone(), RectF::new(origin, fitted));
+        }
     }
 
     fn dispatch_event(

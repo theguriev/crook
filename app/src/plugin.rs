@@ -40,6 +40,7 @@ pub use crook_plugin::{
 use crook_plugin_api::Event;
 
 use crate::keybindings::{Rule, Source, rule_from};
+use crate::plugins::pictures::Pictures;
 use crate::plugins::tabs::TabRow;
 use crate::text_input::TextInput;
 use crate::workspace::{Category, Fonts, Workspace};
@@ -322,6 +323,20 @@ pub struct Host {
     /// `build` so a plugin cannot register in another's name by accident.
     building: Option<PluginId>,
     kept: Vec<(PluginId, Registration)>,
+    /// The registrations made in a `ready`, filed apart from [`Host::kept`]
+    /// because they are the ones taken back and made again as a set.
+    ///
+    /// A `ready` registers things *about the list of plugins* — a switch per
+    /// plugin — so the list changing is what makes every one of them stale at
+    /// once, whichever plugin made them. See [`Host::re_ready`].
+    readied: Vec<(PluginId, Registration)>,
+    /// The commands among those, by owner, so the titles can be taken out of
+    /// [`Host::commands`] with the guards: a command is a registration plus a
+    /// title, and the title has no guard of its own.
+    readied_commands: Vec<(PluginId, ActionName)>,
+    /// Whether a `ready` is running, which is what decides where a
+    /// registration is filed.
+    readying: bool,
     /// Every plugin the binary carries, kept so that one switched off can be
     /// switched back on without restarting.
     ///
@@ -404,6 +419,9 @@ impl Host {
             panels: Vec::new(),
             building: None,
             kept: Vec::new(),
+            readied: Vec::new(),
+            readied_commands: Vec::new(),
+            readying: false,
             plugins: Vec::new(),
             carried: Vec::new(),
             loaded: Vec::new(),
@@ -542,7 +560,10 @@ impl Host {
         let registration =
             self.actions
                 .register(&who, action.clone(), Box::new(handler) as ActionHandler);
-        self.kept.push((who, registration));
+        match self.readying {
+            true => self.readied.push((who, registration)),
+            false => self.kept.push((who, registration)),
+        }
 
         match self.action_names.iter().position(|known| *known == action) {
             Some(index) => ActionId(index),
@@ -783,7 +804,11 @@ impl Host {
         handler: impl Fn(&mut Workspace, &mut ViewContext<Workspace>) + 'static,
     ) -> ActionId {
         let who = self.who();
-        self.commands.push((who, action.clone(), title.into()));
+        self.commands
+            .push((who.clone(), action.clone(), title.into()));
+        if self.readying {
+            self.readied_commands.push((who, action.clone()));
+        }
         self.register_action(action, handler)
     }
 
@@ -1124,6 +1149,21 @@ impl Host {
         self.loaded.iter().any(|manifest| manifest.id == *plugin)
     }
 
+    /// What this plugin looks like, where it carries anything.
+    ///
+    /// Asked of the object rather than of the manifest, because a manifest
+    /// is a `&'static` literal for a native plugin and a picture is
+    /// megabytes somebody decoded: it is data the way the manifest is, and it
+    /// lives with the plugin that carried it in. `None` for a native, for a
+    /// module built before there were pictures, and for a plugin whose object
+    /// is not here — one being built this moment.
+    pub fn pictures_of(&self, plugin: &PluginId) -> Option<&Pictures> {
+        self.plugins
+            .iter()
+            .find(|carried| carried.manifest().id == *plugin)
+            .and_then(|carried| carried.pictures())
+    }
+
     /// Records what a plugin is allowed to do, for the next time it builds.
     ///
     /// Only for the next time: a plugin reads its grant once, while building,
@@ -1172,16 +1212,50 @@ impl Host {
         self.carried.push(plugin.manifest());
         self.plugins.push(plugin);
 
-        if !run {
-            return;
+        if run {
+            // Taken out and put back, the way `enable` does it and for the
+            // same reason: building needs the host and the plugin at once.
+            let mut plugins = std::mem::take(&mut self.plugins);
+            if let Some(last) = plugins.last_mut() {
+                self.build_one(last.as_mut(), ctx);
+            }
+            self.plugins = plugins;
         }
 
-        // Taken out and put back, the way `enable` does it and for the same
-        // reason: building needs the host and the plugin at once.
+        // Whether or not it ran: the list of carried plugins changed, and a
+        // `ready` is about that list. A plugin carried and not run still gets
+        // a row, and the row's switch is a registration somebody's `ready`
+        // makes.
+        self.re_ready(ctx);
+    }
+
+    /// Runs every loaded plugin's `ready` again, from nothing.
+    ///
+    /// What a `ready` registers is about the *list* of plugins — a switch
+    /// per plugin, a show action per row — so the list changing makes all of
+    /// it stale at once, and running one plugin's `ready` on arrival leaves
+    /// every other plugin's answer describing the list as it was. The
+    /// registrations are dropped as a set first, so a name registered again
+    /// is a fresh registration rather than a second one refused as taken;
+    /// then every loaded plugin is asked again, in load order, exactly as
+    /// [`load`] asked the first time.
+    ///
+    /// A plugin's `ready` is therefore something that may run many times in a
+    /// session, and is written to register the same things for the same list.
+    pub(crate) fn re_ready(&mut self, ctx: &mut ViewContext<Workspace>) {
+        self.readied.clear();
+        let titled: Vec<ActionName> = self
+            .readied_commands
+            .drain(..)
+            .map(|(_, action)| action)
+            .collect();
+        self.commands
+            .retain(|(_, action, _)| !titled.contains(action));
+
+        // Taken out and put back, for the reason `enable` takes them out.
         let mut plugins = std::mem::take(&mut self.plugins);
-        if let Some(last) = plugins.last_mut() {
-            self.build_one(last.as_mut(), ctx);
-            self.ready_one(last.as_mut(), ctx);
+        for plugin in &mut plugins {
+            self.ready_one(plugin.as_mut(), ctx);
         }
         self.plugins = plugins;
     }
@@ -1192,7 +1266,7 @@ impl Host {
     /// with a different name: a plugin that has been *removed* must not be on
     /// the list of things that can be switched back on, because the file it
     /// would be switched back on from is not there.
-    pub fn forget(&mut self, plugin: &PluginId) {
+    pub fn forget(&mut self, plugin: &PluginId, ctx: &mut ViewContext<Workspace>) {
         self.unload(plugin);
         self.carried.retain(|manifest| manifest.id != *plugin);
         self.plugins
@@ -1207,6 +1281,11 @@ impl Host {
         // called this; that is the copy on disk, and this is the copy that
         // decides.
         self.grants.remove(plugin.as_str());
+        // And the switch the Plugins page offered for it, which is somebody
+        // else's registration about a row that is no longer there: the
+        // palette would otherwise go on listing a command for a plugin whose
+        // file is gone.
+        self.re_ready(ctx);
     }
 
     /// Builds a plugin that is not loaded, and does nothing to one that is.
@@ -1241,6 +1320,8 @@ impl Host {
     /// before the plugin loaded.
     pub fn unload(&mut self, plugin: &PluginId) {
         self.kept.retain(|(by, _)| by != plugin);
+        self.readied.retain(|(by, _)| by != plugin);
+        self.readied_commands.retain(|(by, _)| by != plugin);
         self.commands.retain(|(by, _, _)| by != plugin);
         self.suggested.retain(|(by, _)| by != plugin);
         self.surfaces.retain(|(by, _, _)| by != plugin);
@@ -1271,7 +1352,9 @@ impl Host {
             return;
         }
         self.building = Some(manifest.id.clone());
+        self.readying = true;
         let outcome = plugin.ready(self, ctx);
+        self.readying = false;
         self.building = None;
 
         if let Err(problem) = outcome {
@@ -1313,12 +1396,25 @@ pub type BuildError = String;
 
 /// One plugin.
 ///
-/// Deliberately two methods. The manifest is *data* — the store reads it to
-/// list a plugin and the settings page reads it to describe one, neither of
-/// which should have to run any of it — and `build` is everything else.
+/// Deliberately two methods, and a third that is more of the first. The
+/// manifest is *data* — the store reads it to list a plugin and the settings
+/// page reads it to describe one, neither of which should have to run any of
+/// it — and `build` is everything else. What the plugin looks like is data of
+/// the manifest's kind, read out of the module beside it, and it has a method
+/// of its own only because it is optional where a manifest is not.
 pub trait Plugin {
     /// What this plugin says about itself.
     fn manifest(&self) -> &'static Manifest;
+
+    /// What it looks like: its icon and its previews, where it carries any.
+    ///
+    /// `None` is the ordinary answer — every native plugin's, and every
+    /// module's that was built before there were pictures — and it draws as
+    /// an empty place beside the name rather than as a mark that says
+    /// "missing".
+    fn pictures(&self) -> Option<&Pictures> {
+        None
+    }
 
     /// Registers everything it contributes, and builds whatever it owns.
     ///
@@ -1347,6 +1443,11 @@ pub trait Plugin {
     /// `build`, because half of it has not been registered yet. The Plugins
     /// page's switches are the case here — one per plugin the binary carries,
     /// and it cannot know how many that is until they have all arrived.
+    ///
+    /// Run again whenever the list of carried plugins changes — a module
+    /// installed from the store, a plugin removed — so it must register the
+    /// same things for the same list: what it registered before is taken
+    /// back as a set first, and what it registers now is the whole answer.
     ///
     /// Nothing about it is different from `build` otherwise: what it registers
     /// is filed under the same plugin and taken back by the same `unload`.

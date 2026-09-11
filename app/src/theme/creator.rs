@@ -11,10 +11,10 @@
 //! sixteen ANSI colours come from one of two fixed palettes, chosen by which
 //! foreground won.
 //!
-//! Crook cannot decode an image — `png` is in the workspace to *write* a
-//! snapshot, the scene has no texture primitive, and there is no file picker —
-//! so the first step is the one that changes: **the five candidates are
-//! clustered out of a theme you already have** rather than out of a photograph.
+//! Crook has no file picker, and the one picture it decodes is a plugin's own
+//! face out of its module — so the first step is the one that changes: **the
+//! five candidates are clustered out of a theme you already have** rather than
+//! out of a photograph.
 //! Every step after it is Warp's, for the reason Warp's is good: the person
 //! makes one choice, and the palette that results is internally consistent
 //! because nothing about it was chosen by hand.

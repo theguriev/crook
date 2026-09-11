@@ -19,13 +19,15 @@ use crookui_core::prelude::*;
 
 use crook_plugin::{Manifest, PluginId};
 
+use crate::plugins::store;
+use crate::plugins::store::index::{Change, change};
 use crate::theme::theme;
 use crate::workspace::section;
 use crate::workspace::settings_page::search::{Query, Words};
 use crate::workspace::settings_page::{named, widgets};
 use crate::workspace::{SettingsAction, TextField, Workspace, WorkspaceAction};
 
-use super::{action, tier_words};
+use super::{about, tier_words};
 
 /// What the field says while nothing has been typed.
 const PLACEHOLDER: &str = "Search plugins";
@@ -102,10 +104,35 @@ pub(super) fn render(
         rows.finish()
     };
 
-    // No footer: the build line under the settings rail says which build this
-    // is, and a second copy of it under a list of what the build is made of
-    // would be the same sentence twice.
-    section::sidebar(field, list, settings.scroll_named(LIST_SCROLL), None)
+    // A footer only when there is something for it to say. The build line
+    // under the settings rail says which build this is, and a second copy of
+    // it under a list of what the build is made of would be the same sentence
+    // twice; what this list has to say at its foot is how many of its rows
+    // the registry is ahead of — and only while the Store, which is what
+    // fetches, is there to ask.
+    let footer = updates_footer(workspace, ui);
+    section::sidebar(field, list, settings.scroll_named(LIST_SCROLL), footer)
+}
+
+/// The count of updates and the button that takes them all, or nothing.
+///
+/// Nothing rather than a dead button when the Store is switched off: the
+/// count is worth a line only beside a way to act on it, and the Store's own
+/// action is what acts. A plugin's card still says its version is behind.
+fn updates_footer(workspace: &Workspace, ui: FamilyId) -> Option<Box<dyn Element>> {
+    let update_all = workspace.host().action(&store::action("update-all"))?;
+    let updates = workspace.updates();
+    if updates.is_empty() {
+        return None;
+    }
+    Some(widgets::update_all_footer(
+        updates.len(),
+        Some(WorkspaceAction::Run(update_all)),
+        workspace
+            .settings_page()
+            .control(named("plugins.update-all")),
+        ui,
+    ))
 }
 
 /// Whether a query is looking for this plugin.
@@ -133,24 +160,56 @@ fn row(
     on: bool,
     ui: FamilyId,
 ) -> Box<dyn Element> {
+    let host = workspace.host();
     let state = workspace
         .settings_page()
         .control(named(&format!("plugins.row.{}", manifest.id)));
-    // `None` is unreachable: `ready` registers one per plugin. Cheaper to draw
-    // an unclickable row than to prove unreachable from here.
-    let command = workspace
-        .host()
-        .action(&action("show", &manifest.id))
-        .map(WorkspaceAction::Run);
+    // One action for every row, run about this one. `None` only while this
+    // page is not loaded, which is a page nobody can be looking at.
+    let command = host
+        .action(&about("show"))
+        .map(|show| WorkspaceAction::RunAbout(show, workspace.subject(manifest.id.as_str())));
+
+    // The dot, then the icon in a box the same size on every row, so the
+    // names line up whether or not a plugin brought a face. A native plugin
+    // has none and its box is empty: "no picture" is the ordinary state of
+    // most of this list, and not a thing to draw a symbol for.
+    let icon = host
+        .pictures_of(&manifest.id)
+        .and_then(|pictures| pictures.icon.as_ref());
+    let leading = Flex::row()
+        .with_main_axis_size(MainAxisSize::Min)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_child(
+            Container::new(widgets::state_dot(on))
+                .with_margin_right(section::LEADING_GAP)
+                .finish(),
+        )
+        .with_child(widgets::picture_box(icon, widgets::ROW_ICON))
+        .finish();
+
+    // The version an update would bring, and only that: a row is scanned for
+    // what is running and, now, for what is behind. "installed" would be
+    // every row, and "current" is what the absence of a word says.
+    let trailing = workspace.heard().offer(&manifest.id).and_then(|offer| {
+        match change(
+            offer,
+            Some(manifest.version),
+            workspace.withdrawn(&manifest.id).is_some(),
+        ) {
+            Change::Update(release) | Change::Replace(release) => Some(release.version),
+            Change::Install(_) | Change::Current | Change::Nothing => None,
+        }
+    });
 
     section::row(
         section::Row {
             label: manifest.name.to_owned(),
             // A filled dot for a plugin that is running and a hollow one for a
-            // plugin that is not, which is the whole of what a row has to say
-            // about a plugin beyond its name. The card draws the same dot
+            // plugin that is not, then its face. The card draws the same dot
             // before the same word, from the same function.
-            leading: Some(widgets::state_dot(on)),
+            leading: Some(leading),
+            trailing,
             selected,
             emphasis: if on {
                 section::Emphasis::Lit

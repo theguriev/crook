@@ -166,6 +166,7 @@ pub(super) fn render(
             list,
             section::content(
                 "Store",
+                None,
                 nothing_chosen(&known, ui),
                 workspace.settings_page().scroll_named(CARD_SCROLL),
                 ui,
@@ -177,6 +178,7 @@ pub(super) fn render(
         list,
         section::content(
             &showing.name,
+            None,
             card(workspace, &known, showing, ui),
             workspace.settings_page().scroll_named(CARD_SCROLL),
             ui,

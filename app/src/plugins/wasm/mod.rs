@@ -50,11 +50,12 @@ use crook_plugin_api::{
 use crook_wasm::{Fuel, Sandbox};
 
 use crate::plugin::{BuildError, Host, Plugin, Watch};
+use crate::plugins::pictures::Pictures;
 use crate::plugins::tabs::{TAB_ROW_BADGE, TabRow};
 use crate::tab::AgentStatus;
 use crate::workspace::{BlockMenuState, Workspace, WorkspaceAction, block_menu};
 
-pub use install::{home, install, installed_bytes, module, uninstall};
+pub use install::{home, install, module, module_in, uninstall, uninstall_from, write};
 use picker::Held;
 use render::Placement;
 use runtime::{Gesture, Runtime};
@@ -158,11 +159,23 @@ pub fn open(path: &Path) -> Result<WasmPlugin, String> {
 /// may have changed since — a module still being written into place passes as
 /// the whole of itself and lands as the half that was there first.
 pub fn opened(bytes: &[u8]) -> Result<WasmPlugin, String> {
-    let (sandbox, manifest) =
-        Sandbox::open(bytes, Fuel::default()).map_err(|why| why.to_string())?;
+    let (sandbox, manifest, pictures) =
+        Sandbox::open_with_pictures(bytes, Fuel::default()).map_err(|why| why.to_string())?;
 
     let id = PluginId::parse(&manifest.id)
         .map_err(|why| format!("its id {:?} is not one: {why}", manifest.id))?;
+
+    // A picture past the rule is a line and a faceless plugin, not a refusal:
+    // the module opened, and it is the registry's job to refuse a build over
+    // its icon — a module that reached this machine some other way is
+    // somebody's choice, and a card with no picture on it costs them nothing.
+    let pictures = match pictures {
+        Ok(pictures) => Pictures::from_module(pictures, &id),
+        Err(why) => {
+            log::warn!("{id} carries a picture Crook cannot draw: {why}");
+            Pictures::default()
+        }
+    };
 
     // Leaked, because `Plugin::manifest` hands back a `&'static Manifest` and
     // a native plugin's is a literal. One leak per installed plugin, once, for
@@ -186,6 +199,7 @@ pub fn opened(bytes: &[u8]) -> Result<WasmPlugin, String> {
 
     Ok(WasmPlugin {
         manifest,
+        pictures,
         sandbox: Rc::new(RefCell::new(sandbox)),
         failures: Rc::new(Cell::new(0)),
     })
@@ -203,6 +217,8 @@ pub fn directory() -> Option<PathBuf> {
 /// One installed plugin.
 pub struct WasmPlugin {
     manifest: &'static Manifest,
+    /// What it looks like, read out of the module beside the manifest.
+    pictures: Pictures,
     /// Shared, because a contribution is an `Fn` and running the guest is not:
     /// the borrow is taken for the length of one call and given back.
     sandbox: Rc<RefCell<Sandbox>>,
@@ -213,6 +229,10 @@ pub struct WasmPlugin {
 impl Plugin for WasmPlugin {
     fn manifest(&self) -> &'static Manifest {
         self.manifest
+    }
+
+    fn pictures(&self) -> Option<&Pictures> {
+        Some(&self.pictures)
     }
 
     fn build(

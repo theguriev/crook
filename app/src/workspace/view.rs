@@ -38,6 +38,7 @@ use crate::pane_surface::{self, Surface};
 use crate::platform_insets::{ControlLayout, LayoutInsets, WindowChrome};
 use crate::plugin::{ActionId, ActionName, Host, PageId, PluginId, SectionId, Watch};
 use crate::plugins::settings::SETTINGS_SECTION;
+use crate::plugins::store::index::{self, Heard, Release};
 use crate::selection::{Blocks, Cells};
 use crate::settings::{
     DEFAULT_FONT_SIZE, Density, FONT_SIZE_STEP, GeneralOptions, Granularity, Settings, TabOptions,
@@ -56,7 +57,7 @@ use crate::{Channel, WINDOW_CHROME};
 
 use super::action::{
     BlockAction, BlockEdge, BlockPart, FindAction, OptionsAction, SearchAction, SettingsAction,
-    TabMenuAction, ThemeAction, WindowAction, WorkspaceAction, WorktreeAction,
+    Subject, TabMenuAction, ThemeAction, WindowAction, WorkspaceAction, WorktreeAction,
 };
 use super::block_list::block_text;
 use super::settings_page::SettingsState;
@@ -471,12 +472,12 @@ impl SaveOrder {
 
 /// What one window is opened with, as one argument.
 ///
-/// Three values that arrive together, are read once each, and travel from
-/// whoever built them to [`Workspace::new`] with nothing in between looking at
-/// them. Passing them separately put that function one argument over clippy's
-/// limit, and grouping them says something true: they are the opening, not
-/// three unrelated parameters. `Launch` in `crate::lib` is the same answer to
-/// the same question one layer up.
+/// Values that arrive together, are read once each, and travel from whoever
+/// built them to [`Workspace::new`] with nothing in between looking at them.
+/// Passing them separately put that function over clippy's argument limit,
+/// and grouping them says something true: they are the opening, not so many
+/// unrelated parameters. `Launch` in `crate::lib` is the same answer to the
+/// same question one layer up.
 pub struct Opening {
     /// The options this window starts with.
     pub settings: Settings,
@@ -499,6 +500,25 @@ pub struct Opening {
     /// withdraws nothing, which is the safe direction: a list that cannot be
     /// read is never a reason to stop running something somebody installed.
     pub withdrawn: BTreeMap<String, String>,
+    /// What the registry offers, as of the same copy of the index.
+    ///
+    /// Read off disk beside [`withdrawn`](Self::withdrawn) and for the same
+    /// reason: the Plugins page says which installed plugins the registry is
+    /// ahead of, and it has to be able to say so on a machine that is offline
+    /// and before anybody has pressed anything in the Store. The Store hands
+    /// over a fresh one whenever its answer changes — see [`Workspace::hear`].
+    pub heard: Heard,
+    /// Where the plugins that are files live: installing writes there,
+    /// removing deletes there, and "is it installed" is asked there.
+    ///
+    /// Handed in rather than looked up, for the reason the plugins are: a
+    /// window that found the directory for itself would be one every test
+    /// reads the data directory of whoever runs it through — on the render
+    /// path, per frame — and one a test could uninstall a real plugin
+    /// through. `None` is a window that has no such place, and says so
+    /// rather than guessing: a test, a picture of the application drawn
+    /// without this machine's plugins, a machine with no data directory.
+    pub plugins_directory: Option<PathBuf>,
 }
 
 /// The window's root view.
@@ -653,6 +673,29 @@ pub struct Workspace {
     /// off a file on this machine, and the host would have to be told about
     /// stores to hold it.
     withdrawn: BTreeMap<String, String>,
+    /// What the registry offers and what the store is doing about it, as the
+    /// store last said.
+    ///
+    /// Beside [`Self::withdrawn`] and held for the same reason: the Plugins
+    /// page has no handle to the store's model, and reading the index off
+    /// disk inside `render` would be a JSON parse per frame.
+    heard: Heard,
+    /// Everything an action has ever been run *about*, in the order it was
+    /// first said, so a [`Subject`] can be an index into it.
+    ///
+    /// Append-only, for the reason `Host::action_names` is: a subject a card
+    /// handed to a button on one frame has to mean the same thing on the frame
+    /// the button is pressed, and one that moved would be a Remove that
+    /// removed something else.
+    subjects: std::cell::RefCell<Vec<String>>,
+    /// Where the plugins that are files live, as the window was opened with.
+    ///
+    /// See [`Opening::plugins_directory`]: installing writes a module there,
+    /// removing deletes a directory from it, and a test that did either to
+    /// the folder of whoever ran it would be a test nobody could run twice.
+    /// `None` where there is no such place, and both say so rather than
+    /// guessing.
+    plugins_directory: Option<PathBuf>,
     /// The context menu a tab's secondary press opens, and what it is on.
     tab_context_menu: TabContextMenuState,
     /// The worktree menu, which is one entry of that one.
@@ -764,6 +807,8 @@ impl Workspace {
             channel,
             plugins,
             withdrawn,
+            heard,
+            plugins_directory,
         } = opening;
 
         let git = ctx.add_model(GitModel::new);
@@ -858,6 +903,9 @@ impl Workspace {
             page: SettingsState::default(),
             host,
             withdrawn,
+            heard,
+            subjects: std::cell::RefCell::new(Vec::new()),
+            plugins_directory,
             tab_context_menu: TabContextMenuState::default(),
             tab_menu: TabMenuState::default(),
             block_menu: BlockMenuState::default(),
@@ -1231,7 +1279,11 @@ impl Workspace {
         // says it is.
         promised(manifest)?;
 
-        crate::plugins::wasm::installed_bytes(bytes)?;
+        let root = self
+            .plugins_directory
+            .as_deref()
+            .ok_or_else(|| String::from("this machine has no data directory to install into"))?;
+        crate::plugins::wasm::write(root, bytes, manifest)?;
         self.run_module(plugin, ctx)
     }
 
@@ -1334,7 +1386,7 @@ impl Workspace {
     /// is nothing installed — and the grant goes with it for the reason
     /// `Host::forget` gives.
     pub fn forget_plugin(&mut self, plugin: &PluginId, ctx: &mut ViewContext<Self>) {
-        self.host.forget(plugin);
+        self.host.forget(plugin, ctx);
         self.withdrawn.remove(plugin.as_str());
         self.sync_input_keys();
         ctx.notify();
@@ -1363,7 +1415,11 @@ impl Workspace {
         plugin: &PluginId,
         ctx: &mut ViewContext<Self>,
     ) -> Result<(), String> {
-        crate::plugins::wasm::uninstall(plugin)?;
+        let root = self
+            .plugins_directory
+            .as_deref()
+            .ok_or_else(|| String::from("this machine has no data directory to uninstall from"))?;
+        crate::plugins::wasm::uninstall_from(root, plugin)?;
 
         // Forgotten rather than kept, which is the difference between a plugin
         // that is missing and one that was removed: a plugin can fail to load
@@ -1373,7 +1429,7 @@ impl Workspace {
         self.settings.set_plugin_disabled(plugin.as_str(), false);
         self.save_settings(ctx);
 
-        self.host.forget(plugin);
+        self.host.forget(plugin, ctx);
         self.sync_input_keys();
         ctx.notify();
         Ok(())
@@ -1387,6 +1443,73 @@ impl Workspace {
     /// launch after a yank with a line in a log nobody reads.
     pub fn withdrawn(&self, plugin: &PluginId) -> Option<&str> {
         self.withdrawn.get(plugin.as_str()).map(String::as_str)
+    }
+
+    /// What the registry offers and what the store is doing, as last heard.
+    pub fn heard(&self) -> &Heard {
+        &self.heard
+    }
+
+    /// Takes what the store now says, for every surface that is not the
+    /// store.
+    ///
+    /// The store's to call, after a look, a download starting or landing,
+    /// and anything else that changes its answer: the Plugins page draws from
+    /// this and from nothing else the store holds.
+    pub fn hear(&mut self, heard: Heard) {
+        self.heard = heard;
+    }
+
+    /// Whether this plugin is on this machine as a file.
+    ///
+    /// Asked of the directory rather than of the manifest's tier, because a
+    /// sandboxed plugin is not always installed: the one somebody is writing
+    /// runs from wherever `cargo build` put it, and a Remove that deleted a
+    /// directory it was never in would delete nothing and say it had.
+    pub fn is_installed(&self, plugin: &PluginId) -> bool {
+        self.plugins_directory
+            .as_deref()
+            .and_then(|root| crate::plugins::wasm::module_in(root, plugin))
+            .is_some()
+    }
+
+    /// Every installed plugin the registry is ahead of, with the release to
+    /// fetch for each.
+    ///
+    /// Only the ones installed as files: a native plugin is never in a
+    /// registry, and a module being run from where it was built is not one an
+    /// update could be written over.
+    pub fn updates(&self) -> Vec<(PluginId, Release)> {
+        let installed: Vec<(&PluginId, &str, bool)> = self
+            .host
+            .available()
+            .iter()
+            .filter(|manifest| manifest.tier == crook_plugin::Tier::Wasm)
+            .filter(|manifest| self.is_installed(&manifest.id))
+            .map(|manifest| {
+                (
+                    &manifest.id,
+                    manifest.version,
+                    self.withdrawn(&manifest.id).is_some(),
+                )
+            })
+            .collect();
+        index::updates(&self.heard, installed)
+    }
+
+    /// Something for an action to be about, as something a button can carry.
+    ///
+    /// Interned: the same text is the same subject however many frames ask,
+    /// and the list only grows. See [`Subject`].
+    pub fn subject(&self, text: &str) -> Subject {
+        let mut subjects = self.subjects.borrow_mut();
+        match subjects.iter().position(|known| known == text) {
+            Some(index) => Subject(index),
+            None => {
+                subjects.push(text.to_owned());
+                Subject(subjects.len() - 1)
+            }
+        }
     }
 
     pub fn run_action(&mut self, id: ActionId, ctx: &mut ViewContext<Self>) {
@@ -6504,6 +6627,18 @@ impl TypedActionView for Workspace {
             WorkspaceAction::ReleaseSelection(pane) => self.release_selection(pane, ctx),
             WorkspaceAction::Complete(pane) => self.request_completions(pane, ctx),
             WorkspaceAction::Run(id) => self.run_action(id, ctx),
+            WorkspaceAction::RunAbout(id, subject) => {
+                // Said, then run, which is the gesture a picker's row makes
+                // by hand: the handler takes what was said. A subject nothing
+                // was ever interned for cannot arrive — the enum is built
+                // from `subject` — but a lookup that missed would run the
+                // action about nothing, which is what a chord does.
+                let said = self.subjects.borrow().get(subject.0).cloned();
+                if let Some(said) = said {
+                    self.host.say(said);
+                }
+                self.run_action(id, ctx);
+            }
             // The keystroke has already been written down by `action_for`, and
             // there is nothing on screen that says a chord is half typed —
             // there is no status bar to say it in. What this arm does is what

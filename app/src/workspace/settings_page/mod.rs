@@ -432,10 +432,12 @@ fn rail_row(
     section::row(
         section::Row {
             label,
-            // No mark: every page in the rail is a page, so there is nothing
-            // for one to say. The plugins list has one because a plugin can be
-            // switched off.
+            // No mark and no word at the end: every page in the rail is a
+            // page, so there is nothing for either to say. The plugins list
+            // has both because a plugin can be switched off and can be
+            // behind the registry.
             leading: None,
+            trailing: None,
             selected,
             // Every page in the rail is a page there is; none of them is
             // running or switched off.
@@ -462,7 +464,7 @@ fn content(
     let rows = page(categories.unwrap_or_default(), title, query, ui)
         .unwrap_or_else(|| nothing_found(query, ui));
 
-    section::content(title, rows, settings.scroll.clone(), ui)
+    section::content(title, None, rows, settings.scroll.clone(), ui)
 }
 
 /// One page's categories, filtered, or `None` when the query emptied it.
