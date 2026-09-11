@@ -78,16 +78,47 @@ esac
 # shellcheck disable=SC2064 # expanded now on purpose
 [ -z "$CLEANUP" ] || trap "rm -f '$CLEANUP'" EXIT INT TERM
 
-echo "==> Submitting $(basename "$SUBMISSION") — this waits on Apple"
-# --wait blocks until Apple has an answer, which is usually a minute or two but
-# has no upper bound worth relying on. A rejection prints an id; the reason for
-# it is only in the log, which is why that is fetched rather than left for
-# somebody to find the command for.
-if ! xcrun notarytool submit "$SUBMISSION" "$@" --wait --timeout 30m; then
-  echo "error: notarization failed. The last submission's log:" >&2
-  LAST="$(xcrun notarytool history "$@" 2>/dev/null |
-    sed -n 's/^ *id: *\([0-9a-f-]*\).*/\1/p' | head -n 1)"
-  [ -z "$LAST" ] || xcrun notarytool log "$LAST" "$@" >&2 || true
+echo "==> Submitting $(basename "$SUBMISSION")"
+# Submitted and then polled by hand rather than with --wait. --wait does the
+# same polling, but one request to Apple that times out on the way ends it
+# with a non-zero exit — and that happened to a submission Apple had already
+# accepted, on a build nothing was wrong with. A poll that fails to reach
+# Apple is not an answer from Apple, so here it is asked again.
+SUBMITTED="$(xcrun notarytool submit "$SUBMISSION" "$@" --output-format plist)" || {
+  echo "error: the submission was not accepted for processing:" >&2
+  printf '%s\n' "$SUBMITTED" >&2
+  exit 1
+}
+ID="$(printf '%s' "$SUBMITTED" | plutil -extract id raw -o - -)" || ID=""
+[ -n "$ID" ] || { echo "error: no submission id in the answer:" >&2; printf '%s\n' "$SUBMITTED" >&2; exit 1; }
+echo "    submission $ID"
+
+# Apple usually answers inside a couple of minutes and has no upper bound
+# worth relying on; thirty minutes is where this stops believing it will.
+echo "==> Waiting on Apple"
+DEADLINE=$(( $(date +%s) + 30 * 60 ))
+STATUS="In Progress"
+while [ "$STATUS" = "In Progress" ]; do
+  if [ "$(date +%s)" -ge "$DEADLINE" ]; then
+    echo "error: Apple has not answered in thirty minutes; submission $ID" >&2
+    exit 1
+  fi
+  sleep 20
+  # A failed poll is a poll, not a verdict: the status stays as it was and
+  # the loop asks again.
+  INFO="$(xcrun notarytool info "$ID" "$@" --output-format plist)" || {
+    echo "    could not reach Apple; asking again"
+    continue
+  }
+  STATUS="$(printf '%s' "$INFO" | plutil -extract status raw -o - -)" || STATUS="In Progress"
+  echo "    $STATUS"
+done
+
+# A rejection prints a status; the reason for it is only in the log, which is
+# why that is fetched rather than left for somebody to find the command for.
+if [ "$STATUS" != Accepted ]; then
+  echo "error: notarization ended as \"$STATUS\". The submission's log:" >&2
+  xcrun notarytool log "$ID" "$@" >&2 || true
   exit 1
 fi
 
