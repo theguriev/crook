@@ -34,6 +34,40 @@
 //! host that will load it. Bumping [`ABI_VERSION`] and forgetting the version
 //! in `Cargo.toml` fails a test rather than shipping a plugin that resolves to
 //! a vocabulary it cannot speak.
+//!
+//! # Pictures
+//!
+//! An icon and up to six previews travel *inside* the module, as custom
+//! sections: named bytes the interpreter never maps, so they cost no guest
+//! memory and no fuel, and they go wherever the module goes — an installed
+//! plugin, a `--dev-plugin`, the artifact a registry built. They are not on
+//! the wire, and nothing about the ABI moves for them. Two lines put them
+//! there, at module level, next to `mod sys;` or wherever the crate's other
+//! statics are:
+//!
+//! ```rust,ignore
+//! crook_plugin_api::icon!("../../../assets/icon.png");
+//! crook_plugin_api::preview!(1, "../../../assets/header.png", "The chip in the header");
+//! ```
+//!
+//! An icon is a square PNG, 32 to 256 pixels a side and at most 32 KiB; 128
+//! is the size to draw one at. A preview is a PNG of at most 512 KiB with no
+//! side past 2048, captured at 2x — `crook-dev --snapshot` renders at that
+//! scale, so a screenshot's logical size is its pixels halved — and its
+//! caption, when it has one, is one line of at most 80 characters. The names
+//! and the numbers are in [`pictures`], once, because two readers apply them:
+//! `crook-plugin-info` refuses to describe a module past one, with a sentence
+//! naming which, and a host that finds one past it draws the plugin without
+//! the picture.
+//!
+//! The macros put a static in a `#[link_section]` only when the target is
+//! `wasm32`: a section name is a linker's word, and the Mach-O linker on a Mac
+//! wants it in two parts (`segment,section`) and refuses this one — so the
+//! same crate keeps building on the machine that runs its tests, the way a
+//! plugin's own imports are already gated on the target. An icon is the
+//! plugin's face beside its name on the Plugins page and in the Store, not a
+//! mark inside its interface: what a plugin *draws* is still a [`Node`], by
+//! name.
 
 #![no_std]
 
@@ -600,7 +634,9 @@ pub enum Node {
     ///
     /// By name rather than by drawing, because a plugin that shipped its own
     /// vector art would be a plugin whose icons are the wrong weight beside
-    /// everything else. A name this build has no icon for draws nothing.
+    /// everything else. A name this build has no icon for draws nothing. The
+    /// plugin's *own* icon — its face beside its name on the Plugins page —
+    /// is [`icon!`], and is not a mark inside its interface.
     Icon {
         /// The Lucide name, in kebab-case: `git-branch`, `circle-alert`.
         name: String,
@@ -1334,6 +1370,212 @@ pub fn to_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, postcard::Error> {
 /// Decodes one.
 pub fn from_bytes<'a, T: Deserialize<'a>>(bytes: &'a [u8]) -> Result<T, postcard::Error> {
     postcard::from_bytes(bytes)
+}
+
+/// Where a plugin's pictures are in its module, and how big they may be.
+///
+/// An icon and its previews are custom sections of the `.wasm`, written by
+/// [`icon!`] and [`preview!`] and read back out with the module still closed:
+/// a custom section is bytes the interpreter never maps, so a picture costs
+/// no guest memory, no fuel and no ABI. See the crate's [Pictures](crate)
+/// section.
+///
+/// The limits are here rather than in the reader, because two readers apply
+/// them: `crook-plugin-info` refuses to describe a module past one, so a
+/// registry never publishes it, and a host that finds one past it — a module
+/// installed by hand, or built before the rule — logs a line and draws the
+/// plugin without the picture. Two policies, one rule.
+pub mod pictures {
+    /// The section the icon is in: one PNG, square, [`MIN_ICON_EDGE`] to
+    /// [`MAX_ICON_EDGE`] pixels a side.
+    pub const ICON_SECTION: &str = "crook.icon";
+
+    /// What the sections previews are in start with; the rest is the number,
+    /// `1` to [`MAX_PREVIEWS`], and the order they are shown in.
+    pub const PREVIEW_SECTION_PREFIX: &str = "crook.preview.";
+
+    /// What the sections captions are in start with, numbered like the
+    /// previews: `crook.caption.2` is the line under `crook.preview.2`, and
+    /// one with no preview of its number is refused.
+    pub const CAPTION_SECTION_PREFIX: &str = "crook.caption.";
+
+    /// How many previews a plugin may carry.
+    ///
+    /// Six is a card, not a gallery: every preview is downloaded with the
+    /// module by everybody who installs it, looked at or not.
+    pub const MAX_PREVIEWS: usize = 6;
+
+    /// The largest icon, in bytes.
+    ///
+    /// Thirty-two KiB rather than sixteen: an icon at the top of the size
+    /// range with an alpha channel and no palette passes sixteen, and the
+    /// icon is the one picture that is also in the *index*, base64, on every
+    /// row of the Store — so it is the one that is kept small.
+    pub const MAX_ICON_BYTES: usize = 32 * 1024;
+
+    /// The smallest icon, in pixels a side.
+    pub const MIN_ICON_EDGE: u32 = 32;
+
+    /// The largest icon, in pixels a side. 128 is the size to draw one at.
+    pub const MAX_ICON_EDGE: u32 = 256;
+
+    /// The largest preview, in bytes.
+    pub const MAX_PREVIEW_BYTES: usize = 512 * 1024;
+
+    /// The longest side a preview may have, in pixels — captured at 2x, so
+    /// 1024 logical.
+    pub const MAX_PREVIEW_EDGE: u32 = 2048;
+
+    /// The longest caption, in characters: one line under a picture.
+    pub const MAX_CAPTION_CHARS: usize = 80;
+
+    /// `text` as a byte array, for [`preview!`](crate::preview) to make a
+    /// static of.
+    ///
+    /// A `static` in a `#[link_section]` has to be an array, and a string
+    /// literal is a reference — so the macro asks for its bytes by length,
+    /// and this copies them one at a time, which is what a `const fn` can do
+    /// at the Rust this crate promises to build on. `N` is the literal's own
+    /// length; anything else is a caller that is not the macro, and fails to
+    /// compile.
+    #[doc(hidden)]
+    pub const fn caption_bytes<const N: usize>(text: &str) -> [u8; N] {
+        let bytes = text.as_bytes();
+        assert!(
+            bytes.len() == N,
+            "a caption's static is exactly as long as the caption"
+        );
+        let mut out = [0u8; N];
+        let mut at = 0;
+        while at < N {
+            out[at] = bytes[at];
+            at += 1;
+        }
+        out
+    }
+}
+
+/// Puts the plugin's icon in the module.
+///
+/// ```rust,ignore
+/// crook_plugin_api::icon!("../../../assets/icon.png");
+/// ```
+///
+/// The path is relative to the file this is written in, as `include_bytes!`'s
+/// is — the macro expands at the call site, so `../../../assets/icon.png`
+/// from `crates/plugin/src/lib.rs` reaches the repository root. What comes
+/// out is a `pub static CROOK_ICON` holding the PNG's bytes, in the
+/// [`pictures::ICON_SECTION`] custom section when the target is `wasm32` and
+/// in no section at all otherwise, so the crate's own `cargo test` on a
+/// laptop still builds and can look at the bytes.
+///
+/// `pub` and hidden from the docs rather than private, because a private
+/// static nothing in the crate reads is a `dead_code` warning in every
+/// plugin's build — and it is read, by the host, from outside.
+#[macro_export]
+macro_rules! icon {
+    ($path:literal) => {
+        #[cfg_attr(target_arch = "wasm32", unsafe(link_section = "crook.icon"))]
+        #[doc(hidden)]
+        pub static CROOK_ICON: [u8; ::core::include_bytes!($path).len()] =
+            *::core::include_bytes!($path);
+    };
+}
+
+/// Puts one of the plugin's previews in the module, with or without a caption.
+///
+/// ```rust,ignore
+/// crook_plugin_api::preview!(1, "../../../assets/header.png", "The chip in the header");
+/// crook_plugin_api::preview!(2, "../../../assets/panel.png");
+/// ```
+///
+/// The number is the picture's place, `1` to [`pictures::MAX_PREVIEWS`], and
+/// is written as a literal because it names the section: `CROOK_PREVIEW_2` in
+/// `crook.preview.2`, and `CROOK_CAPTION_2` in `crook.caption.2` when there is
+/// a caption. Six arms rather than one that pastes the number in, so that
+/// what ends up in a `#[link_section]` is a string somebody can read here.
+/// The path resolves as [`icon!`]'s does, and the statics are `pub` for the
+/// reason its is.
+#[macro_export]
+macro_rules! preview {
+    (1, $path:literal) => {
+        #[cfg_attr(target_arch = "wasm32", unsafe(link_section = "crook.preview.1"))]
+        #[doc(hidden)]
+        pub static CROOK_PREVIEW_1: [u8; ::core::include_bytes!($path).len()] =
+            *::core::include_bytes!($path);
+    };
+    (1, $path:literal, $caption:literal) => {
+        $crate::preview!(1, $path);
+        #[cfg_attr(target_arch = "wasm32", unsafe(link_section = "crook.caption.1"))]
+        #[doc(hidden)]
+        pub static CROOK_CAPTION_1: [u8; $caption.len()] =
+            $crate::pictures::caption_bytes::<{ $caption.len() }>($caption);
+    };
+    (2, $path:literal) => {
+        #[cfg_attr(target_arch = "wasm32", unsafe(link_section = "crook.preview.2"))]
+        #[doc(hidden)]
+        pub static CROOK_PREVIEW_2: [u8; ::core::include_bytes!($path).len()] =
+            *::core::include_bytes!($path);
+    };
+    (2, $path:literal, $caption:literal) => {
+        $crate::preview!(2, $path);
+        #[cfg_attr(target_arch = "wasm32", unsafe(link_section = "crook.caption.2"))]
+        #[doc(hidden)]
+        pub static CROOK_CAPTION_2: [u8; $caption.len()] =
+            $crate::pictures::caption_bytes::<{ $caption.len() }>($caption);
+    };
+    (3, $path:literal) => {
+        #[cfg_attr(target_arch = "wasm32", unsafe(link_section = "crook.preview.3"))]
+        #[doc(hidden)]
+        pub static CROOK_PREVIEW_3: [u8; ::core::include_bytes!($path).len()] =
+            *::core::include_bytes!($path);
+    };
+    (3, $path:literal, $caption:literal) => {
+        $crate::preview!(3, $path);
+        #[cfg_attr(target_arch = "wasm32", unsafe(link_section = "crook.caption.3"))]
+        #[doc(hidden)]
+        pub static CROOK_CAPTION_3: [u8; $caption.len()] =
+            $crate::pictures::caption_bytes::<{ $caption.len() }>($caption);
+    };
+    (4, $path:literal) => {
+        #[cfg_attr(target_arch = "wasm32", unsafe(link_section = "crook.preview.4"))]
+        #[doc(hidden)]
+        pub static CROOK_PREVIEW_4: [u8; ::core::include_bytes!($path).len()] =
+            *::core::include_bytes!($path);
+    };
+    (4, $path:literal, $caption:literal) => {
+        $crate::preview!(4, $path);
+        #[cfg_attr(target_arch = "wasm32", unsafe(link_section = "crook.caption.4"))]
+        #[doc(hidden)]
+        pub static CROOK_CAPTION_4: [u8; $caption.len()] =
+            $crate::pictures::caption_bytes::<{ $caption.len() }>($caption);
+    };
+    (5, $path:literal) => {
+        #[cfg_attr(target_arch = "wasm32", unsafe(link_section = "crook.preview.5"))]
+        #[doc(hidden)]
+        pub static CROOK_PREVIEW_5: [u8; ::core::include_bytes!($path).len()] =
+            *::core::include_bytes!($path);
+    };
+    (5, $path:literal, $caption:literal) => {
+        $crate::preview!(5, $path);
+        #[cfg_attr(target_arch = "wasm32", unsafe(link_section = "crook.caption.5"))]
+        #[doc(hidden)]
+        pub static CROOK_CAPTION_5: [u8; $caption.len()] =
+            $crate::pictures::caption_bytes::<{ $caption.len() }>($caption);
+    };
+    (6, $path:literal) => {
+        #[cfg_attr(target_arch = "wasm32", unsafe(link_section = "crook.preview.6"))]
+        #[doc(hidden)]
+        pub static CROOK_PREVIEW_6: [u8; ::core::include_bytes!($path).len()] =
+            *::core::include_bytes!($path);
+    };
+    (6, $path:literal, $caption:literal) => {
+        $crate::preview!(6, $path);
+        #[cfg_attr(target_arch = "wasm32", unsafe(link_section = "crook.caption.6"))]
+        #[doc(hidden)]
+        pub static CROOK_CAPTION_6: [u8; $caption.len()] =
+            $crate::pictures::caption_bytes::<{ $caption.len() }>($caption);
+    };
 }
 
 #[cfg(test)]
