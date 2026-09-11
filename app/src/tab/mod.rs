@@ -181,6 +181,12 @@ pub struct AgentSession {
     /// a link*, and today there never is. The menu says so on screen rather
     /// than leaving a dead chip to be discovered.
     pub pull_request: Option<String>,
+
+    /// The command the pane is running, or `None` at a prompt.
+    ///
+    /// Reported off the open block's OSC 133 marks. It is a *name*, not state:
+    /// the dot already says whether something is running, and this says what.
+    pub running_command: Option<String>,
 }
 
 /// Where a session starts when nobody named a directory.
@@ -224,16 +230,33 @@ impl AgentSession {
             attention: false,
             working_directory: starting_directory(),
             pull_request: None,
+            running_command: None,
         }
     }
 
     /// What the tab bar should print: what a person called it, else the
     /// agent's own name for its work, else the name it was created with.
     pub fn display_title(&self) -> &str {
+        self.name().unwrap_or(&self.title)
+    }
+
+    /// The name this session has of its own, if it has one at all.
+    ///
+    /// Read as a sentence, in the order a person would answer "what is that
+    /// tab?": what somebody called it, else what the program running in it
+    /// calls its work, else what it is running.
+    ///
+    /// `None` is the honest answer for a shell sitting at a prompt having done
+    /// nothing yet, and it is not the same as [`Self::display_title`]'s
+    /// fallback — a caller that can say something better than `agent 3` should,
+    /// and the row does: see `RowFacts::resolve`, which puts the working
+    /// directory here instead. What is left after that is a pane with no name,
+    /// no program and nowhere to be, which is a test and a detached pane.
+    pub fn name(&self) -> Option<&str> {
         self.custom_title
             .as_deref()
             .or(self.derived_title.as_deref())
-            .unwrap_or(&self.title)
+            .or(self.running_command.as_deref())
     }
 
     /// What the row's dot says, which is the status with one exception: a
@@ -1588,5 +1611,65 @@ mod starting_directory_tests {
             Some(PathBuf::from("/")),
         );
         assert_eq!(resolve_starting_directory(None, None), None);
+    }
+}
+
+#[cfg(test)]
+mod naming_tests {
+    use super::*;
+
+    fn session() -> AgentSession {
+        AgentSession::new("agent 3")
+    }
+
+    /// The order a person would answer "what is that tab?" in.
+    #[test]
+    fn a_name_is_whatever_says_the_most_about_the_work() {
+        let mut s = session();
+        assert_eq!(s.name(), None, "a fresh shell has nothing to say yet");
+
+        s.running_command = Some("cargo test".to_owned());
+        assert_eq!(s.name(), Some("cargo test"), "what it is running");
+
+        s.derived_title = Some("AG-2517 UI simplify".to_owned());
+        assert_eq!(
+            s.name(),
+            Some("AG-2517 UI simplify"),
+            "what the agent calls its work outranks the command running it"
+        );
+
+        s.custom_title = Some("the flaky one".to_owned());
+        assert_eq!(
+            s.name(),
+            Some("the flaky one"),
+            "and a person outranks everything"
+        );
+    }
+
+    /// The bug this replaces: `opened` only ever counts up, so the numbers are
+    /// birth order rather than position — close a few tabs and `agent 7` sits
+    /// beside `agent 23`, naming nothing and ordering nothing.
+    #[test]
+    fn the_placeholder_is_the_last_resort_and_not_the_first() {
+        let mut s = session();
+        assert_eq!(
+            s.display_title(),
+            "agent 3",
+            "with nothing at all to say, the placeholder is still better than \
+             an empty row"
+        );
+        s.running_command = Some("claude".to_owned());
+        assert_eq!(s.display_title(), "claude");
+    }
+
+    /// A tab goes back to being about its directory when the command stops,
+    /// rather than keeping the name of the last thing that happened to run.
+    #[test]
+    fn a_finished_command_stops_naming_the_tab() {
+        let mut s = session();
+        s.running_command = Some("cargo test".to_owned());
+        assert_eq!(s.name(), Some("cargo test"));
+        s.running_command = None;
+        assert_eq!(s.name(), None, "the row puts the directory here instead");
     }
 }

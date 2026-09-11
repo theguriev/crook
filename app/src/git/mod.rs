@@ -162,6 +162,24 @@ pub fn user_friendly_path(path: &Path, home: Option<&Path>) -> String {
     }
 }
 
+/// The short name a directory can be called, for a row that has nothing better.
+///
+/// The last component, which is what a person calls a checkout: `crook`, not
+/// `~/work/crook`. The home directory is `~` rather than the account name,
+/// because "eugen" is not what anybody calls their home — and since a macOS app
+/// opened from the Dock now starts there, that is the first thing a new tab
+/// would otherwise be named.
+///
+/// `None` for a root directory, which has no last component and is not a place
+/// anybody is working in anyway.
+pub fn directory_label(path: &Path, home: Option<&Path>) -> Option<String> {
+    if home.is_some_and(|home| home == path) {
+        return Some("~".to_owned());
+    }
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+}
+
 /// Shortens `text` to `max_chars`, marking the cut with a trailing ellipsis.
 ///
 /// Warp does not do this. Its branch label is `Shrinkable` plus

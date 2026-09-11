@@ -115,6 +115,13 @@ pub(super) struct RowFacts {
     directory: Option<String>,
     /// The branch it is on, if the directory is a repository.
     branch: Option<String>,
+    /// Whether [`Self::command`] is the directory's own name rather than a
+    /// name the session has.
+    ///
+    /// What stops a row printing the same fact twice: with no name of its own
+    /// the title becomes `crook`, and the line under it must not then be
+    /// `~/work/crook`.
+    command_is_the_directory: bool,
 }
 
 impl RowFacts {
@@ -128,8 +135,21 @@ impl RowFacts {
         home: Option<&Path>,
         path_chars: usize,
     ) -> Self {
+        // A name the session has, else the directory's own — `agent 3` is the
+        // last resort it always was, and now reaches only a pane with no name,
+        // no program and nowhere to be.
+        let named = session.name().map(str::to_owned);
+        let label = session
+            .working_directory
+            .as_deref()
+            .and_then(|directory| git::directory_label(directory, home));
+        let command_is_the_directory = named.is_none() && label.is_some();
+
         Self {
-            command: session.display_title().to_owned(),
+            command: named
+                .or(label)
+                .unwrap_or_else(|| session.display_title().to_owned()),
+            command_is_the_directory,
             directory: session.working_directory.as_deref().map(|directory| {
                 git::truncate_start(&git::user_friendly_path(directory, home), path_chars)
             }),
@@ -167,6 +187,13 @@ impl RowFacts {
     /// The description line: whichever of the command and the working
     /// directory the title did not take.
     pub(super) fn description(&self, primary: PrimaryInfo) -> Option<RowLine> {
+        // Nothing at all when the title and the command are the same fact
+        // spelled two ways: `crook` over `~/work/crook` is one thing taking two
+        // lines, whichever of them the setting put on top. The branch line
+        // below is untouched, and is a second fact.
+        if self.command_is_the_directory {
+            return None;
+        }
         match primary {
             PrimaryInfo::Command => self.directory.clone().map(RowLine::plain),
             PrimaryInfo::WorkingDirectory | PrimaryInfo::Branch => {
@@ -202,6 +229,10 @@ impl RowFacts {
                 .map(RowLine::branch)
                 .or_else(|| self.directory.clone().map(RowLine::plain)),
             Subtitle::WorkingDirectory => self.directory.clone().map(RowLine::plain),
+            // The same rule as the description line: a compact row asked for
+            // the command, and a command that is only the directory restated
+            // is a second line saying what the first one said.
+            Subtitle::Command if self.command_is_the_directory => None,
             Subtitle::Command => Some(RowLine::plain(self.command.clone())),
         }
     }
@@ -545,4 +576,71 @@ pub(super) fn metadata_line(
     ConstrainedBox::new(row.finish())
         .with_height(METADATA_ROW_HEIGHT)
         .finish()
+}
+
+#[cfg(test)]
+mod naming_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn session(directory: &str) -> AgentSession {
+        let mut session = AgentSession::new("agent 3");
+        session.working_directory = Some(PathBuf::from(directory));
+        session
+    }
+
+    fn facts(session: &AgentSession) -> RowFacts {
+        RowFacts::resolve(session, None, Some(Path::new("/Users/eugen")), 40)
+    }
+
+    /// A tab at a prompt is about where it is, and says so once.
+    ///
+    /// The row used to read `agent 3` over `~/work/crook`: a placeholder that
+    /// named nothing, above the only fact on the row. Now the fact is the
+    /// title, and the line that repeated it is gone.
+    #[test]
+    fn a_tab_with_no_name_is_called_after_its_directory_once() {
+        let facts = facts(&session("/Users/eugen/work/crook"));
+        assert_eq!(facts.title(PrimaryInfo::Command).text, "crook");
+        assert!(
+            facts.description(PrimaryInfo::Command).is_none(),
+            "`crook` over `~/work/crook` is one fact printed twice"
+        );
+    }
+
+    /// And once it is running something, that is what it is about — with the
+    /// directory back underneath, because now they are two different facts.
+    #[test]
+    fn a_running_command_names_the_tab_and_the_path_comes_back() {
+        let mut session = session("/Users/eugen/work/crook");
+        session.running_command = Some("cargo test".to_owned());
+        let facts = facts(&session);
+        assert_eq!(facts.title(PrimaryInfo::Command).text, "cargo test");
+        assert_eq!(
+            facts
+                .description(PrimaryInfo::Command)
+                .map(|line| line.text),
+            Some("~/work/crook".to_owned())
+        );
+    }
+
+    /// The setting that puts the directory on top must not then print its own
+    /// short name underneath.
+    #[test]
+    fn the_directory_is_not_repeated_whichever_line_it_is_on() {
+        let facts = facts(&session("/Users/eugen/work/crook"));
+        assert_eq!(
+            facts.title(PrimaryInfo::WorkingDirectory).text,
+            "~/work/crook"
+        );
+        assert!(facts.description(PrimaryInfo::WorkingDirectory).is_none());
+    }
+
+    /// Nowhere to be and nothing running: the placeholder is still the honest
+    /// answer, because a row with no title line is not a row.
+    #[test]
+    fn the_placeholder_survives_where_there_is_nothing_else() {
+        let facts = facts(&session("/"));
+        assert_eq!(facts.title(PrimaryInfo::Command).text, "agent 3");
+    }
 }

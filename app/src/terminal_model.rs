@@ -158,6 +158,14 @@ pub enum TerminalUpdate {
     /// is looked up by this, so it is also what makes the branch chip follow a
     /// `cd`.
     WorkingDirectory(PaneId, PathBuf),
+    /// What the pane is running, or `None` once it went back to a prompt.
+    ///
+    /// The command line off the open block, which the shell integration's
+    /// OSC 133 marks already report — so this costs nothing to know and is the
+    /// one fact about a session the strip never showed. It is what a tab with
+    /// no name of its own calls itself: `cargo test` while the tests run, and
+    /// the directory again when they stop.
+    Running(PaneId, Option<String>),
     /// The shell is gone. The pane should close, and with it its tab and the
     /// window if they were the last ones.
     Closed(PaneId),
@@ -359,6 +367,8 @@ struct Session {
     title: Option<String>,
     /// Where the shell last said it was, for the same reason.
     directory: Option<PathBuf>,
+    /// What it was last running, for the same reason again.
+    running: Option<String>,
 }
 
 impl Entity for TerminalModel {
@@ -638,6 +648,7 @@ impl TerminalModel {
                 snapshot,
                 title: None,
                 directory: None,
+                running: None,
             },
         );
         self.watch(pane, ctx);
@@ -788,6 +799,24 @@ impl TerminalModel {
         // Collected before anything is emitted: emitting borrows the context,
         // and the session borrow has to be over by then.
         let mut updates = Vec::new();
+
+        // Read off the snapshot rather than from an event, because there is no
+        // event for it: a block opens and closes as the marks arrive, and what
+        // matters here is the resting state after they have. `None` the moment
+        // the block stops running, so a tab goes back to naming itself after
+        // its directory rather than after the last thing it happened to run.
+        let running = session
+            .snapshot
+            .live_block
+            .state
+            .is_running()
+            .then(|| session.snapshot.live_block.command.clone())
+            .flatten()
+            .filter(|command| !command.trim().is_empty());
+        if session.running != running {
+            session.running = running.clone();
+            updates.push(TerminalUpdate::Running(pane, running));
+        }
         for event in events {
             match event {
                 TerminalEvent::Title(title) => {

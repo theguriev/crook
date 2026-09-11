@@ -5055,6 +5055,14 @@ fn a_tab_is_found_by_a_pane_its_row_does_not_name() {
     harness.update_session(hidden, |session| {
         session.derived_title = Some("kettle".to_owned());
     });
+    // The focused pane is named too, and named something else. Both panes sit
+    // in the same directory here, and a row with no name of its own is now
+    // called after that directory — so without this the two rows would read
+    // the same and the assertion below could not tell them apart.
+    let focused = harness.focused_pane_id().expect("the split focused a pane");
+    harness.update_session(focused, |session| {
+        session.derived_title = Some("cocoa".to_owned());
+    });
     harness.set_granularity(Granularity::Tabs);
 
     harness.click_panel_search();
@@ -5069,10 +5077,11 @@ fn a_tab_is_found_by_a_pane_its_row_does_not_name() {
     // The row that survived names the tab's *focused* pane, which is the one
     // the split made and not the one the query found — so the match came from
     // a pane the list never printed. ("kettle" is in the panel either way: the
-    // box prints what was typed into it.)
+    // box prints what was typed into it, which is why the row is read for
+    // `cocoa` rather than searched for the absence of `kettle`.)
     let text = panel_text(&scene);
     assert!(
-        text.contains("agent 3") && !text.contains("agent 1"),
+        text.contains("cocoa"),
         "the tab kept is not the one running it: {text:?}"
     );
 }
@@ -15224,5 +15233,70 @@ mod from_the_keyboard {
         assert!(harness.workspace.read(&harness.app, |workspace, _| {
             workspace.tab_context_menu().selected_action().is_none()
         }));
+    }
+}
+
+mod what_a_tab_is_called {
+    use super::*;
+    use crate::terminal_model::TerminalUpdate;
+
+    fn report(harness: &mut Harness, update: TerminalUpdate) {
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(&update, ctx);
+        });
+    }
+
+    fn name_of(harness: &Harness, pane: PaneId) -> Option<String> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .pane(pane)
+                .and_then(|pane| pane.session().name().map(str::to_owned))
+        })
+    }
+
+    /// The whole point, end to end through the update the model sends: a tab
+    /// with no name of its own is called after what it is running, and stops
+    /// being called that the moment it stops running it.
+    #[test]
+    fn a_tab_is_called_after_what_it_is_running() {
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+        assert_eq!(name_of(&harness, pane), None, "a fresh shell is unnamed");
+
+        report(
+            &mut harness,
+            TerminalUpdate::Running(pane, Some("cargo test".to_owned())),
+        );
+        assert_eq!(name_of(&harness, pane), Some("cargo test".to_owned()));
+
+        report(&mut harness, TerminalUpdate::Running(pane, None));
+        assert_eq!(
+            name_of(&harness, pane),
+            None,
+            "back to a prompt, and back to being about its directory"
+        );
+    }
+
+    /// What the shell calls the window outranks what it happens to be running:
+    /// an agent reporting its task is the better name, and the reason the
+    /// reporting exists at all.
+    #[test]
+    fn a_reported_title_outranks_the_command() {
+        let mut harness = Harness::panel(1);
+        let pane = harness.active_pane_ids()[0];
+
+        report(
+            &mut harness,
+            TerminalUpdate::Running(pane, Some("claude".to_owned())),
+        );
+        report(
+            &mut harness,
+            TerminalUpdate::Title(pane, Some("AG-2517 UI simplify".to_owned())),
+        );
+        assert_eq!(
+            name_of(&harness, pane),
+            Some("AG-2517 UI simplify".to_owned())
+        );
     }
 }
