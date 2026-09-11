@@ -507,6 +507,12 @@ pub(crate) const PANE_KEYS: &[PaneKey] = &[
         other: "ctrl+c or ctrl+shift+c",
     },
     PaneKey {
+        label: "Paste the clipboard into what is running",
+        keywords: &["clipboard", "paste", "insert"],
+        mac: "cmd+v or ctrl+shift+v",
+        other: "ctrl+shift+v",
+    },
+    PaneKey {
         label: "Copy a whole command and its output",
         keywords: &["clipboard", "block", "yank"],
         mac: "hover it, then click",

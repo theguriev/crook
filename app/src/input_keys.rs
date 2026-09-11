@@ -168,6 +168,14 @@ pub enum Route {
     /// The grid's, not the field's: there are two selections on screen and
     /// this is the one that outranks the other. See rule 1 of [`route`].
     CopyOutput,
+    /// Put the clipboard into the program, as a paste rather than as typing.
+    ///
+    /// The counterpart of [`Route::CopyOutput`], and needed for the same
+    /// reason: a pane with no composer sends every key straight to the pty,
+    /// and no key on any platform means "paste" to a pty. Without this the one
+    /// place a paste is most wanted — an agent or a REPL holding the screen —
+    /// is the one place it cannot happen. See rule 2 of [`route`].
+    PasteToShell,
     /// Nowhere. Nothing is typed and nothing is sent.
     Ignored,
 }
@@ -329,6 +337,11 @@ pub fn route(keystroke: &Keystroke, chars: &str, pane: Pane, platform: Platform)
         return Route::CopyOutput;
     }
     if !pane.composer {
+        // Before the pty gets it, because the pty has no paste key to give it
+        // to: the clipboard reaches a program as text or not at all.
+        if pastes_into_the_shell(keystroke, platform) {
+            return Route::PasteToShell;
+        }
         return Route::Raw;
     }
     match signal(keystroke) {
@@ -391,6 +404,32 @@ fn copies_the_output(keystroke: &Keystroke, platform: Platform) -> bool {
         // a selection on screen both copy, and the Shift is no longer the
         // thing a person has to remember.
         Platform::Other => modifiers.ctrl && !modifiers.cmd,
+    }
+}
+
+/// Whether this keystroke asks for the clipboard to go into the program.
+///
+/// Only ever consulted for a pane with no composer — rule 2 of [`route`] —
+/// where the alternative is the pty being handed a keystroke that means
+/// nothing to it.
+///
+/// Plain Ctrl-V is deliberately absent on both platforms. It is `SYN`, which
+/// is `quoted-insert` in readline and how a person types a control character
+/// on purpose; a terminal that swallowed it would be taking away the one key
+/// that exists to send the next one literally. Ctrl-Shift-V is free — a
+/// terminal encodes it as the same `SYN` — which is why every terminal off
+/// macOS already uses it, and why it is accepted on macOS too rather than
+/// only Cmd-V: the muscle memory arrives with the person.
+fn pastes_into_the_shell(keystroke: &Keystroke, platform: Platform) -> bool {
+    let modifiers = keystroke.modifiers;
+    if keystroke.key != "v" || modifiers.alt {
+        return false;
+    }
+    let command = modifiers.cmd && !modifiers.ctrl && !modifiers.shift;
+    let control_shift = modifiers.ctrl && modifiers.shift && !modifiers.cmd;
+    match platform {
+        Platform::Mac => command || control_shift,
+        Platform::Other => control_shift,
     }
 }
 
@@ -652,6 +691,120 @@ fn buffer_chord(modifiers: Modifiers, platform: Platform) -> bool {
     match platform {
         Platform::Mac => modifiers.cmd && !modifiers.ctrl && !modifiers.alt,
         Platform::Other => modifiers.ctrl && !modifiers.cmd && !modifiers.alt,
+    }
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::*;
+
+    fn keystroke(key: &str, modifiers: Modifiers) -> Keystroke {
+        Keystroke::new(key, modifiers)
+    }
+    fn cmd() -> Modifiers {
+        Modifiers {
+            cmd: true,
+            ..Modifiers::default()
+        }
+    }
+    fn ctrl() -> Modifiers {
+        Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        }
+    }
+    fn ctrl_shift() -> Modifiers {
+        Modifiers {
+            ctrl: true,
+            shift: true,
+            ..Modifiers::default()
+        }
+    }
+    /// A pane whose program holds the screen: an agent, vim, a long command.
+    fn program() -> Pane {
+        Pane {
+            composer: false,
+            line_is_empty: false,
+            grid_has_selection: false,
+        }
+    }
+    fn composing() -> Pane {
+        Pane {
+            composer: true,
+            line_is_empty: false,
+            grid_has_selection: false,
+        }
+    }
+
+    /// The bug: an agent holding the screen took no paste at all, on either
+    /// platform, because rule 2 handed every key to the pty — and no key means
+    /// "paste" to a pty.
+    #[test]
+    fn a_program_with_the_screen_still_takes_a_paste() {
+        assert_eq!(
+            route(&keystroke("v", cmd()), "", program(), Platform::Mac),
+            Route::PasteToShell,
+            "cmd-v is the paste chord on macOS and has to reach a program"
+        );
+        for platform in [Platform::Mac, Platform::Other] {
+            assert_eq!(
+                route(&keystroke("v", ctrl_shift()), "", program(), platform),
+                Route::PasteToShell,
+                "ctrl-shift-v pastes on every platform"
+            );
+        }
+    }
+
+    /// Plain Ctrl-V is `quoted-insert`: the key that exists to send the next
+    /// character literally. Swallowing it would cost more than it bought.
+    #[test]
+    fn plain_control_v_still_reaches_the_program() {
+        for platform in [Platform::Mac, Platform::Other] {
+            assert_eq!(
+                route(&keystroke("v", ctrl()), "", program(), platform),
+                Route::Raw,
+                "ctrl-v is SYN and belongs to the program"
+            );
+        }
+    }
+
+    /// With a field to type into, a paste is an edit in that field, and the
+    /// route that sends text to the program must not steal it.
+    #[test]
+    fn a_composer_keeps_its_own_paste() {
+        assert_eq!(
+            route(&keystroke("v", cmd()), "", composing(), Platform::Mac),
+            Route::Edit(Intent::Paste)
+        );
+        assert_eq!(
+            route(
+                &keystroke("v", ctrl_shift()),
+                "",
+                composing(),
+                Platform::Other
+            ),
+            Route::Edit(Intent::Paste)
+        );
+    }
+
+    /// Cmd is not a chord off macOS, and a stray Alt is somebody's window
+    /// manager rather than a request to paste.
+    #[test]
+    fn only_the_platforms_own_chord_pastes() {
+        assert_eq!(
+            route(&keystroke("v", cmd()), "", program(), Platform::Other),
+            Route::Raw,
+            "there is no command key off macOS"
+        );
+        let alt_cmd = Modifiers {
+            cmd: true,
+            alt: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(
+            route(&keystroke("v", alt_cmd), "", program(), Platform::Mac),
+            Route::Raw
+        );
     }
 }
 
