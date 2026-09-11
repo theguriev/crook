@@ -586,3 +586,22 @@ fn a_working_directory_under_home_is_printed_with_a_tilde() {
         "/Users/eugen/work"
     );
 }
+
+#[test]
+fn a_directory_is_called_by_its_last_component() {
+    let home = Path::new("/Users/eugen");
+    assert_eq!(
+        directory_label(Path::new("/Users/eugen/work/crook"), Some(home)),
+        Some("crook".to_owned())
+    );
+    // The home directory is `~`, not the account name. A macOS app opened from
+    // the Dock starts there, so this is the first thing a new tab is called.
+    assert_eq!(directory_label(home, Some(home)), Some("~".to_owned()));
+    // Nowhere to be. The row falls back past this to the placeholder.
+    assert_eq!(directory_label(Path::new("/"), Some(home)), None);
+    // No home to compare against is not a reason to have no name.
+    assert_eq!(
+        directory_label(Path::new("/opt/crook"), None),
+        Some("crook".to_owned())
+    );
+}

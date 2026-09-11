@@ -90,7 +90,11 @@ To build it yourself instead, see [Prerequisites](#prerequisites) and [Build and
 
 Eight features, and the page that configures them:
 
-- **Tabs.** Open, close, switch, reorder. One agent session per tab, with a derived title.
+- **Tabs.** Open, close, switch, reorder. One agent session per tab, and the tab is named
+  the way a person would answer "what is that one?": what you called it, else what the agent
+  in it calls its work, else what it is running right now — `cargo test` while the tests run —
+  else the directory it sits in. A number is what is left when a pane has no name, no program
+  and nowhere to be, which is nowhere anybody works.
   They live in a panel down the left edge, and a **View options** menu — the panel's own
   secondary click, on the empty space the list leaves — says what a row of them shows. Under
   that space is a `+`, which is where Warp's browser puts the one that opens another tab.

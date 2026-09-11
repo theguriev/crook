@@ -4305,6 +4305,12 @@ impl Workspace {
                     session.working_directory = Some(directory);
                 })
             }
+            TerminalUpdate::Running(pane, command) => {
+                let command = command.clone();
+                self.update_session(*pane, ctx, |session| {
+                    session.running_command = command;
+                })
+            }
             TerminalUpdate::Closed(pane) => {
                 if self.apply(TabAction::ClosePane(*pane), ctx) == TabEffect::CloseWindow {
                     (self.quit)();
