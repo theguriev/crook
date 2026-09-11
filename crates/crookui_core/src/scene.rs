@@ -1,7 +1,7 @@
 //! The retained draw list a frame is compiled into.
 //!
 //! Painting an element tree produces a `Scene`: a stack of [`Layer`]s, each
-//! holding flat vectors of rectangles and glyph references. Nothing here knows
+//! holding flat vectors of rectangles, pictures and glyph references. Nothing here knows
 //! about a GPU — the renderer walks the layers in order, sets a scissor from
 //! each layer's clip bounds, and issues one instanced draw per primitive kind.
 //! That separation is what lets the element tree be tested without a device.
@@ -14,10 +14,16 @@
 //!
 //! Glyphs are stored as *references* ([`crate::fonts::GlyphKey`] plus a
 //! position), never as pixels. The renderer resolves them against its atlas.
+//! A picture is the one thing that cannot be a reference — the renderer has no
+//! way to produce it — so an [`Image`] carries its pixels, shared behind an
+//! `Arc` so that cloning a scene clones none of them.
+
+use std::sync::Arc;
 
 use crate::fonts::{FontId, GlyphId, GlyphKey};
 use crate::geometry::{Color, Point, RectF, Vector2F, ZIndex};
 use crate::icons::IconKey;
+use crate::image::Bitmap;
 
 /// One frame's worth of draw commands.
 #[derive(Clone)]
@@ -47,7 +53,13 @@ pub struct Layer {
     /// Rectangles to fill, in paint order.
     pub rects: Vec<Rect>,
 
-    /// Glyphs to draw, in paint order. Always painted after this layer's rects.
+    /// Pictures to draw, in paint order. Painted after this layer's rects and
+    /// before its glyphs, so a caption written over a picture in the same
+    /// layer is read rather than covered.
+    pub images: Vec<Image>,
+
+    /// Glyphs to draw, in paint order. Always painted after this layer's rects
+    /// and images.
     pub glyphs: Vec<Glyph>,
 
     /// Icons to draw, in paint order. Painted after this layer's glyphs, which
@@ -151,6 +163,29 @@ pub struct Icon {
     pub bounds: RectF,
     /// What to tint the mask with.
     pub color: Color,
+}
+
+/// One picture, stretched into a box.
+///
+/// The box is where it goes and how big it is drawn, in logical pixels; the
+/// bitmap's own size is only its resolution. The renderer resamples the
+/// pixels to the box's device size, so a picture drawn at half its size is
+/// averaged down rather than sampled sparsely. An image records no hit rect,
+/// for the same reason a glyph does not — wrap it to make it clickable.
+#[derive(Clone, Debug)]
+pub struct Image {
+    /// The pixels, shared with whoever decoded them.
+    pub bitmap: Arc<Bitmap>,
+    /// Where it goes, in logical pixels.
+    pub bounds: RectF,
+}
+
+impl PartialEq for Image {
+    // Two images are the same when they draw the same picture in the same
+    // place; comparing pixels would say the same thing at a megabyte a time.
+    fn eq(&self, other: &Self) -> bool {
+        self.bitmap.id() == other.bitmap.id() && self.bounds == other.bounds
+    }
 }
 
 /// How to fill a region.
@@ -606,6 +641,22 @@ impl Scene {
         layer.rects.last_mut().expect("just pushed")
     }
 
+    /// Adds a picture, stretched into `bounds`.
+    ///
+    /// Images record no hit rect, so a picture alone is never clickable: wrap
+    /// it in a [`crate::elements::Container`] or a
+    /// [`crate::elements::Hoverable`] to give it a hit area.
+    pub fn draw_image(&mut self, bitmap: Arc<Bitmap>, bounds: RectF) -> &mut Image {
+        debug_assert!(
+            bounds.origin().is_finite() && bounds.size().is_finite(),
+            "an image reached the scene with a non-finite coordinate: {bounds:?}"
+        );
+
+        let layer = self.active_layer();
+        layer.images.push(Image { bitmap, bounds });
+        layer.images.last_mut().expect("just pushed")
+    }
+
     /// Adds a glyph, positioned where its left edge meets the baseline.
     ///
     /// Glyphs record no hit rect, so text alone is never clickable: wrap a
@@ -904,6 +955,33 @@ mod tests {
             scene.max_active_z_index(),
             ZIndex::Normal(1),
             "back in a normal layer, the overlays above are not the ceiling"
+        );
+    }
+
+    #[test]
+    fn an_image_lands_in_the_active_layer_and_shares_its_picture() {
+        let picture = Arc::new(Bitmap::rgba8(1, 1, vec![0; 4]).unwrap());
+        let mut scene = Scene::new(1.);
+        scene.start_layer(ClipBounds::None);
+        scene.draw_image(picture.clone(), RectF::new(vec2f(1., 2.), vec2f(3., 4.)));
+        scene.stop_layer();
+
+        let images: Vec<_> = scene
+            .layers()
+            .flat_map(|layer| layer.images.iter())
+            .collect();
+
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].bounds, RectF::new(vec2f(1., 2.), vec2f(3., 4.)));
+        assert_eq!(images[0].bitmap.id(), picture.id());
+        assert!(
+            scene.layers().next().unwrap().images.is_empty(),
+            "the root layer was not the active one"
+        );
+        assert_eq!(
+            Arc::strong_count(&picture),
+            2,
+            "the scene shares the pixels rather than copying them"
         );
     }
 

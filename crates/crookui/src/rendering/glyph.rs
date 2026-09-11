@@ -5,13 +5,18 @@
 //! truncates overflowing text with an ellipsis, which is a layout decision that
 //! needs nothing from the shader.
 //!
+//! Pictures are drawn here too, as the same quad with the emoji flag set: the
+//! shader already passes a colour texel through untouched for an emoji, and a
+//! picture is nothing but colour texels. What they need that a glyph does not
+//! is atlases of their own, so [`Sheet`] says which set a batch samples from.
+//!
 //! The instance layout here is the Rust half of the contract in
 //! `src/shaders/README.md`; the two must be changed together.
 
 use std::mem;
 
 use crookui_core::fonts::{Canvas, SubpixelAlignment};
-use crookui_core::geometry::vec2f;
+use crookui_core::geometry::{Color, vec2f};
 use crookui_core::platform::FontDb;
 use crookui_core::scene::Layer;
 use wgpu::util::BufferInitDescriptor;
@@ -141,13 +146,25 @@ pub(super) struct PerFrameState {
     buffer: Option<wgpu::Buffer>,
 }
 
-/// One layer's glyphs, grouped into a draw per atlas texture.
+/// One layer's pictures and glyphs, grouped into a draw per atlas texture.
 pub(super) struct LayerState {
     textures: Vec<PerTextureState>,
 }
 
+/// Which atlas a batch samples: a glyph atlas or an image atlas.
+///
+/// The two sets are numbered independently, so a texture id alone is
+/// ambiguous and the batch has to say which set it means.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(super) enum Sheet {
+    /// A glyph atlas: masks, colour emoji and icons.
+    Marks(TextureId),
+    /// An image atlas: pictures only.
+    Images(TextureId),
+}
+
 struct PerTextureState {
-    texture_id: TextureId,
+    sheet: Sheet,
     start_offset: usize,
     len: usize,
 }
@@ -245,9 +262,15 @@ impl Pipeline {
         }
     }
 
-    /// Appends `layer`'s glyphs to the frame's instance data.
+    /// Lets the cache drop its image atlases if they have grown past their
+    /// budget. Run once per frame, before any layer is walked.
+    pub(super) fn sweep_images(&mut self) {
+        self.glyph_cache.sweep_images();
+    }
+
+    /// Appends `layer`'s pictures and glyphs to the frame's instance data.
     ///
-    /// Returns `None` when the layer draws no glyphs, which keeps a zero-length
+    /// Returns `None` when the layer draws neither, which keeps a zero-length
     /// draw — and, on some backends, a zero-sized buffer — out of the frame.
     pub(super) fn initialize_for_layer(
         &mut self,
@@ -257,7 +280,7 @@ impl Pipeline {
         font_db: &dyn FontDb,
         per_frame_state: &mut PerFrameState,
     ) -> Option<LayerState> {
-        if layer.glyphs.is_empty() && layer.icons.is_empty() {
+        if layer.images.is_empty() && layer.glyphs.is_empty() && layer.icons.is_empty() {
             return None;
         }
 
@@ -271,7 +294,55 @@ impl Pipeline {
         // Grouped in first-seen order rather than through a hash map, so a
         // frame drawn twice produces the same command stream — which is what
         // makes the offscreen path comparable against a golden image.
-        let mut batches: Vec<(TextureId, Vec<GlyphInstanceData>)> = Vec::new();
+        let mut batches: Vec<(Sheet, Vec<GlyphInstanceData>)> = Vec::new();
+        let mut batch = |sheet, instance| match batches.iter_mut().find(|(seen, _)| *seen == sheet)
+        {
+            Some((_, instances)) => instances.push(instance),
+            None => batches.push((sheet, vec![instance])),
+        };
+
+        // Pictures first, so a caption drawn over one in the same layer wins.
+        // A picture is an emoji as far as the shader knows: its texel is
+        // emitted unchanged and the tint is ignored. The quad is the drawn
+        // device size; the region is normally the same size, resampled to it
+        // on the CPU, and only past the atlas ceiling is the sampler asked to
+        // stretch a smaller region up.
+        for image in &layer.images {
+            let origin = image.bounds.origin() * scale_factor;
+            let size = image.bounds.size() * scale_factor;
+            let drawn = (
+                size.x().round().max(0.) as u32,
+                size.y().round().max(0.) as u32,
+            );
+
+            let placed = match self.glyph_cache.get_image(&image.bitmap, drawn, &atlas) {
+                Ok(Some(placed)) => placed,
+                Ok(None) => continue,
+                Err(error) => {
+                    log::warn!("could not place image {:?}: {error:#}", image.bitmap);
+                    continue;
+                }
+            };
+
+            let region = placed.allocated_region.pixel_region;
+            let uv_bounds = if (region.width, region.height) == drawn {
+                rect_to_array(placed.allocated_region.uv_region)
+            } else {
+                inset_half_texel(placed.allocated_region)
+            };
+            let instance = GlyphInstanceData {
+                bounds: [
+                    origin.x().round(),
+                    origin.y().round(),
+                    drawn.0 as f32,
+                    drawn.1 as f32,
+                ],
+                uv_bounds,
+                color: Color::WHITE.to_f32_array(),
+                is_emoji: true as i32,
+            };
+            batch(Sheet::Images(placed.texture_id), instance);
+        }
 
         for glyph in &layer.glyphs {
             let position = glyph.position * scale_factor;
@@ -314,14 +385,7 @@ impl Pipeline {
                 color: glyph.color.to_f32_array(),
                 is_emoji: placed.is_emoji as i32,
             };
-
-            match batches
-                .iter_mut()
-                .find(|(texture_id, _)| *texture_id == placed.texture_id)
-            {
-                Some((_, instances)) => instances.push(instance),
-                None => batches.push((placed.texture_id, vec![instance])),
-            }
+            batch(Sheet::Marks(placed.texture_id), instance);
         }
 
         // Icons after glyphs, into the same batches: an icon is a mask in the
@@ -354,14 +418,7 @@ impl Pipeline {
                 color: icon.color.to_f32_array(),
                 is_emoji: false as i32,
             };
-
-            match batches
-                .iter_mut()
-                .find(|(texture_id, _)| *texture_id == placed.texture_id)
-            {
-                Some((_, instances)) => instances.push(instance),
-                None => batches.push((placed.texture_id, vec![instance])),
-            }
+            batch(Sheet::Marks(placed.texture_id), instance);
         }
 
         if batches.is_empty() {
@@ -371,11 +428,11 @@ impl Pipeline {
         let mut start_offset = per_frame_state.data.len();
         let textures = batches
             .into_iter()
-            .map(|(texture_id, mut instances)| {
+            .map(|(sheet, mut instances)| {
                 let len = instances.len();
                 per_frame_state.data.append(&mut instances);
                 let state = PerTextureState {
-                    texture_id,
+                    sheet,
                     start_offset,
                     len,
                 };
@@ -424,10 +481,14 @@ impl Pipeline {
         render_pass.set_vertex_buffer(1, buffer.slice(..));
 
         for state in &layer_state.textures {
-            let Some(texture) = self.glyph_cache.texture(state.texture_id) else {
+            let texture = match state.sheet {
+                Sheet::Marks(texture_id) => self.glyph_cache.texture(texture_id),
+                Sheet::Images(texture_id) => self.glyph_cache.image_texture(texture_id),
+            };
+            let Some(texture) = texture else {
                 log::warn!(
                     "a layer referenced atlas {:?}, which does not exist",
-                    state.texture_id
+                    state.sheet
                 );
                 continue;
             };
@@ -452,6 +513,29 @@ fn rect_to_array(rect: crookui_core::geometry::RectF) -> [f32; 4] {
     ]
 }
 
+/// `region`'s UV rect pulled in by half a texel on every side, for a quad
+/// that is not the region's size.
+///
+/// A quad drawn one to one samples every texel at its centre and never
+/// touches the padding around the region. A stretched quad does not: its
+/// outermost fragments land within half a texel of the region's edge, and the
+/// linear filter blends the transparent padding in, fringing the picture. With
+/// the edges pulled in, the outermost fragments sample the outermost texel
+/// centres instead. Not applied one to one, where it would put every sample
+/// between two texels and blur the whole picture.
+fn inset_half_texel(region: AllocatedRegion) -> [f32; 4] {
+    let uv = region.uv_region;
+    let pixels = region.pixel_region;
+    let half_x = uv.width() / pixels.width as f32 * 0.5;
+    let half_y = uv.height() / pixels.height as f32 * 0.5;
+    [
+        uv.origin().x() + half_x,
+        uv.origin().y() + half_y,
+        uv.width() - 2. * half_x,
+        uv.height() - 2. * half_y,
+    ]
+}
+
 /// One glyph, as vertex slot 1 sees it.
 ///
 /// Field order and types are the contract in `src/shaders/README.md`: four
@@ -465,7 +549,7 @@ struct GlyphInstanceData {
     uv_bounds: [f32; 4],
     /// Text color, for mask glyphs.
     color: [f32; 4],
-    /// 1 for a color glyph, whose own pixels are used instead.
+    /// 1 for a color glyph or a picture, whose own pixels are used instead.
     is_emoji: i32,
 }
 
@@ -488,11 +572,34 @@ impl GlyphInstanceData {
 
 #[cfg(test)]
 mod tests {
+    use crookui_core::geometry::RectF;
+
+    use super::super::atlas::PixelRect;
     use super::*;
 
     #[test]
     fn the_instance_layout_matches_the_shader_contract() {
         assert_eq!(mem::size_of::<GlyphInstanceData>(), 52);
         assert_eq!(GlyphInstanceData::layout().array_stride, 52);
+    }
+
+    #[test]
+    fn a_stretched_quad_samples_from_half_a_texel_inside_its_region() {
+        // A 4 × 2 region in a 16 px atlas: a texel is a sixteenth of UV space,
+        // so each edge moves in by a thirty-second.
+        let region = AllocatedRegion {
+            uv_region: RectF::new(vec2f(0., 0.5), vec2f(0.25, 0.125)),
+            pixel_region: PixelRect {
+                x: 0,
+                y: 8,
+                width: 4,
+                height: 2,
+            },
+        };
+
+        assert_eq!(
+            inset_half_texel(region),
+            [1. / 32., 0.5 + 1. / 32., 0.25 - 1. / 16., 0.125 - 1. / 16.]
+        );
     }
 }

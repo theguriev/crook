@@ -2,7 +2,8 @@
 
 Two WGSL shaders, both ported from Warp's MIT-licensed `warpui` crate. They are the entire
 rendering surface of Crook v1: `rect_shader.wgsl` draws tabs and the token-usage chip,
-`glyph_shader.wgsl` draws the text inside them.
+`glyph_shader.wgsl` draws the text inside them — and the pictures, which are colour bitmaps
+drawn the way a colour emoji is.
 
 | file | origin | lines |
 | --- | --- | --- |
@@ -229,6 +230,23 @@ at the edges.
    those are identical. For emoji, `k` is computed from the sampled texel and then thrown away by
    the `max(contrasted, f32(in.is_emoji))` — emoji alpha is already final and must not be pushed
    through a contrast curve. Do not "simplify" the `max` away.
+5. **Pictures are `is_emoji = 1` blits, resampled on the CPU to the size they are drawn at.**
+   A scene image has a *logical* size chosen by whoever drew it — a plugin's icon is 12 or 18
+   logical px, a preview captured at 2x is its pixel count halved — and the renderer multiplies
+   that by `scale_factor` exactly once, like every other primitive. `GlyphCache::get_image` then
+   resamples the bitmap to that device size (area-averaged when shrinking, bilinear when growing,
+   premultiplied in between so transparent pixels bleed no colour) before uploading it, so rule 1
+   holds for pictures too: `bounds.zw` is the region size because the region was *made* the drawn
+   size, and the linear sampler reads every texel at its centre. The one exception is a side past
+   1022 device px — a 480-logical preview at 2.13x and up — where the region is clamped, both sides
+   by the same factor, and the quad is still drawn at its full size; that quad's `uv_bounds` are
+   pulled in by half a texel on every side so the filter never reaches the padding, which is the
+   fringe rule 1 is about. Pictures go into atlases of their own, never the glyph atlases
+   (`Sheet::Images` versus `Sheet::Marks` in `glyph.rs`), and that whole set is dropped at the top
+   of a frame once there are more than eight of them — 32 MB — while the glyph atlases are never
+   dropped at all. There is no picture shader and no new attribute: `mix(…, 1.0)` selects the
+   texel and `max(contrasted, 1.0)` leaves its alpha alone, so the texel is emitted as uploaded —
+   which is also why the atlas holds *straight* alpha, the same rule as item 1 of the rect list.
 
 ---
 

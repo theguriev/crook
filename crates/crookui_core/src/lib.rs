@@ -14,7 +14,7 @@
 //! 3. The platform crate hands that invalidation to a [`Presenter`], which
 //!    re-runs `View::render` for exactly those views.
 //! 4. [`Presenter::build_scene`] lays the tree out against the window size and
-//!    paints it into a [`Scene`] of rectangles and glyph references.
+//!    paints it into a [`Scene`] of rectangles, pictures and glyph references.
 //! 5. The renderer walks the scene's layers.
 //!
 //! Nothing polls. A view that changes without notifying shows stale content
@@ -28,8 +28,8 @@
 //! * [`element`] and [`elements`] — the render tree and its primitives.
 //! * [`presenter`] — the layout, paint and event walks.
 //! * [`scene`] — what a frame compiles down to.
-//! * [`geometry`], [`fonts`], [`icons`], [`text_layout`], [`event`] — the
-//!   vocabulary.
+//! * [`geometry`], [`fonts`], [`icons`], [`image`], [`text_layout`],
+//!   [`event`] — the vocabulary.
 //! * [`platform`] — what a renderer must implement.
 //! * [`executor`] — the two executors the app runs on.
 
@@ -42,6 +42,7 @@ pub mod executor;
 pub mod fonts;
 pub mod geometry;
 pub mod icons;
+pub mod image;
 pub mod platform;
 pub mod prelude;
 pub mod presenter;

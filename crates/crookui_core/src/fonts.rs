@@ -285,7 +285,13 @@ impl SubpixelAlignment {
 /// The pixel format of a rasterized glyph.
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
 pub enum RasterFormat {
-    /// Premultiplied R8G8B8A8, little-endian. Color glyphs (emoji).
+    /// Straight-alpha R8G8B8A8, little-endian. Color glyphs (emoji), and
+    /// pictures.
+    ///
+    /// Straight, not premultiplied, end to end: the glyph shader passes a
+    /// colour texel through untouched and the pipeline blends with a
+    /// straight-alpha state, so a premultiplied bitmap would darken at every
+    /// soft edge. This is also the format a PNG decoder hands out.
     Rgba32,
     /// R8G8B8, little-endian.
     Rgb24,
