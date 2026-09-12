@@ -1810,19 +1810,34 @@ fn closing_the_last_tab_asks_the_shell_to_quit_instead_of_emptying_the_strip() {
 
 #[test]
 fn the_first_tab_clears_the_window_controls_this_platform_draws() {
+    // The panel owns the top-left corner, and it spends the reservation on a
+    // strip of nothing above its first row rather than on room beside it —
+    // see `platform_insets` — so what clears the traffic lights is the row's
+    // *top*. Asked of this platform's own layout and of the one that
+    // reserves the most, so the arithmetic is checked wherever this runs.
     let mut harness = Harness::new(1);
-    let insets = crate::platform_insets::window_control_insets(crate::WINDOW_CHROME, false);
-    let boxes = tab_boxes(&harness.frame());
-
+    let insets = harness.window_insets();
+    let first = tab_boxes(&harness.frame())[0];
+    let reserved = if insets.panel_left > 0. {
+        crate::workspace::tabs_panel::TITLE_STRIP_HEIGHT
+    } else {
+        0.
+    };
     assert!(
-        boxes[0].min_x() >= insets.left,
-        "the first tab starts at {} but {} is reserved for window controls",
-        boxes[0].min_x(),
-        insets.left
+        first.min_y() >= reserved,
+        "the first row starts at {} but {reserved} is reserved above it for window controls",
+        first.min_y()
     );
+
+    harness.override_controls(ControlLayout::MacOs);
+    let lowered = tab_boxes(&harness.frame())[0];
     assert!(
-        boxes[0].max_x() <= WINDOW.x() - insets.right,
-        "the last header item runs into the window controls on the right"
+        lowered.min_y()
+            >= first
+                .min_y()
+                .max(crate::workspace::tabs_panel::TITLE_STRIP_HEIGHT),
+        "under the traffic lights the first row starts at {}, which is not below the strip",
+        lowered.min_y()
     );
 }
 
@@ -2992,9 +3007,19 @@ impl Scratch {
     fn new() -> Self {
         static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // macOS's temporary directory is a symlink into `/private`, and git
+        // prints the real path — so a test comparing what git lists with what
+        // it made has to start from the real one. Nowhere else is the
+        // temporary directory a link, and on Windows the canonical form is
+        // the `\\?\` spelling nothing else here writes.
+        let temp = std::env::temp_dir();
+        let temp = if cfg!(target_os = "macos") {
+            fs::canonicalize(&temp).unwrap_or(temp)
+        } else {
+            temp
+        };
         Self {
-            directory: std::env::temp_dir()
-                .join(format!("crook-tab-options-{}-{serial}", std::process::id())),
+            directory: temp.join(format!("crook-tab-options-{}-{serial}", std::process::id())),
         }
     }
 
@@ -5787,10 +5812,18 @@ fn a_list_longer_than_the_panel_is_clipped_instead_of_painting_over_the_body() {
     // quietly stop being true. The stub shaper is deterministic — every glyph
     // is half its font size and every line is 1.2x — so this is arithmetic,
     // not a font's opinion.
+    // One fewer where the panel starts with the strip it reserves for the
+    // traffic lights — a client-decorated macOS window — which is the strip
+    // taking the height of a row.
+    let fits = if harness.window_insets().panel_left > 0. {
+        7
+    } else {
+        8
+    };
     assert_eq!(
         visible.len(),
-        8,
-        "the default combination fits {} tabs, and the module docs say eight",
+        fits,
+        "the default combination fits {} tabs, and the module docs say {fits}",
         visible.len()
     );
     for (_, on_screen) in &painted {
@@ -5832,14 +5865,20 @@ fn a_list_longer_than_the_panel_is_clipped_instead_of_painting_over_the_body() {
         "every tab fitted on one screenful, so this is not an overflowing list"
     );
 
-    // The other extreme, and the other figure the docs quote.
+    // The other extreme, and the other figure the docs quote — one fewer
+    // under the traffic lights, for the same strip.
     harness.set_options(TabOptions {
         density: Density::Expanded,
         ..harness.options()
     });
+    let fits = if harness.window_insets().panel_left > 0. {
+        5
+    } else {
+        6
+    };
     assert_eq!(
         panel_rows(&harness.frame()).len(),
-        6,
+        fits,
         "Panes/Expanded fits a different number than the module docs say"
     );
 }
@@ -12699,14 +12738,7 @@ fn escape_leaves_the_binding_exactly_as_it_was() {
     harness.press("escape", Modifiers::default(), "");
 
     assert_eq!(
-        harness.action_for(
-            "t",
-            Modifiers {
-                ctrl: true,
-                shift: true,
-                ..Modifiers::default()
-            }
-        ),
+        harness.action_for("t", tab_chord()),
         Some(WorkspaceAction::Tab(TabAction::New)),
         "the shipped chord was lost to a recording nobody kept"
     );
@@ -12727,14 +12759,7 @@ fn a_recording_that_is_never_finished_does_not_keep_the_keyboard() {
     harness.show_tabs();
 
     assert_eq!(
-        harness.action_for(
-            "t",
-            Modifiers {
-                ctrl: true,
-                shift: true,
-                ..Modifiers::default()
-            }
-        ),
+        harness.action_for("t", tab_chord()),
         Some(WorkspaceAction::Tab(TabAction::New))
     );
 }
@@ -12750,11 +12775,7 @@ fn a_command_unbound_on_the_page_gives_the_chord_back_and_a_reset_takes_it_again
         .workspace
         .read(&harness.app, |workspace, _| workspace.host().action(&name))
         .expect("the window's own command");
-    let shipped = Modifiers {
-        ctrl: true,
-        shift: true,
-        ..Modifiers::default()
-    };
+    let shipped = tab_chord();
 
     harness.dispatch_workspace_action(SettingsAction::UnbindCommand(id).into());
     harness.frame();
@@ -13663,7 +13684,9 @@ fn what_the_pane_eats_is_not_offered_as_something_to_run() {
     let scene = harness.frame();
     let text = frame_text(&scene);
 
-    assert!(text.contains("Nothing matches that."), "{text}");
+    // Not "nothing matches": a chord's spelling is searchable, and on a Mac
+    // `ctrl+c` is inside `ctrl+cmd+left`, which moves a tab. What must not
+    // match is the row for the key itself.
     assert!(
         !text.contains("Interrupt, suspend, end the input"),
         "the launcher offered a key the pane eats: {text}"

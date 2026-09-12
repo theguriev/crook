@@ -103,7 +103,7 @@ pub(super) const PANEL_WIDTH: f32 = 248.;
 /// macOS's traffic lights have been drawn in for as long as the panel has had
 /// a bar, and a smaller one would move them against a window that has not
 /// changed.
-pub(super) const TITLE_STRIP_HEIGHT: f32 = 32.;
+pub(crate) const TITLE_STRIP_HEIGHT: f32 = 32.;
 
 /// Warp's `GROUP_HORIZONTAL_PADDING`, inset either side of a `Panes` tab.
 const GROUP_HORIZONTAL_PADDING: f32 = 8.;

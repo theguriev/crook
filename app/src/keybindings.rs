@@ -256,8 +256,17 @@ impl Keybindings {
     /// same so that the first binding changed from the settings page has
     /// somewhere to be written.
     pub fn load(path: impl AsRef<Path>) -> Self {
+        Self::load_over(Platform::current(), path)
+    }
+
+    /// The same, over the table shipped for `platform` rather than this one.
+    ///
+    /// For a test about the file — what a rule adds, what a `-command` takes
+    /// away — which names its chords in one spelling and has to mean the same
+    /// thing on the machine that spells them the other way.
+    pub fn load_over(platform: Platform, path: impl AsRef<Path>) -> Self {
         let path = path.as_ref();
-        let mut keybindings = Self::new();
+        let mut keybindings = Self::for_platform(platform);
         keybindings.path = Some(path.to_owned());
         let Ok(text) = fs::read_to_string(path) else {
             return keybindings;
