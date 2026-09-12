@@ -12556,6 +12556,27 @@ fn keybindings_written(path: &Path, needle: &str) -> String {
     }
 }
 
+/// The keybindings file, once a save has taken `needle` out of it.
+///
+/// The other half of [`keybindings_written`], for an edit whose effect is a
+/// line no longer being there.
+fn keybindings_without(path: &Path, needle: &str) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut last = String::new();
+    loop {
+        last = fs::read_to_string(path).unwrap_or(last);
+        if !last.contains(needle) {
+            return last;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{needle:?} was never taken out of {}: {last:?}",
+            path.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
 /// Starts recording a chord for `command`, the way clicking its row does.
 fn record(harness: &mut Harness, command: &str) {
     let name = crate::plugin::ActionName::parse(command).expect("a literal that parses");
@@ -12790,11 +12811,10 @@ fn a_command_unbound_on_the_page_gives_the_chord_back_and_a_reset_takes_it_again
         harness.action_for("t", shipped),
         Some(WorkspaceAction::Tab(TabAction::New))
     );
-    let written = keybindings_written(&path, "[");
-    assert!(
-        !written.contains("crook/window/new-tab"),
-        "a reset left the person's line in the file: {written}"
-    );
+    // Waited for by what the reset's save takes *out*: the file already had a
+    // `[` before it, so a wait for one returns whatever was there last — which
+    // on a slower machine was still the unbind.
+    keybindings_without(&path, "crook/window/new-tab");
 }
 
 #[test]
@@ -15764,7 +15784,12 @@ mod sandboxed {
                 .set_granted("eugen/probe", vec![String::from("tabs.read")]);
             let mut harness = Harness::with_store_fetching(1, opening, cache, fetch);
             harness.show_plugins();
-            harness.click_plugin("Probe");
+            // By name rather than by a click on its row: the row is the last
+            // of sixteen, and on a macOS window the strip the panel reserves
+            // for the traffic lights pushes it under the fold, where a click
+            // lands on nothing. Which card is up is not what this test is
+            // about.
+            harness.run_about("crook/plugins/show", "eugen/probe");
             let scene = harness.frame();
             assert!(
                 says(&scene, "2 updates in the registry"),
