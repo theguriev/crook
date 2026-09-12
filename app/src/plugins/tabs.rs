@@ -410,6 +410,24 @@ impl Plugin for Tabs {
             },
         );
 
+        // The third thing the row prints. A block's menu has copied its
+        // branch since it had a facts group, and the row under a tab's title
+        // has said the branch since there were rows — so the menu that hangs
+        // off that row offered the directory the branch was read in and not
+        // the branch, which is the one of the two a person pastes into a pull
+        // request.
+        host.register_command(
+            action("copy-git-branch"),
+            "Copy git branch",
+            |workspace, ctx| {
+                let Some(branch) = workspace.menu_pane_branch(ctx) else {
+                    return;
+                };
+                workspace.close_tab_context_menu(ctx);
+                workspace.clipboard().write(&branch);
+            },
+        );
+
         host.register_command(action("close-tab"), "Close tab", |workspace, ctx| {
             let Some((tab, _)) = workspace.menu_target() else {
                 return;
@@ -603,14 +621,21 @@ impl Plugin for Tabs {
         // its way down has a hairline to stop at before the one entry here
         // that cannot be undone. Band 5 is the worktree menu's.
         pin_entry(host, 0);
-        contribute(host, "new-group-with-tab", 100, |workspace| {
+        contribute(host, "new-group-with-tab", 100, |workspace, _| {
             workspace.menu_target().is_some()
         });
-        contribute(host, "copy-pane-title", 200, |workspace| {
+        contribute(host, "copy-pane-title", 200, |workspace, _| {
             workspace.menu_pane_title().is_some()
         });
-        contribute(host, "copy-working-directory", 201, |workspace| {
+        contribute(host, "copy-working-directory", 201, |workspace, _| {
             workspace.menu_pane_directory().is_some()
+        });
+        // Inert rather than absent outside a repository, the way the block
+        // menu's is: a row that comes and goes moves everything under it, and
+        // a person reaching for "Rename tab" by position would find it in
+        // different places on different tabs.
+        contribute(host, "copy-git-branch", 202, |workspace, app| {
+            workspace.menu_pane_branch(app).is_some()
         });
         rename_entry(host, "rename-tab", 300, Renaming::Tab, &self.rename, &field);
         rename_entry(
@@ -621,7 +646,7 @@ impl Plugin for Tabs {
             &self.rename,
             &field,
         );
-        contribute(host, "close-tab", 400, |workspace| {
+        contribute(host, "close-tab", 400, |workspace, _| {
             workspace.menu_target().is_some()
         });
         // Band 6, under the worktree menu's 5: the swatches are the foot of
@@ -648,14 +673,14 @@ fn contribute(
     host: &mut Host,
     name: &'static str,
     order: i32,
-    live: impl Fn(&Workspace) -> bool + 'static,
+    live: impl Fn(&Workspace, &AppContext) -> bool + 'static,
 ) {
     let label = host.title_of(&action(name)).unwrap_or(name).to_owned();
     let id = host.action(&action(name));
     let key = format!("crook/tabs/{name}");
 
-    host.contribute(TAB_MENU_ENTRIES, name, order, move |workspace, _| {
-        let Some(id) = id.filter(|_| live(workspace)) else {
+    host.contribute(TAB_MENU_ENTRIES, name, order, move |workspace, app| {
+        let Some(id) = id.filter(|_| live(workspace, app)) else {
             return inert_entry(workspace, &key, label.clone());
         };
         entry(workspace, &key, label.clone(), WorkspaceAction::Run(id))

@@ -3699,6 +3699,7 @@ fn a_tabs_menu_is_the_entries_its_plugins_put_in_it() {
             "crook/tabs/new-group-with-tab",
             "crook/tabs/copy-pane-title",
             "crook/tabs/copy-working-directory",
+            "crook/tabs/copy-git-branch",
             "crook/tabs/rename-tab",
             "crook/tabs/rename-pane",
             "crook/tabs/close-tab",
@@ -8803,6 +8804,57 @@ mod shells {
             clipboard.read().as_deref(),
             Some("copy"),
             "the field overwrote the clipboard the output had just been copied to"
+        );
+    }
+
+    #[test]
+    fn copy_git_branch_puts_the_rows_branch_on_the_clipboard() {
+        // The third thing a row prints, and the one a person pastes into a
+        // pull request. Read the way the row reads it — the seeded facts —
+        // so what lands on the clipboard is the label under the title.
+        let mut harness = Harness::seeded();
+        let Some((clipboard, _held)) = working_clipboard(&harness) else {
+            return;
+        };
+        let tab = harness.active_id();
+        let pane = harness.pane_ids()[0];
+
+        harness.open_tab_menu_on(tab, pane);
+        assert!(
+            frame_text(&harness.frame()).contains("Copy git branch"),
+            "the menu does not offer the branch"
+        );
+        harness.run_command("crook/tabs/copy-git-branch");
+        assert_eq!(clipboard.read().as_deref(), Some(BRANCH));
+        assert_eq!(
+            harness.tab_menu_row(),
+            None,
+            "the menu stayed up after the copy"
+        );
+    }
+
+    #[test]
+    fn copy_git_branch_is_inert_where_there_is_no_repository() {
+        // Drawn and not offered, the way the block menu's is: the row keeps
+        // its place so "Rename tab" is where it always is, and a press on it
+        // does nothing rather than copying nothing.
+        let mut harness = Harness::panel(1);
+        let Some((clipboard, _held)) = working_clipboard(&harness) else {
+            return;
+        };
+        let tab = harness.active_id();
+        let pane = harness.pane_ids()[0];
+
+        harness.open_tab_menu_on(tab, pane);
+        assert!(
+            frame_text(&harness.frame()).contains("Copy git branch"),
+            "the row is gone rather than inert"
+        );
+        harness.run_command("crook/tabs/copy-git-branch");
+        assert_eq!(
+            clipboard.read().as_deref(),
+            Some("crook: nothing was copied over this"),
+            "a pane outside a repository copied something as its branch"
         );
     }
 

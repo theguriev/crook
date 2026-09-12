@@ -1753,26 +1753,26 @@ impl Workspace {
             .clone()
     }
 
+    /// The head checked out where that pane is, as the row prints it, if git
+    /// has said.
+    ///
+    /// What "Copy git branch" copies — the block menu's copies the same label,
+    /// a detached head's short sha included. It is a map lookup on a model the
+    /// background pool fills in — see [`git_facts`](Self::git_facts) — and is
+    /// asked on the render path for that reason.
+    pub(crate) fn menu_pane_branch(&self, app: &AppContext) -> Option<String> {
+        let (tab, pane) = self.menu_target()?;
+        let session = self.tabs.get(tab)?.panes().get(pane)?.session();
+        let head = self.git_facts(session, app)?.branch.as_ref()?;
+        Some(head.label().to_owned())
+    }
+
     /// Whether that pane sits in a git repository with a branch checked out.
     ///
     /// The question `crook/worktrees` asks to decide whether it has a row to
-    /// contribute at all. It is a map lookup on a model the background pool
-    /// fills in — see [`git_facts`](Self::git_facts) — and is asked on the
-    /// render path for that reason.
+    /// contribute at all.
     pub(crate) fn menu_tab_is_in_a_repository(&self, app: &AppContext) -> bool {
-        let Some((tab, pane)) = self.menu_target() else {
-            return false;
-        };
-        let Some(session) = self
-            .tabs
-            .get(tab)
-            .and_then(|tab| tab.panes().get(pane))
-            .map(Pane::session)
-        else {
-            return false;
-        };
-        self.git_facts(session, app)
-            .is_some_and(|facts| facts.branch.is_some())
+        self.menu_pane_branch(app).is_some()
     }
 
     /// Every pane in the window, with the directory it is in.
