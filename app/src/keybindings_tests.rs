@@ -30,10 +30,14 @@ fn scratch(name: &str) -> PathBuf {
 }
 
 /// Writes `text` as a keybindings file and reads it back over the defaults.
+///
+/// Over the Control-Shift table by name: these tests are about what a file
+/// does to the table under it, and they spell that table's chords — which a
+/// Mac, left to choose its own, would not have shipped.
 fn written(name: &str, text: &str) -> Keybindings {
     let path = scratch(name).join(KEYBINDINGS_FILE);
     fs::write(&path, text).expect("a scratch keybindings file");
-    Keybindings::load(&path)
+    Keybindings::load_over(Platform::Other, &path)
 }
 
 /// What one chord means, with nothing else held down and no conditions set.
@@ -781,7 +785,7 @@ fn a_file_that_is_not_a_list_of_bindings_leaves_the_defaults_alone() {
 
     for text in ["{ not json", r#"{"ctrl+shift+t": "new_tab"}"#, "[1, 2, 3]"] {
         fs::write(&path, text).expect("writable");
-        let keybindings = Keybindings::load(&path);
+        let keybindings = Keybindings::load_over(Platform::Other, &path);
         assert!(keybindings.is_empty(), "{text:?}");
         assert_ne!(
             keybindings.resolve(&keys("ctrl+shift+t"), &Context::new()),
@@ -867,7 +871,7 @@ fn editable(name: &str, text: &str) -> (PathBuf, Keybindings) {
     } else {
         fs::write(&path, text).expect("a scratch keybindings file");
     }
-    let keybindings = Keybindings::load(&path);
+    let keybindings = Keybindings::load_over(Platform::Other, &path);
     (path, keybindings)
 }
 
@@ -902,7 +906,7 @@ fn a_binding_made_on_the_page_beats_the_shipped_one_and_replaces_it() {
     assert!(keybindings.is_yours(&new_tab));
     // And the same file read again means the same thing, which is the only
     // sense in which an edit was made at all.
-    assert_eq!(Keybindings::load(&path), keybindings);
+    assert_eq!(Keybindings::load_over(Platform::Other, &path), keybindings);
 }
 
 #[test]
