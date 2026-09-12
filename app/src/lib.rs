@@ -847,8 +847,9 @@ OPTIONS:
                        block: what a drag across several commands takes
     --menu             Start with the tab options menu open
     --tab-menu         Start with the active tab's own context menu open
-    --settings [PAGE]  Start with a settings tab open, on `appearance`,
-                       `shell`, `keys` or `about`
+    --settings [PAGE]  Start with a settings tab open, on the page with this
+                       title: `appearance`, `shell`, `keyboard shortcuts` (quoted)
+                       or `about`, or a plugin\'s own
     --find <TEXT>      Type TEXT into the tabs panel\'s search box, filtering the list
     --search <TEXT>    Type TEXT into the settings page\'s search box, opening it
     --record <COMMAND> Start with the Keyboard Shortcuts page recording a chord for
