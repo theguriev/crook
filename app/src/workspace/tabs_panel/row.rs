@@ -51,7 +51,7 @@ use crate::theme::theme;
 
 use super::super::action::{TabMenuAction, WorkspaceAction};
 use super::super::row_content::{
-    Chips, DetailSection, PANEL_PATH_CHARS, RowFacts, detail_card, detail_panes, metadata_line,
+    Chips, DetailSection, RowFacts, detail_card, detail_panes, metadata_line,
 };
 use super::super::view::Workspace;
 use super::super::{CLOSE_BUTTON_SIZE, CLOSE_ICON_SIZE};
@@ -150,7 +150,7 @@ pub(super) fn render(
         Granularity::Tabs => TabAction::Close(tab),
     };
 
-    let facts = RowFacts::resolve(session, git, home, PANEL_PATH_CHARS);
+    let facts = RowFacts::resolve(session, git, home);
     let chips = match options.density {
         // Warp's `render_compact_pane_row` never calls
         // `render_terminal_right_badges`, which is exactly why the menu hides

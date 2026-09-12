@@ -11,7 +11,7 @@ pub use crate::core::{
 pub use crate::element::{Element, ParentElement as _, SizeConstraint};
 pub use crate::elements::{
     Align, AnchorTo, ChildView, Clipped, ConstrainedBox, Container, Corner, CrossAxisAlignment,
-    Dismiss, Empty, Expanded, Flex, Hoverable, Icon, Image, MainAxisAlignment, MainAxisSize,
+    Cut, Dismiss, Empty, Expanded, Flex, Hoverable, Icon, Image, MainAxisAlignment, MainAxisSize,
     MouseStateHandle, ScrollState, ScrollStateHandle, Scrollable, Shrinkable, Stack, Text,
 };
 pub use crate::geometry::{Color, RectF, Vector2F, vec2f};

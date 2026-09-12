@@ -391,9 +391,13 @@ fn text_asked_to_end_in_an_ellipsis_is_cut_where_the_ellipsis_still_fits() {
     // mark rather than being cut in half by the edge.
     let family = FamilyId::new();
     let mut harness = Harness::new(move |_| {
-        ConstrainedBox::new(Text::new("abcdefgh", family, 10.).with_ellipsis().finish())
-            .with_width(35.)
-            .finish()
+        ConstrainedBox::new(
+            Text::new("abcdefgh", family, 10.)
+                .with_ellipsis(Cut::End)
+                .finish(),
+        )
+        .with_width(35.)
+        .finish()
     });
 
     let scene = harness.build_scene(vec2f(100., 50.));
@@ -407,15 +411,23 @@ fn text_that_fits_is_not_given_an_ellipsis_and_an_unbounded_line_is_never_cut() 
     let mut harness = Harness::new(move |_| {
         Flex::column()
             .with_child(
-                ConstrainedBox::new(Text::new("abc", family, 10.).with_ellipsis().finish())
-                    .with_width(40.)
-                    .finish(),
+                ConstrainedBox::new(
+                    Text::new("abc", family, 10.)
+                        .with_ellipsis(Cut::End)
+                        .finish(),
+                )
+                .with_width(40.)
+                .finish(),
             )
             // A row measures its children against an infinite main axis; a
             // cut there would be a cut against nothing.
             .with_child(
                 Flex::row()
-                    .with_child(Text::new("abcdefgh", family, 10.).with_ellipsis().finish())
+                    .with_child(
+                        Text::new("abcdefgh", family, 10.)
+                            .with_ellipsis(Cut::End)
+                            .finish(),
+                    )
                     .finish(),
             )
             .finish()
@@ -427,17 +439,55 @@ fn text_that_fits_is_not_given_an_ellipsis_and_an_unbounded_line_is_never_cut() 
 }
 
 #[test]
+fn a_path_cut_at_its_start_keeps_its_end_behind_the_mark() {
+    // The same eight characters and the same box of thirty-five: the mark
+    // takes the first place and the last six characters keep theirs, so a
+    // path ends in the directory a person is in.
+    let family = FamilyId::new();
+    let mut harness = Harness::new(move |_| {
+        ConstrainedBox::new(
+            Text::new("abcdefgh", family, 10.)
+                .with_ellipsis(Cut::Start)
+                .finish(),
+        )
+        .with_width(35.)
+        .finish()
+    });
+
+    let scene = harness.build_scene(vec2f(100., 50.));
+
+    assert_eq!(drawn_characters(&scene), "\u{2026}cdefgh");
+}
+
+#[test]
 fn a_box_too_narrow_for_anything_but_the_mark_draws_the_mark() {
     let family = FamilyId::new();
     let mut harness = Harness::new(move |_| {
-        ConstrainedBox::new(Text::new("abcdefgh", family, 10.).with_ellipsis().finish())
-            .with_width(6.)
+        Flex::column()
+            .with_child(
+                ConstrainedBox::new(
+                    Text::new("abcdefgh", family, 10.)
+                        .with_ellipsis(Cut::End)
+                        .finish(),
+                )
+                .with_width(6.)
+                .finish(),
+            )
+            .with_child(
+                ConstrainedBox::new(
+                    Text::new("abcdefgh", family, 10.)
+                        .with_ellipsis(Cut::Start)
+                        .finish(),
+                )
+                .with_width(6.)
+                .finish(),
+            )
             .finish()
     });
 
     let scene = harness.build_scene(vec2f(100., 50.));
 
-    assert_eq!(drawn_characters(&scene), "\u{2026}");
+    assert_eq!(drawn_characters(&scene), "\u{2026}\u{2026}");
 }
 
 #[test]

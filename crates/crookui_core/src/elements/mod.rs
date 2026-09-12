@@ -47,4 +47,4 @@ pub use image::Image;
 pub use paragraph::Paragraph;
 pub use scrollable::{ScrollState, ScrollStateHandle, Scrollable};
 pub use stack::{AnchorTo, Corner, Stack};
-pub use text::Text;
+pub use text::{Cut, Text};

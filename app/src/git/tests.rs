@@ -523,46 +523,6 @@ fn the_badge_omits_a_side_that_is_zero_and_says_zero_when_both_are() {
 }
 
 #[test]
-fn a_row_outside_a_repository_falls_back_to_its_working_directory() {
-    assert_eq!(
-        branch_label(Some("main"), "~/work/crook"),
-        ("main".to_owned(), true)
-    );
-    assert_eq!(
-        branch_label(None, "~/work/crook"),
-        ("~/work/crook".to_owned(), false)
-    );
-    // An empty branch is a read that produced nothing, not a branch.
-    assert_eq!(
-        branch_label(Some("   "), "~/work/crook"),
-        ("~/work/crook".to_owned(), false)
-    );
-}
-
-#[test]
-fn truncation_marks_the_cut_and_never_exceeds_the_budget() {
-    assert_eq!(truncate_end("main", 10), "main");
-    assert_eq!(truncate_end("main", 4), "main");
-    assert_eq!(truncate_end("eugen/feature", 8), "eugen/f\u{2026}");
-    assert_eq!(truncate_end("main", 0), "");
-    // Counted in characters, so a multi-byte name is not cut mid-character.
-    assert_eq!(truncate_end("caf\u{e9}-refactor", 5), "caf\u{e9}\u{2026}");
-}
-
-#[test]
-fn a_path_is_truncated_from_the_front_so_the_tail_survives() {
-    // The direction is the point: a row that clipped the tail would print
-    // `~/work/cr\u{2026}`, which says nothing about where the session is.
-    assert_eq!(truncate_start("~/work/crook", 20), "~/work/crook");
-    assert_eq!(
-        truncate_start("~/work/crook/app/src", 12),
-        "\u{2026}ook/app/src"
-    );
-    assert_eq!(truncate_start("~/work/crook", 0), "");
-    assert_eq!(truncate_start("caf\u{e9}-refactor", 5), "\u{2026}ctor");
-}
-
-#[test]
 fn a_working_directory_under_home_is_printed_with_a_tilde() {
     let home = Path::new("/Users/eugen");
 
