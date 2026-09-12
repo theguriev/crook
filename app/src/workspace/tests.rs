@@ -7819,6 +7819,88 @@ fn the_rail_switches_pages_and_the_pane_shows_the_one_it_names() {
 }
 
 #[test]
+fn a_fact_wider_than_the_page_gives_way_from_its_start_and_stops_at_the_edge() {
+    // A settings file under a profile directory with a long name is wider
+    // than the About page. The value used to be measured free, so it started
+    // where the label stopped and ran on past the divider and off the window;
+    // now it stops where every other value on the page stops, and it is the
+    // start that goes — the file's name is the part somebody came for.
+    let file = format!(
+        "/home/somebody/{}crook/settings.json",
+        "a-profile-directory-with-a-name-this-long/".repeat(6)
+    );
+    let mut harness = Harness::with_settings(1, Settings::load(&file));
+    harness.open_settings_page();
+    harness.select_settings_section("About");
+    let scene = harness.frame();
+    let pane = settings_pane_box(&scene);
+
+    // The hairline under the Build category is as wide as the page's rows, so
+    // its far end is where a right-aligned value ends.
+    let edge = visible_rects(&scene)
+        .filter(|(rect, bounds)| {
+            rect.background == Fill::Solid(theme().border)
+                && (bounds.height() - 1.).abs() < 0.01
+                && pane.contains_point(bounds.origin())
+        })
+        .map(|(_, bounds)| bounds.max_x())
+        .fold(f32::NAN, f32::max);
+    assert!(
+        edge.is_finite(),
+        "the About page draws no hairline under a category"
+    );
+
+    // The page's glyphs only: the rail's "About" shares the row's baseline.
+    let (origin, line) = text_lines(&scene, |position| pane.contains_point(position))
+        .into_iter()
+        .find(|(_, line)| line.ends_with("settings.json"))
+        .expect("the About page names the settings file");
+    assert!(
+        line.starts_with("Settings file…"),
+        "the value was not cut from its start, or ran into its label: {line:?}"
+    );
+    assert!(
+        !line.contains("/home/somebody/"),
+        "the start of the path survived a cut that had no room for it: {line:?}"
+    );
+
+    // The row's glyphs left to right. The stub shaper advances half the font
+    // size per glyph — a label is set at 12 and a monospace value at 10.5 —
+    // so a glyph's right edge is its origin plus that.
+    let mut glyphs: Vec<(f32, char)> = scene
+        .layers()
+        .flat_map(|layer| layer.glyphs.iter())
+        .filter(|glyph| (glyph.position.y() - origin.y()).abs() < 0.5)
+        .filter_map(|glyph| {
+            Some((
+                glyph.position.x(),
+                char::from_u32(glyph.glyph_key.glyph_id)?,
+            ))
+        })
+        .collect();
+    glyphs.sort_by(|left, right| left.0.total_cmp(&right.0));
+    let mark = glyphs
+        .iter()
+        .position(|(_, character)| *character == '…')
+        .expect("the row has an ellipsis on it");
+    let label_end = glyphs[mark - 1].0 + 12. * 0.5;
+    assert!(
+        glyphs[mark].0 - label_end >= 16.,
+        "the value starts {}px after its label, which reads as one word",
+        glyphs[mark].0 - label_end
+    );
+    let last = glyphs.last().map(|(x, _)| *x).unwrap_or(f32::NAN) + 10.5 * 0.5;
+    assert!(
+        last <= edge + 0.5,
+        "the value ran past the page's edge: ends at {last}, the edge is at {edge}"
+    );
+    assert!(
+        last >= edge - 10.5,
+        "the value stopped short of the edge it is aligned to: ends at {last}, the edge is at {edge}"
+    );
+}
+
+#[test]
 fn the_page_and_the_scroll_position_outlive_leaving_the_section() {
     // Coming back to the settings comes back to where you were. The state is
     // the workspace's rather than the section's, which is what makes that true
