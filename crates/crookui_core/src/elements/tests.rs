@@ -375,6 +375,71 @@ fn text_wider_than_its_box_is_cut_off_rather_than_wrapped() {
     assert_eq!(glyph_count, 2, "only whole glyphs inside the box are drawn");
 }
 
+/// The glyph ids the stub shaper drew, which are the characters themselves.
+fn drawn_characters(scene: &Scene) -> String {
+    scene
+        .layers()
+        .flat_map(|layer| layer.glyphs.iter())
+        .map(|glyph| char::from_u32(glyph.glyph_key.glyph_id).expect("a stub glyph is a char"))
+        .collect()
+}
+
+#[test]
+fn text_asked_to_end_in_an_ellipsis_is_cut_where_the_ellipsis_still_fits() {
+    // Eight characters at five wide each is forty; a box of thirty-five holds
+    // six of them and the mark exactly, so the seventh gives its place to the
+    // mark rather than being cut in half by the edge.
+    let family = FamilyId::new();
+    let mut harness = Harness::new(move |_| {
+        ConstrainedBox::new(Text::new("abcdefgh", family, 10.).with_ellipsis().finish())
+            .with_width(35.)
+            .finish()
+    });
+
+    let scene = harness.build_scene(vec2f(100., 50.));
+
+    assert_eq!(drawn_characters(&scene), "abcdef\u{2026}");
+}
+
+#[test]
+fn text_that_fits_is_not_given_an_ellipsis_and_an_unbounded_line_is_never_cut() {
+    let family = FamilyId::new();
+    let mut harness = Harness::new(move |_| {
+        Flex::column()
+            .with_child(
+                ConstrainedBox::new(Text::new("abc", family, 10.).with_ellipsis().finish())
+                    .with_width(40.)
+                    .finish(),
+            )
+            // A row measures its children against an infinite main axis; a
+            // cut there would be a cut against nothing.
+            .with_child(
+                Flex::row()
+                    .with_child(Text::new("abcdefgh", family, 10.).with_ellipsis().finish())
+                    .finish(),
+            )
+            .finish()
+    });
+
+    let scene = harness.build_scene(vec2f(100., 50.));
+
+    assert_eq!(drawn_characters(&scene), "abcabcdefgh");
+}
+
+#[test]
+fn a_box_too_narrow_for_anything_but_the_mark_draws_the_mark() {
+    let family = FamilyId::new();
+    let mut harness = Harness::new(move |_| {
+        ConstrainedBox::new(Text::new("abcdefgh", family, 10.).with_ellipsis().finish())
+            .with_width(6.)
+            .finish()
+    });
+
+    let scene = harness.build_scene(vec2f(100., 50.));
+
+    assert_eq!(drawn_characters(&scene), "\u{2026}");
+}
+
 #[test]
 fn an_icon_fills_the_square_it_asked_for() {
     let mut harness = Harness::new(|_| {
