@@ -10250,6 +10250,39 @@ mod shells {
         }
 
         #[test]
+        fn a_menu_opened_near_the_bottom_stops_short_of_the_window_s_edge() {
+            // One block, which sits just above the composer, and a menu taller
+            // than the room under its dots: the menu slides up to fit, and it
+            // used to stop on the window's last pixel, where its border and
+            // the edge were one line. Eight pixels of ground now, the same as
+            // any other slid popup.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, "echo ALPHA") == 0 {
+                return;
+            }
+
+            let panel = panel_of_the_pane(&mut harness);
+            let scene = hover_block(&mut harness, pane, 0);
+            let controls = block_controls(&scene, panel);
+            assert_eq!(controls.len(), 2, "the controls, on the hovered block");
+            harness.click(center(controls[1]), MouseButton::Left);
+
+            let popup = block_menu_box(&harness.frame());
+            assert!(
+                popup.max_y() > controls[1].max_y(),
+                "the menu was not hung under its dots: {popup:?}"
+            );
+            assert!(
+                (popup.max_y() - (WINDOW.y() - crookui_core::elements::WINDOW_INSET)).abs() < 0.5,
+                "the slid menu does not end the inset short of the edge: {popup:?}"
+            );
+        }
+
+        #[test]
         fn escape_takes_the_block_menu_down() {
             // Every modal popup in the window answers Escape, and the workspace
             // claims the key before the pane under it can type one.

@@ -27,6 +27,14 @@ impl Corner {
     }
 }
 
+/// How close to the window's edge a slid child may come.
+///
+/// A menu that stops exactly on the edge reads as one that was cut off there
+/// — the eye cannot tell a border on the last pixel from no border at all.
+/// Eight pixels of ground between the two is what says the box ends where it
+/// is drawn ending, and it is the inset the rest of the chrome keeps.
+pub const WINDOW_INSET: f32 = 8.;
+
 /// How to place a floating child against the box it hangs off.
 ///
 /// Warp spells this `OffsetPositioning`: five bounding modes times nine anchors
@@ -87,9 +95,11 @@ impl AnchorTo {
 
         let origin = if self.keep_on_screen {
             // Slid, not flipped: a menu that overhangs the right edge moves
-            // left until it fits, and one larger than the window starts at the
-            // origin rather than at a negative coordinate.
-            anchored.min(window - child).max(Vector2F::zero())
+            // left until it fits, with [`WINDOW_INSET`] of air left beyond it,
+            // and one larger than the window starts at the inset rather than
+            // at a negative coordinate.
+            let inset = vec2f(WINDOW_INSET, WINDOW_INSET);
+            anchored.min(window - child - inset).max(inset)
         } else {
             anchored
         };
@@ -198,16 +208,16 @@ mod tests {
                 ..anchor
             }
             .place(vec2f(80., 20.), BUTTON, vec2f(100., 200.)),
-            vec2f(20., 10.),
+            vec2f(20. - WINDOW_INSET, 10.),
             "without the rule it slides over the button, which is the default"
         );
 
         // The other axis is untouched: a card whose top is level with its row
         // was never clear of it vertically, so it still slides up to stay on
-        // screen.
+        // screen — to the inset, which is as far up as anything slides.
         assert_eq!(
-            anchor.place(vec2f(80., 60.), BUTTON, vec2f(200., 40.)).y(),
-            0.,
+            anchor.place(vec2f(80., 60.), BUTTON, vec2f(200., 60.)).y(),
+            WINDOW_INSET,
             "the vertical slide was held by a rule about the horizontal one"
         );
     }
@@ -218,13 +228,26 @@ mod tests {
 
         assert_eq!(
             anchor.place(vec2f(200., 100.), BUTTON, vec2f(100., 200.)),
-            vec2f(0., 42.),
-            "a child wider than the window starts at its left edge"
+            vec2f(WINDOW_INSET, 42.),
+            "a child wider than the window starts at the inset from its left edge"
         );
         assert_eq!(
             anchor.place(vec2f(80., 20.), BUTTON, vec2f(100., 200.)),
-            vec2f(20., 42.),
-            "an overhanging child slides left by exactly its overhang"
+            vec2f(20. - WINDOW_INSET, 42.),
+            "an overhanging child slides left by its overhang and the inset"
         );
+    }
+
+    #[test]
+    fn a_slid_child_stops_short_of_the_edge_by_the_inset() {
+        // A menu hung off a control near the bottom of the window used to end
+        // on the window's last pixel, where its border and the edge were one
+        // line. It stops the inset short now, on every side it was slid to.
+        let anchor = AnchorTo::below(vec2f(0., 4.));
+        let low = RectF::new(vec2f(40., 180.), vec2f(20., 10.));
+
+        let placed = anchor.place(vec2f(80., 60.), low, vec2f(200., 200.));
+        assert_eq!(placed.y() + 60., 200. - WINDOW_INSET, "{placed:?}");
+        assert_eq!(placed.x(), 40., "an axis with room was slid anyway");
     }
 }
