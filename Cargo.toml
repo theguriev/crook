@@ -117,6 +117,17 @@ opt-level = 0
 [profile.dev.package."*"]
 opt-level = 3
 
+# Not for speed: an unoptimized build of this crate crashes on Windows. The
+# `wasmi` generics it instantiates — `Caller::get_export` for the host's data
+# type, with `Inst::as_ptr` and `ThinPtr::with_exposed_provenance` inlined
+# into it — come out of the O0 codegen on x86_64-pc-windows-msvc reading the
+# instance pointer from a stack slot that holds the export name's length, and
+# the first host call dies with STATUS_ACCESS_VIOLATION. Level 1 is fine, as
+# is the release profile. The `"*"` above does not reach workspace members,
+# which is why this one is named.
+[profile.dev.package.crook_wasm]
+opt-level = 1
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
