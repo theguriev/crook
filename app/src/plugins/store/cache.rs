@@ -37,7 +37,7 @@ const ETAG_FILE: &str = "index.etag";
 ///
 /// A path and nothing else, so the store can hand one to every model it
 /// builds — a plugin is built again every time it is switched back on.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Cache {
     directory: PathBuf,
 }
