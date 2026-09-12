@@ -94,8 +94,15 @@ __crook_candidates() {
 # Crook's rather than readline's, so there is nothing on screen to disturb.
 #
 # Guarded because a bash built without readline — or one whose stdin is not a
-# terminal by the time this runs — has no `bind` at all.
-builtin bind -x '"\e[6339~": __crook_complete' 2>/dev/null || true
+# terminal by the time this runs — has no `bind` at all. And not on bash 3,
+# which is the bash macOS ships: its `bind -x` cannot run a command bound to
+# a key *sequence* — every press of the sequence prints `cannot find keymap
+# for command` into the pane — and `mapfile` above is bash 4's anyway. A
+# shell that cannot answer is left unasked; Crook's Tab then does nothing,
+# which is what it did before there was a question to ask.
+if [ "${BASH_VERSINFO[0]}" -ge 4 ]; then
+	builtin bind -x '"\e[6339~": __crook_complete' 2>/dev/null || true
+fi
 
 # \[ ... \] is how readline is told a stretch of prompt prints nothing. Without
 # it bash miscounts the prompt width and every long line the user types wraps in
