@@ -557,12 +557,12 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 let name = args
                     .next()
                     .context("`--uninstall-plugin` needs a plugin's `owner/name`")?;
-                let id = crook_plugin::PluginId::parse(&name)
-                    .map_err(anyhow::Error::msg)
-                    .with_context(|| name.clone())?;
-                let removed = crate::plugins::wasm::uninstall(&id)
-                    .map_err(anyhow::Error::msg)
-                    .with_context(|| name.clone())?;
+                // No context naming the plugin, unlike the path on
+                // `--install-plugin`: both refusals already name it — `"x" is
+                // not `owner/name``, `x is not installed` — and a line that
+                // began `x: x is not installed` said it twice.
+                let id = crook_plugin::PluginId::parse(&name).map_err(anyhow::Error::msg)?;
+                let removed = crate::plugins::wasm::uninstall(&id).map_err(anyhow::Error::msg)?;
                 forget_plugin(&id)?;
                 println!("removed {}", removed.display());
                 return Ok(Startup::Answered);
@@ -782,7 +782,9 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
 /// "what about ssh?" is one nobody can act on.
 fn shell_integration_text(shell: Option<&str>) -> Result<String> {
     let named = shell.context(
-        "`--shell-integration` needs a shell: zsh, bash or fish.          Paste what it prints at the end of that shell's own configuration on a          machine Crook cannot start the shell on itself — over ssh, in a container.",
+        "`--shell-integration` needs a shell: zsh, bash or fish. Paste what it prints at the \
+         end of that shell's own configuration on a machine Crook cannot start the shell on \
+         itself — over ssh, in a container.",
     )?;
     let shell = shell_integration::Shell::of(std::path::Path::new(named));
     let (snippet, file) = shell_integration::snippet(shell)
@@ -2764,9 +2766,26 @@ mod tests {
             shell_integration_text(Some("/usr/bin/nu")).is_err(),
             "a shell with no snippet has to say so rather than print nothing"
         );
+        let missing = shell_integration_text(None).expect_err("the flag needs its argument");
+        // One sentence after another, and not the indentation of the source
+        // file between them: the literal used to carry ten spaces where its
+        // lines were joined, which `crook:` printed as they were.
         assert!(
-            shell_integration_text(None).is_err(),
-            "and the flag needs its argument"
+            !format!("{missing:#}").contains("  "),
+            "the message carries a run of spaces: {missing:#}"
+        );
+    }
+
+    #[test]
+    fn a_plugin_that_cannot_be_uninstalled_is_named_once() {
+        // The refusal names the plugin; a context that named it again read
+        // `x: "x" is not `owner/name``.
+        let error = parse(&["--uninstall-plugin", "not a name"]).expect_err("not a plugin id");
+        let text = format!("{error:#}");
+        assert_eq!(
+            text.matches("not a name").count(),
+            1,
+            "the name is said twice: {text}"
         );
     }
 
@@ -3002,11 +3021,12 @@ mod tests {
         // the queue behind a fifteen-second sleep.
         assert!(
             !a_worker_is_left_over(PARKED_WORKERS, std::time::Duration::from_millis(500)),
-            "a pool the size of the poll chains had a worker to spare, so              this test is no longer describing the machinery it names"
+            "a pool the size of the poll chains had a worker to spare, so this test is no \
+             longer describing the machinery it names"
         );
         assert!(
             a_worker_is_left_over(PARKED_WORKERS + 1, std::time::Duration::from_secs(30)),
-            "one worker per parked chain plus one was not enough to run a              settings save"
+            "one worker per parked chain plus one was not enough to run a settings save"
         );
 
         // And that the floor is actually applied, on the machines that need
@@ -3016,7 +3036,8 @@ mod tests {
         for cores in 1..=PARKED_WORKERS {
             assert!(
                 pool_size(cores) > PARKED_WORKERS,
-                "a {cores}-core machine would get a pool with nothing left to                  run a settings save on"
+                "a {cores}-core machine would get a pool with nothing left to run a settings \
+                 save on"
             );
         }
     }
