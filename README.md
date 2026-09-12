@@ -37,6 +37,15 @@ Find searches the blocks, not the screenful: every finished command and the open
 counted in the bar, the current match in the accent and the rest in amber. It is a search and
 not a filter, so the lines between the hits stay where they are.
 
+![The command palette over the window, reading "rec": two commands under a Commands heading, a tab under Tabs with the directory it is working in, and five settings rows under Settings, each naming the page and category it lives on](docs/images/palette.png)
+
+The palette is one box for everything that has a name: the commands, the tabs that are open
+and the rows of the settings, each kind under a heading of its own when there is more than one
+kind of answer. A command row prints its name and, when one reaches it, the chord; a tab row
+says where it is working and Enter goes there; a settings row says which page and category it
+lives on and Enter opens that page with the row on screen. A sigil narrows it to one list —
+`>` commands, `@` tabs, `#` settings, `?` what is bound to what — and `tab` walks between them.
+
 ![The Plugins page: every plugin with a face beside its name, and the Pirate's card — what it asks to be allowed to do, with Allow beside it, and the pictures it carries under "What it looks like"](docs/images/plugins.png)
 
 Every plugin has a card, and the card is where it is answered. The ones from the box wear one
@@ -57,6 +66,7 @@ every machine:
              --hover-block 2 --snapshot docs/images/blocks.png
 ./script/run --run 'git log --oneline -12' \
              --find-output tab --snapshot docs/images/find.png
+./script/run --action 'crook/palette/open rec' --snapshot docs/images/palette.png
 ./script/run --dev-plugin ../crook-pirate/target/wasm32-unknown-unknown/release/pirate.wasm \
              --section Plugins --action 'crook/plugins/show theguriev/pirate' \
              --action 'crook/plugins/pictures theguriev/pirate' --snapshot docs/images/plugins.png
@@ -313,7 +323,8 @@ Eight features, and the page that configures them:
   anything but `0` to turn it off. It reaches only shells Crook itself starts — not the far
   side of an `ssh`, not a container, and not a shell it has no snippet for (`pwsh`, `nu`,
   `ksh`, `tcsh`) — and on those machines `crook --shell-integration zsh` prints the same text
-  to paste at the end of the rc file by hand.
+  to paste at the end of the rc file by hand. Settings → Shell says which shell a pane starts
+  and whether it gets the marks, which is where to look when the output is one long block.
 
   It also **answers**, which is what makes Tab work. Command marks are an announcement and
   completion is a question, so there is a second channel beside them: Crook writes the line
