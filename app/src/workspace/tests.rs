@@ -7983,6 +7983,23 @@ mod shells {
     const NO_LEAK_PATIENCE: Duration = Duration::from_millis(200);
 
     /// The pane every test here works in.
+    /// Whether the shell a pane would start is a bash older than 4 — the one
+    /// macOS ships — whose `bind -x` cannot answer Crook's completion.
+    fn bash_too_old_to_complete() -> bool {
+        let shell = crook_terminal::default_shell();
+        let program = std::path::Path::new(&shell);
+        if program.file_name().is_none_or(|name| name != "bash") {
+            return false;
+        }
+        crate::process::command(&shell.to_string_lossy())
+            .args(["-c", "echo ${BASH_VERSINFO[0]}"])
+            .output()
+            .ok()
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .and_then(|major| major.trim().parse::<u32>().ok())
+            .is_some_and(|major| major < 4)
+    }
+
     fn one_shell(harness: &mut Harness) -> Option<PaneId> {
         if !harness.start_terminals() {
             return None;
@@ -8722,6 +8739,14 @@ mod shells {
         // answer back into a line the shell has never seen.
         let directory = Scratch::new();
         fs::write(directory.path().join("distinctive-name.txt"), "").expect("writable");
+
+        // The question is bound to a key sequence with `bind -x`, and the
+        // bash macOS ships — 3.2, from 2007 — cannot run a command bound to
+        // one. Crook does not ask it; nor does this test.
+        if bash_too_old_to_complete() {
+            eprintln!("skipped: this bash cannot answer a completion");
+            return;
+        }
 
         let mut harness = Harness::panel(1);
         let Some(pane) = marked_shell(&mut harness) else {

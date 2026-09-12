@@ -273,12 +273,33 @@ pub fn bash(program: &Path, scratch: &Path, login: bool) -> Option<Launch> {
                 OsString::from("-i"),
             ],
         ),
-        environment: identity(),
+        environment: bash_environment(),
         files: vec![ScratchFile {
             contents: bash_rc(super::snippet(Shell::Bash)?, login),
             path: rc,
         }],
     })
+}
+
+/// What a bash with the marks is started with: the identity, and Apple's
+/// notice about zsh switched off.
+///
+/// The bash macOS ships prints "The default interactive shell is now zsh"
+/// before its first prompt unless this variable is set, on every shell it
+/// starts — and in Crook that is a block of Apple's prose at the head of
+/// every new pane, before the person has typed anything, in a pane that keeps
+/// blocks apart on purpose. The notice is about the account's login shell,
+/// which nothing in this pane can change; the person who kept bash has read
+/// it. Every other bash ignores the variable, so it is not gated on the
+/// platform. A bash with the marks off goes through [`plain`] and keeps the
+/// notice, the way it keeps everything else the platform does.
+fn bash_environment() -> Vec<(String, String)> {
+    let mut environment = identity();
+    environment.push((
+        "BASH_SILENCE_DEPRECATION_WARNING".to_owned(),
+        "1".to_owned(),
+    ));
+    environment
 }
 
 /// fish: a scratch directory at the front of `XDG_DATA_DIRS`, holding a
