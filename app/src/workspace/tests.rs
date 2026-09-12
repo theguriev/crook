@@ -7852,26 +7852,46 @@ fn a_fact_wider_than_the_page_gives_way_from_its_start_and_stops_at_the_edge() {
     );
 
     // The page's glyphs only: the rail's "About" shares the row's baseline.
-    let (origin, line) = text_lines(&scene, |position| pane.contains_point(position))
-        .into_iter()
+    // The label and the value are two sizes of text centred on one row, so
+    // their baselines are a fraction apart and may round to different lines
+    // — the value is found by what it ends in, and the label by name.
+    let lines = text_lines(&scene, |position| pane.contains_point(position));
+    let (origin, line) = lines
+        .iter()
         .find(|(_, line)| line.ends_with("settings.json"))
+        .cloned()
         .expect("the About page names the settings file");
+    let value = line.trim_start_matches("Settings file");
     assert!(
-        line.starts_with("Settings file…"),
-        "the value was not cut from its start, or ran into its label: {line:?}"
+        value.starts_with('…'),
+        "the value was not cut from its start: {line:?}"
     );
     assert!(
         !line.contains("/home/somebody/"),
         "the start of the path survived a cut that had no room for it: {line:?}"
     );
+    let (label_at, _) = lines
+        .iter()
+        .find(|(_, line)| line.starts_with("Settings file"))
+        .cloned()
+        .expect("the About page has a Settings file row");
+    assert!(
+        (label_at.y() - origin.y()).abs() < 4.,
+        "the value is not on its label's row: label at {label_at:?}, value at {origin:?}"
+    );
 
-    // The row's glyphs left to right. The stub shaper advances half the font
-    // size per glyph — a label is set at 12 and a monospace value at 10.5 —
-    // so a glyph's right edge is its origin plus that.
+    // The row's glyphs left to right, the label's line and the value's line
+    // together. The stub shaper advances half the font size per glyph — a
+    // label is set at 12 and a monospace value at 10.5 — so a glyph's right
+    // edge is its origin plus that.
     let mut glyphs: Vec<(f32, char)> = scene
         .layers()
         .flat_map(|layer| layer.glyphs.iter())
-        .filter(|glyph| (glyph.position.y() - origin.y()).abs() < 0.5)
+        .filter(|glyph| {
+            pane.contains_point(glyph.position)
+                && ((glyph.position.y() - origin.y()).abs() < 0.5
+                    || (glyph.position.y() - label_at.y()).abs() < 0.5)
+        })
         .filter_map(|glyph| {
             Some((
                 glyph.position.x(),
@@ -7929,6 +7949,30 @@ fn the_shell_page_names_the_shell_a_pane_runs_and_whether_it_gets_the_marks() {
     assert!(
         text.contains("Command marks") && text.contains(marks),
         "the page does not say whether the marks are installed: {text:?}"
+    );
+}
+
+#[test]
+fn the_about_page_says_which_plugin_api_this_build_speaks() {
+    // The number in "built for plugin API 9, and this is Crook 8", and the
+    // line a plugin author's Cargo.toml wants — read off the constant the
+    // sandbox refuses by, so the page cannot drift from the check.
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.select_settings_section("About");
+    let scene = harness.frame();
+    let text = text_where(&scene, |position| {
+        settings_pane_box(&scene).contains_point(position)
+    });
+
+    let wanted = format!("crook_plugin_api = \"0.{}\"", crook_plugin_api::ABI_VERSION);
+    assert!(
+        text.contains("Plugin API") && text.contains(&wanted),
+        "the page does not name the plugin API: {text:?}"
+    );
+    assert!(
+        text.contains(&format!("ABI {}", crook_plugin_api::ABI_VERSION)),
+        "the description does not say the number the refusal names: {text:?}"
     );
 }
 

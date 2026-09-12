@@ -6,6 +6,7 @@
 use crookui_core::prelude::*;
 
 use crook_plugin::{Manifest, PluginId, Tier};
+use crook_plugin_api::ABI_VERSION;
 
 use crate::plugin::{BuildError, Host, Plugin};
 use crate::workspace::Workspace;
@@ -72,6 +73,24 @@ fn about(workspace: &Workspace) -> Vec<Category> {
                     Words::new("Channel").with_keywords(&["dev", "stable", "build"]),
                     workspace.channel().to_owned(),
                     false,
+                    fonts,
+                ),
+                // The number a plugin author needs and the sentence they are
+                // shown when they got it wrong — "built for plugin API 9, and
+                // this is Crook 8" — had nowhere in the window that said what
+                // this build speaks. The value is the line their Cargo.toml
+                // wants, because the crate is versioned `0.<ABI>.<patch>` for
+                // exactly that reason: see the README's "For plugin authors".
+                widgets::fact(
+                    Words::new("Plugin API")
+                        .with_description(format!(
+                            "ABI {ABI_VERSION}: the vocabulary a plugin from a file is built \
+                             against. One built for a later number is refused when it is \
+                             opened, and the sentence names both numbers."
+                        ))
+                        .with_keywords(&["abi", "plugin", "api", "wasm", "sdk", "crate"]),
+                    format!("crook_plugin_api = \"0.{ABI_VERSION}\""),
+                    true,
                     fonts,
                 ),
                 widgets::fact(
