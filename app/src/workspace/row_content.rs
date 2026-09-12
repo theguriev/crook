@@ -82,12 +82,17 @@ impl RowLine {
         weight: Weight,
         ui: FamilyId,
     ) -> Box<dyn Element> {
+        // A name or a branch that outruns the row ends in an ellipsis where
+        // the room does, not mid-word under the close button. A path is not
+        // cut here: it is cut from its start, in `RowFacts::resolve`, so the
+        // directory a person is in is the part that survives.
         let text = Text::new(self.text, ui, size)
             .with_color(color)
             .with_style(Properties {
                 weight,
                 ..Default::default()
             })
+            .with_ellipsis()
             .finish();
         if !self.is_branch {
             return text;
@@ -503,6 +508,7 @@ fn detail_section(
         .with_child(
             Text::new(session.display_title().to_owned(), ui, 12.)
                 .with_color(theme().text_primary)
+                .with_ellipsis()
                 .finish(),
         );
 
