@@ -1306,7 +1306,12 @@ impl Harness {
     }
 
     /// Pumps the queue until `settled` is true, or fails after
-    /// [`SHELL_TIMEOUT`].
+    /// [`SHELL_TIMEOUT`] — saying what the window showed at the end, because
+    /// a wait that ran out is one whose condition never came true and the
+    /// only evidence of *why* is on screen. Read from a log of a machine
+    /// nobody sat at, "the shell never reached a prompt" says which wait; the
+    /// frame under it says whether the shell printed nothing, printed a
+    /// greeting, or printed the prompt with no mark on it.
     fn wait_for(&mut self, what: &str, mut settled: impl FnMut(&mut Self) -> bool) {
         let deadline = std::time::Instant::now() + SHELL_TIMEOUT;
         loop {
@@ -1314,7 +1319,10 @@ impl Harness {
             if settled(self) {
                 return;
             }
-            assert!(std::time::Instant::now() < deadline, "{what}");
+            if std::time::Instant::now() >= deadline {
+                let shown = frame_text(&self.frame());
+                panic!("{what}; the window showed: {shown:?}");
+            }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
