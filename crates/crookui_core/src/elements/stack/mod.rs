@@ -41,7 +41,7 @@ mod anchor;
 mod overlay;
 mod positioned;
 
-pub use anchor::{AnchorTo, Corner};
+pub use anchor::{AnchorTo, Corner, WINDOW_INSET};
 use overlay::Overlay;
 use positioned::Positioned;
 

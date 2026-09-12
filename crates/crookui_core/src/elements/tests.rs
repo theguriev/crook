@@ -913,9 +913,12 @@ fn an_anchored_child_is_laid_out_against_the_window_not_against_the_stack() {
 
     let scene = harness.build_scene(vec2f(200., 200.));
 
+    // At the inset from the window's left edge rather than on it: the button
+    // is at the origin, and a child kept on screen keeps that much ground
+    // between itself and every edge.
     assert_eq!(
         rects(&scene)[0].bounds,
-        RectF::new(vec2f(0., 32.), vec2f(50., 80.)),
+        RectF::new(vec2f(WINDOW_INSET, 32.), vec2f(50., 80.)),
         "80 tall, and hung 4 below the button's bottom-left corner"
     );
 }
