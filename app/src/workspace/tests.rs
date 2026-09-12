@@ -11301,11 +11301,9 @@ mod shells {
             // With nothing selected, Escape and the copy chord are nobody's
             // here — they fall through to the pane.
             assert_eq!(None, harness.action_for("escape", Modifiers::default()));
-            let copy = Modifiers {
-                ctrl: true,
-                shift: true,
-                ..Modifiers::default()
-            };
+            // `cmd-c` on a Mac and `ctrl-shift-c` elsewhere: the copy chord
+            // is the application chord, on `c`.
+            let copy = platform_chord();
             assert_eq!(None, harness.action_for("c", copy));
 
             up(&mut harness);
