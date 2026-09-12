@@ -37,6 +37,14 @@ Find searches the blocks, not the screenful: every finished command and the open
 counted in the bar, the current match in the accent and the rest in amber. It is a search and
 not a filter, so the lines between the hits stay where they are.
 
+![The Plugins page: every plugin with a face beside its name, and the Pirate's card — what it asks to be allowed to do, with Allow beside it, and the pictures it carries under "What it looks like"](docs/images/plugins.png)
+
+Every plugin has a card, and the card is where it is answered. The ones from the box wear one
+of Crook's own marks; the ones from a file bring their own face and their own pictures, inside
+the module, so the card can show what a plugin looks like before it has been allowed anything —
+and what it asks for is a list of sentences with one button beside it, because installing is
+not allowing.
+
 These are rendered by Crook itself rather than captured from a window — `--snapshot` draws one
 frame of the real view tree to a PNG, which is how a picture of the application is the same on
 every machine:
@@ -49,6 +57,9 @@ every machine:
              --hover-block 2 --snapshot docs/images/blocks.png
 ./script/run --run 'git log --oneline -12' \
              --find-output tab --snapshot docs/images/find.png
+./script/run --dev-plugin ../crook-pirate/target/wasm32-unknown-unknown/release/pirate.wasm \
+             --section Plugins --action 'crook/plugins/show theguriev/pirate' \
+             --action 'crook/plugins/pictures theguriev/pirate' --snapshot docs/images/plugins.png
 ```
 
 ## Install
