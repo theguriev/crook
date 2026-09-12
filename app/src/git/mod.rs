@@ -117,28 +117,13 @@ pub fn gather(dir: &Path) -> GitFacts {
     }
 }
 
-/// The text that goes where a row shows the branch, and whether to draw the
-/// branch icon beside it.
-///
-/// Warp's `branch_label_display`, and its one surprise is worth keeping: a
-/// directory outside a repository is *not* rendered as "no branch". The row
-/// falls back to `fallback` — the working directory — with the icon
-/// suppressed, so a session outside a repository quietly shows a path. That
-/// also means the same string can appear twice in one row when the row's other
-/// line is the working directory too, which is what Warp does.
-pub fn branch_label(branch: Option<&str>, fallback: &str) -> (String, bool) {
-    match branch {
-        Some(branch) if !branch.trim().is_empty() => (branch.to_owned(), true),
-        _ => (fallback.to_owned(), false),
-    }
-}
-
 /// A working directory as a row prints it: `$HOME` replaced by `~`.
 ///
 /// Warp's `warp_util::path::user_friendly_path`, and it does exactly one thing
 /// — no shortening of middle components, no basename-only mode.
-/// `~/work/crook/app/src` stays `~/work/crook/app/src`, and it is
-/// [`truncate_start`] that decides what survives a narrow row.
+/// `~/work/crook/app/src` stays `~/work/crook/app/src`, and it is the row —
+/// a `Text` cut from its start, by measure — that decides what survives a
+/// narrow one: the tail, which is the part that says where you are.
 ///
 /// The prefix only counts when the next character is a separator, so a sibling
 /// directory named `/Users/euge` beside `/Users/eugen` is not silently
@@ -178,53 +163,4 @@ pub fn directory_label(path: &Path, home: Option<&Path>) -> Option<String> {
     }
     path.file_name()
         .map(|name| name.to_string_lossy().into_owned())
-}
-
-/// Shortens `text` to `max_chars`, marking the cut with a trailing ellipsis.
-///
-/// Warp does not do this. Its branch label is `Shrinkable` plus
-/// `ClipConfig::ellipsis()`, so it truncates to the pixels actually left over
-/// after the badges have taken theirs, and there is no character limit
-/// anywhere. Crook's `Text` cannot clip yet, and a ninety-character branch name
-/// would push the rest of the strip off the window, so this is the stand-in —
-/// and it should be deleted the day the renderer grows a clip config.
-///
-/// The ellipsis is one character and counts against the budget, so the result
-/// is never longer than `max_chars`.
-pub fn truncate_end(text: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
-        return String::new();
-    }
-    if text.chars().count() <= max_chars {
-        return text.to_owned();
-    }
-
-    let mut truncated: String = text.chars().take(max_chars - 1).collect();
-    truncated.push('\u{2026}');
-    truncated
-}
-
-/// Shortens `text` to `max_chars` by cutting the *front*, marking the cut with
-/// a leading ellipsis.
-///
-/// The direction is the whole point, and it is the single most visible thing a
-/// port of this gets wrong. Warp clips a working directory with
-/// `ClipConfig::start()` and a title or a branch with `ClipConfig::ellipsis()`,
-/// so a narrow row reads `…/crook/app/src` and never `~/work/cro…`. The tail of
-/// a path is the part that says where you are.
-///
-/// Like [`truncate_end`], this is a stand-in for a clip config the renderer
-/// does not have yet, and should go the day it grows one.
-pub fn truncate_start(text: &str, max_chars: usize) -> String {
-    if max_chars == 0 {
-        return String::new();
-    }
-    let count = text.chars().count();
-    if count <= max_chars {
-        return text.to_owned();
-    }
-
-    let mut truncated = String::from('\u{2026}');
-    truncated.extend(text.chars().skip(count - (max_chars - 1)));
-    truncated
 }

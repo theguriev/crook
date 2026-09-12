@@ -149,13 +149,6 @@ const MENU_RADIUS: f32 = 6.;
 const LABEL_SIZE: f32 = 12.;
 const PATH_SIZE: f32 = 10.5;
 
-/// How many characters of a path a row shows before it is cut from the left.
-///
-/// Counted rather than measured, for the reason every other budget in this
-/// application is: measuring needs the shaper, and this runs while the element
-/// tree is being built.
-const PATH_CHARS: usize = 34;
-
 /// What the branch field says before anything is typed into it.
 const BRANCH_PLACEHOLDER: &str = "branch";
 
@@ -603,7 +596,6 @@ fn worktree_row(
 
     let label = branch_label(worktree);
     let path = crate::git::user_friendly_path(&worktree.path, workspace.home());
-    let path = crate::git::truncate_start(&path, PATH_CHARS);
     let badge = if here {
         Some("this tab")
     } else if elsewhere {
@@ -674,6 +666,7 @@ fn worktree_row(
                     Container::new(
                         Text::new(path.clone(), ui, PATH_SIZE)
                             .with_color(theme().text_muted)
+                            .with_ellipsis(Cut::Start)
                             .finish(),
                     )
                     .with_margin_top(1.)
@@ -879,8 +872,9 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
         let path = crate::git::user_friendly_path(&checkout, workspace.home());
         column.add_child(
             Container::new(
-                Text::new(crate::git::truncate_start(&path, PATH_CHARS), ui, PATH_SIZE)
+                Text::new(path, ui, PATH_SIZE)
                     .with_color(theme().text_muted)
+                    .with_ellipsis(Cut::Start)
                     .finish(),
             )
             .with_horizontal_padding(ROW_INSET)

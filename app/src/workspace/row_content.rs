@@ -41,25 +41,33 @@ use crate::theme::theme;
 /// of the "Diff stats" toggle, reflows the entire list.
 pub(super) const METADATA_ROW_HEIGHT: f32 = 14.;
 
-/// The same, for a panel row: 248px of column, minus the icon and the padding,
-/// holds fewer characters than a strip row that may be 220 wide with no icon.
-pub(super) const PANEL_PATH_CHARS: usize = 26;
-
-/// The same, for the hover card, which is wider than either.
-pub(super) const CARD_PATH_CHARS: usize = 46;
-
-/// One line of a row, and whether it is a branch rather than a path or a title.
+/// One line of a row: a name, a path or a branch, and which end of it gives
+/// way when the row is too narrow.
 #[derive(Clone)]
 pub(super) struct RowLine {
     text: String,
     is_branch: bool,
+    cut: Cut,
 }
 
 impl RowLine {
+    /// A name, which loses its end: what it starts with is what it is.
     pub(super) fn plain(text: String) -> Self {
         Self {
             text,
             is_branch: false,
+            cut: Cut::End,
+        }
+    }
+
+    /// A path, which loses its start: the directory a person is in is the
+    /// last component, and `…/crook/app/src` says where they are where
+    /// `~/work/crook/app/…` does not.
+    pub(super) fn path(text: String) -> Self {
+        Self {
+            text,
+            is_branch: false,
+            cut: Cut::Start,
         }
     }
 
@@ -67,6 +75,7 @@ impl RowLine {
         Self {
             text: name.to_owned(),
             is_branch: true,
+            cut: Cut::End,
         }
     }
 
@@ -82,17 +91,17 @@ impl RowLine {
         weight: Weight,
         ui: FamilyId,
     ) -> Box<dyn Element> {
-        // A name or a branch that outruns the row ends in an ellipsis where
-        // the room does, not mid-word under the close button. A path is not
-        // cut here: it is cut from its start, in `RowFacts::resolve`, so the
-        // directory a person is in is the part that survives.
+        // A line that outruns the row is marked with an ellipsis where the
+        // room does, not cut mid-word under the close button — measured by
+        // the shaper, which is what retired the character budgets that used
+        // to guess at this.
         let text = Text::new(self.text, ui, size)
             .with_color(color)
             .with_style(Properties {
                 weight,
                 ..Default::default()
             })
-            .with_ellipsis()
+            .with_ellipsis(self.cut)
             .finish();
         if !self.is_branch {
             return text;
@@ -132,13 +141,10 @@ pub(super) struct RowFacts {
 impl RowFacts {
     /// Reads a session and what git says about where it sits.
     ///
-    /// `path_chars` is the row's width budget for a path — a panel row is
-    /// narrower than a strip row, and the card is wider than both.
     pub(super) fn resolve(
         session: &AgentSession,
         facts: Option<&GitFacts>,
         home: Option<&Path>,
-        path_chars: usize,
     ) -> Self {
         // A name the session has, else the directory's own — `agent 3` is the
         // last resort it always was, and now reaches only a pane with no name,
@@ -155,9 +161,10 @@ impl RowFacts {
                 .or(label)
                 .unwrap_or_else(|| session.display_title().to_owned()),
             command_is_the_directory,
-            directory: session.working_directory.as_deref().map(|directory| {
-                git::truncate_start(&git::user_friendly_path(directory, home), path_chars)
-            }),
+            directory: session
+                .working_directory
+                .as_deref()
+                .map(|directory| git::user_friendly_path(directory, home)),
             branch: facts
                 .and_then(|facts| facts.branch.as_ref())
                 .map(Head::label)
@@ -177,15 +184,15 @@ impl RowFacts {
             PrimaryInfo::WorkingDirectory => self
                 .directory
                 .clone()
-                .map_or_else(|| RowLine::plain(self.command.clone()), RowLine::plain),
-            PrimaryInfo::Branch => {
-                let fallback = self
-                    .directory
-                    .clone()
-                    .unwrap_or_else(|| self.command.clone());
-                let (text, is_branch) = git::branch_label(self.branch.as_deref(), &fallback);
-                RowLine { text, is_branch }
-            }
+                .map_or_else(|| RowLine::plain(self.command.clone()), RowLine::path),
+            // The fallback is the directory when there is one, and a
+            // directory is cut from its start; a branch, or the name that
+            // stands in for both, from its end.
+            PrimaryInfo::Branch => match (self.branch.as_deref(), self.directory.clone()) {
+                (Some(branch), _) if !branch.trim().is_empty() => RowLine::branch(branch),
+                (_, Some(directory)) => RowLine::path(directory),
+                (_, None) => RowLine::plain(self.command.clone()),
+            },
         }
     }
 
@@ -200,7 +207,7 @@ impl RowFacts {
             return None;
         }
         match primary {
-            PrimaryInfo::Command => self.directory.clone().map(RowLine::plain),
+            PrimaryInfo::Command => self.directory.clone().map(RowLine::path),
             PrimaryInfo::WorkingDirectory | PrimaryInfo::Branch => {
                 Some(RowLine::plain(self.command.clone()))
             }
@@ -214,7 +221,7 @@ impl RowFacts {
             PrimaryInfo::Command | PrimaryInfo::WorkingDirectory => {
                 self.branch.as_deref().map(RowLine::branch)
             }
-            PrimaryInfo::Branch => self.directory.clone().map(RowLine::plain),
+            PrimaryInfo::Branch => self.directory.clone().map(RowLine::path),
         }
     }
 
@@ -232,8 +239,8 @@ impl RowFacts {
                 .branch
                 .as_deref()
                 .map(RowLine::branch)
-                .or_else(|| self.directory.clone().map(RowLine::plain)),
-            Subtitle::WorkingDirectory => self.directory.clone().map(RowLine::plain),
+                .or_else(|| self.directory.clone().map(RowLine::path)),
+            Subtitle::WorkingDirectory => self.directory.clone().map(RowLine::path),
             // The same rule as the description line: a compact row asked for
             // the command, and a command that is only the directory restated
             // is a second line saying what the first one said.
@@ -508,15 +515,16 @@ fn detail_section(
         .with_child(
             Text::new(session.display_title().to_owned(), ui, 12.)
                 .with_color(theme().text_primary)
-                .with_ellipsis()
+                .with_ellipsis(Cut::End)
                 .finish(),
         );
 
     if let Some(directory) = session.working_directory.as_deref() {
         let friendly = git::user_friendly_path(directory, home);
         column.add_child(
-            Text::new(git::truncate_start(&friendly, CARD_PATH_CHARS), ui, 12.)
+            Text::new(friendly, ui, 12.)
                 .with_color(theme().text_muted)
+                .with_ellipsis(Cut::Start)
                 .finish(),
         );
     }
@@ -596,7 +604,7 @@ mod naming_tests {
     }
 
     fn facts(session: &AgentSession) -> RowFacts {
-        RowFacts::resolve(session, None, Some(Path::new("/Users/eugen")), 40)
+        RowFacts::resolve(session, None, Some(Path::new("/Users/eugen")))
     }
 
     /// A tab at a prompt is about where it is, and says so once.
@@ -648,5 +656,35 @@ mod naming_tests {
     fn the_placeholder_survives_where_there_is_nothing_else() {
         let facts = facts(&session("/"));
         assert_eq!(facts.title(PrimaryInfo::Command).text, "agent 3");
+    }
+
+    /// Warp's `branch_label_display`, and its one surprise is worth keeping:
+    /// a directory outside a repository is *not* rendered as "no branch". The
+    /// row falls back to the working directory with the icon suppressed — and
+    /// cut from its start, as a path is — so a session outside a repository
+    /// quietly shows a path.
+    #[test]
+    fn a_row_outside_a_repository_falls_back_to_its_working_directory() {
+        let session = session("/Users/eugen/work/crook");
+        let on = |branch: Option<&str>| {
+            let git = GitFacts {
+                branch: branch.map(|name| Head::Branch(name.to_owned())),
+                ..GitFacts::default()
+            };
+            RowFacts::resolve(&session, Some(&git), Some(Path::new("/Users/eugen")))
+                .title(PrimaryInfo::Branch)
+        };
+
+        let branch = on(Some("main"));
+        assert!(branch.is_branch && branch.text == "main" && branch.cut == Cut::End);
+
+        let outside = on(None);
+        assert!(!outside.is_branch);
+        assert_eq!(outside.text, "~/work/crook");
+        assert_eq!(outside.cut, Cut::Start, "a path keeps its tail");
+
+        // An empty branch is a read that produced nothing, not a branch.
+        let blank = on(Some("   "));
+        assert!(!blank.is_branch && blank.text == "~/work/crook");
     }
 }
