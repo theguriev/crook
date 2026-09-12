@@ -57,6 +57,18 @@ ICONS = [
     ("Keyboard", "keyboard", "A chord: what one key would do, on the chip that says so."),
     ("Diff", "diff", "How much has changed in a working tree, on the chip that counts it."),
     ("Bell", "bell", "The tabs that are waiting for you, on the chip in the header that counts them."),
+    # The faces of the plugins from the box, on their rows in the Plugins list
+    # and beside their names on the card: a native plugin has no module to
+    # carry a picture in, so it wears one of these instead.
+    ("AppWindow", "app-window", "The face of the window's own commands: tabs, panes, splits."),
+    ("PanelTop", "panel-top", "The face of the header."),
+    ("Tag", "tag", "The face of the pane chips."),
+    ("Rows3", "rows-3", "The face of the tabs panel."),
+    ("Palette", "palette", "The face of the appearance settings."),
+    ("Terminal", "terminal", "The face of the shell settings."),
+    ("Puzzle", "puzzle", "The face of the Plugins page itself."),
+    ("Store", "store", "The face of the Store, and its button at the foot of the sidebar."),
+    ("Command", "command", "The face of the command palette."),
 ]
 
 SVG_NS = "{http://www.w3.org/2000/svg}"

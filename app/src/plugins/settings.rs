@@ -35,6 +35,10 @@ impl Plugin for Settings {
         manifest()
     }
 
+    fn mark(&self) -> Option<Lucide> {
+        Some(Lucide::Settings)
+    }
+
     fn build(&mut self, host: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
         host.declare_settings_slot();
         // The rail and the page beside it are one answer: the query in the

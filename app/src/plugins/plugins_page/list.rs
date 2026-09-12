@@ -200,13 +200,10 @@ fn row(
     // page is not loaded, which is a page nobody can be looking at.
     let command = workspace.run_about(&about("show"), manifest.id.as_str());
 
-    // The dot, then the icon in a box the same size on every row, so the
-    // names line up whether or not a plugin brought a face. A native plugin
-    // has none and its box is empty: "no picture" is the ordinary state of
-    // most of this list, and not a thing to draw a symbol for.
-    let icon = host
-        .pictures_of(&manifest.id)
-        .and_then(|pictures| pictures.icon.as_ref());
+    // The dot, then the face in a box the same size on every row, so the
+    // names line up whatever a row wears: a picture from a module, a mark
+    // for a plugin from the box, nothing for a module built before pictures.
+    let face = host.face_of(&manifest.id);
     let leading = Flex::row()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
@@ -215,7 +212,7 @@ fn row(
                 .with_margin_right(section::LEADING_GAP)
                 .finish(),
         )
-        .with_child(widgets::picture_box(icon, widgets::ROW_ICON))
+        .with_child(widgets::picture_box(face, widgets::ROW_ICON))
         .finish();
 
     // The version an update would bring, and only that: a row is scanned for

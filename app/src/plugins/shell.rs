@@ -22,6 +22,10 @@ impl Plugin for Shell {
         manifest()
     }
 
+    fn mark(&self) -> Option<Lucide> {
+        Some(Lucide::Terminal)
+    }
+
     fn build(&mut self, host: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
         host.add_settings_page("page", "Shell", 10, |workspace, _| shell(workspace));
         Ok(())

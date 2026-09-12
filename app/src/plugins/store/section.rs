@@ -38,6 +38,7 @@ use crookui_core::prelude::*;
 
 use crook_plugin::PluginId;
 
+use crate::plugin::Face;
 use crate::plugins::pictures::Decoded;
 use crate::theme::theme;
 use crate::workspace::section;
@@ -218,7 +219,7 @@ pub(super) fn render(
     // indented past an empty box would be a title saying a picture was
     // missing.
     let mark = icon(workspace, &known, &showing.id)
-        .map(|icon| widgets::picture_box(Some(icon), widgets::TITLE_MARK));
+        .map(|icon| widgets::picture_box(Some(Face::Picture(icon)), widgets::TITLE_MARK));
 
     (
         list,
@@ -331,7 +332,7 @@ fn row(
         section::Row {
             label: offer.name.clone(),
             leading: Some(widgets::picture_box(
-                icon(workspace, known, &offer.id),
+                icon(workspace, known, &offer.id).map(Face::Picture),
                 widgets::ROW_ICON,
             )),
             trailing: standing(

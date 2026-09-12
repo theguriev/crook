@@ -50,6 +50,10 @@ impl Plugin for PaneSlots {
         manifest()
     }
 
+    fn mark(&self) -> Option<Lucide> {
+        Some(Lucide::Tag)
+    }
+
     fn build(&mut self, host: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
         host.declare_slot(PANE_CHIPS, Cardinality::List);
         Ok(())

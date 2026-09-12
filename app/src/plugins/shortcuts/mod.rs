@@ -69,6 +69,10 @@ impl Plugin for Shortcuts {
         manifest()
     }
 
+    fn mark(&self) -> Option<Lucide> {
+        Some(Lucide::Keyboard)
+    }
+
     fn build(&mut self, host: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
         host.add_settings_page("page", PAGE_TITLE, 30, |workspace, _| shortcuts(workspace));
 

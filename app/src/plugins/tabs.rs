@@ -329,6 +329,10 @@ impl Plugin for Tabs {
         manifest()
     }
 
+    fn mark(&self) -> Option<Lucide> {
+        Some(Lucide::Rows3)
+    }
+
     fn build(&mut self, host: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
         host.declare_row_slot(TAB_ROW_MARK, Cardinality::Single);
         host.declare_row_slot(TAB_ROW_BADGE, Cardinality::Single);

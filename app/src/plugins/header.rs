@@ -40,6 +40,10 @@ impl Plugin for Header {
         manifest()
     }
 
+    fn mark(&self) -> Option<Lucide> {
+        Some(Lucide::PanelTop)
+    }
+
     fn build(&mut self, host: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
         host.declare_slot(HEADER_RIGHT, Cardinality::Single);
         host.declare_slot(HEADER_LEFT, Cardinality::Single);

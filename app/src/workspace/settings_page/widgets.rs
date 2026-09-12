@@ -61,6 +61,7 @@ use crookui_core::image::Bitmap;
 use crookui_core::prelude::*;
 
 use super::search::{Query, Words};
+use crate::plugin::Face;
 use crate::plugins::pictures::Picture;
 use crate::theme::theme;
 
@@ -931,17 +932,22 @@ pub(crate) fn state_dot(on: bool) -> Box<dyn Element> {
     .finish()
 }
 
-/// The place a plugin's icon goes, `edge` square, holding the icon or nothing.
+/// The place a plugin's face goes, `edge` square, holding the face or nothing.
 ///
-/// A box of the same size whether or not there is a picture, so that every
+/// A box of the same size whether or not there is a face, so that every
 /// label in a list starts at the same x: the rows of a list are read down,
-/// and a name that stepped left on the rows with no icon would be a list
-/// with two columns of names. An empty box is empty — no placeholder mark,
-/// no dot — because "this plugin has no picture" is the ordinary state of
-/// every native plugin and is not a thing to draw a symbol for.
-pub(crate) fn picture_box(bitmap: Option<&Arc<Bitmap>>, edge: f32) -> Box<dyn Element> {
-    let inside = match bitmap {
-        Some(bitmap) => Image::new(bitmap.clone(), vec2f(edge, edge)).finish(),
+/// and a name that stepped left on the rows with no face would be a list
+/// with two columns of names. A picture is drawn as it is; a mark is drawn
+/// in the muted colour, which is what says "this one came with Crook" beside
+/// the pictures the plugins from a file brought. An empty box is empty — no
+/// placeholder — for the plugin that is neither, which is a module built
+/// before there were pictures.
+pub(crate) fn picture_box(face: Option<Face<'_>>, edge: f32) -> Box<dyn Element> {
+    let inside = match face {
+        Some(Face::Picture(bitmap)) => Image::new(bitmap.clone(), vec2f(edge, edge)).finish(),
+        Some(Face::Mark(mark)) => Icon::new(mark, edge)
+            .with_color(theme().text_muted)
+            .finish(),
         None => Empty::new().finish(),
     };
     ConstrainedBox::new(inside)

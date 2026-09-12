@@ -52,6 +52,10 @@ impl Plugin for Worktrees {
         manifest()
     }
 
+    fn mark(&self) -> Option<Lucide> {
+        Some(Lucide::GitBranch)
+    }
+
     fn build(&mut self, host: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
         // The branch field, which the worktree menu's creator is typed into.
         // The *field* has moved here even though the popup that draws it has
