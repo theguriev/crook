@@ -1473,11 +1473,24 @@ pub(crate) fn current_theme_row(
     }
 }
 
+/// The least air between a fact's label and its value.
+///
+/// Without it a value that has grown to its room starts where the label
+/// stops, and `Themes folder/tmp/...` reads as one word.
+const FACT_GAP: f32 = 16.;
+
 /// A label and a value that cannot be edited, for the About page.
 ///
 /// `monospace` is for the values that are paths: a settings file's location is
 /// something a person copies into a shell, and proportional text turns runs of
 /// slashes and dots into a smear.
+///
+/// The value takes the room the label leaves and not a pixel more. A path
+/// under a scratch home is longer than the page is wide, and a text that was
+/// measured free ran on past the divider and off the edge of the window; now
+/// it gives way by measure, from the start for a path — the folder a person
+/// is looking for is the last part of it — and from the end for anything
+/// else.
 ///
 /// A description, where the words carry one, goes on a second line under the
 /// label, exactly as it does on a row with a control.
@@ -1488,6 +1501,7 @@ pub(crate) fn fact(
     fonts: super::super::view::Fonts,
 ) -> Entry {
     let family = if monospace { fonts.monospace } else { fonts.ui };
+    let cut = if monospace { Cut::Start } else { Cut::End };
     let value_text = value.clone();
 
     let mut column = Flex::column()
@@ -1502,11 +1516,23 @@ pub(crate) fn fact(
                         .with_color(theme().text_muted)
                         .finish(),
                 )
-                .with_child(Expanded::new(1., Empty::new().finish()).finish())
                 .with_child(
-                    Text::new(value, family, if monospace { 10.5 } else { LABEL_SIZE })
-                        .with_color(theme().text_primary)
+                    Expanded::new(
+                        1.,
+                        Align::new(
+                            Container::new(
+                                Text::new(value, family, if monospace { 10.5 } else { LABEL_SIZE })
+                                    .with_color(theme().text_primary)
+                                    .with_ellipsis(cut)
+                                    .finish(),
+                            )
+                            .with_margin_left(FACT_GAP)
+                            .finish(),
+                        )
+                        .right()
                         .finish(),
+                    )
+                    .finish(),
                 )
                 .finish(),
         );
