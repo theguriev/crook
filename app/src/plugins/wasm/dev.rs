@@ -150,6 +150,14 @@ impl Plugin for Dev {
         manifest()
     }
 
+    // The watcher's own row — the one that says a plugin is being written
+    // and can be switched off — wears the terminal it is being written in,
+    // since every other row on the page has a face now and this was the one
+    // left reading as missing one.
+    fn mark(&self) -> Option<Lucide> {
+        Some(Lucide::Terminal)
+    }
+
     fn build(&mut self, _: &mut Host, ctx: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
         let watch = ctx.add_model(|_| Watch::new(self.path.clone(), self.seen));
 
