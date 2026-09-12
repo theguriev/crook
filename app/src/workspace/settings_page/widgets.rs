@@ -1340,16 +1340,38 @@ pub(crate) fn chord_button(
     with_command(control, command)
 }
 
+/// The room the second control of a [`pair`] is given, whatever is in it.
+///
+/// Wide enough for "Unbind" and "Cancel" in the UI face with their padding,
+/// and a little over, so a face set wider than the one this was measured in
+/// does not push the button past the edge of the page.
+const PAIR_SLOT: f32 = 76.;
+
 /// Two controls side by side on the right of a row.
 ///
 /// The Keyboard Shortcuts page is the only page with a row that has more than
 /// one: a chord and the button that puts it back.
+///
+/// The second sits in a slot of one width whether it says "Reset", "Unbind",
+/// "Cancel" or nothing at all, so the chords stand in a column. They did not:
+/// a chip was pushed by the word beside it, and stood four pixels right of
+/// its neighbour beside a shorter word and at the edge of the page beside
+/// none — and a page whose values do not line up reads as three columns
+/// where there is one.
 pub(crate) fn pair(first: Box<dyn Element>, second: Box<dyn Element>) -> Box<dyn Element> {
     Flex::row()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
         .with_child(first)
-        .with_child(Container::new(second).with_margin_left(6.).finish())
+        .with_child(
+            ConstrainedBox::new(
+                Align::new(Container::new(second).with_margin_left(6.).finish())
+                    .left()
+                    .finish(),
+            )
+            .with_width(PAIR_SLOT)
+            .finish(),
+        )
         .finish()
 }
 

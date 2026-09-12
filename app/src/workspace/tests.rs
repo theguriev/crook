@@ -12817,6 +12817,61 @@ fn clicking_the_chord_on_a_row_hands_it_the_keyboard() {
 }
 
 #[test]
+fn the_chords_stand_in_a_column_whatever_word_is_beside_them() {
+    // A chip beside "Unbind", one beside nothing — a command no key reaches
+    // — and one beside "Cancel" while it records: three rows, one column.
+    // They were three columns, because the chip was pushed left by whatever
+    // word the row had, and a page whose values wobble is a page nobody can
+    // scan.
+    let mut harness = Harness::new(1);
+    let scratch = Scratch::new();
+    keybindings_in(&mut harness, &scratch);
+    harness.open_settings_page();
+    harness.select_settings_section("Keyboard Shortcuts");
+
+    /// The right edge of the leftmost button on each row: the chord's.
+    fn chord_edges(scene: &Scene) -> Vec<f32> {
+        let mut rows: Vec<(i32, f32)> = Vec::new();
+        for bounds in settings_page_button_boxes(scene) {
+            let row = bounds.min_y().round() as i32;
+            match rows.iter_mut().find(|(at, _)| *at == row) {
+                // Sorted by x within a row, so the first box seen is the
+                // chord and the second is the word beside it.
+                Some(_) => {}
+                None => rows.push((row, bounds.max_x())),
+            }
+        }
+        rows.into_iter().map(|(_, edge)| edge).collect()
+    }
+
+    let scene = harness.frame();
+    assert!(
+        frame_text(&scene).contains("not bound"),
+        "no unbound command is on screen to compare against"
+    );
+    let edges = chord_edges(&scene);
+    assert!(edges.len() >= 5, "too few rows to compare: {edges:?}");
+    let first = edges[0];
+    assert!(
+        edges.iter().all(|edge| (edge - first).abs() < 0.5),
+        "the chords do not share a right edge: {edges:?}"
+    );
+
+    // And while one of them is recording.
+    let buttons = settings_page_button_boxes(&scene);
+    harness.click(center(buttons[0]), MouseButton::Left);
+    assert!(
+        harness.recording().is_some(),
+        "the click did not start recording"
+    );
+    let edges = chord_edges(&harness.frame());
+    assert!(
+        edges.iter().all(|edge| (edge - first).abs() < 0.5),
+        "a recording row's chord left the column: {edges:?}"
+    );
+}
+
+#[test]
 fn a_row_that_is_recording_says_so_and_says_what_the_chord_is_already_for() {
     // The two things the row has to say while the keyboard belongs to it: how
     // to finish, and that the chord being pressed is one somebody else has.
