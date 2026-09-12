@@ -160,6 +160,11 @@ pub struct StoreModel {
     looked_inside: Option<LookedInside>,
     /// How a module's bytes are got.
     fetch: Fetcher,
+    /// Where the list is kept between runs: the directory this model was
+    /// built on, so that a look writes back to the same place it read from.
+    /// `None` for a machine with nowhere to keep it, whose looks are for one
+    /// window only.
+    cache: Option<Cache>,
 }
 
 impl Entity for StoreModel {
@@ -174,7 +179,7 @@ impl StoreModel {
     /// would be a test whose answer depends on what they installed. Nothing
     /// is decoded here: see [`remember_icons`](Self::remember_icons).
     pub fn new(cache: Option<Cache>) -> Self {
-        let cached = cache.and_then(|cache| cache.read());
+        let cached = cache.as_ref().and_then(Cache::read);
         Self {
             known: cached.as_ref().map(|cached| cached.index.clone()),
             etag: cached.as_ref().and_then(|cached| cached.etag.clone()),
@@ -189,6 +194,7 @@ impl StoreModel {
             looking_inside: None,
             looked_inside: None,
             fetch: Arc::new(|release| fetch::module(&fetch::agent(), release)),
+            cache,
         }
     }
 
@@ -196,6 +202,13 @@ impl StoreModel {
     #[cfg(test)]
     pub(crate) fn fetch_with(&mut self, fetch: Fetcher) {
         self.fetch = fetch;
+    }
+
+    /// The cache a look would write to. For a test, which has to know that
+    /// it is the one the model was built on and not the machine's.
+    #[cfg(test)]
+    pub(crate) fn keeps(&self) -> Option<&Cache> {
+        self.cache.as_ref()
     }
 
     /// Every plugin the registry has, as this build can offer them.
@@ -328,6 +341,11 @@ impl StoreModel {
         ctx.notify();
 
         let etag = self.etag.clone();
+        // The model's own, not `Cache::user()` looked up again here: the two
+        // were the same directory except in a test, where a look would have
+        // written the developer's real list over — the one place a test must
+        // never reach.
+        let cache = self.cache.clone();
         let background = ctx.background().clone();
         ctx.spawn(
             async move {
@@ -342,7 +360,7 @@ impl StoreModel {
                             // that is not an index must not replace the list
                             // somebody had yesterday.
                             Fetched::New { bytes, etag } => {
-                                let cache = Cache::user().ok_or_else(|| {
+                                let cache = cache.ok_or_else(|| {
                                     String::from("this machine has nowhere to keep the list")
                                 })?;
                                 let index = cache.write(&bytes, etag.as_deref())?;

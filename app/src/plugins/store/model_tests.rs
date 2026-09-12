@@ -525,3 +525,20 @@ fn a_module_whose_picture_is_past_the_rule_is_still_the_module_install_would_fet
     });
     assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
 }
+
+#[test]
+fn a_look_writes_the_list_back_where_the_model_read_it() {
+    // `look()` used to write the fetched list to `Cache::user()` whatever
+    // the model had been built on, which for every model but the window's
+    // was a different directory: a test's look would have replaced the
+    // developer's own copy of the registry. The model keeps its cache and
+    // writes there — or nowhere, for a machine with nowhere to keep it.
+    let scratch = Scratch::new("looks-back");
+    let cache = Cache::at(scratch.path());
+    assert_eq!(
+        StoreModel::new(Some(cache.clone())).keeps(),
+        Some(&cache),
+        "a model built on a directory looks back to it"
+    );
+    assert_eq!(StoreModel::new(None).keeps(), None);
+}
