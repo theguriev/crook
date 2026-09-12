@@ -47,6 +47,10 @@ impl Plugin for Blocks {
         manifest()
     }
 
+    fn mark(&self) -> Option<Lucide> {
+        Some(Lucide::Blocks)
+    }
+
     fn build(&mut self, host: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
         host.declare_slot(BLOCK_MENU, Cardinality::List);
 

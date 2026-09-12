@@ -86,6 +86,10 @@ impl Plugin for CommandPalette {
         manifest()
     }
 
+    fn mark(&self) -> Option<Lucide> {
+        Some(Lucide::Command)
+    }
+
     fn build(&mut self, host: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
         // Claimed before anything else is registered, because the flag it
         // hands back is what the palette's state is built around.

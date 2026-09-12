@@ -20,6 +20,10 @@ impl Plugin for About {
         manifest()
     }
 
+    fn mark(&self) -> Option<Lucide> {
+        Some(Lucide::Info)
+    }
+
     fn build(&mut self, host: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
         host.add_settings_page("page", "About", 40, |workspace, _| about(workspace));
         Ok(())

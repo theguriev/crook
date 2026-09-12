@@ -143,6 +143,10 @@ impl Plugin for Plugins {
         manifest()
     }
 
+    fn mark(&self) -> Option<Lucide> {
+        Some(Lucide::Puzzle)
+    }
+
     fn build(&mut self, host: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
         // Just before About, which is where a "what is this build" page
         // belongs: after everything that configures the application and before
@@ -345,14 +349,14 @@ fn page(
         return (list, Empty::new().finish());
     };
 
-    // The icon beside the name, for a plugin that carries one. Nothing for
-    // one that does not: a title indented past an empty box would be a title
-    // saying a picture was missing, and most plugins have none to miss.
+    // The face beside the name, for a plugin that has one — a picture it
+    // carried, or the mark a plugin from the box wears. Nothing for one that
+    // has neither: a title indented past an empty box would be a title
+    // saying a picture was missing.
     let mark = workspace
         .host()
-        .pictures_of(&manifest.id)
-        .and_then(|pictures| pictures.icon.as_ref())
-        .map(|icon| widgets::picture_box(Some(icon), widgets::TITLE_MARK));
+        .face_of(&manifest.id)
+        .map(|face| widgets::picture_box(Some(face), widgets::TITLE_MARK));
 
     (
         list,

@@ -31,6 +31,10 @@ impl Plugin for Appearance {
         manifest()
     }
 
+    fn mark(&self) -> Option<Lucide> {
+        Some(Lucide::Palette)
+    }
+
     fn build(&mut self, host: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
         host.add_settings_page("page", "Appearance", 0, |workspace, _| {
             appearance(workspace)

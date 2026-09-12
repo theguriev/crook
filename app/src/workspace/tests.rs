@@ -16224,6 +16224,60 @@ mod plugins_page {
     }
 
     #[test]
+    fn a_plugin_from_the_box_wears_a_mark_on_its_row_and_beside_its_title() {
+        // A native plugin has no module to carry a picture in, and an empty
+        // box on every one of its rows read as fourteen faces missing. Each
+        // wears one of the host's own marks instead — the row's at the row
+        // size, the title's at the title size — and every native has one, so
+        // the list has no faceless rows left.
+        let mut harness = harness();
+        let scene = harness.frame();
+        let panel = panel_box(&scene);
+        let icons: Vec<RectF> = scene
+            .layers()
+            .flat_map(|layer| layer.icons.iter())
+            .map(|icon| icon.bounds)
+            .collect();
+
+        let natives = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .host()
+                .available()
+                .iter()
+                .filter(|manifest| manifest.tier == crook_plugin::Tier::Native)
+                .count()
+        });
+        // Under the search box, whose magnifier is a mark of the same size.
+        let field = settings_field_boxes(&scene)[0];
+        let row_marks = icons
+            .iter()
+            .filter(|bounds| {
+                bounds.max_x() <= panel.max_x()
+                    && bounds.min_y() > field.max_y()
+                    && (bounds.width() - crate::workspace::settings_page::widgets::ROW_ICON).abs()
+                        < 0.5
+            })
+            .count();
+        assert_eq!(
+            row_marks, natives,
+            "every native row wears a mark at the row size: {icons:?}"
+        );
+
+        // The title's glyphs start a little under their line's top, which
+        // is where `page_line` points; the mark is centred on that line.
+        let (title, _) = page_line(&scene, "Window commands");
+        assert!(
+            icons.iter().any(|bounds| {
+                bounds.min_x() > panel.max_x()
+                    && (bounds.width() - crate::workspace::settings_page::widgets::TITLE_MARK).abs()
+                        < 0.5
+                    && (bounds.min_y() + bounds.height() / 2. - title.y()).abs() < 12.
+            }),
+            "the title has no mark at the title size beside it: {icons:?}"
+        );
+    }
+
+    #[test]
     fn a_native_plugin_has_no_box_about_this_machine() {
         // A native plugin is the binary: it is not in a registry, it is not
         // a file in the plugins directory, and the About page is what says

@@ -278,6 +278,10 @@ impl Plugin for Window {
         manifest()
     }
 
+    fn mark(&self) -> Option<Lucide> {
+        Some(Lucide::AppWindow)
+    }
+
     fn build(&mut self, host: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
         host.declare_slot(WINDOW_OVERLAY, Cardinality::List);
         // The sidebar is the window's, so the slot its sections go in is too.

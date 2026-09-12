@@ -143,6 +143,10 @@ impl Plugin for Store {
         manifest()
     }
 
+    fn mark(&self) -> Option<Lucide> {
+        Some(Lucide::Store)
+    }
+
     fn build(
         &mut self,
         host: &mut Host,
@@ -257,11 +261,10 @@ impl Plugin for Store {
         host.add_sidebar_section(
             "section",
             "Store",
-            // Not `LayoutGrid`, which is the sessions button, and not `Blocks`,
-            // which is the plugins one. `Plus` is what is left that means
-            // anything here, and what it means is right: this is the button
-            // that adds a plugin.
-            Lucide::Plus,
+            // A shop front. `Plus` stood here while the icon set had nothing
+            // closer — "the button that adds a plugin" — and it read as a
+            // second "new tab" at the foot of the sidebar.
+            Lucide::Store,
             // After Plugins, which is where what a person already has belongs:
             // the list of what is installed is read far more often than the
             // list of what could be.

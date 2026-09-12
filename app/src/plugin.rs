@@ -27,8 +27,10 @@
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crookui_core::event::Keystroke;
+use crookui_core::image::Bitmap;
 use crookui_core::prelude::*;
 use crookui_core::{AppContext, Element};
 
@@ -1225,6 +1227,20 @@ impl Host {
             .and_then(|carried| carried.pictures())
     }
 
+    /// What goes beside a plugin's name: the icon it carries, else the mark a
+    /// native plugin wears, else nothing.
+    pub fn face_of(&self, plugin: &PluginId) -> Option<Face<'_>> {
+        let carried = self
+            .plugins
+            .iter()
+            .find(|carried| carried.manifest().id == *plugin)?;
+        carried
+            .pictures()
+            .and_then(|pictures| pictures.icon.as_ref())
+            .map(Face::Picture)
+            .or_else(|| carried.mark().map(Face::Mark))
+    }
+
     /// Records what a plugin is allowed to do, for the next time it builds.
     ///
     /// Only for the next time: a plugin reads its grant once, while building,
@@ -1455,6 +1471,19 @@ impl Host {
 /// Why a plugin did not load.
 pub type BuildError = String;
 
+/// What is drawn beside a plugin's name: a picture it carried, or the mark a
+/// native plugin wears.
+///
+/// Borrowed, because a picture is an `Arc` the plugin holds and a mark is a
+/// name; neither wants copying to be looked at for one frame.
+#[derive(Copy, Clone, Debug)]
+pub enum Face<'a> {
+    /// The icon out of the module: a plugin from a file.
+    Picture(&'a Arc<Bitmap>),
+    /// One of the host's own icons: a plugin from the box.
+    Mark(Lucide),
+}
+
 /// One plugin.
 ///
 /// Deliberately two methods, and a third that is more of the first. The
@@ -1474,6 +1503,19 @@ pub trait Plugin {
     /// an empty place beside the name rather than as a mark that says
     /// "missing".
     fn pictures(&self) -> Option<&Pictures> {
+        None
+    }
+
+    /// The face a plugin from the box wears, which is one of the host's own
+    /// marks.
+    ///
+    /// A native plugin has no module to carry a picture in, and drawing it
+    /// nothing put every one of them behind an empty box in a list where the
+    /// plugins from a file had faces — fourteen rows that read as missing
+    /// something. A mark, in the muted colour, says the other thing: this one
+    /// came with Crook. `None` is for a plugin that carries a picture instead,
+    /// which is what [`Host::face_of`] prefers.
+    fn mark(&self) -> Option<Lucide> {
         None
     }
 
