@@ -22,7 +22,7 @@ use std::time::{Duration, SystemTime};
 use crook_terminal::{Program, TerminalOptions, default_shell};
 
 use super::launch::{HostEnv, Launch, ScratchFile, plain, plan};
-use super::{OPT_OUT_VARIABLE, Options, Shell};
+use super::{Options, Shell, opted_out};
 
 /// The one directory under the platform's temporary directory that every
 /// session's scratch directory lives in, so a sweep has one place to look.
@@ -204,17 +204,6 @@ impl Drop for Session {
             remove(scratch);
         }
     }
-}
-
-/// Whether the environment says to leave the user's shell alone.
-///
-/// The escape hatch for the case where the setting cannot be reached: a shell
-/// that will not start under injection, a machine where the temporary directory
-/// is on a filesystem mounted `noexec`, a person who simply does not want it.
-/// Checked here rather than folded into [`Options`] so that no caller can
-/// forget it.
-fn opted_out() -> bool {
-    std::env::var_os(OPT_OUT_VARIABLE).is_some_and(|value| !value.is_empty() && value != "0")
 }
 
 /// The directory every session's scratch directory sits in.

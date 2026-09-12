@@ -7901,6 +7901,37 @@ fn a_fact_wider_than_the_page_gives_way_from_its_start_and_stops_at_the_edge() {
 }
 
 #[test]
+fn the_shell_page_names_the_shell_a_pane_runs_and_whether_it_gets_the_marks() {
+    // The two questions a person with one long block comes here with. The
+    // page reads them from `Standing`, the same facts a launch reads — so the
+    // test asks `Standing` what this machine's answer is rather than
+    // spelling a shell that is not the one the suite runs under.
+    let standing = crate::shell_integration::Standing::current();
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.select_settings_section("Shell");
+    let scene = harness.frame();
+    let text = text_where(&scene, |position| {
+        settings_pane_box(&scene).contains_point(position)
+    });
+
+    let program = standing.program.display().to_string();
+    assert!(
+        text.contains(&program),
+        "the page does not name the shell {program:?}: {text:?}"
+    );
+    let marks = match standing.marks {
+        crate::shell_integration::Marks::Installed(_) => "Installed for ",
+        crate::shell_integration::Marks::OptedOut => "Off — ",
+        crate::shell_integration::Marks::NoneFor(_) => "None — ",
+    };
+    assert!(
+        text.contains("Command marks") && text.contains(marks),
+        "the page does not say whether the marks are installed: {text:?}"
+    );
+}
+
+#[test]
 fn the_page_and_the_scroll_position_outlive_leaving_the_section() {
     // Coming back to the settings comes back to where you were. The state is
     // the workspace's rather than the section's, which is what makes that true

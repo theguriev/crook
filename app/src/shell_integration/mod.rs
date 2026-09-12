@@ -199,6 +199,83 @@ impl Shell {
             _ => Self::Other,
         }
     }
+
+    /// The name a person calls this shell by, or `None` for one Crook does
+    /// not recognise — whose name is whatever its file is called, and is
+    /// the caller's to read.
+    pub fn name(self) -> Option<&'static str> {
+        match self {
+            Self::Zsh => Some("zsh"),
+            Self::Bash => Some("bash"),
+            Self::Fish => Some("fish"),
+            Self::Other => None,
+        }
+    }
+}
+
+/// Whether the environment says to leave the user's shell alone.
+///
+/// The escape hatch for the case where the setting cannot be reached: a shell
+/// that will not start under injection, a machine where the temporary directory
+/// is on a filesystem mounted `noexec`, a person who simply does not want it.
+/// Checked at the one place that injects, so that no caller can forget it —
+/// and read by the Shell page, so that it says so.
+pub fn opted_out() -> bool {
+    std::env::var_os(OPT_OUT_VARIABLE).is_some_and(|value| !value.is_empty() && value != "0")
+}
+
+/// What a pane opened now would get: which program, and whether it is
+/// started with the marks.
+///
+/// Decided the way [`Session::open`] decides it, without opening anything —
+/// the program is the one the environment names, the shell is what its file
+/// name says, and the marks are off for a shell there is no snippet for or
+/// when [`OPT_OUT_VARIABLE`] says so. It exists so the Shell page can answer
+/// "which shell, and are the blocks going to work?" from the same facts the
+/// launch reads, rather than from a guess beside them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Standing {
+    /// The executable a pane starts.
+    pub program: PathBuf,
+    /// Whether that shell gets the marks, and if not, why.
+    pub marks: Marks,
+}
+
+/// Whether a shell is started with the marks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Marks {
+    /// Crook installs its snippet for this shell.
+    Installed(Shell),
+    /// [`OPT_OUT_VARIABLE`] is set, so nothing is installed into any shell.
+    OptedOut,
+    /// Crook has no snippet for this shell; the name is the file's.
+    NoneFor(String),
+}
+
+impl Standing {
+    /// The standing of the shell the environment names, right now.
+    pub fn current() -> Self {
+        Self::of(PathBuf::from(crook_terminal::default_shell()), opted_out())
+    }
+
+    /// The standing of `program`, given whether the environment has opted out.
+    pub fn of(program: PathBuf, opted_out: bool) -> Self {
+        let shell = Shell::of(&program);
+        let marks = if opted_out {
+            Marks::OptedOut
+        } else if snippet(shell).is_some() {
+            Marks::Installed(shell)
+        } else {
+            Marks::NoneFor(
+                program
+                    .file_stem()
+                    .and_then(OsStr::to_str)
+                    .unwrap_or("this shell")
+                    .to_owned(),
+            )
+        };
+        Self { program, marks }
+    }
 }
 
 /// What a pane wants from this module.

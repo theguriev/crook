@@ -1501,3 +1501,34 @@ fn test_the_login_default_is_the_one_this_desktops_own_terminal_uses() {
     );
     assert_eq!(Options::default().login, login_by_default());
 }
+
+#[test]
+fn test_the_standing_of_a_shell_is_read_from_its_name_and_the_opt_out() {
+    // What the Shell page prints, decided from the same two facts the launch
+    // reads: the program's file name, and whether the environment opted out.
+    let zsh = Standing::of(PathBuf::from("/bin/zsh"), false);
+    assert_eq!(zsh.marks, Marks::Installed(Shell::Zsh));
+    assert_eq!(zsh.program, PathBuf::from("/bin/zsh"));
+
+    assert_eq!(
+        Standing::of(PathBuf::from("/usr/local/bin/fish"), false).marks,
+        Marks::Installed(Shell::Fish)
+    );
+
+    // `/bin/sh` is not bash even where it is: see `Shell::of`.
+    assert_eq!(
+        Standing::of(PathBuf::from("/bin/sh"), false).marks,
+        Marks::NoneFor("sh".to_owned())
+    );
+    assert_eq!(
+        Standing::of(PathBuf::from("/opt/homebrew/bin/nu"), false).marks,
+        Marks::NoneFor("nu".to_owned())
+    );
+
+    // The opt-out beats a shell that has a snippet, which is the case a person
+    // set the variable in a profile and forgot: the page has to say so.
+    assert_eq!(
+        Standing::of(PathBuf::from("/bin/zsh"), true).marks,
+        Marks::OptedOut
+    );
+}
