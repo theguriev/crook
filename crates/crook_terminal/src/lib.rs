@@ -354,29 +354,11 @@ impl Terminal {
         self.write(COMPLETION_REQUEST)
     }
 
-    /// Sends pasted text.
-    ///
-    /// When the child has asked for bracketed paste it is wrapped in the
-    /// markers that let the child tell a paste from typing, which is how an
-    /// editor avoids auto-indenting what you pasted. When it has not, newlines
-    /// are normalised to carriage returns, because that is what the Enter key
-    /// sends and a bare newline would not run the line.
-    ///
-    /// Inside the brackets, `ESC` and `ETX` are dropped. A paste is untrusted
-    /// text — copied from a web page, a chat log, a file someone else wrote —
-    /// and text that still contains `ESC` can write the end marker itself, at
-    /// which point the shell leaves paste mode and reads the rest as if it had
-    /// been typed. Everything after a smuggled `\x1b[201~` would then run
-    /// without anyone pressing Enter. Filtering the two bytes that can do it is
-    /// what every terminal with bracketed paste does.
+    /// Sends pasted text, the way [`input::paste`] spells it: bracketed when
+    /// the child asked for that, with the bytes that could end the bracket
+    /// taken out, and with newlines as the Enter key sends them otherwise.
     pub fn paste(&mut self, text: &str) -> io::Result<()> {
-        if self.emulator.bracketed_paste() {
-            self.write(b"\x1b[200~")?;
-            self.write(text.replace(['\x1b', '\x03'], "").as_bytes())?;
-            return self.write(b"\x1b[201~");
-        }
-        let typed = text.replace("\r\n", "\r").replace('\n', "\r");
-        self.write(typed.as_bytes())
+        self.write(&input::paste(text, self.emulator.bracketed_paste()))
     }
 
     /// Changes the size of the grid and tells the child about it.

@@ -288,6 +288,35 @@ const FUNCTION_NUMBERS: [u8; 16] = [
     15, 17, 18, 19, 20, 21, 23, 24, 25, 26, 28, 29, 31, 32, 33, 34,
 ];
 
+/// The bytes a paste sends.
+///
+/// When the child has asked for bracketed paste the text is wrapped in the
+/// markers that let it tell a paste from typing, which is how an editor
+/// avoids auto-indenting what you pasted. When it has not, newlines are
+/// normalised to carriage returns, because that is what the Enter key sends
+/// and a bare newline would not run the line.
+///
+/// Inside the brackets, `ESC` and `ETX` are dropped. A paste is untrusted
+/// text — copied from a web page, a chat log, a file someone else wrote — and
+/// text that still contains `ESC` can write the end marker itself, at which
+/// point the shell leaves paste mode and reads the rest as if it had been
+/// typed. Everything after a smuggled `\x1b[201~` would then run without
+/// anyone pressing Enter. Filtering the two bytes that can do it is what every
+/// terminal with bracketed paste does.
+///
+/// `bracketed` comes from the emulator; [`crate::Terminal::paste`] reads it
+/// for the caller, and this function is the way to see the bytes without a
+/// child on the far end of a pty.
+pub fn paste(text: &str, bracketed: bool) -> Vec<u8> {
+    if bracketed {
+        let mut bytes = b"\x1b[200~".to_vec();
+        bytes.extend_from_slice(text.replace(['\x1b', '\x03'], "").as_bytes());
+        bytes.extend_from_slice(b"\x1b[201~");
+        return bytes;
+    }
+    text.replace("\r\n", "\r").replace('\n', "\r").into_bytes()
+}
+
 /// The bytes a key press sends, or `None` when it sends nothing.
 ///
 /// `modes` comes from the emulator; [`crate::Terminal::send_key`] reads it for
