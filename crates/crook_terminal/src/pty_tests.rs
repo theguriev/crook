@@ -111,15 +111,21 @@ fn test_the_default_program_is_the_users_shell_started_the_way_a_terminal_starts
     let arguments = login_arguments(Path::new(&shell));
 
     if arguments.is_empty() {
-        // The argv[0] convention, which `portable-pty` offers only through a
-        // builder that takes no arguments and names the shell itself, out of
-        // the SHELL it is going to hand the child.
-        assert!(argv.is_empty(), "a builder with an argv is not that one");
-        assert_eq!(
-            command.get_env("SHELL"),
-            Some(OsStr::new(&shell)),
-            "which is how it is told which shell to run"
-        );
+        if cfg!(unix) {
+            // The argv[0] convention, which `portable-pty` offers only through
+            // a builder that takes no arguments and names the shell itself,
+            // out of the SHELL it is going to hand the child.
+            assert!(argv.is_empty(), "a builder with an argv is not that one");
+            assert_eq!(
+                command.get_env("SHELL"),
+                Some(OsStr::new(&shell)),
+                "which is how it is told which shell to run"
+            );
+        } else {
+            // Windows has no login shell and no argv[0] convention: the
+            // command processor is started by name, with nothing after it.
+            assert_eq!(argv[..], [shell.clone()][..], "the shell, and nothing else");
+        }
         return;
     }
 
