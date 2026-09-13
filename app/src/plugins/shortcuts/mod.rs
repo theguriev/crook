@@ -350,9 +350,25 @@ fn clause_text(clause: &keybindings::When) -> String {
 }
 
 /// Where the file is, what goes in it, and what a `when` clause may name.
+///
+/// The file *this run* read, not the one on disk: a run with ephemeral
+/// settings — a snapshot, a test — keeps the shipped table and reads nobody's
+/// file, and every control on the page is drawn dead for it. The page used to
+/// name the file on disk all the same, which was a page describing a file it
+/// never opened, above a column of dead buttons with nothing to explain them.
+/// Now the line says so, the way the About page's says where the settings
+/// live in the same run.
 fn the_file(workspace: &Workspace) -> Category {
     let fonts = workspace.fonts();
     let ui = fonts.ui;
+
+    let file = match workspace.keybindings().path() {
+        Some(path) => path.display().to_string(),
+        None if keybindings::user_keybindings_path().is_some() => {
+            "nowhere — this run keeps the chords it shipped with".to_owned()
+        }
+        None => "nowhere — this machine has no configuration directory".to_owned(),
+    };
 
     let mut entries = vec![
         widgets::fact(
@@ -364,11 +380,7 @@ fn the_file(workspace: &Workspace) -> Category {
                 "keybindings.json",
                 "customise",
             ]),
-            keybindings::user_keybindings_path()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| {
-                    "nowhere — this machine has no configuration directory".to_owned()
-                }),
+            file,
             true,
             fonts,
         ),
