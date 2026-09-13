@@ -13001,6 +13001,39 @@ fn the_chords_stand_in_a_column_whatever_word_is_beside_them() {
 }
 
 #[test]
+fn the_page_names_the_file_this_run_read_and_not_the_one_on_disk() {
+    // An ephemeral run keeps the shipped table and reads nobody's file, and
+    // its Unbind and Reset are drawn dead. The page used to print the path
+    // the file *would* be at all the same — a file it never opened, above a
+    // column of dead buttons with nothing to explain them.
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.select_settings_section("Keyboard Shortcuts");
+    harness.scroll_settings_page(-10_000.);
+    let text = frame_text(&harness.frame());
+    assert!(
+        text.contains("Keybindings file") && text.contains("nowhere"),
+        "the page does not say it read no file: {text:?}"
+    );
+    assert!(
+        !text.contains("keybindings.json"),
+        "the page names a file this run never opened: {text:?}"
+    );
+
+    // And a run with a file names that file — by its name, since a scratch
+    // path on a Mac is long enough for the row to cut its start.
+    let scratch = Scratch::new();
+    let _path = keybindings_in(&mut harness, &scratch);
+    harness.frame();
+    harness.scroll_settings_page(-10_000.);
+    let text = frame_text(&harness.frame());
+    assert!(
+        text.contains("keybindings.json") && !text.contains("nowhere"),
+        "the page does not name the file it read: {text:?}"
+    );
+}
+
+#[test]
 fn a_row_that_is_recording_says_so_and_says_what_the_chord_is_already_for() {
     // The two things the row has to say while the keyboard belongs to it: how
     // to finish, and that the chord being pressed is one somebody else has.

@@ -441,6 +441,16 @@ impl Keybindings {
         self.path.is_some()
     }
 
+    /// The file this run read and writes, if it has one.
+    ///
+    /// What the settings page prints as the keybindings file — this and not
+    /// [`user_keybindings_path`], because a run with no file of its own
+    /// keeps the shipped table, and a page that named the file on disk while
+    /// running without it would be describing a file it never opened.
+    pub fn path(&self) -> Option<&Path> {
+        self.path.as_deref()
+    }
+
     /// Whether the person's own file says anything about `command`.
     ///
     /// What the settings page offers "Reset" for: a command nobody has
