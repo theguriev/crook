@@ -8158,8 +8158,34 @@ mod shells {
             .is_some_and(|major| major < 4)
     }
 
+    /// Whether the shell a pane would start is one these tests can talk to.
+    ///
+    /// They speak POSIX — `printf`, `seq`, `$?` — and wait for the marks
+    /// Crook installs into zsh, bash and fish. On a machine whose shell is
+    /// something else — `cmd.exe` on a Windows runner, `nu`, or a bash with
+    /// `CROOK_NO_SHELL_INTEGRATION` set — the pane starts all the same and
+    /// the test then waits for a prompt that never comes: sixty seconds of
+    /// nothing and a failure about a shell the test was never about.
+    /// Skipping, and saying which shell, is the honest answer, and it is the
+    /// same answer `Standing` gives the Shell page.
+    fn a_shell_these_tests_speak() -> bool {
+        use crate::shell_integration::{Marks, Standing};
+        let standing = Standing::current();
+        match standing.marks {
+            Marks::Installed(_) => true,
+            Marks::OptedOut => {
+                eprintln!("skipped: the shell integration is opted out of here");
+                false
+            }
+            Marks::NoneFor(name) => {
+                eprintln!("skipped: {name} is not a shell these tests speak");
+                false
+            }
+        }
+    }
+
     fn one_shell(harness: &mut Harness) -> Option<PaneId> {
-        if !harness.start_terminals() {
+        if !a_shell_these_tests_speak() || !harness.start_terminals() {
             return None;
         }
         harness.focused_pane_id()
@@ -8168,7 +8194,7 @@ mod shells {
     /// A pane whose shell reports command boundaries, or `None` on a machine
     /// where none could be started.
     fn marked_shell(harness: &mut Harness) -> Option<PaneId> {
-        if !harness.start_terminals_with_marks() {
+        if !a_shell_these_tests_speak() || !harness.start_terminals_with_marks() {
             return None;
         }
         harness.focused_pane_id()
