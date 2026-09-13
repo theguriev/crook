@@ -140,14 +140,19 @@ use super::view::Workspace;
 pub(super) const MENU_WIDTH: f32 = 260.;
 
 /// The inset around every row.
-const ROW_INSET: f32 = 12.;
+pub(super) const ROW_INSET: f32 = 12.;
 
 /// The popup's corner radius, which is the options menu's.
 const MENU_RADIUS: f32 = 6.;
 
 /// The size of the label on a row, and of the line under it.
-const LABEL_SIZE: f32 = 12.;
+pub(super) const LABEL_SIZE: f32 = 12.;
 pub(super) const PATH_SIZE: f32 = 10.5;
+
+/// The least room between a worktree row's label and whatever shares its
+/// line — the badge, or the ×. A label cut with a mark is cut this far short
+/// of them, so that the mark does not read as part of the badge.
+const LABEL_GAP: f32 = 8.;
 
 /// What the branch field says before anything is typed into it.
 const BRANCH_PLACEHOLDER: &str = "branch";
@@ -626,23 +631,36 @@ fn worktree_row(
     Hoverable::new(state.control(Control::Worktree(index)), move |mouse| {
         let hovered = mouse.is_hovered() || picked;
 
+        // The label takes what the badge or the × leaves, less a gap, and is
+        // cut with a mark where it runs out: measured free as a plain row
+        // child it was as wide as the branch, and a branch named at the
+        // length people name them stopped at the popup's border on whatever
+        // letter fell there. `Expanded` is what hands it the width; `Align`
+        // is what keeps a short one at the left of it.
+        let label = Text::new(label.clone(), ui, LABEL_SIZE)
+            .with_color(theme().text_primary)
+            .with_ellipsis(Cut::End)
+            .with_style(if here {
+                Properties {
+                    weight: Weight::Semibold,
+                    ..Properties::default()
+                }
+            } else {
+                Properties::default()
+            })
+            .finish();
         let mut line = Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_child(
-                Text::new(label.clone(), ui, LABEL_SIZE)
-                    .with_color(theme().text_primary)
-                    .with_style(if here {
-                        Properties {
-                            weight: Weight::Semibold,
-                            ..Properties::default()
-                        }
-                    } else {
-                        Properties::default()
-                    })
-                    .finish(),
-            )
-            .with_child(Expanded::new(1., Empty::new().finish()).finish());
+                Expanded::new(
+                    1.,
+                    Align::new(Container::new(label).with_margin_right(LABEL_GAP).finish())
+                        .left()
+                        .finish(),
+                )
+                .finish(),
+            );
 
         // The badge and the × share the right edge, and only one of them can
         // ever be there: a checkout somebody is working in is exactly the one
