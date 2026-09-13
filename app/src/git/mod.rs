@@ -29,6 +29,33 @@ pub mod worktree;
 #[cfg(test)]
 mod tests;
 
+/// What the tests make their scratch directories from: a path spelled the
+/// way git will print it back.
+///
+/// Three test files compare a path they made with a path git listed, and
+/// the temporary directory they make it under is not spelled the way git
+/// spells it on two of the three platforms: macOS reaches it through
+/// `/var -> /private/var`, and a GitHub Windows runner names it by its 8.3
+/// short form (`RUNNER~1`), while git prints the resolved, long-named form
+/// of both. `canonicalize` resolves both — and on Windows answers in the
+/// `\\?\` spelling, which git cannot be handed (`worktree add` refuses to
+/// create leading directories under it), so that prefix comes off again.
+#[cfg(test)]
+pub(crate) fn as_git_prints_it(path: std::path::PathBuf) -> std::path::PathBuf {
+    let Ok(canonical) = std::fs::canonicalize(&path) else {
+        return path;
+    };
+    if cfg!(windows) {
+        let text = canonical.to_string_lossy();
+        if let Some(plain) = text.strip_prefix(r"\\?\")
+            && !plain.starts_with("UNC")
+        {
+            return std::path::PathBuf::from(plain);
+        }
+    }
+    canonical
+}
+
 use std::path::Path;
 
 pub use branch::{Head, RepoLayout, branches as branches_in, discover, read_head};
