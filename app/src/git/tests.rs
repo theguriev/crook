@@ -34,10 +34,17 @@ impl ScratchDir {
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).expect("the system temp directory is writable");
 
-        // Resolved now, once: macOS reaches the temp directory through
-        // /var -> /private/var, and git writes the resolved form into a linked
-        // worktree's `.git` file. Comparing the two spellings would fail.
-        let path = std::fs::canonicalize(&path).expect("the directory was just created");
+        // Resolved now, once, on macOS alone: it reaches the temp directory
+        // through /var -> /private/var, and git writes the resolved form into a
+        // linked worktree's `.git` file, so comparing the two spellings would
+        // fail. Nowhere else is the temporary directory a link, and on Windows
+        // the canonical form is the `\\?\` spelling, which git cannot be
+        // handed and nothing else here writes.
+        let path = if cfg!(target_os = "macos") {
+            std::fs::canonicalize(&path).expect("the directory was just created")
+        } else {
+            path
+        };
         Self { path }
     }
 

@@ -233,9 +233,12 @@ fn test_bash_is_given_an_rcfile_that_runs_the_users_own_files_first() {
     );
 
     assert!(launch.marks());
+    // Joined the way the launch joins it, because Windows joins with a
+    // backslash and the argument is whatever the platform spelled.
+    let rcfile = Path::new("/scratch").join("bashrc").display().to_string();
     assert_eq!(
         arguments(&launch),
-        ["--rcfile", "/scratch/bashrc", "-i"],
+        ["--rcfile", rcfile.as_str(), "-i"],
         "and no -l: a login bash reads no rc file at all, so asking for both \
          would silently throw the integration away"
     );
