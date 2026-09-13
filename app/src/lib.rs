@@ -906,17 +906,17 @@ KEYS (macOS):
     cmd+t                      New agent tab
     cmd+,                      Show the settings
     shift+cmd+p                Open the command palette
-    cmd+d / cmd+shift+d        Split the focused pane to the right / downwards
+    cmd+d / shift+cmd+d        Split the focused pane to the right / downwards
     cmd+w                      Close the focused pane, and its tab with the last one
     ctrl+shift+arrows          Focus the pane in that direction
     cmd+] / cmd+[              Focus the next / previous pane
     cmd+k                      Search the tabs
     cmd+f                      Find in the output
     cmd+1 … cmd+8, cmd+9       Select a tab by position, and the last one
-    cmd+alt+left/right         Select the previous/next tab
+    alt+cmd+left/right         Select the previous/next tab
     ctrl+tab / ctrl+shift+tab  The same step, on the chord browsers use
     ctrl+cmd+left/right        Move the active tab
-    cmd+alt+up / cmd+alt+down  Select the block above / below, and copy it with cmd+c
+    alt+cmd+up / alt+cmd+down  Select the block above / below, and copy it with cmd+c
     shift+pageup/pagedown      Page the output
     shift+cmd+pageup/pagedown  Scroll it to its top / bottom
     cmd+plus / cmd+minus       Make the terminal's text bigger / smaller
@@ -3000,10 +3000,17 @@ mod tests {
             commands.sort_unstable();
             commands.dedup();
             for command in commands {
+                // Through the parser and back: the help spells a chord the way
+                // the page prints it, and the page prints `format_chord`.
                 let mentioned = table
                     .iter()
                     .filter(|(_, bound)| *bound == command)
-                    .any(|(chord, _)| help.contains(chord) || spelled_out(chord, &help));
+                    .map(|(chord, _)| {
+                        crate::keybindings::format_chord(
+                            &crate::keybindings::parse_chord(chord).expect("a shipped chord"),
+                        )
+                    })
+                    .any(|chord| help.contains(&chord) || spelled_out(&chord, &help));
                 assert!(
                     mentioned,
                     "{platform}: no chord of {command} is in --help's KEYS"
