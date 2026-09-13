@@ -15308,6 +15308,27 @@ mod sandboxed {
             text.contains("Remove"),
             "there is no way to take it off: {text}"
         );
+
+        // The switch shows the setting — on, since nobody switched it off —
+        // and a press on it is what turns the setting off; a second press
+        // asks the host to try again.
+        let id = crook_plugin::PluginId::parse("eugen/broken").unwrap();
+        assert!(
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.plugin_is_on(&id)),
+            "a plugin that did not load reads as switched off"
+        );
+        let switch = settings_switch_boxes(&harness.frame())[0];
+        harness.click(center(switch), MouseButton::Left);
+        assert!(
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| !workspace.plugin_is_on(&id)),
+            "the press did not switch it off"
+        );
+        let text = frame_text(&harness.frame());
+        assert!(text.contains("switched off"), "{text}");
     }
 
     #[test]

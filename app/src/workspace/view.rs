@@ -1223,7 +1223,7 @@ impl Workspace {
     /// that only did the first would be a switch that lies the next time the
     /// window opens.
     pub fn toggle_plugin(&mut self, plugin: &PluginId, ctx: &mut ViewContext<Self>) {
-        let turning_off = self.host.is_loaded(plugin);
+        let turning_off = self.plugin_is_on(plugin);
         self.settings
             .set_plugin_disabled(plugin.as_str(), turning_off);
         self.save_settings(ctx);
@@ -1236,6 +1236,25 @@ impl Workspace {
         // A plugin's surface may have been what was holding the keyboard.
         self.sync_input_keys();
         ctx.notify();
+    }
+
+    /// What the switch on a plugin's card shows, and what a press on it
+    /// turns off.
+    ///
+    /// Running, or enabled and refused: a plugin that was asked to build and
+    /// could not is still *on* as far as the setting goes, and a switch that
+    /// showed it off — while the line above said "did not load" — would be
+    /// a switch a person flips to no effect. Off is what nobody asked to
+    /// run: switched off in the settings, or withdrawn by the registry, whose
+    /// switch is dead anyway.
+    pub(crate) fn plugin_is_on(&self, plugin: &PluginId) -> bool {
+        self.host.is_loaded(plugin)
+            || (self.host.is_refused(plugin)
+                && !self
+                    .settings
+                    .disabled_plugins()
+                    .iter()
+                    .any(|name| name == plugin.as_str()))
     }
 
     /// Records what one plugin is allowed to do, and remembers the answer.
