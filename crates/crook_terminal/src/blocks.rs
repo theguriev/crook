@@ -896,7 +896,18 @@ impl BlockTracker {
         } else {
             last_content_line(term)
         };
-        let rows = harvest::harvest(term, palette, top, bottom);
+        let mut rows = harvest::harvest(term, palette, top, bottom);
+        // A block whose rows the grid no longer has — `clear` wiped them, or
+        // a program erased the screen on its way out — keeps its command as
+        // its one row rather than being a gap with chrome around it. See
+        // [`BlockRows::of_line`].
+        let mut output_from = None;
+        if rows.is_blank()
+            && let Some(command) = &self.open.command
+        {
+            rows = harvest::BlockRows::of_line(term.columns(), command, palette);
+            output_from = Some(Some(rows.rows()));
+        }
 
         // A shell prints a bare newline between a command finishing and its
         // next prompt, and that leftover is not a block. Neither is the empty
@@ -910,9 +921,11 @@ impl BlockTracker {
             // the last row it is clamped away entirely rather than clamped to
             // the end — a command that printed nothing has no output to offer,
             // and an empty answer is a truer one than the last row.
-            let output_from = self.open.output_start.and_then(|anchor| {
-                let from = usize::try_from(anchor.line(term) - top).ok()?;
-                (from <= rows.rows()).then_some(from)
+            let output_from = output_from.unwrap_or_else(|| {
+                self.open.output_start.and_then(|anchor| {
+                    let from = usize::try_from(anchor.line(term) - top).ok()?;
+                    (from <= rows.rows()).then_some(from)
+                })
             });
             self.finished.push(Block {
                 id: self.open.id,

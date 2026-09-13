@@ -447,7 +447,9 @@ Stage 1 of the port. These are absent on purpose, not overlooked:
   `shift-cmd-PageDown` and `alt-End` — and so does `page-up` / `page-down` and
   `scroll-to-top`, over the block list and over a full-screen program's grid alike. What is
   still absent is the *button* a pointer would press when a block continues below the fold.
-* **`clear` as a gap.** Ctrl-L does what the emulator does with it.
+* **`clear` keeps only its name.** The screen it wiped held the prompt and the command line,
+  so the block keeps the command as its one plain row (`BlockRows::of_line`) rather than
+  being a gap with chrome around it. The prompt that stood before it is not reconstructed.
 * **Lazy reflow on a column change.** A harvested block keeps the width it was harvested at.
 * Share, bookmarks, block filters, and everything else that needs a block to
   be addressable rather than merely visible. Running a command a second time is in the menu —
