@@ -3015,17 +3015,11 @@ impl Scratch {
     fn new() -> Self {
         static SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        // macOS's temporary directory is a symlink into `/private`, and git
-        // prints the real path — so a test comparing what git lists with what
-        // it made has to start from the real one. Nowhere else is the
-        // temporary directory a link, and on Windows the canonical form is
-        // the `\\?\` spelling nothing else here writes.
-        let temp = std::env::temp_dir();
-        let temp = if cfg!(target_os = "macos") {
-            fs::canonicalize(&temp).unwrap_or(temp)
-        } else {
-            temp
-        };
+        // Spelled the way git will print it: a test comparing what git lists
+        // with what it made has to start from the same spelling, and the
+        // temporary directory is a link on macOS and a short name on a
+        // Windows runner. See `git::as_git_prints_it`.
+        let temp = crate::git::as_git_prints_it(std::env::temp_dir());
         Self {
             directory: temp.join(format!("crook-tab-options-{}-{serial}", std::process::id())),
         }
