@@ -337,6 +337,14 @@ pub struct TerminalModel {
     /// rest — the files a person's `PATH` is built in.
     shell_login: bool,
 
+    /// The shell a pane runs, when it is not the user's own.
+    ///
+    /// `None` is the user's shell, resolved the way every terminal resolves
+    /// it. `Some` is what `--shell` asked for — another shell to try, or, for
+    /// a picture and a test, one that does not exist, since a pane whose shell
+    /// could not be started is a state nothing else can reach on purpose.
+    shell: Option<PathBuf>,
+
     /// The one thread that comes back for batches parsed too soon to draw.
     ///
     /// Shared by every pane and started with the first of them, so a model that
@@ -386,6 +394,7 @@ impl TerminalModel {
             watching_children: false,
             shell_marks: true,
             shell_login: shell_integration::login_by_default(),
+            shell: None,
             flusher: Arc::new(Flusher::default()),
             flushing: false,
         }
@@ -429,6 +438,12 @@ impl TerminalModel {
     /// Whether the next shell opened will be a login shell.
     pub fn shell_login(&self) -> bool {
         self.shell_login
+    }
+
+    /// Says which shell panes opened from now on run, or `None` for the
+    /// user's own. Only shells opened after this, like the two above.
+    pub fn set_shell(&mut self, shell: Option<PathBuf>) {
+        self.shell = shell;
     }
 
     /// Opens a shell for every pane that has none, and closes the ones whose
@@ -564,7 +579,7 @@ impl TerminalModel {
         let integration = shell_integration::Session::open(&shell_integration::Options {
             enabled: self.shell_marks,
             login: self.shell_login,
-            ..Default::default()
+            shell: self.shell.clone(),
         });
         let mut options = TerminalOptions {
             size: INITIAL_GRID,

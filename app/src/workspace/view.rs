@@ -4235,6 +4235,15 @@ impl Workspace {
         self.terminals.as_ref(app).shell_login()
     }
 
+    /// Says which shell the panes run, or `None` for the user's own.
+    ///
+    /// Call before [`Self::start_terminals`], for the reason the two above
+    /// are: a shell that is already running is the shell it is.
+    pub fn set_shell(&self, shell: Option<PathBuf>, ctx: &mut ViewContext<Self>) {
+        self.terminals
+            .update(ctx, |model, _| model.set_shell(shell));
+    }
+
     /// Writes to a pane's shell directly, going round the input field.
     ///
     /// **Not the path a command takes.** A person's line is composed in the
@@ -5618,11 +5627,7 @@ impl Workspace {
 
     /// Why a pane has no terminal, when the attempt failed rather than never
     /// having been made.
-    pub(super) fn terminal_failure<'a>(
-        &self,
-        pane: PaneId,
-        app: &'a AppContext,
-    ) -> Option<&'a str> {
+    pub fn terminal_failure<'a>(&self, pane: PaneId, app: &'a AppContext) -> Option<&'a str> {
         self.terminals.as_ref(app).failure(pane)
     }
 

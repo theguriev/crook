@@ -345,6 +345,14 @@ struct Overrides {
     /// drag. Whole pixels, because a fraction of one is not a size anybody
     /// asks for and the type is compared for equality.
     size: Option<[u32; 2]>,
+    /// Run this shell in every pane rather than the user's own.
+    ///
+    /// The one way to a pane whose shell could not be started: the user's
+    /// shell is resolved the way every terminal resolves it, and a `SHELL`
+    /// naming something unrunnable falls back to the password database
+    /// rather than to a pane that will not open. A path that does not exist
+    /// pictures that pane; a path that does runs another shell for a look.
+    shell: Option<PathBuf>,
     /// Start with rows standing for this rather than for the saved one.
     granularity: Option<Granularity>,
     /// Start in this density rather than the saved one.
@@ -430,9 +438,11 @@ impl Overrides {
     /// Whether this run needs shells opened for it.
     ///
     /// Neither the field nor the grid is worth a picture without one: a pane
-    /// with no shell draws a notice instead of both.
+    /// with no shell draws a notice instead of both. A named shell counts,
+    /// since the only reason to name one is to see what it does.
     fn wants_shells(&self) -> bool {
-        !self.run.is_empty()
+        self.shell.is_some()
+            || !self.run.is_empty()
             || self.type_text.is_some()
             || self.select_output.is_some()
             || self.find_output.is_some()
@@ -761,6 +771,10 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 let size = args.next().context("`--size` needs a width and a height")?;
                 overrides.size = Some(parse_size(&size)?);
             }
+            "--shell" => {
+                let shell = args.next().context("`--shell` needs a path")?;
+                overrides.shell = Some(PathBuf::from(shell));
+            }
             "--controls" => {
                 let platform = args.next().context("`--controls` needs a platform")?;
                 overrides.controls = Some(match platform.as_str() {
@@ -924,6 +938,9 @@ OPTIONS:
     --size <WxH>       Open the window, or draw the picture, this many logical
                        pixels wide and high — `640x480` — rather than 1024x640,
                        for a look at what the layout does in a small window
+    --shell <PATH>     Run this shell in every pane rather than your own; a
+                       path that does not exist is the one way to a picture of
+                       a pane whose shell could not be started
     --shell-integration <SHELL>
                        Print the OSC 133 snippet for `zsh`, `bash` or `fish`,
                        to paste into that shell\'s own configuration on a machine
@@ -1195,6 +1212,9 @@ fn apply_overrides(
     }
     if let Some(density) = overrides.density {
         workspace.override_density(density, ctx);
+    }
+    if let Some(shell) = overrides.shell.clone() {
+        workspace.set_shell(Some(shell), ctx);
     }
     if overrides.menu {
         workspace.open_options_menu(ctx);
@@ -1502,6 +1522,16 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
         frame(&mut app, &mut presenter);
 
         if !overrides.run.is_empty() {
+            // A shell that could not be started prints nothing, and a run
+            // that waited ten seconds to type into it would report an empty
+            // block as if the command had run. The reason it has no shell is
+            // the report.
+            let failure = workspace.read(&app, |workspace, app| {
+                workspace.terminal_failure(pane, app).map(str::to_owned)
+            });
+            if let Some(failure) = failure {
+                bail!("the shell could not be started: {failure}");
+            }
             await_shell(&queue, &mut app, &workspace, pane);
             for command in &overrides.run {
                 type_run(&mut app, &mut presenter, window_id, command);
@@ -2880,6 +2910,22 @@ mod tests {
                 overrides: Overrides::default()
             }
         );
+    }
+
+    #[test]
+    fn shell_names_the_program_and_is_a_reason_to_open_one() {
+        let Startup::Window { overrides, .. } = parse(&["--shell", "/opt/fish"]).expect("valid")
+        else {
+            panic!("a shell alone opens the window");
+        };
+        assert_eq!(overrides.shell, Some(PathBuf::from("/opt/fish")));
+        // A snapshot with a shell named opens a pane for it: naming one is
+        // the whole reason.
+        assert!(overrides.wants_shells());
+        assert!(!Overrides::default().wants_shells());
+
+        let bare = parse(&["--shell"]).expect_err("a shell needs a path");
+        assert!(format!("{bare:#}").contains("--shell"), "{bare:#}");
     }
 
     #[test]
