@@ -3193,6 +3193,12 @@ fn two_choices_in_a_row_leave_the_second_one_in_the_file() {
         harness.dispatch_option(OptionsAction::SetDensity(Density::Expanded));
         harness.dispatch_option(OptionsAction::SetSubtitle(Subtitle::WorkingDirectory));
 
+        // The second save has to have landed before the file is judged: on a
+        // loaded runner the pool can take longer than `settled` waits between
+        // two reads to get to it, and a file that holds the first click alone
+        // for a moment is not the lost write this test is about — that one
+        // holds the first click *after* the second landed.
+        scratch.written_containing("\"compact_subtitle\": \"working_directory\"");
         let settled = scratch.settled();
         assert!(
             settled.contains("\"compact_subtitle\": \"working_directory\""),
