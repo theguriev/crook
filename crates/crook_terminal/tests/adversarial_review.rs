@@ -1,19 +1,16 @@
 //! Byte-sequence repros from the adversarial review of the emulator and the
 //! input encoder.
 //!
-//! Everything here drives the crate through its public API only. Five of them
-//! record behaviour the review checked and found correct, so a later change
-//! cannot quietly break it; the other four were the defects it found, and they
-//! now pass because those are fixed.
+//! Everything here drives the crate through its public API only, and none of
+//! it starts a process: what a child would be sent is asked for as bytes. Five
+//! of them record behaviour the review checked and found correct, so a later
+//! change cannot quietly break it; the other four were the defects it found,
+//! and they now pass because those are fixed.
 
-use std::io::Read as _;
 use std::thread;
 use std::time::Duration;
 
-use crook_terminal::{
-    Emulator, InputModes, Key, Modifiers, Palette, Program, Terminal, TerminalOptions,
-    TerminalSize, input,
-};
+use crook_terminal::{Emulator, InputModes, Key, Modifiers, Palette, TerminalSize, input};
 
 /// A small grid, which keeps the assertions readable.
 fn emulator(columns: u16, rows: u16) -> Emulator {
@@ -22,42 +19,31 @@ fn emulator(columns: u16, rows: u16) -> Emulator {
 
 #[test]
 fn test_pasted_text_cannot_end_its_own_bracketed_paste() {
-    let mut terminal = Terminal::spawn(TerminalOptions {
-        program: Program::command("cat", Vec::<String>::new()),
-        ..TerminalOptions::default()
-    })
-    .expect("cat should start on a pty");
-    let mut reader = terminal
-        .take_reader()
-        .expect("a fresh terminal has its reader");
+    // The bytes themselves, which is what the child on the far end of the pty
+    // parses. This used to spawn `cat` and read its echo back, which is not
+    // the same bytes on a Windows console — ConPTY re-renders what a child
+    // writes, and an end marker the child echoed never came back as one.
+    let bytes = input::paste("safe\x1b[201~; echo PWNED\n", true);
+    let text = String::from_utf8(bytes).expect("a paste of text is text");
 
-    terminal
-        .feed(b"\x1b[?2004h")
-        .expect("the mode should reach the emulator");
-    terminal
-        .paste("safe\x1b[201~; echo PWNED\n")
-        .expect("the paste should reach the child");
-    thread::sleep(Duration::from_millis(400));
-    terminal
-        .write(b"\x04")
-        .expect("cat should see end of input");
-    thread::sleep(Duration::from_millis(200));
-
-    let mut buffer = [0; 4096];
-    let read = reader.read(&mut buffer).unwrap_or(0);
-    let echoed = String::from_utf8_lossy(&buffer[..read]).into_owned();
-    let body = echoed
-        .split_once("\x1b[200~")
-        .map(|(_, rest)| rest)
-        .unwrap_or(&echoed);
-    let (inside, _) = body
-        .split_once("\x1b[201~")
-        .expect("the paste is bracketed at both ends");
+    let body = text
+        .strip_prefix("\x1b[200~")
+        .expect("the paste starts with the start marker");
+    let inside = body
+        .strip_suffix("\x1b[201~")
+        .expect("the paste ends with the end marker");
+    assert!(
+        !inside.contains('\x1b'),
+        "the escape that would end the bracket was passed through: {inside:?}"
+    );
     assert!(
         inside.contains("echo PWNED"),
-        "everything pasted must stay inside the brackets, but the child saw {inside:?} \
-         and read the rest as if it had been typed"
+        "everything pasted must stay inside the brackets, but the child would see \
+         {inside:?} and read the rest as if it had been typed"
     );
+
+    // And with no bracketing asked for, a newline is the Enter key.
+    assert_eq!(input::paste("one\ntwo\r\n", false), b"one\rtwo\r");
 }
 
 #[test]
