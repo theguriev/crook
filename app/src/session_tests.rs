@@ -352,6 +352,48 @@ fn test_a_file_that_cannot_be_read_is_a_fresh_window_and_a_line_in_the_log() {
 }
 
 #[test]
+fn test_a_tab_this_build_cannot_read_costs_that_tab_and_not_the_window() {
+    // One tab whose `panes` is not a list — a value from another build, or a
+    // hand edit — used to refuse the whole file, and the window opened with
+    // nothing in it: the one outcome the file exists to prevent. The other
+    // tab comes back, and so does everything beside the key that did not
+    // read.
+    let directory = scratch("one-bad-tab");
+    let path = directory.join("session.json");
+    fs::write(
+        &path,
+        r#"{
+          "tabs": [
+            {"name": "kept", "panes": [{"title": "kept", "flex": 1.0}]},
+            {"name": "broken", "panes": "not a list"}
+          ],
+          "active": 1,
+          "window": "wide",
+          "groups": [{"name": "work", "collapsed": true}]
+        }"#,
+    )
+    .expect("writable");
+
+    let session = Session::load(&path);
+    assert_eq!(
+        session
+            .tabs
+            .iter()
+            .map(|tab| tab.name.as_str())
+            .collect::<Vec<_>>(),
+        ["kept"],
+        "the tab that read is not there, or the one that did not is"
+    );
+    assert_eq!(session.active, 1, "a key that read on its own was lost");
+    assert_eq!(
+        session.window, None,
+        "the key that could not be read takes its default"
+    );
+    assert_eq!(session.groups.len(), 1, "the groups beside it were lost");
+    assert!(!session.is_empty());
+}
+
+#[test]
 fn test_a_window_size_a_person_could_not_see_is_refused() {
     for size in [[0., 0.], [-100., 200.], [f32::NAN, 600.]] {
         let session = Session {
