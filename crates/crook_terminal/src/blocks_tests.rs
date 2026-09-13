@@ -587,7 +587,8 @@ fn test_a_shell_killed_under_a_full_screen_program_still_closes_its_block() {
     // The one signal the alternate screen does not suspend. A session that has
     // ended has to close its block wherever it ended, and what it takes with it
     // is the command — not a picture of the program's last frame, which never
-    // scrolled and is nobody's scrollback.
+    // scrolled and is nobody's scrollback. The command is also the one row
+    // the block keeps, since the grid had none to give: see `BlockRows::of_line`.
     let mut emulator = emulator();
     emulator.advance(format!("{A}$ {B}vim\r\n{C}").as_bytes());
     emulator.advance(b"\x1b[?1049h");
@@ -600,8 +601,38 @@ fn test_a_shell_killed_under_a_full_screen_program_still_closes_its_block() {
     };
     assert_eq!(BlockState::Terminated, block.state);
     assert_eq!(Some("vim".to_owned()), block.command);
-    assert!(block.rows.is_empty());
+    assert_eq!(
+        block.rows.to_text().trim(),
+        "vim",
+        "the program's frame came along"
+    );
     assert_eq!(BlockState::Terminated, emulator.live_block().state);
+}
+
+#[test]
+fn test_a_block_the_screen_was_wiped_under_keeps_its_command_as_its_row() {
+    // `clear` erases the screen the command line was on before the block
+    // closes, so the harvest copies out nothing and the block was a gap with
+    // chrome around it. It keeps what it knows: the command, as one plain
+    // row, with no output after it.
+    let mut emulator = emulator();
+    emulator.advance(format!("{A}$ {B}clear\r\n{C}").as_bytes());
+    // What `clear` prints: home the cursor, erase the display, and erase the
+    // scrollback — the third is what takes the command line with it, since
+    // erasing the display alone moves the rows into history.
+    emulator.advance(b"\x1b[H\x1b[2J\x1b[3J");
+    emulator.advance(format!("\x1b]133;D;0\x07{A}$ {B}").as_bytes());
+
+    let [block] = emulator.blocks() else {
+        panic!("the block was lost");
+    };
+    assert_eq!(Some("clear".to_owned()), block.command);
+    assert_eq!(block.rows.to_text().trim(), "clear");
+    assert_eq!(
+        block.output_from,
+        Some(block.rows.rows()),
+        "the command row was offered as output"
+    );
 }
 
 #[test]

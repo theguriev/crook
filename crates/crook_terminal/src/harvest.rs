@@ -336,6 +336,36 @@ impl BlockRows {
         }
     }
 
+    /// One row of plain text at the grid's default colours, for a block
+    /// whose rows the grid no longer had.
+    ///
+    /// `clear` wipes the screen the command line was on before the block
+    /// closes, and a harvest then copies out nothing. The command itself is
+    /// known — it was read when the shell accepted it — so the block keeps
+    /// that as its one row rather than being a gap with chrome around it.
+    /// Plain, because the prompt that stood before it is gone with the rest.
+    pub(crate) fn of_line(columns: usize, text: &str, palette: &Palette) -> Self {
+        let mut rows = Self::with_columns(columns);
+        let blank = SnapshotCell {
+            c: ' ',
+            foreground: palette.foreground,
+            background: palette.background,
+            flags: CellFlags::NONE,
+        };
+        let mut cells = vec![blank; columns.max(1)];
+        // Wrapped at the grid's width the way the grid would have wrapped it,
+        // so a long command line is as many rows as it was.
+        let characters: Vec<char> = text.chars().collect();
+        for line in characters.chunks(columns.max(1)) {
+            cells.fill(blank);
+            for (cell, character) in cells.iter_mut().zip(line) {
+                cell.c = *character;
+            }
+            rows.push_row(&cells, &mut Vec::new());
+        }
+        rows
+    }
+
     /// Appends one row: its cells in order, and the zero-width characters
     /// found on any of them.
     ///
