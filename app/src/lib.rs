@@ -336,6 +336,15 @@ struct Overrides {
     /// the header out either way needs no second machine — only a way to ask
     /// for it.
     controls: Option<ControlLayout>,
+    /// Open the window, or draw the picture, at this size in logical pixels.
+    ///
+    /// A picture is drawn at 1024 by 640 whatever the session file says, so
+    /// that it is the same picture on every machine — and so every picture
+    /// was of one width. What the settings page does at 640 wide, or the
+    /// palette at 700, was a thing nobody could look at without a window to
+    /// drag. Whole pixels, because a fraction of one is not a size anybody
+    /// asks for and the type is compared for equality.
+    size: Option<[u32; 2]>,
     /// Start with rows standing for this rather than for the saved one.
     granularity: Option<Granularity>,
     /// Start in this density rather than the saved one.
@@ -751,6 +760,10 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                     other => bail!("`--granularity` takes panes or tabs, not {other}"),
                 });
             }
+            "--size" => {
+                let size = args.next().context("`--size` needs a width and a height")?;
+                overrides.size = Some(parse_size(&size)?);
+            }
             "--controls" => {
                 let platform = args.next().context("`--controls` needs a platform")?;
                 overrides.controls = Some(match platform.as_str() {
@@ -796,6 +809,21 @@ fn shell_integration_text(shell: Option<&str>) -> Result<String> {
         "# Crook shell integration for {named}. Append this to {file} on the \
 machine you want blocks on.\n\n{snippet}"
     ))
+}
+
+/// `WxH`, in whole logical pixels, each at least one.
+///
+/// One spelling, the one every image tool uses, rather than a comma or a
+/// space as well: a flag that accepts three notations documents three.
+fn parse_size(text: &str) -> Result<[u32; 2]> {
+    let complaint = || format!("`--size` takes a width and a height like 640x480, not {text:?}");
+    let (width, height) = text.split_once('x').with_context(complaint)?;
+    let width: u32 = width.trim().parse().with_context(complaint)?;
+    let height: u32 = height.trim().parse().with_context(complaint)?;
+    if width == 0 || height == 0 {
+        bail!("`--size` needs a width and a height above zero, not {text:?}");
+    }
+    Ok([width, height])
 }
 
 fn help_text() -> String {
@@ -885,6 +913,9 @@ OPTIONS:
     --controls <OS>    Draw `macos`, `windows` or `linux` window controls in the
                        header rather than this platform's, for a picture of the
                        title bar the other two get
+    --size <WxH>       Open the window, or draw the picture, this many logical
+                       pixels wide and high — `640x480` — rather than 1024x640,
+                       for a look at what the layout does in a small window
     --shell-integration <SHELL>
                        Print the OSC 133 snippet for `zsh`, `bash` or `fish`,
                        to paste into that shell\'s own configuration on a machine
@@ -1276,11 +1307,21 @@ fn open_window(channel: Channel, frames: Option<u32>, overrides: Overrides) -> R
         crate::session::Session::default()
     };
 
+    // The flag first, the session's size second, the default last: a
+    // person asking for a window of a size is asking to look at that size,
+    // whatever the last window was.
     let options = WindowOptions {
         title: channel.window_title(),
-        size: session
-            .window_size()
-            .map_or(WINDOW_SIZE, |[width, height]| vec2f(width, height)),
+        size: launch
+            .overrides
+            .size
+            .map(|[width, height]| vec2f(width as f32, height as f32))
+            .or_else(|| {
+                session
+                    .window_size()
+                    .map(|[width, height]| vec2f(width, height))
+            })
+            .unwrap_or(WINDOW_SIZE),
         chrome: WINDOW_CHROME,
         ..Default::default()
     };
@@ -1416,12 +1457,15 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
     // The presenter is a parameter rather than something the frame closure
     // holds, because typing needs it too: a keystroke is dispatched through the
     // element tree the last frame built.
+    let size = overrides.size.map_or(WINDOW_SIZE, |[width, height]| {
+        vec2f(width as f32, height as f32)
+    });
     let mut presenter = Presenter::new(window_id, text_layout);
     let frame = |app: &mut App, presenter: &mut Presenter| {
         app.update(|ctx| {
             let invalidation = ctx.take_all_invalidations_for_window(window_id);
             presenter.invalidate(invalidation, ctx);
-            presenter.build_scene(WINDOW_SIZE, SNAPSHOT_SCALE_FACTOR, ctx)
+            presenter.build_scene(size, SNAPSHOT_SCALE_FACTOR, ctx)
         })
     };
 
@@ -1532,8 +1576,8 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
 
     let scene = frame(&mut app, &mut presenter);
 
-    let (pixels, width, height) = render_scene_to_rgba(&scene, WINDOW_SIZE, &font_db)
-        .context("failed to render the frame")?;
+    let (pixels, width, height) =
+        render_scene_to_rgba(&scene, size, &font_db).context("failed to render the frame")?;
 
     let file =
         File::create(path).with_context(|| format!("failed to create {}", path.display()))?;
@@ -2828,6 +2872,24 @@ mod tests {
     }
 
     #[test]
+    fn size_takes_a_width_and_a_height_and_nothing_else() {
+        assert_eq!(
+            parse(&["--size", "640x480"]).expect("valid"),
+            Startup::Window {
+                frames: None,
+                overrides: Overrides {
+                    size: Some([640, 480]),
+                    ..Overrides::default()
+                }
+            }
+        );
+        for bad in ["640", "640x", "x480", "640,480", "0x480", "640x-1", "wide"] {
+            assert!(parse(&["--size", bad]).is_err(), "{bad:?} was accepted");
+        }
+        assert!(parse(&["--size"]).is_err(), "the flag needs its argument");
+    }
+
+    #[test]
     fn the_startup_overrides_reach_both_kinds_of_run() {
         assert_eq!(
             parse(&[
@@ -2969,6 +3031,7 @@ mod tests {
             "--find-output",
             "--granularity",
             "--density",
+            "--size",
             "--agent",
             "--agent-hooks",
         ] {
