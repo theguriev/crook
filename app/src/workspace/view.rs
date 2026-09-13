@@ -2504,6 +2504,22 @@ impl Workspace {
         ctx.notify();
     }
 
+    /// Types `query` into the search box of the section that is showing —
+    /// the Store's, the Plugins page's — for a run that named the section.
+    ///
+    /// Every section with a box calls its field `search`, which is what makes
+    /// one flag serve all of them; a section with none gets a field nothing
+    /// draws, which is a query nobody sees rather than a refusal to start.
+    pub fn type_into_section_search(&mut self, query: &str, ctx: &mut ViewContext<Self>) {
+        let Some(section) = self.section.clone() else {
+            return;
+        };
+        self.field(&section, "search")
+            .1
+            .edit(|editor| editor.set_text(query));
+        ctx.notify();
+    }
+
     /// Types `query` into the panel's search box, for a run that was told to.
     ///
     /// With the keyboard in it, unlike the settings page's: that box has the
