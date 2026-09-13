@@ -1651,6 +1651,13 @@ keyed by pane id can collide with a previous process's. And a file this build di
 correct number and a truncated or hand-edited file must not be able to open ten thousand ptys
 before the first frame.
 
+A fourth followed the same rule the settings file already keeps: a file this build cannot read
+*whole* is not a file it cannot read. `Session::salvage` reads the tabs one at a time and drops
+the one that does not read, naming its position in the log, and reads the other keys each on
+their own; `settings.json` does the same per key, so a `"login_shell": "yes"` costs that switch
+and not the font size beside it. Opening a fresh, empty window over one bad value was the one
+outcome both files exist to prevent.
+
 What is *not* remembered is the point: no scrollback, no output, no process. A window that
 redrew yesterday's output over a shell that had never run any of it would be lying about the
 state of the machine. The settings pane is left out too — it is something somebody opened to

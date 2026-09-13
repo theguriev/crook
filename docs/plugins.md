@@ -167,6 +167,13 @@ description of something that was never built.
     can catch, because an abort is not a trap. The workspace turns on `portable-dispatch`,
     which dispatches in a loop and cannot grow the stack whatever it is compiled at. The
     cost is some interpreter speed, for a plugin whose whole job is to format a percentage.
+  - One more, found later on the Windows runner: an *unoptimised* build of `crook_wasm` on
+    `x86_64-pc-windows-msvc` dies with an access violation in the first host call — the O0
+    instantiation of `wasmi::Caller::get_export` reads the instance pointer from the wrong
+    stack slot. The release profile is fine, and so is any opt-level above zero, so the dev
+    profile names `crook_wasm` at `opt-level = 1` (`Cargo.toml` says why; PR #106 has the
+    disassembly). Not reported upstream yet; the workaround is one line and the bug is in
+    somebody else's codegen.
 
   The application half is in: `plugins::wasm` reads `plugin.wasm` out of each directory under
   the platform's data directory, turns what a guest registered into real registrations —
