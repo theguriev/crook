@@ -11,7 +11,7 @@
 //! a folder and does not at three plus a folder; every row is built here, and
 //! the day that stops being true this is where it changes.
 
-use crookui_core::elements::Padding;
+use crookui_core::elements::{Padding, Paragraph};
 use crookui_core::prelude::*;
 
 use crate::theme::theme;
@@ -63,9 +63,60 @@ pub(super) fn render(workspace: &Workspace, _: &AppContext) -> Box<dyn Element> 
         ));
     }
 
+    // After the rows, so the arrows' arithmetic — row `n` is at `n` heights
+    // — is untouched, and so that what could not be chosen comes after what
+    // can. The person who just saved a file with a mistake in it is looking
+    // here for it to appear, and a list that said nothing sent them to a log.
+    for unreadable in workspace.unreadable_themes() {
+        column.add_child(unreadable_row(unreadable, ui));
+    }
+
     Scrollable::new(state.scroll.clone(), column.finish())
         .with_scrollbar(theme().overlay_3)
         .finish()
+}
+
+/// A file in the themes folder that is not a theme yet: its name, and what
+/// is wrong with it, in the words the reader used.
+fn unreadable_row(
+    unreadable: &crate::theme::Unreadable,
+    ui: crookui_core::fonts::FamilyId,
+) -> Box<dyn Element> {
+    let name = unreadable
+        .path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| unreadable.path.display().to_string());
+
+    Container::new(
+        Flex::column()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_child(
+                Text::new(name, ui, 12.)
+                    .with_color(theme().text_muted)
+                    .with_ellipsis(Cut::Start)
+                    .finish(),
+            )
+            .with_child(
+                Container::new(
+                    Paragraph::new(format!("could not be read: {}", unreadable.why), ui, 10.)
+                        .with_color(theme().text_muted)
+                        .with_line_height_ratio(1.35)
+                        .finish(),
+                )
+                .with_margin_top(3.)
+                .finish(),
+            )
+            .finish(),
+    )
+    .with_padding(Padding {
+        top: ROW_PADDING,
+        bottom: ROW_PADDING,
+        left: (content_width() - PANEL_CARD.x()) / 2.,
+        right: (content_width() - PANEL_CARD.x()) / 2.,
+    })
+    .finish()
 }
 
 /// One theme's row.
