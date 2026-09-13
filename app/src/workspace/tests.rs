@@ -15281,6 +15281,36 @@ mod sandboxed {
     }
 
     #[test]
+    fn a_module_that_did_not_open_has_a_card_that_says_why_and_a_remove() {
+        // A directory a person put there and saw nothing of: the plugin was
+        // skipped with a log line, so there was no card to read the reason
+        // on and no Remove to press. The stand-in is on the list, named off
+        // its directory, its line says it did not load rather than that
+        // somebody switched it off, and the loader's sentence is in the box.
+        let scratch = Scratch::new("unopened");
+        install(scratch.path(), "eugen.broken", b"not wasm at all");
+        let mut harness = harness(&scratch);
+
+        harness.show_plugins();
+        harness.click_plugin("eugen/broken");
+        let text = frame_text(&harness.frame());
+
+        assert!(text.contains("Did not load"), "{text}");
+        assert!(
+            text.contains("not a WebAssembly module"),
+            "the loader's own sentence is missing: {text}"
+        );
+        assert!(
+            text.contains("did not load") && !text.contains("switched off"),
+            "the facts line blames the person: {text}"
+        );
+        assert!(
+            text.contains("Remove"),
+            "there is no way to take it off: {text}"
+        );
+    }
+
+    #[test]
     fn a_version_the_registry_took_back_is_carried_and_not_run() {
         // A yank is honoured on the launch after it is published and on a
         // machine that is offline, because it is read off the copy of the

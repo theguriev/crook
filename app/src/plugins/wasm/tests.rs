@@ -681,6 +681,42 @@ fn a_manifest_naming_an_id_that_is_not_one_is_refused() {
     assert!(installed(scratch.path()).is_empty());
 }
 
+#[test]
+fn a_module_that_does_not_open_is_on_the_list_and_one_that_is_not_wasm_says_so() {
+    // A directory a person put there and saw nothing of: the plugin was
+    // skipped with a log line, so there was no card to read the reason on
+    // and no Remove to press. It is on the list now as the one that did not
+    // open, named off its directory, and its build fails with the loader's
+    // sentence — which for a file that is not wasm at all is that, rather
+    // than the text-format parser's "expected `(`".
+    let scratch = Scratch::new("unopened");
+    install_version(scratch.path(), "eugen.broken", "0.1.0", b"not wasm at all");
+
+    let found = installed(scratch.path());
+    assert_eq!(found.len(), 1, "the directory was skipped");
+    let manifest = found[0].manifest();
+    assert_eq!(manifest.id.as_str(), "eugen/broken");
+    assert_eq!(manifest.version, "0.1.0");
+    assert_eq!(manifest.tier, crook_plugin::Tier::Wasm);
+
+    // The reason is the loader's, and for a file that is not wasm at all it
+    // names that rather than the text-format parser's "expected `(`". The
+    // card that prints it is checked in the workspace tests.
+    let why = match open(&newest_module_for(&scratch.path().join("eugen.broken")).unwrap()) {
+        Ok(_) => panic!("it cannot open"),
+        Err(why) => why,
+    };
+    assert!(
+        why.contains("not a WebAssembly module"),
+        "the reason is not the one a person can act on: {why}"
+    );
+
+    // And a directory no install wrote — no `owner.name` to read an id off —
+    // is left out, as it was.
+    install(scratch.path(), "probe", b"not wasm at all");
+    assert_eq!(installed(scratch.path()).len(), 1);
+}
+
 /// The window a node is drawn in.
 ///
 /// Four hundred wide so that a share of the room is a round number of pixels

@@ -95,7 +95,15 @@ pub fn installed(directory: &Path) -> Vec<Box<dyn Plugin>> {
         };
         match open(&path) {
             Ok(plugin) => found.push((plugin.manifest().id.to_string(), Box::new(plugin))),
-            Err(problem) => log::warn!("{}: {problem}", path.display()),
+            Err(problem) => {
+                log::warn!("{}: {problem}", path.display());
+                // On the page all the same, as the one that did not open:
+                // a directory a person put there and sees nothing of is a
+                // plugin they cannot remove and a reason they cannot read.
+                if let Some(broken) = Unopened::in_directory(&entry.path(), &path, problem) {
+                    found.push((broken.manifest.id.to_string(), Box::new(broken)));
+                }
+            }
         }
     }
 
@@ -212,6 +220,61 @@ pub fn opened(bytes: &[u8]) -> Result<WasmPlugin, String> {
 /// often not writable by whoever is running it.
 pub fn directory() -> Option<PathBuf> {
     dirs::data_dir().map(|data| data.join("crook").join("plugins"))
+}
+
+/// A plugin whose module is on this machine and did not open.
+///
+/// It is on the Plugins page for the reason a theme file that did not read
+/// is on the Themes panel: the person who put it there is looking for it,
+/// and a page that said nothing sent them to a log. Its manifest is read
+/// off the directory — `owner.name/version/plugin.wasm` — since the module
+/// could not give one, and its build fails with the loader's own sentence,
+/// which is what the card prints under "Did not load". Remove works on it
+/// as on any other, by id.
+struct Unopened {
+    manifest: &'static Manifest,
+    why: String,
+}
+
+impl Unopened {
+    /// The stand-in for the module at `path` under the plugin directory
+    /// `home`, or `None` for a directory that is not spelled `owner.name`,
+    /// which no install wrote and nothing can name.
+    fn in_directory(home: &Path, path: &Path, why: String) -> Option<Self> {
+        let folder = home.file_name()?.to_str()?;
+        let (owner, name) = folder.split_once('.')?;
+        let id = PluginId::parse(&format!("{owner}/{name}")).ok()?;
+        // The version directory, or the flat layout's nothing.
+        let version = path
+            .parent()
+            .filter(|parent| *parent != home)
+            .and_then(Path::file_name)
+            .and_then(|version| version.to_str())
+            .unwrap_or("")
+            .to_owned();
+        // Leaked for the reason `opened` leaks its manifest: one per
+        // directory, once, for the life of the process.
+        let manifest: &'static Manifest = Box::leak(Box::new(Manifest {
+            schema: Manifest::SCHEMA,
+            name: String::leak(id.to_string()),
+            id,
+            description: "This plugin's module could not be opened.",
+            version: String::leak(version),
+            tier: Tier::Wasm,
+            capabilities: &[],
+        }));
+        Some(Self { manifest, why })
+    }
+}
+
+impl Plugin for Unopened {
+    fn manifest(&self) -> &'static Manifest {
+        self.manifest
+    }
+
+    fn build(&mut self, _: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
+        Err(self.why.clone())
+    }
 }
 
 /// One installed plugin.
