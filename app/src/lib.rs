@@ -905,25 +905,40 @@ OPTIONS:
 KEYS (macOS):
     cmd+t                      New agent tab
     cmd+,                      Show the settings
-    cmd+d / shift+cmd+d        Split the focused pane to the right / downwards
+    shift+cmd+p                Open the command palette
+    cmd+d / cmd+shift+d        Split the focused pane to the right / downwards
     cmd+w                      Close the focused pane, and its tab with the last one
+    ctrl+shift+arrows          Focus the pane in that direction
+    cmd+] / cmd+[              Focus the next / previous pane
     cmd+k                      Search the tabs
-    alt+cmd+left/right         Select the previous/next tab
+    cmd+f                      Find in the output
+    cmd+1 … cmd+8, cmd+9       Select a tab by position, and the last one
+    cmd+alt+left/right         Select the previous/next tab
     ctrl+tab / ctrl+shift+tab  The same step, on the chord browsers use
     ctrl+cmd+left/right        Move the active tab
-    cmd+alt+up / cmd+alt+down   Select the block above / below, and copy it with cmd+c
+    cmd+alt+up / cmd+alt+down  Select the block above / below, and copy it with cmd+c
+    shift+pageup/pagedown      Page the output
+    shift+cmd+pageup/pagedown  Scroll it to its top / bottom
     cmd+plus / cmd+minus       Make the terminal's text bigger / smaller
     cmd+0                      Put the text back to its default size
 
 KEYS (Linux and Windows):
     ctrl+shift+t               New agent tab
     ctrl+,                     Show the settings
+    ctrl+shift+p               Open the command palette
     ctrl+shift+d / ctrl+shift+e  Split the focused pane to the right / downwards
     ctrl+shift+w               Close the focused pane, and its tab with the last one
+    alt+arrows                 Focus the pane in that direction
+    ctrl+shift+] / ctrl+shift+[  Focus the next / previous pane
     ctrl+shift+k               Search the tabs
+    ctrl+shift+f               Find in the output
+    alt+1 … alt+8, alt+9       Select a tab by position, and the last one
     ctrl+pageup/pagedown       Select the previous/next tab
     ctrl+tab / ctrl+shift+tab  The same step, on the chord browsers use
     ctrl+shift+pageup/pagedown Move the active tab
+    ctrl+alt+up / ctrl+alt+down  Select the block above / below, and copy it with ctrl+shift+c
+    shift+pageup/pagedown      Page the output
+    alt+home / alt+end         Scroll it to its top / bottom
     ctrl+plus / ctrl+minus     Make the terminal's text bigger / smaller
     ctrl+0                     Put the text back to its default size
 
@@ -2966,6 +2981,59 @@ mod tests {
                 "--help documents {flag}, which the parser has never heard of"
             );
         }
+    }
+
+    #[test]
+    fn every_command_the_shipped_tables_bind_has_a_line_in_the_help() {
+        // The other direction for the keys: the tables grew a find bar, the
+        // numbered tabs, the pane focus chords and the paging chords, and the
+        // lists in --help stayed at the ten they were written with — one of
+        // them without the block chords the other had. Every command a table
+        // binds has one of its chords in the help, spelled as the table
+        // spells it, so a chord the table gains is a line the help owes.
+        let help = help_text();
+        for (platform, table) in [
+            ("macOS", crate::keybindings::DEFAULTS_MAC),
+            ("Linux", crate::keybindings::DEFAULTS_OTHER),
+        ] {
+            let mut commands: Vec<&str> = table.iter().map(|(_, command)| *command).collect();
+            commands.sort_unstable();
+            commands.dedup();
+            for command in commands {
+                let mentioned = table
+                    .iter()
+                    .filter(|(_, bound)| *bound == command)
+                    .any(|(chord, _)| help.contains(chord) || spelled_out(chord, &help));
+                assert!(
+                    mentioned,
+                    "{platform}: no chord of {command} is in --help's KEYS"
+                );
+            }
+        }
+    }
+
+    /// Whether the help spells `chord` some way other than the table's: a
+    /// pair of keys on one line (`left/right`, `pageup/pagedown`), the four
+    /// arrows as a family, a run of digits as a range, `=` and `-` as the
+    /// words on the keys.
+    fn spelled_out(chord: &str, help: &str) -> bool {
+        let (modifiers, key) = chord.rsplit_once('+').unwrap_or(("", chord));
+        let spellings: &[String] = match key {
+            "left" | "right" => &[
+                format!("{modifiers}+left/right"),
+                format!("{modifiers}+arrows"),
+            ],
+            "up" | "down" => &[
+                format!("{modifiers}+up/down"),
+                format!("{modifiers}+arrows"),
+            ],
+            "pageup" | "pagedown" => &[format!("{modifiers}+pageup/pagedown")],
+            "2" | "3" | "4" | "5" | "6" | "7" | "8" => &[format!("{modifiers}+1 … {modifiers}+8")],
+            "=" | "+" => &[format!("{modifiers}+plus")],
+            "-" | "_" => &[format!("{modifiers}+minus")],
+            _ => &[],
+        };
+        spellings.iter().any(|spelling| help.contains(spelling))
     }
 
     /// Whether a pool of `workers` can still run a task once
