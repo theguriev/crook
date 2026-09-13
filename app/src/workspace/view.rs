@@ -725,6 +725,10 @@ pub struct Workspace {
     /// keeping *one* of it is what stops the panel and the page from
     /// disagreeing about what exists.
     themes: Vec<Available>,
+    /// The files in the themes folder that are not themes yet, read with
+    /// [`Self::themes`] and shown under them, so the person who just saved a
+    /// file with a mistake in it sees the mistake where they are looking.
+    unreadable_themes: Vec<crate::theme::Unreadable>,
     /// The theme that was in force when the creator opened, to put back if it
     /// is cancelled.
     theme_before_draft: Option<String>,
@@ -938,6 +942,7 @@ impl Workspace {
             block_menu: BlockMenuState::default(),
             panel: ThemePanelState::default(),
             themes: crate::theme::available(),
+            unreadable_themes: Vec::new(),
             theme_before_draft: None,
             themes_directory: crate::theme::user_themes_directory(),
             worktrees_directory: worktree_store(),
@@ -1876,6 +1881,12 @@ impl Workspace {
         &self.themes
     }
 
+    /// The files in the themes folder that could not be read, as of the same
+    /// reading as [`Self::themes`].
+    pub(super) fn unreadable_themes(&self) -> &[crate::theme::Unreadable] {
+        &self.unreadable_themes
+    }
+
     /// Points the themes folder somewhere else.
     ///
     /// For a test, and for a run that must not read or write the folder of
@@ -1897,10 +1908,12 @@ impl Workspace {
     /// Re-reads the themes folder, and keeps the keyboard's row pointing at
     /// the theme in force.
     fn refresh_themes(&mut self) {
-        self.themes = match self.themes_directory.as_deref() {
-            Some(directory) => crate::theme::available_in(directory),
-            None => crate::theme::available(),
+        let listing = match self.themes_directory.as_deref() {
+            Some(directory) => crate::theme::listing_in(directory),
+            None => crate::theme::listing(),
         };
+        self.themes = listing.available;
+        self.unreadable_themes = listing.unreadable;
         self.select_theme_in_force();
     }
 
@@ -1928,13 +1941,13 @@ impl Workspace {
         let reading = ctx.background().spawn(async move {
             std::thread::sleep(THEMES_POLL);
             match directory.as_deref() {
-                Some(directory) => crate::theme::available_in(directory),
-                None => crate::theme::available(),
+                Some(directory) => crate::theme::listing_in(directory),
+                None => crate::theme::listing(),
             }
         });
 
-        ctx.spawn(reading, |workspace, themes, ctx| {
-            workspace.adopt_themes(themes, ctx);
+        ctx.spawn(reading, |workspace, listing, ctx| {
+            workspace.adopt_themes(listing, ctx);
             workspace.watch_themes(ctx);
         })
         .detach();
@@ -1946,14 +1959,18 @@ impl Workspace {
     /// By *name*, which is the only way an edit can be noticed: the palette in
     /// force is the old one, so looking the theme up by palette would find the
     /// row it used to be and conclude nothing had happened.
-    fn adopt_themes(&mut self, themes: Vec<crate::theme::Available>, ctx: &mut ViewContext<Self>) {
+    fn adopt_themes(&mut self, listing: crate::theme::Listing, ctx: &mut ViewContext<Self>) {
         // The creator paints a draft on the window. Re-applying anything under
         // it would replace a palette somebody is in the middle of choosing.
-        if !self.panel.open || self.panel.mode == Mode::Creating || self.themes == themes {
+        if !self.panel.open
+            || self.panel.mode == Mode::Creating
+            || (self.themes == listing.available && self.unreadable_themes == listing.unreadable)
+        {
             return;
         }
 
-        self.themes = themes;
+        self.themes = listing.available;
+        self.unreadable_themes = listing.unreadable;
         let name = self.settings.theme().to_owned();
         if let Some(edited) = self
             .themes

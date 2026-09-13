@@ -103,11 +103,36 @@ pub fn user_themes_directory() -> Option<PathBuf> {
     dirs::config_dir().map(|directory| directory.join("crook").join(THEMES_DIRECTORY))
 }
 
+/// A theme file that could not be read, and why.
+///
+/// Carried rather than dropped with a line in the log: the person who wrote
+/// the file is looking at the Themes panel to see it appear, and a panel that
+/// says nothing sends them to a log they may not know exists. The panel prints
+/// the file and the sentence, which is the same sentence the log got.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unreadable {
+    /// The file.
+    pub path: PathBuf,
+    /// What was wrong with it, as [`read`] put it.
+    pub why: String,
+}
+
+/// What a themes directory held: the themes that read, and the files that did
+/// not.
+#[derive(Clone, Debug, Default)]
+pub struct Read {
+    /// Sorted by name and then by path — see [`load_themes_in`].
+    pub themes: Vec<ThemeFile>,
+    /// In path order, which is the order they were found in.
+    pub unreadable: Vec<Unreadable>,
+}
+
 /// Every theme file under the user's themes directory, sorted by name.
 ///
-/// Failures are logged and skipped — a missing directory is the ordinary state
-/// of a machine that has never written a theme, and an unparseable file is one
-/// theme fewer rather than an error anybody has to act on.
+/// Failures are skipped — a missing directory is the ordinary state of a
+/// machine that has never written a theme, and an unparseable file is one
+/// theme fewer rather than an error anybody has to act on; [`read_themes_in`]
+/// is the reader that says which files those were.
 pub fn load_user_themes() -> Vec<ThemeFile> {
     match user_themes_directory() {
         Some(directory) => load_themes_in(&directory),
@@ -122,14 +147,20 @@ pub fn load_user_themes() -> Vec<ThemeFile> {
 /// hand the same two themes to the chooser in a different order on every
 /// launch.
 pub fn load_themes_in(directory: &Path) -> Vec<ThemeFile> {
-    let mut themes = Vec::new();
-    collect(directory, 0, &mut themes);
-    themes.sort_by(|left, right| left.name.cmp(&right.name).then(left.path.cmp(&right.path)));
-    themes
+    read_themes_in(directory).themes
+}
+
+/// The themes in `directory`, and the files there that could not be read.
+pub fn read_themes_in(directory: &Path) -> Read {
+    let mut read = Read::default();
+    collect(directory, 0, &mut read);
+    read.themes
+        .sort_by(|left, right| left.name.cmp(&right.name).then(left.path.cmp(&right.path)));
+    read
 }
 
 /// Reads every theme in `directory`, and in the directories under it.
-fn collect(directory: &Path, depth: usize, themes: &mut Vec<ThemeFile>) {
+fn collect(directory: &Path, depth: usize, read: &mut Read) {
     if depth > MAX_DEPTH {
         log::warn!("{} is nested too deeply to search", directory.display());
         return;
@@ -154,7 +185,7 @@ fn collect(directory: &Path, depth: usize, themes: &mut Vec<ThemeFile>) {
 
     for path in paths {
         if path.is_dir() {
-            collect(&path, depth + 1, themes);
+            collect(&path, depth + 1, read);
             continue;
         }
 
@@ -166,9 +197,18 @@ fn collect(directory: &Path, depth: usize, themes: &mut Vec<ThemeFile>) {
             continue;
         }
 
-        match read(&path) {
-            Ok(theme) => themes.push(theme),
-            Err(error) => log::warn!("skipping {} ({error:#})", path.display()),
+        match self::read(&path) {
+            Ok(theme) => read.themes.push(theme),
+            // Debug rather than warn, because the Themes panel says it — and
+            // the panel re-reads the folder while it is open, which at warn
+            // was the same sentence in the log every second.
+            Err(error) => {
+                log::debug!("skipping {} ({error:#})", path.display());
+                read.unreadable.push(Unreadable {
+                    path,
+                    why: format!("{error:#}"),
+                });
+            }
         }
     }
 }

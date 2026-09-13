@@ -7265,6 +7265,35 @@ fn the_settings_page_shows_the_theme_in_force_and_opens_the_panel() {
 }
 
 #[test]
+fn a_theme_file_that_could_not_be_read_is_a_row_that_says_why() {
+    // The person who just saved a file with a mistake in it is looking at the
+    // panel for it to appear. It used to appear nowhere, with the reason on a
+    // log line they may not know exists; now it is under the list, by name,
+    // with the reader's own sentence.
+    let mut harness = Harness::new(1);
+    let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+    let themes = Scratch::new();
+    fs::write(
+        themes.path().join("almost.yaml"),
+        "name: Almost\nbackground: \"#101418\"\n",
+    )
+    .expect("the scratch folder is writable");
+    harness.set_themes_directory(themes.path().to_owned());
+
+    harness.open_theme_panel();
+    // Tall enough for every row that ships and the one under them.
+    let text = frame_text(&harness.frame_sized(vec2f(1024., 2400.)));
+    assert!(
+        text.contains("almost.yaml") && text.contains("could not be read"),
+        "the panel does not say the file could not be read: {text:?}"
+    );
+    assert!(
+        !text.contains("Almost"),
+        "a file that could not be read was listed as a theme: {text:?}"
+    );
+}
+
+#[test]
 fn choosing_a_theme_in_the_panel_repaints_saves_and_reaches_the_shells() {
     // The whole of what applying a theme has to do. The last of the three is
     // the one that is easy to miss: a grid resolves its colours through a

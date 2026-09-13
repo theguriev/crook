@@ -246,15 +246,43 @@ fn a_directory_of_themes_is_walked_into_its_subdirectories() {
     fs::write(root.join("notes.txt"), SOLARIZED).expect("writable");
     fs::write(root.join("broken.yaml"), "background: \"#fff\"\n").expect("writable");
 
-    let mut themes = Vec::new();
-    collect(&root, 0, &mut themes);
-    let mut names: Vec<&str> = themes.iter().map(|theme| theme.name.as_str()).collect();
+    let read = read_themes_in(&root);
+    let mut names: Vec<&str> = read
+        .themes
+        .iter()
+        .map(|theme| theme.name.as_str())
+        .collect();
     names.sort_unstable();
 
     assert_eq!(
         names,
         ["Solarized Dark", "Solarized Dark"],
         "the walk found {names:?} rather than the two themes"
+    );
+
+    // And the file that did not parse is carried out by name, with the
+    // reason — it is what the Themes panel prints under the list. The wrong
+    // extension is not on it: that file was never a theme file.
+    let unreadable: Vec<(String, &str)> = read
+        .unreadable
+        .iter()
+        .map(|file| {
+            (
+                file.path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                file.why.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(unreadable.len(), 1, "{unreadable:?}");
+    assert_eq!(unreadable[0].0, "broken.yaml");
+    assert!(
+        unreadable[0].1.contains("foreground"),
+        "the reason does not say what is missing: {:?}",
+        unreadable[0].1
     );
 
     let _ = fs::remove_dir_all(&root);

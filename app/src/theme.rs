@@ -40,7 +40,10 @@ mod file;
 mod omarchy;
 
 pub use builtin::{BUILTIN, Builtin, DARK, builtin_named};
-pub use file::{ThemeFile, load_themes_in, load_user_themes, user_themes_directory, write_theme};
+pub use file::{
+    ThemeFile, Unreadable, load_themes_in, load_user_themes, read_themes_in, user_themes_directory,
+    write_theme,
+};
 
 /// A palette, in the roles the interface asks for.
 ///
@@ -348,10 +351,7 @@ impl Available {
 /// watcher, a channel or a second thing that can be stale. A theme dropped in
 /// while Crook is running shows up the next time the chooser is opened.
 pub fn available() -> Vec<Available> {
-    match user_themes_directory() {
-        Some(directory) => available_in(&directory),
-        None => builtins(),
-    }
+    listing().available
 }
 
 /// The same, from a themes directory named outright.
@@ -360,9 +360,36 @@ pub fn available() -> Vec<Available> {
 /// be asserting something about the machine it runs on, and a test that
 /// *wrote* a theme would write into the themes folder of whoever ran it.
 pub fn available_in(directory: &Path) -> Vec<Available> {
+    listing_in(directory).available
+}
+
+/// What the chooser lists: every theme that can be chosen, and every file in
+/// the themes folder that could not be read.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Listing {
+    /// The built-in themes, then the folder's, as [`available`] orders them.
+    pub available: Vec<Available>,
+    /// The files that are not themes yet, with what is wrong with each.
+    pub unreadable: Vec<Unreadable>,
+}
+
+/// [`Listing`] for the user's themes directory.
+pub fn listing() -> Listing {
+    match user_themes_directory() {
+        Some(directory) => listing_in(&directory),
+        None => Listing {
+            available: builtins(),
+            unreadable: Vec::new(),
+        },
+    }
+}
+
+/// [`Listing`] for a themes directory named outright.
+pub fn listing_in(directory: &Path) -> Listing {
+    let read = read_themes_in(directory);
     let mut themes = builtins();
 
-    for file in load_themes_in(directory) {
+    for file in read.themes {
         let entry = Available {
             name: file.name,
             theme: file.theme,
@@ -387,7 +414,10 @@ pub fn available_in(directory: &Path) -> Vec<Available> {
     }
 
     disambiguate(&mut themes);
-    themes
+    Listing {
+        available: themes,
+        unreadable: read.unreadable,
+    }
 }
 
 /// The themes that ship in the binary, as choosable entries.
