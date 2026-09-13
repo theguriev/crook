@@ -16552,6 +16552,27 @@ mod sandboxed {
             let scene = harness.frame();
             assert!(says(&scene, "Nothing here yet"), "{}", frame_text(&scene));
             assert!(says(&scene, "Never looked"), "{}", frame_text(&scene));
+            // The whole sentence, wrapped: as one `Text` it ended at the
+            // panel's edge after the button's name, and what the button does
+            // — the reason the sentence exists — was drawn past it. A scene
+            // clips nothing, so the proof is the wrapping itself: the line
+            // that starts the sentence does not also end it.
+            let panel = panel_box(&scene);
+            let lines = text_lines(&scene, |at| panel.contains_point(at));
+            let (_, first) = lines
+                .iter()
+                .find(|(_, line)| line.contains("Nothing here yet"))
+                .expect("the sentence starts somewhere in the panel");
+            assert!(
+                !first.contains("request"),
+                "the sentence is one line, cut at the panel's edge: {first:?}"
+            );
+            assert!(
+                lines
+                    .iter()
+                    .any(|(_, line)| line.contains("with the request")),
+                "the end of the sentence is not in the panel: {lines:?}"
+            );
         }
 
         #[test]

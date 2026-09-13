@@ -278,9 +278,14 @@ fn list(
     .finish();
 
     let body = if matching.is_empty() {
+        // Wrapped, not cut: the sentence that says what the button under
+        // the list does is three lines in a panel this wide, and as a `Text`
+        // it ended at the edge after "Look for plugins" — which read as the
+        // whole sentence, and was not.
         Container::new(
-            Text::new(nothing_to_show(known), ui, widgets::LABEL_SIZE)
+            Paragraph::new(nothing_to_show(known).to_owned(), ui, widgets::LABEL_SIZE)
                 .with_color(theme().text_muted)
+                .with_line_height_ratio(1.4)
                 .finish(),
         )
         .with_uniform_padding(8.)

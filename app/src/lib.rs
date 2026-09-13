@@ -635,9 +635,6 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                     .next()
                     .context("`--search` needs something to search for")?;
                 overrides.search = Some(query);
-                if overrides.settings.is_none() {
-                    overrides.settings = Some(None);
-                }
             }
             "--find" => {
                 let query = args
@@ -777,6 +774,15 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
         }
     }
 
+    // `--search` with no section named is the settings page's box, and it
+    // opens the page: a query with no list to filter is nothing to look at.
+    // With a section named it is that section's box — the Store's, the
+    // Plugins page's — which is why the implication is decided here, once
+    // both flags have been read, rather than in the arm for either.
+    if overrides.search.is_some() && overrides.section.is_none() && overrides.settings.is_none() {
+        overrides.settings = Some(None);
+    }
+
     match snapshot {
         Some(path) => Ok(Startup::Snapshot { path, overrides }),
         None => Ok(Startup::Window { frames, overrides }),
@@ -881,7 +887,9 @@ OPTIONS:
                        title: `appearance`, `shell`, `keyboard shortcuts` (quoted)
                        or `about`, or a plugin\'s own
     --find <TEXT>      Type TEXT into the tabs panel\'s search box, filtering the list
-    --search <TEXT>    Type TEXT into the settings page\'s search box, opening it
+    --search <TEXT>    Type TEXT into the settings page\'s search box, opening it;
+                       with --section, into that section\'s box instead — the
+                       Store\'s registry search, the Plugins page\'s
     --record <COMMAND> Start with the Keyboard Shortcuts page recording a chord for
                        COMMAND, which is an action name like `crook/window/new-tab`
     --theme <NAME>     Start in this theme rather than the saved one
@@ -1230,7 +1238,10 @@ fn apply_overrides(
         }
     }
     if let Some(query) = &overrides.search {
-        workspace.type_into_settings_search(query, ctx);
+        match overrides.section.is_some() {
+            true => workspace.type_into_section_search(query, ctx),
+            false => workspace.type_into_settings_search(query, ctx),
+        }
     }
     // After `--section`, so that a run asking for both ends where the box is:
     // typing into it shows the tabs, whichever section was named.
@@ -2869,6 +2880,29 @@ mod tests {
                 overrides: Overrides::default()
             }
         );
+    }
+
+    #[test]
+    fn search_opens_the_settings_unless_a_section_was_named() {
+        let alone = parse(&["--search", "font"]).expect("valid");
+        assert!(matches!(
+            alone,
+            Startup::Window {
+                overrides: Overrides {
+                    settings: Some(None),
+                    ..
+                },
+                ..
+            }
+        ));
+        let store = parse(&["--section", "Store", "--search", "pir"]).expect("valid");
+        assert!(matches!(
+            store,
+            Startup::Window {
+                overrides: Overrides { settings: None, .. },
+                ..
+            }
+        ));
     }
 
     #[test]
