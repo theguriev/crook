@@ -17,7 +17,11 @@
 //!
 //! Greedy and word-based: the longest run of words that fits goes on the line.
 //! No hyphenation and no penalty function — this is a settings description,
-//! not a book.
+//! not a book. A word wider than the line on its own — a branch, a path, a
+//! plugin id — is cut at the line's end with an ellipsis, the way a
+//! [`Text`](super::Text) is, rather than painted past the box: what it starts
+//! with is what it is, and a box is what its neighbours were laid out
+//! against.
 
 use std::borrow::Cow;
 
@@ -31,6 +35,8 @@ use crate::fonts::{
 use crate::geometry::{Color, Point, RectF, Vector2F, vec2f};
 use crate::presenter::{EventContext, LayoutContext, PaintContext};
 use crate::text_layout::Line;
+
+use super::text::{Cut, cut_line};
 
 /// Draws text over as many lines as it takes.
 pub struct Paragraph {
@@ -84,6 +90,11 @@ impl Paragraph {
 
     /// Shapes one run of text against an unbounded width.
     fn shape(&self, text: &str, ctx: &mut LayoutContext) -> Line {
+        self.shape_within(text, f32::INFINITY, ctx)
+    }
+
+    /// Shapes one run of text against `max_width`.
+    fn shape_within(&self, text: &str, max_width: f32, ctx: &mut LayoutContext) -> Line {
         let style_runs = [(
             0..text.len(),
             StyleAndFont::new(self.font_family, self.properties, TextStyle::default()),
@@ -97,7 +108,7 @@ impl Paragraph {
                 fixed_width_tab_size: None,
             },
             &style_runs,
-            f32::INFINITY,
+            max_width,
         )
     }
 }
@@ -108,9 +119,10 @@ impl Paragraph {
 /// without a layout pass: it is arithmetic on measurements, and the
 /// measurements are the only thing that needs a shaper.
 ///
-/// A word wider than `width` gets a line of its own and overflows it — the
-/// alternative is breaking inside a word, which for a path or a plugin id is
-/// worse than a line that runs long.
+/// A word wider than `width` gets a line of its own, and overflows it here —
+/// the alternative is breaking inside a word, which for a path or a plugin id
+/// is worse than a line that runs long. The layout cuts that line at its end
+/// with an ellipsis, once it is shaped; this only decides where lines start.
 fn break_lines(text: &str, width: f32, x_of: impl Fn(usize) -> f32) -> Vec<std::ops::Range<usize>> {
     let words: Vec<(usize, usize)> = text
         .split_whitespace()
@@ -153,16 +165,25 @@ impl Element for Paragraph {
         // Once, unbounded, to find out where every character is. `Wrap::None`
         // is what the shaper does with a finite width, so a bounded call would
         // hand back the same single line and no more information.
+        let max_width = constraint.max.x();
         let measured = self.shape(&self.text, ctx);
-        let ranges = break_lines(&self.text, constraint.max.x(), |index| {
-            measured.x_for_index(index)
-        });
+        let ranges = break_lines(&self.text, max_width, |index| measured.x_for_index(index));
 
         self.lines = ranges
             .into_iter()
             .map(|range| {
-                let text = self.text[range].to_owned();
-                self.shape(&text, ctx)
+                let text = &self.text[range];
+                let line = self.shape(text, ctx);
+                // Only a word that overran a finite width is cut: an unbounded
+                // axis is a flex measuring, and the breaking above leaves no
+                // other line wider than it was given.
+                if max_width.is_finite() && line.width > max_width {
+                    cut_line(text, &line, Cut::End, max_width, |text, width| {
+                        self.shape_within(text, width, ctx)
+                    })
+                } else {
+                    line
+                }
             })
             .collect();
 
@@ -237,7 +258,9 @@ mod tests {
     #[test]
     fn a_word_wider_than_the_line_gets_one_of_its_own_and_overflows_it() {
         // Breaking inside a word is worse than a line that runs long: a path
-        // or a plugin id broken in half is a thing nobody can copy.
+        // or a plugin id broken in half reads as two. The layout cuts the
+        // long line with an ellipsis once it is shaped; the breaking hands it
+        // over whole.
         assert_eq!(
             lines("a supercalifragilistic b", 8.),
             ["a", "supercalifragilistic", "b"]

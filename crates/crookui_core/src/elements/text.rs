@@ -16,6 +16,80 @@ use crate::text_layout::Line;
 /// The mark a line that did not fit ends in, or starts with.
 const ELLIPSIS: char = '\u{2026}';
 
+/// The longest part of `text` that, with an ellipsis at the end that gave
+/// way, fits in `max_width` — shaped by `shape`, so the answer is a line and
+/// not a guess. `line` is the whole text as `shape` laid it out unbounded.
+///
+/// Shared by [`Text`] and by [`Paragraph`](super::Paragraph), whose one word
+/// too wide for its line is cut the way a label is, so that the two ends look
+/// the same wherever they meet.
+///
+/// The first cut is read off the full line's glyph advances: the ellipsis
+/// takes its room from the end being cut, and the glyphs that no longer fit
+/// name the byte the text is cut at. For a cut at the end that is the
+/// *lowest* byte among them, for a cut at the start the highest byte among
+/// the glyphs that do fit — either way the whole of a ligature or a bidi run
+/// goes with the cut side, because a glyph's byte index is neither injective
+/// nor monotonic and a cut inside one would draw half of it. Reshaping can
+/// then come out a hair wider than the sum of the parts (kerning against the
+/// ellipsis), so the cut backs off a character at a time until the shaped
+/// line fits. Three tries has never been too few; past that the ellipsis
+/// alone is drawn, which is still a whole mark.
+pub(super) fn cut_line(
+    text: &str,
+    line: &Line,
+    cut: Cut,
+    max_width: f32,
+    mut shape: impl FnMut(&str, f32) -> Line,
+) -> Line {
+    let ellipsis = ELLIPSIS.to_string();
+    let room = max_width - shape(&ellipsis, f32::INFINITY).width;
+    if room <= 0. {
+        return shape(&ellipsis, max_width);
+    }
+
+    let glyphs = line.runs.iter().flat_map(|run| &run.glyphs);
+    let mut at = match cut {
+        Cut::End => glyphs
+            .filter(|glyph| glyph.position_along_baseline.x() + glyph.width > room)
+            .map(|glyph| glyph.index)
+            .min()
+            .unwrap_or(text.len()),
+        Cut::Start => glyphs
+            .filter(|glyph| glyph.position_along_baseline.x() < line.width - room)
+            .map(|glyph| glyph.index)
+            .max()
+            .and_then(|index| text[index..].chars().next().map(|c| index + c.len_utf8()))
+            .unwrap_or(0),
+    };
+
+    for _ in 0..3 {
+        let shorter = match cut {
+            Cut::End => format!("{}{ellipsis}", &text[..at]),
+            Cut::Start => format!("{ellipsis}{}", &text[at..]),
+        };
+        let line = shape(&shorter, max_width);
+        let nothing_left = match cut {
+            Cut::End => at == 0,
+            Cut::Start => at >= text.len(),
+        };
+        if line.width <= max_width || nothing_left {
+            return line;
+        }
+        at = match cut {
+            Cut::End => text[..at]
+                .char_indices()
+                .next_back()
+                .map_or(0, |(index, _)| index),
+            Cut::Start => text[at..]
+                .chars()
+                .next()
+                .map_or(text.len(), |c| at + c.len_utf8()),
+        };
+    }
+    shape(&ellipsis, max_width)
+}
+
 /// Which end of a line gives way when it does not fit.
 ///
 /// A name loses its end: what it starts with is what it is. A path loses its
@@ -104,74 +178,11 @@ impl Text {
         )
     }
 
-    /// The longest part of the text that, with an ellipsis at the end that
-    /// gave way, fits in `max_width` — shaped, so the answer is a line and
-    /// not a guess.
-    ///
-    /// The first cut is read off the full line's glyph advances: the ellipsis
-    /// takes its room from the end being cut, and the glyphs that no longer
-    /// fit name the byte the text is cut at. For a cut at the end that is the
-    /// *lowest* byte among them, for a cut at the start the highest byte
-    /// among the glyphs that do fit — either way the whole of a ligature or a
-    /// bidi run goes with the cut side, because a glyph's byte index is
-    /// neither injective nor monotonic and a cut inside one would draw half
-    /// of it. Reshaping can then come out a hair wider than the sum of the
-    /// parts (kerning against the ellipsis), so the cut backs off a character
-    /// at a time until the shaped line fits. Three tries has never been too
-    /// few; past that the ellipsis alone is drawn, which is still a whole
-    /// mark.
+    /// [`cut_line`] over this text, shaped the way this element shapes.
     fn cut(&self, line: &Line, cut: Cut, ctx: &mut LayoutContext, max_width: f32) -> Line {
-        let ellipsis = ELLIPSIS.to_string();
-        let room = max_width - self.shape(&ellipsis, ctx, f32::INFINITY).width;
-        if room <= 0. {
-            return self.shape(&ellipsis, ctx, max_width);
-        }
-
-        let glyphs = line.runs.iter().flat_map(|run| &run.glyphs);
-        let mut at = match cut {
-            Cut::End => glyphs
-                .filter(|glyph| glyph.position_along_baseline.x() + glyph.width > room)
-                .map(|glyph| glyph.index)
-                .min()
-                .unwrap_or(self.text.len()),
-            Cut::Start => glyphs
-                .filter(|glyph| glyph.position_along_baseline.x() < line.width - room)
-                .map(|glyph| glyph.index)
-                .max()
-                .and_then(|index| {
-                    self.text[index..]
-                        .chars()
-                        .next()
-                        .map(|c| index + c.len_utf8())
-                })
-                .unwrap_or(0),
-        };
-
-        for _ in 0..3 {
-            let shorter = match cut {
-                Cut::End => format!("{}{ellipsis}", &self.text[..at]),
-                Cut::Start => format!("{ellipsis}{}", &self.text[at..]),
-            };
-            let line = self.shape(&shorter, ctx, max_width);
-            let nothing_left = match cut {
-                Cut::End => at == 0,
-                Cut::Start => at >= self.text.len(),
-            };
-            if line.width <= max_width || nothing_left {
-                return line;
-            }
-            at = match cut {
-                Cut::End => self.text[..at]
-                    .char_indices()
-                    .next_back()
-                    .map_or(0, |(index, _)| index),
-                Cut::Start => self.text[at..]
-                    .chars()
-                    .next()
-                    .map_or(self.text.len(), |c| at + c.len_utf8()),
-            };
-        }
-        self.shape(&ellipsis, ctx, max_width)
+        cut_line(&self.text, line, cut, max_width, |text, width| {
+            self.shape(text, ctx, width)
+        })
     }
 
     /// Sets the glyph color.

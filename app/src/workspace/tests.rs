@@ -4633,23 +4633,18 @@ fn spare_checkout(harness: &mut Harness, tab: TabId, store: &Path, made: &[PathB
     path
 }
 
-#[test]
-fn the_sweep_s_sentence_is_broken_where_the_popup_s_width_says() {
-    // "Removing 3 of 6: <branch>…" names a branch, and a branch can be long.
-    // The line was once broken at a count of characters guessed against one
-    // face; it is broken by measure now, so what the test holds it to is the
-    // border itself: every line ends inside the popup, and the words are all
-    // there. Against a real repository, because the branch named is the
-    // first free checkout and nothing shorter than a real one would break.
+/// The sweep staged part way through removing a checkout on `branch`, and
+/// the lines of its "Removing 3 of 6: …" sentence.
+///
+/// Against a real repository, because the branch named is the first free
+/// checkout and nothing shorter than a real one would break. `None` where
+/// there is no git to make one with.
+fn sweep_sentence_over(branch: &str) -> Option<Vec<(Vector2F, String)>> {
     let scratch = Scratch::new();
     let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
         eprintln!("skipped: no git here to make a repository with");
-        return;
+        return None;
     };
-    // Long enough that the sentence cannot be one line, and short enough to
-    // be one itself: a word wider than the popup gets a line of its own and
-    // overflows it, which is a different rough edge from this one.
-    let branch = "feature/named-the-way-people-do";
     let checkout = scratch.path().join("checkout");
     let added = crate::process::command("git")
         .args(["worktree", "add", "--quiet", "-b", branch])
@@ -4685,10 +4680,6 @@ fn the_sweep_s_sentence_is_broken_where_the_popup_s_width_says() {
             .skip_while(|(_, text)| !text.starts_with("Removing 3 of 6:"))
             .take_while(|(_, text)| !text.starts_with("Stop"))
             .collect();
-    assert!(
-        lines.len() > 1,
-        "the sentence was not broken at all: {lines:?}"
-    );
     for (start, text) in &lines {
         let end = start.x() + text.chars().count() as f32 * super::tab_menu::PATH_SIZE * 0.5;
         assert!(
@@ -4697,11 +4688,58 @@ fn the_sweep_s_sentence_is_broken_where_the_popup_s_width_says() {
             menu.max_x()
         );
     }
+    Some(lines)
+}
+
+#[test]
+fn the_sweep_s_sentence_is_broken_where_the_popup_s_width_says() {
+    // "Removing 3 of 6: <branch>…" names a branch, and a branch can be long.
+    // The line was once broken at a count of characters guessed against one
+    // face; it is broken by measure now, so what the test holds it to is the
+    // border itself: every line ends inside the popup, and the words are all
+    // there.
+    //
+    // Long enough that the sentence cannot be one line, and short enough to
+    // be one itself: a word wider than the popup is the next test's.
+    let branch = "feature/named-the-way-people-do";
+    let Some(lines) = sweep_sentence_over(branch) else {
+        return;
+    };
+    assert!(
+        lines.len() > 1,
+        "the sentence was not broken at all: {lines:?}"
+    );
     let joined: Vec<&str> = lines.iter().map(|(_, text)| text.as_str()).collect();
     assert_eq!(
         joined.join(" "),
         format!("Removing 3 of 6: {branch}…"),
         "wrapping dropped or duplicated a word"
+    );
+}
+
+#[test]
+fn a_branch_wider_than_the_popup_is_cut_with_a_mark_and_not_at_the_border() {
+    // A branch with no space to break at is one word, and a word wider than
+    // the popup used to be drawn whole and clipped at the border — cut at
+    // whatever hyphen fell there, which read as the name. A paragraph cuts
+    // it the way a label is cut: at the glyph that leaves room for an
+    // ellipsis, so that the mark says there is more.
+    let branch = "feature/a-branch-named-at-the-length-people-name-them";
+    let Some(lines) = sweep_sentence_over(branch) else {
+        return;
+    };
+    let named = lines
+        .iter()
+        .map(|(_, text)| text.as_str())
+        .find(|text| text.starts_with("feature/"))
+        .unwrap_or_else(|| panic!("no line names the branch: {lines:?}"));
+    assert!(
+        named.ends_with('…') && named.len() < branch.len(),
+        "{named:?} was not cut with a mark"
+    );
+    assert!(
+        branch.starts_with(named.trim_end_matches('…')),
+        "{named:?} is not the start of {branch:?}"
     );
 }
 
