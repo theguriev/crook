@@ -479,20 +479,33 @@ fn height(row: &Row) -> f32 {
 /// target and an overshoot — against last frame's extent, so a switch into the
 /// taller list can be held short until the next arrow moves it.
 ///
-/// The height the row has to fit inside of is the one **this mode** caps the
-/// list at, and not `scroll.viewport()`: `tab` changes the cap and calls this
-/// in the same turn, so the measured viewport is still the list that was just
-/// left, and scrolling the kept row into a 408px window that is about to be a
-/// 306px one leaves it below the fold.
+/// The height the row has to fit inside of is the smaller of two: the one
+/// **this mode** caps the list at, and the one the last layout measured. Not
+/// the cap alone — a window too short for the card gives the list less, and
+/// a row scrolled into a 408px window that is really a 250px one is below
+/// the fold. Not the measurement alone either: `tab` changes the cap and
+/// calls this in the same turn, so the measured viewport is still the list
+/// that was just left, and scrolling the kept row into a 408px window that
+/// is about to be a 306px one leaves it below the fold too. The smaller of
+/// the two is right in a tall window and in a short one, and in the one
+/// case it is short — the taller list entered from the shorter — it scrolls a
+/// row further up than it had to, which the next arrow undoes. Before any
+/// layout the measurement is zero and says nothing, so the cap stands alone.
 pub(super) fn scroll_into_view(palette: &Palette, rows: &Rows) {
     let at = palette.selected();
     let top = rows.top(at);
     let own = rows.rows().get(at).map_or(list::ROW_HEIGHT, height);
     let reveal = rows.reveal(at);
-    let viewport = list::list_height(rows.mode());
+    let cap = list::list_height(rows.mode());
 
     let scroll = palette.scroll();
     let mut scroll = scroll.lock();
+    let measured = scroll.viewport();
+    let viewport = if measured > 0. {
+        cap.min(measured)
+    } else {
+        cap
+    };
     let offset = scroll.offset();
     if top - reveal < offset {
         scroll.scroll_to(top - reveal);
