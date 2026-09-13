@@ -6812,6 +6812,59 @@ fn the_heading_closes_every_tab_in_the_group() {
 }
 
 #[test]
+fn a_searched_group_s_heading_counts_the_group_and_says_what_the_search_left() {
+    // The heading counted the rows under it, which under a search are the
+    // ones the search kept: a group of two with one match read "1 tab", over
+    // a × that closes both. The count is the group's, and a search that hid
+    // some says so.
+    let (mut harness, group) = Harness::grouped_panel(3);
+    let members = harness.members_of(group);
+    let pane = harness.panes_of(members[0])[0];
+    harness.update_session(pane, |session| {
+        session.derived_title = Some("kettle".to_owned());
+    });
+    assert!(
+        panel_text(&harness.frame()).contains("2 tabs"),
+        "the group of two does not say so unsearched"
+    );
+
+    harness.click_panel_search();
+    harness.type_text("kettle");
+
+    let scene = harness.frame();
+    assert_eq!(
+        panel_rows(&scene).len(),
+        1,
+        "the search kept the wrong rows"
+    );
+    let text = panel_text(&scene);
+    assert!(
+        text.contains("1 of 2 tabs"),
+        "the heading does not say what the search left of the group: {text:?}"
+    );
+
+    // And the × still means the group: both members go, the loose tabs stay.
+    let heading = panel_heading(&scene);
+    harness.move_to(center(heading));
+    let scene = harness.frame();
+    let cross = icons_in(&scene, panel_box(&scene), Lucide::X)
+        .into_iter()
+        .find(|bounds| bounds.min_y() < heading.max_y() && bounds.max_y() > heading.min_y())
+        .expect("the heading drew no close button while it was hovered");
+    let survivors: Vec<TabId> = harness
+        .tab_ids()
+        .into_iter()
+        .filter(|tab| !members.contains(tab))
+        .collect();
+    harness.click(center(cross), MouseButton::Left);
+    assert_eq!(
+        harness.tab_ids(),
+        survivors,
+        "the × under a search closed something other than the group"
+    );
+}
+
+#[test]
 fn right_clicking_a_panel_row_opens_the_menu_too() {
     // The panel and the strip answer the same gesture, because the rule is
     // about the tab rather than about how the tab is drawn.

@@ -559,6 +559,9 @@ fn group_block(
         .iter()
         .any(|(tab, _)| workspace.tabs().is_active(*tab));
 
+    // Counted off the strip, not off the rows under the heading: the rows are
+    // the ones the search left, and the × on the heading closes the group.
+    let all = workspace.tabs().members(group).count();
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
@@ -566,7 +569,10 @@ fn group_block(
             workspace,
             group,
             data.name(),
-            members.len(),
+            Count {
+                shown: members.len(),
+                all,
+            },
             collapsed,
         ));
 
@@ -706,6 +712,35 @@ fn carried_plate(
         .finish()
 }
 
+/// How many tabs a group's heading speaks for: the ones in the group, and the
+/// ones of those the search left under the heading.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+struct Count {
+    shown: usize,
+    all: usize,
+}
+
+impl Count {
+    /// The heading's count, as it is printed.
+    ///
+    /// The group's size, whatever the search left of it, because the × beside
+    /// the count closes the group and the count is what says how much that
+    /// is. A search that hid some says so — "1 of 2 tabs" — rather than
+    /// printing the one row as if the group were one tab.
+    fn label(self) -> String {
+        let all = if self.all == 1 {
+            "1 tab".to_owned()
+        } else {
+            format!("{} tabs", self.all)
+        };
+        if self.shown < self.all {
+            format!("{} of {all}", self.shown)
+        } else {
+            all
+        }
+    }
+}
+
 /// A group's heading: a chevron saying which way it folds, its name, and how
 /// many tabs are under it.
 ///
@@ -717,7 +752,7 @@ fn heading(
     workspace: &Workspace,
     group: GroupId,
     name: &str,
-    members: usize,
+    count: Count,
     collapsed: bool,
 ) -> Box<dyn Element> {
     let Some(chrome) = workspace.group_chrome(group) else {
@@ -725,11 +760,7 @@ fn heading(
     };
     let ui = workspace.fonts().ui;
     let name = name.to_owned();
-    let count = if members == 1 {
-        "1 tab".to_owned()
-    } else {
-        format!("{members} tabs")
-    };
+    let count = count.label();
     let close = chrome.close.clone();
     let guard = chrome.close.clone();
 
@@ -1048,4 +1079,18 @@ fn empty_state(ui: FamilyId, query: &Query) -> Box<dyn Element> {
     )
     .with_uniform_padding(EMPTY_STATE_PADDING)
     .finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Count;
+
+    #[test]
+    fn the_count_is_the_group_s_and_says_what_a_search_left_of_it() {
+        assert_eq!(Count { shown: 1, all: 1 }.label(), "1 tab");
+        assert_eq!(Count { shown: 2, all: 2 }.label(), "2 tabs");
+        // Under a search that hid one: the × beside this closes two.
+        assert_eq!(Count { shown: 1, all: 2 }.label(), "1 of 2 tabs");
+        assert_eq!(Count { shown: 0, all: 3 }.label(), "0 of 3 tabs");
+    }
 }
