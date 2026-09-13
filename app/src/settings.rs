@@ -873,21 +873,52 @@ impl Settings {
 ///
 /// `group` names the group in the warning, which is the only thing that tells
 /// a person which half of their file the parser gave up on.
-fn parse_group<T: Default + for<'de> Deserialize<'de>>(
+fn parse_group<T: Default + Serialize + for<'de> Deserialize<'de>>(
     document: &Map<String, Value>,
     path: &Path,
     group: &str,
 ) -> T {
     match serde_json::from_value(Value::Object(document.clone())) {
         Ok(parsed) => parsed,
-        Err(err) => {
-            log::warn!(
-                "{} holds {group} this build cannot read ({err}); using defaults",
+        Err(_) => parse_group_key_by_key(document, path, group),
+    }
+}
+
+/// The same group, one key at a time, once the whole did not read.
+///
+/// A file is hand-edited: `"login_shell": "yes"` where a `true` was wanted,
+/// or a `view_mode` this build has never heard of. Serde refuses the whole
+/// struct for one such field, and defaulting the group for it took the type
+/// size down with a typo in the login switch — the very thing the two groups
+/// being parsed separately was meant to prevent, one level up. So each key
+/// the group owns is tried on its own against the defaults, and the one that
+/// does not read is the one that costs its default, with a line in the log
+/// that names it.
+fn parse_group_key_by_key<T: Default + Serialize + for<'de> Deserialize<'de>>(
+    document: &Map<String, Value>,
+    path: &Path,
+    group: &str,
+) -> T {
+    let Ok(mut kept) = owned_keys(T::default(), group) else {
+        return T::default();
+    };
+    for key in kept.keys().cloned().collect::<Vec<_>>() {
+        let Some(value) = document.get(&key) else {
+            continue;
+        };
+        let mut candidate = kept.clone();
+        candidate.insert(key.clone(), value.clone());
+        match serde_json::from_value::<T>(Value::Object(candidate)) {
+            Ok(_) => {
+                kept.insert(key, value.clone());
+            }
+            Err(err) => log::warn!(
+                "{} holds a `{key}` this build cannot read ({err}); using its default",
                 path.display()
-            );
-            T::default()
+            ),
         }
     }
+    serde_json::from_value(Value::Object(kept)).unwrap_or_default()
 }
 
 /// One group of options as the JSON keys it owns.
@@ -1365,6 +1396,41 @@ mod tests {
         .expect("the file should be a JSON object");
         assert_eq!(Some(&Value::from(7)), written.get("future_key"));
         assert_eq!(Some(&Value::from("compact")), written.get("view_mode"));
+    }
+
+    #[test]
+    fn test_a_key_this_build_cannot_read_costs_that_key_and_not_its_group() {
+        // A typo in one key used to default the whole group: `"login_shell":
+        // "yes"` took the font size with it, and a `view_mode` from another
+        // build took every tab option.
+        let scratch = ScratchDirectory::new("one-bad-key");
+        fs::write(
+            scratch.settings_file(),
+            r#"{"font_size": 15.0, "login_shell": "yes", "restore_session": false,
+                "view_mode": "cosy", "show_pr_link": false}"#,
+        )
+        .expect("the file should be writable");
+
+        let settings = Settings::load(scratch.settings_file());
+        let general = settings.general();
+        assert_eq!(
+            general.font_size(),
+            15.0,
+            "the font size was lost to a typo elsewhere"
+        );
+        assert!(!general.restore_session, "and so was the session switch");
+        assert_eq!(
+            general.login_shell,
+            GeneralOptions::default().login_shell,
+            "the key that could not be read takes its default"
+        );
+
+        let options = settings.tab_options();
+        assert!(
+            !options.show_pr_link,
+            "the tab option beside the unknown one was lost"
+        );
+        assert_eq!(options.density, TabOptions::default().density);
     }
 
     #[test]
