@@ -80,7 +80,7 @@ use std::time::Instant;
 
 use crook_terminal::{Snapshot, TerminalSize};
 use crookui_core::element::SizeConstraint;
-use crookui_core::elements::{MouseStateHandle, Padding};
+use crookui_core::elements::{MouseStateHandle, Padding, Paragraph};
 use crookui_core::event::{DispatchedEvent, Event, MouseButton};
 use crookui_core::fonts::{Properties, Weight};
 use crookui_core::geometry::{Point, Vector2F, vec2f};
@@ -166,6 +166,11 @@ const CHIP_GAP: f32 = 6.;
 
 /// The gap between the line being composed and the row of chips under it.
 const CHIPS_PADDING_TOP: f32 = 8.;
+
+/// How far the notice a pane with no grid shows sits under the pane's top
+/// edge: about a row of the grid the shell would have drawn there, so that
+/// the title stands where the first prompt would.
+const NOTICE_PADDING_TOP: f32 = 12.;
 
 /// How far the floating row is held off the corner it sits in.
 ///
@@ -868,27 +873,39 @@ impl Element for PaneSizer {
 }
 
 /// What a panel with no grid says.
+///
+/// Inset by the gutter the shell's own text is, so the title stands where a
+/// prompt would, and held to the pane: the title is cut with a mark where the
+/// pane runs out, and the reason wraps, because the one time it is a shell
+/// that could not be started its end is the part worth reading.
 fn notice(workspace: &Workspace, pane: &Pane, reason: String) -> Box<dyn Element> {
     let fonts = workspace.fonts();
 
-    Flex::column()
-        .with_main_axis_size(MainAxisSize::Max)
-        .with_spacing(9.)
-        .with_child(
-            Text::new(pane.title().to_owned(), fonts.ui, 16.)
-                .with_color(theme().text_primary)
-                .with_style(Properties {
-                    weight: Weight::Semibold,
-                    ..Default::default()
-                })
-                .finish(),
-        )
-        .with_child(
-            Text::new(reason, fonts.monospace, 12.5)
-                .with_color(theme().text_muted)
-                .finish(),
-        )
-        .finish()
+    Container::new(
+        Flex::column()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Start)
+            .with_spacing(9.)
+            .with_child(
+                Text::new(pane.title().to_owned(), fonts.ui, 16.)
+                    .with_color(theme().text_primary)
+                    .with_ellipsis(Cut::End)
+                    .with_style(Properties {
+                        weight: Weight::Semibold,
+                        ..Default::default()
+                    })
+                    .finish(),
+            )
+            .with_child(
+                Paragraph::new(reason, fonts.monospace, 12.5)
+                    .with_color(theme().text_muted)
+                    .finish(),
+            )
+            .finish(),
+    )
+    .with_horizontal_padding(GUTTER)
+    .with_vertical_padding(NOTICE_PADDING_TOP)
+    .finish()
 }
 
 /// An extent to lay out at, given a maximum that may be unbounded.
