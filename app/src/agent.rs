@@ -46,18 +46,18 @@ pub fn report(status: &str, title: Option<&str>) -> Result<()> {
         format!("`--agent` takes one of {}, not {status}", words.join(", "))
     })?;
 
-    let from_stdin;
     let title = match title {
         Some("-") => {
             let mut input = String::new();
             io::stdin().read_to_string(&mut input).context(
                 "`--title -` reads the hook's input from stdin, and it could not be read",
             )?;
-            from_stdin = title_from_hook(&input);
-            from_stdin.as_deref()
+            title_from_hook(&input)
         }
-        other => other,
+        Some(text) => presentable(text),
+        None => None,
     };
+    let title = title.as_deref();
 
     let mut terminal = terminal().context(
         "`--agent` writes to the terminal this was run in, and there is none: run it from a pane, or from a hook of a program in one",
@@ -91,10 +91,35 @@ fn terminal() -> io::Result<std::fs::File> {
 fn title_from_hook(input: &str) -> Option<String> {
     let parsed: Value = serde_json::from_str(input).ok()?;
     let prompt = parsed.get("prompt")?.as_str()?;
-    let line = prompt
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())?;
+    prompt.lines().find_map(presentable)
+}
+
+/// `text` as a row can print it, or `None` when nothing of it can be.
+///
+/// A control character becomes a space and a run of spaces becomes one, then
+/// the ends are trimmed and the line is cut to a row's width. The wire drops
+/// a title that still holds a control character — see
+/// [`crook_terminal::agent::report`] — and it used to receive one straight
+/// from the command line or a prompt, so a tab in a pasted prompt, which is
+/// the ordinary way a prompt holds one, cost the whole title.
+fn presentable(text: &str) -> Option<String> {
+    let mut line = String::with_capacity(text.len());
+    let mut space = true;
+    for character in text.chars() {
+        if character.is_control() || character.is_whitespace() {
+            if !space {
+                line.push(' ');
+                space = true;
+            }
+        } else {
+            line.push(character);
+            space = false;
+        }
+    }
+    let line = line.trim_end();
+    if line.is_empty() {
+        return None;
+    }
     let mut title: String = line.chars().take(TITLE_CHARS).collect();
     if line.chars().count() > TITLE_CHARS {
         title.push('…');
@@ -157,6 +182,28 @@ mod tests {
         let title = title_from_hook(&format!(r#"{{"prompt": "{long}"}}"#)).unwrap();
         assert_eq!(TITLE_CHARS + 1, title.chars().count());
         assert!(title.ends_with('…'));
+    }
+
+    #[test]
+    fn a_tab_or_an_escape_in_a_title_is_a_space_rather_than_no_title() {
+        // A prompt with pasted code in it holds tabs; a title with one was
+        // dropped whole by the wire's rule against control characters, and
+        // the tab row stayed at whatever it said before.
+        assert_eq!(
+            Some("fix the login bug".to_owned()),
+            presentable("fix\tthe   login  bug  ")
+        );
+        // An escape sequence in a title is text once its control bytes are
+        // spaces: nothing in it can end the wire's sequence early.
+        assert_eq!(
+            Some("fix ]0;x bug".to_owned()),
+            presentable("fix\u{1b}]0;x\u{7}bug")
+        );
+        assert_eq!(
+            Some("fix the login bug".to_owned()),
+            title_from_hook("{\"prompt\": \"fix\\tthe login bug\\nand then\"}")
+        );
+        assert_eq!(None, presentable("\t \u{1b} \u{7}"));
     }
 
     #[test]
