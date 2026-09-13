@@ -291,7 +291,9 @@ const ANSI_NAMES: [&str; 8] = [
 /// Two levels and nothing else: `key: value` at the left margin, and indented
 /// `key: value` under a key that had no value of its own. That is the whole
 /// grammar, which is why the nesting is tracked as "which block am I in"
-/// rather than as a tree.
+/// rather than as a tree. A block may also be written on one line in YAML's
+/// flow style — `normal: {black: "#000", red: "#f00"}` — which is the same
+/// pairs under the same block name; see [`Document::flow`].
 struct Document {
     /// Top-level `key: value` pairs.
     top: Vec<(String, String)>,
@@ -338,12 +340,23 @@ impl Document {
             };
 
             let key = key.trim().to_owned();
-            let value = value_of(value);
 
             // Close every block this line has dedented out of.
             while blocks.last().is_some_and(|(opened, _)| indent <= *opened) {
                 blocks.pop();
             }
+
+            // A block written on one line, in YAML's flow style. What a
+            // person writes by hand when the file is short, and what a `.yml`
+            // saved from a tool that prefers it holds; read one, the eight
+            // colours a block holds were reported as missing, which was a
+            // sentence about a file that plainly had them.
+            if value.trim().starts_with('{') {
+                Self::flow(value.trim(), &key, &mut nested)
+                    .with_context(|| format!("line {}", number + 1))?;
+                continue;
+            }
+            let value = value_of(value);
 
             if value.is_empty() {
                 // A key with no value opens a block, whatever depth it is at.
@@ -361,6 +374,38 @@ impl Document {
         }
 
         Ok(Self { top, nested })
+    }
+
+    /// Reads a flow mapping — `{key: value, key: value}` — as the pairs of
+    /// the block called `block`, and a mapping inside it as a block of its
+    /// own, which is how `terminal_colors: {normal: {...}, bright: {...}}`
+    /// lands on the same `(block, key, value)` rows the indented form does.
+    ///
+    /// Split on the commas at the mapping's own depth, with a quoted value
+    /// left whole: a `#rrggbb` never holds a comma, but a name may.
+    fn flow(text: &str, block: &str, nested: &mut Vec<(String, String, String)>) -> Result<()> {
+        let inside = text
+            .strip_prefix('{')
+            .and_then(|rest| rest.trim_end().strip_suffix('}'))
+            .with_context(|| format!("`{block}` opens a `{{` it never closes"))?;
+
+        for entry in split_flow(inside) {
+            let entry = entry.trim();
+            if entry.is_empty() {
+                continue;
+            }
+            let Some((key, value)) = entry.split_once(':') else {
+                bail!("`{block}` holds {entry:?}, which is not `key: value`");
+            };
+            let key = key.trim();
+            let value = value.trim();
+            if value.starts_with('{') {
+                Self::flow(value, key, nested)?;
+            } else {
+                nested.push((block.to_owned(), key.to_owned(), value_of(value)));
+            }
+        }
+        Ok(())
     }
 
     /// A top-level string value.
@@ -438,6 +483,31 @@ impl Document {
         }
         Ok(colors)
     }
+}
+
+/// The entries of a flow mapping's inside, split on the commas that are its
+/// own: not one inside a nested `{}`, and not one inside quotes.
+fn split_flow(inside: &str) -> Vec<&str> {
+    let mut entries = Vec::new();
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    let mut start = 0;
+    for (at, character) in inside.char_indices() {
+        match (quote, character) {
+            (Some(open), c) if c == open => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(character),
+            (None, '{') => depth += 1,
+            (None, '}') => depth = depth.saturating_sub(1),
+            (None, ',') if depth == 0 => {
+                entries.push(&inside[start..at]);
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    entries.push(&inside[start..]);
+    entries
 }
 
 /// Half way between two colours.

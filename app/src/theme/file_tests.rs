@@ -141,6 +141,51 @@ fn the_fields_warp_has_and_crook_does_not_are_skipped_rather_than_refused() {
 }
 
 #[test]
+fn a_block_written_on_one_line_is_the_same_block() {
+    // YAML's flow style, which a person writing a short file by hand reaches
+    // for and some tools save: the eight colours in braces on the block's
+    // own line. The reader used to keep the braces as the block's *value*
+    // and report every colour missing.
+    let flow = r##"
+name: One Line
+background: "#002b36"
+foreground: "#f8f8f2"
+accent: "#cb4b16"
+cursor: "#ffcc00"
+terminal_colors:
+  normal: {black: "#073642", red: "#dc322f", green: "#859900", yellow: "#b58900", blue: "#268bd2", magenta: "#d33682", cyan: "#2aa198", white: "#eee8d5"}
+  bright: {black: "#002b36", red: "#cb4b16", green: "#586e75", yellow: "#657b83", blue: "#839496", magenta: "#6c71c4", cyan: "#93a1a1", white: "#fdf6e3"}
+"##;
+    let block = parse(SOLARIZED).expect("the indented form parses");
+    let one_line = parse(flow).expect("the flow form parses");
+    assert_eq!(
+        one_line.theme, block.theme,
+        "the two spellings are one theme"
+    );
+
+    // The whole map on one line, nested braces and all — and single quotes,
+    // and spaces wherever YAML allows them.
+    let nested = r##"
+name: Nested
+background: '#002b36'
+foreground: '#f8f8f2'
+accent: '#cb4b16'
+cursor: '#ffcc00'
+terminal_colors: { normal: { black: '#073642', red: '#dc322f', green: '#859900', yellow: '#b58900', blue: '#268bd2', magenta: '#d33682', cyan: '#2aa198', white: '#eee8d5' }, bright: { black: '#002b36', red: '#cb4b16', green: '#586e75', yellow: '#657b83', blue: '#839496', magenta: '#6c71c4', cyan: '#93a1a1', white: '#fdf6e3' } }
+"##;
+    let nested = parse(nested).expect("nested flow parses");
+    assert_eq!(nested.theme, block.theme);
+
+    // A brace that never closes is the file's mistake, named.
+    let unclosed = "name: Broken\nterminal_colors:\n  normal: {black: \"#000\"\n";
+    let error = parse(unclosed).expect_err("an unclosed mapping is refused");
+    assert!(
+        format!("{error:#}").contains("never closes"),
+        "the reason does not name the brace: {error:#}"
+    );
+}
+
+#[test]
 fn a_cursor_that_is_not_named_is_the_accent() {
     // Warp's rule, and the reason `cursor:` is optional in half the themes
     // people have written.
