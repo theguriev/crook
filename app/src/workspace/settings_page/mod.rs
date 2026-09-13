@@ -70,7 +70,7 @@ pub(crate) mod widgets;
 use std::collections::HashMap;
 use std::fmt;
 
-use crookui_core::elements::{MouseStateHandle, Padding};
+use crookui_core::elements::{MouseStateHandle, Padding, Paragraph};
 use crookui_core::prelude::*;
 
 use crate::theme::theme;
@@ -513,18 +513,10 @@ fn nothing_found(query: &Query, ui: crookui_core::fonts::FamilyId) -> Box<dyn El
     let _ = query;
 
     let line = |text: &'static str, size: f32, color: Color| {
-        let mut column = Flex::column()
-            .with_main_axis_size(MainAxisSize::Min)
-            .with_cross_axis_alignment(CrossAxisAlignment::Start);
-        for text in super::wrap(text, 60) {
-            column.add_child(
-                Text::new(text, ui, size)
-                    .with_color(color)
-                    .with_line_height_ratio(1.45)
-                    .finish(),
-            );
-        }
-        column.finish()
+        Paragraph::new(text.to_owned(), ui, size)
+            .with_color(color)
+            .with_line_height_ratio(1.45)
+            .finish()
     };
 
     Container::new(

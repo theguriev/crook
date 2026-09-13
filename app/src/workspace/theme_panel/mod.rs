@@ -67,7 +67,7 @@ pub(super) use list::ROW_HEIGHT;
 
 use std::collections::HashMap;
 
-use crookui_core::elements::{MouseStateHandle, Padding};
+use crookui_core::elements::{MouseStateHandle, Padding, Paragraph};
 use crookui_core::fonts::{Properties, Weight};
 use crookui_core::prelude::*;
 
@@ -287,21 +287,14 @@ fn hint(mode: Mode, ui: crookui_core::fonts::FamilyId) -> Box<dyn Element> {
         Mode::Creating => CREATING_HINT,
     };
 
-    let mut column = Flex::column()
-        .with_main_axis_size(MainAxisSize::Min)
-        .with_cross_axis_alignment(CrossAxisAlignment::Start);
-    for line in super::wrap(text, 30) {
-        column.add_child(
-            Text::new(line, ui, 11.)
-                .with_color(theme().text_muted)
-                .with_line_height_ratio(1.4)
-                .finish(),
-        );
-    }
-
-    Container::new(column.finish())
-        .with_margin_bottom(10.)
-        .finish()
+    Container::new(
+        Paragraph::new(text.to_owned(), ui, 11.)
+            .with_color(theme().text_muted)
+            .with_line_height_ratio(1.4)
+            .finish(),
+    )
+    .with_margin_bottom(10.)
+    .finish()
 }
 
 /// A square button carrying one icon.

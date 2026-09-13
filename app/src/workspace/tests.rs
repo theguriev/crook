@@ -1529,8 +1529,35 @@ fn strip_text(scene: &Scene) -> String {
 /// A scene has no occlusion, so a line found here may be behind something.
 /// Callers that care filter by position first.
 fn text_lines(scene: &Scene, keep: impl Fn(Vector2F) -> bool) -> Vec<(Vector2F, String)> {
+    lines_of(scene.layers().flat_map(|layer| layer.glyphs.iter()), keep)
+}
+
+/// The text drawn on `ground` and over it, one line at a time.
+///
+/// A scene has no occlusion, so the text inside a popup's box is also the
+/// text of the rows it was painted over. Starting from the layer that paints
+/// the popup's ground leaves those rows out: what was drawn before the ground
+/// is under it.
+fn text_lines_over(scene: &Scene, ground: RectF) -> Vec<(Vector2F, String)> {
+    let layers: Vec<_> = scene.layers().collect();
+    let painted = layers
+        .iter()
+        .position(|layer| layer.rects.iter().any(|rect| rect.bounds == ground))
+        .expect("no layer paints that ground");
+    lines_of(
+        layers[painted..]
+            .iter()
+            .flat_map(|layer| layer.glyphs.iter()),
+        |position| ground.contains_point(position),
+    )
+}
+
+fn lines_of<'a>(
+    glyphs: impl Iterator<Item = &'a crookui_core::scene::Glyph>,
+    keep: impl Fn(Vector2F) -> bool,
+) -> Vec<(Vector2F, String)> {
     let mut rows: HashMap<i32, Vec<(f32, char)>> = HashMap::new();
-    for glyph in scene.layers().flat_map(|layer| layer.glyphs.iter()) {
+    for glyph in glyphs {
         let Some(character) = char::from_u32(glyph.glyph_key.glyph_id) else {
             continue;
         };
@@ -2903,9 +2930,10 @@ fn clicking_a_density_segment_changes_how_much_of_a_row_there_is() {
 
 #[test]
 fn the_info_note_fits_inside_the_menu_it_belongs_to() {
-    // `Text` never wraps and `Stack` lays an anchored child out against the
-    // whole window, so the unbroken sentence measured about twice the popup's
-    // width and hung over the body on both sides of it.
+    // A paragraph measured free is one line, and `Stack` lays an anchored
+    // child out against the whole window, so the unbroken sentence measured
+    // about twice the popup's width and hung over the body on both sides of
+    // it.
     let mut harness = Harness::seeded();
     harness.dispatch_option(OptionsAction::SetDensity(Density::Expanded));
     harness.dispatch_option(OptionsAction::TogglePopup);
@@ -2929,6 +2957,30 @@ fn the_info_note_fits_inside_the_menu_it_belongs_to() {
         note.max_y() <= dot.min_y(),
         "the note at {note:?} was drawn below the dot at {dot:?}, over the \
          rows underneath it"
+    );
+
+    // Broken by measure rather than by a count guessed against one font: the
+    // stub shaper advances half the size per glyph, and every line ends where
+    // it can be seen to end. A count that was right for one face is what
+    // lets a wider face run past the border.
+    let lines = text_lines_over(&scene, note);
+    assert!(
+        lines.len() > 1,
+        "the sentence was left on one line: {lines:?}"
+    );
+    for (start, text) in &lines {
+        let end = start.x() + text.chars().count() as f32 * 11. * 0.5;
+        assert!(
+            end <= note.max_x(),
+            "{text:?} ends at {end}, past the note's edge at {}",
+            note.max_x()
+        );
+    }
+    let joined: Vec<&str> = lines.iter().map(|(_, text)| text.as_str()).collect();
+    assert_eq!(
+        joined.join(" "),
+        tab_options_menu::PR_LINK_NOTE,
+        "wrapping dropped or duplicated a word"
     );
 }
 
@@ -4579,6 +4631,78 @@ fn spare_checkout(harness: &mut Harness, tab: TabId, store: &Path, made: &[PathB
     harness.dispatch_action(TabAction::ClosePane(opened));
     harness.dispatch_action(TabAction::Select(tab));
     path
+}
+
+#[test]
+fn the_sweep_s_sentence_is_broken_where_the_popup_s_width_says() {
+    // "Removing 3 of 6: <branch>…" names a branch, and a branch can be long.
+    // The line was once broken at a count of characters guessed against one
+    // face; it is broken by measure now, so what the test holds it to is the
+    // border itself: every line ends inside the popup, and the words are all
+    // there. Against a real repository, because the branch named is the
+    // first free checkout and nothing shorter than a real one would break.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    // Long enough that the sentence cannot be one line, and short enough to
+    // be one itself: a word wider than the popup gets a line of its own and
+    // overflows it, which is a different rough edge from this one.
+    let branch = "feature/named-the-way-people-do";
+    let checkout = scratch.path().join("checkout");
+    let added = crate::process::command("git")
+        .args(["worktree", "add", "--quiet", "-b", branch])
+        .arg(&checkout)
+        .current_dir(&repository)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    assert!(added, "git would not add the checkout");
+
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("both checkouts to be read", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    harness.workspace_update(|workspace, ctx| workspace.stage_sweeping_worktrees(ctx));
+
+    let scene = harness.frame();
+    let menu = worktree_menu_box(&scene).expect("the menu is not up");
+    let lines: Vec<(Vector2F, String)> =
+        text_lines(&scene, |position| menu.contains_point(position))
+            .into_iter()
+            .skip_while(|(_, text)| !text.starts_with("Removing 3 of 6:"))
+            .take_while(|(_, text)| !text.starts_with("Stop"))
+            .collect();
+    assert!(
+        lines.len() > 1,
+        "the sentence was not broken at all: {lines:?}"
+    );
+    for (start, text) in &lines {
+        let end = start.x() + text.chars().count() as f32 * super::tab_menu::PATH_SIZE * 0.5;
+        assert!(
+            end <= menu.max_x(),
+            "{text:?} ends at {end}, past the popup's edge at {}",
+            menu.max_x()
+        );
+    }
+    let joined: Vec<&str> = lines.iter().map(|(_, text)| text.as_str()).collect();
+    assert_eq!(
+        joined.join(" "),
+        format!("Removing 3 of 6: {branch}…"),
+        "wrapping dropped or duplicated a word"
+    );
 }
 
 #[test]

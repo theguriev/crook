@@ -121,7 +121,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crookui_core::elements::{MouseStateHandle, Padding};
+use crookui_core::elements::{MouseStateHandle, Padding, Paragraph, Shrinkable};
 use crookui_core::fonts::{FamilyId, Properties, Weight};
 use crookui_core::prelude::*;
 
@@ -147,7 +147,7 @@ const MENU_RADIUS: f32 = 6.;
 
 /// The size of the label on a row, and of the line under it.
 const LABEL_SIZE: f32 = 12.;
-const PATH_SIZE: f32 = 10.5;
+pub(super) const PATH_SIZE: f32 = 10.5;
 
 /// What the branch field says before anything is typed into it.
 const BRANCH_PLACEHOLDER: &str = "branch";
@@ -1315,28 +1315,24 @@ fn busy_line(
     ui: FamilyId,
 ) -> Box<dyn Element> {
     let pirate = crate::pirate::mark(crate::pirate::chomp_at(state.chomp), false, PIRATE_SIZE);
-    // Broken to the popup's width the way a note is, because the sentence
+    // Wrapped to the popup's width the way a note is, because the sentence
     // names a branch and a branch can be long.
-    let mut sentence = Flex::column()
-        .with_main_axis_size(MainAxisSize::Min)
-        .with_cross_axis_alignment(CrossAxisAlignment::Start);
-    for line in super::wrap(text, 36) {
-        sentence.add_child(
-            Text::new(line, ui, PATH_SIZE)
-                .with_color(theme().text_muted)
-                .with_line_height_ratio(1.4)
-                .finish(),
-        );
-    }
-    let sentence = sentence.finish();
+    let sentence = Paragraph::new(text.to_owned(), ui, PATH_SIZE)
+        .with_color(theme().text_muted)
+        .with_line_height_ratio(1.4)
+        .finish();
 
     let body: Box<dyn Element> = match trail {
+        // Beside the pirate, in the room he leaves: a row measures a plain
+        // child free along its axis, and a paragraph measured free is one
+        // line however long, so the sentence takes its share as a flexible
+        // child and wraps inside it.
         None => Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
             .with_cross_axis_alignment(CrossAxisAlignment::Center)
             .with_spacing(6.)
             .with_child(pirate)
-            .with_child(sentence)
+            .with_child(Shrinkable::new(1., sentence).finish())
             .finish(),
         Some((done, of)) => Flex::column()
             .with_main_axis_size(MainAxisSize::Min)
@@ -1397,24 +1393,17 @@ fn pellet(color: Color) -> Box<dyn Element> {
     .finish()
 }
 
-/// A line of explanation, or of apology, broken to the popup's width.
+/// A line of explanation, or of apology, wrapped to the popup's width.
 fn note(text: impl AsRef<str>, ui: FamilyId) -> Box<dyn Element> {
-    let mut column = Flex::column()
-        .with_main_axis_size(MainAxisSize::Min)
-        .with_cross_axis_alignment(CrossAxisAlignment::Start);
-    for line in super::wrap(text.as_ref(), 36) {
-        column.add_child(
-            Text::new(line, ui, PATH_SIZE)
-                .with_color(theme().text_muted)
-                .with_line_height_ratio(1.4)
-                .finish(),
-        );
-    }
-
-    Container::new(column.finish())
-        .with_horizontal_padding(ROW_INSET)
-        .with_margin_bottom(4.)
-        .finish()
+    Container::new(
+        Paragraph::new(text.as_ref().to_owned(), ui, PATH_SIZE)
+            .with_color(theme().text_muted)
+            .with_line_height_ratio(1.4)
+            .finish(),
+    )
+    .with_horizontal_padding(ROW_INSET)
+    .with_margin_bottom(4.)
+    .finish()
 }
 
 /// The hairline between the worktrees and the way to another.
