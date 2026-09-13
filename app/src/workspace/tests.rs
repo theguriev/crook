@@ -4633,13 +4633,14 @@ fn spare_checkout(harness: &mut Harness, tab: TabId, store: &Path, made: &[PathB
     path
 }
 
-/// The sweep staged part way through removing a checkout on `branch`, and
-/// the lines of its "Removing 3 of 6: …" sentence.
+/// The worktree menu open over a scratch repository with one free checkout
+/// on `branch`, both checkouts read.
 ///
-/// Against a real repository, because the branch named is the first free
-/// checkout and nothing shorter than a real one would break. `None` where
-/// there is no git to make one with.
-fn sweep_sentence_over(branch: &str) -> Option<Vec<(Vector2F, String)>> {
+/// Against a real repository, because a row and the sweep's sentence name
+/// the checkout git lists and nothing shorter than a real one would do. The
+/// scratch comes back with the harness so that it outlives the menu. `None`
+/// where there is no git to make one with.
+fn menu_over_checkout(branch: &str) -> Option<(Scratch, Harness)> {
     let scratch = Scratch::new();
     let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
         eprintln!("skipped: no git here to make a repository with");
@@ -4670,6 +4671,13 @@ fn sweep_sentence_over(branch: &str) -> Option<Vec<(Vector2F, String)>> {
     harness.wait_for("both checkouts to be read", |harness| {
         harness.worktrees_listed() == Some(2)
     });
+    Some((scratch, harness))
+}
+
+/// The sweep staged part way through removing the checkout on `branch`, and
+/// the lines of its "Removing 3 of 6: …" sentence.
+fn sweep_sentence_over(branch: &str) -> Option<Vec<(Vector2F, String)>> {
+    let (_scratch, mut harness) = menu_over_checkout(branch)?;
     harness.workspace_update(|workspace, ctx| workspace.stage_sweeping_worktrees(ctx));
 
     let scene = harness.frame();
@@ -4714,6 +4722,41 @@ fn the_sweep_s_sentence_is_broken_where_the_popup_s_width_says() {
         joined.join(" "),
         format!("Removing 3 of 6: {branch}…"),
         "wrapping dropped or duplicated a word"
+    );
+}
+
+#[test]
+fn a_row_s_branch_wider_than_the_popup_is_cut_with_a_mark_short_of_the_edge() {
+    // The row's label was a plain row child, measured free and so as wide
+    // as the branch: a long one ran to the popup's border and stopped on
+    // whatever letter fell there, no mark, while the path under it had one.
+    // The label takes the row's width now, less a gap, and is cut like a
+    // label.
+    let branch = "feature/a-branch-named-at-the-length-people-name-them";
+    let Some((_scratch, mut harness)) = menu_over_checkout(branch) else {
+        return;
+    };
+
+    let scene = harness.frame();
+    let menu = worktree_menu_box(&scene).expect("the menu is not up");
+    let lines = text_lines(&scene, |position| menu.contains_point(position));
+    let (start, label) = lines
+        .iter()
+        .find(|(_, text)| text.starts_with("feature/"))
+        .unwrap_or_else(|| panic!("no row names the branch: {lines:?}"));
+    assert!(
+        label.ends_with('…') && label.len() < branch.len(),
+        "{label:?} was not cut with a mark"
+    );
+    assert!(
+        branch.starts_with(label.trim_end_matches('…')),
+        "{label:?} is not the start of {branch:?}"
+    );
+    let end = start.x() + label.chars().count() as f32 * super::tab_menu::LABEL_SIZE * 0.5;
+    assert!(
+        end <= menu.max_x() - super::tab_menu::ROW_INSET,
+        "{label:?} ends at {end}, inside the row's inset from the edge at {}",
+        menu.max_x()
     );
 }
 
