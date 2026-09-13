@@ -2409,6 +2409,35 @@ fn a_pane_with_no_grid_says_so_inside_its_gutter_and_inside_its_width() {
 }
 
 #[test]
+fn a_shell_that_could_not_be_started_is_the_pane_s_notice() {
+    // The one way to this state on purpose: `--shell` names a program, and
+    // this one does not exist. The user's own shell never gets here — an
+    // unrunnable `SHELL` falls back to the password database — which is why
+    // the notice's reason had never been on screen before the flag.
+    let mut harness = Harness::new(1);
+    let pane = harness.pane_ids()[0];
+    harness.workspace_update(|workspace, ctx| {
+        workspace.set_shell(Some(PathBuf::from("/nonexistent/crook-shell")), ctx);
+        workspace.start_terminals(ctx);
+    });
+
+    let failure = harness.workspace.read(&harness.app, |workspace, app| {
+        workspace.terminal_failure(pane, app).map(str::to_owned)
+    });
+    let failure = failure.expect("the pane has no failure to show");
+    assert!(
+        failure.contains("crook-shell"),
+        "the failure does not name the shell: {failure:?}"
+    );
+
+    let text = frame_text(&harness.frame());
+    assert!(
+        text.contains("the shell could not be started"),
+        "the pane does not say why it has no shell: {text:?}"
+    );
+}
+
+#[test]
 fn a_vertical_split_stacks_its_panels() {
     let mut harness = Harness::new(1);
 
