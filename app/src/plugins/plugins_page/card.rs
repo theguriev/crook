@@ -84,21 +84,15 @@ pub(super) fn render(
     state: &Rc<PluginsState>,
 ) -> Box<dyn Element> {
     let ui = workspace.fonts().ui;
-    let on = workspace.host().is_loaded(&manifest.id);
+    // The setting, as the switch shows it — see `Workspace::plugin_is_on` —
+    // and the fact, as the line under the name prints it.
+    let on = workspace.plugin_is_on(&manifest.id);
+    let running = workspace.host().is_loaded(&manifest.id);
 
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_child(facts(
-            manifest,
-            on,
-            workspace
-                .host()
-                .refused()
-                .iter()
-                .any(|(id, _)| *id == manifest.id),
-            ui,
-        ))
+        .with_child(facts(manifest, running, on, ui))
         .with_child(widgets::description(manifest.description, ui));
 
     // The stack of boxes: the switch, then what the plugin may do, then what
@@ -129,7 +123,7 @@ pub(super) fn render(
         let under = boxes.pop().expect("the switch's box is always there");
         boxes.push(under.with_footnote(said));
     }
-    if let Some(block) = permissions(workspace, manifest, on, ui) {
+    if let Some(block) = permissions(workspace, manifest, running, ui) {
         boxes.push(block);
     }
 
@@ -305,10 +299,12 @@ impl Boxed {
 /// where it came from.
 ///
 /// A plugin the host refused is not "switched off" — nobody switched it —
-/// and the line said so all the same, above a box that said it did not load.
-fn facts(manifest: &Manifest, on: bool, refused: bool, ui: FamilyId) -> Box<dyn Element> {
+/// and the line said so all the same, above a box that said it did not
+/// load. `on` is the switch's answer (`Workspace::plugin_is_on`): on and not
+/// running is exactly a plugin that was asked to build and could not.
+fn facts(manifest: &Manifest, running: bool, on: bool, ui: FamilyId) -> Box<dyn Element> {
     let (_, tier) = tier_words(manifest.tier);
-    let state = match (on, refused) {
+    let state = match (running, on) {
         (true, _) => "running",
         (false, true) => "did not load",
         (false, false) => "switched off",

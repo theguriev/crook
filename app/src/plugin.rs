@@ -1186,6 +1186,12 @@ impl Host {
             .unwrap_or_else(|| plugin.to_string())
     }
 
+    /// Whether `plugin` was asked to build and could not — the state the
+    /// Plugins page prints as "did not load", with the reason beside it.
+    pub fn is_refused(&self, plugin: &PluginId) -> bool {
+        self.refused.iter().any(|(id, _)| id == plugin)
+    }
+
     /// Every plugin that did not, and why.
     pub fn refused(&self) -> &[(PluginId, String)] {
         &self.refused
@@ -1454,6 +1460,10 @@ impl Host {
         let outcome = plugin.build(self, ctx);
         self.building = None;
 
+        // Whatever the last attempt said is superseded by this one: a retry
+        // that succeeds has no refusal to show, and one that fails again is
+        // one line, not two.
+        self.refused.retain(|(id, _)| id != &manifest.id);
         match outcome {
             Ok(()) => self.loaded.push(manifest),
             Err(problem) => {
