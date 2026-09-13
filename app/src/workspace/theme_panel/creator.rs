@@ -19,7 +19,7 @@
 //! Nothing is written until "Create theme", and "Cancel" puts back the theme
 //! that was in force when the creator opened.
 
-use crookui_core::elements::{MouseStateHandle, Padding};
+use crookui_core::elements::{MouseStateHandle, Padding, Paragraph};
 use crookui_core::prelude::*;
 
 use crate::theme::creator::CANDIDATES;
@@ -173,25 +173,18 @@ fn preview(workspace: &Workspace, draft: &crate::theme::creator::Draft) -> Box<d
 
 /// A line of explanation, broken to the panel's width.
 ///
-/// `Text` never wraps — it is built for a tab title — so a paragraph is a
-/// column of lines, and the budget is counted in characters because measuring
-/// needs the shaper and this runs while the tree is being built.
+/// Wrapped by measure, at the panel's width: a `Paragraph` breaks its lines
+/// where the shaped glyphs run out of room, so a face wider than the one this
+/// was written against still ends inside the panel.
 fn note(text: String, ui: crookui_core::fonts::FamilyId) -> Box<dyn Element> {
-    let mut column = Flex::column()
-        .with_main_axis_size(MainAxisSize::Min)
-        .with_cross_axis_alignment(CrossAxisAlignment::Start);
-    for line in super::super::wrap(&text, 34) {
-        column.add_child(
-            Text::new(line, ui, 10.)
-                .with_color(theme().text_muted)
-                .with_line_height_ratio(1.4)
-                .finish(),
-        );
-    }
-
-    Container::new(column.finish())
-        .with_margin_top(10.)
-        .finish()
+    Container::new(
+        Paragraph::new(text, ui, 10.)
+            .with_color(theme().text_muted)
+            .with_line_height_ratio(1.4)
+            .finish(),
+    )
+    .with_margin_top(10.)
+    .finish()
 }
 
 /// What the draft decided for itself, in one clause.

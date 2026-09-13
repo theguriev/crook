@@ -41,7 +41,7 @@
 //! so the omission is deliberate and is written down here rather than left to
 //! be read as an oversight.
 
-use crookui_core::elements::{MouseStateHandle, Padding};
+use crookui_core::elements::{MouseStateHandle, Padding, Paragraph};
 use crookui_core::fonts::FamilyId;
 use crookui_core::prelude::*;
 
@@ -50,7 +50,6 @@ use crate::theme::theme;
 
 use super::action::{OptionsAction, WorkspaceAction};
 use super::view::Workspace;
-use super::wrap;
 
 /// The popup's fixed width. Not derived from anything: Warp's panel is 248 and
 /// its popup is 200, and the two numbers are unrelated.
@@ -82,24 +81,18 @@ const SEGMENT_LABEL_SIZE: f32 = 14.;
 /// Warp's info affordance says the GitHub CLI has to be installed and
 /// authenticated. Crook's reason is different and more basic, and saying it
 /// here is the alternative to rendering a chip that can never appear.
-const PR_LINK_NOTE: &str = "Crook has no forge integration yet, so no session has a link to show.";
+pub(super) const PR_LINK_NOTE: &str =
+    "Crook has no forge integration yet, so no session has a link to show.";
 
 /// The note's width, fixed rather than sized to its sentence.
 ///
-/// Two things make "sized to content" wrong here and neither is obvious.
-/// [`Text`] never wraps — it is built for a tab title, not a paragraph — and
-/// [`Stack`] lays an anchored child out against the *window* rather than
-/// against the box it hangs off, so nothing anywhere in the path stops one
+/// Two things make "sized to content" wrong here and neither is obvious. A
+/// [`Paragraph`] measured with no width to wrap to is one line however long,
+/// and [`Stack`] lays an anchored child out against the *window* rather than
+/// against the box it hangs off, so nothing anywhere in the path stops that
 /// line from measuring four hundred pixels. A note twice the width of the menu
 /// it belongs to hangs over the tabs on both sides of it.
 pub(super) const NOTE_WIDTH: f32 = 176.;
-
-/// How many characters of the note go on one line.
-///
-/// Against [`NOTE_WIDTH`] minus its 16px of padding, at 11px: a character of
-/// the interface font averages a little over half its size, so 28 of them fit
-/// with room to spare for a font whose average runs wider.
-const NOTE_LINE_CHARS: usize = 28;
 
 /// The info dot's diameter, which the note is centred against.
 pub(super) const INFO_DOT_SIZE: f32 = 12.;
@@ -610,28 +603,19 @@ fn info_icon(info: &InfoNote, ui: FamilyId) -> Box<dyn Element> {
     .finish()
 }
 
-/// The floating panel the note is written in: a fixed-width column of wrapped
-/// lines, clipped to it.
+/// The floating panel the note is written in: a fixed-width paragraph.
 ///
-/// [`Clipped`] is the belt to [`NOTE_WIDTH`]'s braces. The width budget in
-/// [`NOTE_LINE_CHARS`] is counted in characters and the font is measured in
-/// pixels, so an interface font wider than the budget assumes would paint past
-/// the panel's border; clipping means the worst case is a cut word rather than
-/// a sentence lying across the menu.
+/// Wrapped by measure at [`NOTE_WIDTH`], which is what makes the panel's width
+/// the one number here: the lines were once counted in characters and
+/// clipped as a belt to those braces, since a face wider than the count
+/// assumed would have painted past the border.
 fn note_panel(text: &str, ui: FamilyId) -> Box<dyn Element> {
-    let mut column = Flex::column()
-        .with_main_axis_size(MainAxisSize::Min)
-        .with_cross_axis_alignment(CrossAxisAlignment::Start);
-    for line in wrap(text, NOTE_LINE_CHARS) {
-        column.add_child(
-            Text::new(line, ui, 11.)
-                .with_color(theme().text_primary)
-                .finish(),
-        );
-    }
+    let paragraph = Paragraph::new(text.to_owned(), ui, 11.)
+        .with_color(theme().text_primary)
+        .finish();
 
     ConstrainedBox::new(
-        Container::new(Clipped::new(column.finish()).finish())
+        Container::new(paragraph)
             .with_background_color(theme().surface_raised)
             .with_border(Border::all(1.).with_border_color(theme().overlay_2))
             .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
@@ -645,38 +629,4 @@ fn note_panel(text: &str, ui: FamilyId) -> Box<dyn Element> {
     )
     .with_width(NOTE_WIDTH)
     .finish()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn the_note_is_broken_into_lines_that_fit_the_panel() {
-        // The whole reason the note is not one `Text`: at 11px this sentence
-        // measures about four hundred pixels, in a menu two hundred wide.
-        let lines = wrap(PR_LINK_NOTE, NOTE_LINE_CHARS);
-
-        assert!(lines.len() > 1, "the note was left on one line");
-        for line in &lines {
-            assert!(
-                line.chars().count() <= NOTE_LINE_CHARS,
-                "{line:?} is {} characters, over the {NOTE_LINE_CHARS} budget",
-                line.chars().count()
-            );
-        }
-        assert_eq!(
-            lines.join(" "),
-            PR_LINK_NOTE,
-            "wrapping dropped or duplicated a word"
-        );
-    }
-
-    #[test]
-    fn a_word_longer_than_the_budget_gets_a_line_to_itself() {
-        assert_eq!(
-            wrap("a supercalifragilistic b", 8),
-            vec!["a", "supercalifragilistic", "b"]
-        );
-    }
 }

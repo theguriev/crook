@@ -71,26 +71,6 @@ pub(crate) const CLOSE_BUTTON_SIZE: f32 = 16.;
 /// is: the button is the box, the icon is what it says.
 pub(crate) const CLOSE_ICON_SIZE: f32 = 12.;
 
-/// Breaks `text` into lines of at most `max_chars` characters each.
-///
-/// A word longer than the budget gets a line of its own and overflows it,
-/// because breaking inside a word would be worse and the note has no such
-/// word. Counted rather than measured: measuring needs the shaper, and this
-/// runs while the element tree is being built.
-pub(crate) fn wrap(text: &str, max_chars: usize) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    for word in text.split_whitespace() {
-        match lines.last_mut() {
-            Some(line) if line.chars().count() + 1 + word.chars().count() <= max_chars => {
-                line.push(' ');
-                line.push_str(word);
-            }
-            _ => lines.push(word.to_owned()),
-        }
-    }
-    lines
-}
-
 /// The colour that says what an agent is doing.
 ///
 /// One function, because the same mark is drawn at more than one size — a
