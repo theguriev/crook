@@ -175,13 +175,33 @@ fn a_chord_is_written_in_one_order_however_it_was_typed() {
 }
 
 #[test]
+fn the_shipped_tables_spell_every_chord_in_the_order_the_page_prints_it() {
+    // `format_chord` writes VSCode's order — ctrl, shift, alt, cmd — and the
+    // Shortcuts page, the palette and every menu print through it. A table
+    // line in another order is read correctly and printed differently, so
+    // `--help`, which quotes the table, and the page, which prints the
+    // parse, disagreed about `cmd+shift+d`. One order, everywhere it is
+    // written.
+    for (platform, table) in [("macOS", DEFAULTS_MAC), ("Linux", DEFAULTS_OTHER)] {
+        for (text, command) in table {
+            let parsed = parse_chord(text).unwrap_or_else(|| panic!("{platform}: {text}"));
+            assert_eq!(
+                format_chord(&parsed),
+                *text,
+                "{platform}: {command} is bound as {text}, which is not how the page spells it"
+            );
+        }
+    }
+}
+
+#[test]
 fn the_shipped_table_binds_the_chords_each_platform_is_used_to() {
     let mac = Keybindings::for_platform(Platform::Mac);
     let other = Keybindings::for_platform(Platform::Other);
 
     for (keybindings, text, expected) in [
         (&mac, "cmd+t", "crook/window/new-tab"),
-        (&mac, "cmd+alt+left", "crook/window/previous-tab"),
+        (&mac, "alt+cmd+left", "crook/window/previous-tab"),
         (&mac, "cmd+,", "crook/window/open-settings"),
         (&other, "ctrl+shift+t", "crook/window/new-tab"),
         (&other, "ctrl+pagedown", "crook/window/next-tab"),

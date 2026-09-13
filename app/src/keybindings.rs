@@ -854,7 +854,7 @@ pub fn parse_keys(written: &str) -> Option<Vec<Keystroke>> {
     keys.filter(|keys| !keys.is_empty())
 }
 
-/// A chord like `cmd+shift+d`, or `None` when it names no key.
+/// A chord like `shift+cmd+d`, or `None` when it names no key.
 ///
 /// The modifiers are taken off the front one at a time and whatever is left is
 /// the key, which is what makes `ctrl++` and `cmd+-` parse: the key is
@@ -1004,7 +1004,7 @@ pub const DEFAULTS_MAC: &[(&str, &str)] = &[
     ("cmd+t", "crook/window/new-tab"),
     ("cmd+w", "crook/window/close-pane"),
     ("cmd+d", "crook/window/split-right"),
-    ("cmd+shift+d", "crook/window/split-down"),
+    ("shift+cmd+d", "crook/window/split-down"),
     // Telegram's chord, which is what the search box's placeholder says. Free
     // on macOS: the field's own emacs bindings are ctrl-keys, and cmd-k is
     // nobody's here.
@@ -1016,14 +1016,14 @@ pub const DEFAULTS_MAC: &[(&str, &str)] = &[
     // Stepping through the blocks. Not cmd+arrow: macOS text fields spend
     // that on document-start and document-end, and the composer is one. The
     // Option beside it is free there, and nothing in a terminal wants it.
-    ("cmd+alt+up", "crook/window/select-block-up"),
-    ("cmd+alt+down", "crook/window/select-block-down"),
+    ("alt+cmd+up", "crook/window/select-block-up"),
+    ("alt+cmd+down", "crook/window/select-block-down"),
     ("cmd+,", "crook/window/open-settings"),
     // Not cmd+shift+arrow, which every macOS text field spends on selecting to
     // the end of a line — the field needs it more than the tabs do, and
     // cmd+alt+arrow is where a Mac browser keeps its tabs anyway.
-    ("cmd+alt+left", "crook/window/previous-tab"),
-    ("cmd+alt+right", "crook/window/next-tab"),
+    ("alt+cmd+left", "crook/window/previous-tab"),
+    ("alt+cmd+right", "crook/window/next-tab"),
     // The pair every browser puts the same step on, and the one a person
     // reaches for without having read anything. It is bound identically on
     // both platforms because it is the same gesture in both places, which no
