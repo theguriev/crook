@@ -31,7 +31,7 @@
 //! radius, and a second one anywhere would fail that assertion somewhere else
 //! entirely.
 
-use crookui_core::elements::{MouseStateHandle, Padding};
+use crookui_core::elements::{MouseStateHandle, Padding, Shrinkable};
 use crookui_core::fonts::{FamilyId, Properties, Weight};
 use crookui_core::prelude::*;
 
@@ -63,6 +63,13 @@ const CARD_WIDTH: f32 = 560.;
 /// that grows downwards from a fixed point does not move under the pointer as
 /// the list shortens, and every palette worth copying does this.
 const TOP: f32 = 96.;
+
+/// The least ground left under the card in a window too short for it.
+///
+/// The list gives way before the card reaches this: see [`render`], where the
+/// list is the one flexible child of the card's column. A card that ended on
+/// the window's last pixel would lose its hint line and read as cut off.
+const BOTTOM: f32 = 16.;
 
 /// One row's height, which is what makes scrolling to a row arithmetic.
 pub(super) const ROW_HEIGHT: f32 = 34.;
@@ -104,8 +111,10 @@ const GROUPED_LIST_HEIGHT: f32 = ROW_HEIGHT * 12.;
 /// the next arrow key.
 ///
 /// An upper bound and not the viewport: a window too short for the card
-/// narrows the `ConstrainedBox` below this, and there the same under-scroll
-/// returns — in a window where the card is already clipped.
+/// gives the list less than this — it is the card's flexible child, and takes
+/// what the window leaves after the field, the hint and [`BOTTOM`] — which is
+/// why [`super::rows::scroll_into_view`] takes the smaller of this and what
+/// the last layout measured.
 pub(super) fn list_height(mode: Mode) -> f32 {
     match mode {
         // The two that carry headings, and the one that is simply long: the
@@ -235,13 +244,21 @@ pub(super) fn render(palette: &Palette, rows: &Rows) -> Box<dyn Element> {
             });
         }
 
+        // Flexible, so that a window shorter than the card is a shorter list
+        // rather than a card that runs off the bottom: the column is laid out
+        // against the window's height, and the one child that may give way
+        // is this one. Loose, so a list of three rows is three rows tall.
         column.add_child(
-            ConstrainedBox::new(
-                Scrollable::new(palette.scroll(), lines.finish())
-                    .with_scrollbar(theme().overlay_3)
-                    .finish(),
+            Shrinkable::new(
+                1.,
+                ConstrainedBox::new(
+                    Scrollable::new(palette.scroll(), lines.finish())
+                        .with_scrollbar(theme().overlay_3)
+                        .finish(),
+                )
+                .with_max_height(list_height(mode))
+                .finish(),
             )
-            .with_max_height(list_height(mode))
             .finish(),
         );
     }
@@ -268,7 +285,10 @@ pub(super) fn render(palette: &Palette, rows: &Rows) -> Box<dyn Element> {
         .with_child(Expanded::new(1., Empty::new().finish()).finish())
         .finish();
 
-    Container::new(centred).with_margin_top(TOP).finish()
+    Container::new(centred)
+        .with_margin_top(TOP)
+        .with_margin_bottom(BOTTOM)
+        .finish()
 }
 
 /// The name over a block of rows: the plugin that registered them, or one of

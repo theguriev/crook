@@ -13419,6 +13419,46 @@ fn a_query_that_matches_nothing_says_so_rather_than_showing_everything() {
 }
 
 #[test]
+fn a_window_too_short_for_the_palette_gets_a_shorter_list_and_keeps_the_hint() {
+    // The list gives way, not the card: in a 480px window the keys list — a
+    // hundred rows under headings — used to run off the bottom, taking the
+    // hint line and the last rows with it, because it was capped at twelve
+    // rows and never asked how tall the window was.
+    let mut harness = Harness::new(1);
+    open_keys(&mut harness, "");
+    let window = vec2f(700., 480.);
+    let scene = harness.frame_sized(window);
+
+    let card = visible_rects(&scene)
+        .filter(|(rect, bounds)| {
+            rect.corner_radius.get_top_left() == Radius::Pixels(10.) && bounds.width() > 500.
+        })
+        .map(|(_, bounds)| bounds)
+        .next()
+        .expect("the palette's card is drawn");
+    assert!(
+        card.max_y() <= window.y(),
+        "the card runs off the bottom of the window: {card:?}"
+    );
+    assert!(
+        frame_text(&scene).contains("esc to close"),
+        "the hint line is not on screen"
+    );
+
+    // And a row walked to under the fold is scrolled into the list the window
+    // left, not the one the cap describes: every selection stays on screen.
+    for _ in 0..20 {
+        assert!(harness.press_key("down", Modifiers::default()));
+        let scene = harness.frame_sized(window);
+        let selected = palette_selected_row(&scene);
+        assert!(
+            selected.max_y() <= card.max_y() && selected.min_y() >= card.min_y(),
+            "the selected row left the card: {selected:?} in {card:?}"
+        );
+    }
+}
+
+#[test]
 fn enter_runs_what_is_selected_and_takes_the_palette_down() {
     let mut harness = Harness::new(1);
     assert_eq!(harness.tab_ids().len(), 1);
