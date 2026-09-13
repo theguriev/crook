@@ -89,7 +89,16 @@ pub(super) fn render(
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_child(facts(manifest, on, ui))
+        .with_child(facts(
+            manifest,
+            on,
+            workspace
+                .host()
+                .refused()
+                .iter()
+                .any(|(id, _)| *id == manifest.id),
+            ui,
+        ))
         .with_child(widgets::description(manifest.description, ui));
 
     // The stack of boxes: the switch, then what the plugin may do, then what
@@ -294,9 +303,16 @@ impl Boxed {
 
 /// The line under the name: whether it is running, who owns it, which version,
 /// where it came from.
-fn facts(manifest: &Manifest, on: bool, ui: FamilyId) -> Box<dyn Element> {
+///
+/// A plugin the host refused is not "switched off" — nobody switched it —
+/// and the line said so all the same, above a box that said it did not load.
+fn facts(manifest: &Manifest, on: bool, refused: bool, ui: FamilyId) -> Box<dyn Element> {
     let (_, tier) = tier_words(manifest.tier);
-    let state = if on { "running" } else { "switched off" };
+    let state = match (on, refused) {
+        (true, _) => "running",
+        (false, true) => "did not load",
+        (false, false) => "switched off",
+    };
     widgets::facts(
         Some((on, state)),
         &format!("{} \u{b7} {} \u{b7} {tier}", manifest.id, manifest.version),

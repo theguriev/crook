@@ -220,6 +220,15 @@ impl Sandbox {
     /// The whole of opening, with the parsed module kept for whoever wants
     /// what is in it besides code.
     fn instantiated(wasm: &[u8], fuel: Fuel) -> Result<(Self, Manifest, Module), Problem> {
+        // Checked before the engine sees it, because `wasmi` reads anything
+        // that is not a binary as the *text* format and reports the first
+        // thing wrong with that — "expected `(`", with a source excerpt —
+        // which is a sentence about a file nobody wrote.
+        if !wasm.starts_with(b"\0asm") {
+            return Err(Problem::Shape(
+                "not a WebAssembly module: the file does not begin with `\\0asm`".to_owned(),
+            ));
+        }
         let mut config = wasmi::Config::default();
         config.consume_fuel(true);
         let engine = Engine::new(&config);
