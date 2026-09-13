@@ -290,11 +290,43 @@ impl Session {
 
         match serde_json::from_str(&text) {
             Ok(session) => session,
-            Err(error) => {
-                log::warn!("could not read {}: {error}", path.display());
-                Self::default()
+            Err(error) => Self::salvage(&text, path, &error),
+        }
+    }
+
+    /// What can be kept of a file that did not read whole.
+    ///
+    /// A file this build cannot read entire is not usually a file it cannot
+    /// read at all: one tab written by a build with a key this one spells
+    /// differently, one pane with a value that is not the type it should be.
+    /// Refusing the file for that opened a fresh window with nothing in it,
+    /// which is the one outcome the file exists to prevent. So the tabs are
+    /// read one at a time and the one that does not read is the one that is
+    /// dropped, with a line that says which; the other keys are read the
+    /// same way, each falling back on its own.
+    fn salvage(text: &str, path: &Path, error: &serde_json::Error) -> Self {
+        let Ok(serde_json::Value::Object(document)) = serde_json::from_str(text) else {
+            log::warn!("could not read {}: {error}", path.display());
+            return Self::default();
+        };
+
+        let mut session = Self::default();
+        if let Some(tabs) = document.get("tabs").and_then(serde_json::Value::as_array) {
+            for (position, tab) in tabs.iter().enumerate() {
+                match serde_json::from_value::<TabSnapshot>(tab.clone()) {
+                    Ok(tab) => session.tabs.push(tab),
+                    Err(error) => log::warn!(
+                        "{} holds a tab at {position} this build cannot read ({error}); \
+                         opening without it",
+                        path.display()
+                    ),
+                }
             }
         }
+        session.active = read_or_default(&document, "active", path);
+        session.window = read_or_default(&document, "window", path);
+        session.groups = read_or_default(&document, "groups", path);
+        session
     }
 
     /// Reads the per-user session file.
@@ -412,6 +444,29 @@ impl PaneSnapshot {
             {
                 pane.session_mut().working_directory = self.working_directory.clone();
             }
+        }
+    }
+}
+
+/// One key of a session file, or its default with a line in the log naming
+/// the key — see [`Session::salvage`]. A key that is not there is the
+/// ordinary state of a file an older build wrote, and is not worth a line.
+fn read_or_default<T: Default + for<'de> Deserialize<'de>>(
+    document: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    path: &Path,
+) -> T {
+    let Some(value) = document.get(key) else {
+        return T::default();
+    };
+    match serde_json::from_value(value.clone()) {
+        Ok(read) => read,
+        Err(error) => {
+            log::warn!(
+                "{} holds a `{key}` this build cannot read ({error}); using its default",
+                path.display()
+            );
+            T::default()
         }
     }
 }
