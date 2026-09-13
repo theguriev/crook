@@ -2356,6 +2356,59 @@ fn a_pane_fills_its_share_of_the_body_and_not_just_the_cells_it_can_draw() {
 }
 
 #[test]
+fn a_pane_with_no_grid_says_so_inside_its_gutter_and_inside_its_width() {
+    // The notice was drawn against the pane's left edge, and its two lines
+    // were one `Text` each: a title wider than the pane stopped on whatever
+    // letter fell at the border, and so did the reason — which, the one time
+    // it is a shell that could not be started, is the line worth reading to
+    // the end. Inset by the gutter now, the title cut with a mark, the reason
+    // wrapped.
+    let mut harness = Harness::seeded();
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let scene = harness.frame_sized(vec2f(560., 400.));
+    let panes = panel_boxes(&scene);
+    assert_eq!(panes.len(), 2, "the split made two panes");
+    let pane = panes[0];
+    let inset = crate::workspace::body::GUTTER;
+
+    let lines = text_lines(&scene, |position| pane.contains_point(position));
+    let (title_at, title) = lines.first().expect("the pane says nothing");
+    assert!(
+        (title_at.x() - (pane.min_x() + inset)).abs() < 0.5,
+        "the title starts at x={}, not inside the gutter from {}",
+        title_at.x(),
+        pane.min_x()
+    );
+    assert!(
+        title.ends_with('…') && "port the tab bar".starts_with(title.trim_end_matches('…')),
+        "{title:?} is not the start of the title, cut with a mark"
+    );
+    let title_end = title_at.x() + title.chars().count() as f32 * 16. * 0.5;
+    assert!(
+        title_end <= pane.max_x() - inset,
+        "the title ends at {title_end}, past the gutter from {}",
+        pane.max_x()
+    );
+
+    let reason: Vec<&(Vector2F, String)> = lines.iter().skip(1).collect();
+    assert!(reason.len() > 1, "the reason was not wrapped: {reason:?}");
+    for (start, text) in &reason {
+        let end = start.x() + text.chars().count() as f32 * 12.5 * 0.5;
+        assert!(
+            end <= pane.max_x() - inset,
+            "{text:?} ends at {end}, past the gutter from {}",
+            pane.max_x()
+        );
+    }
+    let joined: Vec<&str> = reason.iter().map(|(_, text)| text.as_str()).collect();
+    assert_eq!(
+        joined.join(" "),
+        "no shell is running in this pane",
+        "wrapping dropped or duplicated a word"
+    );
+}
+
+#[test]
 fn a_vertical_split_stacks_its_panels() {
     let mut harness = Harness::new(1);
 
