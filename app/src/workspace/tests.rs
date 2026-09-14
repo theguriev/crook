@@ -3561,12 +3561,18 @@ fn worktree_row_saying(scene: &Scene, prefix: &str) -> RectF {
 /// found in has to be one taken with that row hovered.
 fn worktree_remove_cross(scene: &Scene) -> RectF {
     let menu = worktree_menu_box(scene).expect("the menu is not up");
+    // On the right of its row, which is what tells it from the × that leads
+    // the "Remove N free checkouts…" row on the left — the rows are painted
+    // in their own layer now, so paint order no longer puts a row's × first.
     scene
         .layers()
         .flat_map(|layer| layer.icons.iter())
         .filter(|icon| icon.icon_key.mark == Mark::Icon(Lucide::X))
         .map(|icon| icon.bounds)
-        .find(|bounds| menu.contains_point(center(*bounds)))
+        .find(|bounds| {
+            let at = center(*bounds);
+            menu.contains_point(at) && at.x() > menu.min_x() + menu.width() / 2.
+        })
         .expect("no row offers a ×")
 }
 
@@ -4868,6 +4874,89 @@ fn menu_over_checkout(branch: &str) -> Option<(Scratch, Harness)> {
         harness.worktrees_listed() == Some(2)
     });
     Some((scratch, harness))
+}
+
+/// The worktree menu open over a scratch repository with `count` free
+/// checkouts on branches `many/1` … `many/N`, all read.
+fn menu_over_many_checkouts(count: usize) -> Option<(Scratch, Harness)> {
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return None;
+    };
+    for serial in 1..=count {
+        let added = crate::process::command("git")
+            .args([
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                &format!("many/{serial}"),
+            ])
+            .arg(scratch.path().join(format!("co{serial}")))
+            .current_dir(&repository)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        assert!(added, "git would not add checkout {serial}");
+    }
+
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("every checkout to be read", move |harness| {
+        harness.worktrees_listed() == Some(count + 1)
+    });
+    Some((scratch, harness))
+}
+
+#[test]
+fn a_list_of_checkouts_taller_than_the_window_scrolls_and_keeps_the_actions_in_reach() {
+    // The list is the one face of the menu that grows with the repository,
+    // and it grew past the window: eight checkouts in a window 360 tall
+    // put "New worktree…" and the sweep past the bottom edge, where nothing
+    // could press them. The rows scroll now, between the header and the
+    // actions, and the keyboard's row is brought into view as it walks.
+    let Some((_scratch, mut harness)) = menu_over_many_checkouts(8) else {
+        return;
+    };
+    let window = vec2f(640., 300.);
+    let scene = harness.frame_sized(window);
+    let menu = worktree_menu_box(&scene).expect("the menu is not up");
+    assert!(
+        menu.max_y() <= window.y() - crookui_core::elements::WINDOW_INSET + 0.5,
+        "the menu at {menu:?} runs past the bottom of a {}px window",
+        window.y()
+    );
+    let visible = visible_text_lines(&scene, menu);
+    assert!(
+        visible.iter().any(|line| line.contains("New worktree")),
+        "the row that makes a worktree is out of reach: {visible:?}"
+    );
+    assert!(
+        !visible.iter().any(|line| line.contains("many/8")),
+        "the last checkout is on screen in a window with no room for it, so nothing scrolled: {visible:?}"
+    );
+
+    // Down to the last row: the keyboard's row comes into view with it.
+    for _ in 0..9 {
+        harness.dispatch_worktree(WorktreeAction::MoveSelection(1));
+    }
+    let scene = harness.frame_sized(window);
+    let visible = visible_text_lines(&scene, worktree_menu_box(&scene).expect("still up"));
+    assert!(
+        visible.iter().any(|line| line.contains("many/8")),
+        "walking to the last checkout did not scroll it into view: {visible:?}"
+    );
 }
 
 /// The sweep staged part way through removing the checkout on `branch`, and
