@@ -69,7 +69,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use crookui_core::element::SizeConstraint;
-use crookui_core::elements::MouseStateHandle;
+use crookui_core::elements::{MouseStateHandle, ScrollStateHandle, Scrollable, WINDOW_INSET};
 use crookui_core::event::DispatchedEvent;
 use crookui_core::geometry::Point;
 use crookui_core::icons::Lucide;
@@ -84,6 +84,7 @@ use crate::theme::theme;
 
 use super::action::{TabMenuAction, WorkspaceAction};
 use super::view::Workspace;
+use super::window_room::WindowRoom;
 
 /// How wide the popup is.
 ///
@@ -97,6 +98,10 @@ const ROW_INSET: f32 = 12.;
 
 /// The popup's corner radius, which is every other menu's in this application.
 const MENU_RADIUS: f32 = 6.;
+
+/// The least the menu is shortened to for a window shorter than it: a few
+/// entries' worth, under which a menu that scrolls is a menu nobody can read.
+const MENU_LEAST_HEIGHT: f32 = 120.;
 
 /// The size of an entry's label.
 const LABEL_SIZE: f32 = 12.;
@@ -169,6 +174,14 @@ pub(crate) struct TabContextMenuState {
     /// contribution that stops having something to say takes its row with it,
     /// so a remembered number would come back pointing at its neighbour.
     selected: RefCell<Option<String>>,
+    /// How far the entries are scrolled, in a window too short for them all.
+    pub(super) scroll: ScrollStateHandle,
+}
+
+/// Where `selected` stands among `rows`, if it is there.
+fn next_index(rows: &[(String, WorkspaceAction)], selected: &Option<String>) -> Option<usize> {
+    let key = selected.as_deref()?;
+    rows.iter().position(|(row, _)| row == key)
 }
 
 impl TabContextMenuState {
@@ -228,7 +241,38 @@ impl TabContextMenuState {
         let mut selected = self.selected.borrow_mut();
         let moved = selected.as_deref() != Some(next.as_str());
         *selected = Some(next);
+        if moved {
+            self.scroll_row_into_view(next_index(&rows, &selected), rows.len());
+        }
         moved
+    }
+
+    /// Brings the keyboard's row inside the entries' viewport, near enough.
+    ///
+    /// The entries are not one height — a rule between two bands, the row
+    /// of colours — so a row's top is estimated from the average: the
+    /// content the scroll holds over the count of pressable rows. A row
+    /// scrolled a few pixels short of where it stands is still on screen,
+    /// which is what the wheel would have been asked for. Before any layout
+    /// the measurement is zero and says nothing, and a list that fits has
+    /// nothing to move.
+    fn scroll_row_into_view(&self, at: Option<usize>, count: usize) {
+        let Some(at) = at else {
+            return;
+        };
+        let mut scroll = self.scroll.lock();
+        let viewport = scroll.viewport();
+        if viewport <= 0. || !scroll.is_scrollable() || count == 0 {
+            return;
+        }
+        let row = (scroll.max_offset() + viewport) / count as f32;
+        let top = at as f32 * row;
+        let offset = scroll.offset();
+        if top < offset {
+            scroll.scroll_to(top);
+        } else if top + row > offset + viewport {
+            scroll.scroll_to(top + row - viewport);
+        }
     }
 
     /// What pressing the selected row would dispatch.
@@ -644,16 +688,29 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
         column.add_child(row);
     }
 
+    // The entries scroll, for the window shorter than the menu — the way the
+    // options and block menus do, and for the same reason: the anchor
+    // slides a popup on screen but cannot make it fit, and in a window 360
+    // tall the row of colours was past the bottom edge. The submenu hangs
+    // off the popup's corner, which is where it was, however far the
+    // entries have scrolled under it.
     let popup = ConstrainedBox::new(
-        Container::new(column.finish())
-            .with_background_color(theme().surface_raised)
-            .with_border(Border::all(1.).with_border_color(theme().overlay_2))
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(MENU_RADIUS)))
-            .with_vertical_padding(6.)
-            .finish(),
+        Container::new(
+            Scrollable::new(workspace.tab_context_menu().scroll.clone(), column.finish())
+                .with_scrollbar(theme().overlay_3)
+                .finish(),
+        )
+        .with_background_color(theme().surface_raised)
+        .with_border(Border::all(1.).with_border_color(theme().overlay_2))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(MENU_RADIUS)))
+        .with_vertical_padding(6.)
+        .finish(),
     )
     .with_width(MENU_WIDTH)
     .finish();
+    let popup = WindowRoom::new(popup)
+        .with_height_inset(WINDOW_INSET, MENU_LEAST_HEIGHT)
+        .finish();
 
     // The one submenu there is, and it is not a popup. See this file's doc.
     if !workspace.tab_menu().is_open() {

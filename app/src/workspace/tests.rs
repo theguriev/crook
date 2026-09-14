@@ -3047,6 +3047,46 @@ fn clicking_a_density_segment_changes_how_much_of_a_row_there_is() {
 }
 
 #[test]
+fn the_tab_context_menu_fits_a_window_shorter_than_it_and_walks_to_its_last_row() {
+    // The last of the menus to learn this (#156, #157): in a window 360
+    // tall its row of colours was past the bottom edge. The entries scroll
+    // inside the window's height, and the keyboard's row is brought into
+    // view as it walks — near enough, since the entries are not one height.
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness.pane_ids()[0];
+    harness.open_tab_menu_on(tab, pane);
+
+    let window = vec2f(480., 260.);
+    let scene = harness.frame_sized(window);
+    let popup = tab_menu_box(&scene).expect("the menu is not up");
+    assert!(
+        popup.max_y() <= window.y() - crookui_core::elements::WINDOW_INSET + 0.5,
+        "the menu at {popup:?} runs past the bottom of a {}px window",
+        window.y()
+    );
+    let close_tab_shows = |scene: &Scene| {
+        let popup = tab_menu_box(scene).expect("the menu is not up");
+        visible_text_lines(scene, popup)
+            .iter()
+            .any(|line| line.contains("Close tab"))
+    };
+    assert!(
+        !close_tab_shows(&scene),
+        "the last entries are on screen in a window with no room for them, so nothing scrolled"
+    );
+
+    for _ in 0..12 {
+        harness.dispatch_workspace_action(TabMenuAction::MoveSelection(1).into());
+    }
+    let scene = harness.frame_sized(window);
+    assert!(
+        close_tab_shows(&scene),
+        "walking the keyboard to the last entries did not scroll them into view"
+    );
+}
+
+#[test]
 fn the_options_menu_fits_a_window_shorter_than_it_and_scrolls_to_its_last_row() {
     // The popup was as tall as its rows, and the anchor slides a popup on
     // screen but cannot make it fit: in a window shorter than the menu the
