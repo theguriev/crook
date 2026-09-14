@@ -3589,6 +3589,32 @@ impl Workspace {
             .is_none_or(|handle| handle.has_exited())
     }
 
+    /// Every finished block of a pane as a report: the command line, then
+    /// what it printed, block after block — or `None` when no command has
+    /// finished, which is what a shell without marks looks like all session.
+    ///
+    /// For the windowed `--run`, which types its commands one after another
+    /// and says at the end what came of them; the snapshot's `--run` reports
+    /// each as it settles, and this is the same report in one piece.
+    pub fn blocks_report(&self, pane: PaneId, app: &AppContext) -> Option<String> {
+        let history = self.terminal_blocks(pane, app)?;
+        if history.is_empty() {
+            return None;
+        }
+        let mut report = String::new();
+        for block in history.iter() {
+            let command = block
+                .command
+                .as_deref()
+                .unwrap_or("(a command the shell did not echo)");
+            let output = self
+                .block_rows_text(pane, block.id, block.output_from.unwrap_or(0), app)
+                .unwrap_or_default();
+            report.push_str(&format!("$ {command}\n{}\n", output.trim_end()));
+        }
+        Some(report)
+    }
+
     /// The newest finished block, or `None` before any command has finished.
     ///
     /// For the command line's `--run`, which types a command and wants to

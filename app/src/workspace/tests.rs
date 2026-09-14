@@ -10664,6 +10664,37 @@ mod shells {
         }
 
         #[test]
+        fn the_blocks_report_is_every_command_and_what_it_printed_in_order() {
+            // What the windowed `--run` logs at the end. It printed the grid,
+            // which for a shell with marks is the prompt over blank lines —
+            // the same wrong report the snapshot's `--run` gave before #141.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            let none = harness.workspace.read(&harness.app, |workspace, app| {
+                workspace.blocks_report(pane, app)
+            });
+            assert_eq!(none, None, "a report before any command has finished");
+
+            if run(&mut harness, pane, "echo ALPHA") == 0 {
+                return;
+            }
+            run(&mut harness, pane, "printf 'BETA\\nGAMMA\\n'");
+            let report = harness
+                .workspace
+                .read(&harness.app, |workspace, app| {
+                    workspace.blocks_report(pane, app)
+                })
+                .expect("two commands finished");
+            assert_eq!(
+                report,
+                "$ echo ALPHA\nALPHA\n$ printf 'BETA\\nGAMMA\\n'\nBETA\nGAMMA\n"
+            );
+        }
+
+        #[test]
         fn a_failed_command_is_washed_in_the_theme_s_red() {
             // Failure is visible without reading: scanning a long session for
             // what broke is a glance rather than a search.
