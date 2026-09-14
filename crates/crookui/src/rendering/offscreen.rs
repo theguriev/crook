@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use crookui_core::geometry::Vector2F;
 use crookui_core::platform::FontDb;
 use crookui_core::scene::Scene;
+use parking_lot::{Mutex, MutexGuard};
 
 use super::frame::Renderer;
 use super::resources::Resources;
@@ -43,12 +44,32 @@ pub fn render_scene_to_rgba(
     Ok((pixels, physical.0, physical.1))
 }
 
+/// One offscreen renderer at a time, process-wide, from the device's opening
+/// to its drop.
+///
+/// `Resources::new` already serialises *opening* a device, for the GL
+/// backend's sake. This goes further, because the whole life of a headless
+/// device is where the trouble is: `cargo test` runs every renderer test on
+/// its own thread, each opening a device, drawing into it and dropping it
+/// while the others do the same, and on the Windows runner's software
+/// adapter that killed the test process with an access violation — in the
+/// crate's own tests once and in `icon_to_pixels` the next run, sixty-six
+/// tests in and two tests in. Nothing in the application ever holds two of
+/// these at once, so the lock costs it nothing; what it buys is a test
+/// suite whose renderer tests run one after another rather than on top of
+/// each other.
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
 /// A device, a renderer and one texture to draw into, reusable across scenes.
 pub struct Offscreen {
     resources: Resources,
     renderer: Renderer,
     texture: wgpu::Texture,
     size: (u32, u32),
+    /// Held from before the device opens until after it is dropped — the
+    /// last field, since fields drop in declaration order and the device
+    /// above has to go while this is still held.
+    _exclusive: MutexGuard<'static, ()>,
 }
 
 impl Offscreen {
@@ -59,6 +80,7 @@ impl Offscreen {
     /// validation error on every backend.
     pub fn new(size: (u32, u32)) -> Result<Self> {
         let size = (size.0.max(1), size.1.max(1));
+        let exclusive = ONE_AT_A_TIME.lock();
         let resources = Resources::new(None)?;
         let renderer = Renderer::new(&resources, FORMAT);
 
@@ -82,6 +104,7 @@ impl Offscreen {
             renderer,
             texture,
             size,
+            _exclusive: exclusive,
         })
     }
 
