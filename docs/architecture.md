@@ -718,6 +718,15 @@ resolution on purpose: this same name is what `shell_integration::Shell::of` rea
 which stubs to write, and a Crook that wrapped zsh's stubs around a `/bin/sh` would be worse
 than one that wrote none.
 
+`crook --shell <path>` replaces that answer for every pane of one run, and it is the only
+thing that does: there is no setting, because the resolution above is the right one and a
+setting would be a second copy of `$SHELL` to fall out of date. The path goes through the same
+`Shell::of`, so stubs are written for what will actually run; `Settings → Shell` reads the
+terminal model's answer rather than the environment's, so the page cannot say "zsh, marks
+installed" over panes running `/bin/sh` with none; and a path that does not exist is the one
+way to a pane whose shell could not be started, which is the notice that carries a reason and
+had never been on screen on purpose before the flag existed.
+
 **How.** As a *login* shell, which is what `login(1)`, Terminal.app, iTerm2 and WezTerm all
 start, because that is the only kind that reads the files a person's `PATH` is assembled in —
 and on macOS the only kind that runs `path_helper` at all. There are two conventions for

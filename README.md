@@ -324,7 +324,8 @@ Eight features, and the page that configures them:
   side of an `ssh`, not a container, and not a shell it has no snippet for (`pwsh`, `nu`,
   `ksh`, `tcsh`) — and on those machines `crook --shell-integration zsh` prints the same text
   to paste at the end of the rc file by hand. Settings → Shell says which shell a pane starts
-  and whether it gets the marks, which is where to look when the output is one long block.
+  and whether it gets the marks, which is where to look when the output is one long block;
+  `crook --shell <path>` starts another shell in every pane, for trying one out.
 
   It also **answers**, which is what makes Tab work. Command marks are an announcement and
   completion is a question, so there is a second channel beside them: Crook writes the line
