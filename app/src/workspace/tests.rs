@@ -8815,6 +8815,33 @@ mod shells {
         );
     }
 
+    #[test]
+    fn a_shell_that_exited_is_gone_and_one_that_never_opened_is_too() {
+        // What `--run` asks between commands. A shell that has gone is quiet
+        // for ever, and a run that waited for it to go quiet after `exit`
+        // ran to its ten-second timeout — once per command still to type.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = marked_shell(&mut harness) else {
+            return;
+        };
+        let gone = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                workspace.shell_is_gone(pane, app)
+            })
+        };
+        assert!(!gone(&harness), "a shell that just opened is gone");
+
+        await_prompt(&mut harness, pane);
+        harness.type_into(pane, "exit\n");
+        harness.wait_for("the shell never left", |harness| gone(harness));
+
+        // And a pane that has no terminal at all: nothing to type into.
+        let stranger = PaneId::next();
+        assert!(harness.workspace.read(&harness.app, |workspace, app| {
+            workspace.shell_is_gone(stranger, app)
+        }));
+    }
+
     /// The grid a pane's terminal holds right now, off the emulator.
     fn grid_opened(harness: &Harness, pane: PaneId) -> Option<(u16, u16)> {
         harness.workspace.read(&harness.app, |workspace, app| {

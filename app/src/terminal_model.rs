@@ -1140,6 +1140,18 @@ impl TerminalHandle {
     /// answer "unchanged" and never try again — a single failed `ioctl` while a
     /// window edge is being dragged would leave the shell's `$COLUMNS` wrong for
     /// the life of the pane.
+    /// Whether the shell has exited, asked of the child now rather than of
+    /// the last poll.
+    ///
+    /// For the command line's `--run`, which types into this shell and waits
+    /// for it to go quiet: a shell that has gone is quiet for ever, and the
+    /// wait would otherwise run to its timeout for every command still to
+    /// be typed. Under the terminal's own lock, like every `try_wait`, so
+    /// the exit is cached where the poll that closes the pane reads it.
+    pub fn has_exited(&self) -> bool {
+        self.drive(|terminal| terminal.try_wait().ok().flatten().is_some())
+    }
+
     pub fn resize(&self, size: TerminalSize) -> bool {
         let shared = &self.0;
         if !needs_resize(&shared.grid, size) {

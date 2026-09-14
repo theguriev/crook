@@ -1539,7 +1539,18 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
                 bail!("the shell could not be started: {failure}");
             }
             await_shell(&queue, &mut app, &workspace, pane);
-            for command in &overrides.run {
+            for (index, command) in overrides.run.iter().enumerate() {
+                // A shell that has gone — an `exit` typed before this, a
+                // crash — takes nothing more, and a command typed into it
+                // would wait out the whole timeout for a prompt that is not
+                // coming, once per command still on the list.
+                let gone =
+                    workspace.read(&app, |workspace, app| workspace.shell_is_gone(pane, app));
+                if gone {
+                    let left = overrides.run.len() - index;
+                    log::warn!("the shell has exited; {left} of the commands were not run");
+                    break;
+                }
                 let before =
                     workspace.read(&app, |workspace, app| workspace.newest_block(pane, app));
                 type_run(&mut app, &mut presenter, window_id, command);
@@ -1999,6 +2010,11 @@ fn press(app: &mut App, presenter: &mut Presenter, window_id: WindowId, key: &st
 /// Bounded by [`RUN_TIMEOUT`], because a command that never goes quiet — `top`,
 /// a `sleep` — still has to produce a picture.
 ///
+/// A shell that exits — because the command was `exit`, or because it was
+/// the last thing the shell could take — is finished too, whatever the grid
+/// says: a grid emptied by the exit would otherwise never count as quiet,
+/// and the wait would run to its timeout.
+///
 /// What is reported depends on what the shell did with the output. A shell
 /// with marks closes a block behind the command and its rows leave the grid
 /// for it, so the block is the report — `newest_before` is the block that was
@@ -2029,6 +2045,11 @@ fn settle_run(
             break;
         }
 
+        let gone = workspace.read(&*app, |workspace, app| workspace.shell_is_gone(pane, app));
+        if gone {
+            log::info!("the shell exited while the command ran");
+            break;
+        }
         if Instant::now() >= deadline {
             log::warn!("the command was still printing after {RUN_TIMEOUT:?}");
             break;
