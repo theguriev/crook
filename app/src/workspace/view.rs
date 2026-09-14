@@ -2742,6 +2742,7 @@ impl Workspace {
 
         self.tab_context_menu.tab = Some(tab);
         self.tab_context_menu.pane = Some(pane);
+        self.tab_context_menu.scroll.lock().scroll_to_top();
         self.tab_context_menu.forget_hover_state();
         self.sync_input_keys();
         ctx.notify();
