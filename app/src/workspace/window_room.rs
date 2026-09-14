@@ -19,10 +19,10 @@ use crookui_core::geometry::{Point, Vector2F};
 use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 
 /// Narrows or shortens its child to the room the window leaves.
-pub(super) struct WindowRoom {
+pub(crate) struct WindowRoom {
     child: Box<dyn Element>,
-    /// Where the child starts, from the window's left edge, and the least it
-    /// may be narrowed to: the room to its right is what it gets.
+    /// What is taken off the window's width before the child gets the rest,
+    /// and the least it may be narrowed to.
     width: Option<(f32, f32)>,
     /// The inset kept above and below the child, and the least it may be
     /// shortened to: the window's height less twice the inset is what it gets.
@@ -31,7 +31,7 @@ pub(super) struct WindowRoom {
 
 impl WindowRoom {
     /// Wraps `child`, taking nothing off it until asked.
-    pub(super) fn new(child: Box<dyn Element>) -> Self {
+    pub(crate) fn new(child: Box<dyn Element>) -> Self {
         Self {
             child,
             width: None,
@@ -45,8 +45,19 @@ impl WindowRoom {
     /// The least is where narrowing stops helping: a card cut to nothing
     /// says nothing a row does not, and the clip off the window's edge is
     /// then the lesser evil.
-    pub(super) fn with_width_right_of(mut self, from_left: f32, least: f32) -> Self {
+    pub(crate) fn with_width_right_of(mut self, from_left: f32, least: f32) -> Self {
         self.width = Some((from_left, least));
+        self
+    }
+
+    /// Narrows the child to the window's width less `inset` at each side,
+    /// never under `least`.
+    ///
+    /// For a surface centred on the window: a card built to one width in a
+    /// window narrower than it used to run off the right edge, since the row
+    /// that centres it measures it free.
+    pub(crate) fn with_width_inset(mut self, inset: f32, least: f32) -> Self {
+        self.width = Some((inset * 2., least));
         self
     }
 
@@ -56,7 +67,7 @@ impl WindowRoom {
     /// For a menu whose rows scroll: a window shorter than the menu used to
     /// leave its last rows past the bottom edge, unreachable, since the
     /// anchor slides a popup on screen but cannot make it fit.
-    pub(super) fn with_height_inset(mut self, inset: f32, least: f32) -> Self {
+    pub(crate) fn with_height_inset(mut self, inset: f32, least: f32) -> Self {
         self.height = Some((inset, least));
         self
     }
@@ -69,8 +80,8 @@ impl Element for WindowRoom {
         ctx: &mut LayoutContext,
         app: &AppContext,
     ) -> Vector2F {
-        if let Some((from_left, least)) = self.width {
-            let room = (ctx.window_size.x() - from_left).max(least);
+        if let Some((taken, least)) = self.width {
+            let room = (ctx.window_size.x() - taken).max(least);
             constraint.max.set_x(constraint.max.x().min(room));
             constraint.min.set_x(constraint.min.x().min(room));
         }
