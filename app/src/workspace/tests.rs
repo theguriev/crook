@@ -13566,6 +13566,76 @@ fn keybindings_in(harness: &mut Harness, scratch: &Scratch) -> PathBuf {
     path
 }
 
+#[test]
+fn a_keybindings_file_edited_while_the_settings_show_is_re_read_and_in_force() {
+    // The Keyboard Shortcuts page names the file and says the chords come
+    // from it. Somebody who edits it in their editor and looks back at Crook
+    // used to see the old chords until the next launch — and press the new
+    // one into nothing. The settings being open is what the poll is gated
+    // on, because that is when it is happening.
+    let mut harness = Harness::new(1);
+    let scratch = Scratch::new();
+    let path = keybindings_in(&mut harness, &scratch);
+    harness.open_settings_page();
+    harness.select_settings_section("Keyboard Shortcuts");
+    let ctrl_alt = Modifiers {
+        ctrl: true,
+        alt: true,
+        ..Modifiers::default()
+    };
+    assert_eq!(harness.action_for("n", ctrl_alt), None);
+
+    fs::write(
+        &path,
+        r#"[{ "key": "ctrl+alt+n", "command": "crook/window/new-tab" }]"#,
+    )
+    .expect("writable");
+    harness.settle_for(std::time::Duration::from_secs(5), |harness| {
+        harness.action_for("n", ctrl_alt).is_some()
+    });
+
+    assert_eq!(
+        harness.action_for("n", ctrl_alt),
+        Some(WorkspaceAction::Tab(TabAction::New)),
+        "the edit never reached the window"
+    );
+    assert!(
+        frame_text(&harness.frame()).contains("ctrl+alt+n"),
+        "the page does not print the chord the file now has"
+    );
+}
+
+#[test]
+fn the_keybindings_file_is_not_polled_while_the_settings_are_closed() {
+    // An application that is idle by design stays idle: the chain ends at
+    // the first tick that finds the section gone.
+    let mut harness = Harness::new(1);
+    let scratch = Scratch::new();
+    let path = keybindings_in(&mut harness, &scratch);
+    harness.open_settings_page();
+    harness.show_tabs();
+    let ctrl_alt = Modifiers {
+        ctrl: true,
+        alt: true,
+        ..Modifiers::default()
+    };
+
+    fs::write(
+        &path,
+        r#"[{ "key": "ctrl+alt+n", "command": "crook/window/new-tab" }]"#,
+    )
+    .expect("writable");
+    // Two poll intervals, which is one more than it takes for a poll that
+    // was running to have noticed.
+    harness.settle_for(super::view::KEYBINDINGS_POLL * 2, |_| false);
+
+    assert_eq!(
+        harness.action_for("n", ctrl_alt),
+        None,
+        "the file was read with nobody looking at the settings"
+    );
+}
+
 /// The keybindings file, once a save has written `needle` into it.
 ///
 /// Waits, for the reason [`Scratch::written_containing`] waits: the write is

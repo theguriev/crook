@@ -434,7 +434,9 @@ Eight features, and the page that configures them:
   else in it, comments included. Beside each chord is whichever of "Reset" and "Unbind" that
   row can still be asked for. The same recording is reachable by name, as
   `crook/shortcuts/rebind`, which is how a plugin's own chip can offer "change this
-  keybinding" without being able to write a file itself.
+  keybinding" without being able to write a file itself. Editing the file by hand works too:
+  while the settings are showing, Crook re-reads it and the chords in it are in force — the
+  page tells you where it is.
 
 - **Everything the window does has a name, and most of it has a key.** The window registers
   forty-nine commands of its own and ships chords for thirty-five; the other fourteen are
