@@ -8719,6 +8719,78 @@ mod shells {
         );
     }
 
+    #[test]
+    fn a_split_pane_s_shell_opens_at_the_grid_the_layout_will_give_it() {
+        // A split's shell opens on the split, and the pane's first layout
+        // comes a frame later, so no layout has measured it. It is worked
+        // out instead — half the box the two now share, by the tab's own
+        // weights — and read off the emulator before that layout can happen.
+        let mut harness = Harness::panel(1);
+        harness.workspace_update(|workspace, ctx| workspace.expect_terminals(ctx));
+        harness.frame_sized(vec2f(900., 600.));
+        let Some(first) = one_shell(&mut harness) else {
+            return;
+        };
+
+        harness.dispatch_action(TabAction::Split(Direction::Right));
+        let second = harness.focused_pane_id().expect("the split focused a pane");
+        assert_ne!(first, second);
+        let opened = grid_opened(&harness, second);
+
+        let scene = harness.frame_sized(vec2f(900., 600.));
+        let boxes = panel_boxes(&scene);
+        assert_eq!(boxes.len(), 2);
+        let laid_out = grid_in(boxes[1]);
+        assert_ne!(
+            laid_out,
+            (80, 24),
+            "a half pane that measures the default proves nothing"
+        );
+        assert_eq!(
+            opened,
+            Some(laid_out),
+            "the split pane's shell did not open at the grid its layout gave it"
+        );
+    }
+
+    #[test]
+    fn a_pane_in_a_tab_behind_the_active_one_opens_at_the_body_s_grid() {
+        // Only the active tab is laid out, so at startup the panes behind it
+        // have no measurement of their own. An unsplit tab's one pane shares
+        // the body with the active tab's, and opens at that.
+        let mut harness = Harness::panel(2);
+        harness.workspace_update(|workspace, ctx| workspace.expect_terminals(ctx));
+        let scene = harness.frame_sized(vec2f(900., 600.));
+        let body = grid_in(panel_boxes(&scene)[0]);
+        let active = harness.active_id();
+        let behind = harness
+            .tab_ids()
+            .into_iter()
+            .find(|tab| *tab != active)
+            .expect("two tabs");
+        let pane = harness.panes_of(behind)[0];
+
+        if one_shell(&mut harness).is_none() {
+            return;
+        }
+        assert_eq!(
+            grid_opened(&harness, pane),
+            Some(body),
+            "the pane behind the active tab did not open at the body's grid"
+        );
+    }
+
+    /// The grid a pane's terminal holds right now, off the emulator.
+    fn grid_opened(harness: &Harness, pane: PaneId) -> Option<(u16, u16)> {
+        harness.workspace.read(&harness.app, |workspace, app| {
+            let (_, snapshot) = workspace.terminal(pane, app)?;
+            Some((
+                snapshot.row(0).len() as u16,
+                snapshot.iter_rows().count() as u16,
+            ))
+        })
+    }
+
     fn one_shell(harness: &mut Harness) -> Option<PaneId> {
         if !a_shell_these_tests_speak() || !harness.start_terminals() {
             return None;

@@ -87,7 +87,7 @@ use crook_terminal::{
     Block, BlockId, BlockRows, Key, Modifiers, MouseButton, MouseEventKind, MouseModes, Palette,
     Rgb, Snapshot, Terminal, TerminalEvent, TerminalOptions, TerminalSize,
 };
-use crookui_core::geometry::Color;
+use crookui_core::geometry::{Color, Vector2F};
 use crookui_core::prelude::*;
 
 use crate::completion::{self, Completions};
@@ -128,47 +128,67 @@ const CHILD_POLL: Duration = Duration::from_secs(1);
 /// How long the reader sleeps between attempts to reap.
 const REAP_INTERVAL: Duration = Duration::from_millis(5);
 
-/// The grid a terminal starts at when no layout has measured its pane.
+/// The grid a terminal starts at when nothing has measured its pane.
 ///
-/// The size every terminal has ever defaulted to, and a fallback: a pane that
-/// was laid out before its shell opened — every pane at startup, since the
-/// window's first frame comes before its shells — recorded the grid it holds
-/// in [`Measured`], and the shell opens at that. This is for the rest: a
-/// pane split off after the frame, whose shell opens before its first layout,
-/// and a shell started without a frame at all. The first layout replaces it.
+/// The size every terminal has ever defaulted to, and a fallback for a shell
+/// started before any frame at all. Every other pane has a grid in
+/// [`Measured`] by the time its shell opens: the panes of the active tab
+/// record theirs in the frame the shells wait for, and the rest — the tabs
+/// behind it, the pane a split just made — are worked out from the box that
+/// frame measured and the tab's own weights. The first layout replaces
+/// whichever it was.
 ///
-/// The gap it leaves is real and not only a formality. A shell can print its
-/// whole startup — a `~/.zprofile` banner, a greeting sized with `tput cols`
-/// — inside that window, and what it printed is copied out of the grid into
-/// a block the moment the first prompt mark arrives, so a later resize cannot
-/// reflow it. That is why the startup panes wait for the frame.
+/// The gap this would leave is real and not only a formality. A shell can
+/// print its whole startup — a `~/.zprofile` banner, a greeting sized with
+/// `tput cols` — inside its first grid, and what it printed is copied out of
+/// the grid into a block the moment the first prompt mark arrives, so a
+/// later resize cannot reflow it.
 const INITIAL_GRID: TerminalSize = TerminalSize::new(80, 24);
 
-/// The grids the panes measured before they had a terminal to give them to.
+/// The grids the panes measured before they had a terminal to give them to,
+/// and the box the active tab's panes were laid out in.
 ///
-/// Layout runs on a shared reference, so the number has to travel through
+/// Layout runs on a shared reference, so the numbers have to travel through
 /// something layout can write — the arrangement [`TerminalHandle::resize`]
-/// has in its atomics, for a pane that has no [`Shared`] yet. Written by the
-/// element that stands in a pane with no terminal, read by [`TerminalModel::open`].
+/// has in its atomics, for a pane that has no [`Shared`] yet. The grids are
+/// written by the element that stands in a pane with no terminal; the body
+/// by the element the tab's panes are laid out in, so that a pane no layout
+/// has seen — one in a tab behind the active one, one just split off — can
+/// be given the grid the layout *would* give it, from the box and the tab's
+/// own weights. Read by [`TerminalModel::open`].
 #[derive(Clone, Default)]
-pub struct Measured(Arc<Mutex<HashMap<PaneId, TerminalSize>>>);
+pub struct Measured(Arc<Mutex<MeasuredState>>);
+
+#[derive(Default)]
+struct MeasuredState {
+    panes: HashMap<PaneId, TerminalSize>,
+    body: Option<Vector2F>,
+}
 
 impl Measured {
-    /// Records the grid `pane` would hold, as its last layout measured it.
+    /// Records the grid `pane` would hold, as its last layout measured it —
+    /// or as the workspace worked it out for a pane no layout has measured.
     pub fn record(&self, pane: PaneId, size: TerminalSize) {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(pane, size);
+        self.lock().panes.insert(pane, size);
     }
 
     /// The grid `pane` last measured, if a layout has measured it.
     pub fn get(&self, pane: PaneId) -> Option<TerminalSize> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&pane)
-            .copied()
+        self.lock().panes.get(&pane).copied()
+    }
+
+    /// Records the box the active tab's panes share.
+    pub fn record_body(&self, size: Vector2F) {
+        self.lock().body = Some(size);
+    }
+
+    /// The box the active tab's panes share, once a layout has measured it.
+    pub fn body(&self) -> Option<Vector2F> {
+        self.lock().body
+    }
+
+    fn lock(&self) -> MutexGuard<'_, MeasuredState> {
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 

@@ -4254,6 +4254,9 @@ impl Workspace {
     /// render this very view tree, and neither should leave a shell running
     /// to do it.
     pub fn start_terminals(&self, ctx: &mut ViewContext<Self>) {
+        // The frame measured the active tab's panes; the tabs behind it are
+        // worked out from what it measured, before their shells open.
+        self.estimate_unmeasured_panes(ctx);
         let panes = self.open_panes();
         self.terminals
             .update(ctx, |model, ctx| model.start(&panes, ctx));
@@ -5979,9 +5982,41 @@ impl Workspace {
     /// exists" and "a shell is running in it" are one statement rather than two
     /// that can disagree. Before [`Self::start_terminals`] it opens nothing.
     fn sync_terminals(&mut self, ctx: &mut ViewContext<Self>) {
+        self.estimate_unmeasured_panes(ctx);
         let panes = self.open_panes();
         self.terminals
             .update(ctx, |model, ctx| model.sync(&panes, ctx));
+    }
+
+    /// Gives every pane no layout has measured the grid the layout would
+    /// give it, so that its shell opens at that rather than at eighty by
+    /// twenty-four.
+    ///
+    /// A layout measures the active tab's panes and nothing else. The panes
+    /// behind it at startup, and the pane a split just made — whose first
+    /// layout comes a frame after the split, and whose shell opens now — are
+    /// worked out from the box the active tab's panes share and the tab's own
+    /// weights: see `body::estimated_grid`. Nothing before the first frame,
+    /// since there is no box yet; those shells wait for it, see
+    /// [`Self::expect_terminals`].
+    fn estimate_unmeasured_panes(&self, ctx: &mut ViewContext<Self>) {
+        let measured = self.terminals.as_ref(ctx).measured();
+        let Some(body) = measured.body() else {
+            return;
+        };
+        for tab in self.tabs.iter() {
+            let group = tab.panes();
+            for pane in group.iter() {
+                if measured.get(pane.id()).is_some() {
+                    continue;
+                }
+                if let Some(grid) =
+                    super::body::estimated_grid(body, group, pane.id(), self.cell_font())
+                {
+                    measured.record(pane.id(), grid);
+                }
+            }
+        }
     }
 
     /// The open panes that want a shell, and where each of them is working.
