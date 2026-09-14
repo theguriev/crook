@@ -3566,6 +3566,17 @@ impl Workspace {
         block_text(&Blocks::list(&history, &snapshot), block, from)
     }
 
+    /// Whether a pane's shell has gone: it has exited, or it never opened.
+    ///
+    /// For the command line's `--run`, which has nothing left to type into
+    /// once this is true.
+    pub fn shell_is_gone(&self, pane: PaneId, app: &AppContext) -> bool {
+        self.terminals
+            .as_ref(app)
+            .handle(pane)
+            .is_none_or(|handle| handle.has_exited())
+    }
+
     /// The newest finished block, or `None` before any command has finished.
     ///
     /// For the command line's `--run`, which types a command and wants to
