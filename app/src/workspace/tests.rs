@@ -3047,6 +3047,84 @@ fn clicking_a_density_segment_changes_how_much_of_a_row_there_is() {
 }
 
 #[test]
+fn the_options_menu_fits_a_window_shorter_than_it_and_scrolls_to_its_last_row() {
+    // The popup was as tall as its rows, and the anchor slides a popup on
+    // screen but cannot make it fit: in a window shorter than the menu the
+    // last rows were past the bottom edge, and nothing could reach them.
+    // The rows scroll inside the window's height now.
+    let mut harness = Harness::seeded();
+    harness.dispatch_option(OptionsAction::SetDensity(Density::Expanded));
+    harness.dispatch_option(OptionsAction::TogglePopup);
+
+    let window = vec2f(480., 300.);
+    let scene = harness.frame_sized(window);
+    let popup = menu_box(&scene);
+    assert!(
+        popup.max_y() <= window.y() - crookui_core::elements::WINDOW_INSET + 0.5,
+        "the popup at {popup:?} runs past the bottom of a {}px window",
+        window.y()
+    );
+    let last_row_shows = |scene: &Scene| {
+        let popup = menu_box(scene);
+        visible_text_lines(scene, popup)
+            .iter()
+            .any(|line| line.contains("Show details on hover"))
+    };
+    assert!(
+        !last_row_shows(&scene),
+        "the last row is on screen in a window with no room for it, so nothing scrolled"
+    );
+
+    harness.dispatch(Event::ScrollWheel {
+        position: center(popup),
+        delta: ScrollDelta::Lines(vec2f(0., -40.)),
+        modifiers: Modifiers::default(),
+    });
+    let scene = harness.frame_sized(window);
+    assert!(
+        last_row_shows(&scene),
+        "scrolling the popup did not bring its last row into view"
+    );
+}
+
+/// The lines of text drawn inside `inside`, as the clip lets them be seen:
+/// a glyph the layer's clip cuts off is not on screen.
+fn visible_text_lines(scene: &Scene, inside: RectF) -> Vec<String> {
+    let layers: Vec<_> = scene.layers().collect();
+    let mut rows: HashMap<i32, Vec<(f32, char)>> = HashMap::new();
+    for layer in &layers {
+        for glyph in &layer.glyphs {
+            let Some(character) = char::from_u32(glyph.glyph_key.glyph_id) else {
+                continue;
+            };
+            if !inside.contains_point(glyph.position) {
+                continue;
+            }
+            if let Some(clip) = layer.clip_bounds
+                && !clip.contains_point(glyph.position)
+            {
+                continue;
+            }
+            rows.entry(glyph.position.y().round() as i32)
+                .or_default()
+                .push((glyph.position.x(), character));
+        }
+    }
+    let mut lines: Vec<(i32, String)> = rows
+        .into_iter()
+        .map(|(y, mut glyphs)| {
+            glyphs.sort_by(|left, right| left.0.total_cmp(&right.0));
+            (
+                y,
+                glyphs.into_iter().map(|(_, character)| character).collect(),
+            )
+        })
+        .collect();
+    lines.sort_by_key(|(y, _)| *y);
+    lines.into_iter().map(|(_, text)| text).collect()
+}
+
+#[test]
 fn the_info_note_fits_inside_the_menu_it_belongs_to() {
     // A paragraph measured free is one line, and `Stack` lays an anchored
     // child out against the whole window, so the unbroken sentence measured
@@ -10834,6 +10912,35 @@ mod shells {
                 );
                 Ok(())
             }
+        }
+
+        #[test]
+        fn the_block_menu_fits_a_window_shorter_than_it() {
+            // The options menu's arrangement, on the menu that hangs off a
+            // block: a window shorter than its entries used to leave the
+            // last of them past the bottom edge.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            if run(&mut harness, pane, "echo ALPHA") == 0 {
+                return;
+            }
+            open_block_menu(&mut harness, pane, 0);
+
+            let window = vec2f(480., 200.);
+            let scene = harness.frame_sized(window);
+            let popup = block_menu_box(&scene);
+            assert!(
+                popup.max_y() <= window.y() - crookui_core::elements::WINDOW_INSET + 0.5,
+                "the menu at {popup:?} runs past the bottom of a {}px window",
+                window.y()
+            );
+            assert!(
+                popup.height() >= 100.,
+                "the menu at {popup:?} was shortened to nothing"
+            );
         }
 
         #[test]
