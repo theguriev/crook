@@ -1287,7 +1287,13 @@ Escape leaves the binding alone, and keeping it writes VSCode's two lines into
 The write is a *text* edit — `keybindings::document` finds the span of each entry and inserts
 or cuts one — so a comment somebody wrote survives a button being clicked in a settings page.
 The recorder ends with the page: leaving the settings section or changing page cancels it, and
-`--record <command>` opens the page with a row already recording, for a picture of it.
+`--record <command>` opens the page with a row already recording, for a picture of it. The
+file can be edited by hand too: while the settings section is showing it is re-read on the
+themes folder's cadence — the same poll-not-watcher arrangement, for the same reason, and
+ending the same way when the section is left — and adopted only when it differs, only while
+the section still shows, and only while no save of the page's own is on its way to disk
+(`SaveOrder::is_settled`), since a file read between a recorded chord and its write is the
+file from before the edit.
 
 The danger of keeping that table away from `route` is real: a binding consumed in the delegate
 never reaches `route`, so two tables in two modules can silently take the same key away from
@@ -1610,7 +1616,8 @@ stays whatever somebody chose for it.
 **Hot reload is in, as a poll rather than a watcher, and only while the Themes panel is open.**
 A filesystem watcher is a dependency, a thread and a per-platform API for a folder that changes
 when a person is editing a theme — which is exactly when that panel is open. Closed, it costs
-nothing at all: the chain ends at the first tick that finds the panel gone. The re-read happens
+nothing at all: the chain ends at the first tick that finds the panel gone. (`keybindings.json`
+is re-read the same way while the settings section is showing; see §7.) The re-read happens
 on the background pool, and the theme in force is looked up again *by name*, because the
 palette in force is the old one and a lookup by palette would find the row it used to be and
 conclude nothing had happened.
