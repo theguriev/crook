@@ -270,11 +270,16 @@ impl Element for Container {
         self.origin = Some(Point::from_vec2f(origin, ctx.scene.z_index()));
 
         let box_origin = origin + vec2f(self.margin.left, self.margin.top);
-        let box_size = size
+        // Not below zero. The layout shrinks the box when there is less room
+        // than the margins need (see there), and a box shrunk past nothing
+        // would be a rect with a negative side — which the renderer used to
+        // panic on, clamping a corner radius between zero and half of it.
+        let box_size = (size
             - vec2f(
                 self.margin.left + self.margin.right,
                 self.margin.top + self.margin.bottom,
-            );
+            ))
+        .max(Vector2F::zero());
 
         ctx.scene
             .draw_rect_with_hit_recording(RectF::new(box_origin, box_size))
