@@ -40,9 +40,13 @@
 //! of a 248px column and keeps the panel usable with a mouse; the alternative
 //! was a layout in which the only way to close a tab is a keystroke.
 
-use crookui_core::elements::MouseStateHandle;
+use crookui_core::element::SizeConstraint;
+use crookui_core::elements::{MouseStateHandle, WINDOW_INSET};
+use crookui_core::event::DispatchedEvent;
 use crookui_core::fonts::{FamilyId, Weight};
+use crookui_core::geometry::Point;
 use crookui_core::prelude::*;
+use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 
 use crate::plugins::tabs::TabRow;
 use crate::settings::{Density, Granularity, TabOptions};
@@ -276,7 +280,11 @@ pub(super) fn render(
     // topmost overlay that existed when it painted, so a second would make the
     // row unclickable.
     stack.add_anchored_overlay_child(
-        detail_card(&sections, home, ui),
+        WindowRoom::new(
+            super::PANEL_WIDTH + CARD_GAP + WINDOW_INSET,
+            detail_card(&sections, home, ui),
+        )
+        .finish(),
         AnchorTo {
             parent: Corner::TopRight,
             child: Corner::TopLeft,
@@ -289,12 +297,72 @@ pub(super) fn render(
             // torn down and re-armed frame after frame, and the close button
             // beneath it cannot be reached at all. Warp narrows its sidecar to
             // 240 and then lets it clip off the window edge rather than move
-            // back over the panel; Crook has no way to measure the room at
-            // build time, so it keeps the width and takes the clip.
+            // back over the panel; Crook narrows it to the room the window
+            // leaves — see `WindowRoom` — and keeps this for a window with
+            // less room than the card's least width.
             keep_clear_of_parent: true,
         },
     );
     stack.finish()
+}
+
+/// The least the card is narrowed to. Under this the lines on it say nothing
+/// a row does not, and the clip off the window's edge is the lesser evil.
+const CARD_LEAST_WIDTH: f32 = 160.;
+
+/// Narrows its child to the room the window leaves right of `from_left`.
+///
+/// What lets the card keep its width in a wide window and give it up in a
+/// narrow one. The width a card is built with is a constant, and the room it
+/// has is only known at layout: a card built for 320 in a window 480 wide
+/// stood 245 from the left and ran 85 past the right edge, its last words
+/// and its corner cut off. The layout knows the window, so the room is taken
+/// off the constraint here and the card's own texts give way — each of them
+/// is cut with a mark where it runs out.
+struct WindowRoom {
+    from_left: f32,
+    child: Box<dyn Element>,
+}
+
+impl WindowRoom {
+    fn new(from_left: f32, child: Box<dyn Element>) -> Self {
+        Self { from_left, child }
+    }
+}
+
+impl Element for WindowRoom {
+    fn layout(
+        &mut self,
+        mut constraint: SizeConstraint,
+        ctx: &mut LayoutContext,
+        app: &AppContext,
+    ) -> Vector2F {
+        let room = (ctx.window_size.x() - self.from_left).max(CARD_LEAST_WIDTH);
+        constraint.max.set_x(constraint.max.x().min(room));
+        constraint.min.set_x(constraint.min.x().min(room));
+        self.child.layout(constraint, ctx, app)
+    }
+
+    fn paint(&mut self, origin: Vector2F, ctx: &mut PaintContext, app: &AppContext) {
+        self.child.paint(origin, ctx, app);
+    }
+
+    fn dispatch_event(
+        &mut self,
+        event: &DispatchedEvent,
+        ctx: &mut EventContext,
+        app: &AppContext,
+    ) -> bool {
+        self.child.dispatch_event(event, ctx, app)
+    }
+
+    fn size(&self) -> Option<Vector2F> {
+        self.child.size()
+    }
+
+    fn origin(&self) -> Option<Point> {
+        self.child.origin()
+    }
 }
 
 /// A row's text column, and whether the icon beside it has more than one line
