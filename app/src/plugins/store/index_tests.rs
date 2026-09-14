@@ -39,6 +39,31 @@ fn the_newest_version_this_build_can_run_is_the_one_offered() {
 }
 
 #[test]
+fn the_offers_are_by_name_and_a_lowercase_name_is_not_last() {
+    // The registry's order is whatever its CI walked a directory in, and
+    // `str::cmp` put `dziling` after `Worktree` because a lowercase letter
+    // is a larger byte: the Store listed five capitalised plugins and then
+    // the one spelled in lowercase, as if it were a different kind of thing.
+    let plugin = |id: &str, name: &str| {
+        format!(
+            r#"{{"id": "{id}", "name": "{name}", "description": "", "repository": "", "license": "", "versions": []}}"#
+        )
+    };
+    let text = format!(
+        r#"{{"schema": 1, "plugins": [{}, {}, {}, {}]}}"#,
+        plugin("a/worktree", "Worktree"),
+        plugin("a/dziling", "dziling"),
+        plugin("a/chips", "Chips"),
+        plugin("a/emoji", "Emoji")
+    );
+    let index = parse(text.as_bytes()).expect("it should parse");
+
+    let offers = offers(&index);
+    let names: Vec<&str> = offers.iter().map(|offer| offer.name.as_str()).collect();
+    assert_eq!(names, ["Chips", "dziling", "Emoji", "Worktree"]);
+}
+
+#[test]
 fn a_version_that_was_withdrawn_is_not_offered_and_is_still_remembered() {
     let mut index = parse(ONE.as_bytes()).expect("it should parse");
     index.plugins[0].versions[1].yanked = Some(String::from("it read the wrong file"));
