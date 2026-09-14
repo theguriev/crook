@@ -2786,8 +2786,14 @@ impl Shell {
         run.printed
     }
 
-    /// Says what the pane `--run` typed into is showing, so an unattended run
+    /// Says what came of the commands `--run` typed, so an unattended run
     /// leaves evidence that the loop worked.
+    ///
+    /// The blocks, command by command, the way the snapshot's `--run` reports
+    /// them: the grid is the wrong thing to print for a shell with marks,
+    /// since a finished command's rows leave it for the block, and what is
+    /// left is the prompt over the blank lines above it. The grid is the
+    /// report only for a shell without marks, which closes no block.
     fn report_run(&self) {
         let Some(run) = self.run.as_ref() else {
             return;
@@ -2795,7 +2801,9 @@ impl Shell {
         let printed = self
             .workspace
             .read(&self.app, |workspace, app| {
-                workspace.terminal_text(run.pane, app)
+                workspace
+                    .blocks_report(run.pane, app)
+                    .or_else(|| workspace.terminal_text(run.pane, app))
             })
             .unwrap_or_default();
         log::info!("the shell printed:\n{}", printed.trim_end());
