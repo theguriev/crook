@@ -1955,16 +1955,28 @@ fn type_run(app: &mut App, presenter: &mut Presenter, window_id: WindowId, comma
     press(app, presenter, window_id, "enter", "\r");
 }
 
-/// The window's name: the active tab's title, then the application's, the
-/// way a browser names its window after the page — the tab first, since it
-/// is the part that differs between two windows, and the application after
-/// the dash so that a switcher lists them under one name. The application's
-/// alone when there is no tab, or a tab with nothing to call itself.
-fn window_title(active: Option<&str>, base: &str) -> String {
-    match active.map(str::trim) {
-        Some(tab) if !tab.is_empty() => format!("{tab} — {base}"),
-        _ => base.to_owned(),
+/// The window's name: how many panes are waiting for a person, when any
+/// are, then the active tab's title, then the application's.
+///
+/// The way a browser names its window after the page and a mail client
+/// counts the unread in front of it. The count first, in the words the
+/// header's chip uses, because it is the one thing about a window that
+/// matters while it is *behind* another — an agent that stopped for an
+/// answer in a window nobody is looking at is exactly what a switcher and
+/// a taskbar are for finding. The tab next, since it is the part that
+/// differs between two windows; the application after the dash so that a
+/// switcher lists them under one name; and the application's name alone
+/// when there is no tab, or a tab with nothing to call itself.
+fn window_title(active: Option<&str>, waiting: usize, base: &str) -> String {
+    let mut title = String::new();
+    if waiting > 0 {
+        title.push_str(&format!("({waiting} waiting) "));
     }
+    match active.map(str::trim) {
+        Some(tab) if !tab.is_empty() => title.push_str(&format!("{tab} — {base}")),
+        _ => title.push_str(base),
+    }
+    title
 }
 
 /// Presses one key on the window, exactly as the platform would.
@@ -2772,10 +2784,14 @@ impl Shell {
     /// — a rename, an agent's own name for its work — and sent only when it
     /// changed, because every window system takes this as a message.
     fn follow_the_active_tab_with_the_title(&mut self) {
-        let active = self.workspace.read(&self.app, |workspace, _| {
-            workspace.tabs().active().map(|tab| tab.title().to_owned())
+        let (active, waiting) = self.workspace.read(&self.app, |workspace, _| {
+            let strip = workspace.tabs();
+            (
+                strip.active().map(|tab| tab.title().to_owned()),
+                crate::plugins::tabs::waiting_count(strip),
+            )
         });
-        let title = window_title(active.as_deref(), &self.base_title);
+        let title = window_title(active.as_deref(), waiting, &self.base_title);
         if self.window_title.as_deref() == Some(title.as_str()) {
             return;
         }
@@ -3007,17 +3023,29 @@ mod tests {
     #[test]
     fn the_window_is_named_after_the_tab_it_shows_and_after_crook_when_there_is_none() {
         assert_eq!(
-            window_title(Some("bisect the flaky test"), "Crook"),
+            window_title(Some("bisect the flaky test"), 0, "Crook"),
             "bisect the flaky test — Crook"
         );
         assert_eq!(
-            window_title(Some("port the tab bar"), "Crook (dev)"),
+            window_title(Some("port the tab bar"), 0, "Crook (dev)"),
             "port the tab bar — Crook (dev)"
         );
         // Nothing to call itself, or nothing at all: the application's name
         // alone rather than a dash with nothing in front of it.
-        assert_eq!(window_title(Some("   "), "Crook"), "Crook");
-        assert_eq!(window_title(None, "Crook"), "Crook");
+        assert_eq!(window_title(Some("   "), 0, "Crook"), "Crook");
+        assert_eq!(window_title(None, 0, "Crook"), "Crook");
+    }
+
+    #[test]
+    fn the_window_counts_the_panes_waiting_for_a_person_in_front_of_its_name() {
+        // In the header chip's words, so the two say the same thing; and
+        // nothing at all for none, since a count of zero is not information.
+        assert_eq!(
+            window_title(Some("bisect the flaky test"), 1, "Crook"),
+            "(1 waiting) bisect the flaky test — Crook"
+        );
+        assert_eq!(window_title(None, 3, "Crook"), "(3 waiting) Crook");
+        assert_eq!(window_title(Some("x"), 0, "Crook"), "x — Crook");
     }
 
     #[test]
