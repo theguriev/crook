@@ -476,6 +476,16 @@ pub fn user_session_path() -> Option<PathBuf> {
     Some(config_directory()?.join(SESSION_FILE))
 }
 
+/// Where the session file beside a settings file lives.
+///
+/// The two are one directory's: a window that reads its settings from a
+/// scratch directory — a test's — writes its session there too, and never
+/// into the real one's place. For the settings a person actually has, this
+/// is [`user_session_path`].
+pub fn session_path_beside(settings: &Path) -> PathBuf {
+    settings.with_file_name(SESSION_FILE)
+}
+
 #[cfg(test)]
 #[path = "session_tests.rs"]
 mod tests;

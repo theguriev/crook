@@ -7319,6 +7319,73 @@ fn a_row_armed_before_the_menu_opened_puts_no_card_over_the_menus_underlay() {
     );
 }
 
+/// The session file beside a scratch settings file, once it says `needle`.
+///
+/// Waits the way `Scratch::written_containing` waits: the save is handed to
+/// the background pool and coalesced.
+fn session_written(scratch: &Scratch, needle: &str) -> String {
+    let path = crate::session::session_path_beside(&scratch.path().join("settings.json"));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut last = String::new();
+    loop {
+        last = std::fs::read_to_string(&path).unwrap_or(last);
+        if last.contains(needle) {
+            return last;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no save put {needle} into {}; it holds {last}",
+            path.display()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn a_shell_s_cd_is_written_into_the_session_file_beside_the_settings() {
+    // "Open with the tabs and splits the last window had, in their own
+    // directories" — and the file said where each pane *started*: a `cd`
+    // moved no tab, and only a tab action wrote the file. The pane's shell
+    // reports where it is, the way OSC 7 does, and the file follows.
+    let scratch = Scratch::new();
+    let mut harness = Harness::with_settings(1, scratch.settings());
+    let pane = harness.pane_ids()[0];
+    let elsewhere = scratch.path().join("elsewhere");
+
+    harness.workspace_update(|workspace, ctx| {
+        workspace.apply_terminal_update(
+            &crate::terminal_model::TerminalUpdate::WorkingDirectory(pane, elsewhere.clone()),
+            ctx,
+        );
+    });
+
+    let written = session_written(&scratch, "elsewhere");
+    assert!(
+        written.contains(&elsewhere.display().to_string().replace('\\', "\\\\")),
+        "the session does not say where the shell went: {written}"
+    );
+}
+
+#[test]
+fn a_resize_is_written_into_the_session_file_too() {
+    // The next window opens the size this one was, said the file — at the
+    // size of the last tab action, which a person who resized the window
+    // and closed it never took.
+    let scratch = Scratch::new();
+    let mut harness = Harness::with_settings(1, scratch.settings());
+    let size = harness
+        .workspace
+        .read(&harness.app, |workspace, _| workspace.window_size_cell());
+    size.set(vec2f(777., 555.));
+    harness.workspace_update(|workspace, ctx| workspace.window_resized(ctx));
+
+    let written = session_written(&scratch, "777");
+    assert!(
+        written.contains("555"),
+        "the session does not carry the size the window is: {written}"
+    );
+}
+
 #[test]
 fn choosing_one_option_does_not_carry_another_command_line_override_into_the_file() {
     // `persisted` is the single place an override is stripped out of a save,
