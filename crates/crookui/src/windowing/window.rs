@@ -144,6 +144,11 @@ impl Window {
         );
     }
 
+    /// Names the window for the window manager.
+    pub(super) fn set_title(&self, title: &str) {
+        self.window.set_title(title);
+    }
+
     /// Whether a frame is already built and waiting to be drawn.
     pub(super) fn has_scene(&self) -> bool {
         self.scene.is_some()

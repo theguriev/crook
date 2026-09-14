@@ -1955,6 +1955,18 @@ fn type_run(app: &mut App, presenter: &mut Presenter, window_id: WindowId, comma
     press(app, presenter, window_id, "enter", "\r");
 }
 
+/// The window's name: the active tab's title, then the application's, the
+/// way a browser names its window after the page — the tab first, since it
+/// is the part that differs between two windows, and the application after
+/// the dash so that a switcher lists them under one name. The application's
+/// alone when there is no tab, or a tab with nothing to call itself.
+fn window_title(active: Option<&str>, base: &str) -> String {
+    match active.map(str::trim) {
+        Some(tab) if !tab.is_empty() => format!("{tab} — {base}"),
+        _ => base.to_owned(),
+    }
+}
+
 /// Presses one key on the window, exactly as the platform would.
 ///
 /// Crook's own bindings would be consumed before this in the delegate; none of
@@ -2202,6 +2214,11 @@ struct Shell {
     /// The rectangle the input method was last told the caret occupies, so a
     /// frame that did not move it sends no message.
     ime_area: Option<crookui_core::geometry::RectF>,
+    /// The application's own name for the window — "Crook", or the channel's
+    /// spelling of it — which the active tab's title goes in front of.
+    base_title: String,
+    /// The name the window was last given, for the same reason as `ime_area`.
+    window_title: Option<String>,
     /// Where the workspace reads the window's size from.
     ///
     /// The size is an argument to `build_scene` and reaches nothing in the
@@ -2625,6 +2642,8 @@ impl Shell {
             frame_budget: launch.frames,
             run,
             ime_area: None,
+            base_title: launch.channel.window_title(),
+            window_title: None,
             window_size,
             window,
             window_state: WindowState::default(),
@@ -2743,6 +2762,27 @@ impl Shell {
         log::info!("the shell printed:\n{}", printed.trim_end());
     }
 
+    /// Names the window after the tab it is showing, the way every terminal
+    /// names its window after the shell's title and Warp after the tab's.
+    ///
+    /// What the taskbar, the dock and the switcher show for a window: with an
+    /// agent per tab, "bisect the flaky test — Crook" is the difference
+    /// between finding the right Crook and opening each in turn. After the
+    /// frame, because the title is whatever the frame drew on the active row
+    /// — a rename, an agent's own name for its work — and sent only when it
+    /// changed, because every window system takes this as a message.
+    fn follow_the_active_tab_with_the_title(&mut self) {
+        let active = self.workspace.read(&self.app, |workspace, _| {
+            workspace.tabs().active().map(|tab| tab.title().to_owned())
+        });
+        let title = window_title(active.as_deref(), &self.base_title);
+        if self.window_title.as_deref() == Some(title.as_str()) {
+            return;
+        }
+        self.proxy.set_title(title.clone());
+        self.window_title = Some(title);
+    }
+
     /// Moves the rectangle an input method puts its candidate list beside, so
     /// that a half-composed word and the list of things it could become are in
     /// the same place on screen.
@@ -2841,6 +2881,7 @@ impl WindowDelegate for Shell {
 
     fn frame_drawn(&mut self) {
         self.start_expected_terminals();
+        self.follow_the_active_tab_with_the_title();
         self.follow_caret_with_the_input_method();
         self.type_pending_run();
         self.compose_pending_pane();
@@ -2961,6 +3002,22 @@ mod tests {
                 overrides: Overrides::default()
             }
         );
+    }
+
+    #[test]
+    fn the_window_is_named_after_the_tab_it_shows_and_after_crook_when_there_is_none() {
+        assert_eq!(
+            window_title(Some("bisect the flaky test"), "Crook"),
+            "bisect the flaky test — Crook"
+        );
+        assert_eq!(
+            window_title(Some("port the tab bar"), "Crook (dev)"),
+            "port the tab bar — Crook (dev)"
+        );
+        // Nothing to call itself, or nothing at all: the application's name
+        // alone rather than a dash with nothing in front of it.
+        assert_eq!(window_title(Some("   "), "Crook"), "Crook");
+        assert_eq!(window_title(None, "Crook"), "Crook");
     }
 
     #[test]
