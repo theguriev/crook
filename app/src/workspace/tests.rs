@@ -2462,8 +2462,8 @@ fn a_shell_that_could_not_be_started_is_the_pane_s_notice() {
     });
     let failure = failure.expect("the pane has no failure to show");
     assert!(
-        failure.contains("crook-shell"),
-        "the failure does not name the shell: {failure:?}"
+        failure.contains("crook-shell") && failure.contains("does not exist"),
+        "the failure does not name the shell and say it is missing: {failure:?}"
     );
 
     let text = frame_text(&harness.frame());
