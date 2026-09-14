@@ -1402,6 +1402,17 @@ impl Element for SplitDivider {
 const FIND_BAR_INSET: f32 = 10.;
 /// The icon size on the bar's buttons.
 const FIND_BUTTON_ICON: f32 = 14.;
+/// The padding round that icon, which with it is the height of everything
+/// on the bar but the field.
+const FIND_BUTTON_PADDING: f32 = 3.;
+/// The room the bar's count is given, whatever it says.
+///
+/// Wide enough for "No results" and for a count in the thousands at 11px,
+/// and always there: the bar hangs off the pane's right corner, so a count
+/// that took its own width would move the field — the thing being typed
+/// into — every time the number of digits changed, and once more when the
+/// first letter turned "No results" into "1/16".
+const FIND_COUNT_SLOT: f32 = 64.;
 
 /// The find bar itself: a field, a count, two steps and a way out.
 ///
@@ -1450,15 +1461,25 @@ fn find_bar(
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Center)
         .with_spacing(6.)
-        .with_child(field);
-
-    if !count.is_empty() {
-        row.add_child(
-            Text::new(count, workspace.fonts().ui, 11.)
-                .with_color(theme().text_muted)
+        .with_child(field)
+        .with_child(
+            // Both sides of the slot are fixed: an `Align` takes all the room
+            // it is offered, and the bar floats in a stack that offers it the
+            // whole window's height.
+            ConstrainedBox::new(
+                Align::new(
+                    Text::new(count, workspace.fonts().ui, 11.)
+                        .with_color(theme().text_muted)
+                        .with_ellipsis(Cut::End)
+                        .finish(),
+                )
+                .right()
                 .finish(),
+            )
+            .with_width(FIND_COUNT_SLOT)
+            .with_height(FIND_BUTTON_ICON + FIND_BUTTON_PADDING * 2.)
+            .finish(),
         );
-    }
 
     row.add_child(find_button(
         find.step_state(false),
@@ -1526,7 +1547,7 @@ fn find_button(
                 .with_color(colour)
                 .finish(),
         )
-        .with_uniform_padding(3.)
+        .with_uniform_padding(FIND_BUTTON_PADDING)
         .with_background_color(ground)
         .with_corner_radius(CornerRadius::with_all(Radius::Pixels(4.)))
         .finish()
