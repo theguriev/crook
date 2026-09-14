@@ -1458,37 +1458,48 @@ pub(crate) fn current_theme_row(
             theme().border
         };
 
+        // The name and the line under it take what the preview leaves and
+        // are cut with a mark where they run out: as plain children of the
+        // row they were measured free, and in a page too narrow for the
+        // preview and the name together the name ran past the row's border,
+        // "Crook Da" against the pane's edge.
+        let words = Flex::column()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Start)
+            .with_child(
+                Text::new(name.take().unwrap_or_default(), ui, LABEL_SIZE)
+                    .with_color(theme().text_primary)
+                    .with_ellipsis(Cut::End)
+                    .with_style(Properties {
+                        weight: Weight::Semibold,
+                        ..Properties::default()
+                    })
+                    .finish(),
+            )
+            .with_child(
+                Container::new(
+                    Text::new("Choose another, or make one", ui, DESCRIPTION_SIZE)
+                        .with_color(theme().text_muted)
+                        .with_ellipsis(Cut::End)
+                        .finish(),
+                )
+                .with_margin_top(3.)
+                .finish(),
+            )
+            .finish();
+
         Container::new(
             Flex::row()
                 .with_main_axis_size(MainAxisSize::Max)
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
                 .with_child(card.take().unwrap_or_else(|| Empty::new().finish()))
                 .with_child(
-                    Container::new(
-                        Flex::column()
-                            .with_main_axis_size(MainAxisSize::Min)
-                            .with_cross_axis_alignment(CrossAxisAlignment::Start)
-                            .with_child(
-                                Text::new(name.take().unwrap_or_default(), ui, LABEL_SIZE)
-                                    .with_color(theme().text_primary)
-                                    .with_style(Properties {
-                                        weight: Weight::Semibold,
-                                        ..Properties::default()
-                                    })
-                                    .finish(),
-                            )
-                            .with_child(
-                                Container::new(
-                                    Text::new("Choose another, or make one", ui, DESCRIPTION_SIZE)
-                                        .with_color(theme().text_muted)
-                                        .finish(),
-                                )
-                                .with_margin_top(3.)
-                                .finish(),
-                            )
+                    Expanded::new(
+                        1.,
+                        Align::new(Container::new(words).with_margin_left(14.).finish())
+                            .left()
                             .finish(),
                     )
-                    .with_margin_left(14.)
                     .finish(),
                 )
                 .finish(),
