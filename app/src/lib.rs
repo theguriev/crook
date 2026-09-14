@@ -86,6 +86,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use crook_plugin::ActionName;
+use crook_terminal::BlockId;
 use crookui::{
     CosmicFontDb, Platform, Proxy, WindowControls as PlatformWindow, WindowDelegate, WindowOptions,
     render_scene_to_rgba,
@@ -1534,8 +1535,10 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
             }
             await_shell(&queue, &mut app, &workspace, pane);
             for command in &overrides.run {
+                let before =
+                    workspace.read(&app, |workspace, app| workspace.newest_block(pane, app));
                 type_run(&mut app, &mut presenter, window_id, command);
-                let printed = settle_run(&queue, &mut app, &workspace, pane);
+                let printed = settle_run(&queue, &mut app, &workspace, pane, before);
                 println!("the shell printed:\n{}", printed.trim_end());
             }
         }
@@ -1959,17 +1962,26 @@ fn press(app: &mut App, presenter: &mut Presenter, window_id: WindowId, key: &st
     app.update(|ctx| ctx.dispatch_window_event(window_id, event, presenter));
 }
 
-/// Pumps the queue until the pane stops changing, and returns what it says.
+/// Pumps the queue until the pane stops changing, and returns what the
+/// command printed.
 ///
 /// "Stopped changing" is the only definition of finished available from outside
 /// a pty: a shell runs the command, prints its prompt back, and goes quiet.
 /// Bounded by [`RUN_TIMEOUT`], because a command that never goes quiet — `top`,
 /// a `sleep` — still has to produce a picture.
+///
+/// What is reported depends on what the shell did with the output. A shell
+/// with marks closes a block behind the command and its rows leave the grid
+/// for it, so the block is the report — `newest_before` is the block that was
+/// newest when the command was typed, and a different one now is the
+/// command's. A shell without marks leaves everything on the grid, and the
+/// grid is the report, as it was for both before the blocks were asked.
 fn settle_run(
     queue: &LocalQueue,
     app: &mut App,
     workspace: &ViewHandle<Workspace>,
     pane: PaneId,
+    newest_before: Option<BlockId>,
 ) -> String {
     let deadline = Instant::now() + RUN_TIMEOUT;
     let mut showing = String::new();
@@ -1985,15 +1997,24 @@ fn settle_run(
             showing = now;
             unchanged_since = Instant::now();
         } else if !showing.trim().is_empty() && unchanged_since.elapsed() >= RUN_QUIET {
-            return showing;
+            break;
         }
 
         if Instant::now() >= deadline {
             log::warn!("the command was still printing after {RUN_TIMEOUT:?}");
-            return showing;
+            break;
         }
         std::thread::sleep(RUN_POLL);
     }
+
+    workspace
+        .read(&*app, |workspace, app| {
+            if workspace.newest_block(pane, app) == newest_before {
+                return None;
+            }
+            workspace.newest_block_output(pane, app)
+        })
+        .unwrap_or(showing)
 }
 
 /// Fills the snapshot's strip with something worth looking at.

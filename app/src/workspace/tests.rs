@@ -10283,6 +10283,51 @@ mod shells {
         }
 
         #[test]
+        fn the_newest_block_s_output_is_what_the_command_printed_and_nothing_else() {
+            // What `--run` reports. It used to print the grid, and for a
+            // shell with marks the grid after a command is the next prompt
+            // over the blank lines a finished command left behind: the
+            // report of `echo $0` was four empty lines and `crook main ❯`.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+            let none = harness.workspace.read(&harness.app, |workspace, app| {
+                workspace.newest_block(pane, app)
+            });
+            if run(&mut harness, pane, "echo ALPHA") == 0 {
+                return;
+            }
+            let (first, output) = harness.workspace.read(&harness.app, |workspace, app| {
+                (
+                    workspace.newest_block(pane, app),
+                    workspace.newest_block_output(pane, app),
+                )
+            });
+            assert_ne!(first, none, "the command closed no block");
+            assert_eq!(
+                output.as_deref(),
+                Some("ALPHA"),
+                "the newest block's output is not the command's alone"
+            );
+
+            run(&mut harness, pane, "true");
+            let (second, output) = harness.workspace.read(&harness.app, |workspace, app| {
+                (
+                    workspace.newest_block(pane, app),
+                    workspace.newest_block_output(pane, app),
+                )
+            });
+            assert_ne!(second, first, "the second command closed no block");
+            assert_eq!(
+                output.as_deref(),
+                Some(""),
+                "a command that printed nothing has an empty output, not the prompt"
+            );
+        }
+
+        #[test]
         fn a_failed_command_is_washed_in_the_theme_s_red() {
             // Failure is visible without reading: scanning a long session for
             // what broke is a glance rather than a search.
