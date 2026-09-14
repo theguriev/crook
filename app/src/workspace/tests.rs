@@ -14638,6 +14638,48 @@ fn a_query_that_matches_nothing_says_so_rather_than_showing_everything() {
 }
 
 #[test]
+fn a_window_too_narrow_for_the_palette_gets_a_narrower_card_inside_it() {
+    // The card is built to one width and centred by a row that measures it
+    // free, so in a window narrower than the card it ran off the right
+    // edge, field and all. It is narrowed to the window less its inset now
+    // — and keeps its width where there is room for it.
+    let mut harness = Harness::new(1);
+    open_keys(&mut harness, "");
+
+    let window = vec2f(480., 360.);
+    let scene = harness.frame_sized(window);
+    let card = palette_card_box(&scene);
+    assert!(
+        card.min_x() >= crookui_core::elements::WINDOW_INSET - 0.5
+            && card.max_x() <= window.x() - crookui_core::elements::WINDOW_INSET + 0.5,
+        "the card at {card:?} runs off a {}px window",
+        window.x()
+    );
+
+    let scene = harness.frame_sized(vec2f(1024., 640.));
+    let card = palette_card_box(&scene);
+    assert!(
+        (card.width() - 560.).abs() < 0.5,
+        "the card is {}px wide in a window with room for all 560",
+        card.width()
+    );
+}
+
+/// The palette's card, by its ten-pixel corners: the one such box that is
+/// wider than a row.
+fn palette_card_box(scene: &Scene) -> RectF {
+    visible_rects(scene)
+        .filter(|(rect, bounds)| {
+            rect.corner_radius.get_top_left() == Radius::Pixels(10.)
+                && rect.background == Fill::Solid(theme().surface)
+                && bounds.width() > 200.
+        })
+        .map(|(_, bounds)| bounds)
+        .next()
+        .expect("the palette is not up")
+}
+
+#[test]
 fn a_window_too_short_for_the_palette_gets_a_shorter_list_and_keeps_the_hint() {
     // The list gives way, not the card: in a 480px window the keys list — a
     // hundred rows under headings — used to run off the bottom, taking the

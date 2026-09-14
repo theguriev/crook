@@ -31,7 +31,7 @@
 //! radius, and a second one anywhere would fail that assertion somewhere else
 //! entirely.
 
-use crookui_core::elements::{MouseStateHandle, Padding, Shrinkable};
+use crookui_core::elements::{MouseStateHandle, Padding, Shrinkable, WINDOW_INSET};
 use crookui_core::fonts::{FamilyId, Properties, Weight};
 use crookui_core::prelude::*;
 
@@ -40,6 +40,7 @@ use crook_plugin::ActionName;
 use crate::plugin::Voice;
 use crate::plugins::shortcuts::NOT_BOUND;
 use crate::theme::theme;
+use crate::workspace::window_room::WindowRoom;
 use crate::workspace::{Fonts, TextField, WorkspaceAction};
 
 use super::rows::{Entry, Mode, Row, Rows, Target};
@@ -58,6 +59,11 @@ use super::state::{Control, Palette};
 /// and the title is the flexible child, so what happens past it is a clipped
 /// title rather than a key painted over.
 const CARD_WIDTH: f32 = 560.;
+
+/// The least the card is narrowed to for a window narrower than it: room for
+/// a query and a few words of each row, under which the palette is a field
+/// and nothing to read.
+const CARD_LEAST_WIDTH: f32 = 240.;
 
 /// How far down the window the card starts. Not centred vertically: a palette
 /// that grows downwards from a fixed point does not move under the pointer as
@@ -265,15 +271,22 @@ pub(super) fn render(palette: &Palette, rows: &Rows) -> Box<dyn Element> {
 
     column.add_child(hint(mode, fonts.ui));
 
-    let card = ConstrainedBox::new(
-        Container::new(column.finish())
-            .with_background_color(theme().surface)
-            .with_border(Border::all(1.).with_border_color(theme().overlay_2))
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(10.)))
-            .with_uniform_padding(PADDING)
-            .finish(),
+    // Narrowed to the window less its inset at each side: the row below
+    // measures the card free, so in a window narrower than the card it ran
+    // off the right edge, field and all. The rows' texts give way inside it.
+    let card = WindowRoom::new(
+        ConstrainedBox::new(
+            Container::new(column.finish())
+                .with_background_color(theme().surface)
+                .with_border(Border::all(1.).with_border_color(theme().overlay_2))
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(10.)))
+                .with_uniform_padding(PADDING)
+                .finish(),
+        )
+        .with_width(CARD_WIDTH)
+        .finish(),
     )
-    .with_width(CARD_WIDTH)
+    .with_width_inset(WINDOW_INSET, CARD_LEAST_WIDTH)
     .finish();
 
     // A row that spans the window with the card between two spacers, which is
