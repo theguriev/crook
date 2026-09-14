@@ -668,6 +668,26 @@ impl TerminalModel {
 
     /// Starts a shell for one pane and the thread that reads it.
     fn open(&mut self, pane: PaneId, directory: Option<PathBuf>, ctx: &mut ModelContext<Self>) {
+        // A shell named by a path that is not there is refused here, before
+        // anything is spawned, because below here the platforms disagree
+        // about it: Linux reports the missing program from the spawn, macOS
+        // forks and the child dies on the exec — and where the name reaches
+        // `portable-pty`'s own resolution, a login shell it has no switch
+        // for, both fall back to the password database's shell. That
+        // fallback is right for `$SHELL` outliving the shell it names, and
+        // wrong for a shell a person asked for by name: they asked for that
+        // one, and the pane owes them the reason it did not open.
+        if let Some(shell) = &self.shell
+            && shell.components().count() > 1
+            && !shell.exists()
+        {
+            let reason = format!("{} does not exist", shell.display());
+            log::error!("could not open a shell for pane {pane:?}: {reason}");
+            self.failures.insert(pane, reason);
+            ctx.notify();
+            return;
+        }
+
         // The integration writes its stub files before the shell is started
         // and removes them when this value is dropped, so it is moved into the
         // session below rather than left to fall out of scope here.
