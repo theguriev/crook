@@ -3474,6 +3474,31 @@ impl Workspace {
         block_text(&Blocks::list(&history, &snapshot), block, from)
     }
 
+    /// The newest finished block, or `None` before any command has finished.
+    ///
+    /// For the command line's `--run`, which types a command and wants to
+    /// know when a block has closed behind it: the id moves, whatever the
+    /// count does once the front of the list is being evicted.
+    pub fn newest_block(&self, pane: PaneId, app: &AppContext) -> Option<BlockId> {
+        Some(self.terminal_blocks(pane, app)?.iter().last()?.id)
+    }
+
+    /// What the newest finished block printed, as a copy of it would read.
+    ///
+    /// The other half of `--run`'s report. The grid is the wrong thing to
+    /// print for a shell with marks: a finished command's rows leave it for
+    /// the block, and what is left is the prompt over the blank lines above
+    /// it. From where the shell said the output began, or the whole block
+    /// when it never said — the report is for a person, and the echoed
+    /// command line is a better thing to include than nothing.
+    pub fn newest_block_output(&self, pane: PaneId, app: &AppContext) -> Option<String> {
+        let history = self.terminal_blocks(pane, app)?;
+        let block = history.iter().last()?;
+        let from = block.output_from.unwrap_or(0);
+        let text = self.block_rows_text(pane, block.id, from, app)?;
+        Some(text.trim_end().to_owned())
+    }
+
     /// Brings one edge of the block the menu is up on to the matching edge of
     /// the pane.
     ///
