@@ -41,7 +41,7 @@
 //! so the omission is deliberate and is written down here rather than left to
 //! be read as an oversight.
 
-use crookui_core::elements::{MouseStateHandle, Padding, Paragraph};
+use crookui_core::elements::{MouseStateHandle, Padding, Paragraph, Scrollable, WINDOW_INSET};
 use crookui_core::fonts::FamilyId;
 use crookui_core::prelude::*;
 
@@ -50,6 +50,7 @@ use crate::theme::theme;
 
 use super::action::{OptionsAction, WorkspaceAction};
 use super::view::Workspace;
+use super::window_room::WindowRoom;
 
 /// The popup's fixed width. Not derived from anything: Warp's panel is 248 and
 /// its popup is 200, and the two numbers are unrelated.
@@ -57,6 +58,10 @@ const POPUP_WIDTH: f32 = 200.;
 
 /// The corner radius of the popup shell and of a segmented control's track.
 const POPUP_RADIUS: f32 = 6.;
+
+/// The least the popup is shortened to for a window shorter than it: a few
+/// rows' worth, under which a menu that scrolls is a menu nobody can read.
+const POPUP_LEAST_HEIGHT: f32 = 120.;
 
 /// Every row, header and control is inset by this much. Dividers are not — they
 /// are full-bleed, and getting that backwards is the most visible way to miss
@@ -249,20 +254,34 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
         ui,
     ));
 
-    ConstrainedBox::new(
+    let popup = ConstrainedBox::new(
         // Warp finishes this with `DropShadow::default()`. Crook's fragment
         // shader has no shadow branch — it was deliberately removed — so the
         // popup is separated from the strip by its border and by an opaque
         // ground instead. Rendering a shadow into nothing would be worse.
-        Container::new(column.finish())
-            .with_vertical_padding(8.)
-            .with_background_color(theme().surface_raised)
-            .with_border(Border::all(1.).with_border_color(theme().overlay_1))
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(POPUP_RADIUS)))
-            .finish(),
+        //
+        // The rows scroll, for the window shorter than the popup: the anchor
+        // slides a popup on screen but cannot make it fit, and the rows past
+        // the bottom edge were rows nobody could reach. `WindowRoom` is what
+        // hands the popup the window's height to fit into; in a window with
+        // room for it the scroll never moves and the picture is the same.
+        Container::new(
+            Scrollable::new(menu.scroll.clone(), column.finish())
+                .with_scrollbar(theme().overlay_3)
+                .finish(),
+        )
+        .with_vertical_padding(8.)
+        .with_background_color(theme().surface_raised)
+        .with_border(Border::all(1.).with_border_color(theme().overlay_1))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(POPUP_RADIUS)))
+        .finish(),
     )
     .with_width(POPUP_WIDTH)
-    .finish()
+    .finish();
+
+    WindowRoom::new(popup)
+        .with_height_inset(WINDOW_INSET, POPUP_LEAST_HEIGHT)
+        .finish()
 }
 
 /// The row that opens the settings page.

@@ -65,7 +65,7 @@
 //! The options menu is a panel of preferences somebody changes three of at a
 //! time; this is a list of things to do, each done once.
 
-use crookui_core::elements::{MouseStateHandle, Padding};
+use crookui_core::elements::{MouseStateHandle, Padding, Scrollable, WINDOW_INSET};
 use crookui_core::fonts::FamilyId;
 use crookui_core::prelude::*;
 
@@ -76,6 +76,7 @@ use crate::plugins::blocks::BLOCK_MENU;
 use super::action::{BlockAction, BlockEdge, BlockPart, WorkspaceAction};
 use super::block_list::{CONTROL_INSET, CONTROL_OFFSET, CONTROL_SIZE};
 use super::view::Workspace;
+use super::window_room::WindowRoom;
 
 /// How wide the popup is.
 ///
@@ -87,6 +88,10 @@ const MENU_WIDTH: f32 = 260.;
 
 /// The popup's corner radius, which is every other popup's.
 const MENU_RADIUS: f32 = 6.;
+
+/// The least the menu is shortened to for a window shorter than it: a few
+/// entries' worth, under which a menu that scrolls is a menu nobody can read.
+const MENU_LEAST_HEIGHT: f32 = 120.;
 
 /// The size a row's chord is printed at.
 ///
@@ -124,16 +129,26 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
         column.add_child(group);
     }
 
-    ConstrainedBox::new(
-        Container::new(column.finish())
-            .with_vertical_padding(6.)
-            .with_background_color(theme().surface_raised)
-            .with_border(Border::all(1.).with_border_color(theme().overlay_1))
-            .with_corner_radius(CornerRadius::with_all(Radius::Pixels(MENU_RADIUS)))
-            .finish(),
+    // The entries scroll, for the window shorter than the menu — see the
+    // options menu, which does the same for the same reason.
+    let popup = ConstrainedBox::new(
+        Container::new(
+            Scrollable::new(workspace.block_menu().scroll.clone(), column.finish())
+                .with_scrollbar(theme().overlay_3)
+                .finish(),
+        )
+        .with_vertical_padding(6.)
+        .with_background_color(theme().surface_raised)
+        .with_border(Border::all(1.).with_border_color(theme().overlay_1))
+        .with_corner_radius(CornerRadius::with_all(Radius::Pixels(MENU_RADIUS)))
+        .finish(),
     )
     .with_width(MENU_WIDTH)
-    .finish()
+    .finish();
+
+    WindowRoom::new(popup)
+        .with_height_inset(WINDOW_INSET, MENU_LEAST_HEIGHT)
+        .finish()
 }
 
 /// The gap between the dots and the menu hanging off them.

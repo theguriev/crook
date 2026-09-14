@@ -24,7 +24,7 @@ pub(super) const KEYBINDINGS_POLL: Duration = THEMES_POLL;
 
 use crook_plugin_api::Event;
 use crook_terminal::{BlockId, Rows, Snapshot};
-use crookui_core::elements::MouseStateHandle;
+use crookui_core::elements::{MouseStateHandle, ScrollStateHandle};
 use crookui_core::event::Keystroke;
 use crookui_core::fonts::FamilyId;
 use crookui_core::geometry::{RectF, vec2f};
@@ -208,6 +208,8 @@ pub(super) struct MenuState {
     pub(super) details_on_hover: MouseStateHandle,
     /// The row that opens the settings page.
     pub(super) settings: MouseStateHandle,
+    /// How far the rows are scrolled, in a window too short for them all.
+    pub(super) scroll: ScrollStateHandle,
 }
 
 impl MenuState {
@@ -260,6 +262,8 @@ impl MenuState {
 pub struct BlockMenuState {
     /// Whose list the menu is up on, and which block of it.
     pub(super) on: Option<(PaneId, BlockId)>,
+    /// How far the entries are scrolled, in a window too short for them all.
+    pub(super) scroll: ScrollStateHandle,
     /// The branch the block's directory was on when the menu opened, when it
     /// was in a repository at all.
     pub(crate) branch: Option<String>,

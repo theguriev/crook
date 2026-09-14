@@ -44,6 +44,7 @@ mod theme_panel;
 pub(crate) mod theme_preview;
 mod title_bar;
 mod view;
+mod window_room;
 
 #[cfg(test)]
 mod tests;
