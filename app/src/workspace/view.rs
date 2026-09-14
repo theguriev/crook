@@ -15,6 +15,13 @@ use std::time::{Duration, Instant};
 /// all while the panel is closed — see [`Workspace::watch_themes`].
 pub(super) const THEMES_POLL: Duration = Duration::from_millis(750);
 
+/// How often `keybindings.json` is re-read while the settings are showing.
+///
+/// A stat and a small parse, on the background pool, at a cadence a person
+/// saving a file and turning back to the window does not notice — the same
+/// arrangement the themes folder has, for the same reason.
+pub(super) const KEYBINDINGS_POLL: Duration = THEMES_POLL;
+
 use crook_plugin_api::Event;
 use crook_terminal::{BlockId, Rows, Snapshot};
 use crookui_core::elements::MouseStateHandle;
@@ -434,6 +441,10 @@ struct SaveOrder {
     /// Only ever increases, which is what lets a task compare its own number
     /// with it and know whether it has been overtaken.
     asked_for: AtomicU64,
+    /// How many of those have reached [`Self::write_if_last`] and returned,
+    /// written or overtaken. Equal to `asked_for` exactly when nothing is in
+    /// flight, which is what a reader of the same file waits for.
+    finished: AtomicU64,
     /// Held across the decision *and* the write.
     ///
     /// A `()` because it guards an order rather than a value: the state being
@@ -464,10 +475,19 @@ impl SaveOrder {
     /// later save because of it would turn one lost write into all of them.
     fn write_if_last(&self, asked_at: u64, write: impl FnOnce()) {
         let _ordered = self.writing.lock().unwrap_or_else(PoisonError::into_inner);
-        if self.asked_for.load(Ordering::Relaxed) != asked_at {
-            return;
+        if self.asked_for.load(Ordering::Relaxed) == asked_at {
+            write();
         }
-        write();
+        self.finished.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Whether every write asked for has run or been overtaken.
+    ///
+    /// What a reload of the same file checks before adopting what it read:
+    /// a file read while an edit is still on its way to disk is the file
+    /// from before the edit, and adopting it would take the edit back.
+    fn is_settled(&self) -> bool {
+        self.asked_for.load(Ordering::Relaxed) == self.finished.load(Ordering::Relaxed)
     }
 }
 
@@ -618,6 +638,9 @@ pub struct Workspace {
     /// delegate asks what a keystroke means through a *read* of the workspace,
     /// and the chord being spelled is the keyboard's own state.
     recording: std::cell::RefCell<Option<Recording>>,
+    /// Whether the chain that re-reads `keybindings.json` while the settings
+    /// are showing is already running — one at a time, like the themes'.
+    watching_keybindings: bool,
 
     /// Whether the desktop is set to dark, as of the last thing the window
     /// said about it.
@@ -920,6 +943,7 @@ impl Workspace {
             keybindings,
             pending_keys: std::cell::RefCell::new(Vec::new()),
             recording: std::cell::RefCell::new(None),
+            watching_keybindings: false,
             window_size: Rc::new(std::cell::Cell::new(Vector2F::zero())),
             system_is_dark: true,
             interactions: HashMap::new(),
@@ -1648,10 +1672,8 @@ impl Workspace {
     ///
     /// The rules a plugin asked for are put back afterwards, because they are
     /// not in the file and a reload that dropped them would take the palette's
-    /// chord away. The bindings are read once at startup today, so this has
-    /// one caller and it is a test — but a table that can be replaced is what
-    /// "you changed the file, here it is" needs, and nothing about swapping it
-    /// has to wait for that.
+    /// chord away. [`Self::watch_keybindings`] is the caller, while the
+    /// settings are showing: "you changed the file, here it is".
     ///
     /// It repaints, and that is not housekeeping: a menu row and a palette row
     /// each print the chord that reaches them, read live from this table, so a
@@ -1662,6 +1684,70 @@ impl Workspace {
         self.keybindings = keybindings;
         self.pending_keys.borrow_mut().clear();
         ctx.notify();
+    }
+
+    /// Re-reads `keybindings.json` while the settings are showing, so that a
+    /// file edited beside Crook is the file in force.
+    ///
+    /// The themes' arrangement, for the same reason: no watcher, no channel,
+    /// and nothing running while nobody is looking — the chain stops the
+    /// moment the section is left and starts again when it is opened. The
+    /// Keyboard Shortcuts page names the file and says the chords come from
+    /// it; a person who edits it there and looks back at the page should see
+    /// the edit, and the chord should reach what they bound it to.
+    ///
+    /// What is read is adopted only when it differs, and only while no save
+    /// of the page's own is on its way to disk: a file read between an edit
+    /// and its write is the file from before the edit.
+    fn watch_keybindings(&mut self, ctx: &mut ViewContext<Self>) {
+        // The file the chords in force came from, which a run with no
+        // configuration directory has none of — and then nothing to watch.
+        let Some(path) = self.keybindings.path().map(Path::to_path_buf) else {
+            self.watching_keybindings = false;
+            return;
+        };
+        if !self.settings_are_showing() {
+            self.watching_keybindings = false;
+            return;
+        }
+        self.watching_keybindings = true;
+
+        let reading = ctx.background().spawn(async move {
+            std::thread::sleep(KEYBINDINGS_POLL);
+            Keybindings::load(path)
+        });
+        ctx.spawn(reading, |workspace, keybindings, ctx| {
+            workspace.adopt_keybindings(keybindings, ctx);
+            workspace.watch_keybindings(ctx);
+        })
+        .detach();
+    }
+
+    /// Whether the sidebar is showing the settings, which is when the file
+    /// behind them is watched.
+    fn settings_are_showing(&self) -> bool {
+        self.showing_section().is_some()
+            && self.showing_section() == self.host.sidebar_section_id(SETTINGS_SECTION)
+    }
+
+    /// Takes a freshly read `keybindings.json`, if the settings are still
+    /// showing, it says something new, and nothing of the page's own is still
+    /// being written.
+    ///
+    /// The first check is the one the poll is gated on, asked again here
+    /// because the read was started a tick ago: a section left in between
+    /// is a file nobody is looking at, and the chain ends rather than adopt
+    /// what it happened to read on the way out.
+    fn adopt_keybindings(&mut self, mut keybindings: Keybindings, ctx: &mut ViewContext<Self>) {
+        if !self.settings_are_showing() || !self.keybinding_saves.is_settled() {
+            return;
+        }
+        keybindings.set_plugin_rules(self.host.suggested_rules());
+        if keybindings == self.keybindings {
+            return;
+        }
+        log::info!("keybindings.json changed; the chords in it are in force");
+        self.set_keybindings(keybindings, ctx);
     }
 
     /// What the window is doing, as the keys a `when` clause may name.
@@ -2453,6 +2539,12 @@ impl Workspace {
         self.panel_search.clear();
         self.panel_search.set_focused(false);
         self.sync_input_keys();
+        // The settings re-read the keybindings file while they are showing;
+        // a chain already running carries on and stops itself when the
+        // section is left.
+        if !self.watching_keybindings {
+            self.watch_keybindings(ctx);
+        }
         ctx.notify();
     }
 

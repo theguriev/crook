@@ -388,7 +388,8 @@ fn the_file(workspace: &Workspace) -> Category {
             "A list of bindings, in VSCode's format and with VSCode's rules: \
              { \"key\": \"ctrl+shift+t\", \"command\": \"crook/window/new-tab\" }. The last rule \
              that matches a chord wins, so a line of yours beats the one this build ships \
-             with, and a later line of yours beats an earlier one. Comments are allowed.",
+             with, and a later line of yours beats an earlier one. Comments are allowed. \
+             Edit it while this page is showing and the chords in it are in force as you save.",
             ui,
         ),
         widgets::note(
