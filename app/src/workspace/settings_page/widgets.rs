@@ -394,12 +394,27 @@ pub(crate) fn row(words: Words, enabled: bool, control: Box<dyn Element>, ui: Fa
             Flex::row()
                 .with_main_axis_size(MainAxisSize::Max)
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                .with_child(label_text(words.label.clone(), enabled, ui))
-                // The control is pushed against the right edge by a spacer
-                // rather than placed at a column position, so that rows with
-                // labels of wildly different lengths still line their controls
-                // up.
-                .with_child(Expanded::new(1., Empty::new().finish()).finish())
+                // The label is the row's flexible child: it takes what the
+                // control leaves, which is what pushes the control against
+                // the right edge — so rows with labels of wildly different
+                // lengths still line their controls up — and it is the label
+                // that gives way, cut with a mark, when the two do not fit.
+                // It was a plain child beside a spacer, and in a window too
+                // narrow for the pair the control was the one pushed past the
+                // page's edge, with the label whole and the button gone.
+                .with_child(
+                    Expanded::new(
+                        1.,
+                        Align::new(
+                            Container::new(label_text(words.label.clone(), enabled, ui))
+                                .with_margin_right(LABEL_GAP)
+                                .finish(),
+                        )
+                        .left()
+                        .finish(),
+                    )
+                    .finish(),
+                )
                 .with_child(control)
                 .finish(),
         );
@@ -421,7 +436,12 @@ pub(crate) fn row(words: Words, enabled: bool, control: Box<dyn Element>, ui: Fa
     }
 }
 
-/// A row's label, greyed when the row is inert.
+/// The least room between a row's label and its control, which is what the
+/// label is cut short of when the page is too narrow for both.
+const LABEL_GAP: f32 = 12.;
+
+/// A row's label, greyed when the row is inert, and cut with a mark at the
+/// end where it runs out of the room the control leaves it.
 fn label_text(label: String, enabled: bool, ui: FamilyId) -> Box<dyn Element> {
     Text::new(label, ui, LABEL_SIZE)
         .with_color(if enabled {
@@ -429,6 +449,7 @@ fn label_text(label: String, enabled: bool, ui: FamilyId) -> Box<dyn Element> {
         } else {
             theme().text_muted
         })
+        .with_ellipsis(Cut::End)
         .finish()
 }
 

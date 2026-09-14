@@ -8347,6 +8347,47 @@ fn no_settings_page_paints_a_rect_with_a_negative_side_in_a_small_window() {
 }
 
 #[test]
+fn a_row_too_narrow_for_its_label_and_control_cuts_the_label_and_keeps_the_control() {
+    // The label was a plain row child beside a spacer, so in a window too
+    // narrow for the pair the control was what got pushed past the page's
+    // edge: "Close the focused pane" whole, its chord chip half gone and the
+    // Unbind beside it gone entirely. The label is the flexible child now.
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.select_settings_section("Keyboard Shortcuts");
+    let scene = harness.frame_sized(vec2f(560., 400.));
+    let pane = settings_pane_box(&scene);
+
+    // Every line drawn on the page ends inside it — the labels, the chips
+    // and the buttons alike. Read off every glyph, not the ones inside the
+    // pane: a control pushed past the edge is exactly what the inside-only
+    // filter would hide.
+    let lines = text_lines(&scene, |position| {
+        position.y() >= pane.min_y() && position.y() <= pane.max_y()
+    });
+    let mut cut = 0;
+    for (start, text) in &lines {
+        if start.x() < pane.min_x() {
+            continue;
+        }
+        let end = start.x() + text.chars().count() as f32 * 12. * 0.5;
+        assert!(
+            end <= pane.max_x() + 0.5,
+            "{text:?} ends at {end}, past the page's edge at {}",
+            pane.max_x()
+        );
+        if text.contains('…') {
+            cut += 1;
+        }
+    }
+    assert!(cut > 0, "no label gave way in a 560px window: {lines:?}");
+    assert!(
+        lines.iter().any(|(_, text)| text.contains("Unbind")),
+        "the buttons beside the chords are gone: {lines:?}"
+    );
+}
+
+#[test]
 fn the_shell_page_names_the_shell_the_panes_were_told_to_run() {
     // `--shell` puts another shell in every pane, and the page read the
     // environment's: it said "zsh, marks installed" over panes running
