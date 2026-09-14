@@ -2355,6 +2355,42 @@ fn a_pane_fills_its_share_of_the_body_and_not_just_the_cells_it_can_draw() {
     );
 }
 
+/// The grid a pane's box holds, by the arithmetic the pane's own sizer uses.
+fn grid_in(pane: RectF) -> (u16, u16) {
+    CellFont::headless(CELL_FONT_SIZE).metrics().grid_for(
+        pane.width() - crate::workspace::body::GUTTER * 2.,
+        pane.height() - crate::workspace::body::GRID_VERTICAL_PADDING * 2.,
+    )
+}
+
+#[test]
+fn a_pane_expecting_its_shell_measures_itself_and_draws_no_notice() {
+    // The window's first frame comes before its shells, and it is the frame
+    // that knows how big a pane is. A pane whose shell is coming writes the
+    // grid it holds down for the shell to open at — the shells used to open
+    // at eighty by twenty-four and a startup banner sized with `tput cols`
+    // was sized for that — and draws its ground and nothing else meanwhile,
+    // rather than a notice about a shell that is about to arrive.
+    let mut harness = Harness::new(1);
+    let pane = harness.pane_ids()[0];
+    harness.workspace_update(|workspace, ctx| workspace.expect_terminals(ctx));
+
+    let scene = harness.frame_sized(vec2f(900., 600.));
+    let (columns, rows) = grid_in(panel_boxes(&scene)[0]);
+    let measured = harness.workspace.read(&harness.app, |workspace, app| {
+        workspace.pane_measure(app).get(pane)
+    });
+    assert_eq!(
+        measured.map(|size| (size.columns, size.rows)),
+        Some((columns, rows)),
+        "the pane did not measure the grid it holds"
+    );
+    assert!(
+        !frame_text(&scene).contains("no shell is running"),
+        "a pane whose shell is coming says it has none"
+    );
+}
+
 #[test]
 fn a_pane_with_no_grid_says_so_inside_its_gutter_and_inside_its_width() {
     // The notice was drawn against the pane's left edge, and its two lines
@@ -8648,6 +8684,39 @@ mod shells {
                 false
             }
         }
+    }
+
+    #[test]
+    fn a_shell_opens_at_the_grid_its_pane_measured() {
+        // The other half of the measurement: the shell that opens after the
+        // frame opens at the grid the frame found, so what it prints at
+        // startup is printed for the pane. Read off the emulator's own grid
+        // the moment the shell is open, before any layout could resize it.
+        let mut harness = Harness::panel(1);
+        harness.workspace_update(|workspace, ctx| workspace.expect_terminals(ctx));
+        let scene = harness.frame_sized(vec2f(900., 600.));
+        let (columns, rows) = grid_in(panel_boxes(&scene)[0]);
+        assert_ne!(
+            (columns, rows),
+            (80, 24),
+            "the pane measures the grid every terminal starts at, which proves nothing"
+        );
+
+        let Some(pane) = one_shell(&mut harness) else {
+            return;
+        };
+        let opened = harness.workspace.read(&harness.app, |workspace, app| {
+            let (_, snapshot) = workspace.terminal(pane, app)?;
+            Some((
+                snapshot.row(0).len() as u16,
+                snapshot.iter_rows().count() as u16,
+            ))
+        });
+        assert_eq!(
+            opened,
+            Some((columns, rows)),
+            "the shell did not open at the grid its pane measured"
+        );
     }
 
     fn one_shell(harness: &mut Harness) -> Option<PaneId> {

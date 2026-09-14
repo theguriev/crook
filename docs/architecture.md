@@ -782,13 +782,17 @@ started Crook may have had them, they described its window, and the kernel's `wi
 the pty is opened at before the child exists — is the truth. `TERM_PROGRAM=Crook` and
 `TERM_PROGRAM_VERSION` come from `shell_integration` and reach every shell, marks or no marks.
 
-One gap is worth naming because it is visible now that profiles run. A pane's pty is opened at
-80×24 and only the *first layout* resizes it, so a shell that prints its whole startup —
-a `~/.zprofile` banner, a greeting sized with `tput cols` — can do so before that. What it
+**The pty opens at the pane's size.** A shell prints its whole startup — a `~/.zprofile`
+banner, a greeting sized with `tput cols` — before any resize can reach it, and what it
 printed is copied out of the grid into a block the moment the first prompt mark arrives, so a
-later resize cannot reflow it. Closing that means measuring a pane that has no terminal in it
-yet, which is a change to how panes are laid out rather than to how shells are started;
-`INITIAL_GRID` in `app/src/terminal_model.rs` carries the note.
+later resize cannot reflow it. So the window's shells open *after* its first frame rather than
+before: the frame lays every pane out, a pane with no terminal yet records the grid it holds
+(`PaneMeasurer` in `app/src/workspace/body.rs`, into `terminal_model::Measured`), and
+`TerminalModel::open` starts the pty at that. `Workspace::expect_terminals` is said before the
+frame so that the pane draws its ground rather than a notice for that one frame, and
+`start_terminals` runs from the window's `frame_drawn`. What is left of the gap is a pane split
+off later, whose shell opens before its first layout at `INITIAL_GRID` — 80×24 — and the note
+there says so.
 
 ### Who drives it
 

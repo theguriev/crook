@@ -366,11 +366,23 @@ fn contents(
     let font = workspace.cell_font().clone();
 
     let Some((handle, snapshot)) = terminal else {
-        let reason = workspace.terminal_failure(pane.id(), app).map_or_else(
-            || "no shell is running in this pane".to_owned(),
-            |failure| format!("the shell could not be started: {failure}"),
-        );
-        return notice(workspace, pane, reason);
+        let failure = workspace.terminal_failure(pane.id(), app);
+        // A shell that is coming gets the ground and nothing else for the
+        // frame before it, which is what the frame after it draws too; the
+        // notice is for a pane that has no shell and is not getting one.
+        let body = if failure.is_none() && workspace.terminals_expected(app) {
+            Empty::new().finish()
+        } else {
+            let reason = failure.map_or_else(
+                || "no shell is running in this pane".to_owned(),
+                |failure| format!("the shell could not be started: {failure}"),
+            );
+            notice(workspace, pane, reason)
+        };
+        // Measured all the same: the shell that opens in this pane after the
+        // frame opens at the grid the frame found, not at eighty by
+        // twenty-four.
+        return PaneMeasurer::new(pane.id(), workspace.pane_measure(app), font, body).finish();
     };
 
     let id = pane.id();
@@ -832,17 +844,96 @@ impl Element for PaneSizer {
             bounded(constraint.max.x(), constraint.min.x()),
             bounded(constraint.max.y(), constraint.min.y()),
         );
-        let metrics = self.font.metrics();
-        // The pane minus the insets every surface applies, so the count the
-        // pty is told does not change when the surface does.
-        let (columns, rows) = metrics.grid_for(
-            size.x() - GUTTER * 2.,
-            size.y() - GRID_VERTICAL_PADDING * 2.,
+        self.handle.resize(grid_of(&self.font, size));
+
+        self.size = Some(size);
+        self.child.layout(SizeConstraint::strict(size), ctx, app);
+        size
+    }
+
+    fn paint(&mut self, origin: Vector2F, ctx: &mut PaintContext, app: &AppContext) {
+        self.origin = Some(Point::from_vec2f(origin, ctx.scene.z_index()));
+        self.child.paint(origin, ctx, app);
+    }
+
+    fn dispatch_event(
+        &mut self,
+        event: &DispatchedEvent,
+        ctx: &mut EventContext,
+        app: &AppContext,
+    ) -> bool {
+        self.child.dispatch_event(event, ctx, app)
+    }
+
+    fn size(&self) -> Option<Vector2F> {
+        self.size
+    }
+
+    fn origin(&self) -> Option<Point> {
+        self.origin
+    }
+}
+
+/// The grid a pane of `size` holds, in the cells of `font`.
+///
+/// The pane minus the insets every surface applies, so the count the pty is
+/// told does not change when the surface does. One function for the pane
+/// that has a terminal and the pane that is about to, so that the shell opens
+/// at exactly the grid the first layout after it would resize it to.
+fn grid_of(font: &CellFont, size: Vector2F) -> TerminalSize {
+    let metrics = font.metrics();
+    let (columns, rows) = metrics.grid_for(
+        size.x() - GUTTER * 2.,
+        size.y() - GRID_VERTICAL_PADDING * 2.,
+    );
+    TerminalSize::new(columns, rows)
+        .with_cell_size(metrics.width.round() as u16, metrics.height.round() as u16)
+}
+
+/// Measures a pane that has no terminal yet, for the shell that opens in it.
+///
+/// [`PaneSizer`] with nowhere to send the number: the grid goes into
+/// [`Measured`](crate::terminal_model::Measured), where
+/// `TerminalModel::open` reads it. Everything else is pass-through, as there.
+struct PaneMeasurer {
+    pane: PaneId,
+    measured: crate::terminal_model::Measured,
+    font: CellFont,
+    child: Box<dyn Element>,
+    size: Option<Vector2F>,
+    origin: Option<Point>,
+}
+
+impl PaneMeasurer {
+    fn new(
+        pane: PaneId,
+        measured: crate::terminal_model::Measured,
+        font: CellFont,
+        child: Box<dyn Element>,
+    ) -> Self {
+        Self {
+            pane,
+            measured,
+            font,
+            child,
+            size: None,
+            origin: None,
+        }
+    }
+}
+
+impl Element for PaneMeasurer {
+    fn layout(
+        &mut self,
+        constraint: SizeConstraint,
+        ctx: &mut LayoutContext,
+        app: &AppContext,
+    ) -> Vector2F {
+        let size = vec2f(
+            bounded(constraint.max.x(), constraint.min.x()),
+            bounded(constraint.max.y(), constraint.min.y()),
         );
-        self.handle.resize(
-            TerminalSize::new(columns, rows)
-                .with_cell_size(metrics.width.round() as u16, metrics.height.round() as u16),
-        );
+        self.measured.record(self.pane, grid_of(&self.font, size));
 
         self.size = Some(size);
         self.child.layout(SizeConstraint::strict(size), ctx, app);

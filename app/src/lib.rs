@@ -1514,12 +1514,17 @@ fn write_snapshot(path: &std::path::Path, overrides: Overrides) -> Result<()> {
     }
 
     if overrides.wants_shells() {
+        // A frame before the shells, because it is *layout* that measures the
+        // panes, and a shell opens at the grid its pane measured: a banner
+        // the shell prints at startup is sized for the pane rather than for
+        // the eighty columns every terminal used to start at. And a frame
+        // after them, because a key is dispatched into the element tree the
+        // last frame built, and that tree has to hold the shell.
+        app.update(|ctx| {
+            workspace.update(ctx, |workspace, ctx| workspace.expect_terminals(ctx));
+        });
+        frame(&mut app, &mut presenter);
         let pane = start_shells(&mut app, &workspace)?;
-        // A frame before a keystroke, because it is *layout* that measures the
-        // pane and resizes the pty — and because a key is dispatched into the
-        // element tree that frame builds. A command typed into the grid every
-        // terminal starts at stays wrapped at eighty columns however wide the
-        // window it is finally drawn in.
         frame(&mut app, &mut presenter);
 
         if !overrides.run.is_empty() {
@@ -2582,9 +2587,11 @@ impl Shell {
                 apply_overrides(workspace, &launch.overrides, ctx);
                 workspace.start_git_poll(ctx);
                 workspace.start_caret_blink(ctx);
-                // Last, because it opens a shell in every pane there is and the
-                // overrides above can still change how many that is.
-                workspace.start_terminals(ctx);
+                // Last, and not yet: the shells open after the first frame,
+                // which is what measures the panes they open in — see
+                // `frame_drawn`. Announced here so that the frame draws the
+                // panes as empty rather than as having no shell.
+                workspace.expect_terminals(ctx);
             });
         });
 
@@ -2594,9 +2601,11 @@ impl Shell {
 
         // The windowed run types the commands one after another, so they are
         // queued rather than joined: two commands sent as one line would be
-        // one block.
+        // one block. Aimed at the focused pane now; its shell opens with the
+        // rest after the first frame, and the first command is typed after
+        // that.
         let run = (!launch.overrides.run.is_empty())
-            .then(|| start_shells(&mut app, &workspace).ok())
+            .then(|| workspace.read(&app, |workspace, _| workspace.tabs().focused_pane_id()))
             .flatten()
             .map(|pane| Run {
                 pane,
@@ -2642,6 +2651,26 @@ impl Shell {
         let workspace = &self.workspace;
         self.app
             .update(|ctx| workspace.update(ctx, |_, ctx| ctx.notify()));
+    }
+
+    /// Opens the shells, once there has been a frame to measure the panes they
+    /// open in.
+    ///
+    /// The first frame, and only once: `expect_terminals` was said before it
+    /// and `start_terminals` clears the expectation. A shell opened before
+    /// the frame opened at eighty by twenty-four, and whatever its startup
+    /// printed — a banner sized with `tput cols` — was printed for that.
+    fn start_expected_terminals(&mut self) {
+        let expected = self.workspace.read(&self.app, |workspace, app| {
+            workspace.terminals_expected(app)
+        });
+        if !expected {
+            return;
+        }
+        let workspace = &self.workspace;
+        self.app.update(|ctx| {
+            workspace.update(ctx, |workspace, ctx| workspace.start_terminals(ctx));
+        });
     }
 
     /// Types the `--run` command, once there has been a frame to size the pane
@@ -2811,6 +2840,7 @@ impl WindowDelegate for Shell {
     }
 
     fn frame_drawn(&mut self) {
+        self.start_expected_terminals();
         self.follow_caret_with_the_input_method();
         self.type_pending_run();
         self.compose_pending_pane();
