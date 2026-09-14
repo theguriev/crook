@@ -11,7 +11,7 @@ use crookui_core::prelude::*;
 use crook_plugin::{Manifest, PluginId, Tier};
 
 use crate::plugin::{BuildError, Host, Plugin};
-use crate::shell_integration::{Marks, OPT_OUT_VARIABLE, Standing};
+use crate::shell_integration::{Marks, OPT_OUT_VARIABLE};
 use crate::workspace::settings_page::named;
 use crate::workspace::settings_page::search::Words;
 use crate::workspace::settings_page::widgets::{self, Category};
@@ -30,7 +30,7 @@ impl Plugin for Shell {
     }
 
     fn build(&mut self, host: &mut Host, _: &mut ViewContext<Workspace>) -> Result<(), BuildError> {
-        host.add_settings_page("page", "Shell", 10, |workspace, _| shell(workspace));
+        host.add_settings_page("page", "Shell", 10, shell);
         Ok(())
     }
 }
@@ -52,9 +52,10 @@ fn manifest() -> &'static Manifest {
 /// Which shell a pane starts, whether it gets the marks, and how it is
 /// started — which decides which of the person's own files it reads.
 ///
-/// The two facts are read the way a launch reads them (`Standing`), not
-/// guessed beside it: the page that said "zsh" while the pane ran `/bin/sh`
-/// would be worse than no page. They are here because a person whose output
+/// The two facts are read the way a launch reads them (`Standing`, of the
+/// shell the workspace's panes open), not guessed beside it: the page that
+/// said "zsh" while `--shell` had the pane running `/bin/sh` would be worse
+/// than no page. They are here because a person whose output
 /// is one long block has nowhere else to find out why — `$SHELL` naming a
 /// shell Crook has no marks for, or the opt-out variable set in a profile
 /// they forgot — and the description under the marks says where the marks
@@ -69,15 +70,17 @@ fn manifest() -> &'static Manifest {
 /// Which way it starts is the desktop's answer rather than Crook's, so the note
 /// names both directions rather than assuming the macOS one: see
 /// `shell_integration::login_by_default`.
-fn shell(workspace: &Workspace) -> Vec<Category> {
+fn shell(workspace: &Workspace, app: &AppContext) -> Vec<Category> {
     let ui = workspace.fonts().ui;
     let fonts = workspace.fonts();
     let state = workspace.settings_page();
-    let standing = Standing::current();
+    let (standing, was_named) = workspace.shell_standing(app);
 
     let program = widgets::fact(
         Words::new("Shell")
-            .with_description(if cfg!(windows) {
+            .with_description(if was_named {
+                "What --shell named when Crook was started, for every pane of this run."
+            } else if cfg!(windows) {
                 "What %ComSpec% names, or PowerShell when it is unset."
             } else {
                 "What $SHELL names, or the account's own shell when it is unset."

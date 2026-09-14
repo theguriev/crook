@@ -43,6 +43,7 @@ use crate::selection::{Blocks, Cells};
 use crate::settings::{
     DEFAULT_FONT_SIZE, Density, FONT_SIZE_STEP, GeneralOptions, Granularity, Settings, TabOptions,
 };
+use crate::shell_integration::Standing;
 use crate::tab::{
     AgentSession, AgentStatus, Direction, GroupId, Pane, PaneId, Tab, TabAction, TabEffect,
     TabGroup, TabId, TabStrip,
@@ -4242,6 +4243,19 @@ impl Workspace {
     pub fn set_shell(&self, shell: Option<PathBuf>, ctx: &mut ViewContext<Self>) {
         self.terminals
             .update(ctx, |model, _| model.set_shell(shell));
+    }
+
+    /// The shell the next pane runs and whether it gets the marks, read the
+    /// way the launch reads them, and whether the shell was named rather
+    /// than resolved. What the Shell page prints: a page that said "zsh"
+    /// while `--shell` had every pane running `/bin/sh` would be worse than
+    /// no page.
+    pub fn shell_standing(&self, app: &AppContext) -> (Standing, bool) {
+        let terminals = self.terminals.as_ref(app);
+        (
+            Standing::of(terminals.shell(), crate::shell_integration::opted_out()),
+            terminals.shell_is_named(),
+        )
     }
 
     /// Writes to a pane's shell directly, going round the input field.

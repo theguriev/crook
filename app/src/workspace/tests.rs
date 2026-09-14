@@ -8322,6 +8322,37 @@ fn the_shell_page_names_the_shell_a_pane_runs_and_whether_it_gets_the_marks() {
 }
 
 #[test]
+fn the_shell_page_names_the_shell_the_panes_were_told_to_run() {
+    // `--shell` puts another shell in every pane, and the page read the
+    // environment's: it said "zsh, marks installed" over panes running
+    // `/bin/sh` with none. The page reads the shell the panes open now, and
+    // says where that answer came from.
+    let mut harness = Harness::new(1);
+    harness.workspace_update(|workspace, ctx| {
+        workspace.set_shell(Some(PathBuf::from("/opt/odd/rc")), ctx);
+    });
+    harness.open_settings_page();
+    harness.select_settings_section("Shell");
+    let scene = harness.frame();
+    let text = text_where(&scene, |position| {
+        settings_pane_box(&scene).contains_point(position)
+    });
+
+    assert!(
+        text.contains("/opt/odd/rc"),
+        "the page does not name the shell the panes run: {text:?}"
+    );
+    assert!(
+        text.contains("None — Crook has no marks for rc"),
+        "the marks are not the named shell's: {text:?}"
+    );
+    assert!(
+        text.contains("What --shell named"),
+        "the page does not say where the shell came from: {text:?}"
+    );
+}
+
+#[test]
 fn the_about_page_says_which_plugin_api_this_build_speaks() {
     // The number in "built for plugin API 9, and this is Crook 8", and the
     // line a plugin author's Cargo.toml wants — read off the constant the
