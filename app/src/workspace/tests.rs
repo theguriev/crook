@@ -7629,10 +7629,19 @@ fn choosing_one_option_does_not_carry_another_command_line_override_into_the_fil
 /// which paints no surface of its own — so what bounds the page is the two
 /// things beside it.
 fn settings_pane_box(scene: &Scene) -> RectF {
+    // Sized from the frame rather than from `WINDOW`: a test that renders a
+    // narrow window and asks whether a line ends inside the page was asking
+    // against the default window's right edge, four hundred pixels past the
+    // frame's, and could not fail. The frame's far edges are where its
+    // grounds stop, and the grounds fill the window.
     let panel = panel_box(scene);
+    let right = far_edge(scene);
+    let bottom = visible_rects(scene)
+        .map(|(_, bounds)| bounds.max_y())
+        .fold(0., f32::max);
     RectF::new(
         vec2f(panel.max_x(), 0.),
-        vec2f(WINDOW.x() - panel.max_x(), WINDOW.y()),
+        vec2f(right - panel.max_x(), bottom),
     )
 }
 
