@@ -8692,6 +8692,53 @@ fn no_settings_page_paints_a_rect_with_a_negative_side_in_a_small_window() {
 }
 
 #[test]
+fn the_theme_row_s_name_gives_way_to_the_preview_beside_it() {
+    // The name and the line under it were plain children of the row beside
+    // a preview of one width, so in a page too narrow for both they ran
+    // past the row's border and the pane's edge: "Crook Da", "Choose an".
+    // They take what the preview leaves now, and are cut with a mark where
+    // they run out.
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.select_settings_section("Appearance");
+    let window = vec2f(560., 300.);
+    let scene = harness.frame_sized(window);
+
+    // The words beside the preview: the line under the name is on a
+    // baseline of its own, and the name shares its baseline with the
+    // preview's second line, so both are taken by the column they start.
+    let all = text_lines(&scene, |_| true);
+    let (under, _) = all
+        .iter()
+        .find(|(_, text)| text.starts_with("Choose another"))
+        .unwrap_or_else(|| panic!("the row says nothing under the name: {all:?}"));
+    let column = under.x();
+    let words = text_lines(&scene, |position| {
+        (position.x() - column).abs() < 0.5 || position.x() > column
+    });
+    let words: Vec<&(Vector2F, String)> = words
+        .iter()
+        .filter(|(at, _)| (at.x() - column).abs() < 0.5)
+        .collect();
+    assert!(
+        words.iter().any(|(_, text)| text.starts_with("Crook")),
+        "the row does not name the theme: {words:?}"
+    );
+    assert!(
+        words.iter().any(|(_, text)| text.contains('…')),
+        "nothing beside the preview gave way in a 560px window: {words:?}"
+    );
+    for (start, text) in &words {
+        let end = start.x() + text.chars().count() as f32 * 12. * 0.5;
+        assert!(
+            end <= window.x() - 16.,
+            "{text:?} ends at {end}, past the page's right padding in a {}px window",
+            window.x()
+        );
+    }
+}
+
+#[test]
 fn a_row_too_narrow_for_its_label_and_control_cuts_the_label_and_keeps_the_control() {
     // The label was a plain row child beside a spacer, so in a window too
     // narrow for the pair the control was what got pushed past the page's
