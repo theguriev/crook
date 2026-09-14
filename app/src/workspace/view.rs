@@ -2964,6 +2964,7 @@ impl Workspace {
         // opened with the first checkout lit would be one where Delete has a
         // target nobody aimed.
         self.tab_menu.selected = None;
+        self.tab_menu.scroll.lock().scroll_to_top();
         self.tab_menu.sweep = Sweep::default();
         self.tab_menu.contents = Contents::Reading;
         self.tab_menu.branches.clear();

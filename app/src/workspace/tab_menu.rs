@@ -121,7 +121,9 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-use crookui_core::elements::{MouseStateHandle, Padding, Paragraph, Shrinkable};
+use crookui_core::elements::{
+    MouseStateHandle, Padding, Paragraph, ScrollStateHandle, Scrollable, Shrinkable, WINDOW_INSET,
+};
 use crookui_core::fonts::{FamilyId, Properties, Weight};
 use crookui_core::prelude::*;
 
@@ -131,6 +133,7 @@ use crate::theme::theme;
 
 use super::action::{WorkspaceAction, WorktreeAction};
 use super::view::Workspace;
+use super::window_room::WindowRoom;
 
 /// How wide the popup is.
 ///
@@ -144,6 +147,10 @@ pub(super) const ROW_INSET: f32 = 12.;
 
 /// The popup's corner radius, which is the options menu's.
 const MENU_RADIUS: f32 = 6.;
+
+/// The least the list face is shortened to for a window shorter than it: a
+/// few rows' worth, under which a list that scrolls is a list nobody can read.
+const MENU_LEAST_HEIGHT: f32 = 120.;
 
 /// The size of the label on a row, and of the line under it.
 pub(super) const LABEL_SIZE: f32 = 12.;
@@ -377,6 +384,9 @@ pub(super) struct TabMenuState {
     /// Only [`Mode::Listing`] reads it: the other three modes are one question
     /// with two buttons, and Enter already answers them.
     pub(super) selected: Option<usize>,
+    /// How far the list of checkouts is scrolled, in a window too short for
+    /// them all.
+    pub(super) scroll: ScrollStateHandle,
     /// One mouse state per control, made on the control's first frame.
     controls: std::cell::RefCell<HashMap<Control, MouseStateHandle>>,
 }
@@ -454,7 +464,35 @@ impl TabMenuState {
         let next = Some(next as usize);
         let moved = self.selected != next;
         self.selected = next;
+        if moved {
+            self.scroll_selection_into_view(count);
+        }
         moved
+    }
+
+    /// Brings the keyboard's row inside the list's viewport.
+    ///
+    /// The rows are one height, so a row's top is arithmetic on what the
+    /// last layout measured: the content the scroll holds divided by the
+    /// count. Before any layout the measurement is zero and says nothing,
+    /// and a list that fits has nothing to move.
+    fn scroll_selection_into_view(&self, count: usize) {
+        let Some(at) = self.selected else {
+            return;
+        };
+        let mut scroll = self.scroll.lock();
+        let viewport = scroll.viewport();
+        if viewport <= 0. || !scroll.is_scrollable() {
+            return;
+        }
+        let row = (scroll.max_offset() + viewport) / count as f32;
+        let top = at as f32 * row;
+        let offset = scroll.offset();
+        if top < offset {
+            scroll.scroll_to(top);
+        } else if top + row > offset + viewport {
+            scroll.scroll_to(top + row - viewport);
+        }
     }
 
     /// Forgets every hover and press the menu was holding.
@@ -485,7 +523,7 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
         } => confirmation(workspace, index, local, refused, ui),
     };
 
-    ConstrainedBox::new(
+    let popup = ConstrainedBox::new(
         Container::new(body)
             .with_background_color(theme().surface_raised)
             .with_border(Border::all(1.).with_border_color(theme().overlay_2))
@@ -494,7 +532,20 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
             .finish(),
     )
     .with_width(MENU_WIDTH)
-    .finish()
+    .finish();
+
+    // The list is the one face that grows with the repository, and the one
+    // that scrolls: a window shorter than the list of checkouts is handed
+    // the list its height, and the rows scroll behind the header and above
+    // the row that makes another. The other three faces are a question with
+    // two buttons, and are left their height.
+    if state.mode == Mode::Listing {
+        WindowRoom::new(popup)
+            .with_height_inset(WINDOW_INSET, MENU_LEAST_HEIGHT)
+            .finish()
+    } else {
+        popup
+    }
 }
 
 /// The list: the repository's worktrees, and the way to another.
@@ -518,9 +569,24 @@ fn listing(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
         }
         Contents::Failed(problem) => column.add_child(note(problem.as_str(), ui)),
         Contents::Ready(worktrees) => {
+            let mut rows = Flex::column()
+                .with_main_axis_size(MainAxisSize::Min)
+                .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
             for (index, worktree) in worktrees.iter().enumerate() {
-                column.add_child(worktree_row(workspace, index, worktree, ui));
+                rows.add_child(worktree_row(workspace, index, worktree, ui));
             }
+            // The rows take what the header and the rows under them leave,
+            // and scroll inside it: a loose flexible child, so a short list
+            // is still its own height and only a long one gives way.
+            column.add_child(
+                Shrinkable::new(
+                    1.,
+                    Scrollable::new(state.scroll.clone(), rows.finish())
+                        .with_scrollbar(theme().overlay_3)
+                        .finish(),
+                )
+                .finish(),
+            );
         }
     }
 
