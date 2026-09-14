@@ -2712,17 +2712,23 @@ impl Shell {
     /// and `start_terminals` clears the expectation. A shell opened before
     /// the frame opened at eighty by twenty-four, and whatever its startup
     /// printed — a banner sized with `tput cols` — was printed for that.
-    fn start_expected_terminals(&mut self) {
+    ///
+    /// Reports whether it did, because the frame just drawn was built before
+    /// the shells existed: its tree has no field in any pane, so a command
+    /// typed into it now would be typed into nothing. The caller waits for
+    /// the next frame.
+    fn start_expected_terminals(&mut self) -> bool {
         let expected = self.workspace.read(&self.app, |workspace, app| {
             workspace.terminals_expected(app)
         });
         if !expected {
-            return;
+            return false;
         }
         let workspace = &self.workspace;
         self.app.update(|ctx| {
             workspace.update(ctx, |workspace, ctx| workspace.start_terminals(ctx));
         });
+        true
     }
 
     /// Types the `--run` command, once there has been a frame to size the pane
@@ -2871,8 +2877,20 @@ impl Shell {
 impl WindowDelegate for Shell {
     fn build_scene(&mut self, size: Vector2F, scale_factor: f32) -> Rc<Scene> {
         // Written down rather than dispatched: it costs nothing, it invalidates
-        // nothing, and it is the only place the window's size is known.
+        // nothing, and it is the only place the window's size is known. A size
+        // that changed is told to the workspace all the same, once, because
+        // the session file carries it and a resize moves no tab. The first
+        // frame counts: a tiling desktop opens the window at whatever size it
+        // likes, and the file should say that size rather than the one asked
+        // for.
+        let resized = self.window_size.get() != size;
         self.window_size.set(size);
+        if resized {
+            let workspace = &self.workspace;
+            self.app.update(|ctx| {
+                workspace.update(ctx, |workspace, ctx| workspace.window_resized(ctx))
+            });
+        }
         self.sync_window_state();
 
         let window_id = self.window_id;
@@ -2917,7 +2935,14 @@ impl WindowDelegate for Shell {
     }
 
     fn frame_drawn(&mut self) {
-        self.start_expected_terminals();
+        if self.start_expected_terminals() {
+            // The shells opened after a frame that had none: the next frame
+            // is the first with a field to type into, and it is asked for
+            // rather than waited for, since a shell that has nothing to draw
+            // yet would not ask.
+            self.proxy.request_redraw();
+            return;
+        }
         self.follow_the_active_tab_with_the_title();
         self.follow_caret_with_the_input_method();
         self.type_pending_run();
