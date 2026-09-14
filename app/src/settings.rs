@@ -382,7 +382,9 @@ pub struct TabOptions {
 
 impl Default for TabOptions {
     /// Warp's defaults — `Panes`, `Compact`, `Command`, `Branch`, and every
-    /// "Show" on — plus the one that is not Warp's: [`Layout::Vertical`].
+    /// "Show" on. The tabs live in a panel rather than a strip, which is the
+    /// one place Crook's defaults deliberately differ from Warp's, and that
+    /// is the window's shape rather than an option here.
     ///
     /// The three booleans are why this is written out rather than derived —
     /// `bool`'s default is `false`, and Warp's is `true` for all three.

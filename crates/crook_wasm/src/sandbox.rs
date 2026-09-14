@@ -80,7 +80,7 @@ impl Default for Fuel {
 /// allocator has to deal with rather than the host's problem.
 const MEMORY_PAGES: u32 = 256;
 
-/// The same ceiling in bytes, which is the unit a [`ResourceLimiter`] speaks.
+/// The same ceiling in bytes, which is the unit a [`wasmi::ResourceLimiter`] speaks.
 const MEMORY_BYTES: usize = MEMORY_PAGES as usize * 64 * 1024;
 
 /// How many entries a plugin's tables may hold, all together.

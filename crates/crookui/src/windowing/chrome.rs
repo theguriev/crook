@@ -244,7 +244,7 @@ struct State {
     /// button comes up, and that release is delivered to the *window manager*,
     /// not to us: winit reports the press and then nothing. Left alone, the
     /// input state goes on believing the button is held and turns every later
-    /// move into a drag. See [`Self::take_gesture_started`].
+    /// move into a drag. See [`WindowControls::take_gesture_started`].
     gesture_started: bool,
     /// The resize cursor currently set, so the pointer is only changed when it
     /// actually changes — a mouse move is a common event and setting a cursor

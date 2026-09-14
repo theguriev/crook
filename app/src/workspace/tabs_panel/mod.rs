@@ -1,11 +1,11 @@
 //! The vertical tabs panel: a 248px column down the left of the window.
 //!
-//! Crook's default layout, and the one place its defaults deliberately differ
-//! from Warp's — [`Layout`](crate::settings::Layout) says why. It is the other
-//! half of a mutually exclusive pair with [`tab_bar`](super::tab_bar): when
-//! this renders, the header carries no tab items at all, which is exactly what
-//! Warp's early return at `view.rs:20916` does. There is no state in which
-//! both a strip and a panel show tabs.
+//! Crook's layout, and the one place its defaults deliberately differ from
+//! Warp's: the tabs are in a panel and the header holds none of them. Warp
+//! makes this a setting and a strip along the top the other half of a
+//! mutually exclusive pair; here it is the window, and there is no state in
+//! which the header carries tab items at all — which is exactly what Warp's
+//! early return at `view.rs:20916` does when its panel is on.
 //!
 //! Top to bottom: the search box, the list, the `+` in the space the list
 //! leaves, and the row of buttons that says what the list is. Warp keeps its

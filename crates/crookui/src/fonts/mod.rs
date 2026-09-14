@@ -719,7 +719,7 @@ impl CosmicFontDb {
     /// This is the measurement path — a terminal grid asks it once per distinct
     /// character and then pushes glyph records straight into the scene, never
     /// shaping at all. It does *not* fall back to another face; see
-    /// [`CosmicFontDb::fallback_fonts`].
+    /// [`CosmicFontDb::fallback_glyph`].
     pub fn glyph_for_char(&self, font_id: FontId, character: char) -> Option<GlyphId> {
         self.store.glyph_for_char(font_id, character)
     }

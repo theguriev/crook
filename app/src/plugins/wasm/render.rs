@@ -793,7 +793,7 @@ fn anchored(
 /// stop counting as being over it, so the note would be torn down and put back
 /// frame after frame.
 ///
-/// The ground is [`chrome`], the same one a panel gets, so [`Node::Rule`]'s
+/// The ground is `chrome`, the same one a panel gets, so [`Node::Rule`]'s
 /// full-bleed inset still lands and a [`Node::Fill`] still has an axis to take
 /// a share of.
 fn explained(

@@ -304,7 +304,7 @@ pub enum Binding {
 ///    rule, and it is also the only feedback a copy has: the highlight going
 ///    away is how a person knows it happened. The other three clearing rules —
 ///    typing, clicking elsewhere, closing the pane — are the element's, in
-///    [`crate::workspace::terminal_element`].
+///    [`crate::workspace::TerminalElement`].
 ///
 ///    A modal menu is the one thing that suspends this: while one is up the
 ///    pane reports no selection at all, so the three keys a running command

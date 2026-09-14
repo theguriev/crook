@@ -1,6 +1,6 @@
 //! Shaping: a string and its style runs in, positioned glyphs out.
 //!
-//! The body of [`CosmicTextLayout::layout_line`] is Warp's
+//! The body of `CosmicTextLayout::layout_line` is Warp's
 //! `winit/fonts.rs:1305-1360` with the bidi paragraph walk, the caret table and
 //! the clip configuration removed — build a [`cosmic_text::AttrsList`] from the
 //! style runs, hand it to [`cosmic_text::ShapeLine`], hand the resulting

@@ -791,7 +791,7 @@ impl TabStrip {
 
     /// The tab with this id, for reporting agent progress into it.
     ///
-    /// Crate-private for the same reason as [`Tab::session_mut`].
+    /// Crate-private for the same reason as [`Pane::session_mut`].
     pub(crate) fn get_mut(&mut self, id: TabId) -> Option<&mut Tab> {
         self.tabs.iter_mut().find(|tab| tab.id() == id)
     }

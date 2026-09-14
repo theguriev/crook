@@ -25,7 +25,7 @@
 //! Warp's is the most interesting behaviour on its settings page, and it is
 //! here: one field at the top of the rail filtering the rail and the content
 //! together, per-widget keyword blobs, and a match count beside each page.
-//! See [`search`] for what "matches" means and [`field`] for the box itself,
+//! See [`search`] for what "matches" means and [`rail`] for the box itself,
 //! which is the first text input in Crook that is not a pane's.
 //!
 //! Two deliberate differences from Warp, both of which are the same
@@ -102,7 +102,7 @@ const RAIL_SCROLL: &str = "settings.rail";
 /// on screen, so a struct with a field per handle would need every field
 /// reachable from a renderer that does not know which page it is drawing.
 ///
-/// It is a string now for the reason [`Words`](super::search::Words) holds
+/// It is a string now for the reason [`Words`](search::Words) holds
 /// owned text: a page contributed by a plugin has controls nobody enumerated,
 /// and an enum cannot have a variant for them. What that costs is that two
 /// plugins can collide on a name, so each writes its own id in front — the
