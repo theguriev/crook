@@ -227,7 +227,98 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
         previous = Some(pane.id());
     }
 
-    layout.finish()
+    // The box the panes share, written down for the panes no layout will
+    // see before their shells open: the ones in the tabs behind this one,
+    // and the one a split makes. See `estimated_grid`.
+    BodyMeasurer::new(workspace.pane_measure(app), layout.finish()).finish()
+}
+
+/// The grid the layout would give `pane` in a tab whose panes share `body`.
+///
+/// For a shell that has to open before its pane's first layout: a pane in a
+/// tab behind the active one, or one just split off, whose layout comes a
+/// frame after the split. The arithmetic is [`render`]'s — the dividers are
+/// fixed, the panes divide what is left by their weights along the axis and
+/// take the whole of the other — so the answer is the grid the first layout
+/// would resize the pty to, give or take a pixel of rounding no cell count
+/// turns on.
+pub(super) fn estimated_grid(
+    body: Vector2F,
+    group: &crate::tab::PaneGroup,
+    pane: PaneId,
+    font: &CellFont,
+) -> Option<TerminalSize> {
+    let flex = group.get(pane)?.flex();
+    let total: f32 = group.iter().map(Pane::flex).sum();
+    let dividers = group.len().saturating_sub(1) as f32 * DIVIDER_THICKNESS;
+    let size = match group.axis() {
+        SplitAxis::Horizontal => vec2f((body.x() - dividers) * flex / total, body.y()),
+        SplitAxis::Vertical => vec2f(body.x(), (body.y() - dividers) * flex / total),
+    };
+    Some(grid_of(font, size))
+}
+
+/// Records the box the active tab's panes are laid out in.
+///
+/// Pass-through otherwise, like [`PaneMeasurer`]: the number goes into
+/// [`Measured`](crate::terminal_model::Measured) and the child gets the box.
+struct BodyMeasurer {
+    measured: crate::terminal_model::Measured,
+    child: Box<dyn Element>,
+    size: Option<Vector2F>,
+    origin: Option<Point>,
+}
+
+impl BodyMeasurer {
+    fn new(measured: crate::terminal_model::Measured, child: Box<dyn Element>) -> Self {
+        Self {
+            measured,
+            child,
+            size: None,
+            origin: None,
+        }
+    }
+}
+
+impl Element for BodyMeasurer {
+    fn layout(
+        &mut self,
+        constraint: SizeConstraint,
+        ctx: &mut LayoutContext,
+        app: &AppContext,
+    ) -> Vector2F {
+        let size = vec2f(
+            bounded(constraint.max.x(), constraint.min.x()),
+            bounded(constraint.max.y(), constraint.min.y()),
+        );
+        self.measured.record_body(size);
+
+        self.size = Some(size);
+        self.child.layout(SizeConstraint::strict(size), ctx, app);
+        size
+    }
+
+    fn paint(&mut self, origin: Vector2F, ctx: &mut PaintContext, app: &AppContext) {
+        self.origin = Some(Point::from_vec2f(origin, ctx.scene.z_index()));
+        self.child.paint(origin, ctx, app);
+    }
+
+    fn dispatch_event(
+        &mut self,
+        event: &DispatchedEvent,
+        ctx: &mut EventContext,
+        app: &AppContext,
+    ) -> bool {
+        self.child.dispatch_event(event, ctx, app)
+    }
+
+    fn size(&self) -> Option<Vector2F> {
+        self.size
+    }
+
+    fn origin(&self) -> Option<Point> {
+        self.origin
+    }
 }
 
 /// What a pane is drawn as. Warp's `SplitPaneState`, which is likewise

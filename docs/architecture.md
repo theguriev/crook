@@ -790,9 +790,12 @@ before: the frame lays every pane out, a pane with no terminal yet records the g
 (`PaneMeasurer` in `app/src/workspace/body.rs`, into `terminal_model::Measured`), and
 `TerminalModel::open` starts the pty at that. `Workspace::expect_terminals` is said before the
 frame so that the pane draws its ground rather than a notice for that one frame, and
-`start_terminals` runs from the window's `frame_drawn`. What is left of the gap is a pane split
-off later, whose shell opens before its first layout at `INITIAL_GRID` — 80×24 — and the note
-there says so.
+`start_terminals` runs from the window's `frame_drawn`. A pane no layout will see before its
+shell opens — one in a tab behind the active one, or one a split just made, whose layout comes
+a frame after the split — is given the grid the layout *would* give it, worked out from the box
+the active tab's panes share (`BodyMeasurer`) and the tab's own weights (`body::estimated_grid`,
+the same arithmetic as the layout's). `INITIAL_GRID` — 80×24 — is left for a shell started
+before any frame at all.
 
 ### Who drives it
 
