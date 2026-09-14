@@ -109,6 +109,15 @@ impl Proxy {
         self.send(CrookEvent::Exit);
     }
 
+    /// Names the window, the way the window manager, the taskbar and the
+    /// switcher show it.
+    ///
+    /// Sending the same name twice is harmless; a caller that sends one per
+    /// frame is only paying for a message, as with the input method's area.
+    pub fn set_title(&self, title: String) {
+        self.send(CrookEvent::SetTitle(title));
+    }
+
     /// Says where the text being composed is, so the platform can put an input
     /// method's candidate list beside it rather than in a corner.
     ///
@@ -158,9 +167,9 @@ pub struct Platform {
 
 /// Everything that reaches the main thread from somewhere else.
 ///
-/// Three variants rather than Warp's thirty, because Crook has one window and
-/// no menu bar, no global hotkeys and no notifications. Adding a fourth is how
-/// any future off-thread capability should arrive.
+/// A handful of variants rather than Warp's thirty, because Crook has one
+/// window and no menu bar, no global hotkeys and no notifications. Adding one
+/// is how any future off-thread capability should arrive.
 enum CrookEvent {
     /// Poll a foreground task.
     RunTask(ManuallyDrop<Runnable>),
@@ -173,6 +182,8 @@ enum CrookEvent {
         /// How big the composed text's box is, in logical pixels.
         size: Vector2F,
     },
+    /// Name the window.
+    SetTitle(String),
     /// Leave the event loop.
     Exit,
 }
@@ -324,6 +335,11 @@ impl ApplicationHandler<CrookEvent> for App {
             CrookEvent::SetImeArea { origin, size } => {
                 if let Some(window) = self.window.as_mut() {
                     window.set_ime_area(origin, size);
+                }
+            }
+            CrookEvent::SetTitle(title) => {
+                if let Some(window) = self.window.as_mut() {
+                    window.set_title(&title);
                 }
             }
             CrookEvent::Exit => event_loop.exit(),
