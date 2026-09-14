@@ -108,18 +108,29 @@ fn a_stored_sound_lands_in_the_cache_and_nowhere_else() {
 
 #[test]
 fn no_partial_file_is_left_behind() {
-    let Ok(file) = store(&header()) else {
+    // Its own sound, and only its own leftovers counted. The cache is one
+    // directory for the whole machine, and the test beside this one stores
+    // a sound at the same moment: with the same bytes, the two wrote the
+    // same `.partial` and raced each other's rename; counting every
+    // `.partial` in the directory then saw the other's half-written file
+    // and failed, which is what Crook CI's Linux job did once in a while.
+    let mut wav = header();
+    wav.extend_from_slice(b"no partial file is left behind");
+    let Ok(file) = store(&wav) else {
         return;
     };
     let directory = file.parent().expect("it was written at the root");
+    let mine = format!("{:016x}.", fingerprint(&wav));
     let leftovers = fs::read_dir(directory)
         .expect("the sounds directory went away")
         .filter_map(Result::ok)
         .filter(|entry| {
-            entry
-                .path()
-                .extension()
-                .is_some_and(|kind| kind == "partial")
+            let path = entry.path();
+            path.extension().is_some_and(|kind| kind == "partial")
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.starts_with(&mine))
         })
         .count();
     assert_eq!(leftovers, 0, "a half-written sound was left in the cache");
