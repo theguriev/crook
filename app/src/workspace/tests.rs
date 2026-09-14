@@ -12024,6 +12024,51 @@ mod shells {
         }
 
         #[test]
+        fn the_field_stays_where_it_is_whatever_the_count_says() {
+            // The bar hangs off the pane's right corner and the count sat in
+            // the row at its own width, so the field — the thing being typed
+            // into — moved every time the count changed: once when the first
+            // letter turned nothing into "No results", again when a match
+            // turned that into "1/2". The count has a slot now.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = searching(&mut harness, "alpha beta gamma", "") else {
+                return;
+            };
+            let field_x = |harness: &mut Harness| {
+                let scene = harness.frame();
+                let pane_box = panel_boxes(&scene)[0];
+                let icons = icons_in(&scene, pane_box, Lucide::Search);
+                assert_eq!(icons.len(), 1, "one search icon in the pane, the field's");
+                icons[0].min_x()
+            };
+            let retype = |harness: &mut Harness, query: &str| {
+                let find = harness
+                    .workspace
+                    .read(&harness.app, |workspace, _| workspace.find(pane).cloned())
+                    .expect("the pane has a find bar");
+                find.input().edit(|editor| editor.set_text(query));
+                // The edit went straight into the field's model; the bar is
+                // rebuilt on the workspace's next render, which a keystroke
+                // would have asked for.
+                harness.workspace_update(|_, ctx| ctx.notify());
+            };
+
+            let empty = field_x(&mut harness);
+            retype(&mut harness, "nowhere");
+            assert_eq!(
+                field_x(&mut harness),
+                empty,
+                "the field moved when the count said there were no results"
+            );
+            retype(&mut harness, "beta");
+            assert_eq!(
+                field_x(&mut harness),
+                empty,
+                "the field moved when the count said how many there were"
+            );
+        }
+
+        #[test]
         fn a_query_that_matches_nothing_says_so() {
             let mut harness = Harness::panel(1);
             let Some(pane) = searching(&mut harness, "alpha beta gamma", "nowhere") else {
