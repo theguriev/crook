@@ -2548,6 +2548,18 @@ impl Workspace {
         ctx.notify();
     }
 
+    /// Records that the window is another size, which the session file
+    /// carries so that the next window opens the size this one was.
+    ///
+    /// The size itself is read off the cell the delegate writes before every
+    /// frame; this is the delegate saying it changed, since a resize moves no
+    /// tab and the file was otherwise written at the size of the last tab
+    /// action. Coalesced like every session save: a drag that resizes sixty
+    /// times a second asks sixty times and writes once.
+    pub fn window_resized(&self, ctx: &mut ViewContext<Self>) {
+        self.save_session(ctx);
+    }
+
     /// Which section the sidebar is showing, if it is not showing the tabs.
     pub fn showing_section(&self) -> Option<SectionId> {
         self.section
@@ -4941,9 +4953,17 @@ impl Workspace {
             }
             TerminalUpdate::WorkingDirectory(pane, directory) => {
                 let directory = directory.clone();
-                self.update_session(*pane, ctx, |session| {
+                let reported = self.update_session(*pane, ctx, |session| {
                     session.working_directory = Some(directory);
-                })
+                });
+                // Where the shells are is what the next window opens in, and
+                // a `cd` moves no tab: without this the file said where each
+                // pane *started*, and "in their own directories" was true only
+                // until somebody used one.
+                if reported {
+                    self.save_session(ctx);
+                }
+                reported
             }
             TerminalUpdate::Running(pane, command) => {
                 let command = command.clone();
@@ -6699,15 +6719,18 @@ impl Workspace {
         if !self.general().restore_session {
             return;
         }
-        let Some(path) = crate::session::user_session_path() else {
+        // Beside the settings file, wherever that is. An ephemeral run — a
+        // test, the headless snapshot — has nowhere to write its settings and
+        // writes no session either; a run with its settings in a scratch
+        // directory writes its session there, and never into the real one's
+        // place.
+        let Some(path) = self
+            .settings
+            .path()
+            .map(crate::session::session_path_beside)
+        else {
             return;
         };
-        // An ephemeral run — a test, the headless snapshot — has nowhere to
-        // write its *settings*, and must not write a session file into the
-        // real one's place either.
-        if self.settings.path().is_none() {
-            return;
-        }
 
         let asked_at = self.session_saves.ask();
         let saves = self.session_saves.clone();
