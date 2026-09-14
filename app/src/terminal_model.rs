@@ -446,6 +446,19 @@ impl TerminalModel {
         self.shell = shell;
     }
 
+    /// The shell the next pane runs: the one named, or the user's own
+    /// resolved the way a launch resolves it.
+    pub fn shell(&self) -> PathBuf {
+        self.shell
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(crook_terminal::default_shell()))
+    }
+
+    /// Whether a shell was named, rather than the user's own resolved.
+    pub fn shell_is_named(&self) -> bool {
+        self.shell.is_some()
+    }
+
     /// Opens a shell for every pane that has none, and closes the ones whose
     /// panes have gone.
     ///
