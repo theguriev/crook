@@ -7252,6 +7252,41 @@ fn clicking_a_split_tabs_heading_selects_it_without_moving_the_focus_inside_it()
 }
 
 #[test]
+fn the_card_gives_up_width_for_a_window_with_no_room_for_it_and_not_otherwise() {
+    // A 320px card beside a 248px panel needs a window 559 wide. In one
+    // narrower it was built at 320 all the same and ran off the window's
+    // right edge, last words and corner cut, because its width was a
+    // constant and the room it had was only known at layout. The layout
+    // knows the window, so the card is narrowed to the room — and keeps its
+    // width where there is room for it.
+    let mut harness = Harness::seeded_panel();
+    harness.hover_first_row();
+
+    let scene = harness.frame_sized(vec2f(480., 360.));
+    let cards = detail_cards(&scene);
+    assert_eq!(cards.len(), 1, "the hovered row opened no card");
+    let card = cards[0];
+    assert!(
+        card.max_x() <= 480. - crookui_core::elements::WINDOW_INSET + 0.5,
+        "the card at {card:?} runs off a 480px window"
+    );
+    assert!(
+        card.width() < crate::workspace::row_content::CARD_WIDTH,
+        "the card kept its {}px in a window with no room for it",
+        card.width()
+    );
+
+    let scene = harness.frame_sized(vec2f(1024., 640.));
+    let card = detail_cards(&scene)[0];
+    assert!(
+        (card.width() - crate::workspace::row_content::CARD_WIDTH).abs() < 0.5,
+        "the card is {}px wide in a window with room for all {}",
+        card.width(),
+        crate::workspace::row_content::CARD_WIDTH
+    );
+}
+
+#[test]
 fn a_row_armed_before_the_menu_opened_puts_no_card_over_the_menus_underlay() {
     // A card and the menu are both anchored overlays, and the later of the two
     // covers the earlier. The menu is added last on the ground under the list,
