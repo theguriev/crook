@@ -5055,7 +5055,7 @@ impl Workspace {
     /// any of them is called, because a watcher is handed the whole workspace
     /// and the host is part of it: calling one while the list was still
     /// borrowed would be a borrow of `self` inside a borrow of `self`. Same
-    /// reason [`Self::apply_action`] takes the actions by handle.
+    /// reason [`Self::apply`] takes the actions by handle.
     fn command_finished(
         &mut self,
         pane: PaneId,

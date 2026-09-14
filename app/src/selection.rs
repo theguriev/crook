@@ -498,7 +498,7 @@ impl<'a> Blocks<'a> {
     /// because a case fold that changed the number of characters would put
     /// the highlight one cell off the text it grew from, and terminal output
     /// is ASCII far more often than not. A match never crosses the line break
-    /// [`walk`] writes between two rows, so a query with no newline in it is
+    /// [`Blocks::walk`] writes between two rows, so a query with no newline in it is
     /// found within one logical line, folds and all.
     pub fn find_all(&self, needle: &str) -> Vec<Selection> {
         if needle.is_empty() {

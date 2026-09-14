@@ -33,7 +33,7 @@
 //!
 //! Nothing is passed to a contribution saying which tab the menu is on,
 //! because nothing needs to be: the menu is only ever open on one tab and
-//! [`Workspace::tab_menu_target`] is that tab. A slot whose contributions took
+//! [`Workspace::menu_target`] is that tab. A slot whose contributions took
 //! an argument would be a second kind of slot, and one every other surface in
 //! the application would then have to explain not having.
 //!

@@ -20,7 +20,7 @@
 //! limitation anybody will meet: a panel is modal, so opening a second one
 //! dismisses the first, and a plugin with two chips has two panels of which a
 //! person can see one. What it buys is that the four keys have one thing to
-//! act on and no way of naming which — see [`Held::claims`].
+//! act on and no way of naming which — see [`claims`].
 //!
 //! # The keys are actions, like everything else
 //!

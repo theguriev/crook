@@ -47,7 +47,7 @@ struct State {
     /// Kept even while the bar is closed and even when there are no matches:
     /// a person who typed a query, stepped to the third match and cleared the
     /// field is at nothing, and the number is meaningless until a match
-    /// exists again — at which point [`Self::clamped`] brings it back inside
+    /// exists again — at which point [`PaneFind::clamped`] brings it back inside
     /// the count rather than starting over at the top.
     current: usize,
 }

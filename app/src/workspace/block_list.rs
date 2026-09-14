@@ -13,7 +13,7 @@
 //!
 //! # What it costs
 //!
-//! A [`Heights`] prefix sum over the items, kept in the view between frames
+//! A [`Heights`](crate::pane_blocks::Heights) prefix sum over the items, kept in the view between frames
 //! and rebuilt only when a command finishes. Layout binary-searches it for the
 //! first visible item and walks forward until it passes the bottom of the box,
 //! recording a small vector of what it found; paint replays that vector. So a
@@ -630,7 +630,7 @@ impl BlockList {
     /// The link under the pointer, or `None`.
     ///
     /// Works on every item of the list rather than only the open one, which is
-    /// the difference between this and [`Self::cell_at`]: a selection has to
+    /// the difference between this and a selection: a selection has to
     /// live in the emulator and so can only cover the open block, but a link
     /// is read straight off the text and a URL printed by a command that
     /// finished an hour ago is still a URL.
@@ -1741,7 +1741,7 @@ fn live_height(snapshot: &Snapshot, composer: bool) -> f32 {
 ///
 /// **Two cases, and there is deliberately no third.** Either the shell said
 /// where its prompt ended — OSC 133 `B`, whose cell the emulator kept as
-/// [`LiveBlock::prompt_end`] — and the line being typed continues that row,
+/// [`LiveBlock::prompt_end`](crook_terminal::LiveBlock::prompt_end) — and the line being typed continues that row,
 /// which is what every other terminal does and what stops a composer reading
 /// as a widget however little chrome it has; or nothing said, and the composer
 /// starts at the gutter on the row below, exactly where it has always been.

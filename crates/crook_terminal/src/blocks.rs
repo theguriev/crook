@@ -341,7 +341,7 @@ pub struct Finished {
     /// The status the shell reported, or `None` when it reported none.
     pub exit: Option<i32>,
     /// How long it ran, measured from the submit rather than from OSC 133 `C`,
-    /// for the reason [`Blocks::apply`] times it that way: what a person waited
+    /// for the reason [`BlockTracker::apply`] times it that way: what a person waited
     /// for started when they pressed Enter.
     ///
     /// `None` when the block was already open when Crook started watching, so

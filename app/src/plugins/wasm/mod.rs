@@ -7,7 +7,7 @@
 //!
 //! # A guest names things with strings, and every one of them is resolved
 //!
-//! A native plugin names a [`SlotId`] and cannot name one that does not exist.
+//! A native plugin names a [`SlotId`](crook_plugin::SlotId) and cannot name one that does not exist.
 //! A guest hands over a string, so every string is looked up: a slot nothing
 //! declares is a refused contribution with a line saying which plugin asked
 //! for what, and an action name is prefixed with the plugin's own id before it
