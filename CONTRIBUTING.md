@@ -2,7 +2,7 @@
 
 ## Before you push
 
-**These four commands are the gate.** Not "run them and CI will confirm it" — CI does not run
+**These five commands are the gate.** Not "run them and CI will confirm it" — CI does not run
 by itself. `.github/workflows/ci.yml` is `workflow_dispatch` only, so nothing starts when you
 push or open a pull request, and a green branch is one somebody made green here. Run them, in
 this order:
@@ -14,13 +14,17 @@ cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo check --locked --workspace --all-targets
 cargo test --locked --workspace
+RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" \
+  cargo doc --locked --no-deps --workspace --document-private-items
 ```
 
-Clippy warnings are errors. `.clippy.toml` also bans `std::process::Command`, because on
+Clippy warnings are errors, and so is a comment whose [`link`] points at an item that has
+been renamed or removed — the comments link to the code they explain, and a link to nothing
+is a comment that has quietly started lying about where to look. `.clippy.toml` also bans `std::process::Command`, because on
 Windows it flashes a console window unless the spawner sets `CREATE_NO_WINDOW` — invisible on
 macOS and Linux, and a shipping-blocker for a terminal. Use `crook::process::Command`.
 
-There is a fifth check, which compiles the workspace with the feature set a shipped build uses:
+There is a sixth check, which compiles the workspace with the feature set a shipped build uses:
 
 ```sh
 ./script/bundle --check-only
