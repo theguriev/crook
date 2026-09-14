@@ -331,6 +331,34 @@ fn a_container_grows_by_its_padding_and_border() {
 }
 
 #[test]
+fn a_container_given_less_room_than_its_margins_paints_an_empty_box_not_a_negative_one() {
+    // The layout shrinks the box when the constraint is smaller than the
+    // margins need, and the paint used to subtract the margins from that
+    // shrunken size: a box 1.6 wide with a 16 margin painted a rect 14.4
+    // wide the wrong way. That is what a fact's value on a narrow settings
+    // page is, and what took the renderer down.
+    let mut harness = Harness::new(|_| {
+        ConstrainedBox::new(
+            Container::new(marker(30., 10.))
+                .with_margin_left(16.)
+                .with_background_color(Color::WHITE)
+                .finish(),
+        )
+        .with_width(1.6)
+        .finish()
+    });
+
+    let scene = harness.build_scene(vec2f(100., 50.));
+    for rect in rects(&scene) {
+        assert!(
+            rect.bounds.width() >= 0. && rect.bounds.height() >= 0.,
+            "a rect came out of layout with a negative side: {:?}",
+            rect.bounds
+        );
+    }
+}
+
+#[test]
 fn align_centers_a_child_in_the_space_it_was_given() {
     let mut harness = Harness::new(|_| Align::new(marker(10., 10.)).finish());
 

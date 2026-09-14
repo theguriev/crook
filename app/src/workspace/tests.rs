@@ -8322,6 +8322,31 @@ fn the_shell_page_names_the_shell_a_pane_runs_and_whether_it_gets_the_marks() {
 }
 
 #[test]
+fn no_settings_page_paints_a_rect_with_a_negative_side_in_a_small_window() {
+    // The Keyboard Shortcuts page at 640 by 480 took the window down: a
+    // fact's value, handed less room than its margin, painted a box with a
+    // negative width, and the renderer panicked clamping a corner radius
+    // between zero and half of it. Every page, in a window small enough to
+    // squeeze every row, and not one rect the wrong way round.
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    for page in ["Appearance", "Shell", "Keyboard Shortcuts", "About"] {
+        harness.select_settings_section(page);
+        let scene = harness.frame_sized(vec2f(480., 360.));
+        // Every rect the layers hold, not `visible_rects`: a rect the wrong
+        // way round has no intersection with anything, and would be filtered
+        // out by the very helper meant to find it.
+        for rect in scene.layers().flat_map(|layer| layer.rects.iter()) {
+            assert!(
+                rect.bounds.width() >= 0. && rect.bounds.height() >= 0.,
+                "{page}: a rect came out of layout with a negative side: {:?}",
+                rect.bounds
+            );
+        }
+    }
+}
+
+#[test]
 fn the_shell_page_names_the_shell_the_panes_were_told_to_run() {
     // `--shell` puts another shell in every pane, and the page read the
     // environment's: it said "zsh, marks installed" over panes running

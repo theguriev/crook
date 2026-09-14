@@ -221,7 +221,11 @@ impl RectData {
         corner_radius: CornerRadius,
         scale_factor: f32,
     ) -> Self {
-        let min_dimension = bounds.width().min(bounds.height());
+        // Never below zero: `f32::clamp` panics when its bounds cross, and a
+        // rect with a negative side — a box given less room than its margins
+        // — is a thing a layout can produce and the renderer has to survive.
+        // Such a rect covers nothing, and a radius of nothing draws nothing.
+        let min_dimension = bounds.width().min(bounds.height()).max(0.);
         let radius = |radius: Radius| {
             let pixels = match radius {
                 Radius::Pixels(pixels) => pixels * scale_factor,
@@ -311,6 +315,24 @@ mod tests {
         );
 
         assert_eq!(data.corner_radius, [10., 10., 10., 10.]);
+    }
+
+    #[test]
+    fn a_rect_with_a_negative_side_is_an_instance_with_no_radius_rather_than_a_panic() {
+        // A box given less room than its margins came out of layout with a
+        // negative width, and `f32::clamp` panics when its bounds cross. The
+        // Keyboard Shortcuts page at 640 by 480 took the window down with it.
+        let data = rect_data(
+            RectF::new(vec2f(0., 0.), vec2f(-14.4, 12.6)),
+            CornerRadius::with_all(Radius::Pixels(4.)),
+            1.,
+        );
+
+        assert_eq!(data.corner_radius, [0., 0., 0., 0.]);
+        assert_eq!(
+            data.bounds[2], -14.4,
+            "the bounds are passed on as they were"
+        );
     }
 
     #[test]
