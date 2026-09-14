@@ -51,6 +51,7 @@ pub mod git;
 pub mod git_model;
 pub mod input_keys;
 pub mod keybindings;
+pub mod order;
 pub mod pane_blocks;
 pub mod pane_find;
 pub mod pane_link;

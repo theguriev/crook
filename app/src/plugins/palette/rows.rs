@@ -829,10 +829,11 @@ fn command_matches(
 /// The commands, flat and by title: no headings, and the launcher's ordering
 /// exactly.
 ///
-/// `title.cmp` and not the lowercased comparison a group uses, because this is
-/// the launcher's hot path and nothing about it has changed.
+/// By the title and not its case, through a comparison that allocates
+/// nothing, because this is the launcher's hot path: a plugin whose command
+/// is titled in lowercase belongs among the others, not after them all.
 fn flat(mut matched: Vec<(&PluginId, Entry, Target)>) -> Vec<Row> {
-    matched.sort_by(|(_, left, _), (_, right, _)| left.title.cmp(&right.title));
+    matched.sort_by(|(_, left, _), (_, right, _)| crate::order::by_name(&left.title, &right.title));
     matched
         .into_iter()
         .map(|(_, entry, target)| Row::Command(entry, target))

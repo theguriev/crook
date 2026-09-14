@@ -236,8 +236,11 @@ pub fn offers(index: &Index) -> Vec<Offer> {
 
     // By name, because the registry's own order is whatever its CI walked a
     // directory in, and a list that reorders itself between two fetches is a
-    // list nobody can find anything in twice.
-    offers.sort_by(|left, right| left.name.cmp(&right.name).then(left.id.cmp(&right.id)));
+    // list nobody can find anything in twice. By the name and not its case:
+    // `dziling` belongs between `Chips` and `Emoji`, not after `Worktree`.
+    offers.sort_by(|left, right| {
+        crate::order::by_name(&left.name, &right.name).then(left.id.cmp(&right.id))
+    });
     offers
 }
 

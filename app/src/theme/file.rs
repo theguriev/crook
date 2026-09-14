@@ -154,8 +154,9 @@ pub fn load_themes_in(directory: &Path) -> Vec<ThemeFile> {
 pub fn read_themes_in(directory: &Path) -> Read {
     let mut read = Read::default();
     collect(directory, 0, &mut read);
-    read.themes
-        .sort_by(|left, right| left.name.cmp(&right.name).then(left.path.cmp(&right.path)));
+    read.themes.sort_by(|left, right| {
+        crate::order::by_name(&left.name, &right.name).then(left.path.cmp(&right.path))
+    });
     read
 }
 
