@@ -128,20 +128,49 @@ const CHILD_POLL: Duration = Duration::from_secs(1);
 /// How long the reader sleeps between attempts to reap.
 const REAP_INTERVAL: Duration = Duration::from_millis(5);
 
-/// The grid a terminal starts at, before any pane has been laid out.
+/// The grid a terminal starts at when no layout has measured its pane.
 ///
-/// The size every terminal has ever defaulted to, and a placeholder: a pane has
-/// no rectangle until the first layout measures one, and the shell is started
-/// before that because the element that measures a pane is built around a
-/// running terminal. The first layout replaces it.
+/// The size every terminal has ever defaulted to, and a fallback: a pane that
+/// was laid out before its shell opened — every pane at startup, since the
+/// window's first frame comes before its shells — recorded the grid it holds
+/// in [`Measured`], and the shell opens at that. This is for the rest: a
+/// pane split off after the frame, whose shell opens before its first layout,
+/// and a shell started without a frame at all. The first layout replaces it.
 ///
-/// It is a real gap and not only a formality. A shell can print its whole
-/// startup — a `~/.zprofile` banner, a greeting sized with `tput cols` — inside
-/// that window, and what it printed is copied out of the grid into a block the
-/// moment the first prompt mark arrives, so a later resize cannot reflow it.
-/// Closing it means measuring a pane that has no terminal in it yet, which is a
-/// change to how panes are laid out rather than to how shells are started.
+/// The gap it leaves is real and not only a formality. A shell can print its
+/// whole startup — a `~/.zprofile` banner, a greeting sized with `tput cols`
+/// — inside that window, and what it printed is copied out of the grid into
+/// a block the moment the first prompt mark arrives, so a later resize cannot
+/// reflow it. That is why the startup panes wait for the frame.
 const INITIAL_GRID: TerminalSize = TerminalSize::new(80, 24);
+
+/// The grids the panes measured before they had a terminal to give them to.
+///
+/// Layout runs on a shared reference, so the number has to travel through
+/// something layout can write — the arrangement [`TerminalHandle::resize`]
+/// has in its atomics, for a pane that has no [`Shared`] yet. Written by the
+/// element that stands in a pane with no terminal, read by [`TerminalModel::open`].
+#[derive(Clone, Default)]
+pub struct Measured(Arc<Mutex<HashMap<PaneId, TerminalSize>>>);
+
+impl Measured {
+    /// Records the grid `pane` would hold, as its last layout measured it.
+    pub fn record(&self, pane: PaneId, size: TerminalSize) {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(pane, size);
+    }
+
+    /// The grid `pane` last measured, if a layout has measured it.
+    pub fn get(&self, pane: PaneId) -> Option<TerminalSize> {
+        self.0
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&pane)
+            .copied()
+    }
+}
 
 /// Something one pane's shell did that the rest of the application cares about.
 ///
@@ -308,6 +337,16 @@ pub struct TerminalModel {
     /// snapshot and a test render the real view tree without spawning a process.
     live: bool,
 
+    /// Whether [`Self::start`] is coming, once a frame has measured the panes.
+    ///
+    /// The one frame between the two is drawn with no shell in any pane, and
+    /// this is what tells the pane to draw its ground and nothing else for
+    /// it, rather than the notice a pane that will never have a shell draws.
+    expected: bool,
+
+    /// The grids the panes measured before their shells opened.
+    measured: Measured,
+
     /// The colours every terminal resolves its cells against.
     palette: Palette,
 
@@ -390,6 +429,8 @@ impl TerminalModel {
             sessions: HashMap::new(),
             failures: HashMap::new(),
             live: false,
+            expected: false,
+            measured: Measured::default(),
             palette: crook_palette(),
             watching_children: false,
             shell_marks: true,
@@ -416,6 +457,27 @@ impl TerminalModel {
     /// Whether shells are being opened at all.
     pub fn is_live(&self) -> bool {
         self.live
+    }
+
+    /// Says that [`Self::start`] is coming after the next frame.
+    ///
+    /// The frame is what measures the panes, and a shell opened before it
+    /// opens at [`INITIAL_GRID`] — which is where a startup banner sized with
+    /// `tput cols` gets its wrong answer. Until `start`, a pane draws its
+    /// ground and nothing else, which is what it draws for the first frame
+    /// after a shell opens too.
+    pub fn expect(&mut self) {
+        self.expected = true;
+    }
+
+    /// Whether shells are coming and have not been started yet.
+    pub fn is_expected(&self) -> bool {
+        self.expected && !self.live
+    }
+
+    /// Where a pane with no terminal writes the grid it measured.
+    pub fn measured(&self) -> Measured {
+        self.measured.clone()
     }
 
     /// Says whether shells opened from now on install command marks.
@@ -595,7 +657,7 @@ impl TerminalModel {
             shell: self.shell.clone(),
         });
         let mut options = TerminalOptions {
-            size: INITIAL_GRID,
+            size: self.measured.get(pane).unwrap_or(INITIAL_GRID),
             working_directory: directory,
             palette: self.palette.clone(),
             ..Default::default()

@@ -4221,12 +4221,38 @@ impl Workspace {
         self.hover_row(pane, true, ctx);
     }
 
+    /// Says that [`Self::start_terminals`] is coming after the next frame.
+    ///
+    /// The frame measures every pane, and the shells then open at the grids
+    /// the panes hold rather than at eighty by twenty-four: a startup banner
+    /// sized with `tput cols` is sized for the pane. Until they open, a pane
+    /// draws its ground and nothing else.
+    pub fn expect_terminals(&self, ctx: &mut ViewContext<Self>) {
+        self.terminals.update(ctx, |model, _| model.expect());
+        // The panes draw differently from now on, and a frame already built
+        // would otherwise be laid out again as it was.
+        ctx.notify();
+    }
+
+    /// Whether shells are coming and have not been started yet.
+    pub fn terminals_expected(&self, app: &AppContext) -> bool {
+        self.terminals.as_ref(app).is_expected()
+    }
+
+    /// Where a pane with no terminal writes the grid it measured, for the
+    /// shell that opens in it later.
+    pub(super) fn pane_measure(&self, app: &AppContext) -> crate::terminal_model::Measured {
+        self.terminals.as_ref(app).measured()
+    }
+
     /// Opens a shell in every pane, and in every pane opened from now on.
     ///
-    /// Call once, after the window exists. Separate from [`Self::new`] for the
-    /// reason the poll chains are separate from it: a headless snapshot and a
-    /// test render this very view tree, and neither should leave a shell
-    /// running to do it.
+    /// Call once, after the window exists — and after its first frame, which
+    /// is what measures the panes the shells open in; see
+    /// [`Self::expect_terminals`]. Separate from [`Self::new`] for the reason
+    /// the poll chains are separate from it: a headless snapshot and a test
+    /// render this very view tree, and neither should leave a shell running
+    /// to do it.
     pub fn start_terminals(&self, ctx: &mut ViewContext<Self>) {
         let panes = self.open_panes();
         self.terminals
