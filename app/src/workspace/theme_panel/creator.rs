@@ -46,7 +46,7 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
     // The buttons are pinned and everything above them scrolls. A column that
     // simply grew put Cancel and Create past the bottom edge of a short window
     // — drawn, unreachable, and with no hint that they were there.
-    let scrolling = Flex::column()
+    let mut scrolling = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
         .with_child(swatches(workspace, draft))
@@ -58,8 +58,11 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
         .with_child(note(
             format!("Text and colours follow. {}", contrast_note(draft)),
             ui,
-        ))
-        .finish();
+        ));
+    if let Some(problem) = &state.problem {
+        scrolling.add_child(complaint(problem.clone(), ui));
+    }
+    let scrolling = scrolling.finish();
 
     Flex::column()
         .with_main_axis_size(MainAxisSize::Max)
@@ -180,6 +183,22 @@ fn note(text: String, ui: crookui_core::fonts::FamilyId) -> Box<dyn Element> {
     Container::new(
         Paragraph::new(text, ui, 10.)
             .with_color(theme().text_muted)
+            .with_line_height_ratio(1.4)
+            .finish(),
+    )
+    .with_margin_top(10.)
+    .finish()
+}
+
+/// Why Create did nothing, under the note, in the colour that says so.
+///
+/// The reason as the write reported it — the path and the system's own
+/// words — because a person whose themes folder is read-only, or a file,
+/// or on a disk that is full, needs the path and the words to put it right.
+fn complaint(problem: String, ui: crookui_core::fonts::FamilyId) -> Box<dyn Element> {
+    Container::new(
+        Paragraph::new(format!("The theme was not written: {problem}"), ui, 10.)
+            .with_color(theme().usage_critical)
             .with_line_height_ratio(1.4)
             .finish(),
     )

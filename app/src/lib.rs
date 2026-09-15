@@ -258,6 +258,10 @@ struct Overrides {
     themes: bool,
     /// Start with the Themes panel making a theme.
     creating: bool,
+    /// And press Create on it, so that what the creator says afterwards is
+    /// the frame — which, against a themes folder that cannot be written,
+    /// is why it was not.
+    created: bool,
     /// Start with the active tab's own context menu open.
     ///
     /// A way to look at a frame, like `--menu`: the surface a secondary press
@@ -638,6 +642,11 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 overrides.themes = true;
                 overrides.creating = true;
             }
+            "--create-theme" => {
+                overrides.themes = true;
+                overrides.creating = true;
+                overrides.created = true;
+            }
             "--theme" => {
                 let name = args.next().context("`--theme` needs a name")?;
                 overrides.theme = Some(name);
@@ -917,6 +926,9 @@ OPTIONS:
                        the pirate is drawn and nothing is deleted
     --themes           Start with the Themes panel open
     --new-theme        Start with the Themes panel making a theme
+    --create-theme     Start with that theme's Create pressed: a folder that can
+                       be written to closes the creator, one that cannot leaves
+                       it up saying why
     --hover            Start with the first row's detail card up
     --action <name [argument]>
                        Run this named action before the picture is taken, so a
@@ -1272,6 +1284,9 @@ fn apply_overrides(
     }
     if overrides.themes {
         workspace.open_theme_panel(overrides.creating, ctx);
+        if overrides.created {
+            workspace.create_theme(ctx);
+        }
     }
     if let Some(layout) = overrides.controls {
         workspace.override_control_layout(layout, ctx);

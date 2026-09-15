@@ -165,6 +165,12 @@ pub(super) struct ThemePanelState {
     pub(super) scroll: ScrollStateHandle,
     /// The theme being made, while one is.
     pub(super) draft: Option<Draft>,
+    /// Why the last Create did nothing, while the draft it was pressed on is
+    /// still there: the file could not be written, or there is nowhere to
+    /// write it. A line in the log was the only place this went, and a
+    /// button that does nothing with no word about why is the one thing a
+    /// creator must not have.
+    pub(super) problem: Option<String>,
     /// One mouse state per control, made on the control's first frame.
     controls: std::cell::RefCell<HashMap<Control, MouseStateHandle>>,
 }
