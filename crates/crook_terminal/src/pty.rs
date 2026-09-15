@@ -310,7 +310,13 @@ impl Pty {
             .context("Failed to open a pseudo-terminal")?;
 
         let mut command = command_for(program, environment);
-        if let Some(directory) = working_directory {
+        // Only a directory that is still there. A restored session hands over
+        // the directory a pane was working in, and a worktree removed since it
+        // was saved is exactly that directory gone — passing it to `cwd`
+        // fails the whole spawn, where dropping it lands the child in the same
+        // `$HOME` an unset directory does, which is what the doc promises and
+        // what a person would rather have than a pane that cannot open.
+        if let Some(directory) = working_directory.filter(|directory| directory.is_dir()) {
             command.cwd(directory);
         }
 

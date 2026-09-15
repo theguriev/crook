@@ -339,6 +339,39 @@ fn test_a_real_child_is_told_which_terminal_it_is_on() {
 }
 
 #[test]
+fn test_a_working_directory_that_is_gone_starts_the_child_at_home() {
+    // What a restored session hands over after the worktree it named was
+    // removed: a path that no longer exists. Passed to the child's `cwd` it
+    // fails the spawn and the pane cannot open; dropped, the child lands at
+    // $HOME the way one with no directory does.
+    if cfg!(windows) {
+        return;
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return;
+    };
+    let Some(program) = shell_command("pwd") else {
+        return;
+    };
+    let gone = home.join("a-worktree-crook-never-made-and-that-is-not-there");
+    assert!(!gone.exists(), "the test's supposedly-absent path exists");
+    let mut terminal = Terminal::spawn(TerminalOptions {
+        program,
+        size: TerminalSize::new(120, 6),
+        working_directory: Some(gone),
+        ..TerminalOptions::default()
+    })
+    .expect("a shell should start even when the saved directory is gone");
+    let output = read_on_a_thread(terminal.take_reader().expect("a reader"));
+
+    assert!(
+        feed_until(&mut terminal, &output, &home.to_string_lossy()),
+        "a pane whose saved directory is gone should open at $HOME, got: {:?}",
+        terminal.snapshot().text()
+    );
+}
+
+#[test]
 fn test_a_child_with_no_working_directory_starts_where_a_new_window_would() {
     if cfg!(windows) {
         return;
