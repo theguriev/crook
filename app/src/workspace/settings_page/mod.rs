@@ -463,8 +463,40 @@ fn content(
     let ui = workspace.fonts().ui;
     let rows = page(categories.unwrap_or_default(), title, query, ui)
         .unwrap_or_else(|| nothing_found(query, ui));
+    // Above the rows on every page, because every page's changes go to the
+    // same file and a person on any of them is the one making them.
+    let rows = match workspace.save_problem() {
+        Some(problem) => Flex::column()
+            .with_main_axis_size(MainAxisSize::Min)
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+            .with_child(not_saved(problem, ui))
+            .with_child(rows)
+            .finish(),
+        None => rows,
+    };
 
     section::content(title, None, rows, settings.scroll.clone(), ui)
+}
+
+/// What the page says while its changes are not reaching the disk.
+///
+/// The option a person just changed has been applied and looks like it
+/// worked; this is the one place they can find out that it will be gone on
+/// the next launch, and why — the sentence the log got, which names the file
+/// and what the system said about it.
+fn not_saved(problem: &str, ui: crookui_core::fonts::FamilyId) -> Box<dyn Element> {
+    Container::new(
+        Paragraph::new(
+            format!("Changes made here are not being saved: {problem}."),
+            ui,
+            widgets::DESCRIPTION_SIZE,
+        )
+        .with_color(theme().usage_critical)
+        .with_line_height_ratio(1.45)
+        .finish(),
+    )
+    .with_margin_bottom(widgets::LABEL_SIZE)
+    .finish()
 }
 
 /// One page's categories, filtered, or `None` when the query emptied it.

@@ -77,6 +77,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use anyhow::Context as _;
 use crook_plugin::ActionName;
 use crookui_core::event::{Keystroke, Modifiers};
 use serde_json::Value;
@@ -683,7 +684,10 @@ impl PendingSave {
     /// rather than half a file that parses as nothing.
     pub fn write_blocking(&self) -> anyhow::Result<()> {
         if let Some(directory) = self.path.parent() {
-            fs::create_dir_all(directory)?;
+            // Named, because the sentence reaches the settings page: a bare
+            // "Not a directory" says nothing about which one.
+            fs::create_dir_all(directory)
+                .with_context(|| format!("could not create {}", directory.display()))?;
         }
         crate::settings::atomic_write(&self.path, self.text.as_bytes())
     }

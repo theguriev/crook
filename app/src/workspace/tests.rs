@@ -3388,6 +3388,60 @@ impl Drop for Scratch {
 }
 
 #[test]
+fn a_settings_save_that_fails_says_so_on_the_page_until_one_lands() {
+    // A click applied the option and the save of it failed in the log, so
+    // the person saw it work and found it gone on the next launch. The page
+    // says so now, naming what refused, and stops saying it once a save
+    // lands.
+    let scratch = Scratch::new();
+    // A *file* where the settings folder should be: nothing can be written
+    // under it, on any platform.
+    let blocked = scratch.path().join("blocked");
+    fs::write(&blocked, "not a folder\n").expect("writable scratch");
+    let mut harness = Harness::with_settings(1, Settings::load(blocked.join("settings.json")));
+    harness.open_settings_page();
+    let before = frame_text(&harness.frame());
+    assert!(
+        !before.contains("not being saved"),
+        "the page complains before anything was saved: {before:?}"
+    );
+
+    harness.dispatch_option(OptionsAction::ToggleShowDetailsOnHover);
+    harness.wait_for("the failed save never reached the page", |harness| {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.save_problem().is_some()
+        })
+    });
+    let text = frame_text(&harness.frame());
+    assert!(
+        text.contains("Changes made here are not being saved"),
+        "the page does not say the save failed: {text:?}"
+    );
+    assert!(
+        text.contains("blocked"),
+        "the reason does not name the path that refused: {text:?}"
+    );
+
+    // Put the folder right and the next save lands, and the page is quiet.
+    fs::remove_file(&blocked).expect("removable scratch");
+    harness.dispatch_option(OptionsAction::ToggleShowDetailsOnHover);
+    harness.wait_for("the save that landed never cleared the notice", |harness| {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.save_problem().is_none()
+        })
+    });
+    let text = frame_text(&harness.frame());
+    assert!(
+        !text.contains("not being saved"),
+        "the notice outlived the save that landed: {text:?}"
+    );
+    assert!(
+        blocked.join("settings.json").is_file(),
+        "the settings were not written once the folder could be made"
+    );
+}
+
+#[test]
 fn a_density_the_command_line_asked_for_is_never_written_to_the_settings_file() {
     // `--density expanded` is a way to look at a frame, not a way to change
     // what the next launch does — and every menu click writes the *whole*
