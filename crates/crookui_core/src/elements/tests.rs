@@ -952,6 +952,55 @@ fn an_anchored_child_is_laid_out_against_the_window_not_against_the_stack() {
 }
 
 #[test]
+fn a_child_anchored_within_its_stack_is_laid_out_against_the_stack_not_the_window() {
+    // A 120-wide pane with a bar over its top-right corner that would be 200
+    // wide if it could. Laid out against the window it *is* 200 wide, and
+    // hangs 80 pixels past the pane's left edge — over whatever is there.
+    // Laid out against the pane it is the pane's width, and inside it.
+    let mut harness = Harness::new(|_| {
+        let mut stack = Stack::new().with_child(marker(120., 60.));
+        stack.add_anchored_overlay_child_within(
+            Flex::row()
+                .with_main_axis_size(MainAxisSize::Min)
+                .with_child(
+                    Shrinkable::new(
+                        1.,
+                        ConstrainedBox::new(
+                            Container::new(Empty::new().finish())
+                                .with_background_color(Color::WHITE)
+                                .finish(),
+                        )
+                        .with_max_width(200.)
+                        .with_height(20.)
+                        .finish(),
+                    )
+                    .finish(),
+                )
+                .finish(),
+            AnchorTo {
+                parent: Corner::TopRight,
+                child: Corner::TopRight,
+                offset: vec2f(-10., 10.),
+                keep_on_screen: true,
+                keep_clear_of_parent: false,
+            },
+        );
+        ConstrainedBox::new(stack.finish())
+            .with_width(120.)
+            .with_height(60.)
+            .finish()
+    });
+
+    let scene = harness.build_scene(vec2f(400., 200.));
+
+    assert_eq!(
+        rects(&scene)[1].bounds,
+        RectF::new(vec2f(0., 10.), vec2f(110., 20.)),
+        "as wide as the pane less the offset, and hung inside its corner"
+    );
+}
+
+#[test]
 fn a_press_outside_a_dismiss_closes_it_and_one_on_it_does_not() {
     let mut harness = Harness::new(move |view| {
         Stack::new()

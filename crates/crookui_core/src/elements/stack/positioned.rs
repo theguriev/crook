@@ -1,4 +1,5 @@
-//! The carrier that tells a [`Stack`](super::Stack) a child is anchored.
+//! The carrier that tells a [`Stack`](super::Stack) a child is anchored, and
+//! against what it is laid out.
 
 use std::any::Any;
 
@@ -10,22 +11,43 @@ use crate::presenter::{EventContext, LayoutContext, PaintContext};
 
 use super::AnchorTo;
 
-/// Forwards everything to its child and reports an [`AnchorTo`] as parent
+/// What a floating child is laid out against.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub(super) enum Room {
+    /// The whole window: a menu hung off a control must not be held to the
+    /// control's size.
+    Window,
+    /// The box it hangs off: a bar that is *about* that box must fit inside
+    /// it, or it is drawn over whatever is next door.
+    Parent,
+}
+
+/// Where a floating child goes and how much room it is given.
+#[derive(Copy, Clone, Debug)]
+pub(super) struct Placement {
+    pub(super) anchor: AnchorTo,
+    pub(super) room: Room,
+}
+
+/// Forwards everything to its child and reports a [`Placement`] as parent
 /// data.
 ///
 /// That is the whole element. A [`Stack`](super::Stack) recognises an anchored
-/// child by downcasting [`Element::parent_data`], so the anchor has to hang off
-/// a *direct* child of the stack — which is why it gets a wrapper of its own
-/// rather than living on the element being positioned.
+/// child by downcasting [`Element::parent_data`], so the placement has to hang
+/// off a *direct* child of the stack — which is why it gets a wrapper of its
+/// own rather than living on the element being positioned.
 pub(super) struct Positioned {
     child: Box<dyn Element>,
-    anchor: AnchorTo,
+    placement: Placement,
 }
 
 impl Positioned {
     /// Marks `child` as anchored rather than stacked.
-    pub(super) fn new(child: Box<dyn Element>, anchor: AnchorTo) -> Self {
-        Self { child, anchor }
+    pub(super) fn new(child: Box<dyn Element>, anchor: AnchorTo, room: Room) -> Self {
+        Self {
+            child,
+            placement: Placement { anchor, room },
+        }
     }
 }
 
@@ -61,6 +83,6 @@ impl Element for Positioned {
     }
 
     fn parent_data(&self) -> Option<&dyn Any> {
-        Some(&self.anchor)
+        Some(&self.placement)
     }
 }

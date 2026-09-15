@@ -12,6 +12,13 @@
 //! the button that opens it, the menu itself added as an anchored overlay
 //! child while it is open.
 //!
+//! A floating child that is *about* the box it hangs off rather than hung off
+//! a control in it — a find bar over a pane, a chip row over a program's
+//! screen — is added with [`Stack::add_anchored_overlay_child_within`]
+//! instead, and laid out against that box: offered the window, it would be
+//! exactly as wide as it liked, which in a pane narrower than that is the pane
+//! next door.
+//!
 //! ```no_run
 //! # use crookui_core::prelude::*;
 //! # use crookui_core::elements::{AnchorTo, Dismiss, Stack};
@@ -43,12 +50,12 @@ mod positioned;
 
 pub use anchor::{AnchorTo, Corner, WINDOW_INSET};
 use overlay::Overlay;
-use positioned::Positioned;
+use positioned::{Placement, Positioned, Room};
 
 use crate::AppContext;
 use crate::element::{Element, SizeConstraint};
 use crate::event::DispatchedEvent;
-use crate::geometry::{Point, Vector2F};
+use crate::geometry::{Point, Vector2F, vec2f};
 use crate::presenter::{EventContext, LayoutContext, PaintContext};
 use crate::scene::ClipBounds;
 
@@ -83,7 +90,24 @@ impl Stack {
     /// existed when it was painted, so a second overlay painted after this one
     /// would leave everything inside it unclickable.
     pub fn add_anchored_overlay_child(&mut self, child: Box<dyn Element>, anchor: AnchorTo) {
-        self.push_child(Positioned::new(Overlay::new(child).finish(), anchor).finish());
+        self.push_child(
+            Positioned::new(Overlay::new(child).finish(), anchor, Room::Window).finish(),
+        );
+    }
+
+    /// Adds a child that floats above the whole frame, anchored to this
+    /// stack's box and laid out against it rather than against the window.
+    ///
+    /// For a surface that is *about* the box it hangs off and so must fit
+    /// inside it — a find bar over a pane, a chip row over a program's
+    /// screen. A menu hung off a control is the other kind: it must not be
+    /// held to the control's size, so it takes
+    /// [`Self::add_anchored_overlay_child`]. The same rule about adding it
+    /// last applies.
+    pub fn add_anchored_overlay_child_within(&mut self, child: Box<dyn Element>, anchor: AnchorTo) {
+        self.push_child(
+            Positioned::new(Overlay::new(child).finish(), anchor, Room::Parent).finish(),
+        );
     }
 
     /// Adds an anchored overlay child, for builder chains.
@@ -112,12 +136,12 @@ impl Extend<Box<dyn Element>> for Stack {
     }
 }
 
-/// The anchor a child carries, if it is anchored rather than stacked.
-fn anchor_of(child: &StackChild) -> Option<AnchorTo> {
+/// The placement a child carries, if it is anchored rather than stacked.
+fn placement_of(child: &StackChild) -> Option<Placement> {
     child
         .element
         .parent_data()
-        .and_then(|data| data.downcast_ref::<AnchorTo>())
+        .and_then(|data| data.downcast_ref::<Placement>())
         .copied()
 }
 
@@ -130,22 +154,35 @@ impl Element for Stack {
     ) -> Vector2F {
         let mut size = constraint.min;
         for child in &mut self.children {
-            if anchor_of(child).is_none() {
+            if placement_of(child).is_none() {
                 size = size.max(child.element.layout(constraint, ctx, app));
             }
         }
 
         for child in &mut self.children {
-            if anchor_of(child).is_some() {
-                // The window, not this stack's constraint. A stack wrapping a
-                // 28-pixel toolbar button would otherwise offer a menu 28
-                // pixels of height and get every row of it laid out into
-                // nothing.
-                child.element.layout(
-                    SizeConstraint::new(Vector2F::zero(), ctx.window_size),
-                    ctx,
-                    app,
-                );
+            if let Some(placement) = placement_of(child) {
+                // After the stacked children, so that the box they made is
+                // known to a child that must fit it.
+                let room = match placement.room {
+                    // The window, not this stack's constraint. A stack
+                    // wrapping a 28-pixel toolbar button would otherwise
+                    // offer a menu 28 pixels of height and get every row of
+                    // it laid out into nothing.
+                    Room::Window => ctx.window_size,
+                    // Less the offset: it is how far in from the corner the
+                    // child sits, and a child given the whole box would
+                    // overhang the far edge by exactly that.
+                    Room::Parent => {
+                        let offset = placement.anchor.offset;
+                        vec2f(
+                            (size.x() - offset.x().abs()).max(0.),
+                            (size.y() - offset.y().abs()).max(0.),
+                        )
+                    }
+                };
+                child
+                    .element
+                    .layout(SizeConstraint::new(Vector2F::zero(), room), ctx, app);
             }
         }
 
@@ -165,12 +202,23 @@ impl Element for Stack {
             // the clicks that land on both.
             ctx.scene.start_layer(ClipBounds::ActiveLayer);
 
-            let child_origin = match anchor_of(child) {
-                Some(anchor) => {
+            let child_origin = match placement_of(child) {
+                Some(placement) => {
                     let size = child
                         .element
                         .size()
                         .expect("a stack child was painted before it was laid out");
+                    let anchor = match placement.room {
+                        Room::Window => placement.anchor,
+                        // A child that fits the box it hangs off is on
+                        // screen wherever the box is; the slide would only
+                        // pull it off the box's edge where that edge is the
+                        // window's.
+                        Room::Parent => AnchorTo {
+                            keep_on_screen: false,
+                            ..placement.anchor
+                        },
+                    };
                     anchor.place(size, bounds, ctx.window_size)
                 }
                 None => origin,

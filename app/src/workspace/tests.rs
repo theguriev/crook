@@ -12517,6 +12517,52 @@ mod shells {
             assert_eq!(Some(1), current(&harness, pane), "back wraps the other way");
         }
 
+        /// The find bar, by its ground: the one `surface_raised` box with the
+        /// bar's 7px corners. Read off the raw layers rather than the visible
+        /// rects, because the whole point of asking is whether it is inside
+        /// the pane's clip.
+        fn find_bar_box(scene: &Scene) -> RectF {
+            let boxes: Vec<RectF> = scene
+                .layers()
+                .flat_map(|layer| layer.rects.iter())
+                .filter(|rect| {
+                    rect.corner_radius.get_top_left() == Radius::Pixels(7.)
+                        && rect.background == Fill::Solid(theme().surface_raised)
+                })
+                .map(|rect| rect.bounds)
+                .collect();
+            assert_eq!(boxes.len(), 1, "exactly one find bar per frame");
+            boxes[0]
+        }
+
+        #[test]
+        fn the_bar_fits_the_pane_it_is_about() {
+            // The bar hung off the pane's corner and was laid out against the
+            // window, so it was as wide as it liked — 350 pixels — and in a
+            // pane narrower than that it ran over whatever was to the left:
+            // the tabs panel, or the pane next door. It is laid out against
+            // the pane now and the field is the part that gives way, so the
+            // count, the steps and the way out keep their places.
+            let mut harness = Harness::panel(1);
+            if searching(&mut harness, "alpha beta gamma", "beta").is_none() {
+                return;
+            }
+
+            let scene = harness.frame_sized(vec2f(480., 360.));
+            let pane_box = panel_boxes(&scene)[0];
+            let bar = find_bar_box(&scene);
+            assert!(
+                contains(pane_box, bar),
+                "the bar {bar:?} runs past the pane {pane_box:?}"
+            );
+            assert!(
+                frame_text(&scene).contains("1/2"),
+                "the count gave way instead of the field"
+            );
+            let outs = icons_in(&scene, bar, Lucide::X);
+            assert_eq!(outs.len(), 1, "the way out is still on the bar");
+        }
+
         #[test]
         fn the_field_stays_where_it_is_whatever_the_count_says() {
             // The bar hangs off the pane's right corner and the count sat in
