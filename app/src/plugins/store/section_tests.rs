@@ -236,6 +236,20 @@ fn a_sentence_is_drawn_on_the_card_it_is_about_and_nowhere_else() {
 }
 
 #[test]
+fn a_download_size_reads_in_kilobytes_then_megabytes() {
+    // Every plugin in the registry is a couple of hundred kilobytes; the
+    // megabyte cases are for the one that carries its pictures.
+    assert_eq!(download_size(1), "1 KB");
+    assert_eq!(download_size(204 * 1000), "204 KB");
+    assert_eq!(download_size(999_000), "999 KB");
+    assert_eq!(download_size(1_000_000), "1.0 MB");
+    assert_eq!(download_size(1_500_000), "1.5 MB");
+    // Rounds to the nearest tenth rather than truncating.
+    assert_eq!(download_size(1_950_000), "2.0 MB");
+    assert_eq!(download_size(12_340_000), "12.3 MB");
+}
+
+#[test]
 fn how_old_an_answer_is_reads_as_a_person_would_say_it() {
     assert_eq!(ago(0), "just now");
     assert_eq!(ago(59), "just now");

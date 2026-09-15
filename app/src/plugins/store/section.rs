@@ -753,7 +753,7 @@ fn looks(
             .as_ref()
             .map(|release| release.bytes)
             .filter(|bytes| *bytes > 0)
-            .map(|bytes| format!("{} KB, ", (bytes / 1000).max(1)))
+            .map(|bytes| format!("{}, ", download_size(bytes)))
             .unwrap_or_default();
         let (verb, doing) = match fetching {
             Some(_) => ("Update", "Updating"),
@@ -936,6 +936,29 @@ fn age(known: &Known) -> String {
         // A clock that went backwards, which is a machine that changed time
         // zone or synchronised. Not worth a sentence about clocks.
         Err(_) => String::from("Checked recently"),
+    }
+}
+
+/// A download's size, "204 KB" or "1.5 MB", as a person would read it.
+///
+/// Kilobytes up to a thousand of them, then megabytes to one decimal. Every
+/// plugin in the registry is a couple of hundred kilobytes today, but one
+/// that carries its pictures can pass a megabyte, and "1523 KB" is a number
+/// to divide in your head where "1.5 MB" is a size. Powers of ten, not two,
+/// because this is a figure to read and not an allocation to make — the
+/// same base the disk it downloads to is sold in.
+pub(super) fn download_size(bytes: u64) -> String {
+    const KB: u64 = 1000;
+    const MB: u64 = 1000 * KB;
+    if bytes < MB {
+        // At least one, since the caller only asks about a byte count it has
+        // already found to be more than zero.
+        format!("{} KB", (bytes / KB).max(1))
+    } else {
+        // Rounded to a tenth by adding half of one before the divide, so
+        // 1_950_000 reads "2.0 MB" rather than "1.9 MB".
+        let tenths = (bytes + MB / 20) / (MB / 10);
+        format!("{}.{} MB", tenths / 10, tenths % 10)
     }
 }
 
