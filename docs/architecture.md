@@ -1514,8 +1514,9 @@ row's slot is wherever the last step of the drag put it.
 
 **The rest of shell integration.** Crook now installs the four OSC 133 marks into the zsh,
 bash and fish it starts (`app/src/shell_integration`, and "Blocks" in §7), which is the half
-that says where a command starts and ends. Warp's channel does more than that, and the two
-things still missing are worth naming rather than discovering:
+that says where a command starts and ends. Warp's channel does more than that, and two
+things beyond the marks are worth naming rather than discovering — one Crook's channel has
+since grown, and one it closed but for a corner:
 
 - **Completion is in**, and it took the second channel this paragraph used to ask for. OSC 133
   is an announcement — the shell says where a prompt began and how a command ended — and
