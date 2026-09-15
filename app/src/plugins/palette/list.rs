@@ -421,18 +421,21 @@ fn line(entry: &Entry, mode: Mode, fonts: Fonts) -> Box<dyn Element> {
     // things to do is actually asking.
     let named = trailing(entry);
     if let Some(cluster) = cluster(entry, mode, fonts) {
-        let cluster = Container::new(cluster);
-        line.add_child(match named.is_some() {
-            true => cluster.with_margin_right(CLUSTER_GAP).finish(),
-            false => cluster.finish(),
-        });
+        line.add_child(Container::new(cluster).finish());
     }
 
+    // The gap before the id lives on the id, so a row with keys and one
+    // without both keep the same air between the name and it — and the title,
+    // cut to a mark, ends a clear step short of the id rather than against it.
     if let Some(name) = named {
         line.add_child(
-            Text::new(name.to_owned(), fonts.ui, SECONDARY_SIZE)
-                .with_color(theme().text_muted)
-                .finish(),
+            Container::new(
+                Text::new(name.to_owned(), fonts.ui, SECONDARY_SIZE)
+                    .with_color(theme().text_muted)
+                    .finish(),
+            )
+            .with_margin_left(CLUSTER_GAP)
+            .finish(),
         );
     }
 
@@ -473,8 +476,14 @@ fn trailing(entry: &Entry) -> Option<&str> {
 /// the same reason: it takes the shortfall from the *last* inflexible child,
 /// which is the action name.
 fn titled(entry: &Entry, ui: FamilyId) -> Box<dyn Element> {
+    // Cut with a mark, not at the edge: the title is the flexible child and
+    // loses characters by design (see below), but a hard cut mid-glyph reads
+    // as a truncated word rather than a name shortened to fit — "Copy the
+    // block's working director" against its own action id. The end goes,
+    // because a command is known by what it starts with.
     let title = Text::new(entry.title.clone(), ui, 12.)
         .with_color(theme().text_primary)
+        .with_ellipsis(Cut::End)
         .finish();
 
     let Some(note) = entry.note else {
