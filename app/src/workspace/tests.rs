@@ -12744,6 +12744,48 @@ mod shells {
         }
 
         #[test]
+        fn a_pane_too_narrow_for_the_count_keeps_the_way_out() {
+            // In a pane too narrow for the field and the count both, the
+            // count used to hold its fixed slot and the field alone gave way;
+            // once the field reached nothing the count and the buttons ran on
+            // past the pane, and the way out — the one control a person always
+            // needs — fell off the right. The count gives way too now, so the
+            // steps and the close stay on the bar however narrow the pane.
+            let mut harness = Harness::panel(1);
+            if searching(&mut harness, "qvx wqz rqv", "wqz").is_none() {
+                return;
+            }
+            // A window whose pane is far too narrow for field + count + three
+            // buttons: 380 wide leaves the pane about 130 across.
+            let window = vec2f(380., 360.);
+            let scene = harness.frame_sized(window);
+            let column = RectF::new(
+                vec2f(tabs_panel::PANEL_WIDTH, 0.),
+                vec2f(window.x() - tabs_panel::PANEL_WIDTH, window.y()),
+            );
+            let bar = find_bar_box(&scene);
+            assert!(
+                contains(column, bar),
+                "the bar {bar:?} runs past the pane's column {column:?}"
+            );
+            assert_eq!(
+                icons_in(&scene, bar, Lucide::X).len(),
+                1,
+                "the way out fell off the bar"
+            );
+            assert_eq!(
+                icons_in(&scene, bar, Lucide::ChevronUp).len(),
+                1,
+                "the previous-match step fell off the bar"
+            );
+            assert_eq!(
+                icons_in(&scene, bar, Lucide::ChevronDown).len(),
+                1,
+                "the next-match step fell off the bar"
+            );
+        }
+
+        #[test]
         fn the_field_stays_where_it_is_whatever_the_count_says() {
             // The bar hangs off the pane's right corner and the count sat in
             // the row at its own width, so the field — the thing being typed

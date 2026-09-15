@@ -1415,13 +1415,15 @@ const FIND_BUTTON_PADDING: f32 = 3.;
 /// count, the steps and the way out keep their room, and the bar stays
 /// inside the pane it is about.
 const FIND_FIELD_WIDTH: f32 = 190.;
-/// The room the bar's count is given, whatever it says.
+/// The room the bar's count is given, whatever it says, while the pane can
+/// afford it.
 ///
-/// Wide enough for "No results" and for a count in the thousands at 11px,
-/// and always there: the bar hangs off the pane's right corner, so a count
-/// that took its own width would move the field — the thing being typed
-/// into — every time the number of digits changed, and once more when the
-/// first letter turned "No results" into "1/16".
+/// Wide enough for "No results" and for a count in the thousands at 11px.
+/// A ceiling rather than a fixed width — see where it is used — so that a
+/// count that took its own width does not move the field every time the
+/// number of digits changes, while a pane too narrow for the field and the
+/// count both can still take the slot's room back rather than push the way
+/// out off the bar.
 const FIND_COUNT_SLOT: f32 = 64.;
 
 /// The find bar itself: a field, a count, two steps and a way out.
@@ -1477,21 +1479,31 @@ fn find_bar(
         .with_spacing(6.)
         .with_child(field)
         .with_child(
-            // Both sides of the slot are fixed: an `Align` takes all the room
-            // it is offered, and the bar floats in a stack that offers it the
-            // whole window's height.
-            ConstrainedBox::new(
-                Align::new(
-                    Text::new(count, workspace.fonts().ui, 11.)
-                        .with_color(theme().text_muted)
-                        .with_ellipsis(Cut::End)
-                        .finish(),
+            // The count gives way like the field, so the way out stays on the
+            // bar. It is the *slot* that gives way and not the number in it: a
+            // `max_width` inside a loose flex child is the slot's width while
+            // there is room for it, so the count holds its place — "No
+            // results" and "1/16" both land at the same right edge and the
+            // field does not move as the number changes — and collapses only
+            // in a pane too narrow to afford both it and the field. The number
+            // is right-aligned, so what a collapsing slot cuts is its left,
+            // which is the blank the slot pads with.
+            Shrinkable::new(
+                1.,
+                ConstrainedBox::new(
+                    Align::new(
+                        Text::new(count, workspace.fonts().ui, 11.)
+                            .with_color(theme().text_muted)
+                            .with_ellipsis(Cut::End)
+                            .finish(),
+                    )
+                    .right()
+                    .finish(),
                 )
-                .right()
+                .with_max_width(FIND_COUNT_SLOT)
+                .with_height(FIND_BUTTON_ICON + FIND_BUTTON_PADDING * 2.)
                 .finish(),
             )
-            .with_width(FIND_COUNT_SLOT)
-            .with_height(FIND_BUTTON_ICON + FIND_BUTTON_PADDING * 2.)
             .finish(),
         );
 
