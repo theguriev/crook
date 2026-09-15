@@ -12719,12 +12719,21 @@ mod shells {
                 return;
             }
 
-            let scene = harness.frame_sized(vec2f(480., 360.));
-            let pane_box = panel_boxes(&scene)[0];
+            // The pane's column is everything right of the tabs panel, out
+            // to the frame's edge: named from the two widths rather than
+            // read off the scene, because on CI `panel_boxes` handed back a
+            // twelve-pixel strip at the top of the column instead of the
+            // pane, and the bar "ran past" a box that was never the pane.
+            let window = vec2f(480., 360.);
+            let scene = harness.frame_sized(window);
+            let column = RectF::new(
+                vec2f(tabs_panel::PANEL_WIDTH, 0.),
+                vec2f(window.x() - tabs_panel::PANEL_WIDTH, window.y()),
+            );
             let bar = find_bar_box(&scene);
             assert!(
-                contains(pane_box, bar),
-                "the bar {bar:?} runs past the pane {pane_box:?}"
+                contains(column, bar),
+                "the bar {bar:?} runs past the pane's column {column:?}"
             );
             assert!(
                 frame_text(&scene).contains("1/2"),
