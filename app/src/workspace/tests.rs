@@ -14927,6 +14927,37 @@ fn the_palette_lists_what_it_is_told_and_not_its_own_keys() {
 }
 
 #[test]
+fn a_palette_title_too_wide_for_a_narrow_card_ends_in_a_mark() {
+    // The title is the flexible half of a palette row and loses characters by
+    // design, but a plain cut ended it mid-word against its action id — "Copy
+    // the block's working director" run straight into
+    // "crook/window/copy-block-directory". It ends in a mark now, a step clear
+    // of the id.
+    let mut harness = Harness::new(1);
+    open_palette(&mut harness, "the block's working");
+    let scene = harness.frame_sized(vec2f(420., 360.));
+    let card = palette_card_box(&scene);
+    let lines = text_lines(&scene, |at| card.contains_point(at));
+    let title = lines
+        .iter()
+        .find(|(_, line)| line.starts_with("Copy the block"))
+        .map(|(_, line)| line.clone())
+        .unwrap_or_else(|| panic!("no copy-block row in the card: {lines:?}"));
+    assert!(
+        title.contains('\u{2026}'),
+        "the cut title has no mark: {title:?}"
+    );
+
+    // And the whole card, wide enough, spells the title out with no mark.
+    let scene = harness.frame_sized(vec2f(1024., 720.));
+    assert!(
+        frame_text(&scene).contains("Copy the block's working directory"),
+        "the title did not fit a wide card: {}",
+        frame_text(&scene)
+    );
+}
+
+#[test]
 fn typing_narrows_the_palette() {
     let mut harness = Harness::new(1);
     harness.press("p", palette_chord(), "");
