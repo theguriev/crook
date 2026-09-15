@@ -488,6 +488,30 @@ fn a_path_cut_at_its_start_keeps_its_end_behind_the_mark() {
 }
 
 #[test]
+fn a_paragraph_asked_to_cut_at_the_start_keeps_the_end_of_a_word_wider_than_it() {
+    // "could not write /a/long/path/to/the/file": the path is one word, wider
+    // than the paragraph, and gets a line of its own. Cut at its end the line
+    // says which folder the path starts in; cut at its start it says which
+    // file, which is the part the sentence is about.
+    let family = FamilyId::new();
+    let mut harness = Harness::new(move |_| {
+        ConstrainedBox::new(
+            Paragraph::new("see /abcdefghijklmnop/file", family, 10.)
+                .with_cut(Cut::Start)
+                .finish(),
+        )
+        .with_width(50.)
+        .finish()
+    });
+
+    let scene = harness.build_scene(vec2f(100., 100.));
+
+    // Ten characters to the line: "see" on the first, and the path cut to
+    // the mark and the nine characters that end it on the second.
+    assert_eq!(drawn_characters(&scene), "see\u{2026}mnop/file");
+}
+
+#[test]
 fn a_box_too_narrow_for_anything_but_the_mark_draws_the_mark() {
     let family = FamilyId::new();
     let mut harness = Harness::new(move |_| {

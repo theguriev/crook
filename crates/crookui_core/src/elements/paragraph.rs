@@ -18,10 +18,12 @@
 //! Greedy and word-based: the longest run of words that fits goes on the line.
 //! No hyphenation and no penalty function — this is a settings description,
 //! not a book. A word wider than the line on its own — a branch, a path, a
-//! plugin id — is cut at the line's end with an ellipsis, the way a
-//! [`Text`](super::Text) is, rather than painted past the box: what it starts
-//! with is what it is, and a box is what its neighbours were laid out
-//! against.
+//! plugin id — is cut with an ellipsis, the way a [`Text`](super::Text) is,
+//! rather than painted past the box: a box is what its neighbours were laid
+//! out against. At the line's end unless [`Paragraph::with_cut`] says
+//! otherwise: a branch or a plugin id is known by what it starts with, a path
+//! by what it ends in, and a paragraph that names a file — the one that could
+//! not be written, the one that could not be read — keeps the end.
 
 use std::borrow::Cow;
 
@@ -46,6 +48,7 @@ pub struct Paragraph {
     line_height_ratio: f32,
     properties: Properties,
     color: Color,
+    cut: Cut,
     lines: Vec<Line>,
     size: Option<Vector2F>,
     origin: Option<Point>,
@@ -60,6 +63,7 @@ impl Paragraph {
             font_size,
             line_height_ratio: DEFAULT_UI_LINE_HEIGHT_RATIO,
             properties: Properties::default(),
+            cut: Cut::End,
             color: Color::WHITE,
             lines: Vec::new(),
             size: None,
@@ -70,6 +74,17 @@ impl Paragraph {
     /// Sets the glyph color.
     pub fn with_color(mut self, color: Color) -> Self {
         self.color = color;
+        self
+    }
+
+    /// Which end of a word wider than the line the ellipsis takes.
+    ///
+    /// [`Cut::End`] unless asked: a branch or a plugin id is known by what
+    /// it starts with. A paragraph whose long words are paths asks for
+    /// [`Cut::Start`], so that a file it names ends in the part that says
+    /// which file.
+    pub fn with_cut(mut self, cut: Cut) -> Self {
+        self.cut = cut;
         self
     }
 
@@ -121,8 +136,8 @@ impl Paragraph {
 ///
 /// A word wider than `width` gets a line of its own, and overflows it here —
 /// the alternative is breaking inside a word, which for a path or a plugin id
-/// is worse than a line that runs long. The layout cuts that line at its end
-/// with an ellipsis, once it is shaped; this only decides where lines start.
+/// is worse than a line that runs long. The layout cuts that line with an
+/// ellipsis, once it is shaped; this only decides where lines start.
 fn break_lines(text: &str, width: f32, x_of: impl Fn(usize) -> f32) -> Vec<std::ops::Range<usize>> {
     let words: Vec<(usize, usize)> = text
         .split_whitespace()
@@ -178,7 +193,7 @@ impl Element for Paragraph {
                 // axis is a flex measuring, and the breaking above leaves no
                 // other line wider than it was given.
                 if max_width.is_finite() && line.width > max_width {
-                    cut_line(text, &line, Cut::End, max_width, |text, width| {
+                    cut_line(text, &line, self.cut, max_width, |text, width| {
                         self.shape_within(text, width, ctx)
                     })
                 } else {

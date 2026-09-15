@@ -200,6 +200,9 @@ fn complaint(problem: String, ui: crookui_core::fonts::FamilyId) -> Box<dyn Elem
         Paragraph::new(format!("The theme was not written: {problem}"), ui, 10.)
             .with_color(theme().usage_critical)
             .with_line_height_ratio(1.4)
+            // The long word in this sentence is the path that refused, and
+            // a path is known by what it ends in.
+            .with_cut(Cut::Start)
             .finish(),
     )
     .with_margin_top(10.)
