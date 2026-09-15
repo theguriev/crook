@@ -493,6 +493,9 @@ fn not_saved(problem: &str, ui: crookui_core::fonts::FamilyId) -> Box<dyn Elemen
         )
         .with_color(theme().usage_critical)
         .with_line_height_ratio(1.45)
+        // The long word in the sentence is the path that refused, and a
+        // path is known by what it ends in.
+        .with_cut(Cut::Start)
         .finish(),
     )
     .with_margin_bottom(widgets::LABEL_SIZE)

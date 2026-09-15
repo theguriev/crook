@@ -103,6 +103,10 @@ fn unreadable_row(
                     Paragraph::new(format!("could not be read: {}", unreadable.why), ui, 10.)
                         .with_color(theme().text_muted)
                         .with_line_height_ratio(1.35)
+                        // The reason may name the file in full; the name
+                        // above already says which, so the end is the part
+                        // to keep.
+                        .with_cut(Cut::Start)
                         .finish(),
                 )
                 .with_margin_top(3.)
