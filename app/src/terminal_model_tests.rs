@@ -49,6 +49,36 @@ fn a_model_that_was_never_started_opens_nothing() {
 }
 
 #[test]
+fn a_closed_pane_lets_go_of_the_grid_that_was_recorded_for_it() {
+    // A grid is recorded per pane so the shell that opens in it starts at the
+    // size the layout measured. Pane ids are minted once and never reused, so
+    // a grid left behind by a closed pane is read by nothing — and a window
+    // spends a long day being split and closed. `sync` drops it, from the one
+    // list that knows which panes are still open.
+    let (_queue, mut app) = app();
+    let model = app.update(|ctx| ctx.add_model(TerminalModel::new));
+    let (kept, gone) = (pane(), pane());
+    let measured = model.read(&app, |model, _| model.measured());
+    measured.record(kept, TerminalSize::new(80, 24));
+    measured.record(gone, TerminalSize::new(80, 24));
+
+    app.update(|ctx| {
+        model.update(ctx, |model, ctx| model.sync(&[(kept, None)], ctx));
+    });
+
+    assert_eq!(
+        measured.get(kept),
+        Some(TerminalSize::new(80, 24)),
+        "the open pane lost the grid it will open at"
+    );
+    assert_eq!(
+        measured.get(gone),
+        None,
+        "the closed pane's grid was kept for a pane that will never read it"
+    );
+}
+
+#[test]
 fn a_grid_is_packed_so_either_dimension_moving_is_a_resize() {
     // `TerminalHandle::resize` compares these instead of the terminal's own
     // size, so a packing that collided would silently stop sending `SIGWINCH`.

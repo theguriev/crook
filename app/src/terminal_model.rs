@@ -187,6 +187,18 @@ impl Measured {
         self.lock().body
     }
 
+    /// Drops the grid of every pane `keep` does not name.
+    ///
+    /// A pane id is minted once and never reused, so a grid recorded for one
+    /// that has closed is read by nothing — but nothing dropped it either,
+    /// and a window that spends a day being split and closed would carry a
+    /// grid for every pane it ever held. Reaped alongside the failures, from
+    /// the one list that knows which panes are still open. The body is not
+    /// per-pane and stays.
+    pub fn retain(&self, mut keep: impl FnMut(PaneId) -> bool) {
+        self.lock().panes.retain(|pane, _| keep(*pane));
+    }
+
     fn lock(&self) -> MutexGuard<'_, MeasuredState> {
         self.0.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -559,6 +571,8 @@ impl TerminalModel {
         }
         self.failures
             .retain(|pane, _| panes.iter().any(|(open, _)| open == pane));
+        self.measured
+            .retain(|pane| panes.iter().any(|(open, _)| *open == pane));
 
         if !self.live {
             return;
