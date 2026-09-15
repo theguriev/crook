@@ -46,7 +46,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
-use crate::settings::{atomic_write, config_directory};
+use crate::settings::{atomic_write, config_directory, ensure_directory};
 use crate::tab::{Pane, PaneGroup, SplitAxis, Tab, TabGroup, TabId, TabStrip};
 
 /// The file the last session is remembered in.
@@ -348,8 +348,7 @@ impl Session {
         json.push('\n');
 
         if let Some(directory) = path.parent() {
-            fs::create_dir_all(directory)
-                .with_context(|| format!("could not create {}", directory.display()))?;
+            ensure_directory(directory)?;
         }
         atomic_write(path, json.as_bytes())
     }

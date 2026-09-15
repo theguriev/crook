@@ -789,8 +789,7 @@ impl Settings {
         json.push('\n');
 
         if let Some(directory) = path.parent() {
-            fs::create_dir_all(directory)
-                .with_context(|| format!("could not create {}", directory.display()))?;
+            ensure_directory(directory)?;
         }
 
         write_then_rename(&temporary_path(path), path, json.as_bytes())
@@ -944,6 +943,26 @@ pub fn user_settings_path() -> Option<PathBuf> {
 /// machine with no home rather than one that has never run Crook.
 pub fn config_directory() -> Option<PathBuf> {
     dirs::config_dir().map(|directory| directory.join(CONFIG_DIRECTORY))
+}
+
+/// Makes `directory`, and whatever is missing above it, or says what stood
+/// in the way.
+///
+/// `create_dir_all` refused by a *file* where the folder should be says
+/// "File exists" — or "Not a directory", for a folder wanted under that
+/// file — which reads as the opposite of the problem or as none. Every file
+/// Crook writes under the configuration directory goes through here, and
+/// each of their failures is a sentence on screen now (the settings page,
+/// the tab list, the theme creator), so the sentence names the thing that
+/// is wrong: the nearest path that exists, and that it is a file.
+pub fn ensure_directory(directory: &Path) -> Result<()> {
+    if let Some(blocking) = directory.ancestors().find(|ancestor| ancestor.exists())
+        && !blocking.is_dir()
+    {
+        bail!("{} is a file, not a folder", blocking.display());
+    }
+    fs::create_dir_all(directory)
+        .with_context(|| format!("could not create {}", directory.display()))
 }
 
 /// Writes `contents` to `path` without ever leaving a half-written file there.
@@ -1149,6 +1168,35 @@ mod tests {
             show_diff_stats: false,
             show_details_on_hover: false,
         }
+    }
+
+    #[test]
+    fn test_a_file_where_the_folder_should_be_is_named_as_such() {
+        // `create_dir_all` says "File exists" for the file itself and "Not a
+        // directory" for a folder wanted under it — the first reads as the
+        // opposite of the problem and the second names nothing. Both reach a
+        // sentence on screen, so both say which path is the file.
+        let scratch = ScratchDirectory::new("a-file-not-a-folder");
+        let blocking = scratch.path.join("crook");
+        fs::write(&blocking, "not a folder\n").expect("the scratch file should be writable");
+
+        let itself = ensure_directory(&blocking).expect_err("a file is not a folder");
+        assert_eq!(
+            format!("{itself:#}"),
+            format!("{} is a file, not a folder", blocking.display())
+        );
+
+        let under = ensure_directory(&blocking.join("themes")).expect_err("nor is under one");
+        assert_eq!(
+            format!("{under:#}"),
+            format!("{} is a file, not a folder", blocking.display()),
+            "the sentence names the file, not the folder wanted under it"
+        );
+
+        // And a folder that can be made is made, with what is missing above.
+        let deep = scratch.path.join("a").join("b");
+        ensure_directory(&deep).expect("two levels of folder should be creatable");
+        assert!(deep.is_dir());
     }
 
     #[test]

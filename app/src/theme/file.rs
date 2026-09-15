@@ -622,8 +622,7 @@ fn parse_hex(value: &str) -> Result<Color> {
 /// already taken gets a serial rather than overwriting: nothing here should be
 /// able to destroy a theme somebody wrote by hand.
 pub fn write_theme(directory: &Path, name: &str, theme: &Theme) -> Result<PathBuf> {
-    fs::create_dir_all(directory)
-        .with_context(|| format!("could not create {}", directory.display()))?;
+    crate::settings::ensure_directory(directory)?;
 
     let stem = file_stem(name);
     let mut path = directory.join(format!("{stem}.yaml"));
