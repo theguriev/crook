@@ -11147,6 +11147,31 @@ mod shells {
         }
 
         #[test]
+        fn the_report_marks_a_command_that_failed_and_leaves_the_rest_silent() {
+            // The report is the evidence an unattended run worked, so a
+            // command that failed with nothing to print — `false` here — must
+            // not read as a success with no output. A zero is said with
+            // silence; only the exception gets a line.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = marked_shell(&mut harness) else {
+                return;
+            };
+            harness.frame();
+
+            if run(&mut harness, pane, "echo ok") == 0 {
+                return;
+            }
+            run(&mut harness, pane, "false");
+            let report = harness
+                .workspace
+                .read(&harness.app, |workspace, app| {
+                    workspace.blocks_report(pane, app)
+                })
+                .expect("two commands finished");
+            assert_eq!(report, "$ echo ok\nok\n$ false\n[exit 1]\n");
+        }
+
+        #[test]
         fn a_failed_command_is_washed_in_the_theme_s_red() {
             // Failure is visible without reading: scanning a long session for
             // what broke is a glance rather than a search.
