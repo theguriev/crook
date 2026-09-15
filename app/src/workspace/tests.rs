@@ -12683,6 +12683,68 @@ mod shells {
             });
         }
 
+        /// Types a new query into the open bar, the way a keystroke does.
+        fn retype(harness: &mut Harness, pane: PaneId, query: &str) {
+            let find = harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace.find(pane).cloned())
+                .expect("the pane has a find bar");
+            find.input().edit(|editor| editor.set_text(query));
+            // The edit went into the field's own model; the workspace rebuilds
+            // on its next render, which a keystroke would have asked for.
+            harness.workspace_update(|_, ctx| ctx.notify());
+        }
+
+        #[test]
+        fn a_new_query_starts_at_its_first_match_not_where_the_last_one_stopped() {
+            // Ctrl+F everywhere: change the search term and you are at the top
+            // of the new results, not at whatever the old cursor modulo the
+            // new count lands on. The cursor was kept across a query change,
+            // so stepping to the second match of one query and then searching
+            // another left the bar reading "2/…" of a search that had just
+            // begun.
+            let mut harness = Harness::panel(1);
+            let Some(pane) = searching(&mut harness, "qvx wqz rqv", "wqz") else {
+                return;
+            };
+            assert_eq!(
+                Some(0),
+                current(&harness, pane),
+                "a fresh search is at its first"
+            );
+            step(&mut harness, pane, true);
+            assert_eq!(
+                Some(1),
+                current(&harness, pane),
+                "stepped to the second match"
+            );
+
+            // A different query, with matches of its own.
+            retype(&mut harness, pane, "qvx");
+            assert_eq!(
+                2,
+                matches(&harness, pane),
+                "the new query has its own matches"
+            );
+            assert_eq!(
+                Some(0),
+                current(&harness, pane),
+                "a new query left the cursor where the old search had been stepped to"
+            );
+
+            // The same query again keeps the cursor, so reopening a search
+            // resumes it: step, retype the very same text, and the cursor
+            // stays.
+            step(&mut harness, pane, true);
+            assert_eq!(Some(1), current(&harness, pane));
+            retype(&mut harness, pane, "qvx");
+            assert_eq!(
+                Some(1),
+                current(&harness, pane),
+                "the same query reset the cursor rather than resuming"
+            );
+        }
+
         #[test]
         fn it_counts_the_matches_and_steps_round_them() {
             let mut harness = Harness::panel(1);
