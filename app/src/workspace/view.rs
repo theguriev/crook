@@ -3674,10 +3674,24 @@ impl Workspace {
                 .command
                 .as_deref()
                 .unwrap_or("(a command the shell did not echo)");
+            report.push_str(&format!("$ {command}\n"));
             let output = self
                 .block_rows_text(pane, block.id, block.output_from.unwrap_or(0), app)
                 .unwrap_or_default();
-            report.push_str(&format!("$ {command}\n{}\n", output.trim_end()));
+            let output = output.trim_end();
+            if !output.is_empty() {
+                report.push_str(output);
+                report.push('\n');
+            }
+            // The status when the shell reported one and it was not zero: the
+            // point of the report is evidence that the run worked, and a
+            // command that failed with nothing to say — `false`, a `test`, a
+            // build that printed only to a file — is otherwise a blank a
+            // reader would read as success. A zero is the expected case and
+            // said with silence, so the line marks the exception and only it.
+            if let Some(code) = block.exit.filter(|code| *code != 0) {
+                report.push_str(&format!("[exit {code}]\n"));
+            }
         }
         Some(report)
     }
