@@ -90,3 +90,28 @@ Do not annotate types the compiler infers, especially closure parameters: write
 
 Do not leave `_`-prefixed unused parameters. Delete the parameter and fix the call sites; an
 unused argument that every caller still passes is a lie about the interface.
+
+## Processes go through `crook::process::command`
+
+Never `std::process::Command::new`. On Windows every process a GUI application starts flashes a
+console window of its own unless it is created with `CREATE_NO_WINDOW`, and a terminal starts a
+lot of processes. `crook::process::command` sets the flag; everything else is identical. The
+workspace's `.clippy.toml` bans `Command::new` outright and names the replacement, so the gate
+catches a slip rather than a Windows user finding it — which is why `app/src/process.rs` is the
+one file allowed to call the banned method, and it says so where it does.
+
+## The window keeps no idle timer
+
+Nothing ticks while nothing is happening. A poll, a refresh, a menu's animation, a plugin's
+surface — each hangs off an event or a wake, never a clock that runs when the window is at
+rest, so an idle window does no work and wakes no CPU. When a feature seems to need "check
+every so often", the question to answer first is what event it is really waiting for.
+
+## A disabled control has no handler
+
+A control that cannot do anything right now — a stepper at the end of its range, a Reset with
+nothing to reset, a button for a state the row is not in — is drawn de-emphasised and given no
+click handler at all. Not a live control whose handler returns early: the absence of the
+handler is what says "there is nothing to do here", and it is what keeps a dead button from
+lighting under the pointer as though a press would do something. The `Option` an action builder
+returns is `None` in exactly these cases, and the button reads it.
