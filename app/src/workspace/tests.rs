@@ -16973,6 +16973,53 @@ mod sandboxed {
     }
 
     #[test]
+    fn a_plugin_name_too_wide_for_the_rail_ends_in_a_mark() {
+        // A row's name is the flexible half and loses characters when the
+        // rail is narrow — but it was clipped mid-glyph at the edge, against
+        // the "not allowed" word beside it. It ends in a mark now. Every
+        // shipped name fits; a third-party one need not, so a long one is
+        // installed to press the case.
+        let scratch = Scratch::new("long-name");
+        let mut long = manifest("eugen/probe");
+        long.name = "A Plugin With A Name Far Too Long For The Rail".to_owned();
+        install(
+            scratch.path(),
+            "eugen.probe",
+            &wasm_saying(&long, "header.right", 10),
+        );
+        let mut harness = harness(&scratch);
+        harness.show_plugins();
+
+        let scene = harness.frame_sized(vec2f(470., 520.));
+        let column = settings_field_boxes(&scene)
+            .into_iter()
+            .next()
+            .expect("the Plugins section has a field of its own");
+        let lines = text_lines(&scene, |at| {
+            at.x() >= column.min_x() && at.x() <= column.max_x()
+        });
+        // The name and its "not allowed" share a baseline, so they read as one
+        // line here — the gap between them is a margin, not a space.
+        let row = lines
+            .iter()
+            .find(|(_, line)| line.starts_with("A Plugin With A"))
+            .map(|(_, line)| line.clone())
+            .unwrap_or_else(|| panic!("no row for the long name: {lines:?}"));
+        assert!(
+            row.contains('\u{2026}'),
+            "the cut name has no mark: {row:?}"
+        );
+        assert!(
+            !row.contains("For The Rail"),
+            "a name too wide for the rail was drawn whole: {row:?}"
+        );
+        assert!(
+            row.contains("not allowed"),
+            "the word beside the name fell off the row: {row:?}"
+        );
+    }
+
+    #[test]
     fn a_sandboxed_plugin_is_on_the_plugins_page_beside_the_ones_in_the_box() {
         let scratch = Scratch::new("listed");
         install(

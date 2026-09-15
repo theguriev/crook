@@ -253,6 +253,12 @@ pub(crate) fn row(row: Row, ui: FamilyId) -> Box<dyn Element> {
         let name = Container::new(
             Text::new(label, ui, widgets::LABEL_SIZE)
                 .with_color(color)
+                // Cut with a mark, not at the row's edge: a name too wide for
+                // its half was clipped mid-glyph and run into the word beside
+                // it — a plugin's own name against "not allowed" or a version.
+                // The end goes, because a name is known by what it starts
+                // with.
+                .with_ellipsis(Cut::End)
                 .finish(),
         )
         .with_margin_left(if indented { LEADING_GAP } else { 0. })
@@ -261,13 +267,18 @@ pub(crate) fn row(row: Row, ui: FamilyId) -> Box<dyn Element> {
             // The name takes what is left rather than what it wants, so the
             // word after it stays on the row: a flex measures an inflexible
             // child free along its axis, and a long name would otherwise push
-            // the word out of the panel.
+            // the word out of the panel. The gap before that word is on the
+            // word, so a cut name ends a clear step short of it.
             Some(trailing) => {
                 line.add_child(Expanded::new(1., name).finish());
                 line.add_child(
-                    Text::new(trailing, ui, widgets::DESCRIPTION_SIZE)
-                        .with_color(theme().text_muted)
-                        .finish(),
+                    Container::new(
+                        Text::new(trailing, ui, widgets::DESCRIPTION_SIZE)
+                            .with_color(theme().text_muted)
+                            .finish(),
+                    )
+                    .with_margin_left(LEADING_GAP)
+                    .finish(),
                 );
             }
             None => line.add_child(name),
