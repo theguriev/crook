@@ -176,10 +176,4 @@ impl PaneFind {
         self.0.borrow_mut().current = next;
         Some(next)
     }
-
-    /// Puts the cursor on a particular match, which is what a fresh search
-    /// does: the first match after the caret is the one to stand on.
-    pub fn set_current(&self, current: usize) {
-        self.0.borrow_mut().current = current;
-    }
 }
