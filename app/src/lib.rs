@@ -871,7 +871,7 @@ OPTIONS:
     --install-plugin <PATH>
                        Copy a plugin's `.wasm` into the plugins directory and exit,
                        after checking it is one. What it may then do is nothing
-                       until it is allowed it on the Plugins page
+                       until you allow it on the Plugins page
     --uninstall-plugin <ID>
                        Remove an installed plugin by `owner/name`, with whatever
                        it was allowed to do, and exit
