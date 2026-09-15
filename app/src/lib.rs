@@ -2415,7 +2415,17 @@ fn installed_plugins_in(
         .map(|cached| cached.index);
     let heard = crate::plugins::store::index::Heard::offered(index.as_ref());
 
-    let mut lines = Vec::with_capacity(installed.len());
+    // Gathered before any line is formatted, so the columns can be given a
+    // width: a ragged left edge on the version turns reading a short list
+    // into scanning it, which is what `pip list` and every other "what is
+    // installed" pads to avoid.
+    struct Row {
+        id: String,
+        version: String,
+        module: String,
+        facts: String,
+    }
+    let mut rows = Vec::with_capacity(installed.len());
     for plugin in &installed {
         let manifest = crate::plugin::Plugin::manifest(plugin.as_ref());
         let id = manifest.id.as_str();
@@ -2446,14 +2456,42 @@ fn installed_plugins_in(
             }
         }
 
-        let mut line = format!("{id}  {}  {module}", manifest.version);
-        for fact in said {
-            line.push_str("  ");
-            line.push_str(&fact);
-        }
-        lines.push(line);
+        rows.push(Row {
+            id: id.to_owned(),
+            version: manifest.version.to_owned(),
+            module,
+            // The facts, each behind its own two spaces, so the path column
+            // ends where a fact begins and the annotations trail off the
+            // aligned block rather than sitting in it.
+            facts: said.iter().map(|fact| format!("  {fact}")).collect(),
+        });
     }
-    lines.join("\n")
+
+    // By character rather than by byte, since a plugin id and a version are
+    // ASCII but the padding is a count of columns and not of bytes.
+    let id_width = rows
+        .iter()
+        .map(|row| row.id.chars().count())
+        .max()
+        .unwrap_or(0);
+    let version_width = rows
+        .iter()
+        .map(|row| row.version.chars().count())
+        .max()
+        .unwrap_or(0);
+
+    rows.iter()
+        .map(|row| {
+            format!(
+                "{id:id_width$}  {version:version_width$}  {module}{facts}",
+                id = row.id,
+                version = row.version,
+                module = row.module,
+                facts = row.facts,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Every plugin this window carries: the ones in the box, then the ones a
@@ -3605,6 +3643,45 @@ mod tests {
                  registry)"
             ),
             "{line}"
+        );
+    }
+
+    #[test]
+    fn plugins_are_listed_in_columns_that_line_up() {
+        // A short id and a long one, so the version — the field a person
+        // scans for — starts at the same column on both lines rather than
+        // wherever each id happened to end.
+        use crate::plugins::wasm::tests::{Scratch, install, wasm};
+
+        let plugins = Scratch::new("plugins-aligned");
+        install(
+            plugins.path(),
+            "eugen.a",
+            &wasm("eugen/a", "header.right", 10),
+        );
+        install(
+            plugins.path(),
+            "eugen.longer",
+            &wasm("eugen/longer-name", "header.right", 11),
+        );
+        let text = installed_plugins_in(plugins.path(), &Settings::ephemeral(), None);
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 2, "two plugins, two lines: {text}");
+
+        let version_at = |line: &str| line.find("0.1.0").expect("every line carries the version");
+        assert_eq!(
+            version_at(lines[0]),
+            version_at(lines[1]),
+            "the version column does not line up:\n{text}"
+        );
+
+        let short = lines
+            .iter()
+            .find(|line| line.starts_with("eugen/a "))
+            .expect("the short id is listed");
+        assert!(
+            short.starts_with("eugen/a           "),
+            "the short id was not padded to the long one: {short:?}"
         );
     }
 
