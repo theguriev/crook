@@ -184,6 +184,22 @@ fn matches(manifest: &Manifest, query: &Query) -> bool {
     )
 }
 
+/// The word the card would head its permissions with, while it is one that
+/// says the plugin is not doing what it could: "not allowed" for a plugin
+/// nobody has answered, "partly allowed" for one asking for more than it was
+/// given. Nothing for a plugin that asked for nothing, or has all it asked.
+fn unanswered_word(workspace: &Workspace, manifest: &Manifest) -> Option<&'static str> {
+    if manifest.capabilities.is_empty() {
+        return None;
+    }
+    let granted = workspace.settings().granted_to(manifest.id.as_str());
+    match super::stance(&super::wanted(manifest), granted) {
+        super::Stance::Unanswered => Some("not allowed"),
+        super::Stance::Escalated => Some("partly allowed"),
+        super::Stance::Allowed => None,
+    }
+}
+
 /// One plugin's row.
 fn row(
     workspace: &Workspace,
@@ -220,7 +236,7 @@ fn row(
     // every row, and "current" is what the absence of a word says. Only for
     // a plugin that is a file, which is what the card and the count at the
     // foot offer an update for.
-    let trailing = workspace
+    let update = workspace
         .heard()
         .offer(&manifest.id)
         .filter(|_| workspace.is_installed(&manifest.id))
@@ -233,6 +249,18 @@ fn row(
             .fetchable()
             .map(|release| release.version.clone())
         });
+    // And before it, the answer that is still owed: a plugin nobody has
+    // answered is running and doing nothing — refused everything it asked
+    // for, with the refusal a line in the log — and a row that showed a dot
+    // for "running" and nothing else read as a plugin at work. The card's
+    // own word, so the list and the card agree, with the version after it
+    // when there is one: neither is the kind of thing to hide behind the
+    // other.
+    let trailing = match (unanswered_word(workspace, manifest).filter(|_| on), update) {
+        (Some(word), Some(version)) => Some(format!("{word} \u{b7} {version}")),
+        (Some(word), None) => Some(word.to_owned()),
+        (None, update) => update,
+    };
 
     section::row(
         section::Row {

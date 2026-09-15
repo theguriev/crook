@@ -16353,9 +16353,11 @@ mod sandboxed {
             frame_text(&scene)
         );
         assert!(says(&scene, "Show in Store"), "{}", frame_text(&scene));
+        // Nothing offered, so the row ends in the one word it carries for a
+        // plugin nobody has answered yet.
         assert_eq!(
             probe_row(&scene),
-            "Probe",
+            "Probenot allowed",
             "the row ends in the offered version"
         );
         harness.workspace.read(&harness.app, |workspace, _| {
@@ -16618,7 +16620,8 @@ mod sandboxed {
         assert!(!says(&scene, "newer version"), "{text}");
         assert!(says(&scene, "Show in Store"), "{text}");
         assert!(says(&scene, "On this machine"), "{text}");
-        assert_eq!(probe_row(&scene), "Probe");
+        // No version on the row: only the word for the answer still owed.
+        assert_eq!(probe_row(&scene), "Probenot allowed");
     }
 
     #[test]
@@ -16934,6 +16937,37 @@ mod sandboxed {
         harness.show_plugins();
         harness.click_plugin("Probe");
         (scratch, harness)
+    }
+
+    #[test]
+    fn a_row_says_not_allowed_until_the_card_s_allow_is_pressed() {
+        // A plugin nobody has answered is running and doing nothing: refused
+        // everything it asked for, with the refusal a line in the log. Its
+        // row showed the dot for "running" and no more, which read as a
+        // plugin at work. The row carries the card's own word now, and drops
+        // it the moment the card's Allow is pressed.
+        let (_scratch, mut harness) = probe_card("row-word");
+        let scene = harness.frame();
+        let panel = panel_box(&scene);
+        let lines = text_lines(&scene, |at| panel.contains_point(at));
+        let (row, _) = lines
+            .iter()
+            .find(|(_, line)| line.starts_with("Probe"))
+            .unwrap_or_else(|| panic!("no row names the probe: {lines:?}"));
+        // Two sizes of text on one row can round to two lines; the word is
+        // found by its own baseline being the row's, within a glyph.
+        let word = lines
+            .iter()
+            .find(|(at, line)| line.contains("not allowed") && (at.y() - row.y()).abs() < 4.);
+        assert!(word.is_some(), "the row does not say so: {lines:?}");
+
+        harness.click_page_button("Allow");
+        let scene = harness.frame();
+        let lines = text_lines(&scene, |at| panel.contains_point(at));
+        assert!(
+            !lines.iter().any(|(_, line)| line.contains("not allowed")),
+            "the word outlived the answer: {lines:?}"
+        );
     }
 
     #[test]
