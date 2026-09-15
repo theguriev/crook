@@ -50,6 +50,12 @@ struct State {
     /// exists again — at which point [`PaneFind::clamped`] brings it back inside
     /// the count rather than starting over at the top.
     current: usize,
+    /// The query [`Self::current`] was last counted against. When the query
+    /// in the field is no longer this one, the search is a different search
+    /// and [`PaneFind::follow_query`] takes the cursor back to the first
+    /// match — the way a browser's find does — rather than leaving it
+    /// wherever the last query was stepped to.
+    last_query: String,
 }
 
 impl Default for PaneFind {
@@ -68,6 +74,7 @@ impl PaneFind {
             steps: Default::default(),
             close_button: MouseStateHandle::default(),
             current: 0,
+            last_query: String::new(),
         })))
     }
 
@@ -117,6 +124,28 @@ impl PaneFind {
     /// What is being looked for.
     pub fn query(&self) -> String {
         self.0.borrow().input.editor().text().to_owned()
+    }
+
+    /// Takes the cursor back to the first match when `query` is not the one
+    /// the cursor was last counted against.
+    ///
+    /// A new search starts at the top, the way Ctrl+F does everywhere: a
+    /// person who searched one thing, stepped to its fifth match and then
+    /// typed a different thing means to look at the new thing from the
+    /// start, not at whatever match five modulo the new count lands on. The
+    /// *same* query is left alone, so closing a search and reopening it
+    /// resumes where it was, which is what the workspace's `Open` handler
+    /// leans on.
+    ///
+    /// Called where the matches are counted rather than on the keystroke,
+    /// because the query lives in the field's own editor and this is the one
+    /// place that reads it back as the thing a search is actually for.
+    pub fn follow_query(&self, query: &str) {
+        let mut state = self.0.borrow_mut();
+        if state.last_query != query {
+            state.current = 0;
+            state.last_query = query.to_owned();
+        }
     }
 
     /// The current match, brought inside a count of `total` matches.

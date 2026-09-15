@@ -2278,6 +2278,11 @@ impl Workspace {
         if query.is_empty() {
             return Vec::new();
         }
+        // A changed query is a new search, and a new search starts at its
+        // first match rather than at wherever the last one was stepped to.
+        // Here, where the matches are counted, because the query lives in the
+        // field and this is the one place that reads it back.
+        find.follow_query(&query);
         let (Some(history), Some((_, snapshot))) =
             (self.terminal_blocks(pane, app), self.terminal(pane, app))
         else {
