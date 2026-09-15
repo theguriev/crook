@@ -600,6 +600,11 @@ pub struct Workspace {
     /// Makes the last session save the one that lands. See
     /// [`Self::save_session`] and [`SaveOrder`].
     session_saves: Arc<SaveOrder>,
+    /// Why the last session save did not land, while it has not: the tabs
+    /// on screen will not be back next time, and the one place a person
+    /// would learn that is the panel that lists them. Cleared by the next
+    /// save that lands. The settings' own is `save_problem`.
+    session_problem: Option<String>,
 
     /// How big the window was when it was last laid out, in logical pixels.
     ///
@@ -951,6 +956,7 @@ impl Workspace {
             clipboard: Clipboard::new(),
             divider_drag: DividerDrag::new(),
             session_saves: Arc::default(),
+            session_problem: None,
             keybindings,
             pending_keys: std::cell::RefCell::new(Vec::new()),
             recording: std::cell::RefCell::new(None),
@@ -1166,6 +1172,28 @@ impl Workspace {
         let problem = outcome.err();
         if problem != self.save_problem {
             self.save_problem = problem;
+            ctx.notify();
+        }
+    }
+
+    /// Why the last session save failed, while the tabs are not being
+    /// remembered. See `session_problem`.
+    pub(crate) fn session_problem(&self) -> Option<&str> {
+        self.session_problem.as_deref()
+    }
+
+    /// [`Self::note_save`], for the session file.
+    fn note_session_save(
+        &mut self,
+        outcome: Option<Result<(), String>>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(outcome) = outcome else {
+            return;
+        };
+        let problem = outcome.err();
+        if problem != self.session_problem {
+            self.session_problem = problem;
             ctx.notify();
         }
     }
@@ -6813,15 +6841,15 @@ impl Workspace {
         let saves = self.session_saves.clone();
         let session = crate::session::Session::of(&self.tabs, self.window_size());
 
-        ctx.background()
-            .spawn(async move {
-                saves.write_if_last(asked_at, || {
-                    if let Err(error) = session.save_blocking(&path) {
-                        log::warn!("could not save the session: {error:#}");
-                    }
-                });
+        let written = ctx.background().spawn(async move {
+            saves.write_if_last(asked_at, || {
+                session.save_blocking(&path).map_err(|error| {
+                    log::warn!("could not save the session: {error:#}");
+                    format!("{error:#}")
+                })
             })
-            .detach();
+        });
+        ctx.spawn(written, Self::note_session_save).detach();
     }
 
     /// How big the window was when it was last laid out, if it has been.
