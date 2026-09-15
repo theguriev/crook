@@ -8126,6 +8126,48 @@ fn a_chord_still_reaches_the_window_while_the_panel_is_up() {
 }
 
 #[test]
+fn a_theme_that_cannot_be_written_says_so_on_the_creator_and_keeps_the_draft() {
+    // Create used to do nothing but log a line when the write failed — a
+    // themes folder that is read-only, or a file, or on a full disk — and
+    // the person was left with a button that did nothing and no word about
+    // why. The reason is on the creator now, the draft stays so they can
+    // put the folder right and press again, and it goes with the draft.
+    let scratch = Scratch::new();
+    // A *file* where the folder should be, which no platform can write into.
+    let not_a_folder = scratch.path().join("themes");
+    fs::write(&not_a_folder, "not a folder\n").expect("writable scratch");
+    let mut harness = Harness::new(1);
+    let _guard = crate::theme::ThemeGuard::new(crate::theme::DARK);
+    harness.set_themes_directory(not_a_folder.clone());
+
+    harness.open_theme_panel();
+    harness.start_creating();
+    harness.create_theme();
+
+    assert!(
+        harness.is_creating(),
+        "the draft was thrown away with the failure"
+    );
+    let text = frame_text(&harness.frame());
+    assert!(
+        text.contains("The theme was not written"),
+        "the creator does not say the write failed: {text:?}"
+    );
+    assert!(
+        text.contains("themes"),
+        "the reason does not name the path that refused: {text:?}"
+    );
+
+    harness.cancel_creating();
+    harness.start_creating();
+    let text = frame_text(&harness.frame());
+    assert!(
+        !text.contains("The theme was not written"),
+        "a fresh draft still carries the last one's complaint: {text:?}"
+    );
+}
+
+#[test]
 fn the_creator_builds_a_theme_from_the_one_in_force_and_writes_it_to_the_folder() {
     // Warp's creator makes a theme out of a photograph; Crook has no image
     // decoder, so it makes one out of the palette in force — five candidate

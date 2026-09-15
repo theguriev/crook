@@ -1968,6 +1968,11 @@ impl Workspace {
         }
     }
 
+    /// Presses the creator's Create.
+    pub fn create_theme(&mut self, ctx: &mut ViewContext<Self>) {
+        self.apply_theme_action(ThemeAction::Create, ctx);
+    }
+
     /// Whether it is showing the creator.
     pub fn is_creating_theme(&self) -> bool {
         self.panel.mode == Mode::Creating
@@ -6527,11 +6532,13 @@ impl Workspace {
                 crate::theme::set_theme(draft.theme);
                 self.panel.draft = Some(draft);
                 self.panel.mode = Mode::Creating;
+                self.panel.problem = None;
                 self.panel.forget_hover_state();
                 self.sync_palette(ctx);
                 ctx.notify();
             }
             ThemeAction::CancelCreating => {
+                self.panel.problem = None;
                 self.cancel_draft();
                 self.sync_palette(ctx);
                 ctx.notify();
@@ -6557,8 +6564,14 @@ impl Workspace {
         let Some(draft) = self.panel.draft.clone() else {
             return;
         };
+        // Said on the creator, beside the button that was pressed, and not
+        // only in the log: the draft stays on screen, so the person can put
+        // the folder right and press again, or cancel knowing why.
         let Some(directory) = self.themes_directory.clone() else {
             log::warn!("no configuration directory, so a theme cannot be written anywhere");
+            self.panel.problem =
+                Some("this machine has no configuration directory to keep it in".to_owned());
+            ctx.notify();
             return;
         };
 
@@ -6570,9 +6583,12 @@ impl Workspace {
             Ok(path) => log::info!("wrote {name:?} to {}", path.display()),
             Err(error) => {
                 log::warn!("could not write the theme: {error:#}");
+                self.panel.problem = Some(format!("{error:#}"));
+                ctx.notify();
                 return;
             }
         }
+        self.panel.problem = None;
 
         self.theme_before_draft = None;
         self.panel.draft = None;
