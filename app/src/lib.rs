@@ -217,14 +217,17 @@ struct Overrides {
     menu: bool,
     /// Start with the first row's hover detail card up.
     hover: bool,
-    /// Run these named actions before the picture is taken, in order.
+    /// Run these named actions before the picture is taken, in order — or,
+    /// in a window, once the shells are up and any `--run` has answered.
     ///
     /// A way to look at a frame, like `--menu` and `--themes`, and the only
     /// one that reaches a *plugin's* surface: what a plugin puts up is put up
     /// by one of its own actions, and a picture of a panel nobody can open
     /// from the command line is a picture nobody can take. Run last, after the
     /// shells have settled, because what a plugin draws usually depends on
-    /// what the pane has told it.
+    /// what the pane has told it. In a window it is also the only way to
+    /// reach a state a snapshot cannot hold — one that writes a file, say —
+    /// without a hand on the keyboard.
     actions: Vec<String>,
     /// Load the plugins this machine has installed, as a real run does.
     ///
@@ -934,7 +937,8 @@ OPTIONS:
                        Run this named action before the picture is taken, so a
                        plugin's own panel can be looked at. Anything after the
                        name is what the action is told — what a picker's row or
-                       a menu's entry would have said. Repeatable
+                       a menu's entry would have said. Repeatable. In a window
+                       it runs once the shells are up and any --run has answered
     --with-plugins     Load the plugins this machine has installed, so that a
                        snapshot shows what they draw. Off by default: a picture
                        of the application is the same everywhere and one of a
@@ -2260,6 +2264,9 @@ struct Shell {
     /// What the command line asked to leave on screen, until the first frame
     /// has been drawn. See [`Composed`].
     composed: Composed,
+    /// The named actions `--action` asked for, until they have run. See
+    /// [`Overrides::actions`] for when that is.
+    actions: Vec<String>,
     /// The rectangle the input method was last told the caret occupies, so a
     /// frame that did not move it sends no message.
     ime_area: Option<crookui_core::geometry::RectF>,
@@ -2682,6 +2689,7 @@ impl Shell {
 
         Self {
             composed: Composed::from_overrides(&launch.overrides),
+            actions: launch.overrides.actions.clone(),
             app,
             presenter: Presenter::new(window_id, text_layout),
             window_id,
@@ -2775,6 +2783,24 @@ impl Shell {
         if let Ok(pane) = start_shells(&mut self.app, &self.workspace) {
             compose_pane(&mut self.app, &self.workspace, pane, &asked);
         }
+    }
+
+    /// Runs what `--action` named, once, at the moment the snapshot runs it:
+    /// after the shells are up and any `--run` has been answered, since what
+    /// a plugin's action puts up is usually about what the pane just said.
+    ///
+    /// Nothing is waited for, unlike the snapshot: whatever the action asked
+    /// of the pool comes back through the event loop, and the frame after
+    /// that draws it. The redraw asked for here is for the action itself,
+    /// which is not an event and so has nothing else asking.
+    fn run_pending_actions(&mut self) {
+        if self.actions.is_empty() || !self.budget_has_started() {
+            return;
+        }
+        for name in std::mem::take(&mut self.actions) {
+            run_named_action(&mut self.app, &self.workspace, &name);
+        }
+        self.proxy.request_redraw();
     }
 
     /// Whether a frame counts towards the budget yet.
@@ -2971,6 +2997,7 @@ impl WindowDelegate for Shell {
         self.follow_caret_with_the_input_method();
         self.type_pending_run();
         self.compose_pending_pane();
+        self.run_pending_actions();
 
         let Some(budget) = self.frame_budget else {
             return;
