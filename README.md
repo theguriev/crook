@@ -56,15 +56,16 @@ not allowing.
 
 These are rendered by Crook itself rather than captured from a window — `--snapshot` draws one
 frame of the real view tree to a PNG, which is how a picture of the application is the same on
-every machine:
+every machine. The two that print a git log print it up to the `v0.1.0` tag, so that they say
+the same thing whenever they are rendered again and the find still counts three:
 
 ```sh
 ./script/run --snapshot docs/images/tabs.png            # then cropped to the panel
 ./script/run --run 'git status --short --branch' \
-             --run 'git log --oneline -8' \
+             --run 'git log --oneline -8 v0.1.0' \
              --run 'cargo test -p crook_plugin_api --quiet' \
              --hover-block 2 --snapshot docs/images/blocks.png
-./script/run --run 'git log --oneline -12' \
+./script/run --run 'git log --oneline -12 v0.1.0' \
              --find-output tab --snapshot docs/images/find.png
 ./script/run --action 'crook/palette/open rec' --snapshot docs/images/palette.png
 ./script/run --dev-plugin ../crook-pirate/target/wasm32-unknown-unknown/release/pirate.wasm \
