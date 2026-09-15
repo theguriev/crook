@@ -647,12 +647,15 @@ fn blocks(
     let list = list.finish();
 
     // The bar floats over the top-right of the output, the way a browser's
-    // does: it is about the whole pane, so it does not take a row from it.
+    // does: it is about the whole pane, so it does not take a row from it —
+    // and, being about the pane, it is laid out against the pane, so that in
+    // one narrower than the bar would like to be the field gives way rather
+    // than the bar running over the pane next door.
     let list = match finding {
         Some(find) => {
             let bar = find_bar(workspace, pane, find, &matches);
             let mut stack = Stack::new().with_child(list);
-            stack.add_anchored_overlay_child(
+            stack.add_anchored_overlay_child_within(
                 bar,
                 AnchorTo {
                     parent: Corner::TopRight,
@@ -871,11 +874,11 @@ fn chips(workspace: &Workspace, app: &AppContext) -> Option<Box<dyn Element>> {
 /// An overlay rather than a row, because the pane below it belongs to a
 /// program that was told how many rows it has. Anchored corner-to-corner and
 /// pulled back inside by [`CHIPS_INSET`], so the row sits *in* the corner
-/// rather than hanging off it — and `keep_on_screen` is left on, which is what
-/// keeps a wide chip inside a narrow pane.
+/// rather than hanging off it — and laid out against the pane, which is what
+/// keeps a wide chip inside a narrow one rather than over its neighbour.
 fn over_the_corner(content: Box<dyn Element>, chips: Box<dyn Element>) -> Box<dyn Element> {
     let mut stack = Stack::new().with_child(content);
-    stack.add_anchored_overlay_child(
+    stack.add_anchored_overlay_child_within(
         chips,
         AnchorTo {
             parent: Corner::BottomRight,
@@ -1405,6 +1408,13 @@ const FIND_BUTTON_ICON: f32 = 14.;
 /// The padding round that icon, which with it is the height of everything
 /// on the bar but the field.
 const FIND_BUTTON_PADDING: f32 = 3.;
+/// The width the bar's field takes when the pane has it to give.
+///
+/// Its ceiling, not its size: the field is the one part of the bar that
+/// gives way, so in a pane narrower than the bar it shrinks first — the
+/// count, the steps and the way out keep their room, and the bar stays
+/// inside the pane it is about.
+const FIND_FIELD_WIDTH: f32 = 190.;
 /// The room the bar's count is given, whatever it says.
 ///
 /// Wide enough for "No results" and for a count in the thousands at 11px,
@@ -1431,22 +1441,26 @@ fn find_bar(
     let current = find.clamped(total);
     let has_matches = total > 0;
 
-    let field = ConstrainedBox::new(
-        TextField::new(
-            find.input(),
-            workspace.clipboard().clone(),
-            workspace.fonts(),
-            find.field(),
-            "Find in output",
+    let field = Shrinkable::new(
+        1.,
+        ConstrainedBox::new(
+            TextField::new(
+                find.input(),
+                workspace.clipboard().clone(),
+                workspace.fonts(),
+                find.field(),
+                "Find in output",
+            )
+            .with_icon(Lucide::Search)
+            .with_focus(WorkspaceAction::Find {
+                pane,
+                action: FindAction::Open,
+            })
+            .finish(),
         )
-        .with_icon(Lucide::Search)
-        .with_focus(WorkspaceAction::Find {
-            pane,
-            action: FindAction::Open,
-        })
+        .with_max_width(FIND_FIELD_WIDTH)
         .finish(),
     )
-    .with_width(190.)
     .finish();
 
     let count = if find.query().is_empty() {
