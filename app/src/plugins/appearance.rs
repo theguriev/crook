@@ -272,8 +272,11 @@ fn theme_category(workspace: &Workspace) -> Vec<Entry> {
              written for Warp works here unchanged. Drop a .yaml in and open the panel again.",
             ui,
         ),
-        widgets::fact(
-            Words::new("Themes folder").with_keywords(&[
+        {
+            // A path, or the word "nowhere" with the reason under the label:
+            // a sentence drawn as a path is cut from its start in a narrow
+            // window, and the first word is the one that answers.
+            let mut themes_folder = Words::new("Themes folder").with_keywords(&[
                 "yaml",
                 "warp",
                 "import",
@@ -281,15 +284,17 @@ fn theme_category(workspace: &Workspace) -> Vec<Entry> {
                 "directory",
                 "path",
                 "file",
-            ]),
-            crate::theme::user_themes_directory()
-                .map(|path| path.display().to_string())
-                .unwrap_or_else(|| {
-                    "nowhere — this machine has no configuration directory".to_owned()
-                }),
-            true,
-            fonts,
-        ),
+            ]);
+            let (folder, is_a_path) = match crate::theme::user_themes_directory() {
+                Some(path) => (path.display().to_string(), true),
+                None => {
+                    themes_folder = themes_folder
+                        .with_description("This machine has no configuration directory.");
+                    ("nowhere".to_owned(), false)
+                }
+            };
+            widgets::fact(themes_folder, folder, is_a_path, fonts)
+        },
     ]
 }
 /// The "Rows" category: which fact goes on which line, and which chips a row

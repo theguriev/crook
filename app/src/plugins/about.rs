@@ -50,13 +50,29 @@ fn about(workspace: &Workspace) -> Vec<Category> {
     let ui = workspace.fonts().ui;
     let fonts = workspace.fonts();
 
-    let file = match workspace.settings().path() {
-        Some(path) => path.display().to_string(),
+    // Either a path, or the one word "nowhere" with the sentence under the
+    // label rather than beside it: a value is cut from its start like a path
+    // when it is drawn as one, and a sentence cut that way lost its first
+    // word — the answer — in a window the width of a laptop's.
+    let mut settings_file = Words::new("Settings file").with_keywords(&[
+        "json",
+        "config",
+        "path",
+        "where",
+        "folder",
+        "directory",
+    ]);
+    let (file, is_a_path) = match workspace.settings().path() {
+        Some(path) => (path.display().to_string(), true),
         // Either a run with ephemeral settings — a snapshot, a test — or a
         // machine with no configuration directory at all. The options still
         // work in both cases; they just do not outlive the process, and that
         // is worth saying in the one place somebody would come looking.
-        None => "nowhere — this run keeps its options in memory".to_owned(),
+        None => {
+            settings_file = settings_file
+                .with_description("This run keeps its options in memory; they do not outlive it.");
+            ("nowhere".to_owned(), false)
+        }
     };
 
     vec![
@@ -93,19 +109,7 @@ fn about(workspace: &Workspace) -> Vec<Category> {
                     true,
                     fonts,
                 ),
-                widgets::fact(
-                    Words::new("Settings file").with_keywords(&[
-                        "json",
-                        "config",
-                        "path",
-                        "where",
-                        "folder",
-                        "directory",
-                    ]),
-                    file,
-                    true,
-                    fonts,
-                ),
+                widgets::fact(settings_file, file, is_a_path, fonts),
             ],
         ),
         widgets::category(

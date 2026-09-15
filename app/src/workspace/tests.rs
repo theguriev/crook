@@ -8639,6 +8639,37 @@ fn the_rail_switches_pages_and_the_pane_shows_the_one_it_names() {
 }
 
 #[test]
+fn a_settings_file_kept_nowhere_says_the_word_and_puts_the_reason_under_the_label() {
+    // With ephemeral settings the value was the sentence "nowhere — this run
+    // keeps its options in memory", drawn as a path: monospace and cut from
+    // its start, so that in a window the width of a laptop's it read
+    // "… — this run keeps its options in memory" — every word but the one
+    // that answered. The value is the word now and the sentence is the
+    // label's description, on its own line, wrapped.
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.select_settings_section("About");
+    let scene = harness.frame_sized(vec2f(640., 400.));
+    let pane = settings_pane_box(&scene);
+    let lines = text_lines(&scene, |position| pane.contains_point(position));
+
+    let (_, value_line) = lines
+        .iter()
+        .find(|(_, line)| line.starts_with("Settings file"))
+        .unwrap_or_else(|| panic!("the About page has no Settings file row: {lines:?}"));
+    assert!(
+        value_line.ends_with("nowhere"),
+        "the value is not the word: {value_line:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|(_, line)| line.starts_with("This run keeps its options in memory")),
+        "the reason is not under the label: {lines:?}"
+    );
+}
+
+#[test]
 fn a_fact_wider_than_the_page_gives_way_from_its_start_and_stops_at_the_edge() {
     // A settings file under a profile directory with a long name is wider
     // than the About page. The value used to be measured free, so it started
@@ -12489,6 +12520,12 @@ mod shells {
         /// Opens the bar and leaves `query` in it, on a marked shell that has
         /// printed `line` as one finished command. Returns the pane, or `None`
         /// on a machine where no shell could be started.
+        ///
+        /// The block the find walks holds the prompt row too, and a prompt
+        /// says whatever `PS1` says — the directory, the branch. So `line`
+        /// and `query` are made of words no path is likely to hold: a branch
+        /// called `nowhere-is-a-word-not-a-path` once put "nowhere" on the
+        /// prompt twice, and a query for it that expected nothing found two.
         fn searching(harness: &mut Harness, line: &str, query: &str) -> Option<PaneId> {
             let pane = marked_shell(harness)?;
             await_prompt(harness, pane);
@@ -12521,6 +12558,24 @@ mod shells {
             Some(pane)
         }
 
+        /// Every row of every finished block, prompt rows included, for a
+        /// message about a count that came out wrong.
+        fn block_rows(harness: &Harness, pane: PaneId) -> Vec<String> {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                let Some(history) = workspace.terminal_blocks(pane, app) else {
+                    return Vec::new();
+                };
+                history
+                    .iter()
+                    .flat_map(|block| {
+                        (0..block.rows.rows())
+                            .map(|row| block.rows.text(row).to_owned())
+                            .collect::<Vec<_>>()
+                    })
+                    .collect()
+            })
+        }
+
         fn matches(harness: &Harness, pane: PaneId) -> usize {
             harness.workspace.read(&harness.app, |workspace, app| {
                 workspace.find_matches(pane, app).len()
@@ -12546,7 +12601,7 @@ mod shells {
             let mut harness = Harness::panel(1);
             // `beta` is in the echoed command line once and in the output
             // once: two matches, and a query nothing has to guess about.
-            let Some(pane) = searching(&mut harness, "alpha beta gamma", "beta") else {
+            let Some(pane) = searching(&mut harness, "qvx wqz rqv", "wqz") else {
                 return;
             };
 
@@ -12598,7 +12653,7 @@ mod shells {
             // the pane now and the field is the part that gives way, so the
             // count, the steps and the way out keep their places.
             let mut harness = Harness::panel(1);
-            if searching(&mut harness, "alpha beta gamma", "beta").is_none() {
+            if searching(&mut harness, "qvx wqz rqv", "wqz").is_none() {
                 return;
             }
 
@@ -12625,7 +12680,7 @@ mod shells {
             // letter turned nothing into "No results", again when a match
             // turned that into "1/2". The count has a slot now.
             let mut harness = Harness::panel(1);
-            let Some(pane) = searching(&mut harness, "alpha beta gamma", "") else {
+            let Some(pane) = searching(&mut harness, "qvx wqz rqv", "") else {
                 return;
             };
             let field_x = |harness: &mut Harness| {
@@ -12648,13 +12703,13 @@ mod shells {
             };
 
             let empty = field_x(&mut harness);
-            retype(&mut harness, "nowhere");
+            retype(&mut harness, "zqzqz");
             assert_eq!(
                 field_x(&mut harness),
                 empty,
                 "the field moved when the count said there were no results"
             );
-            retype(&mut harness, "beta");
+            retype(&mut harness, "wqz");
             assert_eq!(
                 field_x(&mut harness),
                 empty,
@@ -12665,11 +12720,17 @@ mod shells {
         #[test]
         fn a_query_that_matches_nothing_says_so() {
             let mut harness = Harness::panel(1);
-            let Some(pane) = searching(&mut harness, "alpha beta gamma", "nowhere") else {
+            let Some(pane) = searching(&mut harness, "qvx wqz rqv", "zqzqz") else {
                 return;
             };
 
-            assert_eq!(0, matches(&harness, pane));
+            let found = matches(&harness, pane);
+            assert_eq!(
+                0,
+                found,
+                "{found} matches for a word the pane never printed; its blocks held {:?}",
+                block_rows(&harness, pane)
+            );
             assert_eq!(None, current(&harness, pane));
             let scene = harness.frame();
             assert!(
@@ -12681,7 +12742,7 @@ mod shells {
         #[test]
         fn the_bar_takes_the_keyboard_and_gives_it_back() {
             let mut harness = Harness::panel(1);
-            let Some(pane) = searching(&mut harness, "alpha beta gamma", "beta") else {
+            let Some(pane) = searching(&mut harness, "qvx wqz rqv", "wqz") else {
                 return;
             };
 
