@@ -468,7 +468,8 @@ impl SaveOrder {
     }
 
     /// Runs `write` unless a later write has been asked for since, with every
-    /// other write to the same file held off until it returns.
+    /// other write to the same file held off until it returns — and hands
+    /// back what it returned, or `None` for a write that was overtaken.
     ///
     /// Blocking, on both counts: the lock is waited for and `write` is a file
     /// being written. This belongs on the background pool.
@@ -477,12 +478,11 @@ impl SaveOrder {
     /// [`SaveOrder::writing`] — so the only thing a panicking writer leaves
     /// behind is a file that may not have been written, and refusing every
     /// later save because of it would turn one lost write into all of them.
-    fn write_if_last(&self, asked_at: u64, write: impl FnOnce()) {
+    fn write_if_last<T>(&self, asked_at: u64, write: impl FnOnce() -> T) -> Option<T> {
         let _ordered = self.writing.lock().unwrap_or_else(PoisonError::into_inner);
-        if self.asked_for.load(Ordering::Relaxed) == asked_at {
-            write();
-        }
+        let written = (self.asked_for.load(Ordering::Relaxed) == asked_at).then(write);
         self.finished.fetch_add(1, Ordering::Relaxed);
+        written
     }
 
     /// Whether every write asked for has run or been overtaken.
@@ -786,6 +786,13 @@ pub struct Workspace {
     /// The same, for the keybindings file, which is written by the same rule
     /// and by a different set of clicks.
     keybinding_saves: Arc<SaveOrder>,
+    /// Why the last save of the settings or the keybindings did not land,
+    /// while it has not: a folder that cannot be written to, a full disk.
+    /// The option was applied to the window regardless, so without this the
+    /// person sees it work and finds it gone on the next launch, with the
+    /// only word about why in a log they may not know exists. Cleared by
+    /// the next save that lands.
+    save_problem: Option<String>,
     /// How far the tabs panel's list has been scrolled.
     ///
     /// On the workspace rather than inside the panel module for the reason
@@ -977,6 +984,7 @@ impl Workspace {
             worktrees_directory: worktree_store(),
             saves: Arc::default(),
             keybinding_saves: Arc::default(),
+            save_problem: None,
             panel_scroll: ScrollStateHandle::default(),
             panel_rows: RowGeometry::new(),
             panel_search: SearchState::default(),
@@ -1142,6 +1150,26 @@ impl Workspace {
     }
 
     /// The settings page's state.
+    /// Why the last save of the settings or the keybindings failed, while
+    /// changes are not reaching the disk. See `save_problem`.
+    pub(crate) fn save_problem(&self) -> Option<&str> {
+        self.save_problem.as_deref()
+    }
+
+    /// Takes the word back from a save on the pool: a failure is shown, and
+    /// a save that landed clears the one before it. A save that was
+    /// overtaken says nothing, because the one that overtook it will.
+    fn note_save(&mut self, outcome: Option<Result<(), String>>, ctx: &mut ViewContext<Self>) {
+        let Some(outcome) = outcome else {
+            return;
+        };
+        let problem = outcome.err();
+        if problem != self.save_problem {
+            self.save_problem = problem;
+            ctx.notify();
+        }
+    }
+
     pub(crate) fn settings_page(&self) -> &SettingsState {
         &self.page
     }
@@ -4200,15 +4228,15 @@ impl Workspace {
 
         let asked_at = self.keybinding_saves.ask();
         let saves = self.keybinding_saves.clone();
-        ctx.background()
-            .spawn(async move {
-                saves.write_if_last(asked_at, || {
-                    if let Err(error) = save.write_blocking() {
-                        log::warn!("could not save the keybindings: {error:#}");
-                    }
-                });
+        let written = ctx.background().spawn(async move {
+            saves.write_if_last(asked_at, || {
+                save.write_blocking().map_err(|error| {
+                    log::warn!("could not save the keybindings: {error:#}");
+                    format!("{error:#}")
+                })
             })
-            .detach();
+        });
+        ctx.spawn(written, Self::note_save).detach();
     }
 
     /// Starts in a density the command line asked for, without adopting it.
@@ -6716,8 +6744,9 @@ impl Workspace {
     /// A click must not wait on a directory being created, a file being
     /// written, `fsync` returning and a rename landing — so it does not: the
     /// settings are cheap to clone, and the clone is what the background pool
-    /// gets. A save that fails says so in the log and changes nothing on
-    /// screen, because the option itself has already been applied.
+    /// gets. A save that fails changes nothing about the option, which has
+    /// already been applied; it says so on the settings page, through
+    /// `save_problem`, until one lands.
     ///
     /// Each save carries a complete snapshot and writes through its own
     /// temporary, so two of them racing is never a half-written file — and
@@ -6738,15 +6767,15 @@ impl Workspace {
         let saves = self.saves.clone();
         let settings = self.settings.clone();
 
-        ctx.background()
-            .spawn(async move {
-                saves.write_if_last(asked_at, || {
-                    if let Err(error) = settings.save_blocking() {
-                        log::warn!("could not save the settings: {error:#}");
-                    }
-                });
+        let written = ctx.background().spawn(async move {
+            saves.write_if_last(asked_at, || {
+                settings.save_blocking().map_err(|error| {
+                    log::warn!("could not save the settings: {error:#}");
+                    format!("{error:#}")
+                })
             })
-            .detach();
+        });
+        ctx.spawn(written, Self::note_save).detach();
     }
 
     /// Writes what the window is showing, so the next one can come back to it.
