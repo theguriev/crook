@@ -48,9 +48,10 @@
 //! than the one drawing it holds rows that cannot be drawn: the highlight
 //! stops with the glyphs, while the copy still takes the whole row.
 //!
-//! Click-to-select a block, keyboard block navigation, the sticky header and
-//! the jump-to-bottom button are all deliberately absent; see
-//! `docs/blocks.md`.
+//! Keyboard block navigation *is* here — the block the arrows land on gets
+//! the accent wash and stripe below. What is deliberately absent is
+//! click-to-select a block with the pointer, the sticky header and the
+//! jump-to-bottom button; see `docs/blocks.md`.
 
 use std::ops::Range;
 use std::sync::Arc;
