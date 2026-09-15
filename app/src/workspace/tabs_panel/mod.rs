@@ -68,7 +68,7 @@
 //! it needs. The offsets are the *last* frame's, which is right: rows do not
 //! move when a selection does.
 
-use crookui_core::elements::Padding;
+use crookui_core::elements::{Padding, Paragraph};
 use crookui_core::fonts::FamilyId;
 use crookui_core::prelude::*;
 
@@ -256,15 +256,41 @@ pub(super) fn tab_list(workspace: &Workspace, app: &AppContext) -> Box<dyn Eleme
     .with_scrollbar(theme().overlay_3)
     .finish();
 
-    controls::options_ground(
-        workspace,
-        Flex::column()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_child(Shrinkable::new(1., scroller).finish())
-            .with_child(controls::new_tab_area(workspace))
-            .finish(),
+    let mut column = Flex::column()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
+        .with_child(Shrinkable::new(1., scroller).finish())
+        .with_child(controls::new_tab_area(workspace));
+    if let Some(problem) = workspace.session_problem() {
+        column.add_child(not_remembered(problem, workspace.fonts().ui));
+    }
+
+    controls::options_ground(workspace, column.finish())
+}
+
+/// What the panel says while the tabs in it are not being written to the
+/// session file.
+///
+/// Under the list, because the list is what will not be back: a save that
+/// failed used to be a line in the log and nothing on screen, and the next
+/// launch opened empty with nobody told why. The sentence names the file
+/// that refused and what the system said about it, the way the settings
+/// page's own does.
+fn not_remembered(problem: &str, ui: FamilyId) -> Box<dyn Element> {
+    Container::new(
+        Paragraph::new(
+            format!("These tabs are not being remembered for next time: {problem}."),
+            ui,
+            10.,
+        )
+        .with_color(theme().usage_critical)
+        .with_line_height_ratio(1.4)
+        // The long word in the sentence is a path, known by what it ends in.
+        .with_cut(Cut::Start)
+        .finish(),
     )
+    .with_uniform_padding(EMPTY_STATE_PADDING)
+    .finish()
 }
 
 /// The row of buttons at the foot of the panel.

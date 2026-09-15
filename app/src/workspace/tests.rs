@@ -7603,6 +7603,68 @@ fn session_written(scratch: &Scratch, needle: &str) -> String {
 }
 
 #[test]
+fn a_session_save_that_fails_says_so_under_the_tabs_until_one_lands() {
+    // The file the next launch reads is written beside the settings, and a
+    // write that failed was a line in the log: the window opened empty next
+    // time and nobody was told why. The tab list says so now, under the
+    // tabs that will not be back, and stops once a save lands.
+    let scratch = Scratch::new();
+    // A *file* where the folder should be, which nothing can write under.
+    let blocked = scratch.path().join("blocked");
+    fs::write(&blocked, "not a folder\n").expect("writable scratch");
+    let mut harness = Harness::with_settings(1, Settings::load(blocked.join("settings.json")));
+    let pane = harness.pane_ids()[0];
+    let before = frame_text(&harness.frame());
+    assert!(
+        !before.contains("not being remembered"),
+        "the panel complains before any save: {before:?}"
+    );
+
+    let moved = |harness: &mut Harness, to: PathBuf| {
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(
+                &crate::terminal_model::TerminalUpdate::WorkingDirectory(pane, to),
+                ctx,
+            );
+        });
+    };
+    moved(&mut harness, scratch.path().join("one"));
+    harness.wait_for("the failed save never reached the panel", |harness| {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.session_problem().is_some()
+        })
+    });
+    let text = frame_text(&harness.frame());
+    assert!(
+        text.contains("These tabs are not being remembered"),
+        "the panel does not say the save failed: {text:?}"
+    );
+    assert!(
+        text.contains("blocked"),
+        "the reason does not name the path that refused: {text:?}"
+    );
+
+    // Put the folder right and the next save lands, and the panel is quiet.
+    fs::remove_file(&blocked).expect("removable scratch");
+    moved(&mut harness, scratch.path().join("two"));
+    harness.wait_for("the save that landed never cleared the note", |harness| {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.session_problem().is_none()
+        })
+    });
+    let text = frame_text(&harness.frame());
+    assert!(
+        !text.contains("not being remembered"),
+        "the note outlived the save that landed: {text:?}"
+    );
+    let session = crate::session::session_path_beside(&blocked.join("settings.json"));
+    assert!(
+        session.is_file(),
+        "the session was not written once the folder could be made"
+    );
+}
+
+#[test]
 fn a_shell_s_cd_is_written_into_the_session_file_beside_the_settings() {
     // "Open with the tabs and splits the last window had, in their own
     // directories" — and the file said where each pane *started*: a `cd`
