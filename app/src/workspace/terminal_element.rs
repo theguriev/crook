@@ -1185,7 +1185,10 @@ fn paint_selection(
 /// on one: dragging right from the left of a character takes it and dragging
 /// right from its middle does not. Outside the row the answer is its first cell
 /// on the left and its last on the right, which is what a drag that has left
-/// the pane means.
+/// the pane means. A row of no columns has no last cell, so it answers with
+/// column zero rather than reaching below `columns` for one — a value no caller
+/// reads, each having refused an empty grid before it asks, but a total answer
+/// keeps the arithmetic off the one input that could underflow it.
 pub(super) fn column_at(x: f32, width: f32, columns: usize) -> (usize, CellSide) {
     if x < 0. {
         return (0, CellSide::Left);
@@ -1193,7 +1196,7 @@ pub(super) fn column_at(x: f32, width: f32, columns: usize) -> (usize, CellSide)
     let cell = x / width;
     let column = cell.floor() as usize;
     if column >= columns {
-        return (columns - 1, CellSide::Right);
+        return (columns.saturating_sub(1), CellSide::Right);
     }
     let side = if cell.fract() < 0.5 {
         CellSide::Left
