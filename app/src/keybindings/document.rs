@@ -219,7 +219,7 @@ struct Array {
 
 /// Finds the array and the entries in it, or `None` for a file that has none.
 ///
-/// One pass, and it is the same walk [`strip_comments`](super::strip_comments)
+/// One pass, and it is the same walk [`strip_comments`]
 /// makes: a `[` inside a string is not an array and a `,` inside a comment
 /// does not end an entry, so both have to be tracked to find either.
 ///

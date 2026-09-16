@@ -339,7 +339,7 @@ fn heading(name: &str, ui: FamilyId) -> Box<dyn Element> {
 ///
 /// The click is the palette's Enter with a pointer: what the row is about is
 /// said, and then the action runs — one dispatch, in the order
-/// [`Voice`](crate::plugin::Voice) is written for, because an action is applied
+/// [`Voice`] is written for, because an action is applied
 /// after the whole tree has seen the press.
 fn command(
     entry: &Entry,

@@ -9,7 +9,7 @@
 //! The other half of the module is how work gets *back* to this thread. A
 //! background task cannot touch an entity, so its result comes home as a
 //! [`CrookEvent`] on winit's proxy — which is also what the
-//! [`Foreground`](crookui_core::executor::Foreground) executor schedules onto.
+//! [`Foreground`] executor schedules onto.
 //! There is no second scheduler: the event loop is the main-thread executor.
 //!
 //! Ported from Warp's `crates/warpui/src/windowing/winit/{app,event_loop}.rs`

@@ -115,7 +115,7 @@ const WINDOW_SIZE: Vector2F = vec2f(1024., 640.);
 /// Crook does. The window is opened with the application's own chrome, so the
 /// header *is* the title bar and the window's controls are painted over it:
 /// AppKit's traffic lights on macOS, Crook's own three buttons everywhere
-/// else. [`WindowChrome`](crookui::WindowChrome) is where the difference
+/// else. [`WindowChrome`] is where the difference
 /// between those two lives.
 ///
 /// One constant because it is one decision. [`open_window`] opens the window
@@ -244,7 +244,7 @@ struct Overrides {
     /// The other half of the answer `with_plugins` is: that one draws whatever
     /// somebody happens to have installed, which is what makes it useless in
     /// CI, and this one draws a tree written down in the repository. See
-    /// [`plugins::wasm::fixture`](crate::plugins::wasm::fixture).
+    /// [`plugins::wasm::fixture`].
     fixture: Option<PathBuf>,
     /// A module to run without installing it, and to run again every time it
     /// is built.
@@ -1108,7 +1108,7 @@ THE INPUT FIELD:
 /// The plugin chain is counted once and not per plugin, which is the one
 /// approximation here. Each sandboxed plugin gets a runtime of its own and
 /// each runtime parks its own worker between ticks — see
-/// [`plugins::wasm`](crate::plugins::wasm) — so a person with three installed
+/// [`plugins::wasm`] — so a person with three installed
 /// has three of these chains rather than one. One is what a machine with the
 /// chip installed actually has, and the spare below is what keeps the second
 /// from costing anybody a save; a fleet of polling plugins would want this

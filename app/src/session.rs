@@ -3,8 +3,8 @@
 //!
 //! # Why these types exist at all
 //!
-//! Nothing here is a live type. [`Tab`](crate::tab::Tab) holds a
-//! [`PaneGroup`](crate::tab::PaneGroup) holding [`Pane`](crate::tab::Pane)s
+//! Nothing here is a live type. [`Tab`] holds a
+//! [`PaneGroup`] holding [`Pane`]s
 //! holding [`AgentSession`](crate::tab::AgentSession)s, and every one of them
 //! carries identity — a [`PaneId`](crate::tab::PaneId) minted from a
 //! process-wide counter — that means nothing in a later process. Beside them,

@@ -594,7 +594,7 @@ pub struct Workspace {
 
     /// The divider drag in progress, shared by every divider in the window so
     /// that only one can be dragged at a time. See
-    /// [`DividerDrag`](crate::pane_split::DividerDrag).
+    /// [`DividerDrag`].
     divider_drag: DividerDrag,
 
     /// Makes the last session save the one that lands. See
@@ -807,7 +807,7 @@ pub struct Workspace {
     panel_scroll: ScrollStateHandle,
     /// Where the panel drew each of its rows on the last frame, so that a
     /// selection made with the keyboard can be scrolled to. See
-    /// [`RowGeometry`](super::tabs_panel::geometry::RowGeometry).
+    /// [`RowGeometry`].
     panel_rows: RowGeometry,
     /// The box above the list: what has been typed into it, and whether the
     /// keyboard is its.
@@ -1065,7 +1065,7 @@ impl Workspace {
 
     /// Puts a theme on screen, remembers it, and repaints everything.
     ///
-    /// Everything: the chrome reads [`theme`](crate::theme::theme) on the next
+    /// Everything: the chrome reads [`theme`] on the next
     /// render, and every shell already running is handed the new palette,
     /// because a grid resolves its colours through the one it was started
     /// with. A theme that stopped at the edge of the terminal would be the
@@ -2504,7 +2504,7 @@ impl Workspace {
     /// its row was on screen. What it needed was a scrollable that can be told
     /// to make a particular child visible, and what that needs is somewhere
     /// for the children to say where they ended up — which is
-    /// [`RowGeometry`](super::tabs_panel::geometry::RowGeometry).
+    /// [`RowGeometry`].
     ///
     /// Against the row boxes the *last* frame recorded, which is right: the
     /// rows do not move when the selection does, so a frame that has not been
@@ -3584,7 +3584,7 @@ impl Workspace {
     ///
     /// The two that are text out of the terminal go through the same region a
     /// drag over the block makes — see
-    /// [`block_text`](super::block_list::block_text) — so that the menu, the
+    /// [`block_text`] — so that the menu, the
     /// copy control beside it and a selection cannot disagree about where a
     /// folded line ends. The three that are facts *about* the block are copied
     /// as they were read when the menu opened.
@@ -4367,7 +4367,7 @@ impl Workspace {
 
     /// Who draws this window's controls.
     ///
-    /// [`WINDOW_CHROME`](crate::WINDOW_CHROME), handed out from here so that a
+    /// [`WINDOW_CHROME`], handed out from here so that a
     /// renderer asks the workspace about its window rather than reaching for a
     /// constant halfway down an element tree.
     pub(super) fn window_chrome(&self) -> WindowChrome {

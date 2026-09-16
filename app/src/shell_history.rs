@@ -51,7 +51,7 @@ use crate::shell_integration::Shell;
 /// How many commands a pane starts with.
 ///
 /// The same bound the in-session history has — see
-/// [`crate::editor`](crate::editor) — because the two become one list the
+/// [`crate::editor`] — because the two become one list the
 /// moment a pane is used, and a bound that only one half respected would be no
 /// bound at all.
 pub const LIMIT: usize = 1000;

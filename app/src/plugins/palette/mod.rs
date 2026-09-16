@@ -29,7 +29,7 @@
 //!
 //! Which list is showing is worked out from the *text*, not held in a flag,
 //! and that is the design the whole surface turns on — see
-//! [`rows::Mode`](rows::Mode). A mode rather than five surfaces, because a
+//! [`rows::Mode`]. A mode rather than five surfaces, because a
 //! second surface would be a second contributor to `WINDOW_OVERLAY` competing
 //! with this one for a keystroke; and a mode in the text because that is what
 //! a search survives — `split`, `>split` and `?split` are one question asked
