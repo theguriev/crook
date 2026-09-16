@@ -1237,6 +1237,11 @@ pub(crate) fn facts(state: Option<(bool, &str)>, rest: &str, ui: FamilyId) -> Bo
             1.,
             Text::new(tail, ui, DESCRIPTION_SIZE)
                 .with_color(theme().text_muted)
+                // Cut with a mark when the page is too narrow for the whole
+                // line, the way every other run of text here gives way, rather
+                // than clipping a version or a licence off mid-character with
+                // nothing to say it happened.
+                .with_ellipsis(Cut::End)
                 .finish(),
         )
         .finish(),
