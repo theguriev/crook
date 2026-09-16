@@ -205,13 +205,17 @@ pub fn request_text(serial: u64, line_to_caret: &str) -> String {
     format!("{serial}\n{line_to_caret}")
 }
 
-/// The word a completion would replace: everything after the last space.
+/// The word a completion would replace: everything after the last space, tab
+/// or newline of the line up to the caret.
 ///
-/// The same approximation the snippets make, and it has to be: the caller
-/// splices the answer back into the line, and if the two disagreed about where
-/// the word began the result would be a line neither of them meant. Quoting is
-/// not parsed — a path with a space in it completes as the fragment after the
-/// space — which offers too *few* completions rather than the wrong ones.
+/// The snippets break on a space alone (`${line##* }`); breaking on a tab or a
+/// newline as well only ever starts the word *later*, so what this returns is a
+/// suffix of what the shell split off — on an ordinary line, with no tab or
+/// newline before the caret, the very same word. The caller splices the shell's
+/// answer back where this word was, so the two agreeing on where it began is
+/// what keeps the result a line both of them meant. Quoting is not parsed — a
+/// path with a space in it completes as the fragment after the space — which
+/// offers too *few* completions rather than the wrong ones.
 pub fn word_at_end(line_to_caret: &str) -> &str {
     match line_to_caret.rfind([' ', '\t', '\n']) {
         Some(at) => &line_to_caret[at + 1..],

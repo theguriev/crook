@@ -68,6 +68,7 @@ fn test_the_word_a_completion_replaces_is_the_one_after_the_last_space() {
     assert_eq!(word_at_end("cargo"), "cargo");
     assert_eq!(word_at_end("cargo "), "");
     assert_eq!(word_at_end("cat a\tb"), "b");
+    assert_eq!(word_at_end("ls foo\nstat"), "stat");
     assert_eq!(word_at_end(""), "");
 }
 
