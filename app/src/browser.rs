@@ -26,9 +26,10 @@ use crate::process::command;
 
 /// The schemes a printed link is allowed to open.
 ///
-/// The same list `crook_terminal::url` recognises, and deliberately so: this
-/// is the second half of one decision, and a scheme that could be *found* but
-/// not opened would be a link that underlines and then does nothing.
+/// The same list `crook_terminal::url::SCHEMES` recognises, and deliberately
+/// so: this is the second half of one decision, and a scheme that could be
+/// *found* but not opened would be a link that underlines and then does
+/// nothing. A test holds the two lists equal.
 const OPENABLE: [&str; 8] = [
     "https://", "http://", "ftps://", "ftp://", "file://", "ssh://", "git://", "mailto:",
 ];
@@ -102,15 +103,21 @@ mod tests {
 
     #[test]
     fn every_scheme_the_terminal_finds_is_one_this_will_open() {
-        // The two lists are one decision. A scheme that could be found but not
-        // opened would be a link that underlines under the pointer and then
-        // does nothing when it is clicked.
-        for scheme in OPENABLE {
-            assert!(
-                is_openable(&format!("{scheme}example")),
-                "{scheme} is recognised and would not be opened"
-            );
-        }
+        // The two lists are one decision, kept in two crates. A scheme the
+        // terminal recognises but this refuses is a link that underlines
+        // under the pointer and does nothing when it is clicked; one this
+        // would open but the terminal never finds is a scheme no printed link
+        // can carry. So the sets must be equal — and checked against the
+        // terminal's own list, not against this one, which would only prove
+        // it equals itself.
+        let mut found = crook_terminal::url::SCHEMES.to_vec();
+        let mut opens = OPENABLE.to_vec();
+        found.sort_unstable();
+        opens.sort_unstable();
+        assert_eq!(
+            found, opens,
+            "the schemes the terminal finds and the ones the browser opens have drifted apart"
+        );
     }
 
     #[test]

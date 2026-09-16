@@ -67,7 +67,12 @@ impl Url {
 /// somebody wants to click; nothing here guesses at `www.` or at a bare
 /// hostname, because `example.com` in a sentence is a word and underlining it
 /// would make ordinary output twitch under the pointer.
-const SCHEMES: [&str; 8] = [
+///
+/// Public because it is the first half of one decision: whatever underlines
+/// as a link must also be something the host is willing to open, and the
+/// host — `crook::browser` — checks its own list against this one so the two
+/// cannot drift into a link that underlines and then does nothing.
+pub const SCHEMES: [&str; 8] = [
     "https://", "http://", "ftps://", "ftp://", "file://", "ssh://", "git://", "mailto:",
 ];
 
