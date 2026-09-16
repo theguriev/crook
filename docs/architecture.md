@@ -1569,31 +1569,36 @@ What the page took from Warp is the *presentation* and the *shape*, not the plum
 presentation: a rail of pages, category headings with a rule between them,
 label-left/control-right rows with a description line, apply-on-click with no Save button, a
 reset button that doubles as the modified indicator, and inert rows drawn greyed rather than
-dropped. The shape is the more interesting half — settings are a **pane**, the same thing a
-shell lives in, so they open in a tab of their own, sit in the strip beside the work they
-configure, split next to a running shell, and close with the same ×, the same middle click and
-the same close chord — `cmd-w`, `ctrl-shift-w` off macOS — as everything else. Warp's
-`settings_pane.rs` plus its one-per-window pane manager; `TabAction::OpenSettings` is both
-halves of that manager, navigating to the existing
-pane or opening a tab for it.
+dropped. The shape changed once. Settings were a **pane** at first — Warp's design, the same
+thing a shell lives in, opened in a tab of their own and closed with the same close chord —
+and they are a **sidebar section** now. The sidebar is Telegram's shape: one column, with a
+short row of buttons at its foot — Sessions, Settings, Plugins, Store — choosing what fills
+it. They are not tabs and are not drawn as tabs, because what they switch is the whole
+window, which a tab does not do. The rail of pages sits where the tab list was, and the page
+where the panes were. `crook/window` declares the `sidebar.section` slot; `crook/settings`
+fills one, and so do `crook/plugins` and `crook/store`. `--section <name>` shows one by the
+name on its button, the way `--settings` shows a page.
 
-That shape has a price and it is worth naming, because the first draft of this page was a
-modal card specifically to avoid it. `PaneContent` is now an enum, `Pane::session` and
-`Pane::status` return `Option`s, and each of the two row renderers carries one branch for a
-row that stands for something other than an agent — a gear where the status dot goes, and one
-line where the fact table would have resolved three. `RowFacts::settings` is where that line
-is decided, once, for both layouts: without it the "Pane title as: Branch" arm falls back to
-the command and the compact subtitle *is* the command, so the row would read "Settings" over
-"Settings". `Workspace::open_panes` is the other half of the bill: it is what the terminal
-model syncs against, and it filters the settings pane out, because a shell opened for a pane
-that draws no grid is a process nobody can see.
+Being a pane had a price, and paying it back is the other reason it is gone. A settings pane
+was a pane with no shell, so `PaneContent` became an enum and everything that reads a pane —
+the two row renderers, the session file, and `Workspace::open_panes`, which the terminal
+model syncs against and which had to keep a shell off the one that drew no grid — grew a
+branch asking whether a pane was really a pane, with `Pane::session` and `Pane::status`
+returning an `Option` for the answer. A section is not a pane, so the whole bill came back:
+`Pane::session` is an `&AgentSession` again, `Pane::status` an `AgentStatus`, and every one
+of those branches is gone.
 
-The omission is search: Warp filters the rail and the content together from one field, per
-widget, with match counts. That needs a text input, and what Crook has is half of one. The
-model is there and is general — `app/src/editor` draws nothing, touches no clipboard and
-knows no keystroke — but the only element that draws it is `CommandInput`, which measures in
-terminal cells against a `CellFont` and reads a pane's `TextInput`. `crookui_core` still has
-no text field of its own, so the gap here is an element, not a model.
+Search is in, and it closed the one gap this list used to name. It is a single field at the
+top of the rail, filtering the rail and the content together — the query matched against
+each row's own keywords and its category's, so `theme` finds the theme row inside the
+category the word names and `keys` finds every binding. It took the text-field *element*
+Crook had been missing: the model was always there — `app/src/editor` draws nothing, touches
+no clipboard and knows no keystroke — but the only thing that drew it was `CommandInput`,
+which measures in terminal cells against a `CellFont`. `app/src/workspace/text_field.rs` is
+that element now; the settings search is the first text input in Crook that is not a pane's,
+and the tab-list search box and the worktree dialog draw the same one. `crookui_core` still
+has no text field of its own — the one that was missing turned out to belong beside the
+workspace's views rather than in the toolkit.
 
 **A theme *system* the size of Warp's.** Themes themselves are in — see below — but Warp's
 appearance layer is a great deal more than a palette: gradient fills for background, accent and
