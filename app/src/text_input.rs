@@ -255,7 +255,16 @@ impl TextInput {
 
         let stem = completion::word_at_end(&self.line_to_caret()).to_owned();
         let typed = answer.insertion(&stem).is_some_and(|whole| {
-            self.edit(|editor| editor.insert(&whole[stem.len()..]));
+            self.edit(|editor| {
+                // In place of the stem, not after it. The match ignores case,
+                // so the letters typed may be the wrong case for the name the
+                // shell returned — `car` for `Cargo.toml`; appending the tail
+                // would leave `cargo.toml`, a path that is not there, where
+                // replacing the stem writes the name the shell actually gave.
+                let caret = editor.caret();
+                editor.set_selection(Selection::new(caret - stem.len(), caret));
+                editor.insert(&whole);
+            });
             true
         });
 
@@ -267,7 +276,10 @@ impl TextInput {
         let word = completion::word_at_end(&line);
         let offered = if answer.matching(word).len() > 1 {
             Some(Offer {
-                stem,
+                // The word as it now stands, in the shell's case: a later
+                // keystroke extends this, not the mixed-case fragment that was
+                // first typed and has since been replaced.
+                stem: word.to_owned(),
                 answer,
                 at: 0,
             })
@@ -702,6 +714,24 @@ mod tests {
 
         assert_eq!(input.editor().text(), "cargo Cargo.");
         assert_eq!(input.suggestion().as_deref(), Some("toml"));
+    }
+
+    #[test]
+    fn tab_completes_across_a_case_difference_and_corrects_it() {
+        // fish's completion ignores case, so a lowercase `c` comes back as
+        // `Cargo.`. Typing the tail onto `c` would leave `cargo.`, a name that
+        // is not there; the stem is replaced with the shell's own case, and
+        // the suggestion that follows reads off the corrected word.
+        let input = holding("cargo c");
+        answered(&input, &["Cargo.toml", "Cargo.lock"]);
+
+        assert_eq!(input.editor().text(), "cargo Cargo.");
+        assert_eq!(input.suggestion().as_deref(), Some("toml"));
+
+        // And a single case-mismatched candidate completes whole.
+        let one = holding("read");
+        answered(&one, &["README.md"]);
+        assert_eq!(one.editor().text(), "README.md");
     }
 
     #[test]
