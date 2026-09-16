@@ -8937,11 +8937,15 @@ fn the_theme_row_s_name_gives_way_to_the_preview_beside_it() {
 }
 
 #[test]
-fn a_row_too_narrow_for_its_label_and_control_cuts_the_label_and_keeps_the_control() {
+fn a_row_too_narrow_for_its_label_and_control_wraps_the_label_and_keeps_the_control() {
     // The label was a plain row child beside a spacer, so in a window too
     // narrow for the pair the control was what got pushed past the page's
     // edge: "Close the focused pane" whole, its chord chip half gone and the
-    // Unbind beside it gone entirely. The label is the flexible child now.
+    // Unbind beside it gone entirely. The label is the flexible child now, and
+    // it gives way by wrapping rather than by being cut -- a fixed-width chord
+    // chip and its button leave so little of a narrow page that a cut label
+    // collapses to a few letters, and two rows that do different things read
+    // alike.
     let mut harness = Harness::new(1);
     harness.open_settings_page();
     harness.select_settings_section("Keyboard Shortcuts");
@@ -8955,7 +8959,6 @@ fn a_row_too_narrow_for_its_label_and_control_cuts_the_label_and_keeps_the_contr
     let lines = text_lines(&scene, |position| {
         position.y() >= pane.min_y() && position.y() <= pane.max_y()
     });
-    let mut cut = 0;
     for (start, text) in &lines {
         if start.x() < pane.min_x() {
             continue;
@@ -8966,11 +8969,21 @@ fn a_row_too_narrow_for_its_label_and_control_cuts_the_label_and_keeps_the_contr
             "{text:?} ends at {end}, past the page's edge at {}",
             pane.max_x()
         );
-        if text.contains('…') {
-            cut += 1;
-        }
     }
-    assert!(cut > 0, "no label gave way in a 560px window: {lines:?}");
+
+    // The label gave way by wrapping. "Split downwards" is too wide for the
+    // room its chord chip leaves, so it is not drawn on one line -- and its
+    // second word, which no command's path spells, is still on the page rather
+    // than cut away with a mark, which is the whole of what wrapping buys over
+    // the ellipsis that was here.
+    assert!(
+        lines.iter().all(|(_, text)| text != "Split downwards"),
+        "the row was not narrow enough to make the label wrap: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|(_, text)| text.contains("downwards")),
+        "the label was cut instead of wrapped -- its last word is gone: {lines:?}"
+    );
     assert!(
         lines.iter().any(|(_, text)| text.contains("Unbind")),
         "the buttons beside the chords are gone: {lines:?}"

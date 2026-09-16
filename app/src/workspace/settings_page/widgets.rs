@@ -398,20 +398,24 @@ pub(crate) fn row(words: Words, enabled: bool, control: Box<dyn Element>, ui: Fa
                 // control leaves, which is what pushes the control against
                 // the right edge — so rows with labels of wildly different
                 // lengths still line their controls up — and it is the label
-                // that gives way, cut with a mark, when the two do not fit.
+                // that gives way, wrapping onto a second line, when the two do not
+                // fit.
                 // It was a plain child beside a spacer, and in a window too
                 // narrow for the pair the control was the one pushed past the
                 // page's edge, with the label whole and the button gone.
                 .with_child(
+                    // The label goes straight into the flex, not through an
+                    // `Align`: a flexible child is handed the bounded width
+                    // left over as its maximum, and a `Paragraph` wraps to
+                    // that -- but an `Align` between them measures its child
+                    // loose, so the width never reaches the label and it lays
+                    // out on one line and is cut. Left is where a `Paragraph`
+                    // starts anyway, so the `Align` only cost it its wrap.
                     Expanded::new(
                         1.,
-                        Align::new(
-                            Container::new(label_text(words.label.clone(), enabled, ui))
-                                .with_margin_right(LABEL_GAP)
-                                .finish(),
-                        )
-                        .left()
-                        .finish(),
+                        Container::new(label_text(words.label.clone(), enabled, ui))
+                            .with_margin_right(LABEL_GAP)
+                            .finish(),
                     )
                     .finish(),
                 )
@@ -440,16 +444,25 @@ pub(crate) fn row(words: Words, enabled: bool, control: Box<dyn Element>, ui: Fa
 /// label is cut short of when the page is too narrow for both.
 const LABEL_GAP: f32 = 12.;
 
-/// A row's label, greyed when the row is inert, and cut with a mark at the
-/// end where it runs out of the room the control leaves it.
+/// A row's label, greyed when the row is inert, and wrapped onto a second line
+/// where it runs out of the room the control leaves it.
+///
+/// A `Paragraph` rather than an ellipsised `Text`: the control beside a row is
+/// fixed-width -- a chord chip and its button -- and in a narrow window it
+/// takes so much of the line that a cut label collapses to a few letters,
+/// which on the shortcuts page left `Split to the right` and `Split downwards`
+/// both reading `Spli...`, two rows that do different things and could not be
+/// told apart. The label is still the row's flexible child, so the control is
+/// still pushed to the right edge and never off it; the label now gives way by
+/// wrapping instead of by vanishing, and a label that fits a line -- which at
+/// any ordinary width is all of them -- draws exactly the one line it did.
 fn label_text(label: String, enabled: bool, ui: FamilyId) -> Box<dyn Element> {
-    Text::new(label, ui, LABEL_SIZE)
+    Paragraph::new(label, ui, LABEL_SIZE)
         .with_color(if enabled {
             theme().text_primary
         } else {
             theme().text_muted
         })
-        .with_ellipsis(Cut::End)
         .finish()
 }
 
