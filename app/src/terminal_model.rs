@@ -755,6 +755,7 @@ impl TerminalModel {
             wake: Arc::new(Wake::default()),
             grid: AtomicU32::new(packed(INITIAL_GRID)),
             resize_failing: AtomicBool::new(false),
+            scroll_remainder: AtomicU32::new(0.0f32.to_bits()),
             publish: Mutex::new(PublishState::new()),
         });
 
@@ -1312,6 +1313,25 @@ impl TerminalHandle {
         self.drive(|terminal| terminal.scroll_lines(delta));
     }
 
+    /// The whole lines a scroll of `delta` lines should move now, carrying the
+    /// fraction left over to the next call.
+    ///
+    /// A wheel turns in whole lines and this hands them straight back. A
+    /// trackpad turns in pixels, which reach the caller as a fraction of a
+    /// line, and a fraction rounded to an integer every event is either dropped
+    /// (a slow drag, nothing moves) or doubled (`round(0.5)` is a whole line).
+    /// Accumulated instead, a drag adds up and a high-resolution wheel keeps
+    /// its pace. The remainder lives on the pane, so two panes do not share
+    /// one and switching between them does not lurch.
+    pub fn take_scroll_lines(&self, delta: f32) -> i32 {
+        let carried = f32::from_bits(self.0.scroll_remainder.load(Ordering::Relaxed));
+        let (whole, remainder) = whole_lines(carried, delta);
+        self.0
+            .scroll_remainder
+            .store(remainder.to_bits(), Ordering::Relaxed);
+        whole
+    }
+
     /// Puts the viewport back on the live output.
     pub fn scroll_to_bottom(&self) {
         self.drive(Terminal::scroll_to_bottom);
@@ -1365,6 +1385,17 @@ impl TerminalHandle {
     }
 }
 
+/// The whole lines to move now and the fraction to carry, given the fraction
+/// carried from before and a new `delta` of lines.
+///
+/// Truncates towards zero rather than rounding, so the carry is always what is
+/// left of the line and never borrows against the next one.
+fn whole_lines(carried: f32, delta: f32) -> (i32, f32) {
+    let total = carried + delta;
+    let whole = total.trunc();
+    (whole as i32, total - whole)
+}
+
 /// Everything a reader thread and the main thread share for one terminal.
 struct Shared {
     terminal: Mutex<Terminal>,
@@ -1394,6 +1425,14 @@ struct Shared {
     /// Whether the last resize failed, so a pty that refuses every one of them
     /// is complained about once rather than sixty times a second.
     resize_failing: AtomicBool,
+
+    /// The fraction of a line a scroll gesture has asked for and not yet been
+    /// given, as `f32` bits. A trackpad reports a scroll in pixels and a slow
+    /// drag is a few of them an event — less than a line, which rounded to
+    /// nothing and was dropped, so the grid did not move until a flick crossed
+    /// a whole line at once. Carrying the remainder here makes a slow drag add
+    /// up. Touched only by the main thread, from [`TerminalHandle::take_scroll_lines`].
+    scroll_remainder: AtomicU32,
 
     /// The throttle: what has been parsed, and when it was last drawn.
     publish: Mutex<PublishState>,

@@ -219,6 +219,7 @@ fn session() -> Option<Arc<Shared>> {
         wake: Arc::new(Wake::default()),
         grid: AtomicU32::new(packed(INITIAL_GRID)),
         resize_failing: AtomicBool::new(false),
+        scroll_remainder: AtomicU32::new(0.0f32.to_bits()),
         publish: Mutex::new(PublishState::new()),
     }))
 }
@@ -382,4 +383,24 @@ fn a_resize_that_reached_the_pty_is_not_sent_twice() {
     assert!(!handle.resize(TerminalSize::new(100, 30)));
     assert_eq!(TerminalSize::new(100, 30), shared.lock().size());
     assert!(handle.resize(TerminalSize::new(60, 20)));
+}
+
+#[test]
+fn a_scroll_shorter_than_a_line_is_carried_to_the_next_one() {
+    // A trackpad reports pixels, which reach this as a fraction of a line an
+    // event. Rounded, a slow drag was dropped and never moved the grid;
+    // carried, the fractions add up to a line.
+    assert_eq!((0, 0.5), whole_lines(0.0, 0.5));
+    assert_eq!((1, 0.0), whole_lines(0.5, 0.5));
+
+    // A wheel notch is a whole line and leaves nothing behind.
+    assert_eq!((1, 0.0), whole_lines(0.0, 1.0));
+
+    // A flick crosses several lines at once, and the fraction still carries.
+    assert_eq!((2, 0.5), whole_lines(0.0, 2.5));
+
+    // The other way carries a negative remainder, and truncation never borrows
+    // a line it has not been given.
+    assert_eq!((0, -0.5), whole_lines(0.0, -0.5));
+    assert_eq!((-1, 0.0), whole_lines(-0.5, -0.5));
 }
