@@ -155,6 +155,13 @@ fn test_a_case_difference_is_still_the_start_of_a_name() {
     let answer = completions(&["Cargo.toml", "Cargo.lock"]);
 
     assert_eq!(answer.matching("car"), vec!["Cargo.toml", "Cargo.lock"]);
+
+    // And it completes, in the name's own case. What the two share is
+    // `Cargo.`, not `cargo.`, so a lowercase `car` is answered with the case
+    // the shell gave rather than left as a name it never offered.
+    assert_eq!(answer.insertion("car").as_deref(), Some("Cargo."));
+    let one = completions(&["Cargo.toml"]);
+    assert_eq!(one.insertion("car").as_deref(), Some("Cargo.toml"));
 }
 
 #[test]

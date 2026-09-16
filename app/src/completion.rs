@@ -131,9 +131,17 @@ impl Completions {
     /// several insert as much as they agree on, and an answer that agrees on
     /// no more than what is already typed inserts nothing — at which point the
     /// candidates themselves are what a person needs to see.
+    ///
+    /// In place of `word`, not after it. The match is case-insensitive — see
+    /// [`Self::matching`] — so the letters already typed may be the wrong case
+    /// for the name the shell returned, `car` for `Cargo.toml`. What comes
+    /// back is the shared prefix in the shell's own case, for the caller to put
+    /// where `word` was: that is what turns `car` into `Cargo` rather than
+    /// leaving `cargo`, a name that is not there.
     pub fn insertion(&self, word: &str) -> Option<String> {
         let prefix = self.common_prefix();
-        (prefix.len() > word.len() && prefix.starts_with(word)).then_some(prefix)
+        (prefix.chars().count() > word.chars().count() && starts_with_ignoring_case(&prefix, word))
+            .then_some(prefix)
     }
 }
 
