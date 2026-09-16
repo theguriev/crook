@@ -146,6 +146,24 @@ fn test_a_window_can_start_part_way_down_the_grid() {
 }
 
 #[test]
+fn test_a_write_past_the_line_stops_where_the_text_does() {
+    // The columns a selection resolves to can run past the last character on a
+    // row — a drag that ended in the blank a shorter line leaves behind. A
+    // copy stops at the text, and the two stores must agree that it does: the
+    // grid keeps blanks out to its edge to hand back, the harvested block kept
+    // none of them, and a highlight taken from one with a copy taken from the
+    // other is the bug this type exists to prevent.
+    for_each("hi", 1, 10, |rows, from| {
+        let mut out = String::new();
+        rows.write(0, 0..10, &mut out);
+        assert_eq!(
+            "hi", out,
+            "{from}: a write past the line invented trailing blanks"
+        );
+    });
+}
+
+#[test]
 fn test_a_row_the_block_does_not_have_is_answered_rather_than_indexed() {
     // A selection is anchored to a row, and the window under it moves: the
     // wheel takes rows off the top of a grid and a shorter pane takes them off
