@@ -145,7 +145,8 @@ impl InputState {
                 is_synthetic: false,
                 ..
             } => {
-                let keystroke = Keystroke::new(event_key_name(event)?, self.modifiers);
+                let keystroke =
+                    Keystroke::new(event_key_name(event, self.modifiers)?, self.modifiers);
                 match event.state {
                     ElementState::Pressed => Some(Event::KeyDown {
                         keystroke,
@@ -252,11 +253,105 @@ fn to_mouse_button(button: winit::event::MouseButton) -> Option<MouseButton> {
 /// NumLock off, the keypad's `1` reports `End`, and that is what it means: the
 /// key is navigating, not typing, and naming it `numpad1` would send a digit
 /// where every terminal sends a cursor movement.
-fn event_key_name(event: &winit::event::KeyEvent) -> Option<String> {
+fn event_key_name(event: &winit::event::KeyEvent, modifiers: Modifiers) -> Option<String> {
     if let Some(name) = keypad_name(event) {
         return Some(name.to_owned());
     }
-    key_name(&event.logical_key)
+    chord_key_name(&event.logical_key, event.physical_key, modifiers)
+}
+
+/// The name a chord is matched against: what the layout printed, unless the
+/// layout printed a character no chord is written in.
+///
+/// A shortcut answers to *where* a key is, not to what a layout prints on it:
+/// `ctrl+t` has to fire from the physical `t` key whether the character there
+/// is Latin or Cyrillic, and `ctrl+c` has to reach the shell as an interrupt
+/// either way. So a character outside ASCII — which no chord and no control
+/// code is written in, and which would otherwise match nothing — is answered by
+/// the character the same physical key carries on a US keyboard, but only while
+/// a chord modifier is down. Without one the key is typing, and what it types is
+/// the layout's business and travels in the event's text, not in this name.
+///
+/// An ASCII character is left exactly as the layout gave it: it is already the
+/// base a chord is written in, and the shifted half of a key — `}` against `]`
+/// — that the chord table depends on is the layout's to keep.
+fn chord_key_name(
+    logical: &winit::keyboard::Key,
+    physical: winit::keyboard::PhysicalKey,
+    modifiers: Modifiers,
+) -> Option<String> {
+    if (modifiers.ctrl || modifiers.cmd || modifiers.alt)
+        && let Key::Character(text) = logical
+        && !text.is_ascii()
+        && let Some(name) = physical_key_name(physical)
+    {
+        return Some(name.to_owned());
+    }
+    key_name(logical)
+}
+
+/// The character a physical key carries on a US keyboard, for the keys a chord
+/// or a control code is ever written against.
+///
+/// `KeyCode` is the position, named as US-QWERTY labels it and independent of
+/// the layout in force, so this is what turns "the key where `t` is" back into
+/// `t` under a layout that prints something else there.
+fn physical_key_name(physical: winit::keyboard::PhysicalKey) -> Option<&'static str> {
+    use winit::keyboard::{KeyCode, PhysicalKey};
+
+    let PhysicalKey::Code(code) = physical else {
+        return None;
+    };
+    Some(match code {
+        KeyCode::KeyA => "a",
+        KeyCode::KeyB => "b",
+        KeyCode::KeyC => "c",
+        KeyCode::KeyD => "d",
+        KeyCode::KeyE => "e",
+        KeyCode::KeyF => "f",
+        KeyCode::KeyG => "g",
+        KeyCode::KeyH => "h",
+        KeyCode::KeyI => "i",
+        KeyCode::KeyJ => "j",
+        KeyCode::KeyK => "k",
+        KeyCode::KeyL => "l",
+        KeyCode::KeyM => "m",
+        KeyCode::KeyN => "n",
+        KeyCode::KeyO => "o",
+        KeyCode::KeyP => "p",
+        KeyCode::KeyQ => "q",
+        KeyCode::KeyR => "r",
+        KeyCode::KeyS => "s",
+        KeyCode::KeyT => "t",
+        KeyCode::KeyU => "u",
+        KeyCode::KeyV => "v",
+        KeyCode::KeyW => "w",
+        KeyCode::KeyX => "x",
+        KeyCode::KeyY => "y",
+        KeyCode::KeyZ => "z",
+        KeyCode::Digit0 => "0",
+        KeyCode::Digit1 => "1",
+        KeyCode::Digit2 => "2",
+        KeyCode::Digit3 => "3",
+        KeyCode::Digit4 => "4",
+        KeyCode::Digit5 => "5",
+        KeyCode::Digit6 => "6",
+        KeyCode::Digit7 => "7",
+        KeyCode::Digit8 => "8",
+        KeyCode::Digit9 => "9",
+        KeyCode::Minus => "-",
+        KeyCode::Equal => "=",
+        KeyCode::BracketLeft => "[",
+        KeyCode::BracketRight => "]",
+        KeyCode::Backslash => "\\",
+        KeyCode::Semicolon => ";",
+        KeyCode::Quote => "'",
+        KeyCode::Backquote => "`",
+        KeyCode::Comma => ",",
+        KeyCode::Period => ".",
+        KeyCode::Slash => "/",
+        _ => return None,
+    })
 }
 
 /// The `numpad*` name for a keypad key that is typing rather than navigating,
@@ -418,5 +513,43 @@ mod tests {
         assert_eq!(named_key_name(NamedKey::F5), "f5");
         assert_eq!(key_name(&Key::Character("A".into())).unwrap(), "a");
         assert_eq!(key_name(&Key::Dead(None)), None);
+    }
+
+    #[test]
+    fn a_shortcut_answers_to_the_physical_key_under_a_non_latin_layout() {
+        use winit::keyboard::{KeyCode, PhysicalKey};
+
+        // The physical `t` key, printing a Cyrillic `е` under a Russian layout.
+        let cyrillic = Key::Character("е".into());
+        let t = PhysicalKey::Code(KeyCode::KeyT);
+
+        // With a chord modifier down it is the shortcut it looks like: ctrl and
+        // the command key both reach `t`, so ctrl+t and cmd+t fire, and ctrl+c
+        // on a Cyrillic `с` reaches the shell as an interrupt.
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Modifiers::default()
+        };
+        let cmd = Modifiers {
+            cmd: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(chord_key_name(&cyrillic, t, ctrl).as_deref(), Some("t"));
+        assert_eq!(chord_key_name(&cyrillic, t, cmd).as_deref(), Some("t"));
+
+        // Without one it is typing, and the layout's own character stands. What
+        // reaches the shell is the event's text, not this name; nothing here
+        // turns a typed `е` into a `t`.
+        assert_eq!(
+            chord_key_name(&cyrillic, t, Modifiers::default()).as_deref(),
+            Some("е")
+        );
+
+        // A Latin character is already what a chord is written in and is left
+        // alone, shifted halves and all: `}` stays `}` rather than collapsing
+        // onto the `]` its physical key also carries.
+        let brace = Key::Character("}".into());
+        let bracket = PhysicalKey::Code(KeyCode::BracketRight);
+        assert_eq!(chord_key_name(&brace, bracket, ctrl).as_deref(), Some("}"));
     }
 }
