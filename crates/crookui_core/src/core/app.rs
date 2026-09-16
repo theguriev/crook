@@ -152,7 +152,7 @@ pub struct AppContext {
     /// Child view to parent view, per window: the responder chain.
     ///
     /// Two things write here. Creating a view through a
-    /// [`ViewContext`](crate::ViewContext) records parentage immediately, and
+    /// [`ViewContext`] records parentage immediately, and
     /// laying out a [`ChildView`](crate::elements::ChildView) reports it after
     /// the fact. The second is what makes the chain follow what is actually on
     /// screen; the first is what gives a view that is never rendered an

@@ -95,11 +95,13 @@ jobs:
       # The comments link to the code they explain, and a link to an item
       # that was renamed or removed is a comment that has quietly started
       # lying. Private items included, since almost every link is to one.
+      # `redundant_explicit_links` keeps `[`Foo`](Foo)` — a target that only
+      # repeats what the text already resolves to — out of the same comments.
       - name: cargo doc
         shell: bash
         run: cargo doc --locked --no-deps --workspace --document-private-items
         env:
-          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links
+          RUSTDOCFLAGS: -D rustdoc::broken_intra_doc_links -D rustdoc::redundant_explicit_links
 
       # The half of `crook_plugin_api` a host build never compiles: the
       # `#[link_section]` arms of `icon!` and `preview!` are gated on wasm32,

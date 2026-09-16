@@ -44,7 +44,7 @@
 //! grid rather than a list is [`TerminalElement`](super::TerminalElement)'s,
 //! and a selection made here is let go of when the pane crosses to it, because
 //! the two number their rows differently — see
-//! [`Cells`](crate::selection::Cells). And a block harvested at a wider pane
+//! [`Cells`]. And a block harvested at a wider pane
 //! than the one drawing it holds rows that cannot be drawn: the highlight
 //! stops with the glyphs, while the copy still takes the whole row.
 //!

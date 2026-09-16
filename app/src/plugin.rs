@@ -982,7 +982,7 @@ impl Host {
     ///
     /// The host makes the field rather than taking one, because a plugin
     /// builds before the workspace exists and there is nothing to take one
-    /// from; what it gets is an [`Rc`](std::rc::Rc) it keeps and hands to an
+    /// from; what it gets is an [`Rc`] it keeps and hands to an
     /// element every frame, which is how every field in this application is
     /// held.
     ///

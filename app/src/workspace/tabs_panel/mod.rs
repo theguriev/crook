@@ -14,7 +14,7 @@
 //! it opened is about the list, so the list's own secondary press opens it —
 //! and the `+` is at the foot of the list, which is where Warp's *browser*
 //! puts it. What was left of the bar was an empty strip, and an empty strip
-//! is chrome that says nothing. See [`controls`](super::controls).
+//! is chrome that says nothing. See [`controls`].
 //!
 //! The one thing that could not go with it is the corner: on a
 //! client-decorated macOS window the window's own controls are painted over
@@ -237,7 +237,7 @@ pub(super) fn render(workspace: &Workspace, body: Box<dyn Element>) -> Box<dyn E
 /// two-row list from measuring a viewport tall and scrolling — and a flexible
 /// child of an infinite axis is a debug assertion. Out here the axis is real,
 /// but the room under the band is not the band's either: see
-/// [`controls`](super::controls) for why the button is a band and not the
+/// [`controls`] for why the button is a band and not the
 /// column.
 pub(super) fn tab_list(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
     let scroller = Scrollable::new(

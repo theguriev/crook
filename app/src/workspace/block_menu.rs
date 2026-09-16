@@ -58,7 +58,7 @@
 //! They are [`tab_options_menu`](super::tab_options_menu)'s, and they are
 //! written out there: the root is a [`Container`] with a background, because a
 //! container is the only element that records a hit rect; and the popup is
-//! painted one layer above its own [`Dismiss`](crookui_core::elements::Dismiss)
+//! painted one layer above its own [`Dismiss`]
 //! underlay, so a press on its padding is covered rather than a dismissal.
 //!
 //! Where this menu differs is what a click does: **every entry closes it.**

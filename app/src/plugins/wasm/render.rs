@@ -263,7 +263,7 @@ pub(super) struct Chrome<'a> {
     placement: Placement,
     /// What the host is holding on this plugin's behalf: the field of
     /// whatever picker it has up, the row the keyboard is on, the menu that is
-    /// open. See [`picker`](super::picker).
+    /// open. See [`picker`].
     held: &'a Rc<Held>,
     /// What a field pastes from.
     clipboard: &'a Clipboard,

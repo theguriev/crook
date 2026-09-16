@@ -81,14 +81,14 @@ pub enum WorkspaceAction {
     /// Show one section of the sidebar, or `None` for the tab list.
     ///
     /// The sections come from a slot, so this carries a
-    /// [`SectionId`](crate::plugin::SectionId) — interned, because the enum is
+    /// [`SectionId`] — interned, because the enum is
     /// `Copy` and a section is named by an `owner/entry` string.
     ShowSection(Option<SectionId>),
     /// Run a named action, which is what every plugin's is.
     ///
     /// Carried as an id rather than an [`ActionName`](crate::plugin::ActionName)
     /// because this enum is `Copy` and a name is a `String`; the host resolves
-    /// one to the other. See [`ActionId`](crate::plugin::ActionId).
+    /// one to the other. See [`ActionId`].
     Run(ActionId),
     /// Run a named action *about* something: a row of a list, a plugin on a
     /// card.
@@ -123,7 +123,7 @@ pub enum WorkspaceAction {
 
 /// Something an action is about, as something `Copy`.
 ///
-/// The same trick [`SectionId`](crate::plugin::SectionId) plays: the
+/// The same trick [`SectionId`] plays: the
 /// workspace keeps every subject ever handed out, in order, and this is the
 /// index. Interned once per distinct text and never forgotten, which is what
 /// makes it safe to carry across frames — a card drawn on Tuesday still says

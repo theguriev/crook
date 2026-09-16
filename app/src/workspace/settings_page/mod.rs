@@ -13,7 +13,7 @@
 //! the panel's body while the settings are showing, and the page is the
 //! window's. Neither draws a width, a border or a fill, because the panel and
 //! the window already have them — and neither draws its own frame either, for
-//! the reason [`section`](super::section) exists: the Plugins section is the
+//! the reason [`section`] exists: the Plugins section is the
 //! same two halves, and it was drawing them differently.
 //!
 //! There is no close button in the corner and no Escape binding. Both would be
@@ -53,7 +53,7 @@
 //! the `order` each page asks for; the mouse-state map is keyed by a string
 //! rather than by a `Control` variant, because a plugin's rows are not
 //! enumerable here; and [`Words`](search::Words) and
-//! [`Category`](widgets::Category) hold owned text, because a plugin's labels
+//! [`Category`] hold owned text, because a plugin's labels
 //! are not literals in this crate.
 //!
 //! # What it does not have
