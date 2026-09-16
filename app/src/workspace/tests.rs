@@ -9523,6 +9523,26 @@ mod shells {
         harness.wait_for("the shell never printed the marker", |harness| {
             harness.terminal_text(pane).contains(marker)
         });
+        // Then wait for the grid to stop moving before reading a row off it.
+        // The marker appears with the command's output, but the shell prints
+        // its next prompt a beat later, and in a short pane that prompt
+        // scrolls the marker up off the row this would return — after which a
+        // drag by that row lands on the prompt instead. There are no marks
+        // here to ask "are you back at a prompt", so this waits for the text
+        // to hold still: a handful of reads that agree is the output done and
+        // the prompt arrived, on a runner however slow.
+        let mut last: Option<String> = None;
+        let mut still = 0;
+        harness.wait_for("the grid never settled after the command", |harness| {
+            let now = harness.terminal_text(pane);
+            if last.as_ref() == Some(&now) {
+                still += 1;
+            } else {
+                still = 0;
+                last = Some(now);
+            }
+            still >= 4
+        });
         harness.frame();
         harness
             .terminal_text(pane)
