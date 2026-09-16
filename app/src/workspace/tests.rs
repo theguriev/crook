@@ -8876,16 +8876,62 @@ fn no_settings_page_paints_a_rect_with_a_negative_side_in_a_small_window() {
     for page in ["Appearance", "Shell", "Keyboard Shortcuts", "About"] {
         harness.select_settings_section(page);
         let scene = harness.frame_sized(vec2f(480., 360.));
-        // Every rect the layers hold, not `visible_rects`: a rect the wrong
-        // way round has no intersection with anything, and would be filtered
-        // out by the very helper meant to find it.
-        for rect in scene.layers().flat_map(|layer| layer.rects.iter()) {
-            assert!(
-                rect.bounds.width() >= 0. && rect.bounds.height() >= 0.,
-                "{page}: a rect came out of layout with a negative side: {:?}",
-                rect.bounds
-            );
-        }
+        assert_no_rect_the_wrong_way_round(&scene, page);
+    }
+}
+
+/// Asserts no rect in `scene` came out of layout with a negative side.
+///
+/// A box handed less room than its margin comes out a negative width, and the
+/// renderer panics clamping a corner radius between zero and half of it. Every
+/// rect the layers hold is checked, not `visible_rects`: a rect the wrong way
+/// round has no intersection with anything, and the very helper meant to find
+/// it would filter it out.
+fn assert_no_rect_the_wrong_way_round(scene: &Scene, surface: &str) {
+    for rect in scene.layers().flat_map(|layer| layer.rects.iter()) {
+        assert!(
+            rect.bounds.width() >= 0. && rect.bounds.height() >= 0.,
+            "{surface}: a rect came out of layout with a negative side: {:?}",
+            rect.bounds
+        );
+    }
+}
+
+#[test]
+fn no_other_surface_paints_a_rect_with_a_negative_side_in_a_small_window() {
+    // The sibling of the settings-page check above: the same underflow can land
+    // on any surface that packs a row tight, not only a settings page. The two
+    // destinations, a docked panel, a tab menu and the palette are squeezed to
+    // the same window and read the same way. Each starts from its own harness
+    // so an overlay one leaves up cannot colour the next.
+    let window = vec2f(480., 360.);
+
+    {
+        let mut harness = Harness::new(1);
+        harness.show_section("crook/store/section");
+        assert_no_rect_the_wrong_way_round(&harness.frame_sized(window), "Store");
+    }
+    {
+        let mut harness = Harness::new(1);
+        harness.show_section("crook/plugins/section");
+        assert_no_rect_the_wrong_way_round(&harness.frame_sized(window), "Plugins");
+    }
+    {
+        let mut harness = Harness::new(1);
+        open_palette(&mut harness, "");
+        assert_no_rect_the_wrong_way_round(&harness.frame_sized(window), "palette");
+    }
+    {
+        let mut harness = Harness::new(1);
+        harness.open_theme_panel();
+        assert_no_rect_the_wrong_way_round(&harness.frame_sized(window), "theme panel");
+    }
+    {
+        let mut harness = Harness::new(1);
+        let tab = harness.tab_ids()[0];
+        let pane = harness.focused_pane_id().expect("a pane to open a menu on");
+        harness.open_tab_menu_on(tab, pane);
+        assert_no_rect_the_wrong_way_round(&harness.frame_sized(window), "tab menu");
     }
 }
 
