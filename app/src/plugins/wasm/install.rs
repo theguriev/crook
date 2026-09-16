@@ -33,6 +33,7 @@
 //! running somebody's plugins would be indistinguishable from losing them. It
 //! is migrated the first time that plugin is installed again.
 
+use crate::filename::windows_reserved;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -243,7 +244,7 @@ fn version_folder(version: &str) -> Result<String, String> {
         // which makes this cheaper than making every comparison survive one.
         && !version.ends_with('.')
         // And a version whose name Windows keeps for a device — `con`, `nul`,
-        // `com1` — names no directory at all there; see [`windows_reserved`].
+        // `com1` — names no directory at all there; see `filename::windows_reserved`.
         && !windows_reserved(version)
         && version.bytes().all(|byte| {
             byte.is_ascii_alphanumeric()
@@ -261,44 +262,6 @@ fn version_folder(version: &str) -> Result<String, String> {
              directory name"
         )),
     }
-}
-
-/// Whether a name is one Windows keeps for a device rather than a file.
-///
-/// `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9` and `LPT1`-`LPT9` name the console,
-/// a printer, the serial and parallel ports and the bit bucket — with any
-/// extension or none, so `con.wasm` is refused as surely as `con` — and a
-/// directory cannot be created under one. Case does not matter to Windows, so
-/// it does not matter here. Refused on every platform for the reason the rest
-/// of [`version_folder`] refuses things: a plugin a manifest installs on one
-/// machine and not another is worse than one it installs on neither.
-fn windows_reserved(name: &str) -> bool {
-    let stem = name.split('.').next().unwrap_or(name);
-    matches!(
-        stem.to_ascii_lowercase().as_str(),
-        "con"
-            | "prn"
-            | "aux"
-            | "nul"
-            | "com1"
-            | "com2"
-            | "com3"
-            | "com4"
-            | "com5"
-            | "com6"
-            | "com7"
-            | "com8"
-            | "com9"
-            | "lpt1"
-            | "lpt2"
-            | "lpt3"
-            | "lpt4"
-            | "lpt5"
-            | "lpt6"
-            | "lpt7"
-            | "lpt8"
-            | "lpt9"
-    )
 }
 
 #[cfg(test)]
