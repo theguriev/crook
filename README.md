@@ -686,7 +686,7 @@ docs/plugins.md          the two plugin tiers, and what each of them may do
 docs/images/             the README's screenshots, rendered by `--snapshot`
 assets/                  the app icon: pirate.svg, composed for Apple's grid
                          in icon-macos.svg, rendered into Crook.iconset
-script/                  bootstrap, run, bundle, install, publish, app-icon,
+script/                  bootstrap, run, bundle, install, publish, icons, app-icon,
                          and for macOS: macos-keychain, macos-app, notarize, macos-dmg
 ```
 
