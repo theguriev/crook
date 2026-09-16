@@ -19616,6 +19616,38 @@ mod from_the_keyboard {
     }
 
     #[test]
+    fn every_chord_the_shipped_defaults_bind_reaches_a_real_command() {
+        // The other direction from the test above, and the one a dead key
+        // hides in. A default binds a chord to a command *by name*; a name
+        // nothing registered — a command renamed and its default left behind,
+        // a typo in the table — is a chord that does nothing, and the gate
+        // notices neither. The registered-command test cannot catch it: it
+        // walks `window::COMMANDS` and asks the host, never the two default
+        // tables, so a `crook/window/split-lft` in them sails straight past.
+        let harness = Harness::panel(1);
+        let registered: Vec<String> = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .host()
+                .commands()
+                .iter()
+                .map(|(_, action, _)| action.to_string())
+                .collect()
+        });
+
+        for (platform, table) in [
+            ("macOS", crate::keybindings::DEFAULTS_MAC),
+            ("Linux", crate::keybindings::DEFAULTS_OTHER),
+        ] {
+            for (chord, command) in table {
+                assert!(
+                    registered.iter().any(|name| name == command),
+                    "{platform}: {chord} is bound to {command}, which nothing registered"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn the_pane_family_declines_rather_than_swallowing_on_an_unsplit_tab() {
         // `nothing_in_the_pane_family_fires...` watches the focus, which three
         // of these never move even when they act. This watches the thing that
