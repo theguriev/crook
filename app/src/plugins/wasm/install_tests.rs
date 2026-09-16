@@ -156,6 +156,33 @@ fn a_version_that_is_a_directory_that_already_means_something_is_refused() {
 }
 
 #[test]
+fn a_version_or_owner_windows_keeps_for_a_device_is_refused() {
+    // `con`, `nul`, `com1`… name devices on Windows rather than files, with any
+    // extension or none, so a directory cannot be one. A manifest that used one
+    // would install here and not there; it installs nowhere instead.
+    for reserved in ["con", "nul", "COM1", "lpt9", "aux.wasm", "con.0"] {
+        let refusal =
+            version_folder(reserved).expect_err(&format!("{reserved:?} is a device name"));
+        assert!(refusal.contains("is not one"), "{refusal}");
+    }
+    // A device name that is not the stem is a file, not a device.
+    version_folder("1.con").expect("a device name after the dot");
+
+    // The owner is the stem of the `owner.name` home, so it is refused the same
+    // way — but the name, after the dot, is where Windows stops looking.
+    let scratch = Scratch::new("install-device");
+    let owner = scratch.path().join("owner.wasm");
+    fs::write(&owner, wasm_at("con/themes", "0.3.0")).expect("the module writes");
+    let refusal = into(scratch.path(), &owner).expect_err("a device owner is refused");
+    assert!(refusal.contains("device"), "{refusal}");
+    assert!(!scratch.path().join("con.themes").exists());
+
+    let name = scratch.path().join("name.wasm");
+    fs::write(&name, wasm_at("eugen/con", "0.3.0")).expect("the module writes");
+    into(scratch.path(), &name).expect("a device name after the dot installs");
+}
+
+#[test]
 fn uninstalling_takes_the_whole_plugin_and_not_one_version_of_it() {
     // A plugin whose last version was removed is not a plugin with an empty
     // directory: the row on the Plugins page comes from what is on disk.
