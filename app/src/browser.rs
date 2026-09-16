@@ -73,12 +73,17 @@ fn spawn(url: &str) -> io::Result<()> {
 
     #[cfg(target_os = "windows")]
     let mut launcher = {
-        // `start` is a builtin of the shell rather than a program, so it needs
-        // one. The empty string is the window title `start` takes as its first
-        // quoted argument — without it a quoted URL becomes the title and
-        // nothing opens.
-        let mut launcher = command("cmd");
-        launcher.args(["/C", "start", "", url]);
+        // `explorer`, not `cmd /C start`. `start` is a shell builtin, so it
+        // needs `cmd`, and `cmd` re-parses its command line: a URL a program
+        // printed can carry an `&` — legal in a query string, and something
+        // `crook_terminal::url` keeps inside a link — which `cmd` reads as a
+        // command separator and runs what follows. `std` only quotes an
+        // argument that holds a space, and a URL holds none, so the `&` would
+        // reach `cmd` bare. `explorer` is a program: it is handed the URL as
+        // one argument through `CreateProcess`, with no shell between them to
+        // split it, and opens it with the same handler `start` would have.
+        let mut launcher = command("explorer");
+        launcher.arg(url);
         launcher
     };
 
@@ -137,6 +142,16 @@ mod tests {
             assert!(!is_openable(url), "{url:?} should not be openable");
             assert!(!open(url), "{url:?} was handed to the platform");
         }
+    }
+
+    #[test]
+    fn a_query_string_is_a_url_and_is_not_refused() {
+        // The `&` a link carries is defended against by the launcher on
+        // Windows — a program is handed the URL whole rather than a shell
+        // re-parsing it — not by refusing the character here, which would
+        // turn away most of the addresses anyone actually clicks.
+        assert!(is_openable("https://example.com/search?q=rust&hl=en"));
+        assert!(is_openable("https://example.com/a?x=1&y=2"));
     }
 
     #[test]
