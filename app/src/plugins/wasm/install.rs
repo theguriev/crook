@@ -75,6 +75,18 @@ pub(super) fn into(root: &Path, path: &Path) -> Result<PathBuf, String> {
 pub fn write(root: &Path, bytes: &[u8], manifest: &Manifest) -> Result<PathBuf, String> {
     let version = version_folder(manifest.version)?;
 
+    // The owner is the stem of the home directory `owner.name`, so a reserved
+    // one is a home Windows cannot make. The name is not — it is after the dot,
+    // where Windows stops looking — so `eugen/con` is fine and `con/themes` is
+    // not. Checked here rather than in `PluginId`, which knows nothing of the
+    // paths a plugin's id is spent on.
+    if windows_reserved(manifest.id.owner()) {
+        return Err(format!(
+            "its owner {:?} is a name Windows keeps for a device",
+            manifest.id.owner()
+        ));
+    }
+
     let home = root.join(folder(&manifest.id));
     let at = home.join(&version);
     fs::create_dir_all(&at).map_err(|why| format!("{} could not be made: {why}", at.display()))?;
@@ -230,6 +242,9 @@ fn version_folder(version: &str) -> Result<String, String> {
         // name that is not on disk. No version anybody writes ends in a dot,
         // which makes this cheaper than making every comparison survive one.
         && !version.ends_with('.')
+        // And a version whose name Windows keeps for a device — `con`, `nul`,
+        // `com1` — names no directory at all there; see [`windows_reserved`].
+        && !windows_reserved(version)
         && version.bytes().all(|byte| {
             byte.is_ascii_alphanumeric()
                 || byte == b'.'
@@ -242,9 +257,48 @@ fn version_folder(version: &str) -> Result<String, String> {
         true => Ok(version.to_owned()),
         false => Err(format!(
             "its version {version:?} is not one: letters, digits, `.`, `-`, `+` and `_`, not \
-             ending in a dot, and short enough to be a directory name"
+             ending in a dot, not a name Windows keeps for a device, and short enough to be a \
+             directory name"
         )),
     }
+}
+
+/// Whether a name is one Windows keeps for a device rather than a file.
+///
+/// `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9` and `LPT1`-`LPT9` name the console,
+/// a printer, the serial and parallel ports and the bit bucket — with any
+/// extension or none, so `con.wasm` is refused as surely as `con` — and a
+/// directory cannot be created under one. Case does not matter to Windows, so
+/// it does not matter here. Refused on every platform for the reason the rest
+/// of [`version_folder`] refuses things: a plugin a manifest installs on one
+/// machine and not another is worse than one it installs on neither.
+fn windows_reserved(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or(name);
+    matches!(
+        stem.to_ascii_lowercase().as_str(),
+        "con"
+            | "prn"
+            | "aux"
+            | "nul"
+            | "com1"
+            | "com2"
+            | "com3"
+            | "com4"
+            | "com5"
+            | "com6"
+            | "com7"
+            | "com8"
+            | "com9"
+            | "lpt1"
+            | "lpt2"
+            | "lpt3"
+            | "lpt4"
+            | "lpt5"
+            | "lpt6"
+            | "lpt7"
+            | "lpt8"
+            | "lpt9"
+    )
 }
 
 #[cfg(test)]
