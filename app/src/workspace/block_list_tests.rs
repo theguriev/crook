@@ -313,12 +313,21 @@ fn links_on_a_command_less_block_land_on_their_own_rows() {
         .expect("the banner is on screen");
     assert_eq!(item.index, 0, "the banner is the first item");
     let origin = list.bounds().expect("the list has bounds").origin();
-    let ctrl = Modifiers {
-        ctrl: true,
-        ..Default::default()
+    // The modifier that follows a link is the platform's — Command on macOS,
+    // Control off it — the same split `opens_links` makes, and the test runs on
+    // both. Hardcoding Control passed on Linux and failed on the macOS runner.
+    let follow = if cfg!(target_os = "macos") {
+        Modifiers {
+            cmd: true,
+            ..Default::default()
+        }
+    } else {
+        Modifiers {
+            ctrl: true,
+            ..Default::default()
+        }
     };
-    // Ctrl is what follows a link off macOS; the test runs there.
-    assert!(terminal_element::opens_links(ctrl));
+    assert!(terminal_element::opens_links(follow));
 
     // The centre of each row lands on that row's own URL — not None, and not
     // the row above's.
@@ -329,7 +338,7 @@ fn links_on_a_command_less_block_land_on_their_own_rows() {
                 item.top + (row as f32 + 0.5) * metrics.height,
             );
         let span = list
-            .link_at(at, ctrl)
+            .link_at(at, follow)
             .unwrap_or_else(|| panic!("row {row} has no link under the pointer"));
         assert_eq!(span.uri, uri, "row {row} opened the wrong URL");
         assert!(
