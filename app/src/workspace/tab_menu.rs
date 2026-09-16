@@ -1001,10 +1001,23 @@ const NAMED: usize = 6;
 fn tidying(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
     let state = workspace.tab_menu();
 
+    // Singular wherever exactly one checkout is in play, the way the button
+    // below and the "Remove 1 free checkout" entry that opens this both count.
+    let count = match &state.sweep {
+        Sweep::Counting { of, .. } | Sweep::Removing { of, .. } => *of,
+        Sweep::Ready { going, .. } => going.len(),
+    };
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_child(header("Remove these checkouts?", ui));
+        .with_child(header(
+            if count == 1 {
+                "Remove this checkout?"
+            } else {
+                "Remove these checkouts?"
+            },
+            ui,
+        ));
 
     let (going, kept) = match &state.sweep {
         // Every candidate is a `git status`, so the question is on screen
@@ -1061,9 +1074,21 @@ fn tidying(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
         // Which is a real answer and not an error: every free checkout has
         // something in it. The face still opens, because "nothing to do here"
         // is what the person asked to be told.
-        column.add_child(note("There is work in every one of them.", ui));
+        column.add_child(note(
+            match kept.len() {
+                1 => "There is work in it.",
+                _ => "There is work in every one of them.",
+            },
+            ui,
+        ));
     } else {
-        column.add_child(note("The branches are kept. Only the checkouts go.", ui));
+        column.add_child(note(
+            match going.len() {
+                1 => "The branch is kept. Only the checkout goes.",
+                _ => "The branches are kept. Only the checkouts go.",
+            },
+            ui,
+        ));
     }
 
     // What git will delete without ever mentioning it, summed over the lot:
@@ -1071,8 +1096,9 @@ fn tidying(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
     // this button, and nothing else on screen would say so.
     let ignored: usize = going.iter().map(|going| going.local.ignored).sum();
     if ignored > 0 {
+        let here = if going.len() == 1 { "it" } else { "them" };
         column.add_child(note(
-            format!("{ignored} ignored in them will be deleted."),
+            format!("{ignored} ignored in {here} will be deleted."),
             ui,
         ));
     }

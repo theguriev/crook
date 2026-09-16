@@ -5254,6 +5254,66 @@ fn tidying_up_takes_the_free_checkouts_and_leaves_the_work_alone() {
 }
 
 #[test]
+fn tidying_one_free_checkout_asks_in_the_singular() {
+    // With exactly one checkout going, the question and the promise under it
+    // read in the singular — "this checkout", "The branch is kept" — the way
+    // the button and the "Remove 1 free checkout" entry that opens this both
+    // already count. The plural forms are what a single checkout used to get.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let tab = harness.active_id();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    // One checkout nobody is in, beside the main one the tab is working in.
+    spare_checkout(&mut harness, tab, &store, &[]);
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("both checkouts to be read", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    assert!(
+        worktree_menu_says(&harness.frame(), "Remove 1 free checkout"),
+        "the list did not offer the one checkout nothing is working in"
+    );
+
+    harness.dispatch_worktree(WorktreeAction::AskTidy);
+    assert!(
+        harness.worktree_menu_is_tidying(),
+        "the row did not open its question"
+    );
+    harness.wait_for("the checkout to be looked in", |harness| {
+        harness.worktrees_going().is_some()
+    });
+    assert_eq!(
+        harness.worktrees_going(),
+        Some(1),
+        "the one free checkout was not the one that would go"
+    );
+
+    let scene = harness.frame();
+    assert!(
+        worktree_menu_says(&scene, "Remove this checkout?"),
+        "the question was not asked in the singular"
+    );
+    assert!(
+        worktree_menu_says(&scene, "The branch is kept. Only the checkout goes."),
+        "the promise under it was not made in the singular"
+    );
+}
+
+#[test]
 fn stop_spares_the_checkouts_after_the_one_in_flight() {
     // Six checkouts with a build in each is minutes of `git worktree remove`,
     // and the way out of that is a Stop that means it: the one git is
