@@ -47,6 +47,7 @@ pub mod browser;
 pub mod clipboard;
 pub mod completion;
 pub mod editor;
+pub mod filename;
 pub mod git;
 pub mod git_model;
 pub mod input_keys;

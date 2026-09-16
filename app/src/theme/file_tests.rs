@@ -540,6 +540,35 @@ fn a_written_theme_cannot_land_outside_the_themes_folder() {
 }
 
 #[test]
+fn a_theme_named_after_a_windows_device_writes_to_a_file_windows_will_take() {
+    // `con`, `com1`, `nul`… name devices rather than files on Windows, so
+    // `con.yaml` cannot be created there. The theme keeps the name it was
+    // given — the `name:` field is written as typed — but its file does not.
+    let scratch = Scratch::new("device");
+
+    for name in ["con", "AUX", "com1", "Lpt9", "nul", "prn"] {
+        let path = write_theme(&scratch.path, name, &crate::theme::DARK)
+            .expect("a device name should still write somewhere");
+
+        let stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .expect("the file has a stem");
+        assert!(
+            !crate::filename::windows_reserved(stem),
+            "{name:?} wrote {stem:?}, which Windows keeps for a device"
+        );
+        assert_eq!(path.parent(), Some(scratch.path.as_path()));
+
+        assert_eq!(
+            read(&path).expect("it reads back").name,
+            name,
+            "the name a person typed did not survive"
+        );
+    }
+}
+
+#[test]
 fn writing_a_theme_never_overwrites_one_that_is_already_there() {
     // A theme file is something somebody may have written by hand and spent an
     // evening on. Two themes that sanitise to the same stem get a serial.

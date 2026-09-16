@@ -644,7 +644,8 @@ pub fn write_theme(directory: &Path, name: &str, theme: &Theme) -> Result<PathBu
 /// entirely, and one with `..` in it lands somewhere much worse. Here the stem
 /// keeps letters, digits and single underscores and nothing else, so a stem
 /// can never contain a separator, a `.`, or a leading dash; an empty result
-/// falls back to `theme`.
+/// falls back to `theme`, and one Windows keeps for a device — `con`, `com1` —
+/// gets a trailing underscore so it names a file there too.
 fn file_stem(name: &str) -> String {
     let mut stem = String::new();
     for character in name.chars() {
@@ -658,6 +659,11 @@ fn file_stem(name: &str) -> String {
     let stem = stem.trim_matches('_');
     if stem.is_empty() {
         "theme".to_owned()
+    } else if crate::filename::windows_reserved(stem) {
+        // A theme called `con` or `com1` keeps its name — the `name:` field is
+        // written as typed — but not as its file name, which Windows would take
+        // for a device. A trailing underscore is still a stem this reads back.
+        format!("{stem}_")
     } else {
         stem.to_owned()
     }
