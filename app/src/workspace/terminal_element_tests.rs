@@ -531,3 +531,13 @@ fn a_column_is_split_down_its_middle_so_a_selection_ends_between_characters() {
     assert_eq!(column_at(-40., 10., 8), (0, CellSide::Left));
     assert_eq!(column_at(800., 10., 8), (7, CellSide::Right));
 }
+
+#[test]
+fn a_row_of_no_columns_answers_zero_rather_than_underflowing() {
+    // No caller asks — the hit tests refuse an empty grid first — but the last
+    // column is `columns - 1`, and on nothing that would wrap round. It
+    // saturates to zero instead, whichever side of the (absent) row is asked.
+    assert_eq!(column_at(0., 10., 0), (0, CellSide::Right));
+    assert_eq!(column_at(800., 10., 0), (0, CellSide::Right));
+    assert_eq!(column_at(-40., 10., 0), (0, CellSide::Left));
+}
