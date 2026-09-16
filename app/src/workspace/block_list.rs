@@ -648,7 +648,7 @@ impl BlockList {
             .iter()
             .find(|item| local.y() >= item.top && local.y() < item.top + item.height)?;
 
-        let rows_top = item.top + PADDING_TOP * metrics.height;
+        let rows_top = item.top + self.padding_top(item.index) * metrics.height;
         let row = ((local.y() - rows_top) / metrics.height).floor();
         if row < 0. {
             // The padding above a block's first row, which belongs to no row.
