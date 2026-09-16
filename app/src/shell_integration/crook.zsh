@@ -69,7 +69,11 @@ __crook_complete() {
 	[[ $line == "$content" ]] && line=''
 
 	local word=${line##* }
-	local prefix=${line%$word}
+	# Quoted, so the word is taken off the line as itself and not as a glob:
+	# `ls *.txt` makes the word `*.txt`, and an unquoted removal would match a
+	# different suffix. The globbing this line does not want is where the file
+	# candidates below opt into it, with an explicit `${~word}`.
+	local prefix=${line%"$word"}
 	local -a candidates=()
 
 	if [[ -z ${prefix//[[:space:]]/} ]]; then
