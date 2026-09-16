@@ -115,13 +115,14 @@ impl Completions {
     /// directory of `PATH` that holds it, and stepping through the same name
     /// four times is four presses that appear to do nothing.
     pub fn matching(&self, word: &str) -> Vec<&str> {
-        let mut kept: Vec<&str> = Vec::new();
-        for candidate in &self.candidates {
-            if starts_with_ignoring_case(candidate, word) && !kept.contains(&candidate.as_str()) {
-                kept.push(candidate);
-            }
-        }
-        kept
+        let mut seen = std::collections::HashSet::new();
+        self.candidates
+            .iter()
+            .map(String::as_str)
+            .filter(|&candidate| {
+                starts_with_ignoring_case(candidate, word) && seen.insert(candidate)
+            })
+            .collect()
     }
 
     /// What to insert in place of `word`, or `None` when there is nothing to
