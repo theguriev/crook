@@ -261,3 +261,81 @@ fn there_is_nothing_to_continue_where_there_is_no_composer() {
         "a long-running command"
     );
 }
+
+/// A command-less block — the pre-prompt banner a shell-integrated session
+/// closes into its first block — is drawn with no top padding, and its links
+/// have to be hit-tested against that. Built here rather than in the real-shell
+/// suite because a shell the harness starts prints no banner to make one, and
+/// the bug this guards is pure row arithmetic: `link_at` once figured the first
+/// row from the constant `PADDING_TOP` instead of the block-aware `padding_top`,
+/// so on such a block the top row's links were dead and every other row opened
+/// the URL from the row above.
+#[test]
+fn links_on_a_command_less_block_land_on_their_own_rows() {
+    use crookui_core::event::Modifiers;
+    use crookui_core::geometry::{Point, ZIndex, vec2f};
+    use std::sync::Arc;
+
+    let mut emulator = emulator();
+    // Two lines of pre-prompt output, a distinct URL on each, closed into a
+    // command-less block by the first prompt mark.
+    emulator.advance(b"https://a.test\r\nhttps://b.test\r\n");
+    emulator.advance(b"\x1b]133;A\x07$ ");
+
+    let block = emulator
+        .blocks()
+        .first()
+        .expect("the banner closed into a block");
+    assert!(
+        block.command.is_none(),
+        "the banner block carries no command"
+    );
+
+    let history = Arc::new(BlockHistory::new(
+        emulator.blocks().iter().cloned().map(Arc::new).collect(),
+        0,
+    ));
+    let font = crate::terminal_font::CellFont::headless(12.);
+    let metrics = font.metrics();
+    let mut list = BlockList::new(history, emulator.snapshot(), font, PaneBlocks::new());
+
+    // Lay the list out in a window big enough to hold it. `size` and `origin`
+    // are what `layout` and `paint` set; a test sets them so `bounds` answers.
+    let size = vec2f(400., 300.);
+    list.size = Some(size);
+    list.origin = Some(Point::from_vec2f(vec2f(0., 0.), ZIndex::Normal(0)));
+    list.measure(size);
+
+    let item = list
+        .window
+        .first()
+        .copied()
+        .expect("the banner is on screen");
+    assert_eq!(item.index, 0, "the banner is the first item");
+    let origin = list.bounds().expect("the list has bounds").origin();
+    let ctrl = Modifiers {
+        ctrl: true,
+        ..Default::default()
+    };
+    // Ctrl is what follows a link off macOS; the test runs there.
+    assert!(terminal_element::opens_links(ctrl));
+
+    // The centre of each row lands on that row's own URL — not None, and not
+    // the row above's.
+    for (row, uri) in [(0usize, "https://a.test"), (1, "https://b.test")] {
+        let at = origin
+            + vec2f(
+                GUTTER + 0.5 * metrics.width,
+                item.top + (row as f32 + 0.5) * metrics.height,
+            );
+        let span = list
+            .link_at(at, ctrl)
+            .unwrap_or_else(|| panic!("row {row} has no link under the pointer"));
+        assert_eq!(span.uri, uri, "row {row} opened the wrong URL");
+        assert!(
+            matches!(span.row, LinkRow::Block { index: 0, row: r } if r == row),
+            "row {row} was hit as {:?}",
+            span.row
+        );
+    }
+}
