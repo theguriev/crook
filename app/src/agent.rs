@@ -247,6 +247,34 @@ mod tests {
     }
 
     #[test]
+    fn every_status_the_hooks_emit_is_one_the_wire_reads() {
+        // The hooks are string literals -- `--agent running`, `--agent idle`,
+        // `--agent needs-input`. Each word has to be one `report` accepts, and
+        // so one `AgentReport` names, or the hook Claude Code runs writes an
+        // error to its own stdout and the tab never moves. Renaming a status is
+        // a two-place edit; the other test pins `needs-input` and `running` by
+        // name, but `idle` on Stop and SessionEnd was checked by nothing, so a
+        // rename could leave those hooks calling a word the wire rejects with
+        // the gate still green. This ties every hook's word back to the enum.
+        let text = hooks_text("claude", Path::new("/usr/bin/crook")).unwrap();
+        let parsed: Value = serde_json::from_str(&text).unwrap();
+        let hooks = parsed["hooks"].as_object().unwrap();
+        for (event, group) in hooks {
+            let command = group[0]["hooks"][0]["command"].as_str().unwrap();
+            let status = command
+                .split("--agent ")
+                .nth(1)
+                .and_then(|rest| rest.split_whitespace().next())
+                .unwrap_or_else(|| panic!("{event} runs no `--agent`: {command}"));
+            assert!(
+                AgentReport::parse(status).is_some(),
+                "{event} reports {status:?}, which is not a status the wire reads",
+            );
+        }
+        assert_eq!(6, hooks.len(), "a hook was added or dropped: {hooks:?}");
+    }
+
+    #[test]
     fn an_agent_nobody_wrote_hooks_for_is_refused_by_name() {
         let error = hooks_text("codex", Path::new("/usr/bin/crook")).unwrap_err();
         assert!(error.to_string().contains("codex"));
