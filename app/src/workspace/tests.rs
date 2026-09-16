@@ -9885,6 +9885,17 @@ mod shells {
         };
         harness.frame();
         run_and_find(&mut harness, "printf 'FIND\\nME\\n' | tr A-Z a-z", "find");
+        // `run_and_find` returns as soon as the *first* line is on screen; the
+        // second — "me", the tail of the selection about to be named — can
+        // still be in flight on a slow runner. Wait for its whole line before
+        // asking for a two-line selection, or the select races the pty and
+        // fails for a reason that has nothing to do with what it tests.
+        harness.wait_for("the second line of the output never arrived", |harness| {
+            harness
+                .terminal_text(pane)
+                .lines()
+                .any(|line| line.trim_end() == "me")
+        });
 
         assert!(harness.select_in_output(pane, "find\nme"));
         assert_eq!(
