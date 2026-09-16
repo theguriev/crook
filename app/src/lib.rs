@@ -898,8 +898,9 @@ OPTIONS:
     --find-output <TEXT>
                        Open the first pane's find bar over its output with TEXT
                        in it; needs a `--run` before it to have output to search
-    --hover-block <N>  Hover the Nth finished block, so its controls are drawn
-    --block-menu <N>   Open the menu on the Nth finished block
+    --hover-block <N>  Hover finished block N — the first is 0 — so its
+                       controls are drawn
+    --block-menu <N>   Open the menu on finished block N, the first being 0
     --scroll-blocks <N>
                        Scroll the first pane's block list up by N lines
     --type <TEXT>      Leave TEXT in the first pane's input field, unsent
@@ -943,9 +944,10 @@ OPTIONS:
                        snapshot shows what they draw. Off by default: a picture
                        of the application is the same everywhere and one of a
                        plugin is not
-    --carry <N>        Pick the Nth row of the tabs panel up and hold it there,
-                       for a picture of a drag in flight
-    --carry-group <N>  The same for the Nth group's whole block, by its heading
+    --carry <N>        Pick up row N of the tabs panel — the first is 0 — and
+                       hold it there, for a picture of a drag in flight
+    --carry-group <N>  The same for group N's whole block, the first being 0,
+                       by its heading
     --carry-by <PX>    How far down the column to carry it; negative carries up
     --section <NAME>   Start showing a sidebar section by the name on its button
     --granularity <M>  Start with rows standing for `panes` or `tabs` rather than as saved
