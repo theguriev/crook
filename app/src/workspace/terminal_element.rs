@@ -639,8 +639,10 @@ impl TerminalElement {
         };
         let height = self.font.metrics().height;
         // Positive is up the screen and back into history, which is the sense
-        // both the wheel and the emulator use.
-        let lines = (delta.to_pixels(height).y() / height).round() as i32;
+        // both the wheel and the emulator use. The pixels a trackpad reports
+        // are a fraction of a line an event, so the handle carries what does
+        // not add up to a whole one yet rather than rounding it away.
+        let lines = handle.take_scroll_lines(delta.to_pixels(height).y() / height);
         if lines == 0 {
             return false;
         }
