@@ -434,6 +434,47 @@ fn test_every_shell_integration_reports_its_working_directory() {
     }
 }
 
+/// Every integration speaks the completion channel Crook parses, both ways.
+///
+/// Completion is two numbers in a Rust constant and a shell snippet that no
+/// compiler reconciles: the key Crook sends to ask ([`crate::COMPLETION_REQUEST`],
+/// which the snippet must bind) and the OSC the shell replies on
+/// (`COMPLETIONS_OSC`, which the snippet must emit). A snippet that bound a
+/// different key, or replied on a different number, would leave Tab doing
+/// nothing with nothing to say why — the same silent break the OSC 7 test
+/// above pins, for the channel most likely to drift.
+#[test]
+fn test_every_shell_integration_speaks_the_completion_channel() {
+    let reply = std::str::from_utf8(COMPLETIONS_OSC).expect("the OSC number is ASCII");
+    // `COMPLETION_REQUEST` is the ESC byte and then the bindable tail; the
+    // snippets write the ESC as the two characters `\e`, so the tail is what
+    // shows up in them verbatim.
+    let request = std::str::from_utf8(&crate::COMPLETION_REQUEST[1..]).expect("the tail is ASCII");
+    for (shell, snippet) in [
+        (
+            "zsh",
+            include_str!("../../../app/src/shell_integration/crook.zsh"),
+        ),
+        (
+            "bash",
+            include_str!("../../../app/src/shell_integration/crook.bash"),
+        ),
+        (
+            "fish",
+            include_str!("../../../app/src/shell_integration/crook.fish"),
+        ),
+    ] {
+        assert!(
+            snippet.contains(&format!("]{reply};")),
+            "the {shell} integration does not reply on the OSC Crook reads completions from"
+        );
+        assert!(
+            snippet.contains(request),
+            "the {shell} integration does not bind the key Crook sends to ask for a completion"
+        );
+    }
+}
+
 #[test]
 fn test_percent_decoding_rejects_truncated_escapes() {
     assert_eq!(Some("plain".to_owned()), percent_decode("plain"));
