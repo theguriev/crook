@@ -604,8 +604,8 @@ name = "crook"
 path = "src/bin/stable.rs"
 ```
 
-Each `src/bin/*.rs` constructs a `ChannelState` — app id, log filename, feature-flag overlay —
-installs it globally, and calls `crook::run()`. Nothing else. All the code, and all the tests,
+Each `src/bin/*.rs` names its channel — `Channel::Dev` or `Channel::Stable` — and calls
+`crook::run(channel)`. Nothing else. All the code, and all the tests,
 are in the library.
 
 ### Why from commit one
@@ -1375,7 +1375,7 @@ release never reaches `crook_terminal`.
 where it belongs: the field is what a line is typed into. `winit` is told
 `set_ime_allowed(true)` — without which the platform never starts a composition and the keys
 that would have begun one arrive as themselves — and its four `Ime` events become one
-`Event::Ime`. The preedit is kept *beside* the editor, in `PaneInput`, never in it: a preedit
+`Event::Ime`. The preedit is kept *beside* the editor, in `TextInput`, never in it: a preedit
 is not text, it is replaced wholesale by the next one, and putting it in the editor would put
 it in the undo history, in a copy and in a submitted line. Only the drawing composes the two,
 and `CommandInput` underlines the result so a half-converted word does not read as a committed
@@ -1504,7 +1504,7 @@ holds `tab_bar` and `tabs_panel` as mutually exclusive halves and `row_content` 
 copy of Warp's which-fact-goes-on-which-line table that both read. What it cost that the
 estimate above did not name was the window-control reservation — with a panel down the left
 edge the top-left corner belongs to the panel rather than to the header, so
-`platform_insets::TabsPlacement` divides one answer between two elements — and, for as long as
+`platform_insets::LayoutInsets` divides one answer between two elements — and, for as long as
 `crookui_core` had no scrollable element, a ceiling: the list was `Clipped`, roughly nine tabs
 fitted a 640px window, and the rest were drawn, clipped away and unclickable. The settings
 page needed a `Scrollable` anyway, so the panel got one too and the ceiling is gone. Auto-scroll
