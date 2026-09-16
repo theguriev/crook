@@ -485,6 +485,25 @@ fn test_every_snippet_is_safe_to_source_twice_and_survives_a_re_exec() {
 }
 
 #[test]
+fn test_a_shell_that_splits_a_completion_word_takes_it_off_the_line_literally() {
+    // bash and zsh read the word under the caret and take it back off the line
+    // to find what comes before it. That removal has to be *literal*: a line
+    // holding a glob -- `ls *.txt` -- makes the word `*.txt`, and an unquoted
+    // `${line%$word}` in zsh matches whatever suffix the pattern does rather
+    // than the word it was handed, which is not the same string bash removes.
+    // The two must agree, so both quote it. (fish does not split a word by hand
+    // -- `complete --do-complete` takes the whole line -- so it is not here.)
+    for shell in [Shell::Bash, Shell::Zsh] {
+        let snippet = snippet(shell).expect("this shell has an integration");
+        assert!(
+            snippet.contains(r#"${line%"$word"}"#),
+            "{shell:?} takes the completion word off the line unquoted, so a \
+             glob in the line becomes a pattern instead of the word it was given"
+        );
+    }
+}
+
+#[test]
 fn test_every_snippet_emits_all_four_marks() {
     // How each shell spells each mark. zsh and bash put A and B in the prompt
     // string, where a mark has to be quoted as zero-width; fish builds its
