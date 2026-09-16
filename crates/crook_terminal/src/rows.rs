@@ -162,7 +162,13 @@ impl<'a> Rows<'a> {
             Self::Stored(rows) => rows.write(row, columns, out),
             Self::Live { snapshot, top, .. } => {
                 let cells = snapshot.row(top + row);
-                let end = columns.end.min(cells.len());
+                // Stops where the text does, not at the edge of the grid: a
+                // stored block's rows keep no trailing blanks, so a live window
+                // that handed the grid's out for a range that ran past the last
+                // character would hand back spaces the other store cannot — a
+                // highlight from one and a copy from the other disagreeing,
+                // which is the one thing this type exists to prevent.
+                let end = columns.end.min(self.line_length(row));
                 for (column, cell) in cells[..end].iter().enumerate().skip(columns.start) {
                     if cell.flags.contains(CellFlags::WIDE_SPACER) {
                         continue;
