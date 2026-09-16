@@ -552,4 +552,73 @@ mod tests {
         let bracket = PhysicalKey::Code(KeyCode::BracketRight);
         assert_eq!(chord_key_name(&brace, bracket, ctrl).as_deref(), Some("}"));
     }
+
+    #[test]
+    fn every_letter_and_digit_names_the_us_key_it_sits_under() {
+        // The fallback is only as good as this table: a letter transcribed
+        // wrong here is a shortcut that quietly stops working under a non-Latin
+        // layout and nowhere else, so the whole alphabet and the digits are
+        // checked against the keys they label, in order, rather than one
+        // example standing in for forty-six untested siblings.
+        use winit::keyboard::{KeyCode, PhysicalKey};
+
+        let name = |code| physical_key_name(PhysicalKey::Code(code));
+
+        let letters = [
+            KeyCode::KeyA,
+            KeyCode::KeyB,
+            KeyCode::KeyC,
+            KeyCode::KeyD,
+            KeyCode::KeyE,
+            KeyCode::KeyF,
+            KeyCode::KeyG,
+            KeyCode::KeyH,
+            KeyCode::KeyI,
+            KeyCode::KeyJ,
+            KeyCode::KeyK,
+            KeyCode::KeyL,
+            KeyCode::KeyM,
+            KeyCode::KeyN,
+            KeyCode::KeyO,
+            KeyCode::KeyP,
+            KeyCode::KeyQ,
+            KeyCode::KeyR,
+            KeyCode::KeyS,
+            KeyCode::KeyT,
+            KeyCode::KeyU,
+            KeyCode::KeyV,
+            KeyCode::KeyW,
+            KeyCode::KeyX,
+            KeyCode::KeyY,
+            KeyCode::KeyZ,
+        ];
+        let spelled: String = letters.into_iter().filter_map(name).collect();
+        assert_eq!(spelled, "abcdefghijklmnopqrstuvwxyz");
+
+        let digits = [
+            KeyCode::Digit0,
+            KeyCode::Digit1,
+            KeyCode::Digit2,
+            KeyCode::Digit3,
+            KeyCode::Digit4,
+            KeyCode::Digit5,
+            KeyCode::Digit6,
+            KeyCode::Digit7,
+            KeyCode::Digit8,
+            KeyCode::Digit9,
+        ];
+        let spelled: String = digits.into_iter().filter_map(name).collect();
+        assert_eq!(spelled, "0123456789");
+
+        // The punctuation a shortcut is written against, each on its own key.
+        assert_eq!(name(KeyCode::Minus), Some("-"));
+        assert_eq!(name(KeyCode::Equal), Some("="));
+        assert_eq!(name(KeyCode::BracketLeft), Some("["));
+        assert_eq!(name(KeyCode::BracketRight), Some("]"));
+
+        // A key nothing is bound against has no name here, so the fallback
+        // leaves the layout's own character to stand.
+        assert_eq!(name(KeyCode::F1), None);
+        assert_eq!(name(KeyCode::Enter), None);
+    }
 }
