@@ -58,6 +58,19 @@ impl History {
         if line.is_empty() {
             return None;
         }
+        // A line walked back to is a whole history entry — there is nothing to
+        // add to it, even when a newer entry extends it (walk to `git commit`
+        // with `git commit --amend` newer, and the ` --amend` is not a
+        // suggestion, it is the entry just stepped past). Text-equality, not a
+        // bare `cursor.is_some()`: edit the recalled line and the walk still
+        // holds, but the line no longer matches its entry, so suggestions
+        // resume — see `editing_a_recalled_entry_leaves_the_draft_alone`.
+        if self
+            .cursor
+            .is_some_and(|at| self.entries.get(at).map(String::as_str) == Some(line))
+        {
+            return None;
+        }
         self.entries
             .iter()
             .rev()
