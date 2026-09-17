@@ -279,8 +279,9 @@ There is no box. A block has no border, no corner radius and no fill in its rest
   nothing.
 * **Padding** — 1.1 lines above a block's first row, 1.0 below its last: 2.1 lines between two
   commands, which is Warp's normal spacing. A block with no command collapses to its rows. The
-  open block has no bottom padding, because what follows it is not another command but the
-  line being typed at its prompt.
+  open block has no bottom padding while the composer is under it, because what follows it is
+  then not another command but the line being typed at its prompt; while a command runs and the
+  composer is gone, a fifth of a line keeps its last row off the window's edge.
 * **Failed** — the theme's ANSI red at 10 % over the block's whole height, plus a 5 px stripe
   down its left edge at full strength. Neither Ctrl-C's 130 nor SIGPIPE's 141 counts as
   failure, and a command that reported no status has no verdict.
