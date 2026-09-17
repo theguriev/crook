@@ -405,6 +405,30 @@ fn test_working_directory_urls_are_parsed() {
     );
 }
 
+#[test]
+fn a_hostile_working_directory_url_is_refused_rather_than_believed() {
+    // OSC 7 is whatever the program in the pane chose to write, so the parser
+    // is the seam between a stranger's bytes and a path Crook trusts.
+
+    // A percent escape that is not two hex digits decodes to nothing, so the
+    // whole update is dropped rather than a corrupt path believed.
+    assert_eq!(None, parse_working_directory(b"/a%zzb"));
+    assert_eq!(None, parse_working_directory(b"/a%2Gb"));
+
+    // Escapes that decode to bytes that are not UTF-8 are refused the same way
+    // — a lone continuation byte is no path.
+    assert_eq!(None, parse_working_directory(b"/%ff"));
+    assert_eq!(None, parse_working_directory(b"/%c3%28"));
+
+    // An escape with too few digits to be one is left as itself rather than
+    // eaten: a trailing `%` or `%2` is a literal, not the start of a byte.
+    assert_eq!(Some(PathBuf::from("/a%")), parse_working_directory(b"/a%"));
+    assert_eq!(
+        Some(PathBuf::from("/a%2")),
+        parse_working_directory(b"/a%2")
+    );
+}
+
 /// Every integration reports the directory, and reports it the same way.
 ///
 /// The bug this pins: Crook parsed OSC 7 and no shell it set up ever sent one,
