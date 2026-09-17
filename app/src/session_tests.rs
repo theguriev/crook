@@ -394,6 +394,51 @@ fn test_a_tab_this_build_cannot_read_costs_that_tab_and_not_the_window() {
 }
 
 #[test]
+fn test_a_dropped_tab_before_the_active_one_keeps_the_active_one_selected() {
+    // `active` is a position in the file's tab list, so a tab dropped *before*
+    // it slides every later tab — the active one among them — down a place.
+    // Read whole from the file, the index would then point one tab too far.
+    // Here the first tab is unreadable and the *second* was active, so the
+    // survivors are [b, c] and the active one is `b`, now at position 0.
+    let directory = scratch("early-bad-tab");
+    let path = directory.join("session.json");
+    fs::write(
+        &path,
+        r#"{
+          "tabs": [
+            {"name": "a", "panes": "not a list"},
+            {"name": "b", "panes": [{"title": "b", "flex": 1.0}]},
+            {"name": "c", "panes": [{"title": "c", "flex": 1.0}]}
+          ],
+          "active": 1
+        }"#,
+    )
+    .expect("writable");
+
+    let session = Session::load(&path);
+    assert_eq!(
+        session
+            .tabs
+            .iter()
+            .map(|tab| tab.name.as_str())
+            .collect::<Vec<_>>(),
+        ["b", "c"],
+        "the unreadable first tab is dropped and the rest kept in order"
+    );
+    assert_eq!(
+        session.active, 0,
+        "the active tab `b` moved from position 1 to 0 when `a` was dropped"
+    );
+
+    let restored = session.restore().expect("two tabs restored");
+    assert_eq!(
+        restored.index_of(restored.active_id()),
+        Some(0),
+        "the tab the file marked active comes back selected, not the one after it"
+    );
+}
+
+#[test]
 fn test_a_window_size_a_person_could_not_see_is_refused() {
     for size in [[0., 0.], [-100., 200.], [f32::NAN, 600.]] {
         let session = Session {
