@@ -14,13 +14,15 @@ cargo fmt --all --check
 cargo clippy --locked --workspace --all-targets -- -D warnings
 cargo check --locked --workspace --all-targets
 cargo test --locked --workspace
-RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links" \
+RUSTDOCFLAGS="-D rustdoc::broken_intra_doc_links -D rustdoc::redundant_explicit_links" \
   cargo doc --locked --no-deps --workspace --document-private-items
 ```
 
 Clippy warnings are errors, and so is a comment whose [`link`] points at an item that has
 been renamed or removed — the comments link to the code they explain, and a link to nothing
-is a comment that has quietly started lying about where to look. `.clippy.toml` also bans `std::process::Command`, because on
+is a comment that has quietly started lying about where to look. So is a target spelled out in
+full when the text beside it already resolves there — ``[`Foo`](Foo)`` — a second copy of the
+link that drifts from the first the moment either one moves. `.clippy.toml` also bans `std::process::Command`, because on
 Windows it flashes a console window unless the spawner sets `CREATE_NO_WINDOW` — invisible on
 macOS and Linux, and a shipping-blocker for a terminal. Use `crook::process::Command`.
 
