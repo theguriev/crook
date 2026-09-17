@@ -237,6 +237,29 @@ fn test_a_wide_character_copies_as_one_character() {
 }
 
 #[test]
+fn a_combining_mark_travels_with_its_letter_through_the_reconstruction() {
+    // An accent stacked on a letter is one column but two characters. The walk
+    // that rebuilds a line to search or copy it emits both at that one column,
+    // or the accent is dropped from what a find matches and a copy takes. This
+    // is the other side of the wide-character test above: that one covers a
+    // spacer column emitting nothing, this one a column emitting two.
+    let mut emulator = Emulator::new(TerminalSize::new(20, 8), 1000, Palette::default());
+    // `cafe` with a combining acute (U+0301) on the final e: four columns, five
+    // characters.
+    emulator.advance(format!("{A}${B}accent\r\n{C}cafe\u{0301}\r\n{D}{A}$ ").as_bytes());
+    let session = Session {
+        finished: BlockHistory::new(emulator.blocks().iter().cloned().map(Arc::new).collect(), 0),
+        snapshot: emulator.snapshot(),
+    };
+
+    assert_eq!(
+        Some("cafe\u{0301}".to_owned()),
+        session.dragged((0, 1, 0), (0, 1, 3)),
+        "the accent comes back stacked on the e at its column"
+    );
+}
+
+#[test]
 fn test_a_press_that_never_moved_selects_nothing() {
     let session = session(40, 12, &["click"]);
     let at = Anchor::new(session.id(0), 1, 3, CellSide::Left);

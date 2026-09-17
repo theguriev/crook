@@ -562,7 +562,6 @@ impl<'a> Blocks<'a> {
     /// One walk, so that "what does it say" and "where does it say it" cannot
     /// disagree about which cell a character came from.
     fn walk(&self, mut visit: impl FnMut(char, Place)) {
-        let mut piece = String::new();
         // Where the last row ended, which is the cell a line break belongs to:
         // a match that ends at a break ends at the end of that line.
         let mut ended: Option<Place> = None;
@@ -579,13 +578,10 @@ impl<'a> Blocks<'a> {
                 }
 
                 let length = item.rows.line_length(local);
-                for column in 0..length {
-                    piece.clear();
-                    item.rows.write(local, column..column + 1, &mut piece);
-                    for character in piece.chars() {
-                        visit(character, Place::new(item.id, row, column));
-                    }
-                }
+                let id = item.id;
+                item.rows.visit_line(local, length, |character, column| {
+                    visit(character, Place::new(id, row, column));
+                });
                 folded = item.rows.wraps(local);
                 ended = Some(Place::new(
                     item.id,

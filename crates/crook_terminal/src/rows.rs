@@ -179,6 +179,37 @@ impl<'a> Rows<'a> {
             }
         }
     }
+
+    /// Visits each character of a row with the column it sits on, left to right
+    /// in one pass — the base character then any zero-width marks stacked on it,
+    /// at that column; a wide character's spacer column yields nothing. `length`
+    /// bounds it the way a caller walking `0..length` with [`Self::write`] a
+    /// column at a time would.
+    ///
+    /// One pass, because that caller — reconstructing a whole pane to search or
+    /// copy it — is otherwise O(length²) per row on a stored block: see
+    /// [`BlockRows::visit_line`], which the stored arm hands off to.
+    pub fn visit_line(&self, row: usize, length: usize, mut visit: impl FnMut(char, usize)) {
+        if row >= self.count() {
+            return;
+        }
+        match self {
+            Self::Stored(rows) => rows.visit_line(row, length, visit),
+            Self::Live { snapshot, top, .. } => {
+                let end = length.min(self.line_length(row));
+                let cells = snapshot.row(top + row);
+                for (column, cell) in cells[..end].iter().enumerate() {
+                    if cell.flags.contains(CellFlags::WIDE_SPACER) {
+                        continue;
+                    }
+                    visit(cell.c, column);
+                    for mark in snapshot.zerowidth(top + row, column) {
+                        visit(*mark, column);
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[cfg(test)]
