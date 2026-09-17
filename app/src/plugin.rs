@@ -57,7 +57,7 @@ pub const SIDEBAR_SECTION: SlotId = SlotId::new("sidebar.section");
 /// Where a page of the settings goes.
 ///
 /// Declared by `crook/settings`, which owns the rail; contributed to by
-/// whichever plugin the page belongs to, which for the five Crook ships is one
+/// whichever plugin the page belongs to, which for the four Crook ships is one
 /// plugin each.
 pub const SETTINGS_PAGE: SlotId = SlotId::new("settings.page");
 

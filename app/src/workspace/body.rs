@@ -161,7 +161,7 @@ const COMPOSER_PADDING_TOP: f32 = 1.1;
 /// else pads the bottom of a pane.
 pub(super) const COMPOSER_PADDING_BOTTOM: f32 = 20.;
 
-/// The gap between two chips in the row above the composer.
+/// The gap between two chips in the row under the composer.
 const CHIP_GAP: f32 = 6.;
 
 /// The gap between the line being composed and the row of chips under it.
