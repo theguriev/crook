@@ -821,8 +821,12 @@ fn command_matches(
             || owner.name().contains(term)
             || chords.iter().any(|chord| chord.text.contains(term))
             // So that `unbound` is a query, which is the list of things worth
-            // binding. Both words, because only one of them is on the row.
-            || (chords.is_empty() && (NOT_BOUND.contains(term) || *term == "unbound"))
+            // binding. Its two words, whole — a `contains` here would match a
+            // bare letter inside "not bound" (`b`, `no`, `ou`), dragging every
+            // unbound command in behind a query that names none of them.
+            || (chords.is_empty()
+                && (NOT_BOUND.split_whitespace().any(|word| word == *term)
+                    || *term == "unbound"))
     })
 }
 

@@ -557,3 +557,31 @@ fn the_keys_a_pane_eats_are_the_table_the_settings_page_prints() {
         ["Interrupt, suspend, end the input"]
     );
 }
+
+#[test]
+fn unbound_is_a_word_query_and_not_a_letter_in_not_bound() {
+    // `not`/`bound`/`unbound` surface the commands worth binding; a bare letter
+    // that only sits inside the words "not bound" must not, or a one-letter
+    // query in the palette drags in every unbound command behind a term that
+    // names none of them. The row below shares no `b`/`o`/`u` run with the
+    // negative probes, so only the unbound clause could match them.
+    let title = "Split the pane";
+    let action = name("crook/window/split");
+    let owner = owner("crook/window");
+    let unbound: &[Chord] = &[];
+
+    for query in ["not", "bound", "unbound"] {
+        assert!(
+            command_matches(title, &action, &owner, unbound, &[query]),
+            "`{query}` should surface an unbound command"
+        );
+    }
+    for query in ["b", "bo", "ou", "bou"] {
+        assert!(
+            !command_matches(title, &action, &owner, unbound, &[query]),
+            "`{query}` is a fragment of \"not bound\", not a word, and flooded the unbound"
+        );
+    }
+    // A term the row actually carries is unaffected.
+    assert!(command_matches(title, &action, &owner, unbound, &["split"]));
+}
