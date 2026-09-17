@@ -110,7 +110,7 @@ To build it yourself instead, see [Prerequisites](#prerequisites) and [Build and
 
 ## v1 scope
 
-Eight features, and the page that configures them:
+Nineteen features, and the page that configures them:
 
 - **Tabs.** Open, close, switch, reorder. One agent session per tab, and the tab is named
   the way a person would answer "what is that one?": what you called it, else what the agent
