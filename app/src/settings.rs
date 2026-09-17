@@ -550,11 +550,12 @@ impl Settings {
         // group of typed options, and a file naming a theme this machine does
         // not have is not a parse failure — the name is kept, and the theme
         // falls back to the default until whatever wrote it is put back.
-        let theme = document
-            .get(THEME_KEY)
-            .and_then(Value::as_str)
-            .unwrap_or(crate::theme::DEFAULT_NAME)
-            .to_owned();
+        //
+        // Through `named_theme`, the same as `light_theme` and `dark_theme`
+        // below: a hand-edited name is trimmed of the space around it (which
+        // an exact-match lookup would otherwise miss), and an empty one is the
+        // default rather than a `no theme called ""` warning on every launch.
+        let theme = named_theme(&document, THEME_KEY, crate::theme::DEFAULT_NAME);
 
         // Read the same way the theme is, and for the same reason: a family
         // name that answers to nothing on this machine is not a parse failure,
@@ -1344,6 +1345,31 @@ mod tests {
 
         let written = fs::read_to_string(empty.settings_file()).expect("readable");
         assert!(!written.contains("font_family"), "{written}");
+    }
+
+    #[test]
+    fn test_a_theme_name_is_trimmed_and_an_empty_one_is_the_default() {
+        // The `theme` key is read the same way `light_theme`, `dark_theme` and
+        // `font_family` are: hand-edited, so the space around a name is trimmed
+        // — an exact-match theme lookup would miss `" Midnight "` — and an empty
+        // one is the default, not a warning on every launch.
+        let scratch = ScratchDirectory::new("theme-name");
+        fs::write(scratch.settings_file(), r#"{"theme": "  Midnight  "}"#)
+            .expect("the file should be writable");
+        assert_eq!(
+            Settings::load(scratch.settings_file()).theme(),
+            "Midnight",
+            "the surrounding space is trimmed off a hand-edited name"
+        );
+
+        let empty = ScratchDirectory::new("theme-empty");
+        fs::write(empty.settings_file(), r#"{"theme": "   "}"#)
+            .expect("the file should be writable");
+        assert_eq!(
+            Settings::load(empty.settings_file()).theme(),
+            crate::theme::DEFAULT_NAME,
+            "an empty name falls back rather than naming a theme nothing has"
+        );
     }
 
     #[test]
