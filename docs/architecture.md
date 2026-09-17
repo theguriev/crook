@@ -1561,8 +1561,8 @@ since grown, and one it closed but for a corner:
 **A settings *stack*.** The page exists; the machinery under it does not, and that is the
 split worth keeping. Warp's stack — a `define_settings_group!` macro, a settings-value crate,
 `schemars` schemas, TOML path routing, cloud sync, per-platform gating, a file watcher and a
-generated JSON Schema — exists to serve roughly 800 settings. Crook has nine, in two `serde`
-structs in one JSON file, read once at startup and written back whole. That is correct at nine
+generated JSON Schema — exists to serve roughly 800 settings. Crook has eleven, in two `serde`
+structs in one JSON file, read once at startup and written back whole. That is correct at eleven
 and the migration to something larger is a day; doing it in the other order is a month.
 
 What the page took from Warp is the *presentation* and the *shape*, not the plumbing. The
@@ -1689,7 +1689,7 @@ outcome both files exist to prevent.
 
 What is *not* remembered is the point: no scrollback, no output, no process. A window that
 redrew yesterday's output over a shell that had never run any of it would be lying about the
-state of the machine. The settings pane is left out too — it is something somebody opened to
+state of the machine. The settings section is left out too — it is something somebody opened to
 change a setting, not work in progress.
 
 **Telemetry, crash reporting, autoupdate.** All absent. Worth noting that adding Sentry on
@@ -1719,11 +1719,11 @@ platforms, and treat a build script as the cost it is.
 | Blocks | a block per command, with selection, navigation and re-run | a block per command: harvested rows, a virtualising list, hover-to-copy (§7, `docs/blocks.md`) |
 | Shell integration | its own bootstrap, a request/response channel | the four OSC 133 marks, injected into zsh, bash and fish |
 | Autotracking | `Tracked<T>` dependency capture | explicit `ctx.notify()` |
-| Settings | ~800, with a macro DSL and cloud sync | 10, two `serde` structs and a name in one JSON file |
+| Settings | ~800, with a macro DSL and cloud sync | 11, two `serde` structs and a name in one JSON file |
 | Themes | 21 built in, gradients, images, a creator, OS sync, hot reload | 13 built in, the same file format, a creator without the image, no OS sync |
 | Theme chooser | a 240px docked panel with search and virtualisation | a 248px docked panel, no search, every row built |
 | Icons | its own `WarpIcon` and `UiIcon` sets, rendered from SVG | Lucide, vendored as path commands, one distance-field rasterizer — and one drawn mark, filled (§4) |
-| Settings UI | a pane, 16 pages, search over ~800 widgets | a pane, 4 pages, search over 30 (§4) |
+| Settings UI | a pane, 16 pages, search over ~800 widgets | a sidebar section, 4 pages, search over 30 (§4) |
 | Git worktrees | none | a right-click menu on a tab, after herdr's model (§7) |
 
 The through-line: Crook keeps every *architectural* idea from Warp and rejects almost every
