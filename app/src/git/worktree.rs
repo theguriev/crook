@@ -703,7 +703,8 @@ const SLUG_FALLBACK: &str = "worktree";
 const SLUG_LIMIT: usize = 64;
 
 /// `text` as one path component: ASCII alphanumerics lowercased, everything
-/// else a single `-`, no leading or trailing dashes, never empty.
+/// else a single `-`, no leading or trailing dashes, never empty, and never a
+/// name Windows keeps for a device.
 ///
 /// Deliberately blunt about non-ASCII — `café` slugs to `caf-` and then `caf` —
 /// because the alternative is deciding what a filesystem, a shell and a person
@@ -725,6 +726,11 @@ fn slug(text: &str) -> String {
     let trimmed = slug.trim_matches('-');
     if trimmed.is_empty() {
         SLUG_FALLBACK.to_owned()
+    } else if crate::filename::windows_reserved(trimmed) {
+        // `con`, `com1`… name devices rather than directories on Windows, so a
+        // branch or repository called one gets a trailing dash to check out
+        // under. See [`crate::filename::windows_reserved`].
+        format!("{trimmed}-")
     } else {
         trimmed.to_owned()
     }
