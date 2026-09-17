@@ -355,6 +355,12 @@ impl Emulator {
             let (piece, remaining) = rest.split_at(consumed);
             self.parser.advance(&mut self.term, piece);
             if let Some(mark) = self.osc_watcher.mark.take() {
+                // A report earlier in this same read has to reach `self.agent`
+                // before the mark settles against it, or the same bytes settle
+                // differently depending on where a pty split them: `drain`
+                // alone applies the report after the loop, too late for a `D`
+                // that ends the very command the report was about.
+                self.apply_agent_report();
                 self.settle_agent(mark);
                 let finished = self.blocks.mark(
                     mark,
@@ -709,12 +715,7 @@ impl Emulator {
             self.events.push(TerminalEvent::Completions(serial));
         }
 
-        if let Some(reported) = self.osc_watcher.agent.take()
-            && (reported.status != self.agent || reported.title.is_some())
-        {
-            self.agent = reported.status;
-            self.events.push(TerminalEvent::Agent(reported));
-        }
+        self.apply_agent_report();
 
         if let Some(directory) = self.osc_watcher.working_directory.take()
             && self.working_directory.as_deref() != Some(directory.as_path())
@@ -727,6 +728,22 @@ impl Emulator {
         // on the way out belongs to the block that is still open.
         if let Some(exit) = exited {
             self.child_exited(exit);
+        }
+    }
+
+    /// Moves a pending agent report onto `self.agent`, emitting the change.
+    ///
+    /// Kept out of the OSC parser so that [`Self::settle_agent`] can be made to
+    /// run against an up-to-date status: a report and the mark that ends it can
+    /// arrive in one read, and the mark has to see the report. Idempotent — it
+    /// takes the pending report, so a second call in the same [`Self::advance`]
+    /// (from [`Self::drain`]) finds nothing.
+    fn apply_agent_report(&mut self) {
+        if let Some(reported) = self.osc_watcher.agent.take()
+            && (reported.status != self.agent || reported.title.is_some())
+        {
+            self.agent = reported.status;
+            self.events.push(TerminalEvent::Agent(reported));
         }
     }
 
