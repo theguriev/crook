@@ -279,8 +279,8 @@ pub enum Error {
         /// The checkout that is not clean.
         path: PathBuf,
     },
-    /// `path` is locked. `reason` is git's own, empty when the lock has none.
-    /// [`remove`] never overrides one; see its documentation for why.
+    /// The worktree is locked. `reason` is git's own, empty when the lock has
+    /// none. [`remove`] never overrides one; see its documentation for why.
     Locked {
         /// Why whoever locked it said they were locking it.
         reason: String,
