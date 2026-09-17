@@ -787,15 +787,21 @@ fn word_at(at: Place, blocks: &Blocks<'_>) -> Option<(Place, Place)> {
     let mut cells = Vec::new();
     for row in first..=last {
         let local = row - item.first;
-        for column in 0..item.rows.line_length(local) {
-            let before = line.len();
-            item.rows.write(local, column..column + 1, &mut line);
-            // A wide character's trailing column writes nothing and has no
-            // offset of its own; the character it belongs to already has one.
-            if line.len() > before {
-                cells.push((before, row, column));
-            }
-        }
+        // One pass per row, not a `write` per column — the same O(length²) a
+        // long folded line double-clicked would otherwise pay that
+        // [`Blocks::walk`] shed. The byte offset a `cells` entry needs is the
+        // line's length when a column's first character arrives; a wide
+        // character's trailing column yields nothing and has no offset of its
+        // own, the character it belongs to already having one.
+        let mut wrote = None;
+        item.rows
+            .visit_line(local, item.rows.line_length(local), |character, column| {
+                if wrote != Some(column) {
+                    cells.push((line.len(), row, column));
+                    wrote = Some(column);
+                }
+                line.push(character);
+            });
     }
 
     // Past the last character of the line — a click in the blank tail — takes

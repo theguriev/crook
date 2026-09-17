@@ -260,6 +260,26 @@ fn a_combining_mark_travels_with_its_letter_through_the_reconstruction() {
 }
 
 #[test]
+fn a_double_click_keeps_a_combining_mark_on_its_word() {
+    // Word selection walks the folded line for the word's bounds, and now
+    // shares `visit_line` with the copy path, so it must still count a letter
+    // and the accent stacked on it as one column with one offset — get that
+    // wrong and the double-click lands the word's edge inside the character.
+    let mut emulator = Emulator::new(TerminalSize::new(20, 8), 1000, Palette::default());
+    emulator.advance(format!("{A}${B}accent\r\n{C}cafe\u{0301}\r\n{D}{A}$ ").as_bytes());
+    let session = Session {
+        finished: BlockHistory::new(emulator.blocks().iter().cloned().map(Arc::new).collect(), 0),
+        snapshot: emulator.snapshot(),
+    };
+
+    assert_eq!(
+        Some("cafe\u{0301}".to_owned()),
+        session.taken(SelectionKind::Semantic, (0, 1, 1), (0, 1, 1)),
+        "the accent comes along with the word its letter is in"
+    );
+}
+
+#[test]
 fn test_a_press_that_never_moved_selects_nothing() {
     let session = session(40, 12, &["click"]);
     let at = Anchor::new(session.id(0), 1, 3, CellSide::Left);
