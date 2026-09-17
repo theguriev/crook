@@ -716,6 +716,41 @@ fn test_the_command_ending_takes_a_running_status_with_it() {
 }
 
 #[test]
+fn test_a_running_status_settles_when_its_end_is_in_the_same_read() {
+    // The command ending takes a running status with it whether the `running`
+    // report and its terminating `D` land in one read or two: the emulator
+    // settles on the bytes, not on where a pty happened to split them. The
+    // two-read form is the test above; the parser only stops on a mark, so a
+    // report in the same piece always precedes it.
+    for report in [
+        b"\x1b]6340;running\x07".as_slice(),
+        b"\x1b]6340;needs-input\x07",
+    ] {
+        let mut emulator = emulator();
+        emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07claude\r\n\x1b]133;C\x07");
+        emulator.take_events();
+
+        let mut one_read = report.to_vec();
+        one_read.extend_from_slice(b"\x1b]133;D;130\x07");
+        emulator.advance(&one_read);
+
+        assert_eq!(
+            AgentReport::Idle,
+            emulator.agent(),
+            "a {report:?} report and its `D` in one read left the status stuck"
+        );
+        assert!(
+            emulator
+                .take_events()
+                .contains(&TerminalEvent::Agent(Reported {
+                    status: AgentReport::Idle,
+                    title: None,
+                }))
+        );
+    }
+}
+
+#[test]
 fn test_a_failure_outlives_its_command_and_goes_with_the_next_one() {
     let mut emulator = emulator();
     emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07claude\r\n\x1b]133;C\x07");
