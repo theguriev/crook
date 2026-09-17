@@ -113,15 +113,17 @@ const WINDOW_SIZE: Vector2F = vec2f(1024., 640.);
 
 /// Who draws Crook's window controls.
 ///
-/// Crook does. The window is opened with the application's own chrome, so the
-/// header *is* the title bar and the window's controls are painted over it:
-/// AppKit's traffic lights on macOS, Crook's own three buttons everywhere
-/// else. [`WindowChrome`] is where the difference
-/// between those two lives.
+/// The window is opened with the application's own chrome, so the header *is*
+/// the title bar — [`open_window`] moves the window by its empty space. It
+/// draws no caption buttons of its own, though: macOS's traffic lights are
+/// AppKit's, painted over the corner [`platform_insets`] reserves for them,
+/// and on Windows and Linux the desktop closes, minimises and maximises the
+/// window the way it does any other, its own gestures and shortcuts and the
+/// commands the window plugin registers — `workspace::title_bar` says why.
 ///
-/// One constant because it is one decision. [`open_window`] opens the window
-/// with it and the header reserves room by it, so what the header leaves free
-/// and what the window actually draws cannot drift apart.
+/// [`WindowChrome`] carries which of those a build gets, so the room the
+/// header reserves and the controls the window actually has cannot drift
+/// apart. One constant because it is one decision.
 pub const WINDOW_CHROME: WindowChrome = WindowChrome::Client;
 
 /// The scale factor the headless snapshot renders at. Two, because that is
