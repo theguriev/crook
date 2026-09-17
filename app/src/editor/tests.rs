@@ -660,6 +660,33 @@ fn history_walking_does_nothing_when_there_is_nothing_to_walk() {
 }
 
 #[test]
+fn a_line_walked_back_to_offers_no_suggestion_even_when_a_newer_entry_extends_it() {
+    let mut editor = Editor::new();
+    for line in ["cargo build", "cargo build --release"] {
+        type_out(&mut editor, line);
+        editor.submit();
+    }
+
+    // The newest entry: nothing in the history extends it, so no ghost.
+    assert!(editor.history_previous());
+    assert_eq!(editor.text(), "cargo build --release");
+    assert_eq!(editor.suggestion(), None);
+
+    // Back one more, onto a whole entry that the newer one *does* extend. The
+    // line is a history entry, not a draft, so it offers nothing — not the
+    // ` --release` of the entry just stepped past.
+    assert!(editor.history_previous());
+    assert_eq!(editor.text(), "cargo build");
+    assert_eq!(editor.suggestion(), None);
+
+    // Editing the recalled line makes it a draft again, and suggestions resume:
+    // the walk still holds, but the text no longer matches its entry.
+    type_out(&mut editor, " -");
+    assert_eq!(editor.text(), "cargo build -");
+    assert_eq!(editor.suggestion(), Some("-release"));
+}
+
+#[test]
 fn up_reaches_for_history_only_from_the_first_line() {
     let mut editor = Editor::new();
     type_out(&mut editor, "old");
