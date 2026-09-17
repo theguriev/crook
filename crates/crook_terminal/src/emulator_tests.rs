@@ -403,6 +403,13 @@ fn test_working_directory_urls_are_parsed() {
         Some(PathBuf::from("/tmp/weird%dir")),
         parse_working_directory(b"file:///tmp/weird%25dir")
     );
+    // `;` is escaped to `%3B` by the snippet, because a raw `;` is where the
+    // terminal splits the OSC into fields — `params[1]` would have stopped at
+    // it — and it decodes back here. See the semicolon snippet test below.
+    assert_eq!(
+        Some(PathBuf::from("/tmp/a;b")),
+        parse_working_directory(b"file:///tmp/a%3Bb")
+    );
 }
 
 #[test]
@@ -454,6 +461,38 @@ fn test_every_shell_integration_reports_its_working_directory() {
             snippet.contains("\\e]7;file://"),
             "the {shell} integration sends no OSC 7, so nothing will ever \
              correct a tab's directory after a cd"
+        );
+    }
+}
+
+/// Every integration escapes a `;` in the path it reports.
+///
+/// A `;` is where the terminal splits an OSC string into fields, and the OSC 7
+/// reader takes the second field only. A working directory holding one — a
+/// legal byte on every Unix filesystem, `mkdir 'a;b'` — would be reported cut
+/// off at it: the tab's directory, its git chips and any pane that inherits
+/// the cwd would all follow the wrong path. So each snippet must send the `;`
+/// as `%3B`, which the reader decodes back (see `test_working_directory_urls_are_parsed`).
+#[test]
+fn test_every_shell_integration_escapes_a_semicolon_in_the_cwd() {
+    for (shell, snippet) in [
+        (
+            "zsh",
+            include_str!("../../../app/src/shell_integration/crook.zsh"),
+        ),
+        (
+            "bash",
+            include_str!("../../../app/src/shell_integration/crook.bash"),
+        ),
+        (
+            "fish",
+            include_str!("../../../app/src/shell_integration/crook.fish"),
+        ),
+    ] {
+        assert!(
+            snippet.contains("%3B"),
+            "the {shell} integration does not escape `;` in the working \
+             directory, so a path holding one is reported truncated at it"
         );
     }
 }

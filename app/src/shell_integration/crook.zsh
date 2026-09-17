@@ -33,10 +33,13 @@ __crook_mark() { builtin printf '\e]133;%s\a' "$1" }
 # because the host is ignored at the other end and asking for it would mean a
 # `hostname` call on every prompt.
 #
-# Only `%` is escaped. It is the one byte the reader could mistake for the
-# start of an escape it should decode; everything else survives the round trip
-# as itself, spaces included.
-__crook_cwd() { builtin printf '\e]7;file://%s\a' "${PWD//\%/%25}" }
+# `%` and `;` are escaped, and nothing else. `%` is the byte the reader would
+# take for the start of a percent-escape; `;` is the one the terminal splits
+# the OSC into fields on, so a path holding one would arrive cut off at it. Both
+# leave as their `%XX` code and the reader turns them back — `%` first, so the
+# `%` in `%3B` is not escaped a second time. Everything else survives the round
+# trip as itself, spaces included.
+__crook_cwd() { builtin printf '\e]7;file://%s\a' "${${PWD//\%/%25}//;/%3B}" }
 
 # Completion, which is the one thing the marks cannot do: they are an
 # announcement, and this is a question with an answer.
