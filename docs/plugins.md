@@ -756,12 +756,14 @@ patterns), `fs` (paths), `clipboard`, `notify`, `tabs`, `settings.read`, `settin
 session budget). A plugin with no capabilities can contribute UI and react to lifecycle events
 and nothing else — which is most plugins.
 
-Thirteen are built, and they are the ones the plugins that exist needed or could be given
+Fifteen are built, and they are the ones the plugins that exist needed or could be given
 honestly: `ReadSettings`, `ReadTabs`, `ReadWorkingDirectory`, `Clipboard`, `Storage`,
 `Network` as a list of hosts, `ReadFiles` as a list of exact paths, `PlaySound`,
-`WatchCommands`, and the four ABI 6 added — `ListDirectories` (roots, and names rather than
+`WatchCommands`, the four ABI 6 added — `ListDirectories` (roots, and names rather than
 contents), `TypeCommands` (exact command templates, with the host filling and quoting the
-hole), `RunCommands` (exact command names) and `ReadCommands`. The last two are lists
+hole), `RunCommands` (exact command names) and `ReadCommands` — and the two since,
+`ReadBlock` (ABI 7, the command line and exit status a block's menu shows) and `WatchBells`
+(ABI 8, a program's bell when no command ended). `RunCommands` and `ReadCommands` are lists
 rather than flags for the same reason: "this plugin talks to the internet" and "this plugin
 reads your files" are not things anybody can meaningfully agree to, and "api.anthropic.com" and
 "~/.claude/.credentials.json" are. A leading `~` is the person's home directory and is the only

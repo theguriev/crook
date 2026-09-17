@@ -1125,7 +1125,7 @@ pub enum Method {
 
 /// What became of a [`Request`].
 ///
-/// Five answers and not one of them is silence: a plugin that asked for
+/// Twelve answers and not one of them is silence: a plugin that asked for
 /// something always finds out what happened to it, because a plugin left
 /// waiting forever is a chip that says "reading…" until the window closes.
 ///
