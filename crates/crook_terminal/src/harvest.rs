@@ -291,6 +291,39 @@ impl BlockRows {
         self.write(row, 0..self.columns(), out);
     }
 
+    /// Visits each character of a row with the column it sits on, left to right
+    /// in one pass — the base character, then any combining marks stacked on
+    /// it, all at that column; a wide character's spacer column yields nothing.
+    /// `length` bounds it the way a caller walking `0..length` with
+    /// [`Self::write`] one column at a time would.
+    ///
+    /// That caller is why this exists: [`Self::write`] reaches its start column
+    /// by `.skip`-ing a `Chars` iterator, which has no O(1) `nth`, so a column
+    /// at a time is O(length²) per row. One left-to-right pass is O(length).
+    pub fn visit_line(&self, row: usize, length: usize, mut visit: impl FnMut(char, usize)) {
+        let combining = self.combining(row);
+        let spacers = self.runs(row).unwrap_or_default().iter().flat_map(|run| {
+            std::iter::repeat_n(
+                run.flags.contains(CellFlags::WIDE_SPACER),
+                usize::from(run.len),
+            )
+        });
+        for (column, (character, spacer)) in self.text(row).chars().zip(spacers).enumerate() {
+            if column >= length {
+                break;
+            }
+            if spacer {
+                continue;
+            }
+            visit(character, column);
+            if let Some(marks) = combining.iter().find(|marks| marks.column == column) {
+                for mark in marks.characters.iter() {
+                    visit(*mark, column);
+                }
+            }
+        }
+    }
+
     /// Roughly how many bytes of heap the block's rows occupy.
     ///
     /// For comparing against `rows * columns * size_of::<SnapshotCell>()`,
