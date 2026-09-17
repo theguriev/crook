@@ -1135,6 +1135,23 @@ fn a_slug_keeps_alphanumerics_lowercases_them_and_collapses_everything_else() {
 }
 
 #[test]
+fn a_slug_that_is_a_windows_device_name_is_a_directory_windows_will_make() {
+    // A branch or repository called `con`, `com1`, `nul`… slugs to a name
+    // Windows keeps for a device, which `git worktree add` cannot check out
+    // under there. A trailing dash makes it a directory instead.
+    for name in ["con", "COM1", "nul", "Lpt9", "aux", "prn"] {
+        let slug = slug(name);
+        assert!(
+            !crate::filename::windows_reserved(&slug),
+            "{name:?} slugged to {slug:?}, which Windows keeps for a device"
+        );
+    }
+    // A word that only begins like one is left alone.
+    assert_eq!(slug("console"), "console");
+    assert_eq!(slug("com10"), "com10");
+}
+
+#[test]
 fn a_slug_with_nothing_left_in_it_falls_back_to_a_name() {
     assert_eq!(slug(""), SLUG_FALLBACK);
     assert_eq!(slug("///"), SLUG_FALLBACK);
