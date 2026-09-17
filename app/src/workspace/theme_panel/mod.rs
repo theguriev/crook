@@ -16,8 +16,9 @@
 //! [`CommandInput`], which exists to send a line to a shell, and reusing it
 //! outside a pane was a refactor of the input layer rather than a panel
 //! feature. The settings page's rail did that refactor —
-//! [`SearchField`](super::settings_page) is a text field with no pane under it
-//! — so a panel that wanted one would now be assembling parts that exist.
+//! [`TextField`](super::text_field::TextField) is a text field with no pane
+//! under it — so a panel that wanted one would now be assembling parts that
+//! exist.
 //!
 //! What is left is the reason Warp has one and Crook does not need one: Warp
 //! lists twenty-one built-in themes plus everything a person has collected;

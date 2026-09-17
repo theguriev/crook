@@ -9,11 +9,10 @@
 //!
 //! # Why `Rc<RefCell<…>>`
 //!
-//! The same reason `MouseStateHandle` is one: this is state a *view* holds
-//! between frames, on the one thread that draws, handed by clone to whatever
-//! needs it. The core's foreground executor is deliberately `!Send`, so there
-//! is no second thread for a lock to protect against, and an `Arc<Mutex>` here
-//! would be a lie about where this runs.
+//! This is state a *view* holds between frames, on the one thread that draws,
+//! handed by clone to whatever needs it. The core's foreground executor is
+//! deliberately `!Send`, so there is no second thread for a lock to protect
+//! against, and an `Arc<Mutex>` here would be a lie about where this runs.
 
 use std::cell::RefCell;
 use std::rc::{Rc, Weak};

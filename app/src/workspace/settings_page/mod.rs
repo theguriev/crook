@@ -156,9 +156,6 @@ pub(crate) struct SettingsState {
     pub(crate) page: Option<String>,
     /// How far the content column has been scrolled.
     pub(super) scroll: ScrollStateHandle,
-    /// One mouse state per control, created the first time that control is
-    /// drawn and kept for as long as the window lives.
-    ///
     /// The scroll positions a page brought with it, by a name of its own.
     ///
     /// A page that draws itself does its own scrolling and may do it in more
