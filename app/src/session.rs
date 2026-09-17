@@ -311,10 +311,24 @@ impl Session {
         };
 
         let mut session = Self::default();
+        // A position in the file's tab list, so it is read before the tabs are
+        // and counted down as tabs before it are dropped (below) rather than
+        // kept whole: a tab dropped ahead of the active one shifts every tab
+        // after it — the active one with them — one place down.
+        let active: usize = read_or_default(&document, "active", path);
         if let Some(tabs) = document.get("tabs").and_then(serde_json::Value::as_array) {
             for (position, tab) in tabs.iter().enumerate() {
                 match serde_json::from_value::<TabSnapshot>(tab.clone()) {
-                    Ok(tab) => session.tabs.push(tab),
+                    Ok(tab) => {
+                        // Every kept tab ahead of the active position is one
+                        // the active index has to step over, so that dropping
+                        // tab 0 does not come back with tab 2 selected where
+                        // the file meant tab 1.
+                        if position < active {
+                            session.active += 1;
+                        }
+                        session.tabs.push(tab);
+                    }
                     Err(error) => log::warn!(
                         "{} holds a tab at {position} this build cannot read ({error}); \
                          opening without it",
@@ -323,7 +337,6 @@ impl Session {
                 }
             }
         }
-        session.active = read_or_default(&document, "active", path);
         session.window = read_or_default(&document, "window", path);
         session.groups = read_or_default(&document, "groups", path);
         session
