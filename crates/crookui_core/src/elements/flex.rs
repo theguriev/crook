@@ -306,7 +306,17 @@ impl Element for Flex {
                     continue;
                 };
 
-                let child_max = remaining_space / remaining_flex * parent_data.flex;
+                // A zero factor is a real request — "grow by nothing" — and it
+                // is also where `remaining_flex` can reach zero: once every
+                // child with any flex has taken its share, what is left asked
+                // for none, and `remaining_space / 0. * 0.` is NaN, which then
+                // spreads through every size that touches it. A zero-flex
+                // child's share is simply zero.
+                let child_max = if remaining_flex > 0. {
+                    remaining_space / remaining_flex * parent_data.flex
+                } else {
+                    0.
+                };
                 let child_min = match parent_data.fit {
                     FlexFit::Tight => child_max,
                     FlexFit::Loose => 0.,
