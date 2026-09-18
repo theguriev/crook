@@ -101,8 +101,8 @@ if [ -z "$DESTINATION" ]; then
 fi
 
 WORK=$(mktemp -d)
-# shellcheck disable=SC2064 # $WORK is expanded now on purpose
-trap "rm -rf '$WORK'" EXIT INT TERM
+# shellcheck disable=SC2064 # the paths are expanded now on purpose
+trap "rm -rf '$WORK'; rm -f '$DESTINATION/crook.new.$$'" EXIT INT TERM
 
 echo "==> Downloading $STEM.tar.gz"
 curl -fsSL --proto '=https' --tlsv1.2 -o "$WORK/$STEM.tar.gz" "$BASE/$STEM.tar.gz" ||
@@ -139,11 +139,14 @@ tar -xzf "$WORK/$STEM.tar.gz" -C "$WORK"
 [ -f "$WORK/$STEM/crook" ] || { echo "error: the archive holds no crook binary" >&2; exit 1; }
 
 mkdir -p "$DESTINATION"
-# Installed by rename-over rather than by writing in place, so that a running
-# Crook keeps the inode it started from instead of having its text overwritten.
-cp "$WORK/$STEM/crook" "$WORK/crook.new"
-chmod 755 "$WORK/crook.new"
-mv -f "$WORK/crook.new" "$DESTINATION/crook"
+# Installed by rename-over from a temp in the destination's own directory, so
+# the replace is a single same-filesystem rename — atomic on every platform —
+# and a running Crook keeps the inode it started from instead of having its text
+# overwritten. A temp under $WORK could be on another filesystem (mktemp often
+# lands on tmpfs), where `mv` is a copy whose atomicity POSIX does not promise.
+cp "$WORK/$STEM/crook" "$DESTINATION/crook.new.$$"
+chmod 755 "$DESTINATION/crook.new.$$"
+mv -f "$DESTINATION/crook.new.$$" "$DESTINATION/crook"
 
 # Belt and braces: nothing curl fetched is quarantined, but a copy that reached
 # this machine some other way might be, and clearing an attribute that is not
