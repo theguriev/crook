@@ -111,8 +111,8 @@ pub struct Release {
     /// them. What it is actually worth is that a truncated download, a
     /// corrupted mirror and a stale cache are all caught before anything runs.
     pub sha256: String,
-    /// How big the artifact is, so a download can be refused before it is
-    /// finished rather than after.
+    /// How big the artifact is, so a download that comes back a different
+    /// length than the index promised is refused rather than run.
     #[serde(default)]
     pub bytes: u64,
     /// The grant keys this version asks for, in the vocabulary

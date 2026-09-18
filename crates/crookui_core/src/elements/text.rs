@@ -27,8 +27,8 @@ const ELLIPSIS: char = '\u{2026}';
 /// The first cut is read off the full line's glyph advances: the ellipsis
 /// takes its room from the end being cut, and the glyphs that no longer fit
 /// name the byte the text is cut at. For a cut at the end that is the
-/// *lowest* byte among them, for a cut at the start the highest byte among
-/// the glyphs that do fit — either way the whole of a ligature or a bidi run
+/// *lowest* byte among them, for a cut at the start the byte just past the
+/// *highest* among them — either way the whole of a ligature or a bidi run
 /// goes with the cut side, because a glyph's byte index is neither injective
 /// nor monotonic and a cut inside one would draw half of it. Reshaping can
 /// then come out a hair wider than the sum of the parts (kerning against the
