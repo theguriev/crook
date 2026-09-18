@@ -108,7 +108,13 @@ impl Allocator {
     }
 
     fn fits_in_row(&self, width: i32, height: i32) -> bool {
-        self.row_extent + width <= self.width && height < self.height - self.row_baseline
+        // `<=` on both axes, not `<` on the height: an item exactly as tall as
+        // the room left in the row fills it, the same way one exactly as wide
+        // as the row fills that. The `insert` gate already rejects anything
+        // taller than the whole atlas as `ItemTooLarge`; a region equal to the
+        // atlas height must land, not fall through to `Full` — which would
+        // discard the atlas and burn a texture id on a glyph that fits.
+        self.row_extent + width <= self.width && height <= self.height - self.row_baseline
     }
 
     fn advance_row(&mut self) -> Result<(), AllocationError> {
@@ -176,5 +182,23 @@ mod tests {
             allocator.insert((16, 14)).err(),
             Some(AllocationError::Full)
         );
+    }
+
+    #[test]
+    fn an_item_as_tall_as_the_atlas_is_placed_rather_than_reported_full() {
+        // The width axis already accepts an item as wide as the atlas (the row
+        // above packs a 16-wide item into a 16-wide atlas); the height axis has
+        // to match. A glyph exactly the atlas's height fits an empty one, and
+        // refusing it as `Full` would discard the atlas and burn a texture id
+        // on something that fits — so it must land at the origin.
+        let mut allocator = Allocator::new(1024);
+
+        let region = allocator
+            .insert((10, 1024))
+            .expect("an item as tall as the atlas fits an empty one")
+            .pixel_region;
+
+        assert_eq!((region.x, region.y), (0, 0));
+        assert_eq!(region.height, 1024);
     }
 }
