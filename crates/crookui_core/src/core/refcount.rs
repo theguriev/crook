@@ -31,8 +31,20 @@ pub(crate) struct DroppedItems {
 
 impl RefCounts {
     /// Records one more handle to `entity_id`.
+    ///
+    /// A handle taken to an entity that had dropped to zero takes it back out
+    /// of the dropped set: between the last handle dropping and the app
+    /// removing the entity, an observer can mint a fresh strong handle to it
+    /// (it is still in the app's maps), and that handle means something holds
+    /// it again. Without this the entity would stay marked for removal and be
+    /// freed while a live handle still points at it — see
+    /// [`is_model_dropped`](Self::is_model_dropped) for the window this lives
+    /// in.
     pub(crate) fn inc_entity(&mut self, entity_id: EntityId) {
         *self.entity_counts.entry(entity_id).or_insert(0) += 1;
+        // An id is only ever a model or a view, so one of these is a no-op.
+        self.dropped.models.remove(&entity_id);
+        self.dropped.views.remove(&entity_id);
     }
 
     /// Records one fewer handle to a model.
@@ -83,5 +95,34 @@ impl DroppedItems {
     /// Whether nothing is waiting to be removed.
     pub(crate) fn is_empty(&self) -> bool {
         self.models.is_empty() && self.views.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_re_acquired_handle_takes_an_entity_back_out_of_the_dropped_set() {
+        // Between an entity's last handle dropping and its removal, an observer
+        // can mint a fresh strong handle to it. That handle means something
+        // holds it again, so it must no longer be waiting to be removed — or
+        // the app would free an entity a live handle still points at.
+        let id = EntityId::new();
+        let mut counts = RefCounts::default();
+
+        counts.inc_entity(id);
+        counts.dec_model(id);
+        assert!(counts.is_model_dropped(id), "its last handle went away");
+
+        counts.inc_entity(id);
+        assert!(
+            !counts.is_model_dropped(id),
+            "a new handle takes it back out of the dropped set"
+        );
+        assert!(
+            counts.take_dropped().models.is_empty(),
+            "so nothing removes an entity a handle still points at"
+        );
     }
 }
