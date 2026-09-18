@@ -74,8 +74,10 @@ use crookui_core::prelude::*;
 
 use crookui_core::elements::MouseStateHandle;
 
+use std::collections::HashMap;
+
 use crate::settings::Granularity;
-use crate::tab::{GroupId, PaneId, Tab, TabAction, TabId};
+use crate::tab::{Block, GroupId, PaneId, Tab, TabAction, TabId};
 use crate::theme::theme;
 
 use super::action::WorkspaceAction;
@@ -501,15 +503,31 @@ struct PanelBlock {
 /// produces no block at all: a heading over nothing is a claim that there is
 /// something under it.
 fn blocks_of(workspace: &Workspace, rows: Vec<(TabId, Vec<PaneId>)>) -> Vec<PanelBlock> {
-    workspace
-        .tabs()
-        .blocks()
+    associate(workspace.tabs().blocks(), rows)
+}
+
+/// Gathers `rows` into `blocks` in one pass over each.
+///
+/// The strip emits one block per ungrouped tab, so re-finding each block's
+/// members in `rows` by a linear scan was quadratic in the tab count — paid
+/// every frame the panel is drawn, which is every frame the default sidebar is
+/// up. `rows` is owned, so it becomes a lookup once and each member is *moved*
+/// out of it rather than scanned for and cloned: one pass, no per-frame
+/// allocation of a row that was already built.
+///
+/// Each tab appears in exactly one block (the strip's contiguity invariant) and
+/// once in `rows`, so removing a member as it is placed cannot lose or double
+/// one, and a member the search filtered out of `rows` is simply absent — the
+/// block it was the only member of produces nothing, as before.
+fn associate(blocks: Vec<Block>, rows: Vec<(TabId, Vec<PaneId>)>) -> Vec<PanelBlock> {
+    let mut by_tab: HashMap<TabId, Vec<PaneId>> = rows.into_iter().collect();
+    blocks
         .into_iter()
         .filter_map(|block| {
             let tabs: Vec<(TabId, Vec<PaneId>)> = block
                 .tabs
                 .iter()
-                .filter_map(|tab| rows.iter().find(|(id, _)| id == tab).cloned())
+                .filter_map(|tab| by_tab.remove(tab).map(|panes| (*tab, panes)))
                 .collect();
             (!tabs.is_empty()).then_some(PanelBlock {
                 group: block.group,
@@ -1109,7 +1127,7 @@ fn empty_state(ui: FamilyId, query: &Query) -> Box<dyn Element> {
 
 #[cfg(test)]
 mod tests {
-    use super::Count;
+    use super::{Block, Count, TabId, associate};
 
     #[test]
     fn the_count_is_the_group_s_and_says_what_a_search_left_of_it() {
@@ -1118,5 +1136,45 @@ mod tests {
         // Under a search that hid one: the × beside this closes two.
         assert_eq!(Count { shown: 1, all: 2 }.label(), "1 of 2 tabs");
         assert_eq!(Count { shown: 0, all: 3 }.label(), "0 of 3 tabs");
+    }
+
+    #[test]
+    fn associate_reunites_each_block_with_its_row_in_strip_order() {
+        let (a, b, c) = (TabId::next(), TabId::next(), TabId::next());
+
+        // What the strip emits for three ungrouped tabs: one block each, in
+        // strip order.
+        let blocks = vec![
+            Block {
+                group: None,
+                tabs: vec![a],
+            },
+            Block {
+                group: None,
+                tabs: vec![b],
+            },
+            Block {
+                group: None,
+                tabs: vec![c],
+            },
+        ];
+        // A search that kept `a` and `c` and hid `b`. Panes are beside the
+        // point here, so each row carries none.
+        let rows = vec![(a, Vec::new()), (c, Vec::new())];
+
+        let panel = associate(blocks, rows);
+
+        let seen: Vec<TabId> = panel
+            .iter()
+            .map(|block| {
+                assert_eq!(block.tabs.len(), 1, "an ungrouped block has one tab");
+                block.tabs[0].0
+            })
+            .collect();
+        assert_eq!(
+            seen,
+            vec![a, c],
+            "the kept tabs come back in strip order and the hidden one's block is gone"
+        );
     }
 }
