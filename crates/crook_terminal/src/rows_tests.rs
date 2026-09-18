@@ -121,6 +121,33 @@ fn test_a_double_width_character_is_one_character_in_two_columns() {
 }
 
 #[test]
+fn test_a_leading_spacer_at_the_margin_is_not_read_as_a_wide_char_s_tail() {
+    // A wide character that will not fit in the last column leaves that column
+    // a blank spacer and wraps itself to the next row. That spacer looks like
+    // the trailing half of a wide character — same flag — but the cell to its
+    // left is an ordinary one, so reaching it must not drag the range back
+    // over that cell the way it would for a real tail.
+    for_each("123456789漢", 2, 10, |rows, from| {
+        // Column 9 is the blank the wide character left when it could not fit.
+        assert!(
+            rows.cell(0, 9)
+                .is_some_and(|cell| cell.flags.contains(CellFlags::WIDE_SPACER)),
+            "{from}"
+        );
+        // Its left neighbour is an ordinary digit, not a wide character.
+        assert!(
+            rows.cell(0, 8)
+                .is_some_and(|cell| !cell.flags.contains(CellFlags::WIDE)),
+            "{from}"
+        );
+
+        // So reaching the blank stays on the blank rather than pulling back
+        // over the digit. (A true tail, `a漢b` above, still pulls back.)
+        assert_eq!(9..10, rows.whole_characters(0, 9..10), "{from}");
+    });
+}
+
+#[test]
 fn test_zero_width_characters_follow_the_character_they_belong_to() {
     // `e` with a combining acute: two chars, one cell, and a copy that dropped
     // the accent would hand back a different word.

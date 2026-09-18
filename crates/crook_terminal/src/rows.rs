@@ -134,9 +134,24 @@ impl<'a> Rows<'a> {
     /// glyph down the middle or a copy losing the character under it.
     pub fn whole_characters(&self, row: usize, columns: Range<usize>) -> Range<usize> {
         let last = self.columns();
+        // A spacer is one of two things, and only one of them wants pulling
+        // back over. The trailing spacer of a wide character sits to the right
+        // of it, so reaching the spacer has to reach the character a column
+        // left. The *leading* spacer — the blank a wide character leaves in the
+        // last column when it will not fit there and wraps to the next row —
+        // sits to the right of an ordinary cell, and pulling back over that
+        // would swallow a character that is no part of any wide one. The two
+        // arrive here as the same flag, so they are told apart by what is to
+        // their left: a wide character, or not.
         let start = match self.cell(row, columns.start) {
-            Some(cell) if cell.flags.contains(CellFlags::WIDE_SPACER) => {
-                columns.start.saturating_sub(1)
+            Some(cell)
+                if cell.flags.contains(CellFlags::WIDE_SPACER)
+                    && columns.start > 0
+                    && self
+                        .cell(row, columns.start - 1)
+                        .is_some_and(|left| left.flags.contains(CellFlags::WIDE)) =>
+            {
+                columns.start - 1
             }
             _ => columns.start,
         };
