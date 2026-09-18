@@ -815,8 +815,13 @@ fn command_matches(
     chords: &[Chord],
     terms: &[&str],
 ) -> bool {
+    // Folded once, not once per term: this runs for every command on every
+    // keystroke and every frame the palette is up, so a fresh lowercased
+    // `String` per term of a multi-word query is an allocation the same fold
+    // already made.
+    let title = title.to_lowercase();
     terms.iter().all(|term| {
-        title.to_lowercase().contains(term)
+        title.contains(term)
             || action.as_str().contains(term)
             || owner.name().contains(term)
             || chords.iter().any(|chord| chord.text.contains(term))
