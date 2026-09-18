@@ -302,7 +302,7 @@ const REF_DEPTH: usize = 8;
 /// a picker and, for a sandboxed plugin, copied into its memory. A repository
 /// with forty thousand refs in it should cost a long list rather than a
 /// megabyte in somebody else's linear memory.
-const REF_LIMIT: usize = 4096;
+pub(crate) const REF_LIMIT: usize = 4096;
 
 /// Every branch the repository has, in name order.
 ///
@@ -342,6 +342,13 @@ fn loose_branches(directory: &Path, prefix: &mut String, depth: usize, found: &m
     };
 
     for entry in entries.flatten() {
+        // The entry check above only fires when this directory is entered; a
+        // flat `refs/heads` with more than the limit in it is one directory, so
+        // the cap has to be re-checked per name here — the way `packed_branches`
+        // does — or the walk hands back every ref a big repository has.
+        if found.len() >= REF_LIMIT {
+            return;
+        }
         let Ok(name) = entry.file_name().into_string() else {
             // A ref whose name is not UTF-8 is not a ref git made.
             continue;

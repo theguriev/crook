@@ -345,6 +345,31 @@ fn a_packed_repository_reads_the_same_branch_as_a_loose_one() {
 }
 
 #[test]
+fn a_flat_refs_heads_past_the_limit_is_capped_like_a_packed_one() {
+    // The cap exists so a repository with tens of thousands of refs costs a
+    // long list rather than a plugin's whole memory, and a flat `refs/heads`
+    // — every branch a plain name, no `/` — is the ordinary layout. The loose
+    // walk has to honour the cap there too, not only when it recurses into a
+    // subdirectory. No git needed: the walk reads the files directly.
+    let scratch = ScratchDir::new("many-loose-branches");
+    let git_dir = scratch.path().join("git");
+    let heads = git_dir.join("refs").join("heads");
+    std::fs::create_dir_all(&heads).expect("the scratch directory is writable");
+    for index in 0..branch::REF_LIMIT + 10 {
+        std::fs::write(heads.join(format!("b{index:05}")), "")
+            .expect("the scratch directory is writable");
+    }
+
+    let layout = RepoLayout {
+        work_tree: None,
+        git_dir: git_dir.clone(),
+        common_dir: git_dir,
+    };
+
+    assert_eq!(branches_in(&layout).len(), branch::REF_LIMIT);
+}
+
+#[test]
 fn a_linked_worktree_finds_the_repository_it_was_added_from() {
     if without_git("a_linked_worktree_finds_the_repository_it_was_added_from") {
         return;
