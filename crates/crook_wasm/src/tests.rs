@@ -688,6 +688,27 @@ const BABBLING: &str = r#"
     (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
 "#;
 
+/// A plugin whose build contributes far more than it is allowed to keep.
+///
+/// Three hundred is past the ceiling, so the point is that the host stops
+/// recording rather than growing a `Vec` for as long as the guest cares to
+/// loop.
+const PROLIFIC: &str = r#"
+    (func (export "crook_build") (result i32)
+      (local $count i32)
+      (block $done
+        (loop $again
+          (br_if $done (i32.ge_u (local.get $count) (i32.const 300)))
+          (call $contribute
+            (global.get $slot_at) (global.get $slot_len)
+            (global.get $entry_at) (global.get $entry_len)
+            (i32.const 0))
+          (local.set $count (i32.add (local.get $count) (i32.const 1)))
+          (br $again)))
+      (i32.const 0))
+    (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
+"#;
+
 /// A plugin that only wants to know what time it is.
 const CLOCK_WATCHING: &str = r#"
     (func (export "crook_build") (result i32)
@@ -817,6 +838,19 @@ fn a_plugin_may_only_have_so_many_questions_outstanding() {
     sandbox.build().expect("it should build");
 
     assert_eq!(sandbox.asked().len(), 32);
+}
+
+#[test]
+fn a_plugin_may_only_register_so_much() {
+    // The same bound as the questions above, for the other thing a guest can
+    // leave behind. Three hundred contributed, two hundred and fifty-six kept,
+    // and the ones past the ceiling dropped rather than trapped.
+    let (mut sandbox, _) =
+        open(&module(&with_strings(PROLIFIC), ABI_VERSION)).expect("it should open");
+
+    let registered = sandbox.build().expect("it should build");
+
+    assert_eq!(registered.contributions.len(), 256);
 }
 
 #[test]

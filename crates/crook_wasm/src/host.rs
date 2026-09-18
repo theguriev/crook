@@ -15,6 +15,25 @@ use crook_plugin_api::{Action, Contribution, Registered, Request};
 /// have outstanding and far less than a way to run a machine out of memory.
 const MAX_ASKED: usize = 32;
 
+/// How many contributions and actions one plugin may leave behind, together.
+///
+/// The same reasoning as [`MAX_ASKED`], for the other thing a guest can make
+/// the host hold onto. Fuel bounds how long `build` runs, but the host
+/// functions it calls are native and unmetered, so a guest looping on
+/// `contribute` grows a host `Vec` its own budget never pays for — and these
+/// imports are reachable from every later call too, none of which clears what
+/// they left. Two hundred and fifty-six is far more than a plugin has reason
+/// to register and far less than a way to run a machine out of memory.
+const MAX_REGISTERED: usize = 256;
+
+/// Whether a plugin has registered everything [`MAX_REGISTERED`] allows.
+///
+/// Counts contributions and actions together: the ceiling is on what the host
+/// holds, and it holds both.
+fn registers_full(registered: &Registered) -> bool {
+    registered.contributions.len() + registered.actions.len() >= MAX_REGISTERED
+}
+
 /// What a plugin registered while it was building, and what it has asked for
 /// since.
 ///
@@ -54,22 +73,28 @@ impl Registry {
         Self::default()
     }
 
-    /// Records a contribution.
+    /// Records a contribution, unless the plugin has already registered as
+    /// much as it is allowed to leave behind.
     pub(crate) fn contribute(&self, slot: String, entry: String, order: i32) {
-        self.0
-            .borrow_mut()
+        let mut inner = self.0.borrow_mut();
+        if registers_full(&inner.registered) {
+            return;
+        }
+        inner
             .registered
             .contributions
             .push(Contribution { slot, entry, order });
     }
 
-    /// Records an action.
+    /// Records an action, under the same ceiling as [`contribute`].
+    ///
+    /// [`contribute`]: Self::contribute
     pub(crate) fn register_action(&self, name: String, title: Option<String>) {
-        self.0
-            .borrow_mut()
-            .registered
-            .actions
-            .push(Action { name, title });
+        let mut inner = self.0.borrow_mut();
+        if registers_full(&inner.registered) {
+            return;
+        }
+        inner.registered.actions.push(Action { name, title });
     }
 
     /// Everything registered so far.
