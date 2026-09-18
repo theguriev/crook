@@ -274,6 +274,32 @@ fn an_expanded_spacer_pushes_the_next_child_to_the_far_edge() {
 }
 
 #[test]
+fn a_zero_flex_child_takes_no_share_rather_than_a_nan() {
+    // `flex: 0` is a real request — grow by none — and it is where
+    // `remaining_flex` reaches zero once every child with any flex has taken
+    // its share. Dividing the free space by that zero used to be NaN, which
+    // spread to every size it touched; a zero-flex child simply gets nothing.
+    let mut harness = Harness::new(|_| {
+        Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            // A flex-2 spacer, then a flex-0 one, then a marker. The flex-2
+            // spacer takes all the surplus (90 of the 100, less the marker's
+            // 10); the flex-0 spacer takes none, so the marker lands right
+            // after it. With the old divide-by-zero the flex-0 spacer's size
+            // was NaN, and the marker's position with it.
+            .with_child(Expanded::new(2., Empty::new().finish()).finish())
+            .with_child(Expanded::new(0., Empty::new().finish()).finish())
+            .with_child(marker(10., 10.))
+            .finish()
+    });
+
+    let scene = harness.build_scene(vec2f(100., 50.));
+    let bounds: Vec<_> = rects(&scene).iter().map(|rect| rect.bounds).collect();
+
+    assert_eq!(bounds[0], RectF::new(vec2f(90., 0.), vec2f(10., 10.)));
+}
+
+#[test]
 fn a_column_asked_not_to_overflow_lays_no_child_out_past_its_end() {
     // A child that is not flexible is measured free along the main axis, so
     // one that asks for more than the column has is given it, laid out past
