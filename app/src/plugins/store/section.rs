@@ -956,8 +956,11 @@ pub(super) fn download_size(bytes: u64) -> String {
         format!("{} KB", (bytes / KB).max(1))
     } else {
         // Rounded to a tenth by adding half of one before the divide, so
-        // 1_950_000 reads "2.0 MB" rather than "1.9 MB".
-        let tenths = (bytes + MB / 20) / (MB / 10);
+        // 1_950_000 reads "2.0 MB" rather than "1.9 MB". Saturating, because
+        // `bytes` came off the network — an index that advertises a size near
+        // `u64::MAX` must read as an absurdly large number, not overflow (a
+        // panic in a debug build, a wrap to something tiny in a release one).
+        let tenths = bytes.saturating_add(MB / 20) / (MB / 10);
         format!("{}.{} MB", tenths / 10, tenths % 10)
     }
 }
