@@ -585,3 +585,25 @@ fn unbound_is_a_word_query_and_not_a_letter_in_not_bound() {
     // A term the row actually carries is unaffected.
     assert!(command_matches(title, &action, &owner, unbound, &["split"]));
 }
+
+#[test]
+fn every_word_of_a_query_is_matched_against_the_title_case_folded() {
+    // Each term must find the title (folded once, not once per term), so a
+    // multi-word query narrows by every word — and the case a person typed is
+    // not the case the title is in.
+    let title = "Split the Pane";
+    let action = name("crook/window/split");
+    let owner = owner("crook/window");
+    let none: &[Chord] = &[];
+
+    assert!(
+        command_matches(title, &action, &owner, none, &["split", "pane"]),
+        "both words are in the title, so the row survives the query"
+    );
+    assert!(
+        // `missing` is in neither the title nor the action `crook/window/split`
+        // nor the owner, so it drops the row even beside a word that does match.
+        !command_matches(title, &action, &owner, none, &["split", "missing"]),
+        "a word the row carries nowhere drops it, even beside one it does"
+    );
+}
