@@ -247,6 +247,9 @@ fn a_download_size_reads_in_kilobytes_then_megabytes() {
     // Rounds to the nearest tenth rather than truncating.
     assert_eq!(download_size(1_950_000), "2.0 MB");
     assert_eq!(download_size(12_340_000), "12.3 MB");
+    // A hostile index can advertise any u64: the pre-round add must saturate,
+    // not overflow (which panics in debug and wraps to a tiny size in release).
+    assert_eq!(download_size(u64::MAX), "18446744073709.5 MB");
 }
 
 #[test]
