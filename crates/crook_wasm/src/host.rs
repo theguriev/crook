@@ -34,6 +34,17 @@ fn registers_full(registered: &Registered) -> bool {
     registered.contributions.len() + registered.actions.len() >= MAX_REGISTERED
 }
 
+/// The soonest a plugin can ask to be ticked again.
+///
+/// The sibling of the other two ceilings here: fuel bounds how long a call
+/// runs, [`MAX_ASKED`] and [`MAX_REGISTERED`] bound what a call leaves behind,
+/// and this bounds how *often* a plugin can make the host come back to it. A
+/// zero — or sub-frame — interval spins the tick chain with no wait between
+/// wakes: the host wakes the guest, it asks to be woken again at once, and a
+/// core is pegged for a plugin that re-arms on every tick. Floored to a frame,
+/// the soonest a plugin is woken is the soonest a host has any use for.
+const MIN_TICK: Duration = Duration::from_millis(16);
+
 /// What a plugin registered while it was building, and what it has asked for
 /// since.
 ///
@@ -132,13 +143,17 @@ impl Registry {
         std::mem::take(&mut self.0.borrow_mut().asked)
     }
 
-    /// Records that the guest would like to be ticked.
+    /// Records that the guest would like to be ticked, no sooner than a frame.
     ///
     /// The last one wins rather than the shortest: a plugin that asks twice in
     /// one call has changed its mind, and a host that kept the earlier answer
     /// would be scheduling on a decision the plugin has already replaced.
+    ///
+    /// Floored at [`MIN_TICK`]: a zero interval would ask the host to wake the
+    /// guest with no wait at all, and a plugin that re-arms on every tick would
+    /// spin a core rather than be drawn.
     pub(crate) fn wants_ticking_in(&self, after: Duration) {
-        self.0.borrow_mut().timer = Some(after);
+        self.0.borrow_mut().timer = Some(after.max(MIN_TICK));
     }
 
     /// Takes the timer the guest asked for, if it asked for one.

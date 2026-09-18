@@ -772,6 +772,24 @@ fn a_timer_a_plugin_asked_for_is_taken_once_too() {
 }
 
 #[test]
+fn a_plugin_cannot_ask_to_be_ticked_faster_than_a_frame() {
+    // A zero interval would spin the tick chain — wake, re-arm, wake again with
+    // no wait between — pegging a core for a plugin that re-arms on every tick.
+    // Floored to a frame, the soonest the host has any use for.
+    let body = r#"
+        (func (export "crook_build") (result i32)
+          (drop (call $timer (i32.const 0)))
+          (i32.const 0))
+        (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
+    "#;
+    let (mut sandbox, _) = open(&module(body, ABI_VERSION)).expect("it should open");
+
+    sandbox.build().expect("it should build");
+
+    assert_eq!(sandbox.timer(), Some(Duration::from_millis(16)));
+}
+
+#[test]
 fn an_answer_reaches_the_guest_with_its_ticket_and_its_bytes() {
     let (mut sandbox, _) = open(&asking(ASKING)).expect("it should open");
     sandbox.build().expect("it should build");
