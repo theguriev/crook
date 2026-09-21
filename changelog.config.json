@@ -1,0 +1,23 @@
+{
+  "repo": "theguriev/crook",
+  "types": {
+    "feat": { "title": "Features", "semver": "minor" },
+    "fix": { "title": "Fixes", "semver": "patch" },
+    "perf": { "title": "Performance", "semver": "patch" },
+    "refactor": { "title": "Refactors", "semver": "patch" },
+    "docs": { "title": "Documentation" },
+    "test": { "title": "Tests" },
+    "build": { "title": "Build", "semver": "patch" },
+    "ci": { "title": "CI" },
+    "chore": { "title": "Chores" }
+  },
+  "scopeMap": {
+    "api": "plugin api",
+    "wasm": "plugin host"
+  },
+  "templates": {
+    "commitMessage": "chore(release): v{{newVersion}}",
+    "tagMessage": "v{{newVersion}}",
+    "tagBody": "v{{newVersion}}"
+  }
+}
