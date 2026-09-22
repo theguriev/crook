@@ -266,6 +266,7 @@ const MUST_HAVE_A_CHORD: &[&str] = &[
     "focus-pane-down",
     "focus-next-pane",
     "focus-previous-pane",
+    "zoom-pane",
     "search-tabs",
     "find",
     "select-block-up",

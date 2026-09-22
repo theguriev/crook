@@ -1082,6 +1082,11 @@ pub const DEFAULTS_MAC: &[(&str, &str)] = &[
     // `chord_intent` names letters, so the brackets are nobody's.
     ("cmd+]", "crook/window/focus-next-pane"),
     ("cmd+[", "crook/window/focus-previous-pane"),
+    // Not shift+cmd+enter, which is iTerm2's and Warp's for the same gesture:
+    // shift+enter is the field's newline on every platform, whatever else is
+    // held. Not shift+cmd+z either, which the field spends on redo. M for
+    // maximise, with the Shift the split-down chord already carries.
+    ("shift+cmd+m", "crook/window/zoom-pane"),
     // The scrollback, on the chord every terminal ever written uses for it.
     // Shift has always been what takes the wheel and the keyboard back from
     // whatever is running in the pane, which is why the bare page keys are
@@ -1179,6 +1184,10 @@ pub const DEFAULTS_OTHER: &[(&str, &str)] = &[
     ("ctrl+shift+}", "crook/window/focus-next-pane"),
     ("ctrl+shift+[", "crook/window/focus-previous-pane"),
     ("ctrl+shift+{", "crook/window/focus-previous-pane"),
+    // Not Terminator's and Tilix's ctrl+shift+x, which is the field's cut off
+    // macOS, and not ctrl+shift+z, which is its undo. The same letter as the
+    // Mac table, in the table's own Ctrl-Shift.
+    ("ctrl+shift+m", "crook/window/zoom-pane"),
     // The same two scrollback chords the Mac table takes, which is the one
     // gesture xterm, GNOME Terminal, konsole, kitty and Windows Terminal all
     // spell identically. The ends of the scrollback are on Alt because

@@ -19653,6 +19653,7 @@ mod from_the_keyboard {
             "crook/window/grow-pane",
             "crook/window/shrink-pane",
             "crook/window/even-panes",
+            "crook/window/zoom-pane",
         ] {
             harness.run_command(command);
             assert_eq!(focused(&harness), alone, "{command}");
@@ -19669,6 +19670,55 @@ mod from_the_keyboard {
         assert_eq!(focused(&harness), panes[0], "past the end is the start");
         harness.run_command("crook/window/focus-previous-pane");
         assert_eq!(focused(&harness), panes[1]);
+    }
+
+    #[test]
+    fn the_zoom_command_toggles_and_the_chord_reaches_it() {
+        // The command by name and then by its shipped chord, which is what
+        // pins the chord to the command on the platform the test runs on:
+        // the two tables bind it to a different key each.
+        let mut harness = Harness::panel(1);
+        harness.run_command("crook/window/split-right");
+        let panes = panes(&harness);
+        let visible = |harness: &Harness| -> Vec<PaneId> {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .tabs()
+                    .active()
+                    .expect("a tab is active")
+                    .panes()
+                    .visible()
+                    .map(Pane::id)
+                    .collect()
+            })
+        };
+
+        harness.run_command("crook/window/zoom-pane");
+        assert_eq!(visible(&harness), vec![panes[1]], "the focused pane alone");
+
+        // The same letter under the platform's own modifier pair.
+        let modifiers =
+            if crate::input_keys::Platform::current() == crate::input_keys::Platform::Mac {
+                Modifiers {
+                    cmd: true,
+                    shift: true,
+                    ..Default::default()
+                }
+            } else {
+                Modifiers {
+                    ctrl: true,
+                    shift: true,
+                    ..Default::default()
+                }
+            };
+        assert!(
+            harness.press_key("m", modifiers),
+            "the chord was not consumed"
+        );
+        assert_eq!(visible(&harness), panes, "the split is back");
+
+        assert!(harness.press_key("m", modifiers));
+        assert_eq!(visible(&harness), vec![panes[1]], "and zoomed again");
     }
 
     #[test]
@@ -19815,6 +19865,7 @@ mod from_the_keyboard {
             "grow-pane",
             "shrink-pane",
             "even-panes",
+            "zoom-pane",
         ] {
             let action = ActionName::parse(&format!("crook/window/{name}")).expect("a literal");
             let resolved = harness.workspace.read(&harness.app, |workspace, _| {

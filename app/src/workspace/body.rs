@@ -12,7 +12,9 @@
 //! A tab that has never been split therefore renders a single grid filling the
 //! body. That is Warp's collapse rule seen from the front: a group that fell
 //! back to one pane is indistinguishable from one that never split — no
-//! divider, `in_split_pane == false`.
+//! divider, `in_split_pane == false`. So does a zoomed tab, by the same path:
+//! [`PaneGroup::visible`](crate::tab::PaneGroup::visible) hands the layout
+//! one pane and the split it is keeping is nobody's business here.
 //!
 //! # The output, and what draws it
 //!
@@ -191,8 +193,12 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
     }
     .with_main_axis_size(MainAxisSize::Max);
 
+    // Only what the tab is showing: the whole split, or — zoomed — the
+    // focused pane alone, whose one flex child then takes the whole row.
+    // The hidden panes are not laid out at all, so their shells keep the
+    // size they had and are told the new one when the split comes back.
     let mut previous: Option<PaneId> = None;
-    for pane in panes.iter() {
+    for pane in panes.visible() {
         if let Some(before) = previous {
             // The divider between this pane and the one before it, which is
             // the pair a drag on it moves the boundary of.
@@ -242,6 +248,10 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
 /// take the whole of the other — so the answer is the grid the first layout
 /// would resize the pty to, give or take a pixel of rounding no cell count
 /// turns on.
+///
+/// A pane a zoom is hiding is measured against the whole split, which is the
+/// layout it will get the moment it is shown again; the zoomed pane against
+/// the one it is in now.
 pub(super) fn estimated_grid(
     body: Vector2F,
     group: &crate::tab::PaneGroup,
@@ -249,8 +259,13 @@ pub(super) fn estimated_grid(
     font: &CellFont,
 ) -> Option<TerminalSize> {
     let flex = group.get(pane)?.flex();
-    let total: f32 = group.iter().map(Pane::flex).sum();
-    let dividers = group.len().saturating_sub(1) as f32 * DIVIDER_THICKNESS;
+    let shown: Vec<&Pane> = if group.is_visible(pane) {
+        group.visible().collect()
+    } else {
+        group.iter().collect()
+    };
+    let total: f32 = shown.iter().map(|pane| pane.flex()).sum();
+    let dividers = shown.len().saturating_sub(1) as f32 * DIVIDER_THICKNESS;
     let size = match group.axis() {
         SplitAxis::Horizontal => vec2f((body.x() - dividers) * flex / total, body.y()),
         SplitAxis::Vertical => vec2f(body.x(), (body.y() - dividers) * flex / total),

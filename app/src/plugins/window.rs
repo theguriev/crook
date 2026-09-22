@@ -58,7 +58,7 @@ pub const WINDOW_OVERLAY: SlotId = SlotId::new("window.overlay");
 ///
 /// The order is the order the shipped keybindings are written in, so a person
 /// reading one and the other is reading the same order twice.
-pub const COMMANDS: [(&str, &str, Binding); 49] = [
+pub const COMMANDS: [(&str, &str, Binding); 50] = [
     ("new-tab", "New agent tab", Binding::NewTab),
     ("close-pane", "Close the focused pane", Binding::ClosePane),
     ("split-right", "Split to the right", Binding::SplitRight),
@@ -162,6 +162,9 @@ pub const COMMANDS: [(&str, &str, Binding); 49] = [
         Binding::ShrinkPane,
     ),
     ("even-panes", "Even out the split", Binding::EvenPanes),
+    // tmux's prefix-z: the whole tab for one pane's output, and the split
+    // back on the next press. Not "maximise", which is the window's word.
+    ("zoom-pane", "Zoom the focused pane", Binding::ZoomPane),
     ("search-tabs", "Search the tabs", Binding::SearchTabs),
     ("find", "Find in output", Binding::FindInOutput),
     (

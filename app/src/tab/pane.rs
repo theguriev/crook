@@ -17,6 +17,12 @@
 //!
 //! What a flat vector cannot express is the nested case, and
 //! [`PaneGroup::split`] says exactly what it does instead of pretending.
+//!
+//! The one thing here Warp does not have is tmux's zoom: one bool that gives
+//! the focused pane the whole body and hides the rest without touching the
+//! split they are in. [`PaneGroup::visible`] is the list the body draws, and
+//! it is the only reader of the group that ever sees fewer panes than there
+//! are.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -219,6 +225,15 @@ pub struct PaneGroup {
     /// Most-recently-focused first. Warp's `pane_history`, and it is what
     /// picks the successor when the focused pane is closed.
     mru: Vec<PaneId>,
+    /// Whether the focused pane has the whole body to itself for now.
+    ///
+    /// tmux's `zoom-pane`. One bool rather than a second layout, because the
+    /// split is *kept*: every weight above stays what it was, and the layout
+    /// simply stops drawing the other panes until this is cleared. It is
+    /// cleared by anything that would change what the kept layout means —
+    /// a split, a close, the focus moving — so that a zoom never outlives the
+    /// arrangement it was a zoom of. See [`Self::toggle_zoom`].
+    zoomed: bool,
 }
 
 impl PaneGroup {
@@ -235,6 +250,7 @@ impl PaneGroup {
             axis: SplitAxis::default(),
             focused: id,
             mru: vec![id],
+            zoomed: false,
         }
     }
 
@@ -257,6 +273,29 @@ impl PaneGroup {
     /// and no undo the two lists are the same one, and this is it.
     pub fn iter(&self) -> impl Iterator<Item = &Pane> {
         self.panes.iter()
+    }
+
+    /// The panes the body draws, in render order: every one of them, or
+    /// only the focused one while the group is zoomed.
+    ///
+    /// The one reader that differs from [`Self::iter`], and the only one that
+    /// should: the panel's rows, the session file and the shells all want
+    /// every pane, because a hidden pane is still open, still running and
+    /// still the way back out of the zoom.
+    pub fn visible(&self) -> impl Iterator<Item = &Pane> {
+        self.panes
+            .iter()
+            .filter(move |pane| !self.zoomed || pane.id() == self.focused)
+    }
+
+    /// Whether the body is drawing this pane right now.
+    pub fn is_visible(&self, id: PaneId) -> bool {
+        self.get(id).is_some() && (!self.zoomed || self.focused == id)
+    }
+
+    /// Whether the focused pane has the whole body to itself.
+    pub fn is_zoomed(&self) -> bool {
+        self.zoomed
     }
 
     /// The pane with this id, if it is still open.
@@ -344,6 +383,9 @@ impl PaneGroup {
         };
 
         self.panes.insert(at, pane);
+        // A zoom is of one arrangement, and this is a different one: the new
+        // pane has to be seen to be used, and it is the one being focused.
+        self.zoomed = false;
         self.repair(Some(id));
         PaneEffect::Changed
     }
@@ -365,6 +407,10 @@ impl PaneGroup {
         }
 
         self.panes.remove(index);
+        // Whichever pane went: the zoomed one, whose successor a person has
+        // to be able to see the split around, or a hidden one, whose going
+        // has changed the layout being kept under the zoom.
+        self.zoomed = false;
         // `repair` prefers whoever is at the front of the MRU list once the
         // closed pane is gone, so closing the focused pane needs no successor
         // computed here and closing any other needs nothing at all.
@@ -500,12 +546,42 @@ impl PaneGroup {
     }
 
     /// Focuses a pane.
+    ///
+    /// Focusing a pane the zoom is hiding is the one way to reach it without
+    /// a chord — a click on its row in the panel — so the zoom ends here
+    /// rather than following the focus to a pane a person has not seen the
+    /// context of. The same rule with a chord: `focus-next-pane` on a zoomed
+    /// tab shows the split again, with the next pane focused in it.
     pub fn focus(&mut self, id: PaneId) -> PaneEffect {
         if self.focused == id || self.get(id).is_none() {
             return PaneEffect::Unchanged;
         }
+        self.zoomed = false;
         self.repair(Some(id));
         PaneEffect::Changed
+    }
+
+    /// Gives the focused pane the whole body, or the split back.
+    ///
+    /// Refused on a tab that was never split, the way [`Self::nudge`] is:
+    /// there is nothing to hide, and a chord that is consumed for a zoom of
+    /// one pane over itself is a chord taken from the shell for nothing.
+    pub fn toggle_zoom(&mut self) -> PaneEffect {
+        if !self.is_split() {
+            return PaneEffect::Unchanged;
+        }
+        self.zoomed = !self.zoomed;
+        PaneEffect::Changed
+    }
+
+    /// Restores a zoom a previous session recorded.
+    ///
+    /// Through the same refusal [`Self::toggle_zoom`] makes, so a file that
+    /// says a single pane was zoomed restores a tab that is not.
+    pub(crate) fn set_zoomed(&mut self, zoomed: bool) {
+        if zoomed != self.zoomed {
+            self.toggle_zoom();
+        }
     }
 
     /// The single place `focused` is ever assigned, and the single place the

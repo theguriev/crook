@@ -905,6 +905,169 @@ mod walking {
     }
 }
 
+/// Giving one pane the whole tab, with the split kept underneath.
+///
+/// The cases are the ones tmux's `zoom-pane` settled: what is drawn, what is
+/// kept, and what ends a zoom — which is anything that would change what the
+/// kept split means.
+mod zooming {
+    use super::*;
+
+    /// A row of `count` panes, and their ids in render order.
+    fn row(count: usize) -> (TabStrip, Vec<PaneId>) {
+        let mut strip = TabStrip::new();
+        for _ in 1..count {
+            strip.apply(TabAction::Split(Direction::Right));
+        }
+        let panes = panes_of(&strip, strip.active_id());
+        (strip, panes)
+    }
+
+    fn group(strip: &TabStrip) -> &PaneGroup {
+        strip.active().expect("a tab is active").panes()
+    }
+
+    /// The panes the body would draw, in render order.
+    fn visible(strip: &TabStrip) -> Vec<PaneId> {
+        group(strip).visible().map(Pane::id).collect()
+    }
+
+    fn flexes(strip: &TabStrip) -> Vec<f32> {
+        group(strip).iter().map(Pane::flex).collect()
+    }
+
+    #[test]
+    fn zooming_hides_every_pane_but_the_focused_one() {
+        let (mut strip, panes) = row(3);
+        strip.apply(TabAction::FocusPane(panes[1]));
+
+        assert_eq!(TabEffect::Changed, strip.apply(TabAction::ZoomPane));
+
+        assert!(group(&strip).is_zoomed());
+        assert_eq!(visible(&strip), vec![panes[1]]);
+        assert_eq!(
+            panes_of(&strip, strip.active_id()),
+            panes,
+            "the hidden panes are still open"
+        );
+        assert!(group(&strip).is_visible(panes[1]));
+        assert!(!group(&strip).is_visible(panes[0]));
+    }
+
+    #[test]
+    fn zooming_again_restores_the_split_exactly() {
+        // The weights are the layout, and a zoom must not touch them: what
+        // comes back is the split as it was dragged, not an even one.
+        let (mut strip, panes) = row(3);
+        strip.apply(TabAction::ResizePanes {
+            before: panes[0],
+            after: panes[1],
+            leading: 0.75,
+        });
+        let before = flexes(&strip);
+
+        strip.apply(TabAction::ZoomPane);
+        assert_eq!(TabEffect::Changed, strip.apply(TabAction::ZoomPane));
+
+        assert!(!group(&strip).is_zoomed());
+        assert_eq!(visible(&strip), panes);
+        assert_eq!(flexes(&strip), before);
+        assert_eq!(group(&strip).focused_id(), panes[2]);
+    }
+
+    #[test]
+    fn a_tab_that_was_never_split_cannot_be_zoomed() {
+        // The same refusal a nudge makes: there is nothing to hide, and the
+        // action has to report that it did nothing so the chord goes on to
+        // the shell.
+        let (mut strip, _) = row(1);
+
+        assert_eq!(TabEffect::Unchanged, strip.apply(TabAction::ZoomPane));
+        assert!(!group(&strip).is_zoomed());
+    }
+
+    #[test]
+    fn closing_the_zoomed_pane_shows_the_split_again() {
+        let (mut strip, panes) = row(3);
+        strip.apply(TabAction::ZoomPane);
+
+        strip.apply(TabAction::ClosePane(panes[2]));
+
+        assert!(!group(&strip).is_zoomed());
+        assert_eq!(visible(&strip), vec![panes[0], panes[1]]);
+    }
+
+    #[test]
+    fn closing_a_hidden_pane_ends_the_zoom_too() {
+        // A hidden pane's shell can exit on its own. The split the zoom was
+        // keeping is not the split any more, so the person gets to see what
+        // is left rather than finding out on the next toggle.
+        let (mut strip, panes) = row(3);
+        strip.apply(TabAction::ZoomPane);
+
+        strip.apply(TabAction::ClosePane(panes[0]));
+
+        assert!(!group(&strip).is_zoomed());
+        assert_eq!(visible(&strip), vec![panes[1], panes[2]]);
+        assert_eq!(group(&strip).focused_id(), panes[2]);
+    }
+
+    #[test]
+    fn moving_the_focus_ends_the_zoom() {
+        // Focusing a hidden pane is the one way to reach one without the
+        // chord — a click on its row — and a zoom that followed the focus
+        // would show a pane a person has not seen the context of.
+        let (mut strip, panes) = row(3);
+        strip.apply(TabAction::ZoomPane);
+
+        strip.apply(TabAction::FocusPane(panes[0]));
+
+        assert!(!group(&strip).is_zoomed());
+        assert_eq!(visible(&strip), panes);
+        assert_eq!(group(&strip).focused_id(), panes[0]);
+    }
+
+    #[test]
+    fn focusing_the_zoomed_pane_itself_changes_nothing() {
+        // A click on the one pane that is showing is not a request to see
+        // the others.
+        let (mut strip, panes) = row(2);
+        strip.apply(TabAction::ZoomPane);
+
+        assert_eq!(
+            TabEffect::Unchanged,
+            strip.apply(TabAction::FocusPane(panes[1]))
+        );
+        assert!(group(&strip).is_zoomed());
+    }
+
+    #[test]
+    fn splitting_a_zoomed_pane_ends_the_zoom() {
+        let (mut strip, _) = row(2);
+        strip.apply(TabAction::ZoomPane);
+
+        strip.apply(TabAction::Split(Direction::Right));
+
+        assert!(!group(&strip).is_zoomed());
+        assert_eq!(visible(&strip).len(), 3, "the new pane is among them");
+    }
+
+    #[test]
+    fn a_zoom_is_the_active_tabs_and_another_tab_keeps_its_own() {
+        // One bool per group, so a zoom in one tab says nothing about the
+        // tab beside it — and selecting the other tab does not end it.
+        let (mut strip, _) = row(2);
+        let zoomed = strip.active_id();
+        strip.apply(TabAction::ZoomPane);
+
+        strip.apply(TabAction::New);
+        assert_eq!(TabEffect::Unchanged, strip.apply(TabAction::ZoomPane));
+
+        strip.apply(TabAction::Select(zoomed));
+        assert!(group(&strip).is_zoomed(), "the tab came back as it was");
+    }
+}
+
 /// The strip's groups, as the panel would draw them: one entry per block,
 /// naming its group's tabs.
 mod groups {

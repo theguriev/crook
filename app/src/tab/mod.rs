@@ -649,6 +649,11 @@ pub enum TabAction {
         /// Give the focused pane more room, rather than less.
         grow: bool,
     },
+    /// Give the active tab's focused pane the whole body, or the split back.
+    ///
+    /// tmux's `zoom-pane`, and it names no pane for the reason
+    /// [`Self::EvenPanes`] does not. See [`PaneGroup::toggle_zoom`].
+    ZoomPane,
 }
 
 /// What the shell must do after an action was applied.
@@ -1440,6 +1445,11 @@ impl TabStrip {
 
             TabAction::EvenPanes => match self.get_mut(self.active) {
                 Some(tab) => pane_effect(tab.panes_mut().even_out()),
+                None => TabEffect::Unchanged,
+            },
+
+            TabAction::ZoomPane => match self.get_mut(self.active) {
+                Some(tab) => pane_effect(tab.panes_mut().toggle_zoom()),
                 None => TabEffect::Unchanged,
             },
         }
