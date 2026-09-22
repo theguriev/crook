@@ -80,6 +80,23 @@ pub struct LayoutInsets {
     pub header_right: f32,
 }
 
+impl LayoutInsets {
+    /// The same reservation with no panel to owe the left end of it.
+    ///
+    /// The corner does not move when the panel is hidden; what stands in it
+    /// does. With the column gone the header runs to the window's left edge,
+    /// which on a client-decorated macOS window is where the traffic lights
+    /// are painted — so the room the panel was leaving is the header's now,
+    /// and the total is exactly what it was.
+    pub const fn without_panel(self) -> Self {
+        Self {
+            panel_left: 0.,
+            header_left: self.header_left + self.panel_left,
+            header_right: self.header_right,
+        }
+    }
+}
+
 impl WindowControlInsets {
     /// Which element owes which end of this reservation.
     ///
@@ -288,6 +305,32 @@ mod tests {
                 header_right: 0.
             }
         );
+    }
+
+    #[test]
+    fn with_the_panel_hidden_the_header_owes_the_corner_the_panel_did() {
+        // The reservation is about the corner, not about the panel: hiding
+        // the column puts the header under the traffic lights, and the room
+        // has to go with it or the first thing pinned to the header's left
+        // end sits under the green light.
+        let split = ControlLayout::MacOs
+            .insets(WindowChrome::Client, false)
+            .split()
+            .without_panel();
+        assert_eq!(
+            split,
+            LayoutInsets {
+                panel_left: 0.,
+                header_left: TRAFFIC_LIGHTS,
+                header_right: 0.
+            }
+        );
+
+        // And nothing is invented where nothing was reserved.
+        for layout in LAYOUTS {
+            let split = layout.insets(WindowChrome::Native, false).split();
+            assert_eq!(split.without_panel(), split, "{layout:?}");
+        }
     }
 
     #[test]

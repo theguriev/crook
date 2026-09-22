@@ -292,6 +292,22 @@ pub struct GeneralOptions {
     ///
     /// [`login_by_default`]: crate::shell_integration::login_by_default
     pub login_shell: bool,
+    /// Whether the tabs panel is drawn down the left of the window.
+    ///
+    /// Off, the body takes the whole width — what a person reading wide
+    /// output or working on a small screen wants, and what herdr's
+    /// `prefix+b` does to its sidebar. The tabs are still there and every
+    /// chord that reaches them still works; only the column is gone. It is
+    /// remembered here rather than in the session because it is a preference
+    /// about the window and not a fact about what was open in it: somebody
+    /// who hid the panel wants it hidden tomorrow too, whatever tabs come
+    /// back.
+    ///
+    /// The tabs section only. Every other section of the sidebar — the
+    /// settings, the plugins, the store — *is* its list, so the column comes
+    /// back while one of those is showing and goes again on the way back to
+    /// the tabs.
+    pub show_tabs_panel: bool,
 }
 
 impl Default for GeneralOptions {
@@ -304,6 +320,7 @@ impl Default for GeneralOptions {
             use_system_theme: false,
             restore_session: true,
             login_shell: crate::shell_integration::login_by_default(),
+            show_tabs_panel: true,
         }
     }
 }
@@ -1417,6 +1434,8 @@ mod tests {
                 // Crook's own: the number a row leads with, which Warp's rows
                 // never carry.
                 "show_tab_numbers",
+                // Crook's own: whether the column of tabs is drawn at all.
+                "show_tabs_panel",
                 // The chosen theme's name, which is a string rather than an
                 // option with a type: see `Settings::theme`.
                 "theme",
@@ -1602,11 +1621,11 @@ mod tests {
         let written: Map<String, Value> =
             serde_json::from_str(&contents).expect("the file should be a JSON object");
 
-        // Eight tab options, four general ones and three theme names, and
+        // Eight tab options, five general ones and three theme names, and
         // nothing else: the 8KB key the file started with is gone. The font
         // family is not among them — an absent key is what "no preference"
         // is, so a save writes no `font_family` unless one was chosen.
-        assert_eq!(15, written.len());
+        assert_eq!(16, written.len());
         assert!(!contents.contains("padding"));
         assert_eq!(
             everything_flipped(),

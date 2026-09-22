@@ -493,6 +493,12 @@ pub enum SettingsAction {
     /// "Start a login shell": whether a pane's shell reads the startup files
     /// that only a login shell reads.
     ToggleLoginShell,
+    /// "Show the tabs panel": whether the column of tabs is drawn at all.
+    ///
+    /// Here beside the other switches on the general options because that is
+    /// where the answer is kept, and a chord sends it as well as the page —
+    /// the same arrangement [`Self::SetFontSize`] has with the zoom chords.
+    ToggleTabsPanel,
     /// Start recording a chord for this command, on the Keyboard Shortcuts
     /// page.
     ///
