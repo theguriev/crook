@@ -4044,6 +4044,7 @@ fn a_tabs_menu_is_the_entries_its_plugins_put_in_it() {
         harness.tab_menu_entries(),
         [
             "crook/tabs/pin-tab",
+            "crook/tabs/mark-waiting",
             "crook/tabs/new-group-with-tab",
             "crook/tabs/copy-pane-title",
             "crook/tabs/copy-working-directory",
@@ -4385,6 +4386,111 @@ fn a_tabs_menu_offers_to_unpin_a_tab_that_is_pinned() {
             .get(tab)
             .is_some_and(crate::tab::Tab::is_pinned)
     }));
+}
+
+#[test]
+fn a_tabs_menu_offers_to_mark_a_row_as_waiting_and_then_to_clear_it() {
+    // The other label that flips, on the same terms as the pin's: it says
+    // what pressing it does. Opened on a row nobody is looking at, so the
+    // mark is a waiting pane from the moment it lands.
+    let mut harness = Harness::new(2);
+    let tabs = harness.tab_ids();
+    let away = tabs[0];
+    let row = harness.panes_of(away)[0];
+    assert_ne!(harness.active_id(), away, "the last tab opened is active");
+
+    harness.open_tab_menu_on(away, row);
+    let scene = harness.frame();
+    assert!(
+        tab_menu_offers(&scene, "Mark as waiting"),
+        "{}",
+        frame_text(&scene)
+    );
+    assert!(
+        !frame_text(&scene).contains("1 waiting"),
+        "nothing has asked for a look yet"
+    );
+
+    harness.run_command("crook/tabs/mark-waiting");
+    assert_eq!(
+        harness.tab_menu_row(),
+        None,
+        "running the entry left the menu up"
+    );
+    let scene = harness.frame();
+    assert!(
+        frame_text(&scene).contains("1 waiting"),
+        "the mark did not count in the header: {}",
+        frame_text(&scene)
+    );
+
+    harness.open_tab_menu_on(away, row);
+    let scene = harness.frame();
+    assert!(
+        tab_menu_offers(&scene, "Clear waiting"),
+        "a marked row was still being offered a mark: {}",
+        frame_text(&scene)
+    );
+
+    harness.run_command("crook/tabs/mark-waiting");
+    let scene = harness.frame();
+    assert!(
+        !frame_text(&scene).contains(" waiting"),
+        "clearing left the row counted: {}",
+        frame_text(&scene)
+    );
+}
+
+#[test]
+fn clearing_waiting_takes_back_what_a_bell_asked_and_not_what_the_agent_said() {
+    // One entry for the person's mark and the bell's ring, because they are
+    // one colour on the row. The agent's own question is neither, and the
+    // menu does not answer it on the agent's behalf.
+    let mut harness = Harness::new(2);
+    let tabs = harness.tab_ids();
+    let row = harness.panes_of(tabs[0])[0];
+    harness.workspace_update(|workspace, ctx| {
+        workspace.update_session(row, ctx, |session| {
+            session.attention = true;
+            session.status = AgentStatus::NeedsInput;
+        });
+    });
+
+    harness.open_tab_menu_on(tabs[0], row);
+    assert!(tab_menu_offers(&harness.frame(), "Clear waiting"));
+    harness.run_command("crook/tabs/mark-waiting");
+
+    let (attention, marked, status) = harness.workspace.read(&harness.app, |workspace, _| {
+        let session = workspace
+            .tabs()
+            .pane(row)
+            .expect("the row is open")
+            .session();
+        (session.attention, session.marked, session.status)
+    });
+    assert_eq!(
+        (false, false, AgentStatus::NeedsInput),
+        (attention, marked, status)
+    );
+    assert!(
+        frame_text(&harness.frame()).contains("1 waiting"),
+        "the agent is still waiting for its answer"
+    );
+    harness.open_tab_menu_on(tabs[0], row);
+    assert!(
+        tab_menu_offers(&harness.frame(), "Mark as waiting"),
+        "a row the agent alone is holding was offered a clear with nothing to clear"
+    );
+}
+
+#[test]
+fn the_palette_finds_mark_as_waiting_by_name() {
+    let mut harness = Harness::new(1);
+    open_palette(&mut harness, "mark tab");
+
+    let text = frame_text(&harness.frame());
+    assert!(text.contains("Mark tab as waiting"), "{text}");
+    assert!(text.contains("crook/tabs/mark-waiting"), "{text}");
 }
 
 #[test]
@@ -14173,6 +14279,81 @@ mod the_agent {
             workspace.tabs().pane(away).map(Pane::status)
         });
         assert_eq!(Some(AgentStatus::Running), shown);
+    }
+
+    #[test]
+    fn a_persons_mark_outlives_a_look_and_goes_when_they_come_back() {
+        // Marked from the palette, with no menu up, so the mark lands on the
+        // pane being looked at — and looking is what clears attention, on
+        // every settle, whether or not the strip moved. The mark is the one
+        // thing a settle that arrives nowhere leaves alone.
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let here = harness.focused_pane_id().expect("the window has a pane");
+        assert_eq!(harness.active_id(), tabs[1]);
+
+        harness.run_command("crook/tabs/mark-waiting");
+        harness.workspace_update(|workspace, ctx| {
+            workspace.update_session(here, ctx, |session| session.attention = true);
+        });
+
+        // A settle with the same pane in front of it: a glance, not an
+        // arrival. The bell's ask is answered by it and the person's is not.
+        harness.dispatch_action(TabAction::Select(tabs[1]));
+        assert_eq!(
+            (AgentStatus::Idle, false, None),
+            session_of(&harness, here),
+            "a settle that arrived nowhere did not answer the bell"
+        );
+        assert!(marked(&harness, here), "a glance took the person's mark");
+        assert!(
+            !frame_text(&harness.frame()).contains(" waiting"),
+            "the pane being looked at can wait for nobody"
+        );
+
+        // Leaving it is what makes the mark a waiting pane, and it stays one
+        // however many times the other tab is settled.
+        harness.dispatch_action(TabAction::Select(tabs[0]));
+        assert!(frame_text(&harness.frame()).contains("1 waiting"));
+        harness.dispatch_action(TabAction::Select(tabs[0]));
+        assert!(marked(&harness, here));
+
+        // The agent getting on with it takes back what its stop asked for,
+        // not what the person asked for.
+        report(&mut harness, here, AgentStatus::Running, None);
+        assert!(marked(&harness, here), "running took the person's mark");
+        assert!(frame_text(&harness.frame()).contains("1 waiting"));
+
+        harness.dispatch_action(TabAction::Select(tabs[1]));
+        assert!(!marked(&harness, here), "arriving did not clear the mark");
+        assert!(!frame_text(&harness.frame()).contains(" waiting"));
+    }
+
+    #[test]
+    fn the_chord_goes_to_a_marked_pane_and_arriving_clears_the_mark() {
+        let mut harness = Harness::new(3);
+        let tabs = harness.tab_ids();
+        let first = harness.panes_of(tabs[0])[0];
+
+        harness.open_tab_menu_on(tabs[0], first);
+        harness.run_command("crook/tabs/mark-waiting");
+        assert!(marked(&harness, first));
+
+        harness.run_command("crook/tabs/next-waiting");
+        assert_eq!(harness.active_id(), tabs[0]);
+        assert!(!marked(&harness, first), "arriving is what answers a mark");
+    }
+
+    /// Whether a person has marked the pane to come back to.
+    fn marked(harness: &Harness, pane: PaneId) -> bool {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .pane(pane)
+                .expect("the pane is open")
+                .session()
+                .marked
+        })
     }
 
     #[test]

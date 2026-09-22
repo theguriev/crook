@@ -5000,19 +5000,31 @@ impl Workspace {
     /// Only the attention: a status is what the agent said, and looking at a
     /// pane that is waiting for an answer does not answer it. A pane that
     /// failed stays failed, and a running command keeps running.
-    fn attend(&mut self, ctx: &mut ViewContext<Self>) {
+    ///
+    /// A person's own mark goes only when they *arrive* — when `before`, the
+    /// pane that had the keyboard before the strip moved, is not the one that
+    /// has it now. Every action settles through here, including the ones that
+    /// move nothing, and "still looking at the tab I marked to come back to"
+    /// is exactly the state the mark exists to survive.
+    fn attend(&mut self, before: Option<PaneId>, ctx: &mut ViewContext<Self>) {
         let Some(pane) = self.tabs.focused_pane_id() else {
             return;
         };
+        let arrived = before != Some(pane);
         let asked = self
             .tabs
             .pane(pane)
             .map(Pane::session)
-            .is_some_and(|session| session.attention);
+            .is_some_and(|session| session.attention || (arrived && session.marked));
         if !asked {
             return;
         }
-        self.update_session(pane, ctx, |session| session.attention = false);
+        self.update_session(pane, ctx, |session| {
+            session.attention = false;
+            if arrived {
+                session.marked = false;
+            }
+        });
     }
 
     /// Asks a pane's shell what the word before its caret could become.
@@ -5193,8 +5205,9 @@ impl Workspace {
     /// a tab that has been closed — and what makes "the strip changed" and
     /// "the window is dirty" the same statement rather than two.
     pub fn apply(&mut self, action: TabAction, ctx: &mut ViewContext<Self>) -> TabEffect {
+        let before = self.tabs.focused_pane_id();
         let effect = self.tabs.apply(action);
-        self.settle(effect, ctx)
+        self.settle(effect, before, ctx)
     }
 
     /// Opens a tab whose shell starts in `directory`.
@@ -5206,6 +5219,7 @@ impl Workspace {
     /// so a directory set afterwards would relabel the row while the shell sat
     /// in the old place. It is the same order [`crate::session`] restores in.
     pub fn open_tab_in(&mut self, directory: PathBuf, ctx: &mut ViewContext<Self>) -> TabEffect {
+        let before = self.tabs.focused_pane_id();
         let effect = self.tabs.apply(TabAction::New);
 
         // `New` inserts after the active tab and makes it active, so the
@@ -5216,7 +5230,7 @@ impl Workspace {
             pane.session_mut().working_directory = Some(directory);
         }
 
-        self.settle(effect, ctx)
+        self.settle(effect, before, ctx)
     }
 
     /// Opens a tab whose shell starts in `directory`, in `tab`'s group.
@@ -5249,6 +5263,7 @@ impl Workspace {
             return self.open_tab_in(directory, ctx);
         }
 
+        let before = self.tabs.focused_pane_id();
         let effect = self.tabs.apply(TabAction::NewInGroupOf(tab));
 
         // The directory before the shells are synced, for the reason
@@ -5272,11 +5287,20 @@ impl Workspace {
             self.tabs.rename_group(group, repository);
         }
 
-        self.settle(effect, ctx)
+        self.settle(effect, before, ctx)
     }
 
     /// Everything that happens after the strip has moved, whatever moved it.
-    fn settle(&mut self, effect: TabEffect, ctx: &mut ViewContext<Self>) -> TabEffect {
+    ///
+    /// `before` is the pane that had the keyboard before it moved, which is
+    /// the one fact the settled strip cannot recover and the one a person's
+    /// mark is cleared by: see [`Self::attend`].
+    fn settle(
+        &mut self,
+        effect: TabEffect,
+        before: Option<PaneId>,
+        ctx: &mut ViewContext<Self>,
+    ) -> TabEffect {
         self.sync_interactions();
         self.sync_git(ctx);
         self.sync_terminals(ctx);
@@ -5285,7 +5309,7 @@ impl Workspace {
         // through here, which is what makes looking at a pane the one and only
         // thing that quiets its bell — and what brings the row it selected
         // into view whichever gesture selected it.
-        self.attend(ctx);
+        self.attend(before, ctx);
         self.scroll_row_into_view();
 
         // An action that changed nothing repaints nothing: holding down

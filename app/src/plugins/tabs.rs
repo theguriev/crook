@@ -350,6 +350,31 @@ impl Plugin for Tabs {
             workspace.handle_action(&WorkspaceAction::Tab(TabAction::TogglePin(tab)), ctx);
         });
 
+        // One name for both directions, for the reason "Pin tab" has one:
+        // the row says which way it will go. What it sets is the person's
+        // own mark and not the agent's status — an operator who glanced at
+        // ten agents and wants this one to say "still waiting on you" again
+        // is not answering for the agent, and clearing it takes back only
+        // what a person or a bell asked for, never what the agent said.
+        host.register_command(
+            action("mark-waiting"),
+            "Mark tab as waiting",
+            |workspace, ctx| {
+                let Some((_, pane)) = workspace.menu_target() else {
+                    return;
+                };
+                let asked = workspace
+                    .tabs()
+                    .pane(pane)
+                    .is_some_and(|pane| pane.session().asks_for_a_look());
+                workspace.close_tab_context_menu(ctx);
+                workspace.update_session(pane, ctx, |session| {
+                    session.attention = false;
+                    session.marked = !asked;
+                });
+            },
+        );
+
         for color in TabColor::ALL.map(Some).into_iter().chain([None]) {
             let name = color.map_or("no-color".to_owned(), |color| {
                 format!("color-{}", color.name())
@@ -621,6 +646,10 @@ impl Plugin for Tabs {
         // its way down has a hairline to stop at before the one entry here
         // that cannot be undone. Band 5 is the worktree menu's.
         pin_entry(host, 0);
+        // Beside the pin rather than in a band of its own: both are a flag a
+        // person puts on a row about how it stands in the panel, and both
+        // rows say which way they will flip it.
+        mark_entry(host, 1);
         contribute(host, "new-group-with-tab", 100, |workspace, _| {
             workspace.menu_target().is_some()
         });
@@ -713,6 +742,44 @@ fn pin_entry(host: &mut Host, order: i32) {
             _ => inert_entry(workspace, key, "Pin tab"),
         }
     });
+}
+
+/// Contributes the entry that marks a row as waiting, the other one whose
+/// label changes.
+///
+/// "Clear waiting" whenever the row is asking for a look, whichever of the
+/// person or a bell asked: the label says what pressing it does, and what it
+/// does is the same in both cases. An agent's own question is not the row's
+/// asking, so a tab whose agent says it needs input still offers to mark —
+/// and clearing never answers for the agent.
+fn mark_entry(host: &mut Host, order: i32) {
+    let id = host.action(&action("mark-waiting"));
+
+    host.contribute(
+        TAB_MENU_ENTRIES,
+        "mark-waiting",
+        order,
+        move |workspace, _| {
+            let key = "crook/tabs/mark-waiting";
+            let asked = workspace
+                .menu_target()
+                .and_then(|(_, pane)| workspace.tabs().pane(pane))
+                .map(|pane| pane.session().asks_for_a_look());
+            match (asked, id) {
+                (Some(asked), Some(id)) => entry(
+                    workspace,
+                    key,
+                    if asked {
+                        "Clear waiting"
+                    } else {
+                        "Mark as waiting"
+                    },
+                    WorkspaceAction::Run(id),
+                ),
+                _ => inert_entry(workspace, key, "Mark as waiting"),
+            }
+        },
+    );
 }
 
 /// Contributes the row of colour swatches at the foot of the menu.

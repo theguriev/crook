@@ -159,6 +159,17 @@ pub struct AgentSession {
     /// fact about the person and not about the work, which is the whole
     /// reason it is not folded into [`Self::status`].
     pub attention: bool,
+    /// Whether a person asked to be brought back here.
+    ///
+    /// "Mark as waiting" on the row: somebody glanced at a tab, decided to
+    /// come back to it later, and wants the row to say so until they do.
+    /// A second flag rather than [`Self::attention`] set by hand, because
+    /// the two are cleared by different things. Attention is about the work
+    /// and goes the moment the pane is looked at or the agent gets on with
+    /// it; this is about the person, and neither of those is the person
+    /// coming back — so it outlives both, and only arriving at the pane
+    /// clears it. The same command clears it early, by name.
+    pub marked: bool,
     /// Where the agent is working.
     ///
     /// Seeded from the process's own directory, because that is where a
@@ -228,6 +239,7 @@ impl AgentSession {
             custom_title: None,
             status: AgentStatus::default(),
             attention: false,
+            marked: false,
             working_directory: starting_directory(),
             pull_request: None,
             running_command: None,
@@ -259,6 +271,16 @@ impl AgentSession {
             .or(self.running_command.as_deref())
     }
 
+    /// Whether somebody should look here: the work asked, or the person did.
+    ///
+    /// The one question the row, the count and the menu's label all ask, so
+    /// that a mark and a bell are the same colour on the row and the same
+    /// word in the menu — the two flags differ in what clears them, never in
+    /// what they mean to a person scanning the panel.
+    pub fn asks_for_a_look(&self) -> bool {
+        self.attention || self.marked
+    }
+
     /// What the row's dot says, which is the status with one exception: a
     /// pane that asked for attention and has no status of its own to show
     /// it with is shown as needing input, because a bell in a pane nobody is
@@ -267,7 +289,7 @@ impl AgentSession {
     /// dot keeps saying what the agent said.
     pub fn shown_status(&self) -> AgentStatus {
         match self.status {
-            AgentStatus::Idle if self.attention => AgentStatus::NeedsInput,
+            AgentStatus::Idle if self.asks_for_a_look() => AgentStatus::NeedsInput,
             status => status,
         }
     }
@@ -275,11 +297,12 @@ impl AgentSession {
     /// Whether this pane is waiting on the person who is not looking at it.
     ///
     /// The count in the header and the tab the "next waiting" chord goes to:
-    /// something happened here unseen, or the agent said it needs input and
-    /// is still saying so. `active` is whether the pane is the one being
-    /// looked at, and a pane that is can wait for nobody.
+    /// something happened here unseen, the person marked it to come back to,
+    /// or the agent said it needs input and is still saying so. `active` is
+    /// whether the pane is the one being looked at, and a pane that is can
+    /// wait for nobody.
     pub fn is_waiting(&self, active: bool) -> bool {
-        !active && (self.attention || self.status == AgentStatus::NeedsInput)
+        !active && (self.asks_for_a_look() || self.status == AgentStatus::NeedsInput)
     }
 
     /// What a pull-request chip says: `PR #123`, or the raw URL when the number

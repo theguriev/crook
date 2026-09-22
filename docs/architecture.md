@@ -1043,8 +1043,11 @@ while nobody was looking — the bell, or a status changing to anything but runn
 without the keyboard. Looking clears attention and only attention; running clears it too,
 since the stop it announced is over. The dot shows the status, with one exception kept from
 before: an idle pane that asked for attention is drawn as needing input, because a bell in a
-pane nobody is looking at is a program saying exactly that. `is_waiting` is the two combined,
-and it is what the count in the header and the "next waiting" chord read.
+pane nobody is looking at is a program saying exactly that. A person can ask for the same
+look by hand — "Mark as waiting" on the row's menu, `crook/tabs/mark-waiting` — and that
+`marked` flag outlives every glance and every running report, going only when they arrive at
+the pane or clear it from the same entry. `is_waiting` is the three combined, and it is what
+the count in the header and the "next waiting" chord read.
 
 **The strip answers.** A waiting row is washed in the amber its dot shows, faintly, because a
 dot is nine pixels and a person scanning a long list wants the row to say it. The header's
