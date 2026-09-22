@@ -1067,7 +1067,12 @@ pane nobody is looking at is a program saying exactly that. A person can ask for
 look by hand — "Mark as waiting" on the row's menu, `crook/tabs/mark-waiting` — and that
 `marked` flag outlives every glance and every running report, going only when they arrive at
 the pane or clear it from the same entry. `is_waiting` is the three combined, and it is what
-the count in the header and the "next waiting" chord read.
+the count in the header and the "next waiting" chord read. "Why this status" on the same menu,
+`crook/tabs/explain-status`, reads all of it out in words — the status and whether the agent
+said it or the shell's `D` took it back (`AgentSession::source`, an `Instant` subtracted when
+the panel is drawn and never ticked), the title and the question, which of the bell or a
+status change set `attention` and whether `marked` is set, and what the shell is running —
+on a read-only panel that hangs off the menu's corner where the worktree list does.
 
 **The strip answers.** A waiting row is washed in the amber its dot shows, faintly, because a
 dot is nine pixels and a person scanning a long list wants the row to say it. The header's

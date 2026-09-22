@@ -53,6 +53,10 @@ use crate::workspace::Workspace;
 use cache::Cache;
 use index::change;
 use model::StoreModel;
+// The one way of saying "how long ago" the window has, lent to the tab
+// menu's "Why this status" so that a report's age reads as the store's
+// "Checked 6 minutes ago" does and not as a second spelling of it.
+pub(crate) use section::ago;
 pub(crate) use state::StoreState;
 
 /// The section this store is the sidebar of, and the name its field is

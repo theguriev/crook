@@ -111,7 +111,9 @@ use crate::settings::StatusMarks;
 use crate::tab::{AgentStatus, PaneId, Tab, TabAction, TabColor, TabId, TabStrip};
 use crate::text_input::TextInput;
 use crate::theme::theme;
-use crate::workspace::tab_context_menu::{entry, field_entry, inert_entry, nothing, swatch_entry};
+use crate::workspace::tab_context_menu::{
+    entry, field_entry, inert_entry, nothing, submenu_entry, swatch_entry,
+};
 use crate::workspace::{OptionsAction, TabMenuAction, Workspace, WorkspaceAction, status_color};
 
 /// The mark at the head of a tab's row.
@@ -385,9 +387,32 @@ impl Plugin for Tabs {
                     .is_some_and(|pane| pane.session().asks_for_a_look());
                 workspace.close_tab_context_menu(ctx);
                 workspace.update_session(pane, ctx, |session| {
-                    session.attention = false;
+                    session.attention = None;
                     session.marked = !asked;
                 });
+            },
+        );
+
+        // The answer to "why is this row amber", which the row itself cannot
+        // give: the dot is one colour and the reasons are five. A panel that
+        // hangs off the menu rather than a status line on the row, because
+        // it is read once, when somebody wonders, and a row that said all of
+        // it all the time would be a row nobody could scan.
+        let explains = host.register_command(
+            action("explain-status"),
+            "Why this status",
+            |workspace, ctx| {
+                let Some((tab, pane)) = workspace.menu_target() else {
+                    return;
+                };
+                // From the palette or a chord there is no menu for the panel
+                // to hang off, so the menu comes up first, on the row being
+                // looked at — the way "Tab menu" brings the tabs up first.
+                if !workspace.tab_context_menu().is_open() {
+                    workspace.handle_action(&WorkspaceAction::ShowSection(None), ctx);
+                    workspace.handle_action(&TabMenuAction::Open { tab, pane }.into(), ctx);
+                }
+                workspace.handle_action(&TabMenuAction::ToggleExplanation.into(), ctx);
             },
         );
 
@@ -666,6 +691,24 @@ impl Plugin for Tabs {
         // person puts on a row about how it stands in the panel, and both
         // rows say which way they will flip it.
         mark_entry(host, 1);
+        // Under the two flags, because it is the row's own state read out:
+        // what the dot says and who set it, and whether either flag did. A
+        // submenu's row — a chevron, lit while the panel is up — since
+        // pressing it opens something rather than doing something.
+        host.contribute(
+            TAB_MENU_ENTRIES,
+            "explain-status",
+            2,
+            move |workspace, _| {
+                submenu_entry(
+                    workspace,
+                    "crook/tabs/explain-status",
+                    "Why this status",
+                    workspace.tab_context_menu().is_explaining(),
+                    WorkspaceAction::Run(explains),
+                )
+            },
+        );
         contribute(host, "new-group-with-tab", 100, |workspace, _| {
             workspace.menu_target().is_some()
         });

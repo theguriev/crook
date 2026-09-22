@@ -63,7 +63,10 @@
 //! popup. It is an anchored child of *this* popup's own stack, painted above
 //! it and inside its hit rect, which is why a press on the worktree list does
 //! not dismiss the menu that opened it and a press outside both takes the
-//! whole thing down in one gesture.
+//! whole thing down in one gesture. The "Why this status" panel —
+//! [`status_explanation`](super::status_explanation) — hangs off the same
+//! corner on the same terms, and opening either takes the other down, so the
+//! corner is never asked for twice.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -147,6 +150,13 @@ pub(crate) struct TabContextMenuState {
     pub(super) tab: Option<TabId>,
     /// The pane whose row was pressed.
     pub(super) pane: Option<PaneId>,
+    /// Whether the panel saying why the row's dot is what it is hangs off
+    /// the menu.
+    ///
+    /// It hangs where the worktree list does, and the two are never up at
+    /// once — see [`render`] — so this is a flag rather than a mode: the
+    /// list has its own state and this has none.
+    pub(super) explaining: bool,
     /// One mouse state per entry, made on that entry's first frame.
     ///
     /// Keyed by a string rather than by an enum of the entries, because the
@@ -188,6 +198,14 @@ impl TabContextMenuState {
     /// Whether the menu is up.
     pub(crate) fn is_open(&self) -> bool {
         self.tab.is_some()
+    }
+
+    /// Whether the panel saying why the row's dot is what it is hangs off it.
+    ///
+    /// Asked by the entry that opens it, to light its row while it is up the
+    /// way the worktree entry lights while its list is.
+    pub(crate) fn is_explaining(&self) -> bool {
+        self.explaining
     }
 
     /// The mouse state for one entry.
@@ -713,11 +731,18 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
         .finish();
 
     // The one submenu there is, and it is not a popup. See this file's doc.
-    if !workspace.tab_menu().is_open() {
+    // The explanation hangs off the same corner and is not a popup for the
+    // same reason; opening either takes the other down, so the corner is
+    // never asked for twice.
+    let aside = if workspace.tab_menu().is_open() {
+        super::tab_menu::render(workspace)
+    } else if workspace.tab_context_menu().explaining {
+        super::status_explanation::render(workspace)
+    } else {
         return popup;
-    }
+    };
     let mut stack = Stack::new().with_child(popup);
-    stack.add_anchored_overlay_child(super::tab_menu::render(workspace), BESIDE);
+    stack.add_anchored_overlay_child(aside, BESIDE);
     stack.finish()
 }
 

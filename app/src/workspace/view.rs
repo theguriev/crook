@@ -52,8 +52,8 @@ use crate::settings::{
 };
 use crate::shell_integration::Standing;
 use crate::tab::{
-    AgentSession, AgentStatus, Direction, GroupId, Pane, PaneId, Tab, TabAction, TabEffect,
-    TabGroup, TabId, TabStrip,
+    AgentSession, AgentStatus, Attention, Direction, GroupId, Pane, PaneId, StatusSource, Tab,
+    TabAction, TabEffect, TabGroup, TabId, TabStrip,
 };
 use crate::terminal_font::CellFont;
 use crate::terminal_model::{BlockHistory, TerminalHandle, TerminalModel, TerminalUpdate};
@@ -2774,7 +2774,28 @@ impl Workspace {
                 }
             }
             TabMenuAction::Close => self.close_tab_context_menu(ctx),
+            TabMenuAction::ToggleExplanation => self.toggle_status_explanation(ctx),
         }
+    }
+
+    /// Hangs the panel saying why the row's dot is what it is off the menu,
+    /// or takes it down.
+    ///
+    /// Off the menu rather than in place of it, because the panel is
+    /// read-only and the menu is still the thing a person is in: Escape
+    /// takes the panel down and leaves the menu standing, the way the
+    /// worktree list's Escape does, and the worktree list gives way to it
+    /// because the two hang off the same corner.
+    fn toggle_status_explanation(&mut self, ctx: &mut ViewContext<Self>) {
+        if !self.tab_context_menu.is_open() {
+            return;
+        }
+        let showing = !self.tab_context_menu.explaining;
+        if showing {
+            self.close_tab_menu(ctx);
+        }
+        self.tab_context_menu.explaining = showing;
+        ctx.notify();
     }
 
     /// Puts the menu up on a row, taking down whatever else was up.
@@ -2848,6 +2869,7 @@ impl Workspace {
 
         self.tab_context_menu.tab = Some(tab);
         self.tab_context_menu.pane = Some(pane);
+        self.tab_context_menu.explaining = false;
         self.tab_context_menu.scroll.lock().scroll_to_top();
         self.tab_context_menu.forget_hover_state();
         self.sync_input_keys();
@@ -2866,6 +2888,7 @@ impl Workspace {
         self.close_tab_menu(ctx);
         self.tab_context_menu.tab = None;
         self.tab_context_menu.pane = None;
+        self.tab_context_menu.explaining = false;
         self.tab_context_menu.forget_hover_state();
         self.sync_input_keys();
         ctx.notify();
@@ -3062,6 +3085,9 @@ impl Workspace {
         {
             self.show_tab_context_menu(tab, row, ctx);
         }
+
+        // The list takes the corner the explanation was hanging off.
+        self.tab_context_menu.explaining = false;
 
         let epoch = self.tab_menu.next_epoch();
         self.tab_menu.tab = Some(tab);
@@ -5008,10 +5034,14 @@ impl Workspace {
             // that means a pane has gone.
             return true;
         }
-        self.update_session(pane, ctx, |session| session.attention = true)
+        self.update_session(pane, ctx, |session| {
+            session.attention = Some(Attention::Bell);
+        })
     }
 
-    /// Records what the program in a pane said it was doing.
+    /// Records what the program in a pane said it was doing — or, with a
+    /// [`StatusSource::CommandEnded`], that the shell ended the command it was
+    /// and took its status back to idle.
     ///
     /// The status is written as said, and the title beside it when one came:
     /// it is the agent's own name for its work, which is what
@@ -5031,6 +5061,7 @@ impl Workspace {
         status: AgentStatus,
         title: Option<String>,
         message: Option<String>,
+        source: StatusSource,
         ctx: &mut ViewContext<Self>,
     ) -> bool {
         let looking = self.tabs.focused_pane_id() == Some(pane);
@@ -5040,11 +5071,12 @@ impl Workspace {
             }
             let changed = session.status != status;
             session.status = status;
+            session.source = source;
             session.message = message.filter(|_| status == AgentStatus::NeedsInput);
             if status == AgentStatus::Running {
-                session.attention = false;
+                session.attention = None;
             } else if changed && !looking {
-                session.attention = true;
+                session.attention = Some(Attention::StatusChange);
             }
         })
     }
@@ -5069,12 +5101,12 @@ impl Workspace {
             .tabs
             .pane(pane)
             .map(Pane::session)
-            .is_some_and(|session| session.attention || (arrived && session.marked));
+            .is_some_and(|session| session.attention.is_some() || (arrived && session.marked));
         if !asked {
             return;
         }
         self.update_session(pane, ctx, |session| {
-            session.attention = false;
+            session.attention = None;
             if arrived {
                 session.marked = false;
             }
@@ -5186,7 +5218,25 @@ impl Workspace {
                 status,
                 title,
                 message,
-            } => self.agent_reported(*pane, *status, title.clone(), message.clone(), ctx),
+            } => self.agent_reported(
+                *pane,
+                *status,
+                title.clone(),
+                message.clone(),
+                StatusSource::Agent(Instant::now()),
+                ctx,
+            ),
+            // The same path as a report of idle, attention included: a pane
+            // whose command ended while nobody was looking is a pane whose
+            // agent stopped, whichever of the two said so.
+            TerminalUpdate::AgentSettled(pane) => self.agent_reported(
+                *pane,
+                AgentStatus::Idle,
+                None,
+                None,
+                StatusSource::CommandEnded(Instant::now()),
+                ctx,
+            ),
         };
 
         if !reported {
@@ -5878,6 +5928,10 @@ impl Workspace {
                 return (keystroke.key == "escape").then_some(TabMenuAction::Close.into());
             }
             let action = match keystroke.key.as_str() {
+                // The explanation is the other step to be at, and it has no
+                // rows of its own to walk: Escape takes it down, and the
+                // arrows keep walking the menu under it.
+                "escape" if self.tab_context_menu.explaining => TabMenuAction::ToggleExplanation,
                 "escape" => TabMenuAction::Close,
                 "up" => TabMenuAction::MoveSelection(-1),
                 "down" => TabMenuAction::MoveSelection(1),

@@ -27,6 +27,7 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use crook_terminal::AgentReport;
 
@@ -110,6 +111,41 @@ impl AgentStatus {
     }
 }
 
+/// What asked for a look at a pane while nobody was giving it one.
+///
+/// The cause rides with the flag rather than beside it, so that a row's menu
+/// can say *why* the row is amber — "the bell rang" and "the agent stopped"
+/// are answered differently by the person reading them — and so that the
+/// two can never disagree: attention that is set has a cause, and attention
+/// that is cleared has none.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Attention {
+    /// The shell rang the bell in a pane without the keyboard.
+    Bell,
+    /// The agent's status changed to something other than running, in a
+    /// pane without the keyboard.
+    StatusChange,
+}
+
+/// Where a session's status came from.
+///
+/// The one fact the dot cannot show: an idle row is idle because nothing has
+/// ever reported, because the agent said it was done, or because the shell's
+/// `D` ended a command whose agent never got to say. The instant is read when
+/// the row's menu asks and never ticks — the window keeps no idle timer, and
+/// "2 minutes ago" is a subtraction at the moment somebody looks.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum StatusSource {
+    /// Nothing has reported. The status is the default, or what a session
+    /// file or a fixture seeded.
+    NoReport,
+    /// The agent said so, at this instant.
+    Agent(Instant),
+    /// The command the agent was ended and took its last report back, at
+    /// this instant. See `Emulator::settle_agent` in `crook_terminal`.
+    CommandEnded(Instant),
+}
+
 /// The agent session a pane is a window onto.
 ///
 /// Warp's tab points at a `ViewHandle<PaneGroup>` whose panes hold views,
@@ -160,7 +196,13 @@ pub struct AgentSession {
     /// shell's marks report when the command ends, takes it with it, because
     /// a question the agent has stopped asking is not one to keep showing.
     pub message: Option<String>,
-    /// Whether something happened here while nobody was looking.
+    /// Where [`Self::status`] came from, and when.
+    ///
+    /// Written with every report and every settle, and read by exactly one
+    /// thing: the row's "Why this status" entry, which is the place a person
+    /// goes when the dot is amber and nothing says why.
+    pub source: StatusSource,
+    /// Whether something happened here while nobody was looking, and what.
     ///
     /// The bell in a pane without the keyboard, or a status that changed
     /// there to anything but running: a person who walked away from a tab
@@ -168,7 +210,7 @@ pub struct AgentSession {
     /// looking — every focus change runs `attend` — because attention is a
     /// fact about the person and not about the work, which is the whole
     /// reason it is not folded into [`Self::status`].
-    pub attention: bool,
+    pub attention: Option<Attention>,
     /// Whether a person asked to be brought back here.
     ///
     /// "Mark as waiting" on the row: somebody glanced at a tab, decided to
@@ -249,7 +291,8 @@ impl AgentSession {
             custom_title: None,
             status: AgentStatus::default(),
             message: None,
-            attention: false,
+            source: StatusSource::NoReport,
+            attention: None,
             marked: false,
             working_directory: starting_directory(),
             pull_request: None,
@@ -289,7 +332,7 @@ impl AgentSession {
     /// word in the menu — the two flags differ in what clears them, never in
     /// what they mean to a person scanning the panel.
     pub fn asks_for_a_look(&self) -> bool {
-        self.attention || self.marked
+        self.attention.is_some() || self.marked
     }
 
     /// What the row's dot says, which is the status with one exception: a

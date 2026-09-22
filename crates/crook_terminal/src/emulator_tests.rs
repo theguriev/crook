@@ -735,11 +735,7 @@ fn test_the_command_ending_takes_a_running_status_with_it() {
     assert!(
         emulator
             .take_events()
-            .contains(&TerminalEvent::Agent(Reported {
-                status: AgentReport::Idle,
-                title: None,
-                message: None,
-            }))
+            .contains(&TerminalEvent::AgentSettled)
     );
 }
 
@@ -770,11 +766,7 @@ fn test_a_running_status_settles_when_its_end_is_in_the_same_read() {
         assert!(
             emulator
                 .take_events()
-                .contains(&TerminalEvent::Agent(Reported {
-                    status: AgentReport::Idle,
-                    title: None,
-                    message: None,
-                }))
+                .contains(&TerminalEvent::AgentSettled)
         );
     }
 }

@@ -35,7 +35,7 @@ use crate::settings::{
     Density, GeneralOptions, Granularity, PrimaryInfo, Settings, StatusMarks, Subtitle, TabOptions,
 };
 use crate::tab::{
-    AgentSession, AgentStatus, Direction, GroupId, Pane, PaneId, Tab, TabAction, TabId,
+    AgentSession, AgentStatus, Attention, Direction, GroupId, Pane, PaneId, Tab, TabAction, TabId,
 };
 use crate::terminal_font::{CELL_FONT_SIZE, CellFont};
 use crate::theme::theme;
@@ -4267,6 +4267,7 @@ fn a_tabs_menu_is_the_entries_its_plugins_put_in_it() {
         [
             "crook/tabs/pin-tab",
             "crook/tabs/mark-waiting",
+            "crook/tabs/explain-status",
             "crook/tabs/new-group-with-tab",
             "crook/tabs/copy-pane-title",
             "crook/tabs/copy-working-directory",
@@ -4673,7 +4674,7 @@ fn clearing_waiting_takes_back_what_a_bell_asked_and_not_what_the_agent_said() {
     let row = harness.panes_of(tabs[0])[0];
     harness.workspace_update(|workspace, ctx| {
         workspace.update_session(row, ctx, |session| {
-            session.attention = true;
+            session.attention = Some(Attention::Bell);
             session.status = AgentStatus::NeedsInput;
         });
     });
@@ -4691,7 +4692,7 @@ fn clearing_waiting_takes_back_what_a_bell_asked_and_not_what_the_agent_said() {
         (session.attention, session.marked, session.status)
     });
     assert_eq!(
-        (false, false, AgentStatus::NeedsInput),
+        (None, false, AgentStatus::NeedsInput),
         (attention, marked, status)
     );
     assert!(
@@ -6410,7 +6411,7 @@ fn waiting_finds_only_the_rows_the_wash_paints() {
     let panes = harness.pane_ids();
     harness.update_session(panes[0], |session| {
         session.derived_title = Some("kettle".to_owned());
-        session.attention = true;
+        session.attention = Some(Attention::Bell);
     });
     harness.update_session(panes[1], |session| {
         session.derived_title = Some("cocoa".to_owned());
@@ -6422,7 +6423,7 @@ fn waiting_finds_only_the_rows_the_wash_paints() {
     });
     harness.update_session(panes[3], |session| {
         session.derived_title = Some("scone".to_owned());
-        session.attention = true;
+        session.attention = Some(Attention::Bell);
     });
 
     for word in ["waiting", "needs-input"] {
@@ -14717,7 +14718,7 @@ mod the_agent {
                 .session();
             (
                 session.status,
-                session.attention,
+                session.attention.is_some(),
                 session.derived_title.clone(),
             )
         })
@@ -14965,7 +14966,9 @@ mod the_agent {
 
         harness.run_command("crook/tabs/mark-waiting");
         harness.workspace_update(|workspace, ctx| {
-            workspace.update_session(here, ctx, |session| session.attention = true);
+            workspace.update_session(here, ctx, |session| {
+                session.attention = Some(Attention::Bell)
+            });
         });
 
         // A settle with the same pane in front of it: a glance, not an
@@ -14998,6 +15001,177 @@ mod the_agent {
         harness.dispatch_action(TabAction::Select(tabs[1]));
         assert!(!marked(&harness, here), "arriving did not clear the mark");
         assert!(!frame_text(&harness.frame()).contains(" waiting"));
+    }
+
+    /// What the "Why this status" panel says, or `None` while it is down.
+    ///
+    /// The panel's own text and not the frame's: the row under the menu
+    /// prints the agent's question too, so a whole-frame search could not
+    /// tell the panel saying it from the row saying it. The panel is found
+    /// the way the worktree list is — it is the same box in the same
+    /// corner, and the two are never up together. Line by line, joined with
+    /// a space, so a sentence wrapped to the panel's width reads whole.
+    fn explanation_text(scene: &Scene) -> Option<String> {
+        let panel = worktree_menu_box(scene)?;
+        let lines: Vec<String> = text_lines(scene, |position| panel.contains_point(position))
+            .into_iter()
+            .map(|(_, line)| line)
+            .collect();
+        Some(lines.join(" "))
+    }
+
+    /// Opens the row's menu and its "Why this status" panel, and reads back
+    /// what the panel says.
+    fn explanation_of(harness: &mut Harness, tab: TabId, pane: PaneId) -> String {
+        harness.open_tab_menu_on(tab, pane);
+        assert!(
+            tab_menu_offers(&harness.frame(), "Why this status"),
+            "the menu has no entry for the panel: {}",
+            frame_text(&harness.frame())
+        );
+        harness.run_command("crook/tabs/explain-status");
+        assert_eq!(
+            harness.tab_menu_row(),
+            Some(pane),
+            "the panel hangs off the menu, and opening it took the menu down"
+        );
+        explanation_text(&harness.frame()).expect("the panel is not drawn")
+    }
+
+    #[test]
+    fn why_this_status_says_what_the_agent_said_and_what_it_asks() {
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        report_waiting_for(
+            &mut harness,
+            away,
+            AgentStatus::NeedsInput,
+            Some("port the tab bar"),
+            Some("run rm -rf build?"),
+        );
+
+        let text = explanation_of(&mut harness, tabs[0], away);
+        assert!(text.contains("needs input"), "{text}");
+        assert!(text.contains("agent"), "{text}");
+        assert!(text.contains("run rm -rf build?"), "{text}");
+        assert!(text.contains("port the tab bar"), "{text}");
+        assert!(
+            text.contains("status changed"),
+            "the stop nobody saw was not named as what asked for a look: {text}"
+        );
+
+        // Escape is one step back: the panel goes and the menu stays, the
+        // way the worktree list's Escape leaves the menu it hangs off.
+        assert!(harness.press_key("escape", Modifiers::default()));
+        assert_eq!(harness.tab_menu_row(), Some(away));
+        assert_eq!(
+            explanation_text(&harness.frame()),
+            None,
+            "escape left the panel up"
+        );
+        assert!(harness.press_key("escape", Modifiers::default()));
+        assert_eq!(harness.tab_menu_row(), None);
+    }
+
+    #[test]
+    fn why_this_status_names_the_bell() {
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(
+                &TerminalUpdate::Bell {
+                    pane: away,
+                    while_running: false,
+                },
+                ctx,
+            );
+        });
+
+        let text = explanation_of(&mut harness, tabs[0], away);
+        assert!(text.contains("bell"), "{text}");
+        assert!(
+            text.contains("The dot says needs input"),
+            "an idle row that rang is drawn amber, and the panel did not say why: {text}"
+        );
+    }
+
+    #[test]
+    fn why_this_status_names_the_person_who_marked_the_row() {
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        harness.open_tab_menu_on(tabs[0], away);
+        harness.run_command("crook/tabs/mark-waiting");
+        assert!(marked(&harness, away));
+
+        let text = explanation_of(&mut harness, tabs[0], away);
+        assert!(text.contains("by you"), "{text}");
+        assert!(!text.contains("bell"), "{text}");
+    }
+
+    #[test]
+    fn why_this_status_says_when_nothing_has_reported() {
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+
+        let text = explanation_of(&mut harness, tabs[0], away);
+        assert!(text.contains("no report yet"), "{text}");
+        assert!(text.contains("at a prompt"), "{text}");
+    }
+
+    #[test]
+    fn why_this_status_says_when_the_command_ending_took_the_report_back() {
+        // The shell's `D` under an interrupted agent arrives as its own
+        // update, and the panel tells it apart from the agent saying idle.
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        report(&mut harness, away, AgentStatus::Running, None);
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(&TerminalUpdate::AgentSettled(away), ctx);
+        });
+        assert_eq!(AgentStatus::Idle, session_of(&harness, away).0);
+
+        let text = explanation_of(&mut harness, tabs[0], away);
+        assert!(text.contains("command ended"), "{text}");
+        assert!(
+            text.contains("status changed"),
+            "a command ending unseen is a stop nobody saw: {text}"
+        );
+    }
+
+    #[test]
+    fn opening_the_worktree_list_takes_the_explanation_down() {
+        // The two hang off the same corner, so opening one is closing the
+        // other — and opening the menu afresh starts with neither.
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        explanation_of(&mut harness, tabs[0], away);
+        let explaining = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.tab_context_menu().is_explaining()
+            })
+        };
+        assert!(explaining(&harness));
+
+        harness.dispatch_worktree(WorktreeAction::OpenMenu(tabs[0]));
+        assert!(
+            !explaining(&harness),
+            "the list left the panel up beside it"
+        );
+
+        harness.open_tab_menu_on(tabs[0], away);
+        assert_eq!(
+            harness.tab_menu_row(),
+            None,
+            "pressing the row again closes"
+        );
+        harness.open_tab_menu_on(tabs[0], away);
+        assert!(!explaining(&harness), "a fresh menu came up with the panel");
     }
 
     #[test]
@@ -16774,7 +16948,7 @@ fn the_palette_s_waiting_tabs_are_the_panel_s_amber_rows() {
     let panes = harness.pane_ids();
     harness.update_session(panes[0], |session| {
         session.derived_title = Some("kettle".to_owned());
-        session.attention = true;
+        session.attention = Some(Attention::Bell);
     });
     harness.update_session(panes[1], |session| {
         session.derived_title = Some("cocoa".to_owned());
@@ -16786,7 +16960,7 @@ fn the_palette_s_waiting_tabs_are_the_panel_s_amber_rows() {
     });
     harness.update_session(panes[3], |session| {
         session.derived_title = Some("scone".to_owned());
-        session.attention = true;
+        session.attention = Some(Attention::Bell);
     });
 
     harness.click_panel_search();
