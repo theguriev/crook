@@ -255,6 +255,8 @@ pub enum Binding {
     EvenPanes,
     /// Give the focused pane the whole tab, or the split back.
     ZoomPane,
+    /// Hide the tabs panel, or show it again.
+    TogglePanel,
     /// Select the tab at this position in the strip, counting from zero.
     SelectTab(usize),
     /// Select the last tab, wherever it is.

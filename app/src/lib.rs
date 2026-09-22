@@ -1019,6 +1019,7 @@ KEYS (macOS):
     ctrl+shift+arrows          Focus the pane in that direction
     cmd+] / cmd+[              Focus the next / previous pane
     shift+cmd+m                Zoom the focused pane: the whole tab, and the split back
+    cmd+b                      Hide the tabs panel, and bring it back
     cmd+k                      Search the tabs
     cmd+f                      Find in the output
     cmd+1 … cmd+8, cmd+9       Select a tab by position, and the last one
@@ -1040,6 +1041,7 @@ KEYS (Linux and Windows):
     alt+arrows                 Focus the pane in that direction
     ctrl+shift+] / ctrl+shift+[  Focus the next / previous pane
     ctrl+shift+m               Zoom the focused pane: the whole tab, and the split back
+    ctrl+shift+b               Hide the tabs panel, and bring it back
     ctrl+shift+k               Search the tabs
     ctrl+shift+f               Find in the output
     alt+1 … alt+8, alt+9       Select a tab by position, and the last one

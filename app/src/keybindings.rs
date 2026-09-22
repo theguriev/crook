@@ -1087,6 +1087,10 @@ pub const DEFAULTS_MAC: &[(&str, &str)] = &[
     // held. Not shift+cmd+z either, which the field spends on redo. M for
     // maximise, with the Shift the split-down chord already carries.
     ("shift+cmd+m", "crook/window/zoom-pane"),
+    // The sidebar chord every editor uses for the same gesture — VS Code,
+    // Zed, Xcode's navigator — and free of the field: the cmd branch of
+    // `chord_intent` names five letters and B is not one of them.
+    ("cmd+b", "crook/window/toggle-panel"),
     // The scrollback, on the chord every terminal ever written uses for it.
     // Shift has always been what takes the wheel and the keyboard back from
     // whatever is running in the pane, which is why the bare page keys are
@@ -1188,6 +1192,9 @@ pub const DEFAULTS_OTHER: &[(&str, &str)] = &[
     // macOS, and not ctrl+shift+z, which is its undo. The same letter as the
     // Mac table, in the table's own Ctrl-Shift.
     ("ctrl+shift+m", "crook/window/zoom-pane"),
+    // The same letter as the Mac table, in the table's own Ctrl-Shift: bare
+    // ctrl-b is readline's "back one character" and the field needs it.
+    ("ctrl+shift+b", "crook/window/toggle-panel"),
     // The same two scrollback chords the Mac table takes, which is the one
     // gesture xterm, GNOME Terminal, konsole, kitty and Windows Terminal all
     // spell identically. The ends of the scrollback are on Alt because

@@ -14271,6 +14271,233 @@ mod text_size {
     }
 }
 
+/// Hiding the tabs panel and getting it back.
+///
+/// The column is a preference about the window rather than a fact about the
+/// tabs, so what these pin is the layout — the body taking the panel's width,
+/// the header taking the corner — and the two ways back: the chord again, and
+/// the search chord, which has nothing to focus while the panel is hidden.
+mod hiding_the_panel {
+    use super::*;
+
+    /// Whether the frame drew the panel's column at all.
+    fn panel_is_drawn(scene: &Scene) -> bool {
+        visible_rects(scene).any(|(rect, bounds)| {
+            rect.background == Fill::Solid(theme().surface)
+                && (bounds.width() - tabs_panel::PANEL_WIDTH).abs() < 0.5
+                && bounds.min_x() < 1.
+        })
+    }
+
+    fn showing(harness: &Harness) -> bool {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tabs_panel_is_showing()
+        })
+    }
+
+    #[test]
+    fn the_command_hides_the_panel_and_the_next_press_brings_it_back() {
+        let mut harness = Harness::panel(2);
+        let scene = harness.frame();
+        assert!(panel_is_drawn(&scene));
+        assert_eq!(header_box(&scene).min_x(), tabs_panel::PANEL_WIDTH);
+
+        harness.run_command("crook/window/toggle-panel");
+        let scene = harness.frame();
+        assert!(!showing(&harness));
+        assert!(!panel_is_drawn(&scene), "the column is still drawn");
+        assert!(
+            header_box(&scene).min_x() < 1.,
+            "the header did not take the column's width: {:?}",
+            header_box(&scene)
+        );
+
+        harness.run_command("crook/window/toggle-panel");
+        let scene = harness.frame();
+        assert!(showing(&harness));
+        assert!(panel_is_drawn(&scene), "the column did not come back");
+        assert_eq!(header_box(&scene).min_x(), tabs_panel::PANEL_WIDTH);
+    }
+
+    #[test]
+    fn the_chord_reaches_it() {
+        // Pinned by its shipped chord on the platform the test runs on: the
+        // same letter under each table's own modifiers.
+        let mut harness = Harness::panel(1);
+
+        assert!(
+            harness.press_key("b", platform_chord()),
+            "the chord was not consumed"
+        );
+        assert!(!showing(&harness));
+
+        assert!(harness.press_key("b", platform_chord()));
+        assert!(showing(&harness));
+    }
+
+    #[test]
+    fn the_search_chord_brings_the_panel_back_and_puts_the_keyboard_in_the_box() {
+        // A search box nobody can see is no use to anybody, so asking for it
+        // is asking for the column it is drawn in.
+        let mut harness = Harness::panel(2);
+        harness.run_command("crook/window/toggle-panel");
+        assert!(!showing(&harness));
+
+        harness.press_search_chord();
+
+        assert!(showing(&harness), "the search chord left the panel hidden");
+        assert!(panel_is_drawn(&harness.frame()));
+        assert!(
+            harness.panel_search_takes_keys(),
+            "the box came back without the keyboard"
+        );
+        harness.type_text("ab");
+        assert_eq!(harness.panel_search_text(), "ab");
+    }
+
+    #[test]
+    fn hiding_the_panel_takes_the_keyboard_away_from_its_box() {
+        // The trap the whole search box is arranged around, from the other
+        // side: a box that went on holding the keyboard after its column
+        // vanished would collect the next command typed into the pane.
+        let mut harness = Harness::panel(2);
+        harness.press_search_chord();
+        harness.type_text("ab");
+        assert!(harness.panel_search_takes_keys());
+
+        harness.run_command("crook/window/toggle-panel");
+
+        assert!(
+            !harness.panel_search_takes_keys(),
+            "the hidden box kept the keyboard"
+        );
+        assert!(harness.pane_takes_keys(), "nobody has the keyboard");
+        assert_eq!(
+            harness.panel_search_text(),
+            "",
+            "a query nobody can see went on filtering the list"
+        );
+    }
+
+    #[test]
+    fn a_section_has_its_column_even_while_the_tabs_are_hidden() {
+        // The settings are their list — the rail is the only way between
+        // their pages — so the column is there while a section is showing and
+        // gone again on the way back to the tabs, without the preference
+        // having changed.
+        let mut harness = Harness::panel(1);
+        harness.run_command("crook/window/toggle-panel");
+        assert!(!panel_is_drawn(&harness.frame()));
+
+        harness.open_settings_page();
+        assert!(showing(&harness));
+        assert!(
+            panel_is_drawn(&harness.frame()),
+            "the settings came up with no rail"
+        );
+        assert!(
+            !harness.general().show_tabs_panel,
+            "showing a section changed the preference"
+        );
+
+        harness.dispatch_workspace_action(WorkspaceAction::ShowSection(None));
+        assert!(
+            !panel_is_drawn(&harness.frame()),
+            "the tabs came back with the column"
+        );
+    }
+
+    #[test]
+    fn the_header_owes_the_corner_while_the_panel_is_hidden() {
+        // On the platform where something is painted over the corner: the
+        // panel's reservation is the header's the moment the panel is gone,
+        // or the waiting chip sits under the traffic lights.
+        let mut harness = Harness::panel(1);
+        harness.override_controls(ControlLayout::MacOs);
+        let before = harness.window_insets();
+        assert!(before.panel_left > 0.);
+
+        harness.run_command("crook/window/toggle-panel");
+        let after = harness.window_insets();
+
+        assert_eq!(
+            after.panel_left, 0.,
+            "a panel that is not drawn owes nothing"
+        );
+        assert_eq!(
+            after.header_left, before.panel_left,
+            "the header took less than the corner needs"
+        );
+    }
+
+    #[test]
+    fn the_waiting_count_is_still_in_the_header() {
+        // The one place the count is drawn is the header, and the header
+        // stays; a person who hid the column still has to know an agent
+        // stopped.
+        let mut harness = Harness::panel(2);
+        let away = harness
+            .workspace
+            .read(&harness.app, |workspace, _| {
+                let active = workspace.tabs().focused_pane_id();
+                workspace
+                    .tabs()
+                    .panes()
+                    .map(|(_, pane)| pane.id())
+                    .find(|id| Some(*id) != active)
+            })
+            .expect("a second tab");
+        harness.run_command("crook/window/toggle-panel");
+
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(
+                &crate::terminal_model::TerminalUpdate::Agent {
+                    pane: away,
+                    status: AgentStatus::NeedsInput,
+                    title: None,
+                    message: None,
+                },
+                ctx,
+            );
+        });
+
+        assert!(frame_text(&harness.frame()).contains("1 waiting"));
+        harness.run_command("crook/tabs/next-waiting");
+        assert_eq!(harness.focused_pane_id(), Some(away));
+    }
+
+    #[test]
+    fn the_hidden_panel_is_written_to_the_settings_and_read_back() {
+        let scratch = Scratch::new();
+        let mut harness = Harness::with_settings(1, scratch.settings());
+        assert!(harness.general().show_tabs_panel);
+
+        harness.run_command("crook/window/toggle-panel");
+        scratch.written_containing("\"show_tabs_panel\": false");
+
+        // The next launch, on the file this one wrote.
+        let mut next = Harness::with_settings(1, scratch.settings());
+        assert!(!next.general().show_tabs_panel);
+        assert!(!showing(&next));
+        assert!(
+            !panel_is_drawn(&next.frame()),
+            "the next window opened with the column"
+        );
+
+        next.run_command("crook/window/toggle-panel");
+        scratch.written_containing("\"show_tabs_panel\": true");
+    }
+
+    #[test]
+    fn the_settings_page_switch_is_the_same_toggle() {
+        let mut harness = Harness::panel(1);
+        harness.dispatch_workspace_action(SettingsAction::ToggleTabsPanel.into());
+        assert!(!showing(&harness));
+        harness.dispatch_workspace_action(SettingsAction::ToggleTabsPanel.into());
+        assert!(showing(&harness));
+    }
+}
+
 /// The bell: what a shell asks for that only the tab strip can answer.
 ///
 /// Driven through `apply_terminal_update`, which is the exact call the

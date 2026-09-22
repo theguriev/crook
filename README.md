@@ -129,6 +129,9 @@ Nineteen features, and the page that configures them:
   printing.
   `cmd-k` (`ctrl-shift-k` off macOS) puts the keyboard in it from anywhere in the window,
   Enter opens the top match, and Escape gives the keyboard back to the shell.
+  `cmd-b` (`ctrl-shift-b`) hides the whole panel for wide output or a small screen and brings
+  it back on the next press — the search chord brings it back too, since a box nobody can see
+  is no use — and a hidden panel stays hidden across launches.
 
   Tabs that belong together are folded into a **group**: a heading with a chevron, a count and
   a close button, and its tabs indented under it. A worktree opened from a tab makes one out of

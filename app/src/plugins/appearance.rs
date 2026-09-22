@@ -128,10 +128,28 @@ fn appearance(workspace: &Workspace) -> Vec<Category> {
         ui,
     );
 
+    // The one control on the page that is a way back: the panel's own menu
+    // cannot offer it, since a hidden panel has no menu, and this page is
+    // reachable by its chord with the column gone.
+    let panel = widgets::row(
+        Words::new("Show the tabs panel")
+            .with_description(
+                "The column of tabs down the left of the window. Off, the output has the whole width.",
+            )
+            .with_keywords(&["sidebar", "hide", "collapse", "toggle", "width", "panel"]),
+        true,
+        widgets::switch(
+            workspace.general().show_tabs_panel,
+            Some(SettingsAction::ToggleTabsPanel.into()),
+            state.control(named("show-tabs-panel")),
+        ),
+        ui,
+    );
+
     vec![
         widgets::category("Theme", theme_category(workspace)),
         widgets::category("Text", text_category(workspace)),
-        widgets::category("Tabs", vec![granularity, density, restore]),
+        widgets::category("Tabs", vec![panel, granularity, density, restore]),
         widgets::category("Rows", rows_category(workspace)),
     ]
 }

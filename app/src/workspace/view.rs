@@ -2231,7 +2231,44 @@ impl Workspace {
     /// it, and [`Self::search_takes_keys`] refuses the keyboard to a box
     /// nobody can see.
     pub(super) fn panel_search_is_showing(&self) -> bool {
-        self.section.is_none()
+        self.section.is_none() && self.tabs_panel_is_showing()
+    }
+
+    /// Whether the column down the left of the window is drawn at all.
+    ///
+    /// The tabs section is the one a person can hide, and the only one:
+    /// every other section *is* its list — the settings' pages, the plugins,
+    /// the store — and a sidebar that hid those would be a page with no way
+    /// to its neighbours. So the column is there whenever a section is
+    /// showing, and it is there for the tabs unless it was asked not to be.
+    /// See [`GeneralOptions::show_tabs_panel`].
+    pub fn tabs_panel_is_showing(&self) -> bool {
+        self.section.is_some() || self.general().show_tabs_panel
+    }
+
+    /// Hides the tabs panel, or shows it again, and remembers which.
+    ///
+    /// What goes with the column when it goes is what goes with it when a
+    /// section covers it — the tab list's menus, the search box and the
+    /// keyboard it may have held, the row the pointer was over — because the
+    /// reason is the same: a popup drawn by a list that is not on screen is
+    /// one nobody can see and nobody can dismiss. A drag in progress is not
+    /// among them; the chord cannot be pressed with a row in hand.
+    fn set_tabs_panel_shown(&mut self, shown: bool, ctx: &mut ViewContext<Self>) {
+        let mut general = self.general();
+        if general.show_tabs_panel == shown {
+            return;
+        }
+        general.show_tabs_panel = shown;
+        if !shown {
+            self.close_menu();
+            self.close_tab_context_menu(ctx);
+            self.forget_section_state();
+            self.panel_search.clear();
+            self.panel_search.set_focused(false);
+        }
+        self.set_general(general, ctx);
+        self.sync_input_keys();
     }
 
     /// One pane's find bar, when the pane is open.
@@ -4363,9 +4400,17 @@ impl Workspace {
     /// takes the traffic lights away there and the room reserved for them has
     /// to go with them. See [`WindowControls`](crate::window_controls).
     pub(super) fn window_insets(&self) -> LayoutInsets {
-        self.control_layout
+        let insets = self
+            .control_layout
             .insets(WINDOW_CHROME, self.window.state().fullscreen)
-            .split()
+            .split();
+        // The corner is the header's while the panel is hidden, and the room
+        // the platform paints its controls in goes to whoever has the corner.
+        if self.tabs_panel_is_showing() {
+            insets
+        } else {
+            insets.without_panel()
+        }
     }
 
     /// Who draws this window's controls.
@@ -5647,6 +5692,11 @@ impl Workspace {
             Binding::ZoomReset => {
                 return Some(SettingsAction::SetFontSize(DEFAULT_FONT_SIZE).into());
             }
+            // A settings action for the reason the zoom chords are: the
+            // answer lives in the general options, and the page's own switch
+            // sends the same one. Never declined — hiding a column nobody
+            // is looking at is still the thing that was asked for.
+            Binding::TogglePanel => return Some(SettingsAction::ToggleTabsPanel.into()),
             // The bar is over the *list of commands*, so it opens only where
             // there is one: a full-screen program has taken the whole pane and
             // draws no blocks, and Ctrl-F is one of its own keys there.
@@ -6401,6 +6451,12 @@ impl Workspace {
                 // press enough; from a click it is already true and
                 // `show_section` returns having done nothing.
                 self.show_section(None, ctx);
+                // And from behind a hidden panel, where the box is not drawn
+                // either. Asking to search the tabs is asking to see them,
+                // so the panel comes back — and stays back, because a column
+                // that vanished again on Escape would be one the person had
+                // to keep finding.
+                self.set_tabs_panel_shown(true, ctx);
                 self.panel_search.set_focused(true);
             }
             SearchAction::Dismiss => {
@@ -6481,6 +6537,10 @@ impl Workspace {
                 let mut general = self.general();
                 general.login_shell = !general.login_shell;
                 self.set_general(general, ctx);
+            }
+            SettingsAction::ToggleTabsPanel => {
+                let shown = !self.general().show_tabs_panel;
+                self.set_tabs_panel_shown(shown, ctx);
             }
             SettingsAction::RecordBinding(id) => {
                 let Some(command) = self.host.action_name(id).cloned() else {
@@ -6969,12 +7029,23 @@ impl View for Workspace {
         // asked once: a section builds both halves together, because its list
         // and its detail are two views of the same state. The tabs are the
         // window's own section and the only one no plugin contributes.
+        //
+        // A hidden panel is no sidebar at all rather than an empty one: the
+        // body takes the column's width, and the list is not built for a
+        // frame that will not draw it. Only the tabs can be hidden — see
+        // [`Self::tabs_panel_is_showing`] — so a section always has its
+        // column.
         let (sidebar, body) = match self.showing_section() {
             Some(id) => self
                 .host
                 .build_sidebar_section(id, self, app)
-                .unwrap_or_else(|| (Empty::new().finish(), Empty::new().finish())),
-            None => (tabs_panel::tab_list(self, app), body::render(self, app)),
+                .map(|(sidebar, body)| (Some(sidebar), body))
+                .unwrap_or_else(|| (Some(Empty::new().finish()), Empty::new().finish())),
+            None if self.tabs_panel_is_showing() => (
+                Some(tabs_panel::tab_list(self, app)),
+                body::render(self, app),
+            ),
+            None => (None, body::render(self, app)),
         };
 
         let main = Flex::column()
@@ -6992,8 +7063,10 @@ impl View for Workspace {
         // else.
         let mut content = Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
-            .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_child(tabs_panel::render(self, sidebar));
+            .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
+        if let Some(sidebar) = sidebar {
+            content.add_child(tabs_panel::render(self, sidebar));
+        }
         if self.panel.open {
             content.add_child(super::theme_panel::render(self, app));
         }
