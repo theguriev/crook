@@ -75,8 +75,33 @@ case "$ARTIFACT" in
     ;;
 esac
 
-# shellcheck disable=SC2064 # expanded now on purpose
-[ -z "$CLEANUP" ] || trap "rm -f '$CLEANUP'" EXIT INT TERM
+# The upload has a watchdog, because notarytool's own has none: on 2026-09-22
+# `submit` of the v0.1.8 image printed nothing for an hour and the job died on
+# its timeout, with nothing to show for four release builds. A stalled upload
+# is a stalled connection, not a verdict, so it is killed and sent once more;
+# a second stall is then a real answer about the network today.
+UPLOAD_MINUTES=15
+UPLOAD_OUTPUT="$(mktemp)"
+# Read when the trap fires, not now: both names are settled by then.
+# shellcheck disable=SC2016 # single quotes on purpose
+trap 'rm -f "$UPLOAD_OUTPUT"; [ -z "$CLEANUP" ] || rm -f "$CLEANUP"' EXIT INT TERM
+
+# Runs one upload with the watchdog beside it. Its output — the plist with
+# the submission id, or notarytool's complaint — lands in UPLOAD_OUTPUT; the
+# exit status is notarytool's, or the kill's when the watchdog fired.
+upload() {
+  xcrun notarytool submit "$SUBMISSION" "$@" --output-format plist > "$UPLOAD_OUTPUT" 2>&1 &
+  UPLOAD_PID=$!
+  # notarytool is xcrun's child, so the child goes first: killing only the
+  # parent would leave the upload running and `wait` waiting on it.
+  ( sleep $(( UPLOAD_MINUTES * 60 )) && pkill -TERM -P "$UPLOAD_PID" 2>/dev/null; kill "$UPLOAD_PID" 2>/dev/null ) &
+  WATCHDOG_PID=$!
+  UPLOAD_STATUS=0
+  wait "$UPLOAD_PID" || UPLOAD_STATUS=$?
+  kill "$WATCHDOG_PID" 2>/dev/null || true
+  wait "$WATCHDOG_PID" 2>/dev/null || true
+  return "$UPLOAD_STATUS"
+}
 
 echo "==> Submitting $(basename "$SUBMISSION")"
 # Submitted and then polled by hand rather than with --wait. --wait does the
@@ -84,11 +109,20 @@ echo "==> Submitting $(basename "$SUBMISSION")"
 # with a non-zero exit — and that happened to a submission Apple had already
 # accepted, on a build nothing was wrong with. A poll that fails to reach
 # Apple is not an answer from Apple, so here it is asked again.
-SUBMITTED="$(xcrun notarytool submit "$SUBMISSION" "$@" --output-format plist)" || {
-  echo "error: the submission was not accepted for processing:" >&2
-  printf '%s\n' "$SUBMITTED" >&2
-  exit 1
-}
+# 143 is the watchdog's kill and nothing notarytool says by itself; any other
+# failure is an answer and is not sent twice.
+if ! upload "$@"; then
+  if [ "$UPLOAD_STATUS" -eq 143 ]; then
+    echo "    the upload did not finish in $UPLOAD_MINUTES minutes; sending it again"
+    upload "$@" || true
+  fi
+  if [ "$UPLOAD_STATUS" -ne 0 ]; then
+    echo "error: the submission was not accepted for processing:" >&2
+    cat "$UPLOAD_OUTPUT" >&2
+    exit 1
+  fi
+fi
+SUBMITTED="$(cat "$UPLOAD_OUTPUT")"
 ID="$(printf '%s' "$SUBMITTED" | plutil -extract id raw -o - -)" || ID=""
 [ -n "$ID" ] || { echo "error: no submission id in the answer:" >&2; printf '%s\n' "$SUBMITTED" >&2; exit 1; }
 echo "    submission $ID"
