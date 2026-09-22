@@ -29,9 +29,10 @@
 //!
 //! **The mark at the head of the row is not this file's any more.** It is two
 //! slots — `tab.row.mark` and the badge on its corner — declared by
-//! `crook/tabs`, which draws the status disc when nothing has taken them. See
-//! [`crate::plugins::tabs`] for why the disc is what the host draws rather
-//! than a contribution competing with a plugin's.
+//! `crook/tabs`, which draws the status disc — or a status glyph, when the
+//! Appearance page's "Status marks" asks for one — when nothing has taken
+//! them. See [`crate::plugins::tabs`] for why the disc is what the host draws
+//! rather than a contribution competing with a plugin's.
 //!
 //! **The title line can lead with the tab's number.** Off by default and
 //! Warp has no such thing; it is the number `cmd-1`…`cmd-8` (`alt-` off

@@ -12,7 +12,7 @@
 use crook_terminal::BlockId;
 
 use crate::plugin::{ActionId, PageId, SectionId};
-use crate::settings::{Density, Granularity, PrimaryInfo, Subtitle};
+use crate::settings::{Density, Granularity, PrimaryInfo, StatusMarks, Subtitle};
 use crate::tab::{PaneId, TabAction, TabId};
 
 /// Everything the header dispatches.
@@ -557,4 +557,6 @@ pub enum OptionsAction {
     ToggleShowDetailsOnHover,
     /// "Show tab numbers".
     ToggleShowTabNumbers,
+    /// "Status marks". The page's own: the menu has no row for it.
+    SetStatusMarks(StatusMarks),
 }

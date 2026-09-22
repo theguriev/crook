@@ -46,7 +46,7 @@ ICONS = [
     ("Info", "info", "The dot beside a setting that has a note attached."),
     ("LayoutGrid", "layout-grid", "The Expanded density, in the tab options menu's segmented control."),
     ("Menu", "menu", "The Compact density, in the same control. Warp draws `Menu01` here."),
-    ("Play", "play", "The mark on a control that plays a sound."),
+    ("Play", "play", "The mark on a control that plays a sound; a row's mark while its agent runs, when the marks are glyphs."),
     ("Plus", "plus", "New tab, and new theme."),
     ("Blocks", "blocks", "The Plugins section, at the foot of the sidebar."),
     ("Search", "search", "The settings page's search box, in the rail."),
@@ -56,7 +56,12 @@ ICONS = [
     ("CornerLeftUp", "corner-left-up", "The way out of a directory, in a picker that walks one."),
     ("Keyboard", "keyboard", "A chord: what one key would do, on the chip that says so."),
     ("Diff", "diff", "How much has changed in a working tree, on the chip that counts it."),
-    ("Bell", "bell", "The tabs that are waiting for you, on the chip in the header that counts them."),
+    ("Bell", "bell", "The tabs that are waiting for you, on the chip in the header that counts them; a row's mark while its agent needs an answer, when the marks are glyphs."),
+    # The status marks a row draws instead of its disc, for a person who reads
+    # shapes better than colours. Running is `play` and waiting is `bell`,
+    # both already here; these two are the states nothing else drew.
+    ("Circle", "circle", "A row's mark while its agent is idle, when the marks are glyphs."),
+    ("CircleX", "circle-x", "A row's mark after its agent failed, when the marks are glyphs."),
     # The faces of the plugins from the box, on their rows in the Plugins list
     # and beside their names on the card: a native plugin has no module to
     # carry a picture in, so it wears one of these instead.

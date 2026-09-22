@@ -32,7 +32,7 @@ use crate::git::{DiffStats, GitFacts, Head};
 use crate::keybindings::Recording;
 use crate::platform_insets::{ControlLayout, WindowChrome};
 use crate::settings::{
-    Density, GeneralOptions, Granularity, PrimaryInfo, Settings, Subtitle, TabOptions,
+    Density, GeneralOptions, Granularity, PrimaryInfo, Settings, StatusMarks, Subtitle, TabOptions,
 };
 use crate::tab::{
     AgentSession, AgentStatus, Direction, GroupId, Pane, PaneId, Tab, TabAction, TabId,
@@ -3138,6 +3138,57 @@ fn the_tab_numbers_row_toggles_from_the_menu_and_from_the_page_alike() {
         harness.options(),
         "the page wrote something the menu did not"
     );
+}
+
+#[test]
+fn the_status_marks_row_on_the_page_switches_the_marks_and_saves_them() {
+    // The page's own row, with no menu row behind it: the menu is Warp's,
+    // and this is a choice Warp does not offer. Through the pixels, so it
+    // also covers that the segment is where it looks like it is.
+    let scratch = Scratch::new();
+    let mut harness = Harness::with_settings(1, scratch.settings());
+    assert_eq!(
+        harness.options().status_marks,
+        StatusMarks::Dots,
+        "dots out of the box"
+    );
+
+    harness.open_settings_page();
+    harness.scroll_settings_page(-100.);
+    let scene = harness.frame();
+    assert!(
+        says(&scene, "Status marks"),
+        "the row is not on the Appearance page: {}",
+        frame_text(&scene)
+    );
+
+    // Inside the label rather than under it: a segment's pill is three
+    // pixels of padding round its text, and a press below the baseline
+    // lands between the pills.
+    let glyphs = page_word(&scene, "Glyphs");
+    harness.click(glyphs + vec2f(4., -4.), MouseButton::Left);
+    assert_eq!(
+        harness.options().status_marks,
+        StatusMarks::Glyphs,
+        "the Glyphs segment did not choose glyphs"
+    );
+    // Saved with the others, under its own key.
+    scratch.written_containing("\"status_marks\": \"glyphs\"");
+    assert_eq!(
+        harness.saved_options(),
+        harness.options(),
+        "the page wrote something other than what it shows"
+    );
+
+    let scene = harness.frame();
+    let dots = page_word(&scene, "Dots");
+    harness.click(dots + vec2f(4., -4.), MouseButton::Left);
+    assert_eq!(
+        harness.options().status_marks,
+        StatusMarks::Dots,
+        "the Dots segment did not choose dots again"
+    );
+    scratch.written_containing("\"status_marks\": \"dots\"");
 }
 
 #[test]
@@ -20304,6 +20355,136 @@ fn a_row_the_plugin_declines_keeps_the_disc_it_had() {
         tab_boxes(&scene)[0].contains_point(center(discs[0])),
         "the disc came back on the wrong row"
     );
+}
+
+/// The glyph the host draws for a status under `StatusMarks::Glyphs`, and
+/// the rows carrying it in the panel, in panel order.
+fn status_glyphs(scene: &Scene, icon: Lucide) -> Vec<RectF> {
+    let rows = tab_boxes(scene);
+    let mut marks: Vec<RectF> = icons_in(scene, panel_box(scene), icon)
+        .into_iter()
+        .filter(|bounds| rows.iter().any(|row| row.contains_point(center(*bounds))))
+        .collect();
+    marks.sort_by(|left, right| left.min_y().total_cmp(&right.min_y()));
+    marks
+}
+
+/// The colour an icon inside `bounds` is tinted with.
+fn icon_color_at(scene: &Scene, bounds: RectF) -> Color {
+    scene
+        .layers()
+        .flat_map(|layer| layer.icons.iter())
+        .find(|drawn| drawn.bounds == bounds)
+        .map(|drawn| drawn.color)
+        .expect("an icon was drawn in this box")
+}
+
+/// The four states an agent reports, one per row, oldest tab first.
+const EVERY_STATUS: [AgentStatus; 4] = [
+    AgentStatus::Idle,
+    AgentStatus::Running,
+    AgentStatus::NeedsInput,
+    AgentStatus::Failed,
+];
+
+/// The glyph each of those is drawn as.
+const STATUS_GLYPH: [Lucide; 4] = [Lucide::Circle, Lucide::Play, Lucide::Bell, Lucide::CircleX];
+
+impl Harness {
+    /// A window with one row in each of the four states, in
+    /// [`EVERY_STATUS`]'s order, reported the way the agent runtime does.
+    fn one_row_per_status() -> Self {
+        let mut harness = Harness::panel(EVERY_STATUS.len());
+        let panes = harness.pane_ids();
+        for (pane, status) in panes.into_iter().zip(EVERY_STATUS) {
+            harness.update_session(pane, |session| session.status = status);
+        }
+        harness
+    }
+}
+
+#[test]
+fn status_marks_as_glyphs_draw_a_shape_per_state_where_the_disc_was() {
+    // The whole point of the setting: four rows a person who cannot tell
+    // violet from grey could not tell apart become four different shapes,
+    // each still in its status colour, each in the disc's own box, and no
+    // row moves for it.
+    let mut harness = Harness::one_row_per_status();
+
+    let dots = harness.frame();
+    let heights: Vec<f32> = tab_boxes(&dots).iter().map(|row| row.height()).collect();
+    assert_eq!(
+        status_discs(&dots).len(),
+        EVERY_STATUS.len(),
+        "a disc per row"
+    );
+    for icon in STATUS_GLYPH {
+        assert!(
+            status_glyphs(&dots, icon).is_empty(),
+            "{icon:?} was drawn on a row while the marks are dots"
+        );
+    }
+
+    harness.dispatch_option(OptionsAction::SetStatusMarks(StatusMarks::Glyphs));
+    let glyphs = harness.frame();
+    assert!(
+        status_discs(&glyphs).is_empty(),
+        "a disc was drawn under the glyph that replaced it"
+    );
+    let rows = tab_boxes(&glyphs);
+    assert_eq!(
+        rows.iter().map(|row| row.height()).collect::<Vec<_>>(),
+        heights,
+        "the glyphs changed a row's height"
+    );
+    let diameter = crate::plugins::tabs::MARK_SIZE * 0.76;
+    for (index, (status, icon)) in EVERY_STATUS.into_iter().zip(STATUS_GLYPH).enumerate() {
+        let marks = status_glyphs(&glyphs, icon);
+        assert_eq!(marks.len(), 1, "{status:?} is drawn as {icon:?} on one row");
+        assert!(
+            rows[index].contains_point(center(marks[0])),
+            "{icon:?} is on the wrong row"
+        );
+        assert!(
+            (marks[0].width() - diameter).abs() < 0.5,
+            "{icon:?} is {} wide, not the disc's {diameter}",
+            marks[0].width()
+        );
+        assert_eq!(
+            icon_color_at(&glyphs, marks[0]),
+            super::status_color(status),
+            "{icon:?} is not in {status:?}'s colour"
+        );
+    }
+
+    // And back, so the choice is not one-way.
+    harness.dispatch_option(OptionsAction::SetStatusMarks(StatusMarks::Dots));
+    let back = harness.frame();
+    assert_eq!(status_discs(&back).len(), EVERY_STATUS.len());
+    for icon in STATUS_GLYPH {
+        assert!(
+            status_glyphs(&back, icon).is_empty(),
+            "{icon:?} outlived the setting"
+        );
+    }
+}
+
+#[test]
+fn a_plugin_that_took_the_mark_is_left_alone_by_the_status_marks() {
+    // The glyph is the host's answer to an empty slot, exactly as the disc
+    // is: a plugin that replaced the mark replaced both, and the setting
+    // must not put a glyph under, over or instead of what it drew.
+    let mut harness = Harness::with_marks(2);
+    harness.dispatch_option(OptionsAction::SetStatusMarks(StatusMarks::Glyphs));
+
+    let scene = harness.frame();
+    assert_eq!(icons_in(&scene, panel_box(&scene), MARK_ICON).len(), 2);
+    for icon in [Lucide::Circle, Lucide::Play, Lucide::Bell, Lucide::CircleX] {
+        assert!(
+            status_glyphs(&scene, icon).is_empty(),
+            "{icon:?} was drawn on a row a plugin marked"
+        );
+    }
 }
 
 /// What every row a plugin was asked about said it was, in panel order.

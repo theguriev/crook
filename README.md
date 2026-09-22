@@ -121,6 +121,9 @@ Nineteen features, and the page that configures them:
   secondary click, on the empty space the list leaves — says what a row of them shows: which
   fact it leads with, what its second line says, which chips it carries, whether hovering it
   opens a card, and the tab's number, which is the one `cmd-4` means once the tabs are named.
+  One more row is the Appearance page's alone: **Status marks**, which turns the dot into a
+  glyph per state in the same colour — a play mark, a bell, a crossed ring, a hollow one — for
+  an eye the colour says nothing to, or a screenshot in greyscale.
   Under that space is a `+`, which is where Warp's browser puts the one that opens another tab.
   Above the list is a **search box**, Telegram's way round: it
   filters the rows by what a tab is running, where it is working, the branch it is on and its
@@ -426,9 +429,10 @@ Nineteen features, and the page that configures them:
   Keyboard Shortcuts and About — and a plugin's page arrives on the same rail beside them.
   Every option on it is one the application actually reads; there is nothing there that does
   not do something. Changes apply on the click and are
-  written to `<config>/crook/settings.json`, which is the same eight keys that menu writes plus the
-  theme, the light and dark pair it follows the desktop between, the terminal's type size,
-  whether the tabs come back, and — set in the file rather than on the page — its font family.
+  written to `<config>/crook/settings.json`, which is the same eight keys that menu writes, the
+  status marks, the theme, the light and dark pair it follows the desktop between, the
+  terminal's type size, whether the tabs come back, and — set in the file rather than on the
+  page — its font family.
   The type size is also on `cmd/ctrl-plus`, `-minus` and `-0`, and every pane resizes with it:
   a pane's columns and rows are its box divided by a cell, so the ptys follow.
   It is the one pane with no shell under it and no field: every control on it is a click.
