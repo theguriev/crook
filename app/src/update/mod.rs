@@ -171,6 +171,10 @@ pub enum Refusal {
     BuildTree(PathBuf),
     /// Somewhere this process may not write: a package manager's, or root's.
     ReadOnly(PathBuf),
+    /// The file this process started from is no longer there, because
+    /// something — `crook --update`, another window's Update — already wrote a
+    /// new one over it.
+    Replaced,
     /// A platform no release publishes an archive for.
     Platform,
     /// The path of this process could not be read at all.
@@ -202,6 +206,10 @@ impl std::fmt::Display for Refusal {
                  is what updates it",
                 path.display()
             ),
+            Self::Replaced => write!(
+                out,
+                "this Crook has already been replaced on disk; restart it to run the new one"
+            ),
             Self::Platform => write!(
                 out,
                 "no release publishes an archive for this platform; see {RELEASES}"
@@ -221,10 +229,24 @@ pub fn replaceable(channel: Channel) -> Result<PathBuf, Refusal> {
     }
 
     let binary = std::env::current_exe().map_err(|why| Refusal::Unknown(why.to_string()))?;
+    replaceable_at(binary)
+}
+
+/// The checks [`replaceable`] makes of the binary's path, apart from where
+/// that path came from.
+fn replaceable_at(binary: PathBuf) -> Result<PathBuf, Refusal> {
     // Resolved, because the thing to replace is the file and not the symlink
     // somebody put on their PATH: writing a new binary over the link would
     // leave the release where it was and the link no longer pointing at it.
     let binary = binary.canonicalize().unwrap_or(binary);
+
+    // Once the file a Linux process started from has been renamed over, its
+    // own path reads back as `<dir>/crook (deleted)`. The directory is still
+    // writable, so without this the update would be written to a new file of
+    // that name — and reported as done.
+    if !binary.is_file() {
+        return Err(Refusal::Replaced);
+    }
 
     if binary
         .ancestors()
@@ -533,6 +555,29 @@ cccc *crook-v0.2.0-x86_64-pc-windows-msvc.zip
         assert!(
             matches!(refusal, Refusal::BuildTree(_) | Refusal::Bundle(_)),
             "{refusal:?}"
+        );
+    }
+
+    #[test]
+    fn a_binary_already_replaced_on_disk_is_refused() {
+        // What Linux reports as the path of a process whose file was renamed
+        // over: a name that does not exist, in a directory that is writable.
+        // An update written there would be a stray `crook (deleted)`.
+        let directory =
+            std::env::temp_dir().join(format!("crook-update-replaced-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).expect("a scratch directory");
+        let installed = directory.join("crook");
+        std::fs::write(&installed, b"a release").expect("an installed binary");
+
+        let refused = replaceable_at(directory.join("crook (deleted)"));
+        let kept = replaceable_at(installed.clone());
+        let _ = std::fs::remove_dir_all(&directory);
+
+        assert_eq!(refused, Err(Refusal::Replaced));
+        assert_eq!(
+            kept.map(|binary| binary.file_name().map(ToOwned::to_owned)),
+            Ok(installed.file_name().map(ToOwned::to_owned)),
+            "the file that is still there is the one to replace"
         );
     }
 }
