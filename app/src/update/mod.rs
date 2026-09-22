@@ -518,7 +518,18 @@ cccc *crook-v0.2.0-x86_64-pc-windows-msvc.zip
         // Where `cargo test` runs from, which is the one case this can prove
         // in a test: the test binary lives in `target/debug/deps`, so the
         // refusal is read off the path rather than out of a channel.
+        //
+        // Except where there is no archive to be behind. `triple()` names the
+        // platforms a release publishes a `.tar.gz` for, Windows is published
+        // as a `.zip` and is not one of them, and the platform is refused two
+        // checks before the path is looked at. Same answer — this binary is
+        // not one to replace — reached earlier, and asserting the path's
+        // refusal there was asserting that Windows is an update platform.
         let refusal = replaceable(Channel::Stable).expect_err("a build is not an install");
+        if triple().is_none() {
+            assert_eq!(refusal, Refusal::Platform, "{refusal:?}");
+            return;
+        }
         assert!(
             matches!(refusal, Refusal::BuildTree(_) | Refusal::Bundle(_)),
             "{refusal:?}"
