@@ -412,10 +412,11 @@ description of something that was never built.
   the binary.
 
   - **A place that is not the header.** `pane.chips` is a `List` slot declared by `crook/pane`
-    and drawn by `workspace::body` in two places: under the line being composed, and — when a
-    program has taken the screen and there is no line — floating over the pane's bottom corner.
-    Which of the two a contribution lands in is not something it is told. It is drawn for the
-    **focused** pane only, which is the same pane `ReadWorkingDirectory` is about.
+    and drawn by `workspace::body` under the line being composed. When a program has taken the
+    screen there is no line and no chips: every row of the pane is that program's, and the
+    bottom one — where the row used to float — is where it draws its own status line. Whether
+    it is being drawn is not something a contribution is told. It is drawn for the **focused**
+    pane only, which is the same pane `ReadWorkingDirectory` is about.
   - **A contribution knows which of its own it is.** `crook_render` takes the entry as well as
     the slot, because a plugin may put four things in one list slot and a render told only the
     slot would have to draw all four in each of them.

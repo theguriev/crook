@@ -10039,7 +10039,7 @@ mod shells {
     /// nothing and a failure about a shell the test was never about.
     /// Skipping, and saying which shell, is the honest answer, and it is the
     /// same answer `Standing` gives the Shell page.
-    fn a_shell_these_tests_speak() -> bool {
+    pub(super) fn a_shell_these_tests_speak() -> bool {
         use crate::shell_integration::{Marks, Standing};
         let standing = Standing::current();
         match standing.marks {
@@ -10196,7 +10196,7 @@ mod shells {
 
     /// A pane whose shell reports command boundaries, or `None` on a machine
     /// where none could be started.
-    fn marked_shell(harness: &mut Harness) -> Option<PaneId> {
+    pub(super) fn marked_shell(harness: &mut Harness) -> Option<PaneId> {
         if !a_shell_these_tests_speak() || !harness.start_terminals_with_marks() {
             return None;
         }
@@ -10209,7 +10209,7 @@ mod shells {
     /// written to it whether or not a child has read it yet, and a command
     /// submitted into the block that is still open from before the first
     /// prompt is a command the shell never reports a boundary for.
-    fn await_prompt(harness: &mut Harness, pane: PaneId) {
+    pub(super) fn await_prompt(harness: &mut Harness, pane: PaneId) {
         harness.wait_for("the shell never reached a prompt", |harness| {
             harness
                 .workspace
@@ -18535,10 +18535,9 @@ mod sandboxed {
     #[test]
     fn a_chip_a_plugin_pins_to_a_pane_is_drawn_with_the_pane_it_is_about() {
         // The other place a plugin may put a chip, and the one that is not the
-        // header: `pane.chips` is drawn by the pane the keyboard is in —
-        // beside the line being composed while there is one, and over the
-        // pane's own corner while a program has the screen. This starts a real
-        // shell, because a pane with nothing running in it draws neither.
+        // header: `pane.chips` is drawn by the pane the keyboard is in, beside
+        // the line being composed. This starts a real shell, because a pane
+        // with nothing running in it draws neither.
         let scratch = Scratch::new("pane-chips");
         install(
             scratch.path(),
@@ -18557,6 +18556,44 @@ mod sandboxed {
         assert!(
             icons_of(&harness.frame()).contains(&Lucide::GitBranch),
             "the icon it asked for was not drawn"
+        );
+    }
+
+    #[test]
+    fn nothing_is_pinned_over_a_screen_a_program_has_taken() {
+        // The row used to float over the pane's bottom corner while a program
+        // had the screen. That is the one row of a full-screen program that is
+        // never spare — Claude Code's mode line, vim's ruler, a pager's
+        // percentage — and Crook's chrome sat on top of whatever it said. The
+        // chips belong to the prompt, so a pane with no prompt draws none.
+        let scratch = Scratch::new("pane-chips-alt");
+        install(
+            scratch.path(),
+            "eugen.probe",
+            &wasm("eugen/probe", "pane.chips", 10),
+        );
+        let mut harness = harness(&scratch);
+        if !super::shells::a_shell_these_tests_speak() {
+            return;
+        }
+        let Some(pane) = super::shells::marked_shell(&mut harness) else {
+            return;
+        };
+        super::shells::await_prompt(&mut harness, pane);
+        assert!(
+            icons_of(&harness.frame()).contains(&Lucide::GitBranch),
+            "the chip was not beside the prompt to begin with, so what follows proves nothing"
+        );
+
+        // The escape every full-screen program starts with.
+        harness.type_into(pane, "printf '\\033[?1049h'\n");
+        harness.wait_for("the shell never took the alt screen", |harness| {
+            harness.alt_screen(pane)
+        });
+
+        assert!(
+            !icons_of(&harness.frame()).contains(&Lucide::GitBranch),
+            "a chip is still drawn over the screen the program was given"
         );
     }
 
