@@ -39,6 +39,11 @@
 //! not the shape this build expects — is one line in the log and a fresh
 //! window with one tab in it. A session file is a convenience, and a
 //! convenience that could refuse to start would be a bug.
+//!
+//! What a bad file *does* cost is kept: a file that did not read whole is
+//! copied, byte for byte, into `session-backups/` beside it before anything
+//! can overwrite it — see [`back_up_unreadable`] — so that the tab a build
+//! dropped is still there to be read by a person.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -51,6 +56,13 @@ use crate::tab::{Pane, PaneGroup, SplitAxis, Tab, TabGroup, TabId, TabStrip};
 
 /// The file the last session is remembered in.
 const SESSION_FILE: &str = "session.json";
+/// The directory beside it that keeps copies of session files this build
+/// could not read whole — see [`back_up_unreadable`].
+const BACKUP_DIRECTORY: &str = "session-backups";
+/// How many of those copies are kept. Three is enough to see what a run of
+/// bad launches left behind and few enough that the directory never grows
+/// into a thing that needs its own tidying.
+const BACKUPS_KEPT: usize = 3;
 
 /// The most tabs and panes a session file is allowed to restore.
 ///
@@ -290,7 +302,13 @@ impl Session {
 
         match serde_json::from_str(&text) {
             Ok(session) => session,
-            Err(error) => Self::salvage(&text, path, &error),
+            Err(error) => {
+                // Before the salvage, not after: the first save that follows
+                // writes a file that parses over the only evidence of what
+                // was dropped.
+                back_up_unreadable(text.as_bytes(), path);
+                Self::salvage(&text, path, &error)
+            }
         }
     }
 
@@ -303,7 +321,9 @@ impl Session {
     /// which is the one outcome the file exists to prevent. So the tabs are
     /// read one at a time and the one that does not read is the one that is
     /// dropped, with a line that says which; the other keys are read the
-    /// same way, each falling back on its own.
+    /// same way, each falling back on its own. The file as it was is kept
+    /// beside it first, by [`back_up_unreadable`], since the next save
+    /// replaces it.
     fn salvage(text: &str, path: &Path, error: &serde_json::Error) -> Self {
         let Ok(serde_json::Value::Object(document)) = serde_json::from_str(text) else {
             log::warn!("could not read {}: {error}", path.display());
@@ -480,6 +500,76 @@ fn read_or_default<T: Default + for<'de> Deserialize<'de>>(
             );
             T::default()
         }
+    }
+}
+
+/// Keeps a copy of a session file that did not read whole, as it was.
+///
+/// [`Session::salvage`] drops what it cannot read and the next save replaces
+/// the file with one that parses, so without this the tab a build could not
+/// read is gone with nothing to look at but a line in the log. The bytes go
+/// untouched to `session-backups/session-<timestamp>.json` beside the file,
+/// where the person — or the bug report — can still see them. The newest
+/// [`BACKUPS_KEPT`] are kept and the rest removed.
+///
+/// Nothing here can stop the salvage: a directory that cannot be made or a
+/// copy that cannot be written is a line in the log, and the tabs that *did*
+/// read still come back.
+fn back_up_unreadable(bytes: &[u8], path: &Path) {
+    let Some(directory) = path.parent() else {
+        return;
+    };
+    let directory = directory.join(BACKUP_DIRECTORY);
+    if let Err(error) = ensure_directory(&directory) {
+        log::warn!("could not keep a copy of {}: {error:#}", path.display());
+        return;
+    }
+
+    // Second resolution, because two salvages of one file inside a second
+    // are the same bytes, and a name that sorts as a date is what lets the
+    // pruning below tell the oldest copy by name alone.
+    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    let backup = directory.join(format!("session-{stamp}.json"));
+    if let Err(error) = fs::write(&backup, bytes) {
+        log::warn!(
+            "could not keep a copy of {} at {}: {error}",
+            path.display(),
+            backup.display()
+        );
+        return;
+    }
+    log::warn!(
+        "{} could not be read whole; a copy is kept at {}",
+        path.display(),
+        backup.display()
+    );
+    prune_backups(&directory);
+}
+
+/// Removes every backup but the newest [`BACKUPS_KEPT`].
+///
+/// Newest by name rather than by modification time: the names are dates in
+/// an order-preserving spelling, and a name survives a copy or a restore of
+/// the configuration directory where a timestamp does not.
+fn prune_backups(directory: &Path) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    let mut backups: Vec<PathBuf> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("session-") && name.ends_with(".json"))
+        })
+        .collect();
+    backups.sort();
+    for stale in backups.iter().rev().skip(BACKUPS_KEPT) {
+        // A copy that will not go is not worth a line: the next backup tries
+        // again, and three files nobody can delete are not a problem this
+        // code can solve.
+        let _ = fs::remove_file(stale);
     }
 }
 

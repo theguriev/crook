@@ -1685,7 +1685,9 @@ A fourth followed the same rule the settings file already keeps: a file this bui
 the one that does not read, naming its position in the log, and reads the other keys each on
 their own; `settings.json` does the same per key, so a `"login_shell": "yes"` costs that switch
 and not the font size beside it. Opening a fresh, empty window over one bad value was the one
-outcome both files exist to prevent.
+outcome both files exist to prevent. What the salvage drops is not lost either: before it runs,
+the file is copied as it was into `session-backups/` beside it — the three newest kept — since
+the next save writes a file that parses over the only evidence of what could not be read.
 
 What is *not* remembered is the point: no scrollback, no output, no process. A window that
 redrew yesterday's output over a shell that had never run any of it would be lying about the

@@ -438,6 +438,121 @@ fn test_a_dropped_tab_before_the_active_one_keeps_the_active_one_selected() {
     );
 }
 
+/// The backups under `directory`, in name order — oldest first.
+fn backups(directory: &Path) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = fs::read_dir(directory.join(BACKUP_DIRECTORY))
+        .map(|entries| entries.flatten().map(|entry| entry.path()).collect())
+        .unwrap_or_default();
+    found.sort();
+    found
+}
+
+#[test]
+fn test_a_file_that_did_not_read_whole_is_kept_as_it_was_before_the_salvage() {
+    // The salvage drops the tab it cannot read and the next save writes a
+    // file that parses over it — so the copy is the only place the dropped
+    // tab can still be seen, and it has to be the bytes as they were, not a
+    // re-serialisation of what survived.
+    let directory = scratch("backup");
+    let path = directory.join("session.json");
+    let broken = r#"{"tabs": [{"name": "kept", "panes": [{"title": "kept", "flex": 1.0}]}, {"name": "broken", "panes": "not a list"}], "active": 0}"#;
+    fs::write(&path, broken).expect("writable");
+
+    let session = Session::load(&path);
+    assert_eq!(session.tabs.len(), 1, "the salvage itself still happened");
+
+    let kept = backups(&directory);
+    assert_eq!(kept.len(), 1, "one copy, and only one: {kept:?}");
+    let name = kept[0]
+        .file_name()
+        .and_then(|name| name.to_str())
+        .expect("a name");
+    assert!(
+        name.starts_with("session-") && name.ends_with(".json"),
+        "named as a dated session file, not {name}"
+    );
+    assert_eq!(
+        fs::read(&kept[0]).expect("readable"),
+        broken.as_bytes(),
+        "the copy is the file as it was"
+    );
+}
+
+#[test]
+fn test_a_fourth_backup_removes_the_oldest() {
+    let directory = scratch("backup-prune");
+    let path = directory.join("session.json");
+    let older = directory.join(BACKUP_DIRECTORY);
+    fs::create_dir_all(&older).expect("writable");
+    // Dated before any clock this test can run under, so the copy made now
+    // is the newest of the four by name, which is how the pruning orders
+    // them.
+    for stamp in ["20200101-000000", "20200101-000001", "20200101-000002"] {
+        fs::write(older.join(format!("session-{stamp}.json")), "{}").expect("writable");
+    }
+    fs::write(&path, "{ not json").expect("writable");
+
+    Session::load(&path);
+
+    let kept = backups(&directory);
+    assert_eq!(kept.len(), BACKUPS_KEPT, "three kept, not {kept:?}");
+    assert!(
+        !older.join("session-20200101-000000.json").exists(),
+        "the oldest copy is the one that goes"
+    );
+    assert!(
+        older.join("session-20200101-000002.json").exists(),
+        "a newer copy than the oldest is kept"
+    );
+}
+
+#[test]
+fn test_a_file_that_reads_whole_makes_no_backup_and_no_directory() {
+    let directory = scratch("no-backup");
+    let path = directory.join("session.json");
+    Session::of(&split(2), None)
+        .save_blocking(&path)
+        .expect("writable");
+
+    assert!(!Session::load(&path).is_empty());
+
+    assert!(
+        !directory.join(BACKUP_DIRECTORY).exists(),
+        "a file that read has nothing to keep a copy of"
+    );
+}
+
+#[test]
+fn test_a_backup_directory_that_cannot_be_made_still_salvages() {
+    // A file where the folder should be is the shape of a thing a person
+    // did by hand, and it must cost the copy and nothing else: the tabs that
+    // read still come back.
+    let directory = scratch("backup-blocked");
+    let path = directory.join("session.json");
+    fs::write(directory.join(BACKUP_DIRECTORY), "in the way").expect("writable");
+    fs::write(
+        &path,
+        r#"{"tabs": [{"name": "kept", "panes": [{"title": "kept", "flex": 1.0}]}, {"name": "broken", "panes": "not a list"}]}"#,
+    )
+    .expect("writable");
+
+    let session = Session::load(&path);
+
+    assert_eq!(
+        session
+            .tabs
+            .iter()
+            .map(|tab| tab.name.as_str())
+            .collect::<Vec<_>>(),
+        ["kept"],
+        "the salvage was lost with the copy"
+    );
+    assert!(
+        directory.join(BACKUP_DIRECTORY).is_file(),
+        "the thing in the way was not touched"
+    );
+}
+
 #[test]
 fn test_a_window_size_a_person_could_not_see_is_refused() {
     for size in [[0., 0.], [-100., 200.], [f32::NAN, 600.]] {
