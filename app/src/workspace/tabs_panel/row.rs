@@ -82,6 +82,12 @@ const ROW_RADIUS: f32 = 4.;
 /// at full strength is a warning and at this strength is a note.
 const WAITING_WASH_ALPHA: u8 = 28;
 
+/// The wash a waiting row wears, for the one other box that wears it: a
+/// folded group's heading, which is standing in for the rows it hides.
+pub(in crate::workspace) fn waiting_wash() -> Color {
+    theme().usage_high.with_alpha(WAITING_WASH_ALPHA)
+}
+
 /// Warp's row padding: `Padding::uniform(8.)`, in both densities.
 const ROW_PADDING: f32 = 8.;
 
@@ -493,7 +499,7 @@ fn row_shell(
     } else if is_hovered {
         theme().overlay_1
     } else if is_waiting {
-        theme().usage_high.with_alpha(WAITING_WASH_ALPHA)
+        waiting_wash()
     } else {
         Color::TRANSPARENT
     };

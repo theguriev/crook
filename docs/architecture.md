@@ -1078,7 +1078,11 @@ the pane or clear it from the same entry. `is_waiting` is the three combined, an
 the count in the header and the "next waiting" chord read.
 
 **The strip answers.** A waiting row is washed in the amber its dot shows, faintly, because a
-dot is nine pixels and a person scanning a long list wants the row to say it. The header's
+dot is nine pixels and a person scanning a long list wants the row to say it. A group folded
+away carries the worst of the rows it hides on its heading — the same wash when any member is
+waiting, and the host's own mark before the name, needs-input over failed over running and
+nothing for idle — because a wash on a row nobody can see says nothing, and an open group's
+heading stays plain since its rows say it themselves. The header's
 left end — a second single-item slot, `header.left`, beside the one the usage chip takes — is
 a chip that counts the waiting panes and goes to the next one when pressed, and is nothing at
 all at zero, since a count of zero is not information. The same move is
