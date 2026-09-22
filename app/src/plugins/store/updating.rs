@@ -2,7 +2,7 @@
 //!
 //! What the Update button does, for `--update-plugin` and `--update-plugins`:
 //! the same index, the same comparison, the same download and the same hash
-//! check, ending in the same [`wasm::write`](crate::plugins::wasm::write).
+//! check, ending in the same [`crate::plugins::wasm::write`].
 //! Only the two things a window is needed for are missing, and neither of them
 //! is a check — the module is not *carried* into a running host, so nothing
 //! draws until the next launch, and nothing is granted, because a capability
