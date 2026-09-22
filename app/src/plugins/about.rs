@@ -167,10 +167,6 @@ fn update_row(
         return widgets::row(words, false, Empty::new().finish(), ui);
     };
 
-    // Whether this copy is one an update may be written over, asked of the
-    // path rather than of the press: the sentence goes under the label, where
-    // a person reads it before pressing anything.
-    let refusal = crate::update::replaceable(workspace.release_channel()).err();
     let running = crate::update::running();
 
     let (said, control) = if model.checking() {
@@ -197,22 +193,34 @@ fn update_row(
         match (model.newer(), model.found().is_some()) {
             // A newer release, and either the button that installs it or the
             // reason there is no button.
-            (Some(found), _) => (
-                match &refusal {
-                    Some(refusal) => format!("crook {} is out. {}", found.version, told(refusal)),
-                    None => format!("crook {} is out, and this is {running}", found.version),
-                },
-                // The button is Update where this copy can take one, and the
-                // check again everywhere else: a row whose only control is
-                // dead is a row that looks broken rather than one that is
-                // telling you where your Crook came from.
-                match refusal.is_none() {
-                    true => run(workspace, "update").map(|command| ("Update", command)),
-                    false => {
-                        run(workspace, "check-updates").map(|command| ("Check again", command))
-                    }
-                },
-            ),
+            (Some(found), _) => {
+                // Whether this copy is one an update may be written over,
+                // asked of the path rather than of the press: the sentence
+                // goes under the label, where a person reads it before
+                // pressing anything. Asked here and nowhere above, because the
+                // asking writes a file beside the binary, and this page is
+                // built on every keystroke of a settings search and of the
+                // palette — not only while it is on screen.
+                let refusal = crate::update::replaceable(workspace.release_channel()).err();
+                (
+                    match &refusal {
+                        Some(refusal) => {
+                            format!("crook {} is out. {}", found.version, told(refusal))
+                        }
+                        None => format!("crook {} is out, and this is {running}", found.version),
+                    },
+                    // The button is Update where this copy can take one, and
+                    // the check again everywhere else: a row whose only
+                    // control is dead is a row that looks broken rather than
+                    // one that is telling you where your Crook came from.
+                    match refusal.is_none() {
+                        true => run(workspace, "update").map(|command| ("Update", command)),
+                        false => {
+                            run(workspace, "check-updates").map(|command| ("Check again", command))
+                        }
+                    },
+                )
+            }
             (None, true) => (
                 format!("crook {running} is the newest release"),
                 run(workspace, "check-updates").map(|command| ("Check again", command)),
