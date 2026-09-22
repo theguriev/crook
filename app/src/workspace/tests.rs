@@ -7734,7 +7734,7 @@ fn a_person_s_mark_rolls_up_to_the_folded_heading_too() {
     // amber on the row; folded away, it is the same amber on the heading.
     let (mut harness, group) = Harness::grouped_panel(2);
     let hidden = harness.panes_of(harness.members_of(group)[0])[0];
-    harness.update_session(hidden, |session| session.attention = true);
+    harness.update_session(hidden, |session| session.attention = Some(Attention::Bell));
     harness.dispatch_action(TabAction::ToggleGroup(group));
 
     let scene = harness.frame();
