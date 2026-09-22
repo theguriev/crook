@@ -57,7 +57,6 @@ use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
 
-use crook_terminal::url;
 use crook_terminal::{Block, BlockId, CellSide, Rows, SelectionKind, Snapshot, SnapshotCell};
 use crookui_core::AppContext;
 use crookui_core::element::{Element, SizeConstraint};
@@ -70,7 +69,7 @@ use crookui_core::scene::{ClipBounds, CornerRadius, Radius, Scene};
 use crate::browser;
 use crate::clipboard::Clipboard;
 use crate::pane_blocks::{Control, PaneBlocks, ScrollCause};
-use crate::pane_link::{LinkRow, LinkSpan, PaneLink};
+use crate::pane_link::{self, LinkRow, LinkSpan, PaneLink};
 use crate::pane_selection::PaneSelection;
 use crate::pane_surface;
 use crate::selection::{Anchor, Blocks, Cells, Item, Region, Selection};
@@ -666,46 +665,11 @@ impl BlockList {
         }
         let (column, _) = terminal_element::column_at(local.x() - GUTTER, metrics.width, columns);
 
-        let (link_row, text) = match self.block(item.index) {
-            Some(block) => {
-                let text = block.rows.text(row).to_owned();
-                (
-                    LinkRow::Block {
-                        index: item.index,
-                        row,
-                    },
-                    text,
-                )
+        pane_link::find(&self.rows_of(item.index), row, column, |row| {
+            LinkRow::Block {
+                index: item.index,
+                row,
             }
-            None => {
-                // The open block, whose rows are still the snapshot's.
-                let (first, last) = self.live_rows()?;
-                let source = first + row;
-                if source > last || source >= self.snapshot.rows {
-                    return None;
-                }
-                let text = self
-                    .snapshot
-                    .row(source)
-                    .iter()
-                    .map(|cell| cell.c)
-                    .collect();
-                (
-                    LinkRow::Block {
-                        index: item.index,
-                        row,
-                    },
-                    text,
-                )
-            }
-        };
-
-        let url = url::at(&text, column)?;
-        Some(LinkSpan {
-            row: link_row,
-            start: url.start,
-            len: url.len,
-            uri: url.uri,
         })
     }
 

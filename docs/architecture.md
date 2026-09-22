@@ -1430,7 +1430,12 @@ without the key the pointer goes on selecting, because a terminal where clicking
 browser is a terminal you cannot copy a URL out of. `app::browser` hands it to `open`,
 `xdg-open` or `cmd /c start`, and checks the scheme against a list first: a program's output is
 not trustworthy, and nothing printed into a pane should be able to ask the platform to open a
-scheme some application has registered a handler for.
+scheme some application has registered a handler for. A URL longer than the pane is wide is
+still one link: `app::pane_link::find` joins the row under the pointer with the rows the
+terminal folded it across — the same `WRAPLINE` flag a copy reads — scans the joined line, and
+maps the span back onto every row it crosses, so the underline and the click both cover the
+whole URL. A newline the program printed carries no flag, and two URLs on adjacent rows stay two
+links.
 
 **OSC 8 is not read**, and that is a decision rather than an omission. Carrying a per-cell
 hyperlink to the renderer means either putting it on `SnapshotCell` — twelve bytes and `Copy`

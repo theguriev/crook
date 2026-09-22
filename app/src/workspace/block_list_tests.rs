@@ -10,8 +10,10 @@
 use std::time::Instant;
 
 use crook_terminal::{Block, Emulator, Palette, TerminalSize};
+use crookui_core::event::Modifiers;
 
 use super::*;
+use crate::pane_link::LinkCells;
 
 /// A grid wide enough for the marks below and short enough to reason about.
 const GRID: TerminalSize = TerminalSize::new(20, 6);
@@ -272,7 +274,6 @@ fn there_is_nothing_to_continue_where_there_is_no_composer() {
 /// the URL from the row above.
 #[test]
 fn links_on_a_command_less_block_land_on_their_own_rows() {
-    use crookui_core::event::Modifiers;
     use crookui_core::geometry::{Point, ZIndex, vec2f};
     use std::sync::Arc;
 
@@ -313,20 +314,7 @@ fn links_on_a_command_less_block_land_on_their_own_rows() {
         .expect("the banner is on screen");
     assert_eq!(item.index, 0, "the banner is the first item");
     let origin = list.bounds().expect("the list has bounds").origin();
-    // The modifier that follows a link is the platform's — Command on macOS,
-    // Control off it — the same split `opens_links` makes, and the test runs on
-    // both. Hardcoding Control passed on Linux and failed on the macOS runner.
-    let follow = if cfg!(target_os = "macos") {
-        Modifiers {
-            cmd: true,
-            ..Default::default()
-        }
-    } else {
-        Modifiers {
-            ctrl: true,
-            ..Default::default()
-        }
-    };
+    let follow = follow();
     assert!(terminal_element::opens_links(follow));
 
     // The centre of each row lands on that row's own URL — not None, and not
@@ -342,9 +330,97 @@ fn links_on_a_command_less_block_land_on_their_own_rows() {
             .unwrap_or_else(|| panic!("row {row} has no link under the pointer"));
         assert_eq!(span.uri, uri, "row {row} opened the wrong URL");
         assert!(
-            matches!(span.row, LinkRow::Block { index: 0, row: r } if r == row),
+            matches!(
+                span.cells.as_slice(),
+                [LinkCells { row: LinkRow::Block { index: 0, row: r }, .. }] if *r == row
+            ),
             "row {row} was hit as {:?}",
-            span.row
+            span.cells
+        );
+    }
+}
+
+/// The modifier that follows a link: the platform's — Command on macOS,
+/// Control off it — the same split `opens_links` makes, and the tests run on
+/// both. Hardcoding Control passed on Linux and failed on the macOS runner.
+fn follow() -> Modifiers {
+    if cfg!(target_os = "macos") {
+        Modifiers {
+            cmd: true,
+            ..Default::default()
+        }
+    } else {
+        Modifiers {
+            ctrl: true,
+            ..Default::default()
+        }
+    }
+}
+
+/// A URL longer than the pane is wide, printed by a command that finished, is
+/// one link on the two rows the terminal folded it onto — found whole from a
+/// pointer on either, and underlined on both. The block is a harvested one,
+/// so this is the stored rows' fold flag rather than the grid's.
+#[test]
+fn a_folded_url_in_a_finished_block_is_one_link_on_both_of_its_rows() {
+    use crookui_core::geometry::{Point, ZIndex, vec2f};
+    use std::sync::Arc;
+
+    let mut emulator = emulator();
+    // Thirty-six characters into a twenty-column grid.
+    let url = "https://example.com/abcdefghijklmnop";
+    cycle(&mut emulator, "cat log", url, 0);
+    let block = finished(&emulator);
+    assert!(block.rows.wraps(1), "the emulator folded the URL");
+
+    let history = Arc::new(BlockHistory::new(
+        emulator.blocks().iter().cloned().map(Arc::new).collect(),
+        0,
+    ));
+    let font = crate::terminal_font::CellFont::headless(12.);
+    let metrics = font.metrics();
+    let mut list = BlockList::new(history, emulator.snapshot(), font, PaneBlocks::new());
+    let size = vec2f(400., 300.);
+    list.size = Some(size);
+    list.origin = Some(Point::from_vec2f(vec2f(0., 0.), ZIndex::Normal(0)));
+    list.measure(size);
+
+    let item = list
+        .window
+        .first()
+        .copied()
+        .expect("the block is on screen");
+    assert_eq!(item.index, 0);
+    let origin = list.bounds().expect("the list has bounds").origin();
+    let rows_top = item.top + list.padding_top(item.index) * metrics.height;
+    let follow = follow();
+
+    // Row 0 is the prompt line; the URL is rows 1 and 2.
+    let whole = vec![
+        LinkCells {
+            row: LinkRow::Block { index: 0, row: 1 },
+            start: 0,
+            len: 20,
+        },
+        LinkCells {
+            row: LinkRow::Block { index: 0, row: 2 },
+            start: 0,
+            len: 16,
+        },
+    ];
+    for (row, column) in [(1usize, 5usize), (2, 3)] {
+        let at = origin
+            + vec2f(
+                GUTTER + (column as f32 + 0.5) * metrics.width,
+                rows_top + (row as f32 + 0.5) * metrics.height,
+            );
+        let span = list
+            .link_at(at, follow)
+            .unwrap_or_else(|| panic!("row {row} has no link under the pointer"));
+        assert_eq!(span.uri, url, "row {row} found a cut-off URL");
+        assert_eq!(
+            span.cells, whole,
+            "row {row} did not map the link onto both rows"
         );
     }
 }
