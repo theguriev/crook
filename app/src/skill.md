@@ -89,6 +89,7 @@ command-line flag for any of this; tell the person where the menu is.
 
 ```sh
 crook --plugins                        # list the plugins installed as files
+crook --plugins --json                 # the same as a JSON array: id, version, path, enabled, allowed
 crook --install-plugin <path>          # copy a plugin's .wasm into the plugins directory
 crook --uninstall-plugin <owner/name>  # remove one, with whatever it was allowed to do
 crook --dev-plugin <path>              # run the plugin being written, from where it is built
