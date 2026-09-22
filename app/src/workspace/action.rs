@@ -549,4 +549,6 @@ pub enum OptionsAction {
     ToggleShowDiffStats,
     /// "Show details on hover".
     ToggleShowDetailsOnHover,
+    /// "Show tab numbers".
+    ToggleShowTabNumbers,
 }

@@ -206,6 +206,8 @@ pub(super) struct MenuState {
     pub(super) diff_stats: MouseStateHandle,
     /// "Show details on hover".
     pub(super) details_on_hover: MouseStateHandle,
+    /// "Show tab numbers".
+    pub(super) tab_numbers: MouseStateHandle,
     /// The row that opens the settings page.
     pub(super) settings: MouseStateHandle,
     /// How far the rows are scrolled, in a window too short for them all.
@@ -239,6 +241,7 @@ impl MenuState {
             &self.pr_link_info,
             &self.diff_stats,
             &self.details_on_hover,
+            &self.tab_numbers,
             &self.settings,
         ] {
             state.lock().reset_interaction_state();
@@ -6332,6 +6335,9 @@ impl Workspace {
             }
             OptionsAction::ToggleShowDetailsOnHover => {
                 options.show_details_on_hover = !options.show_details_on_hover;
+            }
+            OptionsAction::ToggleShowTabNumbers => {
+                options.show_tab_numbers = !options.show_tab_numbers;
             }
         }
 

@@ -33,6 +33,17 @@
 //! [`crate::plugins::tabs`] for why the disc is what the host draws rather
 //! than a contribution competing with a plugin's.
 //!
+//! **The title line can lead with the tab's number.** Off by default and
+//! Warp has no such thing; it is the number `cmd-1`…`cmd-8` (`alt-` off
+//! macOS) selects the tab by, and once tabs are named there is no other way
+//! to see which one `cmd-4` means. It is the tab's place in the strip — the
+//! count [`Binding::SelectTab`](crate::input_keys::Binding::SelectTab)
+//! uses — so every row of a split tab carries the same number, and a group's
+//! members count on from the tab before the group rather than from one. It
+//! sits between the mark and the title rather than in the mark's slot, which
+//! a plugin may have taken, and on the title's own line at the title's own
+//! size, so a row is exactly as tall with it as without.
+//!
 //! **There is a close button in the trailing edge**, in a slot reserved on
 //! every row in every state. Warp closes a tab from a floating action belt
 //! that overhangs the tab's top-right corner — an overlay — and a row already
@@ -93,6 +104,12 @@ const COMPACT_LINE_GAP: f32 = 1.;
 /// The gap above each line of an `Expanded` row after the first.
 const EXPANDED_LINE_GAP: f32 = 2.;
 
+/// The gap between the tab's number and the title it leads.
+///
+/// Four: the number is the title's size in the title's face, and at less
+/// than this `1 kettle` reads as one word.
+const NUMBER_GAP: f32 = 4.;
+
 /// The gap between a panel row and the detail card it opens.
 ///
 /// Warp's `DETAIL_SIDECAR_HORIZONTAL_GAP`. The card opens on the side away
@@ -152,6 +169,13 @@ pub(super) fn render(
     };
 
     let facts = RowFacts::resolve(session, git, home);
+    // One-based, because it is what the chord's key says: `cmd-1` is the
+    // first tab. Counted off the strip and not off the rows, so a split tab's
+    // rows share it and a filtered-out tab still takes its number with it.
+    let number = options
+        .show_tab_numbers
+        .then(|| strip.index_of(tab).map(|index| index + 1))
+        .flatten();
     let chips = match options.density {
         // Warp's `render_compact_pane_row` never calls
         // `render_terminal_right_badges`, which is exactly why the menu hides
@@ -160,8 +184,8 @@ pub(super) fn render(
         Density::Compact => Chips::default(),
     };
     let body = match options.density {
-        Density::Compact => compact_column(&facts, options, ui),
-        Density::Expanded => expanded_column(&facts, &chips, options, ui),
+        Density::Compact => compact_column(&facts, number, options, ui),
+        Density::Expanded => expanded_column(&facts, &chips, number, options, ui),
     };
 
     // Made once and lent to whatever is drawing the row's mark, which is
@@ -326,17 +350,17 @@ struct RowBody {
 /// really does lose 12px of height when the subtitle is absent — the icon is
 /// the floor, so a subtitle-less row is exactly as tall as the icon plus the
 /// padding.
-fn compact_column(facts: &RowFacts, options: TabOptions, ui: FamilyId) -> RowBody {
+fn compact_column(
+    facts: &RowFacts,
+    number: Option<usize>,
+    options: TabOptions,
+    ui: FamilyId,
+) -> RowBody {
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Start)
         .with_spacing(COMPACT_LINE_GAP)
-        .with_child(facts.title(options.primary_info).render(
-            TITLE_SIZE,
-            theme().text_primary,
-            Weight::Normal,
-            ui,
-        ));
+        .with_child(title_line(facts, number, options, ui));
 
     // Resolved here as well as in the menu: a menu that ticked the stored
     // value would put a check beside an option this line is overriding.
@@ -357,7 +381,13 @@ fn compact_column(facts: &RowFacts, options: TabOptions, ui: FamilyId) -> RowBod
 /// Warp's `render_pane_row` through `render_terminal_row_content`. The column
 /// has no spacing of its own; the second and third children each carry a 2px
 /// top margin, which is the same arithmetic said in the place Warp says it.
-fn expanded_column(facts: &RowFacts, chips: &Chips, options: TabOptions, ui: FamilyId) -> RowBody {
+fn expanded_column(
+    facts: &RowFacts,
+    chips: &Chips,
+    number: Option<usize>,
+    options: TabOptions,
+    ui: FamilyId,
+) -> RowBody {
     let description = facts
         .description(options.primary_info)
         // An empty line rather than no line: see the module docs. The row's
@@ -376,12 +406,7 @@ fn expanded_column(facts: &RowFacts, chips: &Chips, options: TabOptions, ui: Fam
         // Stretch, so the metadata line below gets the column's full width to
         // push its chips to the far end of.
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-        .with_child(facts.title(options.primary_info).render(
-            TITLE_SIZE,
-            theme().text_primary,
-            Weight::Normal,
-            ui,
-        ))
+        .with_child(title_line(facts, number, options, ui))
         .with_child(
             Container::new(description)
                 .with_margin_top(EXPANDED_LINE_GAP)
@@ -402,6 +427,43 @@ fn expanded_column(facts: &RowFacts, chips: &Chips, options: TabOptions, ui: Fam
         column,
         is_multiline: true,
     }
+}
+
+/// The title line of either density: the title, led by the tab's number when
+/// there is one to show.
+///
+/// The number is muted where the title is not, so the eye lands on the name
+/// and reads the digit only when it goes looking for one; it is the title's
+/// size so the two share a baseline and the line is no taller for it. The
+/// title yields to the number and not the other way round — a `10` must
+/// never be cut to a `1` by a long name, since a wrong number is worse than a
+/// shorter title.
+fn title_line(
+    facts: &RowFacts,
+    number: Option<usize>,
+    options: TabOptions,
+    ui: FamilyId,
+) -> Box<dyn Element> {
+    let title = facts.title(options.primary_info).render(
+        TITLE_SIZE,
+        theme().text_primary,
+        Weight::Normal,
+        ui,
+    );
+    let Some(number) = number else {
+        return title;
+    };
+
+    Flex::row()
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_spacing(NUMBER_GAP)
+        .with_child(
+            Text::new(number.to_string(), ui, TITLE_SIZE)
+                .with_color(theme().text_muted)
+                .finish(),
+        )
+        .with_child(Shrinkable::new(1., title).finish())
+        .finish()
 }
 
 /// The box every row is drawn in, at either density.

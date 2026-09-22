@@ -359,6 +359,25 @@ fn rows_category(workspace: &Workspace) -> Vec<Entry> {
         ui,
     ));
 
+    // Before the chips rather than after the detail card, which is the order
+    // the things it describes come in on a row: the number is on the title
+    // line, the chips are under it, and the card is beside it.
+    rows.push(widgets::row(
+        Words::new("Show tab numbers")
+            .with_description(
+                "Each row leads with its tab's place in the list, which is the number the \
+                 tab-by-position chord selects it by.",
+            )
+            .with_keywords(&["number", "index", "position", "ordinal", "digit", "chord"]),
+        true,
+        widgets::switch(
+            options.show_tab_numbers,
+            Some(OptionsAction::ToggleShowTabNumbers.into()),
+            state.control(named("show-tab-numbers")),
+        ),
+        ui,
+    ));
+
     rows.push(widgets::row(
         Words::new("Show the PR link chip")
             .with_description(
