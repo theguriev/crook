@@ -37,6 +37,7 @@ pub mod index;
 pub mod model;
 mod section;
 mod state;
+pub mod updating;
 
 use std::rc::Rc;
 use std::sync::OnceLock;

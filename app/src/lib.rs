@@ -76,6 +76,7 @@ pub mod terminal_keys;
 pub mod terminal_model;
 pub mod text_input;
 pub mod theme;
+pub mod update;
 pub mod window_controls;
 pub mod workspace;
 
@@ -86,7 +87,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 use crook_plugin::ActionName;
 use crook_terminal::BlockId;
 use crookui::{
@@ -650,6 +651,31 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
                     .context("`--plugin-fixture` needs a path to a fixture")?;
                 overrides.fixture = Some(PathBuf::from(path));
             }
+            // Every one of these reaches the network, and every one of them
+            // is somebody asking it to: see `update`'s first paragraph and
+            // `store::fetch`'s. None of them opens a window — updating and
+            // then drawing would be a window whose plugins were replaced
+            // under it while it built.
+            "--update-plugin" => {
+                let name = args
+                    .next()
+                    .context("`--update-plugin` needs a plugin's `owner/name`")?;
+                let id = crook_plugin::PluginId::parse(&name).map_err(anyhow::Error::msg)?;
+                print!("{}", plugins_updated(Some(&id))?);
+                return Ok(Startup::Answered);
+            }
+            "--update-plugins" => {
+                print!("{}", plugins_updated(None)?);
+                return Ok(Startup::Answered);
+            }
+            "--check-update" => {
+                println!("{}", update_checked(channel)?);
+                return Ok(Startup::Answered);
+            }
+            "--update" => {
+                print!("{}", updated(channel)?);
+                return Ok(Startup::Answered);
+            }
             // Answered after the loop rather than here, unlike `--version`:
             // `--json` may come before it or after it, and the answer is not
             // known until both have been read.
@@ -934,6 +960,18 @@ OPTIONS:
     --json             With --plugins, print the list as a JSON array instead,
                        one object per plugin — `id`, `version`, `path`,
                        `enabled` and `allowed` — for a script or an agent
+    --update-plugin <ID>
+                       Fetch the registry's newest build of an installed plugin
+                       and install it over the version that is there
+    --update-plugins   The same for every installed plugin the registry is
+                       ahead of, one at a time, and say what each one did
+    --check-update     Ask the releases page whether a newer Crook is out and
+                       say so. Nothing is asked of the network until you run
+                       this, or --update, or open the store
+    --update           The same, and then install that release over this
+                       binary: the archive for this platform, checked against
+                       the published SHA256SUMS, renamed into place. Restart
+                       Crook to run it
     --dev-plugin <PATH>
                        Run the plugin you are writing, from wherever you built
                        it, and run it again every time you build it. Takes a
@@ -2473,6 +2511,99 @@ fn installed_plugins_text() -> String {
     )
 }
 
+/// What `--check-update` prints: whether a newer Crook has been released.
+///
+/// One request, and the line it produces says what to do about the answer —
+/// `--update` when this copy can replace itself, and the reason it cannot when
+/// it cannot, since "0.2.0 is out" is only useful next to the way to get it.
+fn update_checked(channel: Channel) -> Result<String> {
+    let agent = crate::plugins::store::fetch::agent();
+    let published = crate::update::published(&agent).map_err(anyhow::Error::msg)?;
+    let running = crate::update::running();
+
+    if !published.is_newer() {
+        return Ok(format!("crook {running} is the newest release"));
+    }
+    let how = match crate::update::replaceable(channel) {
+        Ok(binary) => format!("`crook --update` installs it over {}", binary.display()),
+        Err(refusal) => refusal.to_string(),
+    };
+    Ok(format!(
+        "crook {} is out, and this is {running}\n{how}",
+        published.version
+    ))
+}
+
+/// What `--update` prints, having done it.
+///
+/// Refusing is an error rather than a line, because a script that asked for an
+/// update and got a sentence about a bundle should stop rather than carry on
+/// as though it had one.
+fn updated(channel: Channel) -> Result<String> {
+    let agent = crate::plugins::store::fetch::agent();
+    let published = crate::update::published(&agent).map_err(anyhow::Error::msg)?;
+    let running = crate::update::running();
+
+    if !published.is_newer() {
+        return Ok(format!("crook {running} is already the newest release\n"));
+    }
+    // Before the download rather than after it: forty megabytes fetched to be
+    // told the bundle cannot be written is forty megabytes nobody asked for.
+    let binary = crate::update::replaceable(channel).map_err(|refusal| anyhow!("{refusal}"))?;
+
+    let mut said = format!(
+        "==> {running} → {} ({})\n",
+        published.version, published.tag
+    );
+    crate::update::install(&published.tag, &binary, &agent).map_err(anyhow::Error::msg)?;
+    said.push_str(&format!("==> {}\n", binary.display()));
+    said.push_str("==> Updated. A window that is open is still the old one: restart it.\n");
+    Ok(said)
+}
+
+/// What `--update-plugin` and `--update-plugins` print.
+///
+/// The work is `store::updating`, which is the same fetch, the same hash check
+/// and the same write the store's button does — this is the part that turns
+/// its outcomes into lines.
+fn plugins_updated(only: Option<&crook_plugin::PluginId>) -> Result<String> {
+    let outcomes = crate::plugins::store::updating::update(only).map_err(anyhow::Error::msg)?;
+    if outcomes.is_empty() {
+        return Ok(match only {
+            Some(id) => format!("{id} is the newest build the registry has\n"),
+            None => String::from("every installed plugin is the newest build the registry has\n"),
+        });
+    }
+
+    let mut said = String::new();
+    let mut failed = 0;
+    for outcome in &outcomes {
+        match &outcome.result {
+            Ok(()) => said.push_str(&format!(
+                "updated {} {} → {}\n",
+                outcome.id, outcome.from, outcome.to
+            )),
+            Err(why) => {
+                failed += 1;
+                said.push_str(&format!(
+                    "{} {} → {} failed: {why}\n",
+                    outcome.id, outcome.from, outcome.to
+                ));
+            }
+        }
+    }
+    // The lines are the answer either way; the exit status is what a script
+    // reads, and one plugin that did not install is a run that did not do what
+    // it was asked.
+    match failed {
+        0 => Ok(said),
+        _ => {
+            print!("{said}");
+            bail!("{failed} of {} could not be updated", outcomes.len())
+        }
+    }
+}
+
 /// What `--plugins --json` prints: the same plugins, for a script.
 ///
 /// One object per plugin and nothing a person would have to parse out of a
@@ -3587,6 +3718,35 @@ mod tests {
         assert!(parse(&["--density"]).is_err());
         assert!(parse(&["--granularity", "sessions"]).is_err());
         assert!(parse(&["--granularity"]).is_err());
+    }
+
+    #[test]
+    fn the_four_update_flags_are_documented_and_known_to_the_parser() {
+        // Not in the loop below, and that is the point: `--check-update`,
+        // `--update` and `--update-plugins` reach the network the moment they
+        // are parsed, so a test that fed them to the parser would be a test
+        // that asked GitHub how the suite is going. What can be checked
+        // without leaving the machine is that the help names them and that
+        // the one taking an argument complains about the argument rather than
+        // about itself.
+        let help = help_text();
+        for flag in [
+            "--check-update",
+            "--update",
+            "--update-plugin <ID>",
+            "--update-plugins",
+        ] {
+            assert!(help.contains(flag), "{flag} is not in --help");
+        }
+
+        let complaint = parse(&["--update-plugin"])
+            .err()
+            .map(|error| error.to_string())
+            .unwrap_or_default();
+        assert!(
+            complaint.contains("owner/name"),
+            "--update-plugin with no plugin said {complaint:?}"
+        );
     }
 
     #[test]

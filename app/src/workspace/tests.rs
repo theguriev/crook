@@ -9381,6 +9381,82 @@ fn the_rail_switches_pages_and_the_pane_shows_the_one_it_names() {
 }
 
 #[test]
+fn the_sidebar_marks_the_way_back_to_the_page_that_found_an_update() {
+    // The notice a check leaves behind: a dot on the button that leads to the
+    // page the Update button is on. Nothing draws it until a check has found
+    // something, which is what the first count below is.
+    let mut harness = Harness::new(1);
+    let before = rects_rounded_by(&harness.frame(), Radius::Pixels(3.)).len();
+
+    let workspace = harness.workspace.clone();
+    harness.app.update(|ctx| {
+        workspace.update(ctx, |workspace, ctx| {
+            workspace.note_newer_release(Some(String::from("9.9.9")), ctx);
+        });
+    });
+    let after = rects_rounded_by(&harness.frame(), Radius::Pixels(3.)).len();
+
+    assert_eq!(
+        after,
+        before + 1,
+        "the settings button carries no mark once a check has found a release"
+    );
+
+    // And it goes away with the answer, so a window that updated and was told
+    // to restart does not keep the dot for the rest of its life.
+    let workspace = harness.workspace.clone();
+    harness.app.update(|ctx| {
+        workspace.update(ctx, |workspace, ctx| {
+            workspace.note_newer_release(None, ctx);
+        });
+    });
+    assert_eq!(
+        rects_rounded_by(&harness.frame(), Radius::Pixels(3.)).len(),
+        before,
+        "the mark outlived what it was about"
+    );
+}
+
+#[test]
+fn the_about_page_offers_a_check_for_updates_and_has_not_made_one() {
+    // The window asks the network nothing until somebody presses this, which
+    // is the rule the store is under and the one this row has to keep: a
+    // freshly opened About says what the button would do rather than what a
+    // check found, and the sidebar carries no mark.
+    let mut harness = Harness::new(1);
+    harness.open_settings_page();
+    harness.select_settings_section("About");
+    let scene = harness.frame_sized(vec2f(640., 400.));
+    let pane = settings_pane_box(&scene);
+    let lines = text_lines(&scene, |position| pane.contains_point(position));
+
+    assert!(
+        lines.iter().any(|(_, line)| line.starts_with("Updates")),
+        "the About page has no Updates row: {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|(_, line)| line.contains("Nothing is asked of the network")),
+        "the row does not say that nothing has been asked: {lines:?}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|(_, line)| line.contains("Check for updates")),
+        "there is no button to ask with: {lines:?}"
+    );
+    assert!(
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace
+                .newer_release()
+                .is_none()),
+        "a window that has asked nothing knows of no release"
+    );
+}
+
+#[test]
 fn a_settings_file_kept_nowhere_says_the_word_and_puts_the_reason_under_the_label() {
     // With ephemeral settings the value was the sentence "nowhere — this run
     // keeps its options in memory", drawn as a path: monospace and cut from

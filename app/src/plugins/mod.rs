@@ -63,7 +63,7 @@ pub fn defaults() -> Vec<Box<dyn Plugin>> {
         // two buttons appear in at the foot of the sidebar and the order a
         // person reads them in: what I have, then what there is.
         Box::new(store::Store::new()),
-        Box::new(about::About),
+        Box::new(about::About::default()),
         Box::new(palette::CommandPalette),
     ]
 }

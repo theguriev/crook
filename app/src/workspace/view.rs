@@ -686,6 +686,12 @@ pub struct Workspace {
     /// rather than looked up: nothing else in the view layer knows which
     /// binary started it, and the alternative is a second global.
     channel: Channel,
+    /// The release the About page's last check found this build to be behind.
+    ///
+    /// Not on disk, and not asked for at startup: a window that has not
+    /// checked shows no mark, which is the same rule the check itself is
+    /// under. See [`Workspace::note_newer_release`].
+    newer_release: Option<String>,
     /// The options, kept beside [`Self::settings`] rather than read out of it
     /// on every access. A renderer reads this dozens of times per frame and
     /// wants a `Copy` snapshot, not a borrow of the thing a save is cloning.
@@ -972,6 +978,7 @@ impl Workspace {
             panel_drag: PanelDrag::new(),
             settings,
             channel,
+            newer_release: None,
             options,
             overridden: Overridden::default(),
             menu: MenuState::default(),
@@ -1156,6 +1163,31 @@ impl Workspace {
     /// Which build this is: `dev` or `stable`.
     pub fn channel(&self) -> &'static str {
         self.channel.name()
+    }
+
+    /// The channel itself, for the one question that is not about a label:
+    /// whether this build is a release that may replace itself. See
+    /// [`crate::update::replaceable`].
+    pub fn release_channel(&self) -> crate::Channel {
+        self.channel
+    }
+
+    /// The release a check found this window to be behind, if one has.
+    ///
+    /// Only ever set by the About page's own check — nothing asks the network
+    /// on its own — and read by the sidebar, which marks the button that leads
+    /// to the page that can do something about it.
+    pub(crate) fn newer_release(&self) -> Option<&str> {
+        self.newer_release.as_deref()
+    }
+
+    /// What the About page's model found, kept where the sidebar can see it.
+    pub fn note_newer_release(&mut self, version: Option<String>, ctx: &mut ViewContext<Self>) {
+        if self.newer_release == version {
+            return;
+        }
+        self.newer_release = version;
+        ctx.notify();
     }
 
     /// The settings page's state.
