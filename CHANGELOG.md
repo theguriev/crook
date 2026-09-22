@@ -5,6 +5,26 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.10
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.9...v0.1.10)
+
+### Features
+
+- Update Crook and its plugins, from the command line and from the window ([#274](https://github.com/theguriev/crook/pull/274))
+
+### Fixes
+
+- **plugins:** Leave a contribution that draws nothing out of its slot ([#273](https://github.com/theguriev/crook/pull/273))
+
+### Refactors
+
+- **release:** Read the release notes through script/release-notes ([#272](https://github.com/theguriev/crook/pull/272))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.9
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.8...v0.1.9)
