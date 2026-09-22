@@ -19,6 +19,12 @@
 //! is a fragment of Claude Code's own settings file, to be merged into it by
 //! the person whose file it is — Crook does not write a file it does not own,
 //! and that one it has never opened.
+//!
+//! `--skill` prints [`SKILL`], the file that teaches an agent the rest of
+//! this: how it tells it is in a pane, what the four words do to the row,
+//! and what else the binary will do for it. A hook makes Claude Code report
+//! without knowing it is; the skill is for an agent a person has asked to
+//! know.
 
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
@@ -34,6 +40,17 @@ use serde_json::{Value, json};
 /// somebody meant to say about it; this is roughly the width the panel gives
 /// a title before it has to cut one itself.
 const TITLE_CHARS: usize = 60;
+
+/// What `--skill` prints: a skill file in the Agent Skills format, front
+/// matter and body, that teaches a coding agent what it can do from inside
+/// a pane.
+///
+/// A file beside the code rather than a string in it, the way the shell
+/// integration keeps its snippets: it is Markdown a person reads whole, and
+/// it is what a test pins — every `crook --flag` it names has to be one the
+/// parser accepts, so a flag renamed here is a test failing rather than an
+/// agent typing something the binary has never heard of.
+pub const SKILL: &str = include_str!("skill.md");
 
 /// Writes `status` to the terminal this process was started in.
 ///

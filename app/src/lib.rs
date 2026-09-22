@@ -562,6 +562,18 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 );
                 return Ok(Startup::Answered);
             }
+            // The other thing printed for a person to put somewhere: the
+            // hooks make an agent report without knowing it is, and this
+            // tells one that was asked to know. Stdout is the file and
+            // stderr the note, so `> SKILL.md` takes exactly the file.
+            "--skill" => {
+                print!("{}", agent::SKILL);
+                eprintln!(
+                    "# Save the text above as ~/.claude/skills/crook/SKILL.md, or as a \
+project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can do."
+                );
+                return Ok(Startup::Answered);
+            }
             // Answered like `--version` rather than started like `--theme`: a
             // person installing a plugin is not opening a window, and doing
             // both would be a window that opened before the plugin it was
@@ -978,6 +990,9 @@ OPTIONS:
     --agent-hooks <AGENT>
                        Print the hooks that make `claude` (Claude Code) say
                        all of that by itself, to merge into its settings file
+    --skill            Print the skill file that teaches a coding agent what it
+                       can do from inside a pane, to save as SKILL.md where
+                       the agent loads its skills
     -h, --help         Print this message
     -V, --version      Print the version and channel
 
@@ -3127,6 +3142,84 @@ mod tests {
     }
 
     #[test]
+    fn the_skill_is_printed_and_answered_without_a_window() {
+        // The file is the answer, the way the hooks are: a flag that opened a
+        // window after printing it would put a window over the shell that
+        // was redirecting it into a file.
+        assert_eq!(parse(&["--skill"]).expect("valid"), Startup::Answered);
+    }
+
+    #[test]
+    fn the_skill_has_front_matter_and_names_only_flags_the_parser_knows() {
+        // Agent Skills format: a `---` block carrying a name and a one-line
+        // description, then the body. A loader that finds no front matter
+        // finds no skill.
+        let mut lines = agent::SKILL.lines();
+        assert_eq!(lines.next(), Some("---"));
+        let front: Vec<&str> = lines.by_ref().take_while(|line| *line != "---").collect();
+        assert!(front.contains(&"name: crook"), "front matter: {front:?}");
+        let described = front
+            .iter()
+            .filter(|line| line.starts_with("description: "))
+            .count();
+        assert_eq!(1, described, "one description line, not {described}");
+        assert!(
+            lines.any(|line| line.starts_with("# ")),
+            "the body starts with a heading"
+        );
+
+        // Every `crook --flag` the text tells an agent to run is one in the
+        // help's own table. A flag renamed there and not here would be a
+        // skill teaching an agent to type something `crook` calls
+        // unrecognised, and the agent would have no way to know.
+        let help = help_text();
+        // The short spellings come first on their lines — `-h, --help` —
+        // which is why the entry is the first long word rather than the
+        // first word.
+        let table: Vec<&str> = help
+            .lines()
+            .filter_map(|line| line.strip_prefix("    "))
+            .filter(|entry| entry.starts_with('-'))
+            .filter_map(|entry| entry.split(' ').find_map(|word| word.strip_prefix("--")))
+            .collect();
+        let mut flags: Vec<&str> = agent::SKILL
+            .match_indices("crook --")
+            .map(|(at, _)| {
+                let rest = &agent::SKILL[at + "crook --".len()..];
+                let end = rest
+                    .find(|character: char| !character.is_ascii_lowercase() && character != '-')
+                    .unwrap_or(rest.len());
+                &rest[..end]
+            })
+            .collect();
+        flags.sort_unstable();
+        flags.dedup();
+        assert!(
+            flags.contains(&"agent") && flags.contains(&"agent-hooks"),
+            "the skill teaches the status report: {flags:?}"
+        );
+        for flag in flags {
+            assert!(
+                table.contains(&flag),
+                "the skill names --{flag}, which --help does not list"
+            );
+            // And the parser, for the flags that stop at a missing argument:
+            // `--plugins` bare would list this machine's plugins, which is
+            // nothing a test should read.
+            let takes_argument = help.contains(&format!("--{flag} <"));
+            if takes_argument {
+                let complaint = parse(&[&format!("--{flag}")])
+                    .err()
+                    .map(|error| error.to_string());
+                assert!(
+                    !complaint.is_some_and(|complaint| complaint.contains("unrecognised")),
+                    "the skill names --{flag}, which the parser has never heard of"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_plugin_that_cannot_be_uninstalled_is_named_once() {
         // The refusal names the plugin; a context that named it again read
         // `x: "x" is not `owner/name``.
@@ -3392,6 +3485,7 @@ mod tests {
             "--size",
             "--agent",
             "--agent-hooks",
+            "--skill",
         ] {
             assert!(help.contains(flag), "{flag} is not in --help");
             // Either it parses, or it complains about the value it is missing.
