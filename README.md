@@ -121,8 +121,10 @@ Nineteen features, and the page that configures them:
   secondary click, on the empty space the list leaves — says what a row of them shows. Under
   that space is a `+`, which is where Warp's browser puts the one that opens another tab.
   Above the list is a **search box**, Telegram's way round: it
-  filters the rows by what a tab is running, where it is working and the branch it is on, and
-  filters nothing else — the active tab stays active and a filtered-out tab goes on printing.
+  filters the rows by what a tab is running, where it is working, the branch it is on and its
+  status word — `waiting` is the amber rows, and `running`, `failed` and `idle` are the dot's —
+  and filters nothing else — the active tab stays active and a filtered-out tab goes on
+  printing.
   `cmd-k` (`ctrl-shift-k` off macOS) puts the keyboard in it from anywhere in the window,
   Enter opens the top match, and Escape gives the keyboard back to the shell.
 

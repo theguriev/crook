@@ -6176,6 +6176,83 @@ fn a_tab_is_found_by_a_pane_its_row_does_not_name() {
 }
 
 #[test]
+fn waiting_finds_only_the_rows_the_wash_paints() {
+    // An operator with ten tabs typing `waiting` means the amber rows and
+    // nothing else, so the word is the wash's rule to the letter: a bell
+    // remembered or an agent asking, in a pane nobody is looking at. The pane
+    // on screen is asking too and is not found — it waits for nobody, and its
+    // row is not amber. `needs-input` is the same rule under the dot's name.
+    let mut harness = Harness::panel(4);
+    let panes = harness.pane_ids();
+    harness.update_session(panes[0], |session| {
+        session.derived_title = Some("kettle".to_owned());
+        session.attention = true;
+    });
+    harness.update_session(panes[1], |session| {
+        session.derived_title = Some("cocoa".to_owned());
+        session.status = AgentStatus::NeedsInput;
+    });
+    harness.update_session(panes[2], |session| {
+        session.derived_title = Some("toast".to_owned());
+        session.status = AgentStatus::Running;
+    });
+    harness.update_session(panes[3], |session| {
+        session.derived_title = Some("scone".to_owned());
+        session.attention = true;
+    });
+
+    for word in ["waiting", "needs-input"] {
+        harness.click_panel_search();
+        harness.type_text(word);
+
+        let scene = harness.frame();
+        let text = panel_text(&scene);
+        assert_eq!(panel_rows(&scene).len(), 2, "{word} kept: {text:?}");
+        assert!(
+            text.contains("kettle") && text.contains("cocoa"),
+            "{word} lost an amber row: {text:?}"
+        );
+        assert!(
+            !text.contains("toast") && !text.contains("scone"),
+            "{word} kept a row that is not amber: {text:?}"
+        );
+
+        harness.press("escape", Modifiers::default(), "");
+    }
+}
+
+#[test]
+fn running_finds_a_running_row_and_still_a_row_called_that() {
+    // The status word is one more word of the row's and not a mode: a row
+    // whose title happens to say `running` is found exactly as it was before
+    // there was a status to search by.
+    let mut harness = Harness::panel(3);
+    let panes = harness.pane_ids();
+    harness.update_session(panes[0], |session| {
+        session.derived_title = Some("kettle".to_owned());
+        session.status = AgentStatus::Running;
+    });
+    harness.update_session(panes[1], |session| {
+        session.derived_title = Some("running lights".to_owned());
+    });
+    harness.update_session(panes[2], |session| {
+        session.derived_title = Some("cocoa".to_owned());
+    });
+
+    harness.click_panel_search();
+    harness.type_text("running");
+
+    let scene = harness.frame();
+    let text = panel_text(&scene);
+    assert_eq!(panel_rows(&scene).len(), 2, "kept: {text:?}");
+    assert!(
+        text.contains("kettle") && text.contains("running lights"),
+        "the running row or the row called running is gone: {text:?}"
+    );
+    assert!(!text.contains("cocoa"), "an idle row was kept: {text:?}");
+}
+
+#[test]
 fn enter_selects_the_top_match_and_gives_the_keyboard_back() {
     // Telegram's Enter, and the reason the box is worth a chord: three
     // letters, one key, and you are in that tab with the keyboard back in the
@@ -16090,6 +16167,60 @@ fn the_tab_a_person_is_in_says_so() {
         text.matches("you are here").count(),
         1,
         "one row is the tab on screen, and only one: {text}"
+    );
+}
+
+#[test]
+fn the_palette_s_waiting_tabs_are_the_panel_s_amber_rows() {
+    // One matcher behind two boxes, and this is the word where drifting would
+    // be felt: a tab the panel washes amber that `@waiting` does not list is
+    // a person who stops trusting both. The active tab's pane is asking too,
+    // and neither surface counts it.
+    let mut harness = Harness::new(4);
+    let panes = harness.pane_ids();
+    harness.update_session(panes[0], |session| {
+        session.derived_title = Some("kettle".to_owned());
+        session.attention = true;
+    });
+    harness.update_session(panes[1], |session| {
+        session.derived_title = Some("cocoa".to_owned());
+        session.status = AgentStatus::NeedsInput;
+    });
+    harness.update_session(panes[2], |session| {
+        session.derived_title = Some("toast".to_owned());
+        session.status = AgentStatus::Running;
+    });
+    harness.update_session(panes[3], |session| {
+        session.derived_title = Some("scone".to_owned());
+        session.attention = true;
+    });
+
+    harness.click_panel_search();
+    harness.type_text("waiting");
+    let scene = harness.frame();
+    let panel = panel_text(&scene);
+    let in_panel: Vec<&str> = ["kettle", "cocoa", "toast", "scone"]
+        .into_iter()
+        .filter(|title| panel.contains(title))
+        .collect();
+    assert_eq!(in_panel, ["kettle", "cocoa"], "{panel:?}");
+    harness.press("escape", Modifiers::default(), "");
+
+    open_palette(&mut harness, "@waiting");
+    let scene = harness.frame();
+    // Inside the card only: the panel goes on drawing every row under it,
+    // and a line found there would be the wrong box answering.
+    let card = palette_card_box(&scene);
+    let lines = text_lines(&scene, |at| card.contains_point(at));
+    let in_palette: Vec<&str> = ["kettle", "cocoa", "toast", "scone"]
+        .into_iter()
+        .filter(|title| lines.iter().any(|(_, line)| line == title))
+        .collect();
+    assert_eq!(
+        in_palette,
+        in_panel,
+        "the two boxes disagree: {}",
+        frame_text(&scene)
     );
 }
 

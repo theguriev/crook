@@ -674,7 +674,8 @@ fn everything(
 ///
 /// What a tab is *found* by is [`tab_search::whole`], which is the rule the
 /// panel's own search box uses — the title, the directory as the row
-/// abbreviates it, the branch, and the tab's name.
+/// abbreviates it, the branch, the tab's name, and the status word its dot
+/// stands for, so `@waiting` here is the panel's amber rows.
 fn tabs(workspace: &Workspace, app: &AppContext, needle: &str, goto: Goto) -> Vec<Row> {
     let query = Query::new(needle);
     let here = workspace.tabs().active_id();
