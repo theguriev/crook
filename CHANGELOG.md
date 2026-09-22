@@ -5,6 +5,19 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.11
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.10...v0.1.11)
+
+### Fixes
+
+- **ci:** Two things #274 left red on every platform ([#276](https://github.com/theguriev/crook/pull/276), [#274](https://github.com/theguriev/crook/issues/274))
+- **panes:** Draw no chips over a screen a program has taken ([#275](https://github.com/theguriev/crook/pull/275))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.10
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.9...v0.1.10)
