@@ -122,8 +122,14 @@ against the published sums, unpacked, and renamed into place within the binary's
 so a Crook that is running keeps the file it started from until it is restarted. Where the binary
 is not Crook's to replace it says so and stops: a notarized `Crook.app` is replaced whole from
 the disk image, a binary a package manager installed is that package manager's, and a build in
-`target/` is another build. A plugin updates in the window too — its card on the Plugins page
-says when the registry is ahead of it and offers **Update**, and the list has **Update all**.
+`target/` is another build.
+
+Both also live in the window. **Settings → About** has an **Updates** row: *Check for updates*
+asks, the answer is the line under it, and *Update* appears beside it when this copy is one Crook
+may replace — with the reason in its place when it is not. While a check has found a newer
+release the **Settings** button in the sidebar carries a dot, which is the whole of the notice.
+A plugin is the same story on its own card: the Plugins page says when the registry is ahead of
+it and offers **Update**, and the list has **Update all**.
 
 **Nothing here is asked of the network until you ask for it.** There is no check at launch, no
 timer and no background poll, which is the same rule the store is written under: the request

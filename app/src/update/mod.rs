@@ -37,6 +37,10 @@ use std::path::{Path, PathBuf};
 
 use crate::Channel;
 
+pub mod model;
+
+pub use model::UpdateModel;
+
 /// Where the newest release is named.
 ///
 /// The API rather than the `/releases/latest` redirect, for the reason

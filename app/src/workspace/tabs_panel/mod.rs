@@ -346,6 +346,9 @@ fn sections(workspace: &Workspace) -> Box<dyn Element> {
         .finish()
 }
 
+/// How wide the dot on a marked section button is.
+const SECTION_MARK: f32 = 6.;
+
 /// One of those buttons: an icon with its name under it.
 fn button(
     workspace: &Workspace,
@@ -364,6 +367,13 @@ fn button(
     };
     let state = workspace.section_button(&key);
     let label = title.to_owned();
+    // A dot on the settings button while a check has found a newer Crook: the
+    // About page is where that check was made and where the Update button is,
+    // so the mark goes on the way back to it. Keyed on the section that holds
+    // that page rather than on a flag a section could set, because one window
+    // has one thing to say here and inventing a per-section channel for it
+    // would be a mechanism with one user.
+    let marked = key.starts_with("crook/settings/") && workspace.newer_release().is_some();
 
     Hoverable::new(state, move |mouse| {
         // Three states and only two colours: the chosen one is lit, and
@@ -382,11 +392,12 @@ fn button(
             Flex::column()
                 .with_main_axis_size(MainAxisSize::Min)
                 .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                .with_child(
-                    Icon::new(icon, SECTION_ICON_SIZE)
+                .with_child(match marked {
+                    true => marked_icon(icon, color),
+                    false => Icon::new(icon, SECTION_ICON_SIZE)
                         .with_color(color)
                         .finish(),
-                )
+                })
                 .with_child(
                     Container::new(
                         Text::new(label.clone(), workspace.fonts().ui, SECTION_LABEL_SIZE)
@@ -404,6 +415,39 @@ fn button(
     })
     .on_click(move |_, ctx, _| ctx.dispatch_typed_action(WorkspaceAction::ShowSection(section)))
     .finish()
+}
+
+/// The section's icon with a dot on its top-right corner.
+///
+/// The accent, at the size the plugins list draws its running dot, hanging
+/// half off the corner so that the icon itself is not redrawn smaller to make
+/// room for it — a row of buttons whose icons changed size when one of them
+/// had something to say would be a row that moved.
+fn marked_icon(icon: Lucide, color: Color) -> Box<dyn Element> {
+    let mut stack = Stack::new().with_child(
+        Icon::new(icon, SECTION_ICON_SIZE)
+            .with_color(color)
+            .finish(),
+    );
+    stack.add_anchored_overlay_child(
+        ConstrainedBox::new(
+            Container::new(Empty::new().finish())
+                .with_background_color(theme().accent)
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(SECTION_MARK / 2.)))
+                .finish(),
+        )
+        .with_width(SECTION_MARK)
+        .with_height(SECTION_MARK)
+        .finish(),
+        AnchorTo {
+            parent: Corner::TopRight,
+            child: Corner::TopRight,
+            offset: vec2f(SECTION_MARK / 3., -SECTION_MARK / 3.),
+            keep_on_screen: false,
+            keep_clear_of_parent: false,
+        },
+    );
+    stack.finish()
 }
 
 /// The room the window's own controls have already taken at the top of the
