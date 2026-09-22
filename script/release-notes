@@ -1,0 +1,60 @@
+#!/bin/sh
+#
+# Print what a tag changed, for a release page to be written from.
+#
+#   ./script/release-notes v0.2.0      # the section CHANGELOG.md holds for it
+#
+# script/release writes the `## vX.Y.Z` section into CHANGELOG.md in the very
+# commit the tag sits on, so the file in the repository and the release page
+# cannot disagree — this reads that section back, heading dropped, because the
+# page carries the tag as its title already.
+#
+# A tag made by hand has no section. Then the same generator runs here over the
+# same range, which is the next best thing, and the last line says so rather
+# than letting a page nobody cut with the script look like one that was.
+#
+# changelogen is pinned, and for the same reason script/release pins it: the
+# notes for a tag should not change shape because a generator release happened
+# in between. Node is the only thing it needs.
+set -eu
+
+CHANGELOGEN="changelogen@0.6.2"
+
+tag=${1:-}
+case "$tag" in
+  v[0-9]*) ;;
+  *) echo "usage: script/release-notes vX.Y.Z" >&2; exit 2 ;;
+esac
+
+here=$(cd "$(dirname "$0")/.." && pwd)
+cd "$here"
+
+if [ -f CHANGELOG.md ] && grep -q "^## $tag\$" CHANGELOG.md; then
+  # From the section's own heading to the next one, both headings dropped.
+  awk -v tag="$tag" '
+    $0 == "## " tag { on = 1; next }
+    on && /^## / { exit }
+    on { print }
+  ' CHANGELOG.md
+  exit 0
+fi
+
+# The release before this one. A first release has none, and then the range
+# starts at the root commit — everything there has ever been.
+previous=$(git tag --list 'v[0-9]*' --sort=-v:refname | grep -vx "$tag" | head -1)
+[ -n "$previous" ] || previous=$(git rev-list --max-parents=0 "$tag" | tail -1)
+
+echo "release-notes: no '## $tag' section in CHANGELOG.md; generating from $previous" >&2
+command -v npx >/dev/null || { echo "release-notes: node is needed to generate them" >&2; exit 1; }
+
+# `--no-output` prints the section instead of writing the file. Its own
+# `## vX.Y.Z` heading goes, because the page is titled with the tag already,
+# and everything under it stays — the compare link included, which is the whole
+# of what a reader gets when the titles in the range are ones the generator
+# drops.
+generated=$(npx --yes "$CHANGELOGEN" --from "$previous" --to "$tag" -r "${tag#v}" --no-output)
+body=$(printf '%s\n' "$generated" | awk 'seen { print; next } /^## / { seen = 1 }')
+# No heading to cut is not a reason to print nothing at all.
+[ -n "$(printf '%s' "$body" | tr -d '[:space:]')" ] || body=$generated
+printf '%s\n' "$body"
+printf '\n_Generated on the runner: this tag was not cut with `script/release`._\n'
