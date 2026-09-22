@@ -224,6 +224,37 @@ pub fn subtitle_options_for(primary: PrimaryInfo) -> [Subtitle; 2] {
     }
 }
 
+/// What the mark at the head of a row says its status with — the page's
+/// "Status marks".
+///
+/// Crook's own; Warp has a glyph in every row's mark and a status ring on its
+/// corner, so it never had to choose. The disc is the default because a fresh
+/// install should open looking like Warp's, and the glyphs are for the person
+/// the disc says nothing to: one who cannot tell violet from grey, a
+/// screenshot in greyscale, or a row washed amber where an amber dot
+/// disappears. Either way the colour is the same, so a person who reads both
+/// loses nothing by switching.
+#[derive(Copy, Clone, Debug, Default, Hash, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusMarks {
+    /// A filled disc in the status colour, and nothing else.
+    #[default]
+    Dots,
+    /// A small glyph per state in the same colour: a shape that reads where a
+    /// colour does not.
+    Glyphs,
+}
+
+impl StatusMarks {
+    /// What the page calls this.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Dots => "Dots",
+            Self::Glyphs => "Glyphs",
+        }
+    }
+}
+
 /// Everything the settings page writes that is not about the tab strip.
 ///
 /// Four switches, and that is not an accident of scheduling. Crook has a
@@ -400,6 +431,10 @@ pub struct TabOptions {
     /// it by. Crook's own, with no Warp key behind it: once tabs are named the
     /// chord is blind without it.
     pub show_tab_numbers: bool,
+    /// "Status marks" — whether the mark at the head of a row says its status
+    /// as a disc or as a glyph. Crook's own, like the numbers: Warp's rows
+    /// carry both a glyph and a ring, and this file has one mark to spend.
+    pub status_marks: StatusMarks,
 }
 
 impl Default for TabOptions {
@@ -410,8 +445,8 @@ impl Default for TabOptions {
     ///
     /// The three "Show" booleans are why this is written out rather than
     /// derived — `bool`'s default is `false`, and Warp's is `true` for all
-    /// three. The tab numbers are off: they are Crook's own, and a fresh
-    /// install should open looking like Warp's.
+    /// three. The tab numbers are off and the status marks are dots: both
+    /// are Crook's own, and a fresh install should open looking like Warp's.
     fn default() -> Self {
         Self {
             granularity: Granularity::default(),
@@ -422,6 +457,7 @@ impl Default for TabOptions {
             show_diff_stats: true,
             show_details_on_hover: true,
             show_tab_numbers: false,
+            status_marks: StatusMarks::default(),
         }
     }
 }
@@ -1194,6 +1230,7 @@ mod tests {
             show_diff_stats: false,
             show_details_on_hover: false,
             show_tab_numbers: true,
+            status_marks: StatusMarks::Glyphs,
         }
     }
 
@@ -1239,6 +1276,7 @@ mod tests {
         assert!(options.show_details_on_hover);
         // Crook's own, and off: a fresh install opens looking like Warp.
         assert!(!options.show_tab_numbers);
+        assert_eq!(StatusMarks::Dots, options.status_marks);
     }
 
     #[test]
@@ -1436,6 +1474,9 @@ mod tests {
                 "show_tab_numbers",
                 // Crook's own: whether the column of tabs is drawn at all.
                 "show_tabs_panel",
+                // Crook's own: what the mark at the head of a row is drawn
+                // as, which in Warp is not a choice.
+                "status_marks",
                 // The chosen theme's name, which is a string rather than an
                 // option with a type: see `Settings::theme`.
                 "theme",
@@ -1450,6 +1491,7 @@ mod tests {
         );
         assert_eq!(Some(&Value::from("expanded")), written.get("view_mode"));
         assert_eq!(Some(&Value::from("branch")), written.get("primary_info"));
+        assert_eq!(Some(&Value::from("glyphs")), written.get("status_marks"));
     }
 
     #[test]
@@ -1621,11 +1663,11 @@ mod tests {
         let written: Map<String, Value> =
             serde_json::from_str(&contents).expect("the file should be a JSON object");
 
-        // Eight tab options, five general ones and three theme names, and
+        // Nine tab options, five general ones and three theme names, and
         // nothing else: the 8KB key the file started with is gone. The font
         // family is not among them — an absent key is what "no preference"
         // is, so a save writes no `font_family` unless one was chosen.
-        assert_eq!(16, written.len());
+        assert_eq!(17, written.len());
         assert!(!contents.contains("padding"));
         assert_eq!(
             everything_flipped(),

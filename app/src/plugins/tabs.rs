@@ -35,6 +35,13 @@
 //! predict. The `Z` on the corner of a zoomed pane's row is the host's for the
 //! same reason, and it yields the corner to any plugin's badge.
 //!
+//! The disc has one alternative, and it is the host's too: under the
+//! Appearance page's "Status marks" a person can ask for a glyph per state
+//! in the status colour instead of a filled dot, for the eye the colour alone
+//! says nothing to. It is the same answer to the same empty slot — a plugin
+//! that took the mark replaces both, and one that declined a row gets
+//! whichever the setting says.
+//!
 //! This plugin owns [`TAB_MENU_ENTRIES`] — the place a tab's context menu is
 //! made of — and contributes the entries that are about a tab as such: putting
 //! it in a group, copying what it says, closing it. The popup those rows land
@@ -100,6 +107,7 @@ use crate::git::GitFacts;
 use crate::input_keys::Platform;
 use crate::plugin::{ActionId, BuildError, Host, Plugin, Showing};
 use crate::plugins::header::HEADER_LEFT;
+use crate::settings::StatusMarks;
 use crate::tab::{AgentStatus, PaneId, Tab, TabAction, TabColor, TabId, TabStrip};
 use crate::text_input::TextInput;
 use crate::theme::theme;
@@ -1002,7 +1010,10 @@ pub fn mark(workspace: &Workspace, row: &TabRow<'_>, app: &AppContext) -> Box<dy
         .rows()
         .one(TAB_ROW_MARK, |build| build(workspace, row, app))
         .flatten()
-        .unwrap_or_else(|| disc(row.status));
+        .unwrap_or_else(|| match workspace.options().status_marks {
+            StatusMarks::Dots => disc(row.status),
+            StatusMarks::Glyphs => glyph(row.status),
+        });
 
     let mut stack = Stack::new().with_child(Align::new(face).finish());
     // A plugin's badge first, then the zoom's: the corner is one thing at a
@@ -1031,6 +1042,7 @@ pub fn mark(workspace: &Workspace, row: &TabRow<'_>, app: &AppContext) -> Box<dy
 /// bottom-right corner. Crook has no icon font, so the status is the disc's
 /// own colour — one mark instead of two, in the same reserved box, so rows
 /// line up with Warp's. The corner it left free is what [`TAB_ROW_BADGE`] is.
+/// The other answer, for a person the colour says nothing to, is [`glyph`].
 fn disc(status: AgentStatus) -> Box<dyn Element> {
     let diameter = MARK_SIZE * DISC_RATIO;
 
@@ -1043,6 +1055,32 @@ fn disc(status: AgentStatus) -> Box<dyn Element> {
     .with_width(diameter)
     .with_height(diameter)
     .finish()
+}
+
+/// The same mark as a shape rather than a fill: what the host draws under
+/// [`StatusMarks::Glyphs`].
+///
+/// A Lucide glyph per state in the status colour, in the disc's own box, so
+/// a row is exactly as wide and as tall with either. The states are the
+/// four words `crook --agent` takes, and each glyph is one the window already
+/// uses for that state where it can be: `play` is what a running thing has
+/// always been drawn as, and the `bell` is the header's chip for the panes
+/// that are waiting. The `circle` is hollow so that idle is the quietest of
+/// the four — the disc's grey was already the one that said nothing — and
+/// the cross in a ring is the failure everybody recognises. Nothing here
+/// turns or blinks: a spinner for a running agent would be the idle timer
+/// the window keeps none of.
+fn glyph(status: AgentStatus) -> Box<dyn Element> {
+    let icon = match status {
+        AgentStatus::Idle => Lucide::Circle,
+        AgentStatus::Running => Lucide::Play,
+        AgentStatus::NeedsInput => Lucide::Bell,
+        AgentStatus::Failed => Lucide::CircleX,
+    };
+
+    Icon::new(icon, MARK_SIZE * DISC_RATIO)
+        .with_color(status_color(status))
+        .finish()
 }
 
 /// tmux's `Z`, on the row of the pane that has its tab to itself.

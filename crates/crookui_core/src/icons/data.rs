@@ -340,6 +340,30 @@ pub(super) static BELL: &[Segment] = &[
     Cubic(6.0, 12.499, 4.589, 13.956, 3.262, 15.326),
 ];
 
+/// Lucide's `circle`.
+pub(super) static CIRCLE: &[Segment] = &[
+    Move(22.0, 12.0),
+    Cubic(22.0, 17.5228, 17.5228, 22.0, 12.0, 22.0),
+    Cubic(6.4772, 22.0, 2.0, 17.5228, 2.0, 12.0),
+    Cubic(2.0, 6.4772, 6.4772, 2.0, 12.0, 2.0),
+    Cubic(17.5228, 2.0, 22.0, 6.4772, 22.0, 12.0),
+    Close,
+];
+
+/// Lucide's `circle-x`.
+pub(super) static CIRCLE_X: &[Segment] = &[
+    Move(22.0, 12.0),
+    Cubic(22.0, 17.5228, 17.5228, 22.0, 12.0, 22.0),
+    Cubic(6.4772, 22.0, 2.0, 17.5228, 2.0, 12.0),
+    Cubic(2.0, 6.4772, 6.4772, 2.0, 12.0, 2.0),
+    Cubic(17.5228, 2.0, 22.0, 6.4772, 22.0, 12.0),
+    Close,
+    Move(15.0, 9.0),
+    Line(9.0, 15.0),
+    Move(9.0, 9.0),
+    Line(15.0, 15.0),
+];
+
 /// Lucide's `app-window`.
 pub(super) static APP_WINDOW: &[Segment] = &[
     Move(4.0, 4.0),
@@ -595,6 +619,8 @@ pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [
     (Lucide::Keyboard, "keyboard", KEYBOARD),
     (Lucide::Diff, "diff", DIFF),
     (Lucide::Bell, "bell", BELL),
+    (Lucide::Circle, "circle", CIRCLE),
+    (Lucide::CircleX, "circle-x", CIRCLE_X),
     (Lucide::AppWindow, "app-window", APP_WINDOW),
     (Lucide::PanelTop, "panel-top", PANEL_TOP),
     (Lucide::Tag, "tag", TAG),
@@ -607,7 +633,7 @@ pub(super) static TABLE: [(Lucide, &str, &[Segment]); ICONS] = [
 ];
 
 /// How many there are.
-pub const ICONS: usize = 30;
+pub const ICONS: usize = 32;
 
 /// The icons Crook draws, from Lucide.
 ///
@@ -655,7 +681,7 @@ pub enum Lucide {
     ///
     /// Lucide's [`menu`](https://lucide.dev/icons/menu).
     Menu,
-    /// The mark on a control that plays a sound.
+    /// The mark on a control that plays a sound; a row's mark while its agent runs, when the marks are glyphs.
     ///
     /// Lucide's [`play`](https://lucide.dev/icons/play).
     Play,
@@ -695,10 +721,18 @@ pub enum Lucide {
     ///
     /// Lucide's [`diff`](https://lucide.dev/icons/diff).
     Diff,
-    /// The tabs that are waiting for you, on the chip in the header that counts them.
+    /// The tabs that are waiting for you, on the chip in the header that counts them; a row's mark while its agent needs an answer, when the marks are glyphs.
     ///
     /// Lucide's [`bell`](https://lucide.dev/icons/bell).
     Bell,
+    /// A row's mark while its agent is idle, when the marks are glyphs.
+    ///
+    /// Lucide's [`circle`](https://lucide.dev/icons/circle).
+    Circle,
+    /// A row's mark after its agent failed, when the marks are glyphs.
+    ///
+    /// Lucide's [`circle-x`](https://lucide.dev/icons/circle-x).
+    CircleX,
     /// The face of the window's own commands: tabs, panes, splits.
     ///
     /// Lucide's [`app-window`](https://lucide.dev/icons/app-window).

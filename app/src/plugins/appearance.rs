@@ -6,8 +6,11 @@
 //! # Every control writes through the action the gear menu dispatches
 //!
 //! So the popup and the page cannot disagree about what an option means or
-//! about when it is saved. The two actions that are the page's own are the
-//! ones the popup has no control for.
+//! about when it is saved. The actions that are the page's own are the ones
+//! the popup has no control for — and "Status marks" is one of those even
+//! though it is a tab option: the popup is Warp's menu, and a row of it for a
+//! choice Warp never offers would be a row a Warp user goes looking for in
+//! the wrong place.
 
 use crookui_core::prelude::*;
 
@@ -15,7 +18,7 @@ use crook_plugin::{Manifest, PluginId, Tier};
 
 use crate::plugin::{BuildError, Host, Plugin};
 use crate::settings::{
-    Density, FONT_SIZE_STEP, Granularity, PrimaryInfo, TabOptions, resolve_subtitle,
+    Density, FONT_SIZE_STEP, Granularity, PrimaryInfo, StatusMarks, TabOptions, resolve_subtitle,
     subtitle_options_for,
 };
 use crate::workspace::settings_page::search::Words;
@@ -377,9 +380,36 @@ fn rows_category(workspace: &Workspace) -> Vec<Entry> {
         ui,
     ));
 
-    // Before the chips rather than after the detail card, which is the order
-    // the things it describes come in on a row: the number is on the title
-    // line, the chips are under it, and the card is beside it.
+    // Crook's own rows, after Warp's two and in the order the things they
+    // describe come in on a row: the mark is at its head, the number is on
+    // the title line, the chips are under it, and the card is beside it.
+    rows.push(widgets::row(
+        Words::new("Status marks")
+            .with_description(
+                "What the mark at the head of a row says the agent's status with: a disc in \
+                 the status colour, or a glyph per state in the same colour, for anyone the \
+                 colour alone says nothing to.",
+            )
+            .with_keywords(&[
+                "dot", "glyph", "icon", "shape", "colour", "color", "blind", "status", "running",
+                "waiting", "failed", "idle",
+            ]),
+        true,
+        widgets::segmented(
+            [StatusMarks::Dots, StatusMarks::Glyphs]
+                .into_iter()
+                .map(|marks| Segment {
+                    label: marks.label(),
+                    selected: options.status_marks == marks,
+                    command: Some(OptionsAction::SetStatusMarks(marks).into()),
+                    state: state.control(keyed("status-marks", marks)),
+                })
+                .collect(),
+            ui,
+        ),
+        ui,
+    ));
+
     rows.push(widgets::row(
         Words::new("Show tab numbers")
             .with_description(

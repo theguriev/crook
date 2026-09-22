@@ -6396,6 +6396,7 @@ impl Workspace {
             OptionsAction::ToggleShowTabNumbers => {
                 options.show_tab_numbers = !options.show_tab_numbers;
             }
+            OptionsAction::SetStatusMarks(marks) => options.status_marks = marks,
         }
 
         if self.overridden.clear(chosen) && options == self.options {
