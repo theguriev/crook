@@ -48,7 +48,8 @@
 //! cannot come to disagree about what typing two words means. What a tab
 //! offers it is what its rows print: the session's title, the working
 //! directory as the row abbreviates it, the branch, and the name of the tab
-//! the row sits under.
+//! the row sits under — and one thing its rows paint rather than print, the
+//! status word the dot and the amber wash stand for. See [`status_words`].
 
 use crookui_core::elements::{MouseStateHandle, Padding};
 use crookui_core::prelude::*;
@@ -56,7 +57,7 @@ use crookui_core::prelude::*;
 use crate::git::{self, Head};
 use crate::input_keys::Platform;
 use crate::settings::Granularity;
-use crate::tab::{Pane, PaneId, Tab, TabId};
+use crate::tab::{AgentSession, AgentStatus, Pane, PaneId, Tab, TabId};
 use crate::text_input::TextInput;
 
 use super::super::action::{SearchAction, WorkspaceAction};
@@ -281,9 +282,43 @@ fn matches(workspace: &Workspace, app: &AppContext, query: &Query, tab: &Tab, pa
         .git_facts(session, app)
         .and_then(|facts| facts.branch.as_ref())
         .map(Head::label);
-    if let Some(branch) = branch {
-        words = words.with_keywords(&[branch]);
-    }
+    // Whether this pane is the one on screen, computed the way the row
+    // computes `is_selected`: a status word has to name the rows a person can
+    // see painted with it, and the wash asks exactly this.
+    let active = workspace.tabs().is_active(tab.id()) && tab.panes().is_focused(pane.id());
+
+    let mut keywords: Vec<&str> = status_words(session, active);
+    keywords.extend(branch);
+    words = words.with_keywords(&keywords);
 
     query.matches(&words, &[tab.name()])
+}
+
+/// The words a pane is found by for what its agent is doing.
+///
+/// Keywords rather than a line of the row: the dot and the wash already say
+/// this, and an operator with ten tabs typing `waiting` means the amber rows
+/// and nothing else. So `waiting` is the wash's rule to the letter — the pane
+/// on screen waits for nobody, and a row that is not amber is not found by
+/// the word — and `needs-input` is a second spelling of the same rule, for
+/// whoever reads the dot's label rather than the colour. The other three are
+/// the dot's. A pane on screen whose dot says needs input has no status word
+/// at all, which is deliberate: the person is already looking at it.
+///
+/// Matched as substrings like every other word here, so `wait` finds a
+/// waiting row and `fail` a failed one. A whole-word rule for these five alone
+/// would be a second matcher inside the first, and the settings page already
+/// decided against fuzzy for the same box.
+fn status_words(session: &AgentSession, active: bool) -> Vec<&'static str> {
+    let mut words = Vec::with_capacity(2);
+    if session.is_waiting(active) {
+        words.extend(["waiting", "needs-input"]);
+    }
+    match session.shown_status() {
+        AgentStatus::Idle => words.push("idle"),
+        AgentStatus::Running => words.push("running"),
+        AgentStatus::Failed => words.push("failed"),
+        AgentStatus::NeedsInput => {}
+    }
+    words
 }
