@@ -98,10 +98,12 @@ pub enum TerminalEvent {
     /// A program in the pane said what it is doing, on the channel
     /// [`crate::agent`] describes — or the command it was running ended and
     /// took its status with it, which arrives as [`AgentReport::Idle`] with
-    /// no title.
+    /// no title and no message.
     ///
     /// Reported on change only, so a program that says `running` on every
-    /// tool call costs one event when it starts and nothing after.
+    /// tool call costs one event when it starts and nothing after. A title
+    /// or a message is a change on its own: the same `needs-input` twice
+    /// with a different question is two questions.
     Agent(Reported),
 }
 
@@ -740,7 +742,9 @@ impl Emulator {
     /// (from [`Self::drain`]) finds nothing.
     fn apply_agent_report(&mut self) {
         if let Some(reported) = self.osc_watcher.agent.take()
-            && (reported.status != self.agent || reported.title.is_some())
+            && (reported.status != self.agent
+                || reported.title.is_some()
+                || reported.message.is_some())
         {
             self.agent = reported.status;
             self.events.push(TerminalEvent::Agent(reported));
@@ -768,6 +772,7 @@ impl Emulator {
             self.events.push(TerminalEvent::Agent(Reported {
                 status: AgentReport::Idle,
                 title: None,
+                message: None,
             }));
         }
     }

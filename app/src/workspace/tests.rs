@@ -11016,23 +11016,33 @@ mod shells {
                     .map(|pane| pane.session().status)
             })
         };
+        let message = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .tabs()
+                    .pane(pane)
+                    .and_then(|pane| pane.session().message.clone())
+            })
+        };
         assert_eq!(status(&harness), Some(AgentStatus::Idle));
 
         harness.type_into(
             pane,
-            "printf '\\033]6340;needs-input;port the tab bar\\007'; read\n",
+            "printf '\\033]6340;needs-input;port the tab bar;;run rm -rf build?\\007'; read\n",
         );
         harness.wait_for("the status never reached the strip", |harness| {
             status(harness) == Some(AgentStatus::NeedsInput)
         });
         assert_eq!(harness.pane_title(pane), "port the tab bar");
+        assert_eq!(message(&harness), Some("run rm -rf build?".to_owned()));
 
         // Ending the command — `read` gets its line — is the shell's `D`,
-        // which takes a waiting status back to idle.
+        // which takes a waiting status back to idle, and the question with it.
         harness.type_into(pane, "\n");
         harness.wait_for("the command ending never took the status back", |harness| {
             status(harness) == Some(AgentStatus::Idle)
         });
+        assert_eq!(message(&harness), None);
     }
 
     #[test]
@@ -14385,14 +14395,39 @@ mod the_agent {
     use crate::terminal_model::TerminalUpdate;
 
     fn report(harness: &mut Harness, pane: PaneId, status: AgentStatus, title: Option<&str>) {
+        report_waiting_for(harness, pane, status, title, None);
+    }
+
+    /// The same, with what the agent said it is waiting for.
+    fn report_waiting_for(
+        harness: &mut Harness,
+        pane: PaneId,
+        status: AgentStatus,
+        title: Option<&str>,
+        message: Option<&str>,
+    ) {
         let update = TerminalUpdate::Agent {
             pane,
             status,
             title: title.map(str::to_owned),
+            message: message.map(str::to_owned),
         };
         harness.workspace_update(|workspace, ctx| {
             workspace.apply_terminal_update(&update, ctx);
         });
+    }
+
+    /// What a pane's row would print under its title.
+    fn message_of(harness: &Harness, pane: PaneId) -> Option<String> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .pane(pane)
+                .expect("the pane is open")
+                .session()
+                .message
+                .clone()
+        })
     }
 
     fn session_of(harness: &Harness, pane: PaneId) -> (AgentStatus, bool, Option<String>) {
@@ -14461,6 +14496,114 @@ mod the_agent {
             workspace.tabs().active().map(|tab| tab.title().to_owned())
         });
         assert_eq!(Some("port the tab bar".to_owned()), shown);
+    }
+
+    #[test]
+    fn what_the_agent_is_waiting_for_lives_as_long_as_the_wait() {
+        // The message comes with `needs-input` and goes with whatever
+        // follows it — running, idle from the shell's own `D`, failed — and
+        // a second `needs-input` without one is a wait with nothing said.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+
+        report_waiting_for(
+            &mut harness,
+            pane,
+            AgentStatus::NeedsInput,
+            Some("port the tab bar"),
+            Some("run rm -rf build?"),
+        );
+        assert_eq!(
+            Some("run rm -rf build?".to_owned()),
+            message_of(&harness, pane)
+        );
+        assert_eq!(
+            Some("port the tab bar".to_owned()),
+            session_of(&harness, pane).2,
+            "the message displaced the title"
+        );
+
+        report(&mut harness, pane, AgentStatus::Running, None);
+        assert_eq!(None, message_of(&harness, pane));
+
+        report_waiting_for(
+            &mut harness,
+            pane,
+            AgentStatus::NeedsInput,
+            None,
+            Some("overwrite main.rs?"),
+        );
+        assert_eq!(
+            Some("overwrite main.rs?".to_owned()),
+            message_of(&harness, pane)
+        );
+        report(&mut harness, pane, AgentStatus::Idle, None);
+        assert_eq!(None, message_of(&harness, pane));
+
+        // A message on any other status is not "waiting for", and is not kept.
+        report_waiting_for(
+            &mut harness,
+            pane,
+            AgentStatus::Failed,
+            None,
+            Some("the build broke"),
+        );
+        assert_eq!(None, message_of(&harness, pane));
+    }
+
+    #[test]
+    fn the_row_says_what_the_agent_is_waiting_for_and_the_branch_again_after() {
+        // On the row itself, in both densities: the second line is the
+        // question while the agent waits, and the branch once it is working.
+        let mut harness = Harness::seeded();
+        let pane = harness.pane_ids()[0];
+        harness.set_options(TabOptions {
+            density: Density::Compact,
+            primary_info: PrimaryInfo::Command,
+            subtitle: Subtitle::Branch,
+            ..harness.options()
+        });
+        let before = strip_text(&harness.frame());
+        assert!(before.contains(BRANCH));
+
+        report_waiting_for(
+            &mut harness,
+            pane,
+            AgentStatus::NeedsInput,
+            None,
+            Some("run rm -rf build?"),
+        );
+        let waiting = strip_text(&harness.frame());
+        assert!(waiting.contains(TITLE), "the title line was displaced");
+        assert!(waiting.contains("run rm -rf build?"));
+        assert!(
+            !waiting.contains(BRANCH),
+            "the branch stayed beside the question, and the row has one second line"
+        );
+        assert!(
+            waiting.find(TITLE) < waiting.find("run rm -rf build?"),
+            "the question was drawn above the title"
+        );
+
+        harness.set_options(TabOptions {
+            density: Density::Expanded,
+            ..harness.options()
+        });
+        let expanded = strip_text(&harness.frame());
+        assert!(expanded.contains("run rm -rf build?"));
+        assert!(
+            !expanded.contains(DIRECTORY),
+            "the directory line kept its place under the title"
+        );
+        assert!(
+            expanded.contains(BRANCH),
+            "the metadata line is the branch's, and the question took it too"
+        );
+
+        report(&mut harness, pane, AgentStatus::Running, None);
+        let after = strip_text(&harness.frame());
+        assert!(!after.contains("run rm -rf build?"));
+        assert!(after.contains(DIRECTORY));
     }
 
     #[test]

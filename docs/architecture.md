@@ -1013,11 +1013,17 @@ the snapshot fixture and by nothing else, which made the sidebar a list of shell
 promise painted on it. The promise is now kept by the program the promise is about, and it is
 kept over the one channel that program already has.
 
-**The report is an escape sequence.** `OSC 6340 ; <status> [; <title>] BEL`, read by the same
-watcher that reads OSC 7 and the completion channel's 6339, in `crates/crook_terminal/src/agent.rs`.
-Four words — `idle`, `running`, `needs-input`, `failed` — and an optional name for the work,
-which lands in `derived_title` because that is what `derived_title` has always been: what the
-agent calls what it is doing. The alternative was a socket, and a socket is the wrong shape
+**The report is an escape sequence.** `OSC 6340 ; <status> [; <title> [;; <message>]] BEL`, read
+by the same watcher that reads OSC 7 and the completion channel's 6339, in
+`crates/crook_terminal/src/agent.rs`. Four words — `idle`, `running`, `needs-input`, `failed` —
+an optional name for the work, which lands in `derived_title` because that is what
+`derived_title` has always been: what the agent calls what it is doing — and, after that, what
+the agent is waiting for. The title may hold a `;`, and always could — everything after the
+status is the title — so the message is not a third field but the tail after the first *empty*
+field, `;;`, and the writer squeezes a `;;` out of either text so neither can forge the cut.
+A sequence without the tail reads exactly as it did; a Crook older than the field reads the
+whole tail as the title, which is wrong on the row and nothing worse, so a new `crook --agent`
+is safe to run into an old pane. The alternative was a socket, and a socket is the wrong shape
 three times over. It needs an address, which the agent would have to be told; it stops at this
 machine, where the terminal crosses `ssh` and `docker exec` without noticing; and it needs to
 say *which pane*, where the terminal a program writes to *is* the pane. Every other terminal
@@ -1027,9 +1033,13 @@ them.
 **The CLI writes it.** `crook --agent running --title "port the tab bar"` opens `/dev/tty` —
 `CONOUT$` on Windows — and writes the sequence there, not to standard output. The caller is a
 hook, and a hook's standard output belongs to the program that ran it: Claude Code reads what
-its hooks print. `crook --agent-hooks claude` prints the fragment of Claude Code's settings
+its hooks print. `--message "run rm -rf build?"` is what a `needs-input` is waiting for, cut to
+one line of 200 characters in the writer so the sequence never carries a novel; `--message -`
+reads it from standard input, the `message` of a hook's JSON when the input is one and the
+whole input otherwise. `crook --agent-hooks claude` prints the fragment of Claude Code's settings
 that makes it say all of this by itself — running on a prompt and around every tool, needing
-input on every notification, idle on stop — naming the binary by its full path, since a hook
+input on every notification with the notification's text piped in as the message, idle on
+stop — naming the binary by its full path, since a hook
 runs in whatever `PATH` Claude Code was started with. It is printed rather than installed:
 Crook writes no file it does not own, and it has never opened that one.
 
@@ -1038,7 +1048,12 @@ the emulator listens to the shell's marks beside the report: `D` ends the comman
 waiting agent was, and takes the claim with it. A failure is the one status worth seeing after
 the fact, so it outlives its `D` and goes with the next command's `C` — new work being the
 thing that answers it. All of that is in `Emulator::settle_agent`, and none of it in the
-workspace, which only ever hears a status change.
+workspace, which only ever hears a status change. The message lives as long as the wait:
+`AgentSession::message` is written with a `NeedsInput` and cleared by whatever status follows
+it — running, failed, or the idle the shell's `D` reports — and while it is there the row's
+second line is the question rather than the branch or the directory, since "wants to run
+`rm -rf build`" is what decides whether a person comes now, and which branch the pane is on is
+not. The header's count and the window title are unchanged by it.
 
 **Attention is a separate fact.** The bell used to write `NeedsInput` and looking used to
 clear it, and that was right for a bell and wrong for an agent: an agent waiting for an

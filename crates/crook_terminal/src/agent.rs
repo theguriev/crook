@@ -4,8 +4,8 @@
 //! a shell can say: from where it stands an agent is one command that has not
 //! finished yet. Whether that agent is working, waiting for an answer or has
 //! given up is something only the agent knows, and this is the sequence it
-//! says it with — `OSC 6340 ; <status> [; <title>] BEL`, written to its own
-//! terminal.
+//! says it with — `OSC 6340 ; <status> [; <title> [;; <message>]] BEL`,
+//! written to its own terminal.
 //!
 //! The terminal rather than a socket, because the terminal is the one thing
 //! the program already has. It needs no address, no file to find and no
@@ -19,10 +19,30 @@
 //! the same reason: far from anything standardised, so a stream carrying one
 //! was written by something that meant it for Crook.
 //!
-//! What the sequence carries is a word and, optionally, a name. The word is
-//! one of four and the name is what the agent calls the work it is doing.
-//! Nothing else: not a message, not a number, not a colour. A plugin can put
-//! a picture on a status; the status itself is a fact about the work.
+//! What the sequence carries is a word, optionally a name, and optionally
+//! what the agent is waiting for. The word is one of four and the name is
+//! what the agent calls the work it is doing. The message is the one thing
+//! an agent that has stopped to ask can add that the word cannot say — *what*
+//! it is asking, "run `rm -rf build`?" — and the tab keeps it only beside
+//! `needs-input`, since it is the answer to "waiting for what?" and nothing
+//! else is waiting. Nothing more than those: not a number, not a colour. A
+//! plugin can put a picture on a status; the status itself is a fact about
+//! the work.
+//!
+//! # How the fields are cut
+//!
+//! `vte` splits an OSC on every `;`, and the title has always been allowed
+//! to hold one — the sequence has exactly two fields before it, and
+//! everything after them is put back together. So the message cannot be a
+//! third field: `fix a; then b` already is a third and a fourth. What ends
+//! the title instead is an *empty* field — `;;` — and everything after that
+//! is the message, put back together the same way. A title with a `;` in it
+//! still travels whole, a sequence with no message reads exactly as it did,
+//! and the writer squeezes a `;;` out of either text so that neither can
+//! forge the cut. A Crook older than the message reads the whole tail as the
+//! title, `port the tab bar;;run rm -rf build?` — wrong on the row, and
+//! nothing worse than wrong, which is what makes the field safe to send to
+//! a pane whose Crook is not known.
 
 use std::str;
 
@@ -73,15 +93,35 @@ impl AgentReport {
 /// The title is dropped rather than escaped when it holds a byte that would
 /// end the sequence early or be read as a parameter of its own: a program
 /// with a control character in its title has no title worth keeping, and an
-/// escaping scheme is a second parser on both ends of the wire.
-pub fn report(status: AgentReport, title: Option<&str>) -> String {
+/// escaping scheme is a second parser on both ends of the wire. The message
+/// is dropped by the same rule, and both lose a `;;`, because that is the
+/// cut between them — see the module docs. A message with no title is the
+/// cut straight after the status, `;;message`: the empty piece the reader
+/// looks for is the first one, and there is no title in front of it.
+pub fn report(status: AgentReport, title: Option<&str>, message: Option<&str>) -> String {
     let mut sequence = format!("\x1b]{OSC};{}", status.word());
-    if let Some(title) = title.filter(|title| !title.chars().any(char::is_control)) {
+    if let Some(title) = title.and_then(field) {
         sequence.push(';');
-        sequence.push_str(title);
+        sequence.push_str(&title);
+    }
+    if let Some(message) = message.and_then(field) {
+        sequence.push_str(";;");
+        sequence.push_str(&message);
     }
     sequence.push('\x07');
     sequence
+}
+
+/// `text` as one field of the sequence, or `None` when it cannot be one.
+fn field(text: &str) -> Option<String> {
+    if text.chars().any(char::is_control) {
+        return None;
+    }
+    let mut squeezed = text.to_owned();
+    while squeezed.contains(";;") {
+        squeezed = squeezed.replace(";;", ";");
+    }
+    Some(squeezed)
 }
 
 /// One report, as it arrived.
@@ -91,6 +131,8 @@ pub struct Reported {
     pub status: AgentReport,
     /// What it called its work, when it said.
     pub title: Option<String>,
+    /// What it is waiting for, when it said.
+    pub message: Option<String>,
 }
 
 /// Reads a report out of the parameters of an OSC sequence, or returns `None`
@@ -98,7 +140,8 @@ pub struct Reported {
 ///
 /// `parameters` is what `vte` split on `;`, so a title with a semicolon in it
 /// arrives in pieces and is put back together here: the sequence has exactly
-/// two fields before the title, and everything after them is the title.
+/// two fields before the title, and everything after them is the title up to
+/// the first empty piece, which is the `;;` that starts the message.
 pub(crate) fn parse(parameters: &[&[u8]]) -> Option<Reported> {
     let [number, word, rest @ ..] = parameters else {
         return None;
@@ -107,16 +150,26 @@ pub(crate) fn parse(parameters: &[&[u8]]) -> Option<Reported> {
         return None;
     }
     let status = AgentReport::parse(str::from_utf8(word).ok()?)?;
-    let title = rest
+    let (title, message) = match rest.iter().position(|piece| piece.is_empty()) {
+        Some(cut) => (&rest[..cut], &rest[cut + 1..]),
+        None => (rest, &rest[rest.len()..]),
+    };
+    Some(Reported {
+        status,
+        title: joined(title),
+        message: joined(message),
+    })
+}
+
+/// `pieces` as the one text `vte` cut them out of, or `None` for no text.
+fn joined(pieces: &[&[u8]]) -> Option<String> {
+    let text = pieces
         .iter()
         .map(|piece| String::from_utf8_lossy(piece))
         .collect::<Vec<_>>()
         .join(";");
-    let title = title.trim();
-    Some(Reported {
-        status,
-        title: (!title.is_empty()).then(|| title.to_owned()),
-    })
+    let text = text.trim();
+    (!text.is_empty()).then(|| text.to_owned())
 }
 
 #[cfg(test)]
@@ -148,20 +201,74 @@ mod tests {
             assert_eq!(
                 Some(Reported {
                     status,
-                    title: None
+                    title: None,
+                    message: None,
                 }),
-                parsed(&report(status, None))
+                parsed(&report(status, None, None))
             );
         }
     }
 
     #[test]
     fn a_title_travels_with_the_status_and_keeps_its_semicolons() {
-        let sequence = report(AgentReport::Running, Some("fix a; then b"));
+        let sequence = report(AgentReport::Running, Some("fix a; then b"), None);
         assert_eq!(
             Some(Reported {
                 status: AgentReport::Running,
                 title: Some("fix a; then b".to_owned()),
+                message: None,
+            }),
+            parsed(&sequence)
+        );
+    }
+
+    #[test]
+    fn a_message_travels_after_the_title_and_both_keep_their_semicolons() {
+        let sequence = report(
+            AgentReport::NeedsInput,
+            Some("fix a; then b"),
+            Some("run `rm -rf build`; then `make`?"),
+        );
+        assert_eq!(
+            format!("\x1b]{OSC};needs-input;fix a; then b;;run `rm -rf build`; then `make`?\x07"),
+            sequence
+        );
+        assert_eq!(
+            Some(Reported {
+                status: AgentReport::NeedsInput,
+                title: Some("fix a; then b".to_owned()),
+                message: Some("run `rm -rf build`; then `make`?".to_owned()),
+            }),
+            parsed(&sequence)
+        );
+    }
+
+    #[test]
+    fn a_message_with_no_title_is_the_cut_straight_after_the_status() {
+        // The cut has to be there for the message to be read as one, and
+        // nothing before it is what an absent title looks like on the wire.
+        let sequence = report(AgentReport::NeedsInput, None, Some("approve?"));
+        assert_eq!(format!("\x1b]{OSC};needs-input;;approve?\x07"), sequence);
+        assert_eq!(
+            Some(Reported {
+                status: AgentReport::NeedsInput,
+                title: None,
+                message: Some("approve?".to_owned()),
+            }),
+            parsed(&sequence)
+        );
+    }
+
+    #[test]
+    fn a_double_semicolon_in_either_text_cannot_forge_the_cut() {
+        // Squeezed to one on the way out, so `a;;b` in a title is `a;b` on
+        // the row rather than a title `a` waiting for `b`.
+        let sequence = report(AgentReport::Running, Some("a;;;b"), Some("c;;d"));
+        assert_eq!(
+            Some(Reported {
+                status: AgentReport::Running,
+                title: Some("a;b".to_owned()),
+                message: Some("c;d".to_owned()),
             }),
             parsed(&sequence)
         );
@@ -171,14 +278,19 @@ mod tests {
     fn a_title_that_would_break_the_sequence_is_left_off() {
         assert_eq!(
             format!("\x1b]{OSC};failed\x07"),
-            report(AgentReport::Failed, Some("one\x07two"))
+            report(AgentReport::Failed, Some("one\x07two"), None)
+        );
+        assert_eq!(
+            format!("\x1b]{OSC};failed\x07"),
+            report(AgentReport::Failed, None, Some("one\x07two"))
         );
         assert_eq!(
             Some(Reported {
                 status: AgentReport::NeedsInput,
                 title: None,
+                message: None,
             }),
-            parsed(&report(AgentReport::NeedsInput, Some("   ")))
+            parsed(&report(AgentReport::NeedsInput, Some("   "), Some(" ")))
         );
     }
 

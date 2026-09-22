@@ -665,6 +665,33 @@ fn test_a_program_reports_what_it_is_doing() {
         vec![TerminalEvent::Agent(Reported {
             status: AgentReport::NeedsInput,
             title: Some("port the tab bar".to_owned()),
+            message: None,
+        })],
+        emulator.take_events()
+    );
+}
+
+#[test]
+fn test_a_program_says_what_it_is_waiting_for() {
+    // The message rides after the `;;` cut, and it is news even when the
+    // status is not: the agent is asking a different question.
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b]6340;needs-input;port the tab bar;;run rm -rf build?\x07");
+    assert_eq!(
+        vec![TerminalEvent::Agent(Reported {
+            status: AgentReport::NeedsInput,
+            title: Some("port the tab bar".to_owned()),
+            message: Some("run rm -rf build?".to_owned()),
+        })],
+        emulator.take_events()
+    );
+
+    emulator.advance(b"\x1b]6340;needs-input;;overwrite main.rs?\x07");
+    assert_eq!(
+        vec![TerminalEvent::Agent(Reported {
+            status: AgentReport::NeedsInput,
+            title: None,
+            message: Some("overwrite main.rs?".to_owned()),
         })],
         emulator.take_events()
     );
@@ -711,6 +738,7 @@ fn test_the_command_ending_takes_a_running_status_with_it() {
             .contains(&TerminalEvent::Agent(Reported {
                 status: AgentReport::Idle,
                 title: None,
+                message: None,
             }))
     );
 }
@@ -745,6 +773,7 @@ fn test_a_running_status_settles_when_its_end_is_in_the_same_read() {
                 .contains(&TerminalEvent::Agent(Reported {
                     status: AgentReport::Idle,
                     title: None,
+                    message: None,
                 }))
         );
     }

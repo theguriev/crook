@@ -538,17 +538,30 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 let status = args
                     .next()
                     .context("`--agent` needs a status: idle, running, needs-input or failed")?;
-                let title = match args.peek().map(String::as_str) {
-                    Some("--title") => {
-                        args.next();
-                        Some(args.next().context("`--title` needs the title")?)
+                let mut title = None;
+                let mut message = None;
+                // In either order, each at most once: a hook that names the
+                // work and says what it is waiting for spells both.
+                while let Some(flag) = args.peek().map(String::as_str) {
+                    let (field, needs) = match flag {
+                        "--title" => (&mut title, "`--title` needs the title"),
+                        "--message" => (
+                            &mut message,
+                            "`--message` needs the message, or `-` to read it from stdin",
+                        ),
+                        _ => break,
+                    };
+                    if field.is_some() {
+                        bail!("`{flag}` was given twice");
                     }
-                    _ => None,
-                };
-                agent::report(&status, title.as_deref())?;
+                    args.next();
+                    *field = Some(args.next().context(needs)?);
+                }
+                agent::report(&status, title.as_deref(), message.as_deref())?;
                 return Ok(Startup::Answered);
             }
             "--title" => bail!("`--title` goes after `--agent <status>`"),
+            "--message" => bail!("`--message` goes after `--agent <status>`"),
             "--agent-hooks" => {
                 let agent = args
                     .next()
@@ -980,13 +993,14 @@ OPTIONS:
                        Print the OSC 133 snippet for `zsh`, `bash` or `fish`,
                        to paste into that shell\'s own configuration on a machine
                        Crook cannot start the shell on — over ssh, in a container
-    --agent <STATUS> [--title <TEXT>]
+    --agent <STATUS> [--title <TEXT>] [--message <TEXT>]
                        Tell the pane this is run in what the program in it is
                        doing: `idle`, `running`, `needs-input` or `failed`,
-                       and what it calls its work. Written to the terminal,
-                       so it works from a hook, over ssh and in a container;
-                       `--title -` takes the prompt out of a Claude Code hook\'s
-                       input on stdin
+                       what it calls its work, and with `needs-input` what it
+                       is waiting for. Written to the terminal, so it works
+                       from a hook, over ssh and in a container; `--title -`
+                       takes the prompt out of a Claude Code hook\'s input on
+                       stdin, and `--message -` the notification\'s text
     --agent-hooks <AGENT>
                        Print the hooks that make `claude` (Claude Code) say
                        all of that by itself, to merge into its settings file

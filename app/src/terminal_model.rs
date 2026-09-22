@@ -287,6 +287,8 @@ pub enum TerminalUpdate {
         status: AgentStatus,
         /// What it called its work, when it said.
         title: Option<String>,
+        /// What it is waiting for, when it said.
+        message: Option<String>,
     },
 }
 
@@ -1019,6 +1021,7 @@ impl TerminalModel {
                     pane,
                     status: reported.status.into(),
                     title: reported.title,
+                    message: reported.message,
                 }),
                 // The enum is `#[non_exhaustive]`. A shell asking for something
                 // a later version of the emulator learned to report is not an

@@ -15,7 +15,8 @@
 //!
 //! `--agent-hooks claude` prints the hooks that make Claude Code say all of
 //! this by itself: running when a prompt is sent and while tools run,
-//! needing input when it stops to ask, idle when it is done. What it prints
+//! needing input when it stops to ask — with what it is asking, read out of
+//! the notification's own text — idle when it is done. What it prints
 //! is a fragment of Claude Code's own settings file, to be merged into it by
 //! the person whose file it is — Crook does not write a file it does not own,
 //! and that one it has never opened.
@@ -52,35 +53,60 @@ const TITLE_CHARS: usize = 60;
 /// agent typing something the binary has never heard of.
 pub const SKILL: &str = include_str!("skill.md");
 
+/// The longest message a report carries, in characters.
+///
+/// Longer than a title, because a question is longer than a name and the
+/// row's second line has no icon or chips beside it; still one line, since
+/// the row is one and the sequence should never carry a novel. A permission
+/// prompt's text — "Claude needs your permission to use Bash" — fits with
+/// room to spare, and a message cut here still says what was asked.
+const MESSAGE_CHARS: usize = 200;
+
 /// Writes `status` to the terminal this process was started in.
 ///
 /// `title` is what the agent calls its work; `Some("-")` reads it out of the
 /// hook input on standard input instead, which is how the hooks
 /// [`hooks_text`] prints name a prompt without a `jq` on the machine.
-pub fn report(status: &str, title: Option<&str>) -> Result<()> {
+/// `message` is what it is waiting for, and `Some("-")` reads that from
+/// standard input the same way: a hook's JSON `message` when the input is
+/// one, else the input itself, so the same flag serves a hook that hands
+/// over JSON and a script that pipes a line.
+pub fn report(status: &str, title: Option<&str>, message: Option<&str>) -> Result<()> {
     let status = AgentReport::parse(status).with_context(|| {
         let words: Vec<_> = AgentReport::ALL.iter().map(|word| word.word()).collect();
         format!("`--agent` takes one of {}, not {status}", words.join(", "))
     })?;
 
+    // Read once, whichever of the two asked for it: stdin has one reading in
+    // it, and `--title - --message -` would otherwise hand the second an
+    // empty string.
+    let input = if title == Some("-") || message == Some("-") {
+        let mut input = String::new();
+        io::stdin()
+            .read_to_string(&mut input)
+            .context("`-` reads the hook's input from stdin, and it could not be read")?;
+        Some(input)
+    } else {
+        None
+    };
     let title = match title {
-        Some("-") => {
-            let mut input = String::new();
-            io::stdin().read_to_string(&mut input).context(
-                "`--title -` reads the hook's input from stdin, and it could not be read",
-            )?;
-            title_from_hook(&input)
-        }
+        Some("-") => title_from_hook(input.as_deref().unwrap_or_default()),
         Some(text) => presentable(text),
         None => None,
     };
-    let title = title.as_deref();
+    let message = match message {
+        Some("-") => message_from_hook(input.as_deref().unwrap_or_default()),
+        Some(text) => presentable_message(text),
+        None => None,
+    };
 
     let mut terminal = terminal().context(
         "`--agent` writes to the terminal this was run in, and there is none: run it from a pane, or from a hook of a program in one",
     )?;
     terminal
-        .write_all(crook_terminal::agent::report(status, title).as_bytes())
+        .write_all(
+            crook_terminal::agent::report(status, title.as_deref(), message.as_deref()).as_bytes(),
+        )
         .and_then(|()| terminal.flush())
         .context("could not write to the terminal")
 }
@@ -111,6 +137,25 @@ fn title_from_hook(input: &str) -> Option<String> {
     prompt.lines().find_map(presentable)
 }
 
+/// The message on standard input: a hook's `message`, else the input itself.
+///
+/// Claude Code's Notification hook is handed a JSON object whose `message`
+/// is the notification's text — "Claude needs your permission to use Bash"
+/// — which is exactly what the row wants to say. Input that is not that
+/// shape is taken whole, so `echo "approve the deploy?" | crook --agent
+/// needs-input --message -` works from a script with no JSON to hand;
+/// JSON with no `message` in it is not a message, and the status goes
+/// without one rather than with a line of braces.
+fn message_from_hook(input: &str) -> Option<String> {
+    match serde_json::from_str::<Value>(input) {
+        Ok(parsed) => parsed
+            .get("message")?
+            .as_str()
+            .and_then(presentable_message),
+        Err(_) => presentable_message(input),
+    }
+}
+
 /// `text` as a row can print it, or `None` when nothing of it can be.
 ///
 /// A control character becomes a space and a run of spaces becomes one, then
@@ -120,6 +165,20 @@ fn title_from_hook(input: &str) -> Option<String> {
 /// from the command line or a prompt, so a tab in a pasted prompt, which is
 /// the ordinary way a prompt holds one, cost the whole title.
 fn presentable(text: &str) -> Option<String> {
+    one_line(text, TITLE_CHARS)
+}
+
+/// [`presentable`] at a message's length.
+///
+/// The same cleaning: a notification's text is one line already, and a
+/// script's may not be, and either way the row has one line to put it on.
+fn presentable_message(text: &str) -> Option<String> {
+    one_line(text, MESSAGE_CHARS)
+}
+
+/// `text` as one line of at most `chars` characters, with a mark where it
+/// was cut.
+fn one_line(text: &str, chars: usize) -> Option<String> {
     let mut line = String::with_capacity(text.len());
     let mut space = true;
     for character in text.chars() {
@@ -137,11 +196,11 @@ fn presentable(text: &str) -> Option<String> {
     if line.is_empty() {
         return None;
     }
-    let mut title: String = line.chars().take(TITLE_CHARS).collect();
-    if line.chars().count() > TITLE_CHARS {
-        title.push('…');
+    let mut cut: String = line.chars().take(chars).collect();
+    if line.chars().count() > chars {
+        cut.push('…');
     }
-    Some(title)
+    Some(cut)
 }
 
 /// The hooks that make `agent` report itself, as a fragment of its settings.
@@ -167,8 +226,8 @@ pub fn hooks_text(agent: &str, binary: &Path) -> Result<String> {
             "PostToolUse": hook("running"),
             // Every notification Claude Code sends is one that wants a
             // person: a permission to give, a question to answer, a long
-            // idle at its prompt.
-            "Notification": hook("needs-input"),
+            // idle at its prompt. Its text says which, and the row says it.
+            "Notification": hook("needs-input --message -"),
             "Stop": hook("idle"),
             "SessionEnd": hook("idle"),
         }
@@ -224,6 +283,42 @@ mod tests {
     }
 
     #[test]
+    fn the_message_is_the_hooks_message_or_else_the_whole_input() {
+        assert_eq!(
+            Some("Claude needs your permission to use Bash".to_owned()),
+            message_from_hook(
+                r#"{"hook_event_name": "Notification", "message": "Claude needs your permission to use Bash", "notification_type": "permission_prompt"}"#
+            )
+        );
+        // A script with no JSON to hand pipes the line itself.
+        assert_eq!(
+            Some("approve the deploy?".to_owned()),
+            message_from_hook("approve the deploy?\n")
+        );
+        // JSON that is not a hook's says nothing, rather than `{`.
+        assert_eq!(None, message_from_hook(r#"{"tool_name": "Bash"}"#));
+        assert_eq!(None, message_from_hook(r#"{"message": 3}"#));
+        assert_eq!(None, message_from_hook("  \n"));
+    }
+
+    #[test]
+    fn a_message_is_one_line_and_never_a_novel() {
+        let long = "y".repeat(MESSAGE_CHARS + 40);
+        let message = presentable_message(&long).unwrap();
+        assert_eq!(MESSAGE_CHARS + 1, message.chars().count());
+        assert!(message.ends_with('…'));
+        // Longer than a title — a question is longer than a name — so a
+        // question a title's width would cut short travels whole.
+        let question = "z".repeat(TITLE_CHARS + 40);
+        assert!(presentable(&question).unwrap().ends_with('…'));
+        assert_eq!(Some(question.clone()), presentable_message(&question));
+        assert_eq!(
+            Some("run rm -rf build? y/n".to_owned()),
+            presentable_message("run rm -rf build?\n\ty/n\n")
+        );
+    }
+
+    #[test]
     fn a_hook_input_with_no_prompt_names_nothing() {
         assert_eq!(None, title_from_hook("not json"));
         assert_eq!(None, title_from_hook(r#"{"tool_name": "Bash"}"#));
@@ -249,11 +344,14 @@ mod tests {
                 "{event} runs {command}"
             );
         }
+        // The notification's text is what the agent is waiting for, and it
+        // comes in on stdin: the hook pipes it through rather than needing
+        // a `jq` on the machine to pick it out.
         assert!(
             hooks["Notification"][0]["hooks"][0]["command"]
                 .as_str()
                 .unwrap()
-                .ends_with("needs-input")
+                .ends_with("needs-input --message -")
         );
         assert!(
             hooks["UserPromptSubmit"][0]["hooks"][0]["command"]
@@ -299,7 +397,7 @@ mod tests {
 
     #[test]
     fn a_word_that_is_not_a_status_is_refused_with_the_words_that_are() {
-        let error = report("sleeping", None).unwrap_err();
+        let error = report("sleeping", None, None).unwrap_err();
         let message = error.to_string();
         assert!(message.contains("sleeping"));
         assert!(message.contains("needs-input"));

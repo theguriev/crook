@@ -22,6 +22,14 @@
 //! The strip has room for two lines and takes line 1 and line 3's left text;
 //! the panel has room for three in `Expanded` and takes all of them. Neither
 //! decides what those lines *are*.
+//!
+//! One thing overrides the table: an agent that has stopped to ask, and
+//! said what for. While it is waiting, line 2 — the `Expanded` description
+//! and the `Compact` subtitle — is the question rather than the directory or
+//! the branch, because "wants to run `rm -rf build`" is what decides whether
+//! a person comes now, and which branch the pane is on is not. The moment
+//! the agent goes back to work the message goes with it (see
+//! `AgentSession::message`), and the line says what the table says again.
 
 use std::path::Path;
 
@@ -129,6 +137,9 @@ pub(super) struct RowFacts {
     directory: Option<String>,
     /// The branch it is on, if the directory is a repository.
     branch: Option<String>,
+    /// What the agent is waiting for, while it is waiting: the second line
+    /// while it is there, in place of whatever the table put there.
+    message: Option<String>,
     /// Whether [`Self::command`] is the directory's own name rather than a
     /// name the session has.
     ///
@@ -169,6 +180,7 @@ impl RowFacts {
                 .and_then(|facts| facts.branch.as_ref())
                 .map(Head::label)
                 .map(str::to_owned),
+            message: session.message.clone(),
         }
     }
 
@@ -199,6 +211,9 @@ impl RowFacts {
     /// The description line: whichever of the command and the working
     /// directory the title did not take.
     pub(super) fn description(&self, primary: PrimaryInfo) -> Option<RowLine> {
+        if let Some(message) = &self.message {
+            return Some(RowLine::plain(message.clone()));
+        }
         // Nothing at all when the title and the command are the same fact
         // spelled two ways: `crook` over `~/work/crook` is one thing taking two
         // lines, whichever of them the setting put on top. The branch line
@@ -232,6 +247,9 @@ impl RowFacts {
     /// a menu that checked the stored value would put a tick beside an option
     /// the row is silently overriding.
     pub(super) fn subtitle(&self, options: TabOptions) -> Option<RowLine> {
+        if let Some(message) = &self.message {
+            return Some(RowLine::plain(message.clone()));
+        }
         match resolve_subtitle(options.primary_info, options.subtitle) {
             // Warp's `compact_branch_subtitle_display`: the branch, else the
             // directory, else no second line at all.
@@ -595,6 +613,7 @@ pub(super) fn metadata_line(
 #[cfg(test)]
 mod naming_tests {
     use super::*;
+    use crate::tab::AgentStatus;
     use std::path::PathBuf;
 
     fn session(directory: &str) -> AgentSession {
@@ -648,6 +667,48 @@ mod naming_tests {
             "~/work/crook"
         );
         assert!(facts.description(PrimaryInfo::WorkingDirectory).is_none());
+    }
+
+    /// A question beats a place: while the agent is waiting and has said
+    /// what for, that is the second line in both densities, and the title
+    /// stays what it was. The directory comes back when the message goes,
+    /// which `AgentSession::message` ties to the status leaving `NeedsInput`.
+    #[test]
+    fn what_the_agent_is_waiting_for_takes_the_second_line_while_it_waits() {
+        let mut session = session("/Users/eugen/work/crook");
+        session.derived_title = Some("port the tab bar".to_owned());
+        session.status = AgentStatus::NeedsInput;
+        session.message = Some("run rm -rf build?".to_owned());
+        let options = TabOptions {
+            primary_info: PrimaryInfo::Command,
+            subtitle: Subtitle::Branch,
+            ..TabOptions::default()
+        };
+
+        let waiting = facts(&session);
+        assert_eq!(waiting.title(PrimaryInfo::Command).text, "port the tab bar");
+        assert_eq!(
+            waiting
+                .description(PrimaryInfo::Command)
+                .map(|line| line.text),
+            Some("run rm -rf build?".to_owned())
+        );
+        assert_eq!(
+            waiting.subtitle(options).map(|line| line.text),
+            Some("run rm -rf build?".to_owned())
+        );
+        // Even where the table would print nothing: a directory-named tab
+        // has no second line, and a question is not the directory again.
+        session.derived_title = None;
+        assert!(facts(&session).description(PrimaryInfo::Command).is_some());
+
+        session.status = AgentStatus::Running;
+        session.message = None;
+        let working = facts(&session);
+        assert_eq!(
+            working.subtitle(options).map(|line| line.text),
+            Some("~/work/crook".to_owned())
+        );
     }
 
     /// Nowhere to be and nothing running: the placeholder is still the honest
