@@ -174,13 +174,6 @@ const CHIPS_PADDING_TOP: f32 = 8.;
 /// the title stands where the first prompt would.
 const NOTICE_PADDING_TOP: f32 = 12.;
 
-/// How far the floating row is held off the corner it sits in.
-///
-/// The row is over a screen a program has taken rather than beside a prompt,
-/// so it is inset from both edges: a chip flush against the corner reads as
-/// part of whatever the program drew there.
-const CHIPS_INSET: f32 = 12.;
-
 pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element> {
     let Some(tab) = workspace.tabs().active() else {
         return Empty::new().finish();
@@ -537,25 +530,25 @@ fn contents(
         Surface::Grid => grid(workspace, id, &handle, snapshot, font.clone(), keys),
     };
 
-    // What a plugin pinned to this pane, or nothing at all — which is what a
-    // release binary carries. Built once and spent in exactly one of the two
-    // places below: beside the prompt while there is one, over the corner
-    // while a program has the screen.
-    let chips = is_focused.then(|| chips(workspace, app)).flatten();
-
     // The pty is told the *pane's* size, so it is measured here — outside the
     // column, where the composer appearing and hiding cannot move the box the
     // measurement comes from.
     if !surface.composer {
-        // The chips float rather than take a row. A program that has the
-        // screen was given the whole pane and counts on having it: a row of
-        // chrome above `top` would be a row `top` does not know it lost.
-        let output = match chips {
-            Some(chips) => over_the_corner(output, chips),
-            None => output,
-        };
+        // And no chips, because there is nowhere in this pane to put them.
+        // They used to float over its bottom corner, which is where a
+        // full-screen program draws its own status line: Claude Code's mode
+        // line, vim's ruler, a pager's percentage. The program was given the
+        // whole pane and is drawing every row of it, so any chrome Crook
+        // floats on top covers something somebody is reading. A row above it
+        // is no better — that is a row `top` does not know it lost. They come
+        // back with the prompt.
         return PaneSizer::new(handle, font, output).finish();
     }
+
+    // What a plugin pinned to this pane, or nothing at all — which is what a
+    // release binary carries. Beside the line being composed, which is the
+    // only place in a pane that is Crook's own to draw on.
+    let chips = is_focused.then(|| chips(workspace, app)).flatten();
 
     // The output is the flexible one and the composer is not, so the composer
     // is measured first and the output divides what is left. That is the whole
@@ -890,28 +883,6 @@ fn chips(workspace: &Workspace, app: &AppContext) -> Option<Box<dyn Element>> {
         .with_spacing(CHIP_GAP);
     row.extend(built);
     Some(row.finish())
-}
-
-/// Floats `chips` over the bottom-right corner of `content`.
-///
-/// An overlay rather than a row, because the pane below it belongs to a
-/// program that was told how many rows it has. Anchored corner-to-corner and
-/// pulled back inside by [`CHIPS_INSET`], so the row sits *in* the corner
-/// rather than hanging off it — and laid out against the pane, which is what
-/// keeps a wide chip inside a narrow one rather than over its neighbour.
-fn over_the_corner(content: Box<dyn Element>, chips: Box<dyn Element>) -> Box<dyn Element> {
-    let mut stack = Stack::new().with_child(content);
-    stack.add_anchored_overlay_child_within(
-        chips,
-        AnchorTo {
-            parent: Corner::BottomRight,
-            child: Corner::BottomRight,
-            offset: vec2f(-CHIPS_INSET, -CHIPS_INSET),
-            keep_on_screen: true,
-            keep_clear_of_parent: false,
-        },
-    );
-    stack.finish()
 }
 
 /// Resizes a pane's pty from the pane's own rectangle, and draws its child

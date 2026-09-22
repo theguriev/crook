@@ -5,10 +5,12 @@
 //! [`PANE_CHIPS`] is a row of small things about the pane a person is working
 //! in: where it is, what branch it is on, what a chord would do. Warp draws
 //! exactly this, and where it draws it is the interesting part — the chips sit
-//! *with the prompt* while there is one, and move to the bottom corner of the
-//! screen while a program has taken it. Both are the same statement about the
-//! same pane, so both are this one slot, and which of the two a contribution
-//! lands in is not something it is told: a chip that had to know whether an
+//! *with the prompt*, and are not drawn at all while a program has taken the
+//! screen. They used to float over the pane's bottom corner then, which is
+//! the one row of a full-screen program that is never spare: Claude Code's
+//! mode line, vim's ruler, a pager's percentage all live there, and chrome on
+//! top of them covers what somebody is reading. Whether a contribution is
+//! being drawn is not something it is told: a chip that had to know whether an
 //! agent was running would be a chip with an opinion about the terminal.
 //!
 //! A `List`, not a `Single`. The header takes one item because it is also the
@@ -19,8 +21,8 @@
 //!
 //! # Where they are drawn
 //!
-//! `workspace::body`, in two places, and it is worth saying why the slot is
-//! declared here rather than there. The plugin that owns a place in the
+//! `workspace::body`, beside the composer, and it is worth saying why the slot
+//! is declared here rather than there. The plugin that owns a place in the
 //! interface is the one that can say what belongs in it; the body is the
 //! surface that happens to paint it. That is the same split `header.right` and
 //! `header_toolbar` are on either side of.
@@ -67,7 +69,7 @@ fn manifest() -> &'static Manifest {
         schema: Manifest::SCHEMA,
         id: PluginId::parse("crook/pane").expect("a literal that parses"),
         name: "Pane chips",
-        description: "The row of chips about the pane being worked in: beside the prompt, or over the corner of a screen a program has taken.",
+        description: "The row of chips about the pane being worked in, beside the prompt. Not drawn while a program has the screen.",
         version: env!("CARGO_PKG_VERSION"),
         tier: Tier::Native,
         capabilities: &[],
