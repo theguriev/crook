@@ -421,13 +421,23 @@ impl Plugin for WasmPlugin {
                                 .then(|| Subject::Block(sees.block(workspace.block_menu(), &who))),
                         };
                         let node = ask(&sandbox, &failures, &who, &render);
+                        // Nothing described is nothing contributed, and the
+                        // difference from an element that lays out to nothing
+                        // is the room around it: a row of chips spaces what it
+                        // draws, so a guest that answers `Empty` on the frames
+                        // it has nothing to say — the branch chip outside a
+                        // checkout — must be absent from the row rather than
+                        // an empty place in it. See [`UiContribution`].
+                        if matches!(node, Node::Empty) {
+                            return None;
+                        }
                         // A menu's rows are the host's to draw — their
                         // padding, their type size, the colour one takes under
                         // the pointer — so what a guest describes here is
                         // mapped onto them rather than laid inside them. See
                         // [`render::menu_group`].
                         if about_a_block {
-                            return menu_group(&node, workspace, &who, &chrome, &hovers);
+                            return Some(menu_group(&node, workspace, &who, &chrome, &hovers));
                         }
                         let element = drawn(
                             &node,
@@ -445,7 +455,7 @@ impl Plugin for WasmPlugin {
                         if chrome.keyboard_moved() {
                             workspace.sync_input_keys();
                         }
-                        element
+                        Some(element)
                     },
                 );
                 continue;

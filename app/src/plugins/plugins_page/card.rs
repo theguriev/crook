@@ -936,7 +936,7 @@ fn status(
         .contributors(PLUGIN_CARD)
         .into_iter()
         .position(|(owner, _)| owner == manifest.id)?;
-    let drawn = slots.at(PLUGIN_CARD, index, |build| build(workspace, app))?;
+    let drawn = slots.at(PLUGIN_CARD, index, |build| build(workspace, app))??;
 
     // Inside the box rather than under it, because what it is about is the
     // controls in the box. A line of prose floating between two blocks belongs

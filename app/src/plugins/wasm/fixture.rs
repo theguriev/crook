@@ -156,7 +156,14 @@ impl Plugin for Fixture {
             // taking a picture *of* the plugin tier: a slot that only holds
             // one thing should hold this one.
             host.contribute(slot, "fixture", -1000, move |workspace, _| {
-                render::element(
+                // `Empty` is how a fixture says a contribution drew nothing on
+                // this frame, and a contribution that drew nothing is not in
+                // its slot at all — the same answer the tier it stands in for
+                // gives. See [`UiContribution`].
+                if matches!(node, Node::Empty) {
+                    return None;
+                }
+                Some(render::element(
                     &node,
                     render::Chrome::new(
                         workspace.fonts(),
@@ -171,7 +178,7 @@ impl Plugin for Fixture {
                     // the tier it is standing in for.
                     &|_| None,
                     &hovers,
-                )
+                ))
             });
         }
 

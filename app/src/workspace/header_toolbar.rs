@@ -82,6 +82,7 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
                     .one(crate::plugins::header::HEADER_LEFT, |build| {
                         build(workspace, app)
                     })
+                    .flatten()
                     .unwrap_or_else(|| Empty::new().finish()),
             )
             .with_child(Expanded::new(1., Empty::new().finish()).finish())
@@ -96,6 +97,7 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
                     .one(crate::plugins::header::HEADER_RIGHT, |build| {
                         build(workspace, app)
                     })
+                    .flatten()
                     .unwrap_or_else(|| Empty::new().finish()),
             )
             .finish(),

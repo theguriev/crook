@@ -164,7 +164,7 @@ const COMPOSER_PADDING_TOP: f32 = 1.1;
 pub(super) const COMPOSER_PADDING_BOTTOM: f32 = 20.;
 
 /// The gap between two chips in the row under the composer.
-const CHIP_GAP: f32 = 6.;
+pub(super) const CHIP_GAP: f32 = 6.;
 
 /// The gap between the line being composed and the row of chips under it.
 const CHIPS_PADDING_TOP: f32 = 8.;
@@ -866,12 +866,20 @@ fn composer(
 /// to be as ordinary here as a full one: nothing a release binary carries
 /// fills it, and a plugin installed from a file does.
 fn chips(workspace: &Workspace, app: &AppContext) -> Option<Box<dyn Element>> {
-    let built = workspace
+    // Only what is drawn. A contribution answers `None` on a frame it has
+    // nothing to say — a branch chip in a directory that is not a checkout —
+    // and the gap belongs between chips rather than around the place one would
+    // have been: four contributions of which two are silent used to draw the
+    // two that were not with three gaps' worth of hole between them.
+    let built: Vec<Box<dyn Element>> = workspace
         .host()
         .slots()
         .map(crate::plugins::pane::PANE_CHIPS, |build| {
             build(workspace, app)
-        });
+        })
+        .into_iter()
+        .flatten()
+        .collect();
     if built.is_empty() {
         return None;
     }

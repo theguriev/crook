@@ -11665,6 +11665,97 @@ mod shells {
     /// These are the only tests that ask for the integration, and they are
     /// worth a real shell for the reason the rest of this module is: the whole
     /// point of a block is that the *shell* said where it ended.
+    /// The radius nothing else in the window draws, so that the pills
+    /// [`ChipProbe`] puts in the row can be picked out of a frame.
+    const PROBE_RADIUS: f32 = 9.;
+
+    /// A plugin whose three contributions to the pane's chips are a chip,
+    /// nothing, and a chip.
+    ///
+    /// The middle one is what every real row has in it — the chips plugin's
+    /// branch chip in a directory that is not a checkout, its diff chip where
+    /// nothing has changed — and what it must not be is a gap.
+    struct ChipProbe;
+
+    impl crate::plugin::Plugin for ChipProbe {
+        fn manifest(&self) -> &'static crook_plugin::Manifest {
+            static MANIFEST: std::sync::OnceLock<crook_plugin::Manifest> =
+                std::sync::OnceLock::new();
+            MANIFEST.get_or_init(|| crook_plugin::Manifest {
+                schema: crook_plugin::Manifest::SCHEMA,
+                id: crook_plugin::PluginId::parse("eugen/chip-probe").expect("a literal"),
+                name: "Chip probe",
+                description: "A plugin that puts two chips and a silence in the pane's row.",
+                version: "0.1.0",
+                tier: crook_plugin::Tier::Native,
+                capabilities: &[],
+            })
+        }
+
+        fn build(
+            &mut self,
+            host: &mut crate::plugin::Host,
+            _: &mut ViewContext<Workspace>,
+        ) -> Result<(), crate::plugin::BuildError> {
+            for (entry, order, draws) in [
+                ("first", 0, true),
+                ("silent", 10, false),
+                ("last", 20, true),
+            ] {
+                host.contribute(
+                    crate::plugins::pane::PANE_CHIPS,
+                    entry,
+                    order,
+                    move |_, _| draws.then(probe_pill),
+                );
+            }
+            Ok(())
+        }
+    }
+
+    /// One of the probe's pills: a box of a size and a radius nothing else
+    /// draws.
+    fn probe_pill() -> Box<dyn Element> {
+        ConstrainedBox::new(
+            Container::new(Empty::new().finish())
+                .with_background_color(theme().surface_raised)
+                .with_corner_radius(CornerRadius::with_all(Radius::Pixels(PROBE_RADIUS)))
+                .finish(),
+        )
+        .with_width(40.)
+        .with_height(12.)
+        .finish()
+    }
+
+    #[test]
+    fn a_contribution_with_nothing_to_draw_takes_no_room_in_the_row_of_chips() {
+        // The row is spaced between what it draws. A contribution that has
+        // nothing to say on a frame answers `None` and is not in the row at
+        // all — it used to answer with an element that laid out to nothing,
+        // which the row still put a gap on either side of, so a pane outside a
+        // repository drew its two silent chips as a hole between the two that
+        // were not.
+        let mut plugins = crate::plugins::defaults();
+        plugins.push(Box::new(ChipProbe));
+        let mut harness = Harness::with_plugins(1, Settings::ephemeral(), plugins);
+        if marked_shell(&mut harness).is_none() {
+            return;
+        }
+        let scene = harness.frame();
+
+        let mut pills = rects_rounded_by(&scene, Radius::Pixels(PROBE_RADIUS));
+        pills.sort_by(|left, right| left.min_x().total_cmp(&right.min_x()));
+        assert_eq!(pills.len(), 2, "one pill per contribution that draws one");
+
+        let gap = pills[1].min_x() - pills[0].max_x();
+        assert!(
+            (gap - crate::workspace::body::CHIP_GAP).abs() < 0.5,
+            "the chips are {gap} apart rather than {}: the contribution between them draws \
+             nothing and must take no room",
+            crate::workspace::body::CHIP_GAP,
+        );
+    }
+
     mod blocks {
         use super::*;
         use crate::pane_blocks::{PaneBlocks, ScrollPosition};
@@ -12084,9 +12175,11 @@ mod shells {
                     "probe",
                     5,
                     |workspace, _| {
-                        Text::new("Probe this block", workspace.fonts().ui, 12.)
-                            .with_color(theme().text_primary)
-                            .finish()
+                        Some(
+                            Text::new("Probe this block", workspace.fonts().ui, 12.)
+                                .with_color(theme().text_primary)
+                                .finish(),
+                        )
                     },
                 );
                 Ok(())

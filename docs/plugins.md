@@ -419,6 +419,11 @@ description of something that was never built.
   - **A contribution knows which of its own it is.** `crook_render` takes the entry as well as
     the slot, because a plugin may put four things in one list slot and a render told only the
     slot would have to draw all four in each of them.
+  - **A contribution that draws nothing is not in the row.** An entry whose answer is `Empty`
+    — the branch chip in a directory that is not a checkout, the diff chip where nothing has
+    changed — is left out of the slot rather than laid into it as a thing of no size. A list
+    slot spaces what it draws, so the alternative is a gap with nothing on either side of it,
+    which is what the row drew until the contribution type learned to say `None`.
   - **An action may be told what it is about.** `crook_run` takes an argument, and `Host::voice`
     is the same thing for a native one: an action is a name with no parameters, so what a
     *thing* — this row, that command — is said into a place the handler takes it from. One

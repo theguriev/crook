@@ -116,11 +116,15 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
         .with_main_axis_size(MainAxisSize::Min)
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
 
+    // A group with nothing in it is not a group: the divider is drawn between
+    // what there is, so a contribution that drew nothing on this frame cannot
+    // leave a rule with nothing under it. See [`UiContribution`].
     for (index, group) in workspace
         .host()
         .slots()
         .map(BLOCK_MENU, |build| build(workspace, app))
         .into_iter()
+        .flatten()
         .enumerate()
     {
         if index > 0 {
