@@ -253,6 +253,8 @@ pub enum Binding {
     ShrinkPane,
     /// Give every pane of the split an equal share again.
     EvenPanes,
+    /// Give the focused pane the whole tab, or the split back.
+    ZoomPane,
     /// Select the tab at this position in the strip, counting from zero.
     SelectTab(usize),
     /// Select the last tab, wherever it is.

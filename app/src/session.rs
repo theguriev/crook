@@ -126,6 +126,13 @@ pub struct TabSnapshot {
     pub horizontal: bool,
     /// Which pane had the keyboard, as a position in `panes`.
     pub focused: usize,
+    /// Whether that pane had the whole tab to itself, with the split kept
+    /// underneath.
+    ///
+    /// Remembered for the reason a pane's share is: it is a fact about how
+    /// the work was laid out, and a window that came back with the split it
+    /// had a moment ago hidden again is the window that was closed.
+    pub zoomed: bool,
     /// The panes, in render order.
     pub panes: Vec<PaneSnapshot>,
     /// Whether it was held at the front of its block.
@@ -231,6 +238,7 @@ impl Session {
                 name: tab.name().to_owned(),
                 horizontal: tab.panes().axis() == SplitAxis::Horizontal,
                 focused,
+                zoomed: tab.panes().is_zoomed(),
                 panes,
                 pinned: tab.is_pinned(),
                 color: tab.color().map(|color| color.name().to_owned()),
@@ -430,6 +438,9 @@ impl TabSnapshot {
         if let Some(id) = ids.get(self.focused.min(ids.len().saturating_sub(1))) {
             tab.panes_mut().focus(*id);
         }
+        // After the focus, since moving it is one of the things that ends a
+        // zoom.
+        tab.panes_mut().set_zoomed(self.zoomed);
         Some(tab)
     }
 }

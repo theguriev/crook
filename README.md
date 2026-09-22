@@ -249,10 +249,11 @@ Nineteen features, and the page that configures them:
   lines of scrollback, `SIGWINCH` on resize, and titles and working directories the shell
   reports with OSC 0, 2 and 7 — which is what makes a tab rename itself and its git chips
   follow a `cd`. A tab splits into panes with `cmd-d` and `cmd-shift-d` (`ctrl-shift-d` and
-  `ctrl-shift-e` off macOS), and a shell that exits closes its pane, its tab, and with the
-  last tab the window. With shell integration the scrollback moves into the blocks: each
-  finished command owns its rows, so ten thousand *commands* survive a `clear`, a resize, and
-  the emulator's own history evicting anything.
+  `ctrl-shift-e` off macOS), `cmd-shift-m` (`ctrl-shift-m`) gives the focused pane the whole
+  tab and the split back on the next press, tmux's zoom, and a shell that exits closes its
+  pane, its tab, and with the last tab the window. With shell integration the scrollback
+  moves into the blocks: each finished command owns its rows, so ten thousand *commands*
+  survive a `clear`, a resize, and the emulator's own history evicting anything.
 - **Output as a list of commands.** A pane is not a grid with decorations drawn over it: each
   command is a block holding its prompt, the line that was run and everything it printed, with
   a hairline between one and the next, a red wash on one that failed and an accent stripe on

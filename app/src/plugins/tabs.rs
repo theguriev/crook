@@ -32,8 +32,8 @@
 //! looking for a second opinion. So the disc is what the *host* draws when
 //! the slot has nothing to say, and "declined" means "as it was" rather than
 //! "empty" — which is the only meaning a person reading the panel could
-//! predict.
-//!
+//! predict. The `Z` on the corner of a zoomed pane's row is the host's for the
+//! same reason, and it yields the corner to any plugin's badge.
 //!
 //! This plugin owns [`TAB_MENU_ENTRIES`] — the place a tab's context menu is
 //! made of — and contributes the entries that are about a tab as such: putting
@@ -85,6 +85,7 @@
 //! sensibly mean, and the same handler serves both without a branch.
 
 use crookui_core::elements::{MouseStateHandle, Padding};
+use crookui_core::fonts::{Properties, Weight};
 use crookui_core::icons::Lucide;
 use crookui_core::prelude::*;
 
@@ -139,6 +140,13 @@ const BADGE_RATIO: f32 = 0.46;
 /// difference of ten percent on eleven pixels. What this draws instead is a
 /// hole in the mark, which is what a badge on an avatar has always been.
 const BADGE_RING: f32 = 1.5;
+
+/// The letter on the corner of a zoomed pane's row, in points.
+///
+/// What fits inside the ring with a pixel to spare: the badge is eight pixels
+/// across, and a capital of this size is a shape at that width rather than a
+/// smudge.
+const ZOOM_LETTER_SIZE: f32 = 7.;
 
 /// What a row is, for a plugin being asked what to draw on it.
 ///
@@ -997,11 +1005,15 @@ pub fn mark(workspace: &Workspace, row: &TabRow<'_>, app: &AppContext) -> Box<dy
         .unwrap_or_else(|| disc(row.status));
 
     let mut stack = Stack::new().with_child(Align::new(face).finish());
-    if let Some(badge) = host
+    // A plugin's badge first, then the zoom's: the corner is one thing at a
+    // time, and a plugin that took it has said something about the row that
+    // outlives a keystroke.
+    let badge = host
         .rows()
         .one(TAB_ROW_BADGE, |build| build(workspace, row, app))
         .flatten()
-    {
+        .or_else(|| zoom_badge(workspace, row));
+    if let Some(badge) = badge {
         stack.add_child(Align::new(ringed(badge)).bottom_right().finish());
     }
 
@@ -1031,6 +1043,28 @@ fn disc(status: AgentStatus) -> Box<dyn Element> {
     .with_width(diameter)
     .with_height(diameter)
     .finish()
+}
+
+/// tmux's `Z`, on the row of the pane that has its tab to itself.
+///
+/// The row is the one place a hidden split is visible at all — the body is
+/// showing one pane and nothing about it says there are others — so the mark
+/// goes on the pane that is doing the hiding, which is the only row a person
+/// is looking at.
+fn zoom_badge(workspace: &Workspace, row: &TabRow<'_>) -> Option<Box<dyn Element>> {
+    let group = workspace.tabs().get(row.tab)?.panes();
+    if !group.is_zoomed() || !group.is_focused(row.pane) {
+        return None;
+    }
+    Some(
+        Text::new("Z", workspace.fonts().ui, ZOOM_LETTER_SIZE)
+            .with_color(theme().text_primary)
+            .with_style(Properties {
+                weight: Weight::Semibold,
+                ..Properties::default()
+            })
+            .finish(),
+    )
 }
 
 /// A badge, in its own disc of the row's ground.

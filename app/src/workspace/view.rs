@@ -5664,10 +5664,11 @@ impl Workspace {
             }
             Binding::SplitLeft => TabAction::Split(Direction::Left),
             Binding::SplitUp => TabAction::Split(Direction::Up),
-            // The three that mean nothing without a divider to move. They
-            // decline rather than doing nothing, so the chord goes to the
-            // shell on a tab that was never split.
-            Binding::GrowPane | Binding::ShrinkPane | Binding::EvenPanes
+            // The four that mean nothing without a split — three move a
+            // divider and one hides them all. They decline rather than doing
+            // nothing, so the chord goes to the shell on a tab that was never
+            // split.
+            Binding::GrowPane | Binding::ShrinkPane | Binding::EvenPanes | Binding::ZoomPane
                 if !self.tabs.active().is_some_and(|tab| tab.panes().is_split()) =>
             {
                 return None;
@@ -5675,6 +5676,7 @@ impl Workspace {
             Binding::GrowPane => TabAction::NudgePane { grow: true },
             Binding::ShrinkPane => TabAction::NudgePane { grow: false },
             Binding::EvenPanes => TabAction::EvenPanes,
+            Binding::ZoomPane => TabAction::ZoomPane,
             // Counting the strip, which is the order the panel draws and the
             // order `next-tab` steps through. A number past the end declines.
             Binding::SelectTab(index) => TabAction::Select(self.tabs.iter().nth(index)?.id()),

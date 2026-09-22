@@ -186,6 +186,43 @@ fn test_a_dragged_divider_survives() {
 }
 
 #[test]
+fn test_a_zoom_survives_and_the_split_under_it_does_too() {
+    let mut strip = split(3);
+    let panes: Vec<_> = strip.panes().map(|(_, pane)| pane.id()).collect();
+    strip.apply(TabAction::FocusPane(panes[1]));
+    strip.apply(TabAction::ZoomPane);
+
+    let restored = Session::of(&strip, None).restore().expect("restored");
+    let group = restored.active().expect("a tab").panes();
+
+    assert!(group.is_zoomed());
+    assert_eq!(group.len(), 3, "the hidden panes came back with the zoom");
+    assert_eq!(
+        group.index_of(group.focused_id()),
+        Some(1),
+        "the zoomed pane is the one that was zoomed"
+    );
+}
+
+#[test]
+fn test_a_file_that_zooms_a_tab_of_one_pane_restores_a_tab_that_is_not() {
+    // A tab of one pane cannot be zoomed by hand, and a file that says one
+    // was is a file this build did not write.
+    let snapshot = TabSnapshot {
+        zoomed: true,
+        panes: vec![PaneSnapshot::default()],
+        ..TabSnapshot::default()
+    };
+    let session = Session {
+        tabs: vec![snapshot],
+        ..Session::default()
+    };
+
+    let restored = session.restore().expect("restored");
+    assert!(!restored.active().expect("a tab").panes().is_zoomed());
+}
+
+#[test]
 fn test_the_split_axis_survives() {
     let mut strip = TabStrip::new();
     strip.apply(TabAction::Split(Direction::Down));
