@@ -966,7 +966,7 @@ pub(super) fn download_size(bytes: u64) -> String {
 }
 
 /// "just now", "6 minutes ago", "3 days ago".
-pub(super) fn ago(seconds: u64) -> String {
+pub(crate) fn ago(seconds: u64) -> String {
     const MINUTE: u64 = 60;
     const HOUR: u64 = 60 * MINUTE;
     const DAY: u64 = 24 * HOUR;

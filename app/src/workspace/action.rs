@@ -238,6 +238,12 @@ pub enum TabMenuAction {
     MoveSelection(isize),
     /// Do what pressing the row the keyboard is on would have done.
     RunSelected,
+    /// Show, or stop showing, why the row's dot is what it is.
+    ///
+    /// A toggle rather than an open and a close, for the reason "Pin tab"
+    /// is one action: the entry that opens it is the entry that closes it,
+    /// and Escape reaches it only while it is up.
+    ToggleExplanation,
 }
 
 impl From<TabMenuAction> for WorkspaceAction {

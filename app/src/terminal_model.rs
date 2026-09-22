@@ -275,8 +275,7 @@ pub enum TerminalUpdate {
     /// Tab twice quickly leaves two outstanding, and only the answer to the
     /// second is about the line on screen.
     Completions(PaneId, u64, Completions),
-    /// A program in the pane said what it is doing, or the command it was
-    /// running ended and the emulator took the status back to idle.
+    /// A program in the pane said what it is doing.
     ///
     /// The status is the app's own from here on: the wire's word is the
     /// emulator's business, and what a tab does with it is the strip's.
@@ -290,6 +289,13 @@ pub enum TerminalUpdate {
         /// What it is waiting for, when it said.
         message: Option<String>,
     },
+    /// The command a running or waiting agent was ended, and the emulator
+    /// took the status back to idle for it.
+    ///
+    /// Told apart from an [`Self::Agent`] saying idle so that a row's menu can
+    /// say which of the two happened: the agent finished, or something ended
+    /// it before it could say so.
+    AgentSettled(PaneId),
 }
 
 /// The finished blocks of one pane, as the surface holds them.
@@ -1023,6 +1029,7 @@ impl TerminalModel {
                     title: reported.title,
                     message: reported.message,
                 }),
+                TerminalEvent::AgentSettled => updates.push(TerminalUpdate::AgentSettled(pane)),
                 // The enum is `#[non_exhaustive]`. A shell asking for something
                 // a later version of the emulator learned to report is not an
                 // error here; it is a line in the log and a feature to add.

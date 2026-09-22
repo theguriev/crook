@@ -96,15 +96,23 @@ pub enum TerminalEvent {
     /// have.
     Completions(u64),
     /// A program in the pane said what it is doing, on the channel
-    /// [`crate::agent`] describes — or the command it was running ended and
-    /// took its status with it, which arrives as [`AgentReport::Idle`] with
-    /// no title and no message.
+    /// [`crate::agent`] describes.
     ///
     /// Reported on change only, so a program that says `running` on every
     /// tool call costs one event when it starts and nothing after. A title
     /// or a message is a change on its own: the same `needs-input` twice
     /// with a different question is two questions.
     Agent(Reported),
+    /// The command a running or waiting agent was ended, and took its report
+    /// with it: the status is [`AgentReport::Idle`] again, with no title and
+    /// no message.
+    ///
+    /// Its own event rather than an [`Self::Agent`] the program never sent,
+    /// because the difference is the one thing a person asking "why is this
+    /// row idle" wants to know: the agent said so, or the shell's `D` said it
+    /// for an agent that was interrupted and never got to. The rule for
+    /// which marks end which statuses is `Emulator::settle_agent`'s.
+    AgentSettled,
 }
 
 /// Collects `Term`'s events so they can be handled after parsing, rather than
@@ -769,11 +777,7 @@ impl Emulator {
         );
         if over {
             self.agent = AgentReport::Idle;
-            self.events.push(TerminalEvent::Agent(Reported {
-                status: AgentReport::Idle,
-                title: None,
-                message: None,
-            }));
+            self.events.push(TerminalEvent::AgentSettled);
         }
     }
 
