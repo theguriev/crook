@@ -5,6 +5,41 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.9
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.8...v0.1.9)
+
+### Features
+
+- **tabs:** Mark a tab as waiting again from its menu ([#255](https://github.com/theguriev/crook/pull/255))
+- **window:** Zoom the focused pane over the whole tab ([#257](https://github.com/theguriev/crook/pull/257))
+- **shell:** Set CROOK_PANE_ID in every pane's shell ([#258](https://github.com/theguriev/crook/pull/258))
+- **cli:** Print a skill file that teaches an agent to use Crook with --skill ([#260](https://github.com/theguriev/crook/pull/260))
+- **tabs:** Find tabs by their status word in the search box and the palette ([#259](https://github.com/theguriev/crook/pull/259))
+- **tabs:** Show a tab's number beside its title on request ([#263](https://github.com/theguriev/crook/pull/263))
+- **agent:** Say what a waiting agent is waiting for ([#264](https://github.com/theguriev/crook/pull/264))
+- **window:** Hide the tabs panel and bring it back on one chord ([#265](https://github.com/theguriev/crook/pull/265))
+- **tabs:** Draw a row's status as a glyph on request ([#266](https://github.com/theguriev/crook/pull/266))
+- **cli:** Print the installed plugins as JSON with --plugins --json ([#267](https://github.com/theguriev/crook/pull/267))
+- **agent:** Print hooks for codex, gemini, copilot and opencode ([#268](https://github.com/theguriev/crook/pull/268))
+- **tabs:** Roll the worst member's status up to a folded group's heading ([#269](https://github.com/theguriev/crook/pull/269))
+- **tabs:** Say why a row's dot is what it is from its menu ([#270](https://github.com/theguriev/crook/pull/270))
+
+### Fixes
+
+- **session:** Keep a copy of a session file that did not read whole ([#254](https://github.com/theguriev/crook/pull/254))
+- **links:** Follow a URL the terminal folded onto the next row ([#256](https://github.com/theguriev/crook/pull/256))
+- **release:** Send a notarization upload again when it stalls ([#261](https://github.com/theguriev/crook/pull/261))
+- **tabs:** Spell a test's attention as the enum #270 made it ([#271](https://github.com/theguriev/crook/pull/271), [#270](https://github.com/theguriev/crook/issues/270))
+
+### Documentation
+
+- **skill:** Say what CROOK_PANE_ID is for, and what it is not ([#262](https://github.com/theguriev/crook/pull/262))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.8
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.7...v0.1.8)
