@@ -118,8 +118,10 @@ Nineteen features, and the page that configures them:
   else the directory it sits in. A number is what is left when a pane has no name, no program
   and nowhere to be, which is nowhere anybody works.
   They live in a panel down the left edge, and a **View options** menu — the panel's own
-  secondary click, on the empty space the list leaves — says what a row of them shows. Under
-  that space is a `+`, which is where Warp's browser puts the one that opens another tab.
+  secondary click, on the empty space the list leaves — says what a row of them shows: which
+  fact it leads with, what its second line says, which chips it carries, whether hovering it
+  opens a card, and the tab's number, which is the one `cmd-4` means once the tabs are named.
+  Under that space is a `+`, which is where Warp's browser puts the one that opens another tab.
   Above the list is a **search box**, Telegram's way round: it
   filters the rows by what a tab is running, where it is working, the branch it is on and its
   status word — `waiting` is the amber rows, and `running`, `failed` and `idle` are the dot's —

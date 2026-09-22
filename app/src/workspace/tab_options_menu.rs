@@ -5,7 +5,9 @@
 //! column. Every number in here is Warp's
 //! (`app/src/workspace/view/vertical_tabs.rs:5733`), because the menu is
 //! Warp's; the two places Crook deliberately differs are marked where they
-//! happen.
+//! happen. One row is Crook's own and sits with the last section: "Show tab
+//! numbers", which is the only way to see which tab `cmd-4` means once the
+//! tabs are named, and which Warp's rows have no key for.
 //!
 //! One menu, and it knows nothing about where it opens. Warp hangs it off a
 //! gear and has two copies of this function for the two layouts that gear can
@@ -228,13 +230,22 @@ pub(super) fn render(workspace: &Workspace) -> Box<dyn Element> {
     }
 
     column.add_child(divider());
-    // The one row with no header above it, and the only option every state of
-    // the menu shows.
+    // The rows with no header above them, and the only options every state of
+    // the menu shows. The number goes on a row's title line in both
+    // densities, which is why it is not under Expanded's "Show".
     column.add_child(check_row(
         "Show details on hover",
         options.show_details_on_hover,
         menu.details_on_hover.clone(),
         OptionsAction::ToggleShowDetailsOnHover,
+        None,
+        ui,
+    ));
+    column.add_child(check_row(
+        "Show tab numbers",
+        options.show_tab_numbers,
+        menu.tab_numbers.clone(),
+        OptionsAction::ToggleShowTabNumbers,
         None,
         ui,
     ));

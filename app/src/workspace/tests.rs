@@ -2679,8 +2679,8 @@ fn clicking_an_option_changes_it_and_leaves_the_menu_up() {
 
     let rows = menu_option_boxes(&harness.frame());
     // Compact, so: three "Pane title as" rows, two "Additional metadata" rows,
-    // and "Show details on hover".
-    assert_eq!(rows.len(), 6, "the Compact menu draws six option rows");
+    // "Show details on hover" and "Show tab numbers".
+    assert_eq!(rows.len(), 7, "the Compact menu draws seven option rows");
 
     // "Working Directory", the second of the three title options.
     harness.click(center(rows[1]), MouseButton::Left);
@@ -2966,6 +2966,177 @@ fn the_hover_card_shows_the_chips_the_row_was_told_to_hide() {
         chip_boxes(&scene).len(),
         1,
         "the row kept its chip, or the card lost it"
+    );
+}
+
+/// The title line of each visible panel row, top to bottom: the topmost line
+/// of text inside the row's box.
+fn panel_title_lines(scene: &Scene) -> Vec<String> {
+    panel_rows(scene)
+        .into_iter()
+        .map(|row| {
+            text_lines(scene, |position| row.contains_point(position))
+                .into_iter()
+                .next()
+                .map(|(_, line)| line)
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+impl Harness {
+    /// Names every tab something without a digit in it, so a number on a row
+    /// can only be the row's own.
+    fn name_tabs(&mut self, names: &[&str]) {
+        let panes = self.pane_ids();
+        assert_eq!(panes.len(), names.len(), "one name per pane");
+        for (pane, name) in panes.into_iter().zip(names) {
+            self.update_session(pane, |session| {
+                session.derived_title = Some((*name).to_owned());
+            });
+        }
+    }
+}
+
+#[test]
+fn show_tab_numbers_leads_every_row_with_its_place_in_the_strip() {
+    // The stub shaper draws no glyph for a gap, so a title line reads as the
+    // number run straight into the name — which is what makes "starts with"
+    // an assertion about where the number was drawn rather than that it was
+    // drawn somewhere.
+    let mut harness = Harness::panel(3);
+    harness.name_tabs(&["kettle", "mug", "spoon"]);
+    assert!(!harness.options().show_tab_numbers, "off out of the box");
+
+    let off = harness.frame();
+    let heights: Vec<f32> = tab_boxes(&off).iter().map(|row| row.height()).collect();
+    assert_eq!(panel_title_lines(&off), vec!["kettle", "mug", "spoon"]);
+
+    harness.dispatch_option(OptionsAction::ToggleShowTabNumbers);
+    let on = harness.frame();
+    assert_eq!(panel_title_lines(&on), vec!["1kettle", "2mug", "3spoon"]);
+    assert_eq!(
+        tab_boxes(&on)
+            .iter()
+            .map(|row| row.height())
+            .collect::<Vec<_>>(),
+        heights,
+        "the number changed a row's height"
+    );
+
+    // And in the other density, on the same line as the title.
+    harness.dispatch_option(OptionsAction::SetDensity(Density::Expanded));
+    assert_eq!(
+        panel_title_lines(&harness.frame()),
+        vec!["1kettle", "2mug", "3spoon"]
+    );
+
+    harness.dispatch_option(OptionsAction::ToggleShowTabNumbers);
+    assert_eq!(
+        panel_title_lines(&harness.frame()),
+        vec!["kettle", "mug", "spoon"],
+        "turning the option off left a number on a row"
+    );
+}
+
+#[test]
+fn a_tab_past_the_ninth_still_shows_its_number() {
+    // The chords stop at nine and the numbers do not: a list read aloud
+    // needs the tenth row to say ten. Twelve rows are more than the window
+    // shows, and selecting the last tab is what scrolls it into view.
+    let mut harness = Harness::panel(12);
+    harness.name_tabs(&["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"]);
+    harness.dispatch_option(OptionsAction::ToggleShowTabNumbers);
+    harness.frame();
+    harness.run_command("crook/window/select-tab-1");
+    harness.frame();
+    harness.run_command("crook/window/select-last-tab");
+
+    let lines = panel_title_lines(&harness.frame());
+    assert_eq!(
+        lines.last().map(String::as_str),
+        Some("12l"),
+        "the twelfth row is not numbered twelve: {lines:?}"
+    );
+}
+
+#[test]
+fn the_number_on_a_row_is_the_number_the_chord_selects_it_by() {
+    // A group of the first two tabs, and a split in the last: the number is
+    // the tab's place in the strip and nothing else, so a group's members
+    // count on from where the strip is rather than from one, and both rows
+    // of a split tab carry the tab's number. Checked against the chord
+    // itself rather than against `index_of`, since the chord is the thing
+    // the number exists to be read off for.
+    let (mut harness, _) = Harness::grouped_panel(3);
+    harness.name_tabs(&["kettle", "mug", "spoon", "fork"]);
+    harness.run_command("crook/window/select-last-tab");
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    harness.name_tabs(&["kettle", "mug", "spoon", "fork", "knife"]);
+    harness.dispatch_option(OptionsAction::ToggleShowTabNumbers);
+
+    assert_eq!(
+        panel_title_lines(&harness.frame()),
+        vec!["1kettle", "2mug", "3spoon", "4fork", "4knife"],
+        "the rows are not numbered the way the strip counts"
+    );
+
+    for (command, number) in [
+        ("crook/window/select-tab-1", "1"),
+        ("crook/window/select-tab-2", "2"),
+        ("crook/window/select-tab-3", "3"),
+        ("crook/window/select-tab-4", "4"),
+        ("crook/window/select-last-tab", "4"),
+    ] {
+        harness.run_command(command);
+        let scene = harness.frame();
+        let selected = selected_panel_rows(&scene);
+        assert_eq!(selected.len(), 1, "one selected row after {command}");
+        let line = text_lines(&scene, |position| selected[0].contains_point(position))
+            .into_iter()
+            .next()
+            .map(|(_, line)| line)
+            .unwrap_or_default();
+        assert!(
+            line.starts_with(number),
+            "{command} selected the row reading {line:?}, not the one numbered {number}"
+        );
+    }
+}
+
+#[test]
+fn the_tab_numbers_row_toggles_from_the_menu_and_from_the_page_alike() {
+    let scratch = Scratch::new();
+    let mut harness = Harness::with_settings(1, scratch.settings());
+    harness.dispatch_option(OptionsAction::TogglePopup);
+
+    // The last row of the menu, under "Show details on hover", in either
+    // density.
+    let rows = menu_option_boxes(&harness.frame());
+    harness.click(center(rows[6]), MouseButton::Left);
+    assert!(
+        harness.options().show_tab_numbers,
+        "the menu row did not toggle it"
+    );
+    assert_eq!(checked_rows(&harness.frame()).last(), Some(&6));
+    // Saved with the others, under its own key.
+    scratch.written_containing("\"show_tab_numbers\": true");
+
+    harness.dispatch_option(OptionsAction::TogglePopup);
+    harness.open_settings_page();
+    harness.scroll_settings_page(-100.);
+    let switches = settings_switch_boxes(&harness.frame());
+    // Fourth from the end: the detail card's is last, and the two chip
+    // switches sit between it and this one.
+    harness.click(center(switches[switches.len() - 4]), MouseButton::Left);
+    assert!(
+        !harness.options().show_tab_numbers,
+        "the page's switch is not the same option"
+    );
+    assert_eq!(
+        harness.saved_options(),
+        harness.options(),
+        "the page wrote something the menu did not"
     );
 }
 
@@ -5847,8 +6018,9 @@ fn the_menu_marks_the_chosen_option_and_reserves_the_slot_on_the_others() {
 
     let scene = harness.frame();
     let rows = menu_option_boxes(&scene);
-    assert_eq!(rows.len(), 6, "the Compact menu draws six option rows");
-    // "Command / Conversation", "Branch" as the subtitle, and the hover row.
+    assert_eq!(rows.len(), 7, "the Compact menu draws seven option rows");
+    // "Command / Conversation", "Branch" as the subtitle, and the hover row;
+    // the tab numbers are off.
     assert_eq!(checked_rows(&scene), vec![0, 3, 5]);
 
     let checked = row_label_x(&scene, rows[0]);
@@ -5886,8 +6058,9 @@ fn every_show_toggle_carries_its_own_check() {
 
     let scene = harness.frame();
     let rows = menu_option_boxes(&scene);
-    // Three "Pane title as", "PR link", "Diff stats", and the hover row.
-    assert_eq!(rows.len(), 6, "the Expanded menu draws six option rows");
+    // Three "Pane title as", "PR link", "Diff stats", the hover row, and the
+    // tab numbers — which are off, and the one row here that is not a "Show".
+    assert_eq!(rows.len(), 7, "the Expanded menu draws seven option rows");
     assert_eq!(checked_rows(&scene), vec![0, 3, 4, 5], "every Show is on");
 
     harness.click(center(rows[4]), MouseButton::Left);

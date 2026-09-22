@@ -376,8 +376,13 @@ pub struct TabOptions {
     /// "Show: Diff stats" — the chip counting added and removed lines.
     pub show_diff_stats: bool,
     /// "Show details on hover" — whether hovering a row opens its detail card.
-    /// The only option the menu shows in every state.
+    /// One of the two options the menu shows in every state.
     pub show_details_on_hover: bool,
+    /// "Show tab numbers" — whether a row leads with the tab's place in the
+    /// strip, which is the number `cmd-1`…`cmd-8` (`alt-` off macOS) selects
+    /// it by. Crook's own, with no Warp key behind it: once tabs are named the
+    /// chord is blind without it.
+    pub show_tab_numbers: bool,
 }
 
 impl Default for TabOptions {
@@ -386,8 +391,10 @@ impl Default for TabOptions {
     /// one place Crook's defaults deliberately differ from Warp's, and that
     /// is the window's shape rather than an option here.
     ///
-    /// The three booleans are why this is written out rather than derived —
-    /// `bool`'s default is `false`, and Warp's is `true` for all three.
+    /// The three "Show" booleans are why this is written out rather than
+    /// derived — `bool`'s default is `false`, and Warp's is `true` for all
+    /// three. The tab numbers are off: they are Crook's own, and a fresh
+    /// install should open looking like Warp's.
     fn default() -> Self {
         Self {
             granularity: Granularity::default(),
@@ -397,6 +404,7 @@ impl Default for TabOptions {
             show_pr_link: true,
             show_diff_stats: true,
             show_details_on_hover: true,
+            show_tab_numbers: false,
         }
     }
 }
@@ -1168,6 +1176,7 @@ mod tests {
             show_pr_link: false,
             show_diff_stats: false,
             show_details_on_hover: false,
+            show_tab_numbers: true,
         }
     }
 
@@ -1211,6 +1220,8 @@ mod tests {
         assert!(options.show_pr_link);
         assert!(options.show_diff_stats);
         assert!(options.show_details_on_hover);
+        // Crook's own, and off: a fresh install opens looking like Warp.
+        assert!(!options.show_tab_numbers);
     }
 
     #[test]
@@ -1403,6 +1414,9 @@ mod tests {
                 "show_details_on_hover",
                 "show_diff_stats",
                 "show_pr_link",
+                // Crook's own: the number a row leads with, which Warp's rows
+                // never carry.
+                "show_tab_numbers",
                 // The chosen theme's name, which is a string rather than an
                 // option with a type: see `Settings::theme`.
                 "theme",
@@ -1588,11 +1602,11 @@ mod tests {
         let written: Map<String, Value> =
             serde_json::from_str(&contents).expect("the file should be a JSON object");
 
-        // Seven tab options, four general ones and three theme names, and
+        // Eight tab options, four general ones and three theme names, and
         // nothing else: the 8KB key the file started with is gone. The font
         // family is not among them — an absent key is what "no preference"
         // is, so a save writes no `font_family` unless one was chosen.
-        assert_eq!(14, written.len());
+        assert_eq!(15, written.len());
         assert!(!contents.contains("padding"));
         assert_eq!(
             everything_flipped(),
