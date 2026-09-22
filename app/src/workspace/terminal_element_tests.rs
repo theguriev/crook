@@ -541,3 +541,87 @@ fn a_row_of_no_columns_answers_zero_rather_than_underflowing() {
     assert_eq!(column_at(800., 10., 0), (0, CellSide::Right));
     assert_eq!(column_at(-40., 10., 0), (0, CellSide::Left));
 }
+
+/// A URL the terminal folded onto the next row of the grid is one link from a
+/// pointer on either row, and underlines both. The fold here is the flag set
+/// by hand, because the scan reads the flag and nothing else; what the
+/// emulator sets it for is pinned in `crook_terminal::rows`.
+#[test]
+fn a_folded_url_on_the_grid_is_one_link_from_either_row() {
+    use crate::pane_link::{LinkCells, LinkRow};
+    use crookui_core::event::Modifiers;
+    use crookui_core::geometry::{Point, ZIndex};
+
+    let url = "https://example.com/abcdefghijklmnop";
+    let mut grid = snapshot(&[&url[..20], &url[20..], "https://b.test"], 20);
+    grid.cells[19].flags = CellFlags::WRAPLINE;
+
+    let font = font();
+    let metrics = font.metrics();
+    let mut element = TerminalElement::new(Arc::new(grid), font);
+    element.size = Some(vec2f(20. * metrics.width, 3. * metrics.height));
+    element.origin = Some(Point::from_vec2f(Vector2F::zero(), ZIndex::Normal(0)));
+
+    // The modifier that follows a link is the platform's — Command on macOS,
+    // Control off it — the same split `opens_links` makes, and the test runs
+    // on both.
+    let follow = if cfg!(target_os = "macos") {
+        Modifiers {
+            cmd: true,
+            ..Default::default()
+        }
+    } else {
+        Modifiers {
+            ctrl: true,
+            ..Default::default()
+        }
+    };
+    let at = |row: usize, column: usize| {
+        vec2f(
+            (column as f32 + 0.5) * metrics.width,
+            (row as f32 + 0.5) * metrics.height,
+        )
+    };
+
+    let whole = vec![
+        LinkCells {
+            row: LinkRow::Viewport(0),
+            start: 0,
+            len: 20,
+        },
+        LinkCells {
+            row: LinkRow::Viewport(1),
+            start: 0,
+            len: 16,
+        },
+    ];
+    for (row, column) in [(0, 5), (1, 3)] {
+        let link = element
+            .link_at(at(row, column), follow)
+            .unwrap_or_else(|| panic!("row {row} has no link under the pointer"));
+        assert_eq!(link.uri, url, "row {row} found a cut-off URL");
+        assert_eq!(
+            link.cells, whole,
+            "row {row} did not map the link onto both rows"
+        );
+    }
+
+    // The row below was printed with a newline before it: a link of its own.
+    let below = element
+        .link_at(at(2, 3), follow)
+        .expect("the hard-wrapped row's link");
+    assert_eq!(below.uri, "https://b.test");
+    assert_eq!(
+        below.cells,
+        vec![LinkCells {
+            row: LinkRow::Viewport(2),
+            start: 0,
+            len: 14,
+        }]
+    );
+
+    assert!(
+        element.link_at(at(0, 5), Modifiers::default()).is_none(),
+        "without the chord key the pointer is selecting, not following"
+    );
+}

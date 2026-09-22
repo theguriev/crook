@@ -75,7 +75,6 @@
 use std::ops::Range;
 use std::sync::Arc;
 
-use crook_terminal::url::{self, Url};
 use crook_terminal::{
     BlockId, CellFlags, CellSide, Cursor, CursorShape, MouseEventKind, Rgb, RowCombining, Rows,
     SelectionKind, Snapshot, SnapshotCell,
@@ -96,7 +95,7 @@ use crookui_core::scene::Scene;
 use crate::browser;
 use crate::clipboard::Clipboard;
 use crate::input_keys::Platform;
-use crate::pane_link::{LinkRow, LinkSpan, PaneLink};
+use crate::pane_link::{self, LinkRow, LinkSpan, PaneLink};
 use crate::pane_selection::PaneSelection;
 use crate::pane_surface;
 use crate::selection::{Anchor, Blocks, Cells, Item, Region, Selection, grid_first_row};
@@ -272,22 +271,14 @@ impl TerminalElement {
             return false;
         };
 
-        let found = self
-            .link_at(position, modifiers)
-            .map(|(row, url)| LinkSpan {
-                row: LinkRow::Viewport(row),
-                start: url.start,
-                len: url.len,
-                uri: url.uri,
-            });
-        links.set(found)
+        links.set(self.link_at(position, modifiers))
     }
 
-    /// The URL under a window position, and the viewport row it is on.
+    /// The URL under a window position, on the viewport rows it covers.
     ///
     /// `None` unless the link modifier is held, which is what keeps this scan
     /// off every ordinary pointer move.
-    fn link_at(&self, position: Vector2F, modifiers: Modifiers) -> Option<(usize, Url)> {
+    fn link_at(&self, position: Vector2F, modifiers: Modifiers) -> Option<LinkSpan> {
         if !opens_links(modifiers) {
             return None;
         }
@@ -302,21 +293,20 @@ impl TerminalElement {
         // by. A selection's anchor names a row of the text instead, which is a
         // different number the moment anything has scrolled.
         let (row, column) = self.viewport_cell_at(position)?;
-        if row >= self.snapshot.rows {
-            return None;
-        }
-        // One `char` per cell, which is what `url::at` counts in.
-        let text: String = self.snapshot.row(row).iter().map(|cell| cell.c).collect();
-        let url = url::at(&text, column)?;
-        Some((row, url))
+        let rows = Rows::Live {
+            snapshot: &self.snapshot,
+            top: 0,
+            count: self.snapshot.rows,
+        };
+        pane_link::find(&rows, row, column, LinkRow::Viewport)
     }
 
     /// Opens the link under the pointer, reporting whether there was one.
     fn open_link(&self, position: Vector2F, modifiers: Modifiers) -> bool {
-        let Some((_, url)) = self.link_at(position, modifiers) else {
+        let Some(link) = self.link_at(position, modifiers) else {
             return false;
         };
-        browser::open(&url.uri)
+        browser::open(&link.uri)
     }
 
     /// The grid as the one block a selection addresses.
@@ -752,14 +742,10 @@ impl Element for TerminalElement {
         // Over the grid, because it is an affordance rather than something the
         // shell printed: it appears when the chord key goes down and goes away
         // when it comes up, and the cells under it are unchanged.
-        if let Some(link) = self
-            .links
-            .as_ref()
-            .and_then(|links| links.on_viewport_rows(self.snapshot.rows))
-        {
-            let LinkRow::Viewport(row) = link.row else {
-                return;
-            };
+        let Some(links) = self.links.as_ref() else {
+            return;
+        };
+        for (row, link) in links.on_viewport_rows(self.snapshot.rows) {
             paint_link_rule(
                 origin + vec2f(0., row as f32 * self.font.metrics().height),
                 link.start,
