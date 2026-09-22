@@ -83,7 +83,7 @@ jobs:
         run: |
           set -eu
           failed=0
-          for file in script/*; do
+          for file in script/* script/hooks/*; do
             [ -f "$file" ] || continue
             head -1 "$file" | grep -q '^#!/bin/sh' || continue
             for parser in sh bash; do
@@ -200,6 +200,9 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: ${{ inputs.tag || github.ref }}
+          # The whole history and every tag: the changelog fallback below walks
+          # from the previous release tag to this one.
+          fetch-depth: 0
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -305,6 +308,9 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: ${{ inputs.tag || github.ref }}
+          # The whole history and every tag: the changelog fallback below walks
+          # from the previous release tag to this one.
+          fetch-depth: 0
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -326,14 +332,50 @@ jobs:
           echo "--- SHA256SUMS ---"
           cat SHA256SUMS
 
+      # What changed, from CHANGELOG.md. script/release writes the `## vX.Y.Z`
+      # section there from the commits since the previous tag, in the same
+      # commit the tag sits on, so the page and the file cannot disagree. A tag
+      # made by hand has no section; then the same generator runs here over the
+      # same range, which is the next best thing and says so.
+      - name: Read the changelog
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -eu
+          if [ -f CHANGELOG.md ] && grep -q "^## $TAG\$" CHANGELOG.md; then
+            # From the section's own heading up to the next one, heading dropped:
+            # the release page has its title already.
+            awk -v tag="$TAG" '
+              $0 == "## " tag { on = 1; next }
+              on && /^## / { exit }
+              on { print }
+            ' CHANGELOG.md > changes.md
+            echo "==> from CHANGELOG.md"
+          else
+            previous=$(git tag --list 'v[0-9]*' --sort=-v:refname | grep -vx "$TAG" | head -1)
+            echo "==> no section for $TAG in CHANGELOG.md; generating from $previous..$TAG"
+            npx --yes changelogen@0.6.2 --from "$previous" --to "$TAG" -r "${TAG#v}" --no-output \
+              | sed '1,/^\[compare changes\]/d' > changes.md
+            printf '\n_Generated on the runner: this tag was not cut with `script/release`._\n' >> changes.md
+          fi
+          cat changes.md
+
       - name: Write the release notes
         shell: bash
         env:
           TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           {
+            echo "A terminal whose unit of work is an agent."
+            echo
+            echo "## What changed"
+            # The generator's `### Features` and so on already sit one level
+            # under a `##`, and the compare link stays where it put it.
+            cat changes.md
+            echo
+            echo "The whole history is in [\`CHANGELOG.md\`](https://github.com/${GITHUB_REPOSITORY}/blob/${TAG}/CHANGELOG.md)."
             cat <<'NOTES'
-          A terminal whose unit of work is an agent.
 
           ## Install
 

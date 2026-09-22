@@ -1,0 +1,19 @@
+#!/bin/sh
+#
+# Refuse a commit whose title the changelog cannot read.
+#
+# The release notes are generated from commit titles by changelogen, which
+# understands exactly one shape — Conventional Commits:
+#
+#   type(scope): what changed        scope optional; `!` before the colon marks a break
+#
+# with `type` one of the keys under "types" in changelog.config.json. A title in
+# any other shape is not an error to the generator, it is silently dropped, and
+# a release that lists half of what went into it is worse than one that lists
+# none. So the shape is checked where the title is written.
+#
+# Installed with:   git config core.hooksPath script/hooks
+# The same check runs on every pull request (.github/workflows/commits.yml),
+# through script/commit-lint, which is what this hook calls.
+set -eu
+exec "$(dirname "$0")/../commit-lint" --file "$1"

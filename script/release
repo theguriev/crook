@@ -1,0 +1,113 @@
+#!/bin/sh
+#
+# Cut a release: bump the version, write its changelog, commit, tag.
+#
+#   ./script/release 0.1.8                  # everything below, leaving the tag unpushed
+#   ./script/release 0.1.8 --push           # and push main with the tag, which starts release.yml
+#   ./script/release 0.1.8 --dry-run        # print the changelog it would write and stop
+#   ./script/release 0.1.8 --allow-untyped  # release over commits the changelog cannot list
+#
+# What one release is, in order:
+#
+#   1. The tree is clean, on main, and the version is newer than the last tag.
+#   2. `version` under [workspace.package] in Cargo.toml becomes the new one and
+#      Cargo.lock is refreshed, because release.yml refuses a tag whose manifest
+#      disagrees with it.
+#   3. changelogen reads every commit since the previous v* tag and prepends a
+#      `## vX.Y.Z` section to CHANGELOG.md, grouped by the types in
+#      changelog.config.json. release.yml lifts that section into the release
+#      notes, so the file in the repository and the release page say the same.
+#   4. One commit, `chore(release): vX.Y.Z`, and an annotated tag on it.
+#
+# The generator reads only Conventional Commit titles and drops the rest without
+# a word. A release whose range holds such commits is refused here, listing
+# them, unless --allow-untyped says the omission is understood — which is the
+# case exactly once, for the release that spans the change of convention.
+#
+# changelogen is pinned rather than @latest: the notes for v0.1.8 should not
+# change shape because a generator release happened in between. Node is the
+# only thing it needs; there is no package.json here and there will not be one.
+set -eu
+
+CHANGELOGEN="changelogen@0.6.2"
+
+here=$(cd "$(dirname "$0")/.." && pwd)
+cd "$here"
+
+version=${1:-}
+case "$version" in
+  [0-9]*.[0-9]*.[0-9]*) ;;
+  *) echo "usage: script/release X.Y.Z [--push] [--dry-run] [--allow-untyped]" >&2; exit 2 ;;
+esac
+shift
+push=; dry=; allow_untyped=
+for arg in "$@"; do
+  case "$arg" in
+    --push) push=1 ;;
+    --dry-run) dry=1 ;;
+    --allow-untyped) allow_untyped=1 ;;
+    *) echo "release: unknown option $arg" >&2; exit 2 ;;
+  esac
+done
+tag="v$version"
+
+fail() { echo "release: $1" >&2; exit 1; }
+
+command -v npx >/dev/null || fail "node is needed to run changelogen — https://nodejs.org"
+[ "$(git branch --show-current)" = main ] || fail "release from main, not $(git branch --show-current)"
+[ -z "$(git status --porcelain)" ] || fail "the tree is not clean"
+git rev-parse -q --verify "refs/tags/$tag" >/dev/null && fail "$tag already exists"
+
+# The previous release is the newest v* tag; the crate tags (crook_wasm-v0.8.0)
+# are a different thing and are skipped on purpose, which is also why
+# changelogen is never left to pick "the latest tag" by itself.
+previous=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -1)
+[ -n "$previous" ] || fail "no previous v* tag to write the changelog from"
+range="$previous..HEAD"
+[ "$(git rev-list --count "$range")" -gt 0 ] || fail "nothing since $previous"
+
+# Newer than the last one, by sort -V, so 0.1.10 goes after 0.1.9.
+newest=$(printf '%s\n%s\n' "${previous#v}" "$version" | sort -V | tail -1)
+[ "$newest" = "$version" ] && [ "$version" != "${previous#v}" ] \
+  || fail "$version is not newer than $previous"
+
+echo "==> $previous → $tag, $(git rev-list --count "$range") commits"
+
+if ! ./script/commit-lint "$range"; then
+  if [ -n "$allow_untyped" ]; then
+    echo "==> --allow-untyped: the titles above will be missing from the notes"
+  else
+    fail "those would be dropped from the changelog; fix the titles or pass --allow-untyped"
+  fi
+fi
+
+if [ -n "$dry" ]; then
+  echo "==> The changelog section, not written:"
+  npx --yes "$CHANGELOGEN" --from "$previous" --to HEAD -r "$version" --no-output
+  exit 0
+fi
+
+echo "==> Setting Cargo.toml to $version"
+# Only the workspace version line: every crate says version.workspace = true.
+sed -i.bak "/^\[workspace\.package\]/,/^\[/ s/^version *= *\"[^\"]*\"/version = \"$version\"/" Cargo.toml
+rm -f Cargo.toml.bak
+grep -q "^version = \"$version\"" Cargo.toml || fail "could not set the version in Cargo.toml"
+cargo metadata --format-version 1 >/dev/null
+
+echo "==> Writing CHANGELOG.md"
+npx --yes "$CHANGELOGEN" --from "$previous" --to HEAD -r "$version" --output CHANGELOG.md >/dev/null
+grep -q "^## $tag" CHANGELOG.md || fail "changelogen wrote no '## $tag' section"
+
+git add Cargo.toml Cargo.lock CHANGELOG.md
+git commit -q -m "chore(release): $tag"
+git tag -a "$tag" -m "$tag"
+echo "==> Committed and tagged $tag"
+sed -n "/^## $tag/,/^## v/p" CHANGELOG.md | sed '$d'
+
+if [ -n "$push" ]; then
+  echo "==> Pushing main and $tag"
+  git push origin main "$tag"
+  echo "==> release.yml is building https://github.com/theguriev/crook/releases/tag/$tag"
+else
+  echo "==> Not pushed. When it looks right:  git push origin main $tag"
+fi

@@ -1,0 +1,73 @@
+#!/bin/sh
+#
+# Check that commit titles are in the one shape the changelog generator reads.
+#
+#   ./script/commit-lint --file .git/COMMIT_EDITMSG    # one message, from the commit-msg hook
+#   ./script/commit-lint v0.1.7..HEAD                  # every commit in a range, from CI or by hand
+#   ./script/commit-lint --title "fix(tabs): keep the row"   # one title, e.g. a pull request's
+#
+# The shape is Conventional Commits, `type(scope)!: description`, where the type
+# is one of the keys under "types" in changelog.config.json. Merge commits and
+# reverts are let through: git writes those titles, and neither is a change the
+# notes should list. Prints every offender with the reason and exits 1 if there
+# was one, so a range check names all of them at once rather than one per run.
+set -eu
+
+here=$(cd "$(dirname "$0")/.." && pwd)
+types=$(sed -n 's/^    "\([a-z]*\)": {.*/\1/p' "$here/changelog.config.json" | tr '\n' '|' | sed 's/|$//')
+[ -n "$types" ] || { echo "commit-lint: no types found in changelog.config.json" >&2; exit 2; }
+
+# One title. Prints nothing and returns 0 when it passes.
+check() {
+  title=$1
+  case "$title" in
+    "Merge "*|"Revert "*|"fixup! "*|"squash! "*) return 0 ;;
+  esac
+  if printf '%s\n' "$title" | grep -Eq "^($types)(\([^)]+\))?!?: [^ ].*"; then
+    return 0
+  fi
+  if printf '%s\n' "$title" | grep -Eq "^[a-z]+(\([^)]+\))?!?: "; then
+    echo "  unknown type — allowed: $(echo "$types" | tr '|' ' ')"
+  else
+    echo "  not 'type(scope): description' — see script/hooks/commit-msg"
+  fi
+  return 1
+}
+
+status=0
+case "${1:-}" in
+  --file)
+    # The title is the first line that is not a comment; git strips those
+    # comment lines itself, but the hook sees them.
+    title=$(grep -v '^#' "$2" | sed -n '1p')
+    if ! out=$(check "$title"); then
+      printf 'commit-lint: refused "%s"\n%s\n' "$title" "$out" >&2
+      status=1
+    fi
+    ;;
+  --title)
+    if ! out=$(check "$2"); then
+      printf 'commit-lint: "%s"\n%s\n' "$2" "$out" >&2
+      status=1
+    fi
+    ;;
+  "")
+    echo "usage: script/commit-lint --file <msg> | --title <title> | <range>" >&2
+    exit 2
+    ;;
+  *)
+    # A range. Hashes and titles come out of git separated by a tab, one per line.
+    git -C "$here" log --format='%h	%s' "$1" | while IFS='	' read -r hash title; do
+      if ! out=$(check "$title"); then
+        printf '%s  %s\n%s\n' "$hash" "$title" "$out"
+      fi
+    done > "${TMPDIR:-/tmp}/commit-lint.$$"
+    if [ -s "${TMPDIR:-/tmp}/commit-lint.$$" ]; then
+      echo "commit-lint: these titles the changelog would drop:" >&2
+      cat "${TMPDIR:-/tmp}/commit-lint.$$" >&2
+      status=1
+    fi
+    rm -f "${TMPDIR:-/tmp}/commit-lint.$$"
+    ;;
+esac
+exit $status

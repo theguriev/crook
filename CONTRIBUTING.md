@@ -53,6 +53,63 @@ local commands on one machine cannot cover.
 If `cargo metadata --locked` fails, `Cargo.lock` is out of date with a manifest. Run
 `cargo check` and commit the updated lockfile.
 
+## Commit titles are what the release notes say
+
+Every commit title is a [Conventional Commit](https://www.conventionalcommits.org/en/v1.0.0/):
+
+```
+type(scope): what changed
+```
+
+The scope is optional and names the part of Crook — `tabs`, `find`, `palette`, `plugins`,
+`api` for the plugin API crate. A `!` before the colon marks a change that breaks something,
+and the body says what. The types are the keys under `types` in `changelog.config.json`:
+
+| type | what it lists as |
+| --- | --- |
+| `feat` | Features |
+| `fix` | Fixes |
+| `perf` | Performance |
+| `refactor` | Refactors |
+| `docs` | Documentation |
+| `test` | Tests |
+| `build` | Build |
+| `ci` | CI |
+| `chore` | Chores |
+
+The reason is mechanical. `script/release` writes the section for a version into
+`CHANGELOG.md` from the commits since the previous tag, with
+[changelogen](https://github.com/unjs/changelogen), and `release.yml` lifts that section into
+the release page. The generator reads exactly this shape and drops every other title without
+a word, so a title outside it is a change the release will not mention. The check runs in
+three places so that it is caught where the title is written rather than on release day:
+
+```sh
+git config core.hooksPath script/hooks    # once per clone: refuses the commit locally
+./script/commit-lint v0.1.7..HEAD         # a range, by hand
+```
+
+and `.github/workflows/commits.yml` on every pull request, over its commits and its title —
+the title because a squash merge makes it the commit `main` gets.
+
+The description after the colon is the same sentence it always was: what changed, in the
+imperative, specific enough to mean something on a release page on its own.
+`fix(find): count the open block's matches too` says more than `fix: find bug`.
+
+## Cutting a release
+
+```sh
+./script/release 0.1.8            # bump, changelog, commit, tag; nothing pushed
+./script/release 0.1.8 --dry-run  # print the section it would write and stop
+./script/release 0.1.8 --push     # and push main with the tag, which starts release.yml
+```
+
+From a clean `main`, with Node installed for the generator. The script sets the workspace
+`version` in `Cargo.toml`, refreshes `Cargo.lock`, prepends `## vX.Y.Z` to `CHANGELOG.md`,
+commits the three as `chore(release): vX.Y.Z` and tags it. It refuses a range holding
+titles the generator would drop; `--allow-untyped` is the way past that, and is needed exactly
+once, for the release that spans the change of convention.
+
 ## Comments say why, never what
 
 A comment that restates the code beneath it is noise that has to be maintained. Delete it.
