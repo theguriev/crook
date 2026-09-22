@@ -7137,16 +7137,18 @@ impl View for Workspace {
         // the window rather than against whatever it happens to hang off, and
         // painted into an overlay layer above every menu the chrome opened.
         //
-        // Built even when there is nothing showing: a contribution that has
-        // nothing to say returns `Empty`, which lays out to nothing and paints
-        // nothing, and the alternative is the workspace knowing which plugin's
-        // surface is up.
-        let overlays = self
+        // Asked even when there is nothing showing: a contribution that has
+        // nothing to say answers `None`, which is no overlay at all, and the
+        // alternative is the workspace knowing which plugin's surface is up.
+        let overlays: Vec<Box<dyn Element>> = self
             .host
             .slots()
             .map(crate::plugins::window::WINDOW_OVERLAY, |build| {
                 build(self, app)
-            });
+            })
+            .into_iter()
+            .flatten()
+            .collect();
         if overlays.is_empty() {
             return window;
         }

@@ -280,7 +280,7 @@ impl Plugin for CommandPalette {
                 // a branch per frame rather than a grouped list built for a
                 // card that is not on screen.
                 if !palette.is_open() {
-                    return Empty::new().finish();
+                    return None;
                 }
                 // The query is read every frame rather than watched, so a
                 // keystroke into the field re-filters the list without
@@ -288,7 +288,7 @@ impl Plugin for CommandPalette {
                 // that the selection has to be put back when the list under it
                 // has: see `rows::showing`.
                 let rows = rows::showing(workspace, &palette, app);
-                list::render(&palette, &rows)
+                Some(list::render(&palette, &rows))
             }
         });
 

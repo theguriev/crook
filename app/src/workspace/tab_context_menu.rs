@@ -71,13 +71,9 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
-use crookui_core::element::SizeConstraint;
 use crookui_core::elements::{MouseStateHandle, ScrollStateHandle, Scrollable, WINDOW_INSET};
-use crookui_core::event::DispatchedEvent;
-use crookui_core::geometry::Point;
 use crookui_core::icons::Lucide;
 use crookui_core::prelude::*;
-use crookui_core::presenter::{EventContext, LayoutContext, PaintContext};
 
 use crook_plugin::ActionName;
 
@@ -323,77 +319,6 @@ impl TabContextMenuState {
         self.selected.borrow_mut().take();
         self.rows.borrow_mut().clear();
     }
-}
-
-/// What a contribution returns when it has nothing to put in the menu.
-///
-/// Not [`Empty`], and the difference is the hairlines. The shell puts a rule
-/// between two neighbours in different bands, so a contribution that answered
-/// "nothing" with an element that merely laid out to nothing would still be
-/// counted as its band's row — and a worktree entry that was absent because
-/// there is no repository would leave a rule at the foot of the menu with
-/// nothing under it.
-///
-/// So the answer says what it is, through the channel
-/// [`Element::parent_data`] exists for: an untyped word from a child to the
-/// particular parent that knows how to read it, which is how an anchored child
-/// tells a [`Stack`] it is anchored. The menu is that parent here, and this is
-/// the one word it understands.
-pub(crate) fn nothing() -> Box<dyn Element> {
-    Box::new(NotARow {
-        child: Empty::new().finish(),
-    })
-}
-
-/// The carrier [`nothing`] hands back: an empty child, and a `parent_data`
-/// that says so.
-struct NotARow {
-    child: Box<dyn Element>,
-}
-
-/// The word itself. Its type is the whole message, so it has no fields.
-struct Absent;
-
-impl Element for NotARow {
-    fn layout(
-        &mut self,
-        constraint: SizeConstraint,
-        ctx: &mut LayoutContext,
-        app: &AppContext,
-    ) -> Vector2F {
-        self.child.layout(constraint, ctx, app)
-    }
-
-    fn paint(&mut self, origin: Vector2F, ctx: &mut PaintContext, app: &AppContext) {
-        self.child.paint(origin, ctx, app);
-    }
-
-    fn dispatch_event(
-        &mut self,
-        event: &DispatchedEvent,
-        ctx: &mut EventContext,
-        app: &AppContext,
-    ) -> bool {
-        self.child.dispatch_event(event, ctx, app)
-    }
-
-    fn size(&self) -> Option<Vector2F> {
-        self.child.size()
-    }
-
-    fn origin(&self) -> Option<Point> {
-        self.child.origin()
-    }
-
-    fn parent_data(&self) -> Option<&dyn std::any::Any> {
-        Some(&Absent)
-    }
-}
-
-/// Whether a contribution said it had nothing to draw.
-fn is_absent(row: &dyn Element) -> bool {
-    row.parent_data()
-        .is_some_and(|data| data.downcast_ref::<Absent>().is_some())
 }
 
 /// One entry, as every contributor draws one.
@@ -691,13 +616,15 @@ pub(super) fn render(workspace: &Workspace, app: &AppContext) -> Box<dyn Element
         .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
 
     let mut last: Option<i32> = None;
-    for (row, order) in rows.into_iter().zip(bands) {
-        // A contribution with nothing to say is not a row, and must not be a
-        // band either: counting it would put a rule under the last entry of a
-        // menu whose final band drew nothing. See `nothing`.
-        if is_absent(row.as_ref()) {
-            continue;
-        }
+    // A contribution with nothing to say is not a row, and must not be a band
+    // either: counting it would put a rule under the last entry of a menu
+    // whose final band drew nothing. Zipped before they are dropped, so the
+    // rows that stay keep their own orders. See [`UiContribution`].
+    let drawn = rows
+        .into_iter()
+        .zip(bands)
+        .filter_map(|(row, order)| row.map(|row| (row, order)));
+    for (row, order) in drawn {
         let band = order.div_euclid(BAND);
         if last.is_some_and(|previous| previous != band) {
             column.add_child(divider());

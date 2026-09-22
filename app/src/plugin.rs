@@ -62,13 +62,23 @@ pub const SIDEBAR_SECTION: SlotId = SlotId::new("sidebar.section");
 pub const SETTINGS_PAGE: SlotId = SlotId::new("settings.page");
 
 /// What a plugin contributes to a slot: something that can build an element
-/// out of the workspace, every frame.
+/// out of the workspace, every frame, or nothing on the frames it has nothing
+/// to say.
 ///
 /// A closure taking `&Workspace` rather than a value captured when the plugin
 /// built, because `View::render` is immutable and runs again for every frame:
 /// a contribution that captured what it wanted to draw would be drawing the
 /// state of the window at the moment the plugin loaded.
-pub type UiContribution = Box<dyn Fn(&Workspace, &AppContext) -> Box<dyn Element>>;
+///
+/// `None` is not the same as an element that draws nothing, and the difference
+/// is a [`Cardinality::List`] slot's spacing: a row of chips puts a gap
+/// between the things in it, and a contribution that returned an empty element
+/// on the frames it had nothing to show would be a gap with nothing on either
+/// side of it — which is exactly what `pane.chips` drew for a pane outside a
+/// repository, where two of the four chips are about a repository. So a
+/// contribution that draws nothing is *not in the row*, and the row is spaced
+/// between what it actually draws.
+pub type UiContribution = Box<dyn Fn(&Workspace, &AppContext) -> Option<Box<dyn Element>>>;
 
 /// What a plugin contributes to a slot that is drawn once per row.
 ///
@@ -78,11 +88,10 @@ pub type UiContribution = Box<dyn Fn(&Workspace, &AppContext) -> Box<dyn Element
 /// asks the same plugin seven questions and "which one is this" is the whole
 /// of what distinguishes them.
 ///
-/// And it may answer `None`, which [`UiContribution`] has no need for: the
-/// header's slot is empty or it is not, whereas a mark per tab is something a
-/// plugin may want on *some* rows — the worktrees, the failures — and nowhere
-/// else. `None` means "as it was": the host draws whatever it would have drawn
-/// with no plugin there at all, rather than a hole where a mark goes.
+/// And its `None` means something [`UiContribution`]'s does not: "as it was",
+/// the host drawing whatever it would have drawn with no plugin there at all,
+/// rather than a hole where a mark goes. A mark per tab is something a plugin
+/// may want on *some* rows — the worktrees, the failures — and nowhere else.
 pub(crate) type RowContribution =
     Box<dyn Fn(&Workspace, &TabRow<'_>, &AppContext) -> Option<Box<dyn Element>>>;
 
@@ -533,12 +542,16 @@ impl Host {
     ///
     /// `order` places it among the others: lower is earlier, and two entries
     /// with the same order keep the order their plugins loaded in.
+    ///
+    /// Answering `None` on a frame is the way to contribute nothing on it: the
+    /// entry keeps its place in the order and takes no room in the slot. See
+    /// [`UiContribution`].
     pub fn contribute(
         &mut self,
         slot: SlotId,
         entry: impl Into<String>,
         order: i32,
-        build: impl Fn(&Workspace, &AppContext) -> Box<dyn Element> + 'static,
+        build: impl Fn(&Workspace, &AppContext) -> Option<Box<dyn Element>> + 'static,
     ) {
         let who = self.who();
         let registration = self.slots.contribute(

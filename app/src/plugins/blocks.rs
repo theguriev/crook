@@ -58,16 +58,16 @@ impl Plugin for Blocks {
         // groups rather than only at the ends. Nothing here relies on the
         // numbers: they are the order the groups read in.
         host.contribute(BLOCK_MENU, "copy", 0, |workspace, _| {
-            block_menu::copy_group(workspace)
+            Some(block_menu::copy_group(workspace))
         });
         host.contribute(BLOCK_MENU, "facts", 10, |workspace, _| {
-            block_menu::facts_group(workspace)
+            Some(block_menu::facts_group(workspace))
         });
         host.contribute(BLOCK_MENU, "run", 20, |workspace, _| {
-            block_menu::run_group(workspace)
+            Some(block_menu::run_group(workspace))
         });
         host.contribute(BLOCK_MENU, "scroll", 30, |workspace, _| {
-            block_menu::scroll_group(workspace)
+            Some(block_menu::scroll_group(workspace))
         });
         Ok(())
     }

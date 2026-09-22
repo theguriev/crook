@@ -32,7 +32,7 @@ use crookui_core::prelude::*;
 use crook_plugin::{ActionName, Manifest, PluginId, Tier};
 
 use crate::plugin::{BuildError, Host, Plugin};
-use crate::workspace::tab_context_menu::{nothing, submenu_entry};
+use crate::workspace::tab_context_menu::submenu_entry;
 use crate::workspace::{Workspace, WorkspaceAction, WorktreeAction};
 
 use super::tabs::TAB_MENU_ENTRIES;
@@ -87,15 +87,15 @@ impl Plugin for Worktrees {
         host.contribute(TAB_MENU_ENTRIES, "menu", 500, move |workspace, app| {
             let open = workspace.worktree_menu_is_open();
             if !open && !workspace.menu_tab_is_in_a_repository(app) {
-                return nothing();
+                return None;
             }
-            submenu_entry(
+            Some(submenu_entry(
                 workspace,
                 "crook/worktrees/menu",
                 "Worktrees",
                 open,
                 WorkspaceAction::Run(opens),
-            )
+            ))
         });
 
         Ok(())

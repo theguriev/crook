@@ -114,7 +114,7 @@ use crate::tab::{AgentStatus, GroupId, PaneId, Tab, TabAction, TabColor, TabId, 
 use crate::text_input::TextInput;
 use crate::theme::theme;
 use crate::workspace::tab_context_menu::{
-    entry, field_entry, inert_entry, nothing, submenu_entry, swatch_entry,
+    entry, field_entry, inert_entry, submenu_entry, swatch_entry,
 };
 use crate::workspace::{OptionsAction, TabMenuAction, Workspace, WorkspaceAction, status_color};
 
@@ -591,7 +591,7 @@ impl Plugin for Tabs {
         );
         host.contribute(HEADER_LEFT, "waiting", 0, {
             let hover = self.waiting.clone();
-            move |workspace, _| waiting_chip(workspace, hover.clone(), next_waiting)
+            move |workspace, _| Some(waiting_chip(workspace, hover.clone(), next_waiting))
         });
 
         // The field every rename is typed into. One, not two: only one of the
@@ -702,13 +702,13 @@ impl Plugin for Tabs {
             "explain-status",
             2,
             move |workspace, _| {
-                submenu_entry(
+                Some(submenu_entry(
                     workspace,
                     "crook/tabs/explain-status",
                     "Why this status",
                     workspace.tab_context_menu().is_explaining(),
                     WorkspaceAction::Run(explains),
-                )
+                ))
             },
         );
         contribute(host, "new-group-with-tab", 100, |workspace, _| {
@@ -771,9 +771,14 @@ fn contribute(
 
     host.contribute(TAB_MENU_ENTRIES, name, order, move |workspace, app| {
         let Some(id) = id.filter(|_| live(workspace, app)) else {
-            return inert_entry(workspace, &key, label.clone());
+            return Some(inert_entry(workspace, &key, label.clone()));
         };
-        entry(workspace, &key, label.clone(), WorkspaceAction::Run(id))
+        Some(entry(
+            workspace,
+            &key,
+            label.clone(),
+            WorkspaceAction::Run(id),
+        ))
     });
 }
 
@@ -793,7 +798,7 @@ fn pin_entry(host: &mut Host, order: i32) {
             .menu_target()
             .and_then(|(tab, _)| workspace.tabs().get(tab))
             .map(crate::tab::Tab::is_pinned);
-        match (pinned, id) {
+        Some(match (pinned, id) {
             (Some(pinned), Some(id)) => entry(
                 workspace,
                 key,
@@ -801,7 +806,7 @@ fn pin_entry(host: &mut Host, order: i32) {
                 WorkspaceAction::Run(id),
             ),
             _ => inert_entry(workspace, key, "Pin tab"),
-        }
+        })
     });
 }
 
@@ -826,7 +831,7 @@ fn mark_entry(host: &mut Host, order: i32) {
                 .menu_target()
                 .and_then(|(_, pane)| workspace.tabs().pane(pane))
                 .map(|pane| pane.session().asks_for_a_look());
-            match (asked, id) {
+            Some(match (asked, id) {
                 (Some(asked), Some(id)) => entry(
                     workspace,
                     key,
@@ -838,7 +843,7 @@ fn mark_entry(host: &mut Host, order: i32) {
                     WorkspaceAction::Run(id),
                 ),
                 _ => inert_entry(workspace, key, "Mark as waiting"),
-            }
+            })
         },
     );
 }
@@ -862,7 +867,7 @@ fn swatch_row(host: &mut Host, order: i32) {
             .and_then(|(tab, _)| workspace.tabs().get(tab))
             .map(crate::tab::Tab::color)
         else {
-            return nothing();
+            return None;
         };
 
         // The one that takes a colour off leads, which is Warp's order and the
@@ -873,7 +878,7 @@ fn swatch_row(host: &mut Host, order: i32) {
             chosen.is_none(),
             match none {
                 Some(id) => WorkspaceAction::Run(id),
-                None => return nothing(),
+                None => return None,
             },
         )];
         for (color, id) in &colors {
@@ -887,7 +892,7 @@ fn swatch_row(host: &mut Host, order: i32) {
                 WorkspaceAction::Run(*id),
             ));
         }
-        swatch_entry(workspace, swatches)
+        Some(swatch_entry(workspace, swatches))
     });
 }
 
@@ -913,18 +918,23 @@ fn rename_entry(
 
     host.contribute(TAB_MENU_ENTRIES, name, order, move |workspace, _| {
         if rename.what() == Some(what) {
-            return field_entry(workspace, &key, &field, RENAME_PLACEHOLDER);
+            return Some(field_entry(workspace, &key, &field, RENAME_PLACEHOLDER));
         }
         // Inert while the *other* one is being typed into, rather than absent:
         // a menu that reflowed under the field a person is typing in would
         // move the field.
         let Some(id) = id.filter(|_| rename.what().is_none()) else {
-            return inert_entry(workspace, &key, label.clone());
+            return Some(inert_entry(workspace, &key, label.clone()));
         };
         if current_name(workspace, what).is_none() {
-            return inert_entry(workspace, &key, label.clone());
+            return Some(inert_entry(workspace, &key, label.clone()));
         }
-        entry(workspace, &key, label.clone(), WorkspaceAction::Run(id))
+        Some(entry(
+            workspace,
+            &key,
+            label.clone(),
+            WorkspaceAction::Run(id),
+        ))
     });
 }
 
