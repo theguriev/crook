@@ -1041,7 +1041,15 @@ that makes it say all of this by itself — running on a prompt and around every
 input on every notification with the notification's text piped in as the message, idle on
 stop — naming the binary by its full path, since a hook
 runs in whatever `PATH` Claude Code was started with. It is printed rather than installed:
-Crook writes no file it does not own, and it has never opened that one.
+Crook writes no file it does not own, and it has never opened that one. Codex CLI and Gemini
+CLI read the same object under their own event names, and GitHub Copilot CLI a versioned
+cousin of it with `bash` for the command, so `--agent-hooks codex`, `gemini` and `copilot`
+are the same table with a different first column; OpenCode has no command hooks, and
+`--agent-hooks opencode` prints the TypeScript plugin its plugin directory loads instead,
+which reports through Bun's shell. Codex's permission request names a tool and no text, so
+`--message -` says "permission to use" the tool when the JSON has a `tool_name` and no
+`message`. An agent with no hooks at all — `aider` — gets a sentence saying so and what to
+do instead, on stdout with exit 0, since the sentence is the whole answer.
 
 **The shell takes the status back.** An agent that was interrupted never says it stopped, so
 the emulator listens to the shell's marks beside the report: `D` ends the command a running or

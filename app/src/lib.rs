@@ -564,17 +564,24 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
             }
             "--title" => bail!("`--title` goes after `--agent <status>`"),
             "--message" => bail!("`--message` goes after `--agent <status>`"),
+            // Stdout is the fragment and stderr the note, so `> hooks.json`
+            // takes exactly the fragment; an agent with no hooks gets a
+            // sentence on stdout and no note, since the sentence is the
+            // whole answer.
             "--agent-hooks" => {
-                let agent = args
-                    .next()
-                    .context("`--agent-hooks` needs the agent to write hooks for: claude")?;
+                let agent = args.next().with_context(|| {
+                    format!(
+                        "`--agent-hooks` needs the agent to write hooks for: {}",
+                        agent::names_listed()
+                    )
+                })?;
                 let binary =
                     std::env::current_exe().context("could not find this binary's own path")?;
-                println!("{}", agent::hooks_text(&agent, &binary)?);
-                eprintln!(
-                    "# Merge the `hooks` above into ~/.claude/settings.json, or into a project's \
-.claude/settings.json. Claude Code then tells the tab it runs in what it is doing."
-                );
+                let hooks = agent::hooks_text(&agent, &binary)?;
+                println!("{}", hooks.text);
+                if let Some(note) = hooks.note {
+                    eprintln!("{note}");
+                }
                 return Ok(Startup::Answered);
             }
             // The other thing printed for a person to put somewhere: the
@@ -1023,8 +1030,10 @@ OPTIONS:
                        takes the prompt out of a Claude Code hook\'s input on
                        stdin, and `--message -` the notification\'s text
     --agent-hooks <AGENT>
-                       Print the hooks that make `claude` (Claude Code) say
-                       all of that by itself, to merge into its settings file
+                       Print the hooks that make an agent say all of that by
+                       itself, to merge into its settings: `claude` (Claude
+                       Code), `codex`, `gemini`, `copilot` or `opencode`;
+                       `aider` has none, and this says what to do instead
     --skill            Print the skill file that teaches a coding agent what it
                        can do from inside a pane, to save as SKILL.md where
                        the agent loads its skills
@@ -3244,6 +3253,19 @@ mod tests {
             !format!("{missing:#}").contains("  "),
             "the message carries a run of spaces: {missing:#}"
         );
+    }
+
+    #[test]
+    fn the_hooks_flag_without_an_agent_lists_the_agents_it_knows() {
+        // The complaint is the list: a person who typed the flag bare is
+        // asking which names it takes, and the answer that names them all
+        // is the one that needs no second try.
+        let complaint = parse(&["--agent-hooks"])
+            .expect_err("the flag needs its agent")
+            .to_string();
+        for name in ["claude", "codex", "gemini", "copilot", "opencode", "aider"] {
+            assert!(complaint.contains(name), "{complaint}");
+        }
     }
 
     #[test]

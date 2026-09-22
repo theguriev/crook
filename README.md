@@ -251,6 +251,9 @@ Nineteen features, and the page that configures them:
   hooks that make Claude Code say all of it by itself: running when a prompt is sent and
   around every tool, needing input whenever it stops to ask — with the notification's own
   text as the message — idle when it is done; merge them into `~/.claude/settings.json`.
+  `codex`, `gemini` and `copilot` print the same for Codex CLI, Gemini CLI and GitHub
+  Copilot CLI in each one's own hooks file, `opencode` prints the plugin OpenCode loads
+  instead, and `aider`, which has no hooks, gets a sentence saying what to do instead.
   `crook --skill` prints the skill file that teaches an agent the rest — how to tell it is in
   a pane, what the four words do, where the worktrees and the plugins are — to save as
   `~/.claude/skills/crook/SKILL.md`.

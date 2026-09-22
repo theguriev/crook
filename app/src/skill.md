@@ -59,7 +59,10 @@ status never taken back goes when the shell's own marks say the command ended.
 `crook --agent-hooks claude` prints the fragment of Claude Code's settings that reports all of
 this by itself: running when a prompt is sent and around every tool, needing input on every
 notification, idle on stop. Print it and let the person merge it into `~/.claude/settings.json`
-or a project's `.claude/settings.json`. Do not write either file yourself.
+or a project's `.claude/settings.json`. Do not write either file yourself. The same flag takes
+`codex`, `gemini`, `copilot` and `opencode`, and prints each one's own hooks file or plugin
+with a note on stderr saying where it goes; `aider` has no hooks, and it says what to do
+instead.
 
 ## Tabs, groups and worktrees
 
@@ -103,8 +106,9 @@ built in and runs it again on every build; nothing is installed and nothing is l
 
 - Never guess a pane id, a tab name or a worktree path. Crook hands an agent none of them and
   needs none: the terminal it runs in is the pane.
-- Never write `~/.claude/settings.json` or a project's `.claude/settings.json` yourself.
-  Print the hooks with `crook --agent-hooks claude` and let the person merge them.
+- Never write `~/.claude/settings.json` or a project's `.claude/settings.json` yourself, nor
+  another agent's hooks file. Print the hooks with `crook --agent-hooks <agent>` and let the
+  person merge them.
 - Do not claim a feature this file does not list. `crook --help` is the whole command line.
 - Report only what is true: `running` when the work starts, `needs-input` only when you have
   actually stopped for a person, `failed` when the work failed, `idle` when it is done.
