@@ -16,7 +16,8 @@
 #   3. changelogen reads every commit since the previous v* tag and prepends a
 #      `## vX.Y.Z` section to CHANGELOG.md, grouped by the types in
 #      changelog.config.json. release.yml lifts that section into the release
-#      notes, so the file in the repository and the release page say the same.
+#      notes through script/release-notes, so the file in the repository and
+#      the release page say the same.
 #   4. One commit, `chore(release): vX.Y.Z`, and an annotated tag on it.
 #
 # The generator reads only Conventional Commit titles and drops the rest without
@@ -102,7 +103,7 @@ git add Cargo.toml Cargo.lock CHANGELOG.md
 git commit -q -m "chore(release): $tag"
 git tag -a "$tag" -m "$tag"
 echo "==> Committed and tagged $tag"
-sed -n "/^## $tag/,/^## v/p" CHANGELOG.md | sed '$d'
+./script/release-notes "$tag"
 
 if [ -n "$push" ]; then
   echo "==> Pushing main and $tag"

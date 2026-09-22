@@ -110,6 +110,11 @@ commits the three as `chore(release): vX.Y.Z` and tags it. It refuses a range ho
 titles the generator would drop; `--allow-untyped` is the way past that, and is needed exactly
 once, for the release that spans the change of convention.
 
+`script/release-notes vX.Y.Z` prints what a tag's release page will say: the section out of
+`CHANGELOG.md`, or — for a tag made by hand, which has none — the same generator run over the
+same range, with a line admitting that is what happened. `release.yml` publishes what it
+prints, and every plugin repository cuts its releases with the same two scripts.
+
 ## Comments say why, never what
 
 A comment that restates the code beneath it is noise that has to be maintained. Delete it.
