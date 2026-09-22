@@ -235,11 +235,15 @@ Nineteen features, and the page that configures them:
 - **An agent that says what it is doing.** The dot on a tab's row is written by the program
   in the pane, over the one channel it already has: `crook --agent running`, `needs-input`,
   `failed` or `idle`, with `--title` for what it calls its work, writes one escape sequence to
-  its own terminal and exits. No socket and no pane id — the terminal it has *is* the pane —
-  so it works from a hook, over `ssh` and inside a container, and every other terminal drops
-  the sequence unread. `crook --agent-hooks claude` prints the hooks that make Claude Code
-  say all of it by itself: running when a prompt is sent and around every tool, needing input
-  whenever it stops to ask, idle when it is done; merge them into `~/.claude/settings.json`.
+  its own terminal and exits. `needs-input --message "run rm -rf build?"` says what it is
+  waiting for, and the row prints that under the title until the agent gets on with it — so
+  you know whether to come now or later without switching to the tab; `--message -` reads it
+  from stdin, a hook's JSON `message` or the whole line. No socket and no pane id — the
+  terminal it has *is* the pane — so it works from a hook, over `ssh` and inside a container,
+  and every other terminal drops the sequence unread. `crook --agent-hooks claude` prints the
+  hooks that make Claude Code say all of it by itself: running when a prompt is sent and
+  around every tool, needing input whenever it stops to ask — with the notification's own
+  text as the message — idle when it is done; merge them into `~/.claude/settings.json`.
   `crook --skill` prints the skill file that teaches an agent the rest — how to tell it is in
   a pane, what the four words do, where the worktrees and the plugins are — to save as
   `~/.claude/skills/crook/SKILL.md`.

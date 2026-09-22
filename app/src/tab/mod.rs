@@ -150,6 +150,16 @@ pub struct AgentSession {
     /// waiting for an answer is still waiting after somebody has glanced at
     /// its row.
     pub status: AgentStatus,
+    /// What the agent said it is waiting for, while it is waiting.
+    ///
+    /// The one thing [`Self::status`] cannot say: `needs-input` is a stop,
+    /// and this is the question — "run `rm -rf build`?" — so a person
+    /// reading the row knows whether to come now or later without switching
+    /// to the tab to find out. Written with the report that brought it and
+    /// only with a `NeedsInput`; any other status, including the idle the
+    /// shell's marks report when the command ends, takes it with it, because
+    /// a question the agent has stopped asking is not one to keep showing.
+    pub message: Option<String>,
     /// Whether something happened here while nobody was looking.
     ///
     /// The bell in a pane without the keyboard, or a status that changed
@@ -238,6 +248,7 @@ impl AgentSession {
             derived_title: None,
             custom_title: None,
             status: AgentStatus::default(),
+            message: None,
             attention: false,
             marked: false,
             working_directory: starting_directory(),

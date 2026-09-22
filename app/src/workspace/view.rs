@@ -4970,7 +4970,11 @@ impl Workspace {
     ///
     /// The status is written as said, and the title beside it when one came:
     /// it is the agent's own name for its work, which is what
-    /// `derived_title` has always been. What is decided here is attention. A
+    /// `derived_title` has always been. The message is written as said too,
+    /// and it is the one field a report *clears*: it is what a stopped agent
+    /// is waiting for, so it lives exactly as long as the `NeedsInput` that
+    /// brought it, and a title-only report cannot leave a stale question on
+    /// the row. What is decided here is attention. A
     /// change in a pane without the keyboard is something that happened
     /// while nobody was looking, and it asks for a look — unless the change
     /// is to running, which is an agent getting on with it and the one
@@ -4981,6 +4985,7 @@ impl Workspace {
         pane: PaneId,
         status: AgentStatus,
         title: Option<String>,
+        message: Option<String>,
         ctx: &mut ViewContext<Self>,
     ) -> bool {
         let looking = self.tabs.focused_pane_id() == Some(pane);
@@ -4990,6 +4995,7 @@ impl Workspace {
             }
             let changed = session.status != status;
             session.status = status;
+            session.message = message.filter(|_| status == AgentStatus::NeedsInput);
             if status == AgentStatus::Running {
                 session.attention = false;
             } else if changed && !looking {
@@ -5134,7 +5140,8 @@ impl Workspace {
                 pane,
                 status,
                 title,
-            } => self.agent_reported(*pane, *status, title.clone(), ctx),
+                message,
+            } => self.agent_reported(*pane, *status, title.clone(), message.clone(), ctx),
         };
 
         if !reported {
