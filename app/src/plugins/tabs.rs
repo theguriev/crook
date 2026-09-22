@@ -862,13 +862,13 @@ fn swatch_row(host: &mut Host, order: i32) {
         .collect();
 
     host.contribute(TAB_MENU_ENTRIES, "color", order, move |workspace, _| {
-        let Some(chosen) = workspace
+        // A menu that is open on no tab has no colour to show as chosen, and
+        // nothing to draw: `None` is the whole entry gone rather than a row of
+        // swatches none of which is lit.
+        let chosen = workspace
             .menu_target()
             .and_then(|(tab, _)| workspace.tabs().get(tab))
-            .map(crate::tab::Tab::color)
-        else {
-            return None;
-        };
+            .map(crate::tab::Tab::color)?;
 
         // The one that takes a colour off leads, which is Warp's order and the
         // right one: it is the state a tab starts in.
