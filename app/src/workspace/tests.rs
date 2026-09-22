@@ -7747,9 +7747,11 @@ fn a_person_s_mark_rolls_up_to_the_folded_heading_too() {
 }
 
 #[test]
-fn an_open_group_s_heading_is_plain_whatever_its_rows_say() {
-    // Open, the rows say it themselves; a heading repeating them would be
-    // the same fact twice on one screen.
+fn an_open_group_s_heading_is_marked_but_not_washed() {
+    // The mark is the group's own line — the worst of the work under it, in
+    // one disc, which is what a person scanning a panel of headings reads —
+    // and it stays whether or not the rows are showing. The wash does not:
+    // it is what a waiting *row* wears, and the waiting row is right there.
     let (mut harness, group) = Harness::folded_group_with(AgentStatus::NeedsInput);
     harness.dispatch_action(TabAction::ToggleGroup(group));
 
@@ -7761,12 +7763,114 @@ fn an_open_group_s_heading_is_plain_whatever_its_rows_say() {
     );
     assert_eq!(
         heading_disc(&scene, heading),
-        None,
-        "the open heading carries a mark"
+        Some(super::status_color(AgentStatus::NeedsInput)),
+        "the open heading lost the mark for the member that is asking"
     );
     assert!(
         status_discs(&scene).len() >= 2,
         "the members lost their own discs"
+    );
+}
+
+#[test]
+fn an_idle_group_s_heading_carries_no_mark() {
+    // Nothing to report is drawn as nothing: a heading over rows that are all
+    // idle looks exactly as it did before there was anything to roll up.
+    let (mut harness, _) = Harness::grouped_panel(2);
+
+    let scene = harness.frame();
+    let heading = panel_heading(&scene);
+    assert_eq!(
+        heading_disc(&scene, heading),
+        None,
+        "an idle group's heading carries a mark"
+    );
+}
+
+/// The rail's lines inside the panel: the stems down the gutter and the elbows
+/// into the members, told apart by which way round they are.
+///
+/// A hairline is the only thing in the panel that is one pixel across, so the
+/// colour and the thickness are enough to find them without knowing where the
+/// rail decided to draw.
+fn rail_lines(scene: &Scene) -> (Vec<RectF>, Vec<RectF>) {
+    let panel = panel_box(scene);
+    let hairlines = visible_rects(scene).filter(|(rect, bounds)| {
+        rect.background == Fill::Solid(theme().border) && panel.contains_point(center(*bounds))
+    });
+
+    let mut stems = Vec::new();
+    let mut elbows = Vec::new();
+    for (_, bounds) in hairlines {
+        if (bounds.width() - 1.).abs() < 0.5 {
+            stems.push(bounds);
+        } else if (bounds.height() - 1.).abs() < 0.5 {
+            elbows.push(bounds);
+        }
+    }
+    (stems, elbows)
+}
+
+#[test]
+fn a_group_s_members_hang_off_a_rail() {
+    // One stem and one elbow per member, and each elbow arrives at the mark
+    // at the head of the member it belongs to: the indent is a relation now,
+    // not twelve pixels of nothing.
+    let (mut harness, _) = Harness::grouped_panel(2);
+
+    let scene = harness.frame();
+    let (stems, elbows) = rail_lines(&scene);
+    assert_eq!(stems.len(), 2, "expected a stem per member: {stems:?}");
+    assert_eq!(elbows.len(), 2, "expected an elbow per member: {elbows:?}");
+
+    let discs = status_discs(&scene);
+    for elbow in &elbows {
+        let arrives = discs
+            .iter()
+            .any(|disc| (center(*disc).y() - center(*elbow).y()).abs() < 1.);
+        assert!(arrives, "an elbow met no mark: {elbow:?} against {discs:?}");
+        assert!(
+            elbow.max_x() <= discs[0].min_x(),
+            "the elbow was drawn over the mark it stops at"
+        );
+    }
+}
+
+#[test]
+fn the_last_member_s_stem_stops_at_it() {
+    // What makes the bottom of the tree a `└` and everything above it a `├`.
+    let (mut harness, _) = Harness::grouped_panel(2);
+
+    let scene = harness.frame();
+    let (mut stems, mut elbows) = rail_lines(&scene);
+    stems.sort_by(|a, b| a.min_y().total_cmp(&b.min_y()));
+    elbows.sort_by(|a, b| a.min_y().total_cmp(&b.min_y()));
+
+    assert!(
+        stems[0].max_y() > elbows[0].min_y(),
+        "the first member's stem stopped at its own elbow"
+    );
+    assert!(
+        (stems[1].min_y() - stems[0].max_y()).abs() < 1.,
+        "the stem breaks between the two members"
+    );
+    assert!(
+        (stems[1].max_y() - elbows[1].min_y()).abs() < 1.,
+        "the last member's stem ran past its own elbow"
+    );
+}
+
+#[test]
+fn a_folded_group_has_no_rail() {
+    // Nothing to tie a heading to: the members are behind the fold.
+    let (mut harness, group) = Harness::grouped_panel(2);
+    harness.dispatch_action(TabAction::ToggleGroup(group));
+
+    let scene = harness.frame();
+    let (stems, elbows) = rail_lines(&scene);
+    assert!(
+        stems.is_empty() && elbows.is_empty(),
+        "a folded group drew a rail"
     );
 }
 
