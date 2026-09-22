@@ -89,7 +89,10 @@ pub(in crate::workspace) fn waiting_wash() -> Color {
 }
 
 /// Warp's row padding: `Padding::uniform(8.)`, in both densities.
-const ROW_PADDING: f32 = 8.;
+///
+/// Read outside this file by [`rail`](super::rail), which puts the elbow of a
+/// group's tree at the middle of the mark this padding is above.
+pub(super) const ROW_PADDING: f32 = 8.;
 
 /// The title line, in both densities.
 const TITLE_SIZE: f32 = 12.;

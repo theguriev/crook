@@ -89,6 +89,7 @@ use super::view::Workspace;
 
 pub(crate) mod drag;
 pub(super) mod geometry;
+mod rail;
 mod row;
 pub(crate) mod search;
 
@@ -627,6 +628,10 @@ fn tab_block(
 /// rather than by a colour. A member skips its own outer chrome because the
 /// group is already providing it; that is Warp's
 /// `uses_outer_group_container = !in_tab_group && …`.
+///
+/// The indent belongs to [`rail`], which draws in it: the gap Warp leaves
+/// empty carries the stem and the elbows that say which heading these rows are
+/// under, and nothing moved to make room for them.
 fn group_block(
     workspace: &Workspace,
     group: GroupId,
@@ -650,13 +655,12 @@ fn group_block(
     let holds_the_active_tab = members
         .iter()
         .any(|(tab, _)| workspace.tabs().is_active(*tab));
-    // Only while folded: an open group's rows say it themselves, and a
-    // heading repeating the worst of them would be the same fact twice on
-    // one screen. Folded, the heading is the only place the rows can be
-    // seen at all, so it says what the worst of them would have.
-    let rollup = collapsed
-        .then(|| crate::plugins::tabs::group_rollup(workspace.tabs(), group))
-        .flatten();
+    // Whether or not it is folded, which is herdr's shape: a heading that
+    // says what the worst of the work under it is doing is the line a person
+    // reads when they are looking for the group rather than at it, and an
+    // open group's own rows are eight of them. It was folded-only while the
+    // mark was standing in for rows nobody could see.
+    let rollup = crate::plugins::tabs::group_rollup(workspace.tabs(), group);
 
     // Counted off the strip, not off the rows under the heading: the rows are
     // the ones the search left, and the × on the heading closes the group.
@@ -668,32 +672,47 @@ fn group_block(
             workspace,
             group,
             data.name(),
-            Count {
-                shown: members.len(),
-                all,
-            },
+            heading_line(
+                base_branch(workspace, members, app).as_deref(),
+                Count {
+                    shown: members.len(),
+                    all,
+                },
+            ),
             collapsed,
             rollup,
         ));
 
     if !collapsed {
+        let spacing = match granularity {
+            Granularity::Panes => 0.,
+            Granularity::Tabs => TABS_MODE_ITEM_SPACING,
+        };
         let mut rows = Flex::column()
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch)
-            .with_spacing(match granularity {
-                Granularity::Panes => 0.,
-                Granularity::Tabs => TABS_MODE_ITEM_SPACING,
-            });
+            .with_spacing(spacing);
 
-        for (tab, panes) in members {
-            rows.add_child(tab_block(workspace, *tab, panes, Some(group), app));
+        let last = members.len() - 1;
+        for (index, (tab, panes)) in members.iter().enumerate() {
+            let names_itself = workspace.tabs().get(*tab).is_some_and(shows_group_header);
+            rows.add_child(
+                rail::Rail::new(
+                    tab_block(workspace, *tab, panes, Some(group), app),
+                    rail::meets(granularity, names_itself),
+                    (index < last).then_some(spacing),
+                )
+                .finish(),
+            );
         }
 
         column.add_child(
             Container::new(rows.finish())
                 .with_padding(Padding {
                     top: 0.,
-                    left: MEMBER_INDENT,
+                    // The indent is the rail's: a gutter one element draws in
+                    // and another reserves is two numbers that have to agree.
+                    left: 0.,
                     bottom: GROUP_BODY_BOTTOM_PADDING,
                     right: 0.,
                 })
@@ -715,7 +734,10 @@ fn group_block(
     // the lift the active tab gives the block, as a waiting row's wash is
     // painted over its tab's lifted container: the person is in one member
     // of this group and another is asking, and a plain lift says nothing.
-    let waiting = rollup.is_some_and(|rollup| rollup.waiting);
+    // Folded only, unlike the mark beside the name: the wash is what a
+    // waiting *row* wears, and an open group's waiting row is wearing it two
+    // lines below a heading that would be wearing it too.
+    let waiting = collapsed && rollup.is_some_and(|rollup| rollup.waiting);
     let block = Hoverable::new(heading_state, move |mouse| {
         let container = Container::new(column).with_background_color(if mouse.is_hovered() {
             theme().overlay_1
@@ -852,24 +874,67 @@ impl Count {
     }
 }
 
-/// A group's heading: a chevron saying which way it folds, its name, and how
-/// many tabs are under it.
+/// The branch the group was cut from, if the checkout it was cut from is
+/// still one of its members.
+///
+/// A group is one repository in several checkouts, and every member's row
+/// already says which branch it is on. The one no row says is the branch they
+/// all came from — the member that is not a linked worktree — which is the
+/// line herdr puts under a repository's name and the one fact about a group
+/// that cannot be read off the rows under it.
+///
+/// `None` once that checkout has been closed, and until the background gather
+/// has answered for it: the heading then goes back to counting, which is what
+/// it always did.
+fn base_branch(
+    workspace: &Workspace,
+    members: &[(TabId, Vec<PaneId>)],
+    app: &AppContext,
+) -> Option<String> {
+    members
+        .iter()
+        .filter_map(|(_, panes)| panes.first())
+        .filter_map(|pane| workspace.tabs().pane(*pane))
+        .find_map(|pane| {
+            let facts = workspace.git_facts(pane.session(), app)?;
+            let branch = facts.branch.as_ref()?;
+            (!facts.worktree).then(|| branch.label().to_owned())
+        })
+}
+
+/// What a heading says under the group's name.
+///
+/// The branch, whenever there is one: a heading that repeated the count of
+/// rows a person can already see was spending its one line on arithmetic.
+///
+/// A search that has hidden some of those rows takes the line back, because
+/// then the count is the half a person *cannot* see — the × beside it closes
+/// every tab in the group, and "1 of 2 tabs" is what says how much that is.
+fn heading_line(branch: Option<&str>, count: Count) -> String {
+    match branch {
+        Some(branch) if count.shown == count.all => branch.to_owned(),
+        _ => count.label(),
+    }
+}
+
+/// A group's heading: a chevron saying which way it folds, its name, and the
+/// line under it.
 ///
 /// Clicking it folds the group away and back — Warp's, and the gesture every
 /// disclosure in every sidebar has. The close button beside it closes every
 /// tab in the group, which is the only way to put a group down in one gesture
 /// once the tabs inside it are the work rather than the panes.
 ///
-/// `rollup` is what the hidden rows would have said, and it is `Some` only
-/// while the group is folded. The mark it puts before the name is the host's
-/// own — the disc, or the glyph the setting asks for — and an idle group gets
-/// none, so a heading with nothing to report looks as it did before there was
-/// anything to roll up.
+/// `line` is what goes under the name — see [`heading_line`] — and `rollup`
+/// is the worst of the members. The mark the rollup puts before the name is
+/// the host's own — the disc, or the glyph the setting asks for — and an idle
+/// group gets none, so a heading with nothing to report looks as it did
+/// before there was anything to roll up.
 fn heading(
     workspace: &Workspace,
     group: GroupId,
     name: &str,
-    count: Count,
+    line: String,
     collapsed: bool,
     rollup: Option<GroupRollup>,
 ) -> Box<dyn Element> {
@@ -878,7 +943,6 @@ fn heading(
     };
     let ui = workspace.fonts().ui;
     let name = name.to_owned();
-    let count = count.label();
     let close = chrome.close.clone();
     let guard = chrome.close.clone();
     let mark = rollup
@@ -940,7 +1004,7 @@ fn heading(
                                 .finish(),
                         )
                         .with_child(
-                            Text::new(count.clone(), ui, GROUP_HEADER_SIZE)
+                            Text::new(line.clone(), ui, GROUP_HEADER_SIZE)
                                 .with_color(theme().text_muted)
                                 .finish(),
                         )
@@ -1212,7 +1276,7 @@ fn empty_state(ui: FamilyId, query: &Query) -> Box<dyn Element> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Block, Count, TabId, associate};
+    use super::{Block, Count, TabId, associate, heading_line};
 
     #[test]
     fn the_count_is_the_group_s_and_says_what_a_search_left_of_it() {
@@ -1221,6 +1285,27 @@ mod tests {
         // Under a search that hid one: the × beside this closes two.
         assert_eq!(Count { shown: 1, all: 2 }.label(), "1 of 2 tabs");
         assert_eq!(Count { shown: 0, all: 3 }.label(), "0 of 3 tabs");
+    }
+
+    #[test]
+    fn a_heading_says_the_branch_its_checkouts_were_cut_from() {
+        let whole = Count { shown: 2, all: 2 };
+
+        assert_eq!(heading_line(Some("main"), whole), "main");
+        // Before git has answered, and after the checkout it was cut from has
+        // been closed: what the heading always said.
+        assert_eq!(heading_line(None, whole), "2 tabs");
+    }
+
+    #[test]
+    fn a_search_that_hid_a_row_takes_the_branch_back() {
+        // The × beside the line closes both tabs, and with one of them hidden
+        // the count is the half that cannot be seen — which outranks a branch
+        // every row under it is already printing.
+        assert_eq!(
+            heading_line(Some("main"), Count { shown: 1, all: 2 }),
+            "1 of 2 tabs"
+        );
     }
 
     #[test]
