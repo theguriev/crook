@@ -236,6 +236,9 @@ Nineteen features, and the page that configures them:
   the sequence unread. `crook --agent-hooks claude` prints the hooks that make Claude Code
   say all of it by itself: running when a prompt is sent and around every tool, needing input
   whenever it stops to ask, idle when it is done; merge them into `~/.claude/settings.json`.
+  `crook --skill` prints the skill file that teaches an agent the rest — how to tell it is in
+  a pane, what the four words do, where the worktrees and the plugins are — to save as
+  `~/.claude/skills/crook/SKILL.md`.
   A status the agent never took back goes when the shell's own marks say the command ended,
   and a failure stays on the row until the next command starts. Looking at a tab clears the
   *attention* it asked for and nothing else: an agent waiting for an approval is still waiting
