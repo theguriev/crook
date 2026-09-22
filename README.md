@@ -179,7 +179,8 @@ Nineteen features, and the page that configures them:
   manifest and puts it where Crook looks —
   `<data>/crook/plugins/theguriev.pirate/0.3.0/plugin.wasm`, the version in the path so that an
   upgrade writes somewhere new rather than over the bytes a running interpreter is reading.
-  `crook --plugins` says what is installed and which file each one runs from, and
+  `crook --plugins` says what is installed and which file each one runs from — as a JSON array
+  with `--json`, for a script or an agent — and
   `crook --uninstall-plugin theguriev/pirate` takes it and its permissions back off. It draws
   Crook's own pirate — the artwork is the host's, asked for by icon name, and the plugin
   animates the bite itself by naming a different frame — and it says how much of the session's

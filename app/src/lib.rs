@@ -514,6 +514,8 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
     let mut args = args.peekable();
     let mut frames = None;
     let mut snapshot = None;
+    let mut plugins = false;
+    let mut json = false;
     let mut overrides = Overrides::default();
 
     while let Some(argument) = args.next() {
@@ -641,10 +643,11 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
                     .context("`--plugin-fixture` needs a path to a fixture")?;
                 overrides.fixture = Some(PathBuf::from(path));
             }
-            "--plugins" => {
-                println!("{}", installed_plugins_text());
-                return Ok(Startup::Answered);
-            }
+            // Answered after the loop rather than here, unlike `--version`:
+            // `--json` may come before it or after it, and the answer is not
+            // known until both have been read.
+            "--plugins" => plugins = true,
+            "--json" => json = true,
             "--snapshot" => {
                 let path = args.next().context("`--snapshot` needs a path")?;
                 snapshot = Some(PathBuf::from(path));
@@ -830,6 +833,21 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
         }
     }
 
+    // Refused rather than ignored: a script that wrote `--json` and got a
+    // window, or columns, would parse what it was not asked for and never
+    // learn why. It is an argument error, on the same exit status as an
+    // argument nobody has heard of.
+    if json && !plugins {
+        bail!("`--json` goes with `--plugins`; try --help");
+    }
+    if plugins {
+        match json {
+            true => println!("{}", installed_plugins_json()),
+            false => println!("{}", installed_plugins_text()),
+        }
+        return Ok(Startup::Answered);
+    }
+
     // `--search` with no section named is the settings page's box, and it
     // opens the page: a query with no list to filter is nothing to look at.
     // With a section named it is that section's box — the Store's, the
@@ -906,6 +924,9 @@ OPTIONS:
     --plugins          List the plugins installed as files: name, version and
                        which file each is running from, and what the registry's
                        copy on this machine says about that version
+    --json             With --plugins, print the list as a JSON array instead,
+                       one object per plugin — `id`, `version`, `path`,
+                       `enabled` and `allowed` — for a script or an agent
     --dev-plugin <PATH>
                        Run the plugin you are writing, from wherever you built
                        it, and run it again every time you build it. Takes a
@@ -1009,6 +1030,13 @@ OPTIONS:
                        the agent loads its skills
     -h, --help         Print this message
     -V, --version      Print the version and channel
+
+EXIT STATUS:
+    0 when what was asked for was done: a window that was closed, a snapshot
+    that was written, a list that was printed, a plugin that was installed.
+    1 for everything else — an argument the parser refuses, a plugin that
+    could not be installed or removed, a window that could not be opened —
+    with the reason on stderr, after `crook: `. There is no third code.
 
 KEYS (macOS):
     cmd+t                      New agent tab
@@ -2436,6 +2464,67 @@ fn installed_plugins_text() -> String {
     )
 }
 
+/// What `--plugins --json` prints: the same plugins, for a script.
+///
+/// One object per plugin and nothing a person would have to parse out of a
+/// column. The keys are the ones a script can rely on — `id`, `version`,
+/// `path`, `enabled`, `allowed` — and `allowed` is the grant exactly as the
+/// settings hold it, one key per host and per path, since that is the form
+/// the Plugins page compares against what a plugin asks for. The module's
+/// ABI is not among them: the host's manifest does not carry it, and the
+/// only way to read it is to run the module's own export — at which point it
+/// is the host's, or the module would not have opened.
+///
+/// `[]` with no data directory rather than the sentence `--plugins` prints:
+/// a script reads stdout as JSON or not at all, and the sentence goes to
+/// the log, which is stderr.
+fn installed_plugins_json() -> String {
+    let Some(directory) = crate::plugins::wasm::directory() else {
+        log::warn!("this machine has no data directory to install plugins into");
+        return String::from("[]");
+    };
+    installed_plugins_json_in(&directory, &Settings::for_user())
+}
+
+/// The same, out of a named plugins directory against a named copy of the
+/// settings — which is what lets a test read it back.
+fn installed_plugins_json_in(directory: &std::path::Path, settings: &Settings) -> String {
+    /// One entry, with the keys in the order the help lists them.
+    #[derive(serde::Serialize)]
+    struct Entry<'a> {
+        id: &'a str,
+        version: &'a str,
+        /// `null` for a directory a version could not be read out of, which
+        /// `installed` does not list — kept an `Option` so the two walks
+        /// disagreeing is a `null` and not a panic.
+        path: Option<String>,
+        enabled: bool,
+        allowed: &'a [String],
+    }
+
+    let installed = crate::plugins::wasm::installed(directory);
+    let entries: Vec<Entry> = installed
+        .iter()
+        .map(|plugin| {
+            let manifest = crate::plugin::Plugin::manifest(plugin.as_ref());
+            let id = manifest.id.as_str();
+            Entry {
+                id,
+                version: manifest.version,
+                path: crate::plugins::wasm::module_in(directory, &manifest.id)
+                    .map(|path| path.display().to_string()),
+                enabled: !settings.disabled_plugins().iter().any(|name| name == id),
+                allowed: settings.granted_to(id),
+            }
+        })
+        .collect();
+
+    // Pretty, because a person reads the output of a command they typed
+    // before a script does, and a parser reads either.
+    serde_json::to_string_pretty(&entries)
+        .expect("a list of strings, a bool and a list of strings serializes")
+}
+
 /// The same, out of a named plugins directory against a named copy of the
 /// index — which is what lets a test say what the line says.
 fn installed_plugins_in(
@@ -3502,6 +3591,7 @@ mod tests {
             "--agent",
             "--agent-hooks",
             "--skill",
+            "--json",
         ] {
             assert!(help.contains(flag), "{flag} is not in --help");
             // Either it parses, or it complains about the value it is missing.
@@ -3800,6 +3890,105 @@ mod tests {
             short.starts_with("eugen/a           "),
             "the short id was not padded to the long one: {short:?}"
         );
+    }
+
+    #[test]
+    fn plugins_as_json_lists_what_the_columns_list() {
+        // The same plugins the columns show, as objects with the keys the
+        // help promises — so a script reads `id` and `path` rather than
+        // counting spaces, and reads the grant as the settings hold it.
+        use crate::plugins::wasm::tests::{Scratch, install, wasm};
+
+        let plugins = Scratch::new("plugins-json");
+        install(
+            plugins.path(),
+            "eugen.a",
+            &wasm("eugen/a", "header.right", 10),
+        );
+        // In the directory an install writes, `owner.name`: the path is
+        // looked up by id, and a directory called anything else is a
+        // plugin with no path to name.
+        install(
+            plugins.path(),
+            "eugen.longer-name",
+            &wasm("eugen/longer-name", "header.right", 11),
+        );
+        let mut settings = Settings::ephemeral();
+        settings.set_plugin_disabled("eugen/a", true);
+        settings.set_granted(
+            "eugen/longer-name",
+            vec![String::from("net:api.github.com")],
+        );
+
+        let text = installed_plugins_json_in(plugins.path(), &settings);
+        let listed: Vec<serde_json::Value> =
+            serde_json::from_str(&text).unwrap_or_else(|why| panic!("not JSON ({why}): {text}"));
+
+        let columns = installed_plugins_in(plugins.path(), &settings, None);
+        let in_columns: Vec<&str> = columns
+            .lines()
+            .filter_map(|line| line.split(' ').next())
+            .collect();
+        let in_json: Vec<&str> = listed
+            .iter()
+            .map(|entry| entry["id"].as_str().expect("`id` is a string"))
+            .collect();
+        assert_eq!(
+            in_json, in_columns,
+            "the two listings disagree:\n{columns}\n{text}"
+        );
+
+        for entry in &listed {
+            // Sorted, since a parsed object keeps its keys in no order a
+            // test should pin — a script reads them by name.
+            let object = entry.as_object().expect("one object per plugin");
+            let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            assert_eq!(
+                keys,
+                ["allowed", "enabled", "id", "path", "version"],
+                "the keys a script relies on: {entry}"
+            );
+            assert_eq!(entry["version"], "0.1.0");
+            assert!(
+                entry["path"]
+                    .as_str()
+                    .is_some_and(|path| path.ends_with("plugin.wasm")),
+                "the path names the module: {entry}"
+            );
+        }
+        assert_eq!(listed[0]["enabled"], false, "eugen/a is switched off");
+        assert_eq!(listed[0]["allowed"], serde_json::json!([]));
+        assert_eq!(listed[1]["enabled"], true);
+        assert_eq!(
+            listed[1]["allowed"],
+            serde_json::json!(["net:api.github.com"]),
+            "the grant as the settings hold it"
+        );
+    }
+
+    #[test]
+    fn plugins_as_json_is_an_empty_array_when_nothing_is_installed() {
+        // `[]` and not a sentence: a script parses stdout as JSON or not at
+        // all, and the sentence is for the columns.
+        use crate::plugins::wasm::tests::Scratch;
+
+        let plugins = Scratch::new("plugins-json-empty");
+        let text = installed_plugins_json_in(plugins.path(), &Settings::ephemeral());
+        let listed: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+        assert_eq!(listed, serde_json::json!([]), "{text}");
+    }
+
+    #[test]
+    fn json_without_plugins_is_an_argument_error() {
+        // A `--json` with nothing to print as JSON is refused in the parser's
+        // own voice, and it names the flag it goes with — not "unrecognised",
+        // which would say the flag does not exist.
+        let error = parse(&["--json"]).expect_err("nothing to print as JSON");
+        let text = error.to_string();
+        assert!(text.contains("--plugins"), "{text}");
+        assert!(!text.contains("unrecognised"), "{text}");
+        assert!(parse(&["--json", "--frames", "1"]).is_err());
     }
 
     #[test]
