@@ -22,7 +22,8 @@ use std::time::{Duration, SystemTime};
 use crook_terminal::{Program, TerminalOptions, default_shell};
 
 use super::launch::{HostEnv, Launch, ScratchFile, plain, plan};
-use super::{Options, Shell, opted_out};
+use super::{Options, PANE_ID_VARIABLE, Shell, opted_out};
+use crate::tab::PaneId;
 
 /// The one directory under the platform's temporary directory that every
 /// session's scratch directory lives in, so a sweep has one place to look.
@@ -75,20 +76,21 @@ pub struct Session {
 }
 
 impl Session {
-    /// Prepares a shell launch, installing the integration when this shell has
-    /// one and the user has not opted out.
+    /// Prepares a shell launch for `pane`, installing the integration when
+    /// this shell has one and the user has not opted out.
     ///
     /// Never fails. Every way this can go wrong — an unrecognised shell, a
     /// temporary directory that cannot be written, no `HOME` to point zsh's
     /// stubs back at — produces a session that starts the user's shell exactly
     /// as Crook did before any of this existed, with [`Self::marks`] false.
-    pub fn open(options: &Options) -> Self {
-        Self::with_host(options, HostEnv::current())
+    /// The pane's number reaches the shell on every one of those paths too.
+    pub fn open(pane: PaneId, options: &Options) -> Self {
+        Self::with_host(pane, options, HostEnv::current())
     }
 
     /// [`Self::open`] against a stated environment rather than the process's
     /// own, so a test can spawn a real shell with a `HOME` it controls.
-    pub(super) fn with_host(options: &Options, host: HostEnv) -> Self {
+    pub(super) fn with_host(pane: PaneId, options: &Options, host: HostEnv) -> Self {
         let program = options
             .shell
             .clone()
@@ -96,7 +98,7 @@ impl Session {
         let shell = Shell::of(&program);
 
         if !options.enabled || opted_out() {
-            return Self::unmarked(shell, &program, options.login);
+            return Self::unmarked(pane, shell, &program, options.login);
         }
 
         SWEPT.call_once(|| sweep(&root(), &mine(), STALE_AFTER));
@@ -104,7 +106,7 @@ impl Session {
         let scratch = scratch_directory();
         let launch = plan(shell, &program, &scratch, options.login, &host);
         if !launch.marks() {
-            return Self::unmarked(shell, &program, options.login);
+            return Self::unmarked(pane, shell, &program, options.login);
         }
 
         if let Err(error) = write(&launch.files) {
@@ -114,10 +116,10 @@ impl Session {
                 scratch.display()
             );
             remove(&scratch);
-            return Self::unmarked(shell, &program, options.login);
+            return Self::unmarked(pane, shell, &program, options.login);
         }
 
-        Self::from_launch(shell, launch, Some(scratch))
+        Self::from_launch(pane, shell, launch, Some(scratch))
     }
 
     /// The shell this launch is for.
@@ -158,8 +160,8 @@ impl Session {
 
     /// The launch with no integration in it. Still a login shell, when that is
     /// what the setting says and the shell has a switch for it.
-    fn unmarked(shell: Shell, program: &Path, login: bool) -> Self {
-        Self::from_launch(shell, plain(program, login), None)
+    fn unmarked(pane: PaneId, shell: Shell, program: &Path, login: bool) -> Self {
+        Self::from_launch(pane, shell, plain(program, login), None)
     }
 
     /// Where the shell reads a completion request from and writes its answer.
@@ -176,8 +178,13 @@ impl Session {
         Some(self.scratch.as_ref()?.join(COMPLETION_ANSWER_FILE))
     }
 
-    fn from_launch(shell: Shell, launch: Launch, scratch: Option<PathBuf>) -> Self {
+    fn from_launch(pane: PaneId, shell: Shell, launch: Launch, scratch: Option<PathBuf>) -> Self {
         let mut environment = launch.environment;
+        // Here rather than in the launch, because the launch is what a shell
+        // gets and this is what a pane gets: the planners know the shell and
+        // not the pane, and every session — marked, unmarked, opted out —
+        // passes through this one constructor, so no path can forget it.
+        environment.push((PANE_ID_VARIABLE.to_owned(), pane.as_u64().to_string()));
         // The snippet has to be told where to look, and an environment
         // variable is the only channel that reaches it: the file it reads is
         // in a directory whose name is minted per session.

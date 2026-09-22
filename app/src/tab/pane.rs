@@ -37,9 +37,10 @@ impl PaneId {
         Self(NEXT.fetch_add(1, Ordering::Relaxed))
     }
 
-    /// The bare number, for the one place a pane has to be named outside the
-    /// process: a sandboxed plugin, which gets something it can key state on
-    /// and nothing it could reach the pane with.
+    /// The bare number, for the places a pane has to be named outside the
+    /// process: a sandboxed plugin, and the shell in the pane through
+    /// `CROOK_PANE_ID` — each gets something it can key state on and nothing
+    /// it could reach the pane with, and the two agree on the name.
     pub fn as_u64(self) -> u64 {
         self.0
     }

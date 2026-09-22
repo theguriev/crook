@@ -328,7 +328,10 @@ Nineteen features, and the page that configures them:
   `ksh`, `tcsh`) — and on those machines `crook --shell-integration zsh` prints the same text
   to paste at the end of the rc file by hand. Settings → Shell says which shell a pane starts
   and whether it gets the marks, which is where to look when the output is one long block;
-  `crook --shell <path>` starts another shell in every pane, for trying one out.
+  `crook --shell <path>` starts another shell in every pane, for trying one out. Marks or no
+  marks, every shell Crook starts has `TERM_PROGRAM=Crook` and `CROOK_PANE_ID` set to the
+  pane's number — what WezTerm's `WEZTERM_PANE` is — so a script or an agent can tell it is
+  inside Crook and which pane, and name a log file after it.
 
   It also **answers**, which is what makes Tab work. Command marks are an announcement and
   completion is a question, so there is a second channel beside them: Crook writes the line

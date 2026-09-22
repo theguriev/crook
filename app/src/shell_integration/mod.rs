@@ -69,6 +69,17 @@
 //! framework tells which terminal it is in; they are not part of the
 //! injection.
 //!
+//! Beside them is [`PANE_ID_VARIABLE`] — `CROOK_PANE_ID` — the number of the
+//! pane the shell is running in, the same one a plugin is handed. It is what
+//! WezTerm's `WEZTERM_PANE` and kitty's `KITTY_WINDOW_ID` are: a way for a
+//! script or an agent to know it is inside Crook and *which* pane, to name a
+//! log file after or to refuse a Crook-only step anywhere else. It is not a
+//! routing address. The agent status channel needs no pane id because it
+//! writes to its own tty, and nothing reads this variable back — it is a fact
+//! the shell is told, not a handle it can reach the pane with. A restored
+//! pane, a split and a new tab all get it, because every shell Crook starts
+//! goes through [`Session::open`] and that is where it is set.
+//!
 //! # What it costs when it does not work
 //!
 //! One pane's blocks, and nothing else. [`Session::open`] cannot fail: an
@@ -119,6 +130,15 @@ pub const TERM_PROGRAM: &str = "Crook";
 
 /// What `TERM_PROGRAM_VERSION` is set to.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The variable that names the pane a shell runs in: `CROOK_PANE_ID`, set to
+/// the pane's bare number.
+///
+/// Set in every shell Crook starts, marks or no marks, the way `TERM_PROGRAM`
+/// is — the two together answer "am I in Crook, and where?". The value is the
+/// same number [`PaneId::as_u64`](crate::tab::PaneId::as_u64) hands a plugin,
+/// so a script and a plugin looking at the same pane agree on its name.
+pub const PANE_ID_VARIABLE: &str = "CROOK_PANE_ID";
 
 /// Setting this in the environment to anything but `0` or the empty string
 /// stops Crook injecting anything into any shell, whatever the setting says.

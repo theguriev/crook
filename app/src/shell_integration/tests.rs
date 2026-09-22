@@ -11,6 +11,7 @@ use crook_terminal::{Program, PtyReader, Terminal, TerminalOptions, TerminalSize
 use super::launch::{HostEnv, Launch, plain, plan};
 use super::scratch::sweep;
 use super::*;
+use crate::tab::PaneId;
 
 /// How long a shell that should reach its first prompt immediately is given
 /// before the test calls it a failure rather than hanging the suite.
@@ -68,8 +69,13 @@ fn arguments(launch: &Launch) -> Vec<String> {
 
 /// One environment variable a launch adds.
 fn variable<'a>(launch: &'a Launch, key: &str) -> Option<&'a str> {
-    launch
-        .environment
+    session_variable(&launch.environment, key)
+}
+
+/// One environment variable in a list of them — a session's, or a terminal's
+/// options after a session was applied to them.
+fn session_variable<'a>(environment: &'a [(String, String)], key: &str) -> Option<&'a str> {
+    environment
         .iter()
         .find(|(name, _)| name == key)
         .map(|(_, value)| value.as_str())
@@ -607,7 +613,7 @@ fn test_a_session_writes_its_scratch_files_and_takes_them_with_it() {
     };
 
     let scratch = {
-        let session = Session::with_host(&options, host_at(&home));
+        let session = Session::with_host(PaneId::next(), &options, host_at(&home));
         assert!(session.marks());
         assert_eq!(session.shell(), Shell::Zsh);
 
@@ -630,7 +636,9 @@ fn test_a_session_writes_its_scratch_files_and_takes_them_with_it() {
 #[test]
 fn test_a_session_fills_in_the_terminals_options() {
     let home = TempDir::new("home");
+    let pane = PaneId::next();
     let session = Session::with_host(
+        pane,
         &Options {
             enabled: true,
             login: true,
@@ -659,12 +667,62 @@ fn test_a_session_fills_in_the_terminals_options() {
             .iter()
             .any(|(key, _)| key == "TERM_PROGRAM")
     );
+    assert_eq!(
+        session_variable(&options.environment, PANE_ID_VARIABLE),
+        Some(pane.as_u64().to_string().as_str()),
+        "the shell is told which pane it is in, and by the same number a \
+         plugin is handed for that pane"
+    );
+}
+
+#[test]
+fn test_every_shell_is_told_which_pane_it_is_in_marks_or_no_marks() {
+    // WEZTERM_PANE and KITTY_WINDOW_ID are what scripts and agent skills gate
+    // on — "only inside this terminal, and name the log after the pane". The
+    // marks are a separate promise: a shell Crook has no snippet for, and a
+    // person who opted out of the injection, still get to know where they are.
+    let home = TempDir::new("home");
+    for (name, enabled, program) in [
+        ("marked zsh", true, "/nowhere/zsh"),
+        ("bash with the marks off", false, "/nowhere/bash"),
+        ("a shell with no integration", true, "/nowhere/nu"),
+    ] {
+        let pane = PaneId::next();
+        let session = Session::with_host(
+            pane,
+            &Options {
+                enabled,
+                login: true,
+                shell: Some(PathBuf::from(program)),
+            },
+            host_at(&home),
+        );
+        assert_eq!(
+            session_variable(session.environment(), PANE_ID_VARIABLE),
+            Some(pane.as_u64().to_string().as_str()),
+            "{name} should carry its pane's number"
+        );
+        assert_eq!(
+            session_variable(session.environment(), "TERM_PROGRAM"),
+            Some(TERM_PROGRAM),
+            "{name} is named beside the terminal, not instead of it"
+        );
+    }
+
+    let first = Session::with_host(PaneId::next(), &Options::default(), host_at(&home));
+    let second = Session::with_host(PaneId::next(), &Options::default(), host_at(&home));
+    assert_ne!(
+        session_variable(first.environment(), PANE_ID_VARIABLE),
+        session_variable(second.environment(), PANE_ID_VARIABLE),
+        "two panes are two numbers, or a log named after the pane is one file"
+    );
 }
 
 #[test]
 fn test_the_opt_out_leaves_the_shell_exactly_as_it_was() {
     let home = TempDir::new("home");
     let session = Session::with_host(
+        PaneId::next(),
         &Options {
             enabled: false,
             login: true,
@@ -809,6 +867,7 @@ impl RealShell<'_> {
         }
 
         let session = Session::with_host(
+            PaneId::next(),
             &Options {
                 enabled: true,
                 login: self.login,

@@ -705,11 +705,14 @@ impl TerminalModel {
         // The integration writes its stub files before the shell is started
         // and removes them when this value is dropped, so it is moved into the
         // session below rather than left to fall out of scope here.
-        let integration = shell_integration::Session::open(&shell_integration::Options {
-            enabled: self.shell_marks,
-            login: self.shell_login,
-            shell: self.shell.clone(),
-        });
+        let integration = shell_integration::Session::open(
+            pane,
+            &shell_integration::Options {
+                enabled: self.shell_marks,
+                login: self.shell_login,
+                shell: self.shell.clone(),
+            },
+        );
         let mut options = TerminalOptions {
             size: self.measured.get(pane).unwrap_or(INITIAL_GRID),
             working_directory: directory,

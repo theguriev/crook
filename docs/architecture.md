@@ -780,7 +780,12 @@ because `alacritty_terminal` implements those sequences and the entry is in ever
 database old enough to matter. `LINES` and `COLUMNS` are *removed* rather than set: whatever
 started Crook may have had them, they described its window, and the kernel's `winsize` — which
 the pty is opened at before the child exists — is the truth. `TERM_PROGRAM=Crook` and
-`TERM_PROGRAM_VERSION` come from `shell_integration` and reach every shell, marks or no marks.
+`TERM_PROGRAM_VERSION` come from `shell_integration` and reach every shell, marks or no marks,
+and so does `CROOK_PANE_ID`, the pane's bare number — the same one a plugin is handed — set by
+`shell_integration::Session` because the session is the one thing that is per pane where the
+launch planners are per shell. It is what `WEZTERM_PANE` and `KITTY_WINDOW_ID` are: a fact a
+script or an agent gates on or names a log after, not an address anything routes by — the agent
+status channel writes to its own tty and needs no pane id.
 
 **The pty opens at the pane's size.** A shell prints its whole startup — a `~/.zprofile`
 banner, a greeting sized with `tput cols` — before any resize can reach it, and what it
