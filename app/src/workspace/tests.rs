@@ -7657,6 +7657,218 @@ fn a_searched_group_s_heading_counts_the_group_and_says_what_the_search_left() {
     );
 }
 
+/// Whether the heading is washed in the amber a waiting row wears: a box
+/// in the wash's own colour that the chevron sits inside.
+fn heading_is_washed(scene: &Scene, heading: RectF) -> bool {
+    visible_rects(scene).any(|(rect, bounds)| {
+        rect.background == Fill::Solid(tabs_panel::waiting_wash())
+            && bounds.contains_point(center(heading))
+    })
+}
+
+/// The status disc drawn on the heading's own line, with its colour, or
+/// `None` when the heading carries no mark. A member's disc is on a row
+/// below the heading and is not this one.
+fn heading_disc(scene: &Scene, heading: RectF) -> Option<Color> {
+    let diameter = crate::plugins::tabs::MARK_SIZE * 0.76;
+    let discs: Vec<Color> = visible_rects(scene)
+        .filter(|(rect, bounds)| {
+            rect.corner_radius.get_top_left() == Radius::Percentage(50.)
+                && (bounds.width() - diameter).abs() < 0.5
+                && center(*bounds).y() > heading.min_y()
+                && center(*bounds).y() < heading.max_y()
+        })
+        .filter_map(|(rect, _)| match rect.background {
+            Fill::Solid(color) => Some(color),
+            _ => None,
+        })
+        .collect();
+    assert!(discs.len() <= 1, "the heading drew {} marks", discs.len());
+    discs.first().copied()
+}
+
+/// The status glyph drawn on the heading's own line, if any.
+fn heading_glyph(scene: &Scene, heading: RectF, icon: Lucide) -> Option<RectF> {
+    icons_in(scene, panel_box(scene), icon)
+        .into_iter()
+        .find(|bounds| {
+            center(*bounds).y() > heading.min_y() && center(*bounds).y() < heading.max_y()
+        })
+}
+
+impl Harness {
+    /// A group of two, folded away, with its first member — the one not
+    /// being looked at — reporting `status`.
+    fn folded_group_with(status: AgentStatus) -> (Self, GroupId) {
+        let (mut harness, group) = Self::grouped_panel(2);
+        let hidden = harness.panes_of(harness.members_of(group)[0])[0];
+        harness.update_session(hidden, |session| session.status = status);
+        harness.dispatch_action(TabAction::ToggleGroup(group));
+        (harness, group)
+    }
+}
+
+#[test]
+fn a_folded_group_s_heading_is_washed_and_marked_for_a_waiting_member() {
+    // The row that would have been amber is behind the fold, so the heading
+    // says it: the same wash, and the same needs-input disc before the name.
+    let (mut harness, _) = Harness::folded_group_with(AgentStatus::NeedsInput);
+
+    let scene = harness.frame();
+    let heading = panel_heading(&scene);
+    assert!(
+        heading_is_washed(&scene, heading),
+        "the heading is not washed for the member it hides"
+    );
+    assert_eq!(
+        heading_disc(&scene, heading),
+        Some(super::status_color(AgentStatus::NeedsInput)),
+        "the heading does not carry the needs-input mark"
+    );
+}
+
+#[test]
+fn a_person_s_mark_rolls_up_to_the_folded_heading_too() {
+    // "Mark as waiting" is a person asking for a look, and it is the same
+    // amber on the row; folded away, it is the same amber on the heading.
+    let (mut harness, group) = Harness::grouped_panel(2);
+    let hidden = harness.panes_of(harness.members_of(group)[0])[0];
+    harness.update_session(hidden, |session| session.attention = true);
+    harness.dispatch_action(TabAction::ToggleGroup(group));
+
+    let scene = harness.frame();
+    let heading = panel_heading(&scene);
+    assert!(heading_is_washed(&scene, heading));
+    assert_eq!(
+        heading_disc(&scene, heading),
+        Some(super::status_color(AgentStatus::NeedsInput))
+    );
+}
+
+#[test]
+fn an_open_group_s_heading_is_plain_whatever_its_rows_say() {
+    // Open, the rows say it themselves; a heading repeating them would be
+    // the same fact twice on one screen.
+    let (mut harness, group) = Harness::folded_group_with(AgentStatus::NeedsInput);
+    harness.dispatch_action(TabAction::ToggleGroup(group));
+
+    let scene = harness.frame();
+    let heading = panel_heading(&scene);
+    assert!(
+        !heading_is_washed(&scene, heading),
+        "the open heading is washed"
+    );
+    assert_eq!(
+        heading_disc(&scene, heading),
+        None,
+        "the open heading carries a mark"
+    );
+    assert!(
+        status_discs(&scene).len() >= 2,
+        "the members lost their own discs"
+    );
+}
+
+#[test]
+fn a_folded_group_s_heading_says_failed_over_running() {
+    // Nothing waiting, so no wash; and of two stopped-or-not members the
+    // one that stopped badly is the one worth a look.
+    let (mut harness, group) = Harness::folded_group_with(AgentStatus::Running);
+    let members = harness.members_of(group);
+    let other = harness.panes_of(members[1])[0];
+    harness.update_session(other, |session| session.status = AgentStatus::Failed);
+
+    let scene = harness.frame();
+    let heading = panel_heading(&scene);
+    assert!(
+        !heading_is_washed(&scene, heading),
+        "a failed member is not a waiting one"
+    );
+    assert_eq!(
+        heading_disc(&scene, heading),
+        Some(super::status_color(AgentStatus::Failed))
+    );
+
+    // And the other way round, since the order is not the strip's order.
+    harness.update_session(other, |session| session.status = AgentStatus::Running);
+    let hidden = harness.panes_of(members[0])[0];
+    harness.update_session(hidden, |session| session.status = AgentStatus::Failed);
+    let scene = harness.frame();
+    assert_eq!(
+        heading_disc(&scene, panel_heading(&scene)),
+        Some(super::status_color(AgentStatus::Failed))
+    );
+}
+
+#[test]
+fn a_folded_group_with_nothing_to_report_carries_no_mark() {
+    let (mut harness, _) = Harness::folded_group_with(AgentStatus::Idle);
+
+    let scene = harness.frame();
+    let heading = panel_heading(&scene);
+    assert!(!heading_is_washed(&scene, heading));
+    assert_eq!(heading_disc(&scene, heading), None);
+    // The one disc left is the loose tab's, on its own row under the fold.
+    let discs = status_discs(&scene);
+    assert_eq!(discs.len(), 1, "a folded group's members are drawing discs");
+    assert!(center(discs[0]).y() > heading.max_y());
+}
+
+#[test]
+fn the_glyph_setting_changes_the_folded_heading_s_mark_too() {
+    // One setting, one shape: the mark on the heading is the host's own, as
+    // a row's is, so the person who asked for shapes gets a bell here too.
+    let (mut harness, _) = Harness::folded_group_with(AgentStatus::NeedsInput);
+    harness.dispatch_option(OptionsAction::SetStatusMarks(StatusMarks::Glyphs));
+
+    let scene = harness.frame();
+    let heading = panel_heading(&scene);
+    assert_eq!(
+        heading_disc(&scene, heading),
+        None,
+        "the disc outlived the setting"
+    );
+    let bell = heading_glyph(&scene, heading, Lucide::Bell).expect("the heading drew no bell");
+    assert_eq!(
+        icon_color_at(&scene, bell),
+        super::status_color(AgentStatus::NeedsInput)
+    );
+    assert!(
+        heading_is_washed(&scene, heading),
+        "the glyph took the wash with it"
+    );
+
+    harness.dispatch_option(OptionsAction::SetStatusMarks(StatusMarks::Dots));
+    let scene = harness.frame();
+    let heading = panel_heading(&scene);
+    assert!(heading_glyph(&scene, heading, Lucide::Bell).is_none());
+    assert!(heading_disc(&scene, heading).is_some());
+}
+
+#[test]
+fn the_header_counts_a_waiting_member_the_fold_hides_and_the_chord_reaches_it() {
+    // The roll-up is display only: the count and the chord already saw
+    // through the fold, and unfolding is not what they do.
+    let (mut harness, group) = Harness::folded_group_with(AgentStatus::NeedsInput);
+    let hidden = harness.panes_of(harness.members_of(group)[0])[0];
+
+    assert!(
+        frame_text(&harness.frame()).contains("1 waiting"),
+        "the fold hid the pane from the count"
+    );
+    harness.run_command("crook/tabs/next-waiting");
+    assert_eq!(harness.focused_pane_id(), Some(hidden));
+    assert!(
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .group(group)
+                .is_some_and(crate::tab::TabGroup::is_collapsed)
+        }),
+        "reaching the pane unfolded the group"
+    );
+}
+
 #[test]
 fn right_clicking_a_panel_row_opens_the_menu_too() {
     // The panel and the strip answer the same gesture, because the rule is

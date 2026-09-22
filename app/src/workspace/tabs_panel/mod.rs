@@ -76,8 +76,9 @@ use crookui_core::elements::MouseStateHandle;
 
 use std::collections::HashMap;
 
+use crate::plugins::tabs::GroupRollup;
 use crate::settings::Granularity;
-use crate::tab::{Block, GroupId, PaneId, Tab, TabAction, TabId};
+use crate::tab::{AgentStatus, Block, GroupId, PaneId, Tab, TabAction, TabId};
 use crate::theme::theme;
 
 use super::action::WorkspaceAction;
@@ -90,6 +91,9 @@ pub(crate) mod drag;
 pub(super) mod geometry;
 mod row;
 pub(crate) mod search;
+
+#[cfg(test)]
+pub(super) use row::waiting_wash;
 
 /// Warp's `PANEL_WIDTH`.
 ///
@@ -602,6 +606,13 @@ fn group_block(
     let holds_the_active_tab = members
         .iter()
         .any(|(tab, _)| workspace.tabs().is_active(*tab));
+    // Only while folded: an open group's rows say it themselves, and a
+    // heading repeating the worst of them would be the same fact twice on
+    // one screen. Folded, the heading is the only place the rows can be
+    // seen at all, so it says what the worst of them would have.
+    let rollup = collapsed
+        .then(|| crate::plugins::tabs::group_rollup(workspace.tabs(), group))
+        .flatten();
 
     // Counted off the strip, not off the rows under the heading: the rows are
     // the ones the search left, and the × on the heading closes the group.
@@ -618,6 +629,7 @@ fn group_block(
                 all,
             },
             collapsed,
+            rollup,
         ));
 
     if !collapsed {
@@ -652,9 +664,20 @@ fn group_block(
     // back. See [`drag::Handle::new`].
     let grip_state = chrome.heading.clone();
 
+    // The wash goes on the block and not on the heading inside it because a
+    // folded block *is* its heading — the same box, wearing the block's own
+    // corners — and a second box washed inside the first would poke its
+    // square corners past the card's round ones under `Tabs`. It outranks
+    // the lift the active tab gives the block, as a waiting row's wash is
+    // painted over its tab's lifted container: the person is in one member
+    // of this group and another is asking, and a plain lift says nothing.
+    let waiting = rollup.is_some_and(|rollup| rollup.waiting);
     let block = Hoverable::new(heading_state, move |mouse| {
-        let lit = holds_the_active_tab || mouse.is_hovered();
-        let container = Container::new(column).with_background_color(if lit {
+        let container = Container::new(column).with_background_color(if mouse.is_hovered() {
+            theme().overlay_1
+        } else if waiting {
+            row::waiting_wash()
+        } else if holds_the_active_tab {
             theme().overlay_1
         } else {
             Color::TRANSPARENT
@@ -792,12 +815,19 @@ impl Count {
 /// disclosure in every sidebar has. The close button beside it closes every
 /// tab in the group, which is the only way to put a group down in one gesture
 /// once the tabs inside it are the work rather than the panes.
+///
+/// `rollup` is what the hidden rows would have said, and it is `Some` only
+/// while the group is folded. The mark it puts before the name is the host's
+/// own — the disc, or the glyph the setting asks for — and an idle group gets
+/// none, so a heading with nothing to report looks as it did before there was
+/// anything to roll up.
 fn heading(
     workspace: &Workspace,
     group: GroupId,
     name: &str,
     count: Count,
     collapsed: bool,
+    rollup: Option<GroupRollup>,
 ) -> Box<dyn Element> {
     let Some(chrome) = workspace.group_chrome(group) else {
         return Empty::new().finish();
@@ -807,68 +837,79 @@ fn heading(
     let count = count.label();
     let close = chrome.close.clone();
     let guard = chrome.close.clone();
+    let mark = rollup
+        .map(|rollup| rollup.status)
+        .filter(|status| *status != AgentStatus::Idle)
+        .map(|status| crate::plugins::tabs::status_mark(workspace, status));
 
     Hoverable::new(chrome.heading.clone(), move |mouse| {
         let hovered = mouse.is_hovered();
-        Container::new(
-            Flex::row()
-                .with_main_axis_size(MainAxisSize::Max)
-                .with_cross_axis_alignment(CrossAxisAlignment::Center)
-                .with_spacing(HEADING_ICON_GAP)
-                .with_child(
-                    // Centred in a slot the size of a row's leading icon, which
-                    // is Warp's line for Warp's reason: it is what brings the
-                    // name on the heading into something like the column its
-                    // members' names are in.
-                    ConstrainedBox::new(
-                        Align::new(
-                            Icon::new(
-                                if collapsed {
-                                    Lucide::ChevronRight
-                                } else {
-                                    Lucide::ChevronDown
-                                },
-                                HEADING_ICON_SIZE,
-                            )
-                            .with_color(if hovered {
-                                theme().text_primary
+        let mut row = Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_cross_axis_alignment(CrossAxisAlignment::Center)
+            .with_spacing(HEADING_ICON_GAP)
+            .with_child(
+                // Centred in a slot the size of a row's leading icon, which
+                // is Warp's line for Warp's reason: it is what brings the
+                // name on the heading into something like the column its
+                // members' names are in.
+                ConstrainedBox::new(
+                    Align::new(
+                        Icon::new(
+                            if collapsed {
+                                Lucide::ChevronRight
                             } else {
-                                theme().text_muted
-                            })
-                            .finish(),
+                                Lucide::ChevronDown
+                            },
+                            HEADING_ICON_SIZE,
                         )
+                        .with_color(if hovered {
+                            theme().text_primary
+                        } else {
+                            theme().text_muted
+                        })
                         .finish(),
                     )
-                    .with_width(HEADING_ICON_SLOT)
-                    .with_height(HEADING_ICON_SLOT)
                     .finish(),
                 )
-                .with_child(
-                    Expanded::new(
-                        1.,
-                        Flex::column()
-                            .with_main_axis_size(MainAxisSize::Min)
-                            .with_cross_axis_alignment(CrossAxisAlignment::Start)
-                            .with_child(
-                                Text::new(name.clone(), ui, HEADING_SIZE)
-                                    .with_color(theme().text_primary)
-                                    .finish(),
-                            )
-                            .with_child(
-                                Text::new(count.clone(), ui, GROUP_HEADER_SIZE)
-                                    .with_color(theme().text_muted)
-                                    .finish(),
-                            )
-                            .finish(),
-                    )
-                    .finish(),
-                )
-                .with_child(row::close_slot(
-                    TabAction::CloseGroup(group),
-                    close.clone(),
-                    hovered,
-                ))
+                .with_width(HEADING_ICON_SLOT)
+                .with_height(HEADING_ICON_SLOT)
                 .finish(),
+            );
+        // Between the chevron and the name, where a row's own mark sits
+        // before its title, and nowhere when there is nothing to say: the
+        // name moves right by one mark while the group needs a look and
+        // back when it does not, which is the same thing the wash does.
+        if let Some(mark) = mark {
+            row.add_child(mark);
+        }
+        Container::new(
+            row.with_child(
+                Expanded::new(
+                    1.,
+                    Flex::column()
+                        .with_main_axis_size(MainAxisSize::Min)
+                        .with_cross_axis_alignment(CrossAxisAlignment::Start)
+                        .with_child(
+                            Text::new(name.clone(), ui, HEADING_SIZE)
+                                .with_color(theme().text_primary)
+                                .finish(),
+                        )
+                        .with_child(
+                            Text::new(count.clone(), ui, GROUP_HEADER_SIZE)
+                                .with_color(theme().text_muted)
+                                .finish(),
+                        )
+                        .finish(),
+                )
+                .finish(),
+            )
+            .with_child(row::close_slot(
+                TabAction::CloseGroup(group),
+                close.clone(),
+                hovered,
+            ))
+            .finish(),
         )
         .with_horizontal_padding(GROUP_HORIZONTAL_PADDING)
         .with_vertical_padding(GROUP_HEADER_VERTICAL_PADDING)

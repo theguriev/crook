@@ -40,7 +40,9 @@
 //! in the status colour instead of a filled dot, for the eye the colour alone
 //! says nothing to. It is the same answer to the same empty slot — a plugin
 //! that took the mark replaces both, and one that declined a row gets
-//! whichever the setting says.
+//! whichever the setting says. A folded group's heading borrows that answer
+//! for the worst of the rows it hides — see [`group_rollup`] — since it has
+//! no row of its own to offer the slot for.
 //!
 //! This plugin owns [`TAB_MENU_ENTRIES`] — the place a tab's context menu is
 //! made of — and contributes the entries that are about a tab as such: putting
@@ -108,7 +110,7 @@ use crate::input_keys::Platform;
 use crate::plugin::{ActionId, BuildError, Host, Plugin, Showing};
 use crate::plugins::header::HEADER_LEFT;
 use crate::settings::StatusMarks;
-use crate::tab::{AgentStatus, PaneId, Tab, TabAction, TabColor, TabId, TabStrip};
+use crate::tab::{AgentStatus, GroupId, PaneId, Tab, TabAction, TabColor, TabId, TabStrip};
 use crate::text_input::TextInput;
 use crate::theme::theme;
 use crate::workspace::tab_context_menu::{entry, field_entry, inert_entry, nothing, swatch_entry};
@@ -923,6 +925,68 @@ pub fn waiting_count(strip: &TabStrip) -> usize {
         .count()
 }
 
+/// What a folded group's heading says for the rows it is hiding.
+///
+/// herdr rolls an agent's state up to the tab and the workspace for the same
+/// reason this exists: a collapsed group has taken its members off the
+/// panel, and the amber wash on a row nobody can see is a request nobody
+/// sees. The two fields are the two things a row shows separately — the wash
+/// is [`AgentSession::is_waiting`](crate::tab::AgentSession::is_waiting) for
+/// any member, and the mark is the worst status among them — so the heading
+/// can say exactly what the worst of its rows would have said.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct GroupRollup {
+    /// The worst status among the members, by [`severity`].
+    pub status: AgentStatus,
+    /// Whether any member is waiting on the person who is not looking at it.
+    pub waiting: bool,
+}
+
+/// The order a heading tells the states in: the one that needs a person
+/// outranks the one that needs nobody, and a stopped agent outranks a working
+/// one. Not `AgentStatus`'s declaration order, which lists the two stopped
+/// states the other way round.
+fn severity(status: AgentStatus) -> u8 {
+    match status {
+        AgentStatus::Idle => 0,
+        AgentStatus::Running => 1,
+        AgentStatus::Failed => 2,
+        AgentStatus::NeedsInput => 3,
+    }
+}
+
+/// The worst of a group's members, or `None` for a group with no panes.
+///
+/// A waiting pane counts as needing input whatever its own dot says: a
+/// running agent that rang keeps its play mark on its own row because the
+/// row is amber too, but a heading summarising it is answering "does anyone
+/// in here need me", and the honest one-word answer is yes.
+pub fn group_rollup(strip: &TabStrip, group: GroupId) -> Option<GroupRollup> {
+    strip
+        .members(group)
+        .flat_map(|tab| tab.panes().iter().map(move |pane| (tab.id(), pane)))
+        .map(|(tab, pane)| {
+            let active = strip.is_active(tab) && strip.focused_pane_id() == Some(pane.id());
+            let waiting = pane.session().is_waiting(active);
+            GroupRollup {
+                status: if waiting {
+                    AgentStatus::NeedsInput
+                } else {
+                    pane.status()
+                },
+                waiting,
+            }
+        })
+        .reduce(|worst, next| GroupRollup {
+            status: if severity(next.status) > severity(worst.status) {
+                next.status
+            } else {
+                worst.status
+            },
+            waiting: worst.waiting || next.waiting,
+        })
+}
+
 /// The chip in the header that counts the waiting panes and goes to the next
 /// one when pressed — or nothing at all, which is what the header shows
 /// while nobody is waiting. A count of zero is not information.
@@ -1010,10 +1074,7 @@ pub fn mark(workspace: &Workspace, row: &TabRow<'_>, app: &AppContext) -> Box<dy
         .rows()
         .one(TAB_ROW_MARK, |build| build(workspace, row, app))
         .flatten()
-        .unwrap_or_else(|| match workspace.options().status_marks {
-            StatusMarks::Dots => disc(row.status),
-            StatusMarks::Glyphs => glyph(row.status),
-        });
+        .unwrap_or_else(|| status_mark(workspace, row.status));
 
     let mut stack = Stack::new().with_child(Align::new(face).finish());
     // A plugin's badge first, then the zoom's: the corner is one thing at a
@@ -1034,6 +1095,20 @@ pub fn mark(workspace: &Workspace, row: &TabRow<'_>, app: &AppContext) -> Box<dy
         .with_width(MARK_SIZE)
         .with_height(MARK_SIZE)
         .finish()
+}
+
+/// The host's own mark for a status: the disc, or the glyph the Appearance
+/// page asked for instead.
+///
+/// What a row gets when no plugin took [`TAB_ROW_MARK`], and what a folded
+/// group's heading carries for the worst of its members — the heading has no
+/// row behind it to offer the slot, so it is the host's answer and only
+/// that, which keeps a group's mark the same shape as its members'.
+pub fn status_mark(workspace: &Workspace, status: AgentStatus) -> Box<dyn Element> {
+    match workspace.options().status_marks {
+        StatusMarks::Dots => disc(status),
+        StatusMarks::Glyphs => glyph(status),
+    }
 }
 
 /// What a row's mark is when nothing has replaced it: a status-coloured disc.
