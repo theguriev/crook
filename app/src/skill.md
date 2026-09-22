@@ -19,6 +19,11 @@ Every shell Crook starts has `TERM_PROGRAM=Crook` in its environment, with Crook
 [ "$TERM_PROGRAM" = "Crook" ]
 ```
 
+`CROOK_PANE_ID` is there too: the number of the pane the shell runs in, the same for the life
+of the pane and different from every other pane in the window. It is for telling panes apart
+— a log file named after it, a lock keyed on it — and for nothing else: no command takes it,
+and reporting status needs no id at all, because the terminal you are in is the pane.
+
 Use this skill only when the user mentions Crook or the task is about Crook. In any other
 terminal, or for any other task, do nothing Crook-specific: the flags below write an escape
 sequence only Crook reads, and a status reported anywhere else is noise.
