@@ -1076,6 +1076,51 @@ fn a_chord_another_command_has_taken_is_not_printed_on_the_row_that_lost_it() {
 }
 
 #[test]
+fn a_chord_that_now_only_starts_a_longer_one_is_not_printed_either() {
+    // Not the same chord, but one that begins with it: pressing
+    // `ctrl+shift+d` now waits for the second key, so split-right cannot be
+    // reached by it, and a row that still offered it would be lying.
+    let keybindings = written(
+        "prefixed",
+        r#"[{ "key": "ctrl+shift+d ctrl+shift+x", "command": "crook/window/new-tab" }]"#,
+    );
+
+    assert_eq!(meaning(&keybindings, "ctrl+shift+d"), Resolution::Chord);
+    assert!(
+        keybindings
+            .chords_for(&command("crook/window/split-right"))
+            .is_empty()
+    );
+    assert_eq!(
+        keybindings.chords_for(&command("crook/window/new-tab")),
+        vec!["ctrl+shift+t", "ctrl+shift+d ctrl+shift+x"]
+    );
+}
+
+#[test]
+fn a_chord_whose_first_key_now_runs_something_else_is_not_printed_either() {
+    // The other way round: the first key alone now runs a command, so the
+    // two-key chord that starts with it can never be finished.
+    let keybindings = written(
+        "cut short",
+        r#"[
+            { "key": "ctrl+k ctrl+s", "command": "crook/window/open-settings" },
+            { "key": "ctrl+k", "command": "crook/window/new-tab" }
+        ]"#,
+    );
+
+    assert_eq!(
+        meaning(&keybindings, "ctrl+k"),
+        Resolution::Command(command("crook/window/new-tab"))
+    );
+    assert!(
+        !keybindings
+            .chords_for(&command("crook/window/open-settings"))
+            .contains(&String::from("ctrl+k ctrl+s"))
+    );
+}
+
+#[test]
 fn a_conditional_rule_does_not_take_a_chord_off_the_row_that_owns_it() {
     // The other half: a rule that only holds sometimes takes the chord only
     // sometimes, and a row that went blank over a clause which does not hold

@@ -384,9 +384,16 @@ impl Keybindings {
             // Whether a chord was taken is a question about this rule alone
             // and not about who is asking, which is why it is settled here
             // once for every rule rather than once per command asked about.
-            let taken = effective[at + 1..].iter().any(|later| {
-                later.keys == rule.keys && later.when.is_none() && later.command != rule.command
-            });
+            //
+            // And not only the same chord. `resolve` lets the last rule that
+            // matches *or begins with* what was pressed decide, so a later
+            // `ctrl+shift+d ctrl+shift+x` makes `ctrl+shift+d` start a chord
+            // rather than run this rule, and a later `ctrl+k` runs before
+            // `ctrl+k ctrl+s` can be finished. Either way this rule's chord is
+            // one nobody can press any more.
+            let taken = effective[at + 1..]
+                .iter()
+                .any(|later| later.when.is_none() && shadows(later, rule));
             if !taken {
                 standing.push(rule);
             }
@@ -1205,6 +1212,20 @@ pub const DEFAULTS_OTHER: &[(&str, &str)] = &[
     ("alt+home", "crook/window/scroll-to-top"),
     ("alt+end", "crook/window/scroll-to-bottom"),
 ];
+
+/// Whether `later`, written after `rule`, leaves `rule`'s chord unpressable.
+///
+/// The same chord for another command — the same chord for the *same*
+/// command is only the rule said twice. Or either chord a prefix of the
+/// other, whatever the command: the longer one turns the shorter into the
+/// start of a chord, and the shorter one fires before the longer can be
+/// finished.
+fn shadows(later: &Rule, rule: &Rule) -> bool {
+    if later.keys == rule.keys {
+        return later.command != rule.command;
+    }
+    later.keys.starts_with(&rule.keys) || rule.keys.starts_with(&later.keys)
+}
 
 #[cfg(test)]
 #[path = "keybindings_tests.rs"]
