@@ -521,9 +521,16 @@ impl<'a> Blocks<'a> {
 
         let mut found = Vec::new();
         let mut from = 0;
+        // How many chars come before `counted`, carried forward from one match
+        // to the next: counting from the start for each match made a search
+        // that matched often in a long output quadratic, on every frame the
+        // find bar is open.
+        let (mut counted, mut chars) = (0, 0);
         while let Some(relative) = haystack[from..].find(&needle) {
             let byte = from + relative;
-            let first = haystack[..byte].chars().count();
+            chars += haystack[counted..byte].chars().count();
+            counted = byte;
+            let first = chars;
             let last = first + needle_chars - 1;
             if let (Some(start), Some(end)) = (at.get(first), at.get(last)) {
                 found.push(Selection::new(

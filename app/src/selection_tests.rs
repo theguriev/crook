@@ -608,6 +608,30 @@ fn an_evicted_block_leaves_the_highlight_and_the_copy_agreeing() {
 }
 
 #[test]
+fn find_all_lands_every_match_on_its_word_past_wide_and_accented_text() {
+    // Thousands of matches, with characters of every width in front of each
+    // one: the char index a byte offset maps to is carried from match to
+    // match, and a slip anywhere shows as a match covering the wrong cells.
+    let mut emulator = Emulator::new(TerminalSize::new(40, 12), 5000, Palette::default());
+    emulator.advance(A.as_bytes());
+    emulator.advance(format!("{B}log\r\n{C}").as_bytes());
+    for line in 0..2000 {
+        emulator.advance(format!("é日{line} one ü\r\n").as_bytes());
+    }
+    emulator.advance(format!("{D}{A}$ ").as_bytes());
+    let session = Session {
+        finished: BlockHistory::new(emulator.blocks().iter().cloned().map(Arc::new).collect(), 0),
+        snapshot: emulator.snapshot(),
+    };
+
+    let matches = session.blocks().find_all("ONE");
+    assert_eq!(2000, matches.len());
+    for found in &matches {
+        assert_eq!(Some("one".to_owned()), found.text(&session.blocks()));
+    }
+}
+
+#[test]
 fn find_all_finds_every_occurrence_across_blocks_and_folds_ascii_case() {
     // Two commands, each printing its own name in capitals twice. The word
     // "one" appears once per command's output, so a search for it finds two,
