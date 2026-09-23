@@ -1613,3 +1613,57 @@ fn test_the_standing_of_a_shell_is_read_from_its_name_and_the_opt_out() {
         Marks::OptedOut
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn test_a_bash_completion_is_offered_the_way_it_has_to_be_typed() {
+    // `compgen` prints bare names, and the answer is inserted verbatim, so the
+    // snippet itself has to add what readline would: a directory's slash, so
+    // the next Tab can go into it, and a quoted space, so a file name stays
+    // one argument. Run in a real bash, since the snippet is the thing under
+    // test; skipped where there is no bash 4 to run it in, the version the
+    // snippet binds the key on at all.
+    let directory = TempDir::new("bash-completion");
+    fs::create_dir_all(directory.path().join("projects").join("src"))
+        .expect("the directories should be creatable");
+    fs::write(directory.path().join("notes file.txt"), "").expect("the file should be writable");
+    let snippet = directory.path().join("crook.bash");
+    fs::write(&snippet, BASH_SNIPPET).expect("the snippet should be writable");
+
+    let Ok(output) = crate::process::command("bash")
+        .args(["--norc", "--noprofile", "-i", "-c"])
+        .arg(
+            r#"[ "${BASH_VERSINFO[0]}" -ge 4 ] || exit 77
+. "$1"
+for line in "cd proj" "cat no" "cd projects/" "ls ~/pro"; do
+    candidates=()
+    __crook_candidates "$line"
+    printf '%s|' "${candidates[@]}"
+    printf '\n'
+done"#,
+        )
+        .arg("crook-test")
+        .arg(&snippet)
+        .current_dir(directory.path())
+        .env("HOME", directory.path())
+        .stdin(std::process::Stdio::null())
+        .output()
+    else {
+        return;
+    };
+    if output.status.code() == Some(77) {
+        return;
+    }
+
+    let said = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        said.lines().collect::<Vec<_>>(),
+        [
+            "projects/|",
+            "notes\\ file.txt|",
+            "projects/src/|",
+            "~/projects/|"
+        ],
+        "{said}"
+    );
+}

@@ -84,11 +84,40 @@ __crook_candidates() {
 	case $word in
 		# A variable, which `compgen -v` knows and no glob does.
 		\$*) mapfile -t candidates < <(builtin compgen -P '$' -v -- "${word#\$}" 2>/dev/null) ;;
-		# `-o default` is what makes a directory come back with its slash and a
-		# name with a space come back quoted, both of which the caller inserts
-		# verbatim.
-		*) mapfile -t candidates < <(builtin compgen -o default -- "$word" 2>/dev/null) ;;
+		# Files and directories, the way readline would offer them.
+		*)
+			mapfile -t candidates < <(builtin compgen -o default -- "$word" 2>/dev/null)
+			__crook_as_typed
+			;;
 	esac
+}
+
+# The `candidates` array as they have to be typed.
+#
+# `compgen` prints bare names: readline adds a directory's slash and quotes a
+# space only when it completes by itself, and this is not readline completing.
+# The caller inserts a candidate verbatim, so without these a Tab could never
+# step into a directory — the name it finishes has no slash to go on from —
+# and `cat notes file.txt` would be two arguments.
+#
+# A leading `~` or `~user` is left as it is, since quoted it is no longer a
+# home directory; everything after it is quoted.
+__crook_as_typed() {
+	local i candidate home rest
+	for i in "${!candidates[@]}"; do
+		candidate=${candidates[i]}
+		home=
+		case $candidate in
+			\~*) home=${candidate%%/*} ;;
+		esac
+		rest=${candidate#"$home"}
+		case $home in
+			\~) [ -d "$HOME$rest" ] && rest+=/ ;;
+			'') [ -d "$rest" ] && rest+=/ ;;
+		esac
+		[ -n "$rest" ] && builtin printf -v rest '%q' "$rest"
+		candidates[i]=$home$rest
+	done
 }
 
 # `bind -x` runs the function and then redraws the prompt, which is exactly
