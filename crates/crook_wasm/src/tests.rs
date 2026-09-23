@@ -288,6 +288,22 @@ fn a_plugin_built_for_another_version_is_refused_by_both_numbers() {
 }
 
 #[test]
+fn a_plugin_built_for_an_earlier_version_is_refused_too() {
+    // Not only a later one: the host speaks one vocabulary, and the About
+    // page tells a plugin author so. An older module is decoded against
+    // shapes that have since changed, which is a refusal and not a fallback.
+    let wasm = module(&with_strings(WELL_BEHAVED), ABI_VERSION - 1);
+
+    assert_eq!(
+        refused(&wasm),
+        Problem::Abi {
+            theirs: ABI_VERSION - 1,
+            ours: ABI_VERSION
+        }
+    );
+}
+
+#[test]
 fn something_that_is_not_wasm_at_all_is_refused_rather_than_run() {
     let problem = refused(b"this is not a plugin");
 

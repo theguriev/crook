@@ -305,8 +305,9 @@ fn about(
                     Words::new("Plugin API")
                         .with_description(format!(
                             "ABI {ABI_VERSION}: the vocabulary a plugin from a file is built \
-                             against. One built for a later number is refused when it is \
-                             opened, and the sentence names both numbers."
+                             against. One built for any other number, later or earlier, is \
+                             refused when it is opened, and the sentence names both \
+                             numbers."
                         ))
                         .with_keywords(&["abi", "plugin", "api", "wasm", "sdk", "crate"]),
                     format!("crook_plugin_api = \"0.{ABI_VERSION}\""),
