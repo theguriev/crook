@@ -100,7 +100,15 @@ impl AgentReport {
 /// looks for is the first one, and there is no title in front of it.
 pub fn report(status: AgentReport, title: Option<&str>, message: Option<&str>) -> String {
     let mut sequence = format!("\x1b]{OSC};{}", status.word());
-    if let Some(title) = title.and_then(field) {
+    // And a title loses a `;` at either end, or is left off when that leaves
+    // nothing: beside the `;` in front of it, or the `;;` behind it, an edge
+    // semicolon is an empty piece of its own, and the reader cuts at the
+    // first one — `running;;title` is a message with no title.
+    let title = title
+        .and_then(field)
+        .map(|title| title.trim_matches(';').to_owned())
+        .filter(|title| !title.is_empty());
+    if let Some(title) = title {
         sequence.push(';');
         sequence.push_str(&title);
     }
@@ -272,6 +280,28 @@ mod tests {
             }),
             parsed(&sequence)
         );
+    }
+
+    #[test]
+    fn a_semicolon_at_the_edge_of_a_title_cannot_forge_the_cut_either() {
+        // Squeezing is not enough at the ends: `;x` beside the `;` in front
+        // of it is `;;x`, which read as a message with no title.
+        let read = |title: &str, message: Option<&str>| {
+            parsed(&report(AgentReport::NeedsInput, Some(title), message))
+                .map(|reported| (reported.title, reported.message))
+        };
+        let text = |text: &str| Some(text.to_owned());
+
+        assert_eq!(read(";; comment", None), Some((text("comment"), None)));
+        assert_eq!(read("; x", None), Some((text("x"), None)));
+        assert_eq!(
+            read("fix a;", Some("approve?")),
+            Some((text("fix a"), text("approve?")))
+        );
+        // A title that is nothing but the edge is no title, and the message
+        // after it arrives whole rather than with a `;` in front.
+        assert_eq!(read(";", Some("approve?")), Some((None, text("approve?"))));
+        assert_eq!(read("", Some("approve?")), Some((None, text("approve?"))));
     }
 
     #[test]
