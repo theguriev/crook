@@ -142,6 +142,15 @@ fn parse_head(contents: &str) -> Option<Head> {
 
     if let Some(reference) = head.strip_prefix("ref:") {
         let reference = reference.trim();
+        // What a reftable repository writes into this file for tools that
+        // read it: a ref no branch can be named, since `check-ref-format`
+        // refuses a component starting with a dot. The real `HEAD` is in the
+        // binary tables under `reftable/`, which this module does not read —
+        // so no branch, rather than a row, a pull-request lookup and a
+        // suggested worktree name all built on one called `.invalid`.
+        if reference == "refs/heads/.invalid" {
+            return None;
+        }
         // A symbolic HEAD can legally point outside refs/heads — at a remote
         // ref, or at a tag. Rare, but showing the last segment beats showing
         // nothing, and neither case is worth a branch in the type.
