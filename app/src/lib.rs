@@ -511,6 +511,51 @@ fn attach_to_parent_console() {
     }
 }
 
+/// What follows `--agent`: the status, and a title and a message if given.
+///
+/// Apart from [`parse_args`] so that what it accepts can be tested without
+/// sending a report to whatever terminal the test runs in.
+fn agent_arguments(
+    args: &mut std::iter::Peekable<impl Iterator<Item = String>>,
+) -> Result<(String, Option<String>, Option<String>)> {
+    let status = args
+        .next()
+        .context("`--agent` needs a status: idle, running, needs-input or failed")?;
+    let mut title = None;
+    let mut message = None;
+    // In either order, each at most once: a hook that names the
+    // work and says what it is waiting for spells both.
+    while let Some(flag) = args.peek().map(String::as_str) {
+        let (field, needs) = match flag {
+            "--title" => (&mut title, "`--title` needs the title"),
+            "--message" => (
+                &mut message,
+                "`--message` needs the message, or `-` to read it from stdin",
+            ),
+            _ => break,
+        };
+        if field.is_some() {
+            bail!("`{flag}` was given twice");
+        }
+        args.next();
+        *field = Some(args.next().context(needs)?);
+    }
+    // A flag left over is one nothing here reads — most often a
+    // `--mesage` a hook misspelled, which would otherwise report
+    // needs-input with no question and exit as though it had.
+    // Refused before anything reaches the terminal. A word that is
+    // not a flag is let through as it always was: Codex's older
+    // `notify` runs the program it names with a JSON payload
+    // appended, and `--agent idle` there has to keep working.
+    if let Some(extra) = args.peek().filter(|word| word.starts_with("--")) {
+        bail!(
+            "unrecognised argument {extra}; `--agent <status>` takes only \
+             --title and --message"
+        );
+    }
+    Ok((status, title, message))
+}
+
 fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<Startup> {
     let mut args = args.peekable();
     let mut frames = None;
@@ -531,6 +576,9 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
             }
             "--shell-integration" => {
                 let shell = args.next();
+                if let Some(extra) = args.next() {
+                    bail!("unrecognised argument {extra}; `--shell-integration` takes one shell");
+                }
                 println!("{}", shell_integration_text(shell.as_deref())?);
                 return Ok(Startup::Answered);
             }
@@ -538,28 +586,7 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
             // about is already open, and this process is a program inside it
             // saying one thing to it.
             "--agent" => {
-                let status = args
-                    .next()
-                    .context("`--agent` needs a status: idle, running, needs-input or failed")?;
-                let mut title = None;
-                let mut message = None;
-                // In either order, each at most once: a hook that names the
-                // work and says what it is waiting for spells both.
-                while let Some(flag) = args.peek().map(String::as_str) {
-                    let (field, needs) = match flag {
-                        "--title" => (&mut title, "`--title` needs the title"),
-                        "--message" => (
-                            &mut message,
-                            "`--message` needs the message, or `-` to read it from stdin",
-                        ),
-                        _ => break,
-                    };
-                    if field.is_some() {
-                        bail!("`{flag}` was given twice");
-                    }
-                    args.next();
-                    *field = Some(args.next().context(needs)?);
-                }
+                let (status, title, message) = agent_arguments(&mut args)?;
                 agent::report(&status, title.as_deref(), message.as_deref())?;
                 return Ok(Startup::Answered);
             }
@@ -3784,6 +3811,46 @@ mod tests {
                 "--help documents {flag}, which the parser has never heard of"
             );
         }
+    }
+
+    #[test]
+    fn a_flag_after_what_agent_reads_is_refused_rather_than_dropped() {
+        // A misspelled flag used to be skipped: the report went out with no
+        // message and the command exited 0, so nothing told the hook's author
+        // why the row said nothing. Refused before the terminal is touched,
+        // which is also why this test needs no terminal.
+        for (args, extra) in [
+            (
+                &["--agent", "needs-input", "--mesage", "approve deploy?"][..],
+                "--mesage",
+            ),
+            (
+                &["--agent", "running", "--title", "port", "--bogus"][..],
+                "--bogus",
+            ),
+            (&["--shell-integration", "zsh", "--bogus"][..], "--bogus"),
+        ] {
+            let complaint = format!(
+                "{:#}",
+                parse(args).expect_err("a flag nothing reads is an error")
+            );
+            assert!(
+                complaint.starts_with(&format!("unrecognised argument {extra};")),
+                "{args:?}: {complaint}"
+            );
+        }
+
+        // What an agent appends is not a flag, and is left alone: Codex's
+        // older `notify` hands the program a JSON payload after its own
+        // arguments.
+        let mut appended = ["idle", r#"{"type":"agent-turn-complete"}"#]
+            .map(str::to_owned)
+            .into_iter()
+            .peekable();
+        assert_eq!(
+            agent_arguments(&mut appended).expect("a payload an agent appends is let through"),
+            ("idle".to_owned(), None, None)
+        );
     }
 
     #[test]
