@@ -10448,19 +10448,23 @@ mod shells {
         // scrolls the marker up off the row this would return — after which a
         // drag by that row lands on the prompt instead. There are no marks
         // here to ask "are you back at a prompt", so this waits for the text
-        // to hold still: a handful of reads that agree is the output done and
-        // the prompt arrived, on a runner however slow.
-        let mut last: Option<String> = None;
-        let mut still = 0;
+        // to hold still — for a stretch of *time*, not a count of reads. It
+        // was four reads that agreed, which at `wait_for`'s 10ms poll is 40ms
+        // of quiet, and a loaded machine takes longer than that to draw the
+        // next prompt: the row came back, the prompt scrolled it, and the drag
+        // selected the wrong line. A quarter of a second of nothing changing
+        // is the output done and the prompt arrived.
+        const QUIET: std::time::Duration = std::time::Duration::from_millis(250);
+        let mut last: Option<(String, std::time::Instant)> = None;
         harness.wait_for("the grid never settled after the command", |harness| {
             let now = harness.terminal_text(pane);
-            if last.as_ref() == Some(&now) {
-                still += 1;
-            } else {
-                still = 0;
-                last = Some(now);
+            match &last {
+                Some((seen, since)) if *seen == now => since.elapsed() >= QUIET,
+                _ => {
+                    last = Some((now, std::time::Instant::now()));
+                    false
+                }
             }
-            still >= 4
         });
         harness.frame();
         harness
