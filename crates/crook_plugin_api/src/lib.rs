@@ -207,7 +207,9 @@ pub enum Capability {
     /// a weaker thing to agree to than a named file and the sentence says so,
     /// but it is the only shape in which "the transcripts Claude Code writes"
     /// can be asked for at all: they are a directory of files whose names
-    /// nobody knows in advance.
+    /// nobody knows in advance. It is what a [`Request::Tally`] of that
+    /// directory needs, and only that: a [`Request::ReadFile`] names one file
+    /// and needs that file granted by name, `/**` or not.
     ReadFiles(Vec<String>),
     /// Make a sound, by handing the host the audio to play.
     ///
@@ -899,7 +901,10 @@ pub enum Request {
         path: String,
     },
     /// Walk a directory of line-delimited JSON and hand back what it adds up
-    /// to. Needs [`Capability::ReadFiles`] granting a path this root is under.
+    /// to. Needs [`Capability::ReadFiles`] granting exactly `<root>/**`,
+    /// spelled the way `root` is: the grant has to name this directory and
+    /// say it means everything under it, and a grant of a directory above it
+    /// is not one.
     ///
     /// **The host reads and counts; the plugin decides what counting means.**
     /// A directory like the transcripts Claude Code writes is hundreds of
@@ -916,7 +921,7 @@ pub enum Request {
     /// what to group by, what to add up, and what any of it means — because
     /// each of those is a *field name* it supplies. The host knows none of it.
     Tally {
-        /// The directory to walk, which must be inside a granted path.
+        /// The directory to walk, granted as this string followed by `/**`.
         root: String,
         /// Only files whose name ends in this.
         extension: String,

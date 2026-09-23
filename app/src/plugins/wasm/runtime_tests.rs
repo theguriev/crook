@@ -438,6 +438,13 @@ fn walking_a_directory_is_a_different_thing_to_agree_to_than_reading_a_file() {
 
     let granted = vec![format!("file:{}/**", root.to_string_lossy())];
     assert!(allowed(&granted, &tally).is_ok());
+
+    // And the grant names this directory, not one above it: the crate's docs
+    // tell a plugin author exactly that, so a host that started accepting a
+    // parent's `/**` would be widening what people agreed to behind them.
+    let parent = root.parent().expect("the transcripts are in a directory");
+    let above = vec![format!("file:{}/**", parent.to_string_lossy())];
+    assert!(allowed(&above, &tally).is_err());
 }
 
 /// A week of this machine's own transcripts, counted.

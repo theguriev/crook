@@ -153,8 +153,9 @@ pub mod exports {
     ///
     /// The argument is what the thing that was pressed had to say: the key of
     /// the row a person chose out of a
-    /// [`Picker`](crook_plugin_api::Node::Picker), what they typed into it,
-    /// the entry of a [`Menu`](crook_plugin_api::Node::Menu). Empty for every
+    /// [`Picker`](crook_plugin_api::Node::Picker) — never what they typed into
+    /// it, which only filters the rows — or the entry of a
+    /// [`Menu`](crook_plugin_api::Node::Menu). Empty for every
     /// other way an action is reached — a chord, the palette, another plugin —
     /// which is most of them, and is why it is an argument the guest may
     /// ignore rather than a second export.
