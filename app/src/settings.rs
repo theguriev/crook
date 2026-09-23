@@ -854,6 +854,7 @@ impl Settings {
             ensure_directory(directory)?;
         }
 
+        let path = &through_a_link(path);
         write_then_rename(&temporary_path(path), path, json.as_bytes())
     }
 
@@ -1035,7 +1036,29 @@ pub fn ensure_directory(directory: &Path) -> Result<()> {
 /// with [`crate::session`], which wants exactly the same promise about a file
 /// that is written far more often than this one.
 pub fn atomic_write(path: &Path, contents: &[u8]) -> Result<()> {
+    let path = &through_a_link(path);
     write_then_rename(&temporary_path(path), path, contents)
+}
+
+/// The file a write to `path` should land in: the one a symlink there points
+/// at, or `path` itself.
+///
+/// A rename replaces what is at its destination, and what is at a symlink's
+/// path is the link. Somebody who keeps `settings.json` or `keybindings.json`
+/// in a dotfiles repository and links it here would otherwise find the link
+/// swapped for a plain file by the first option they changed — their edits
+/// no longer reaching the repository, and the repository's no longer reaching
+/// Crook. So the temporary and the rename go beside the link's target.
+///
+/// Only a link is resolved, so every other path is written exactly where it
+/// was named. A link to nothing is written over as before: there is no file
+/// of theirs to keep.
+fn through_a_link(path: &Path) -> PathBuf {
+    let is_a_link = fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_symlink());
+    match is_a_link {
+        true => fs::canonicalize(path).unwrap_or_else(|_| path.to_owned()),
+        false => path.to_owned(),
+    }
 }
 
 /// Reads `path` as a JSON object, treating every way that can fail as an empty
@@ -1277,6 +1300,42 @@ mod tests {
         // Crook's own, and off: a fresh install opens looking like Warp.
         assert!(!options.show_tab_numbers);
         assert_eq!(StatusMarks::Dots, options.status_marks);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_a_settings_file_that_is_a_link_stays_one_and_its_target_is_written() {
+        // A dotfiles repository linked into place: the save lands in the file
+        // the link points at, and the link is still a link afterwards.
+        let scratch = ScratchDirectory::new("linked");
+        let target = scratch.path.join("dotfiles-settings.json");
+        fs::write(&target, "{}\n").expect("the target should be writable");
+        std::os::unix::fs::symlink(&target, scratch.settings_file())
+            .expect("the link should be creatable");
+
+        let mut settings = Settings::load(scratch.settings_file());
+        settings.set_tab_options(everything_flipped());
+        settings.save_blocking().expect("the save should succeed");
+
+        assert!(
+            fs::symlink_metadata(scratch.settings_file())
+                .expect("the link should still be there")
+                .is_symlink(),
+            "the save replaced the link with a file"
+        );
+        assert_eq!(
+            everything_flipped(),
+            Settings::load(&target).tab_options(),
+            "the save did not reach the file the link points at"
+        );
+        // And no temporary is left beside either of them.
+        assert_eq!(
+            scratch.entries(),
+            vec![
+                "dotfiles-settings.json".to_owned(),
+                SETTINGS_FILE.to_owned()
+            ]
+        );
     }
 
     #[test]
