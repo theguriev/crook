@@ -136,9 +136,12 @@ impl Document {
         };
 
         let mut removed = 0;
-        for (span, value) in array.entries.into_iter().rev() {
+        for (index, (span, value)) in array.entries.iter().enumerate().rev() {
             if value.as_ref().is_some_and(&unwanted) {
-                self.cut(span);
+                // Where the entry above it ends, which nothing cut so far can
+                // have moved: every cut is further down the file.
+                let above = index.checked_sub(1).map(|above| array.entries[above].0.end);
+                self.cut(span.clone(), above);
                 removed += 1;
             }
         }
@@ -169,26 +172,25 @@ impl Document {
     /// An entry removed without its comma is a file that no longer parses, and
     /// an entry removed without its line is a hole in the middle of the file
     /// that grows by one blank line every time somebody changes a binding.
-    fn cut(&mut self, span: Range<usize>) {
-        let mut start = span.start;
-        let mut end = span.end;
+    ///
+    /// `above` is where the entry before it ends, if there is one: the last
+    /// entry has no comma after it, so the one that has to go is the one
+    /// *before* it, which is what stops the file ending in `, ]`.
+    fn cut(&mut self, span: Range<usize>, above: Option<usize>) {
+        // Found past comments as well as whitespace, and taken on its own: a
+        // comment between an entry and its comma is somebody's, and stays.
+        let comma = match next_code(&self.text, span.end) {
+            Some((at, ',')) => Some(at),
+            _ => above.and_then(|above| comma_between(&self.text, above..span.start)),
+        };
 
-        let rest = &self.text[end..];
-        let next = rest.find(|character: char| !character.is_whitespace());
-        match next {
-            // The comma after it, and nothing else on that line.
-            Some(at) if rest[at..].starts_with(',') => end += at + 1,
-            // Nothing follows: this is the last entry, so the comma that has
-            // to go is the one *before* it, which is what stops the file
-            // ending in `, ]`.
-            _ => {
-                let head = self.text[..start].trim_end();
-                if head.ends_with(',') {
-                    start = head.len() - 1;
-                }
-            }
+        // The comma after it first, since taking it out moves nothing above.
+        if let Some(at) = comma.filter(|at| *at >= span.end) {
+            self.text.remove(at);
         }
 
+        let mut start = span.start;
+        let mut end = span.end;
         // The line it was on, where it had one to itself.
         let line = self.text[..start]
             .rfind('\n')
@@ -203,9 +205,51 @@ impl Document {
                 }
             }
         }
-
         self.text.replace_range(start..end, "");
+
+        if let Some(at) = comma.filter(|at| *at < span.start) {
+            self.text.remove(at);
+        }
     }
+}
+
+/// The first thing at or after `from` that is neither whitespace nor inside a
+/// comment, and where it is.
+fn next_code(text: &str, from: usize) -> Option<(usize, char)> {
+    let mut characters = text[from..]
+        .char_indices()
+        .map(|(at, character)| (from + at, character))
+        .peekable();
+    while let Some((at, character)) = characters.next() {
+        match (character, characters.peek().map(|(_, next)| *next)) {
+            ('/', Some('/')) => {
+                for (_, character) in characters.by_ref() {
+                    if character == '\n' {
+                        break;
+                    }
+                }
+            }
+            ('/', Some('*')) => {
+                characters.next();
+                let mut star = false;
+                for (_, character) in characters.by_ref() {
+                    if star && character == '/' {
+                        break;
+                    }
+                    star = character == '*';
+                }
+            }
+            (character, _) if character.is_whitespace() => {}
+            _ => return Some((at, character)),
+        }
+    }
+    None
+}
+
+/// Where the comma between two entries is, looking only at code.
+fn comma_between(text: &str, between: Range<usize>) -> Option<usize> {
+    next_code(&text[..between.end], between.start)
+        .and_then(|(at, character)| (character == ',').then_some(at))
 }
 
 /// Where the array is, and where each of its entries is.

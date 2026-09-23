@@ -92,6 +92,59 @@ fn removing_the_last_entry_takes_the_comma_before_it() {
 }
 
 #[test]
+fn a_comment_between_the_last_entry_and_its_comma_does_not_hide_the_comma() {
+    // The comma that has to go is behind a comment, and whitespace-only
+    // looking missed it: the file ended `, // find ]` and nothing in it parsed
+    // — every binding in it lost, not only the one being changed.
+    for text in [
+        "[\n    { \"command\": \"a/b/c\" },\n    // find\n    { \"command\": \"a/b/d\" }\n]\n",
+        "[\n    { \"command\": \"a/b/c\" }, // mine\n    { \"command\": \"a/b/d\" }\n]\n",
+        "[\n    { \"command\": \"a/b/c\" }, /* mine */\n    { \"command\": \"a/b/d\" }\n]\n",
+    ] {
+        let mut document = Document::new(text);
+        assert_eq!(document.remove(|entry| command(entry) == "a/b/d"), 1);
+
+        assert!(
+            serde_json::from_str::<Value>(&strip_comments(document.text())).is_ok(),
+            "{}",
+            document.text()
+        );
+        assert!(document.text().contains("mine") || document.text().contains("// find"));
+        assert_eq!(document.entries().len(), 1);
+
+        // And the next edit from the page still writes a file that parses.
+        assert!(document.append(r#"{ "key": "ctrl+t", "command": "a/b/e" }"#));
+        assert!(
+            serde_json::from_str::<Value>(&strip_comments(document.text())).is_ok(),
+            "{}",
+            document.text()
+        );
+    }
+}
+
+#[test]
+fn a_comment_between_an_entry_and_the_comma_after_it_does_not_hide_that_comma() {
+    // The first entry, whose comma is behind a comment: a look through
+    // whitespace alone took it for the last, found no comma above it to take
+    // instead, and left the array starting `[ , {`.
+    let mut document = Document::new(
+        "[\n    { \"command\": \"a/b/d\" } // mine\n    ,\n    { \"command\": \"a/b/e\" }\n]\n",
+    );
+    assert_eq!(document.remove(|entry| command(entry) == "a/b/d"), 1);
+
+    assert!(
+        serde_json::from_str::<Value>(&strip_comments(document.text())).is_ok(),
+        "{}",
+        document.text()
+    );
+    assert!(document.text().contains("// mine"));
+    assert_eq!(
+        document.entries().iter().map(command).collect::<Vec<_>>(),
+        ["a/b/e"]
+    );
+}
+
+#[test]
 fn removing_every_entry_leaves_a_file_that_still_parses() {
     let mut document =
         Document::new("[\n    { \"command\": \"a/b/c\" },\n    { \"command\": \"a/b/d\" }\n]\n");
