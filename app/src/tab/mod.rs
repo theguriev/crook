@@ -1130,12 +1130,21 @@ impl TabStrip {
     ///
     /// Sound as a *boundary* because the pinned ones are always at its front:
     /// every path that can change the order goes through
-    /// [`slot_for`](Self::slot_for), which is what keeps that true.
+    /// [`slot_for`](Self::slot_for) or is refused by
+    /// [`pins_first`](Self::pins_first), which is what keeps that true.
     fn pinned_in(&self, block: &std::ops::Range<usize>) -> usize {
         self.tabs[block.clone()]
             .iter()
             .filter(|tab| tab.pinned)
             .count()
+    }
+
+    /// Whether a block's pinned tabs are all in front of its unpinned ones.
+    fn pins_first(&self, block: &std::ops::Range<usize>) -> bool {
+        self.tabs[block.clone()]
+            .iter()
+            .skip_while(|tab| tab.pinned)
+            .all(|tab| !tab.pinned)
     }
 
     /// Where a tab joining `group` in front of `before` actually goes.
@@ -1410,6 +1419,10 @@ impl TabStrip {
                     },
                     None => self.tabs.len(),
                 };
+                // And through the clamp every other move goes through, so that
+                // opening a tab from a pinned one puts it after the pins rather
+                // than among them.
+                let at = self.slot_for(None, self.tabs.get(at).map(Tab::id), false);
                 self.tabs.insert(at, tab);
                 self.repair(Some(id));
                 TabEffect::Changed
@@ -1596,6 +1609,15 @@ impl TabStrip {
         tab.group = self.neighbouring_group(to);
         let joined = tab.group();
         self.tabs.insert(to, tab);
+        // A hop does not unpin anything, so one that would put an unpinned
+        // tab above a pinned one — or a pinned one below — goes nowhere,
+        // the way a hop at the end of the strip does.
+        if !self.pins_first(&self.block_around(joined, to)) {
+            let mut tab = self.tabs.remove(to);
+            tab.group = left;
+            self.tabs.insert(from, tab);
+            return TabEffect::Unchanged;
+        }
         if let Some(left) = left.filter(|left| Some(*left) != joined) {
             self.prune(left);
         }
