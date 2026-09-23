@@ -1219,3 +1219,93 @@ fn a_clause_names_each_of_its_keys_once() {
     assert_eq!(clause.names(), vec!["a", "b", "a"]);
     assert_eq!(clause.names_once(), vec!["a", "b"]);
 }
+
+#[test]
+fn the_readme_counts_the_window_commands_and_names_every_one_without_a_chord() {
+    // The paragraph was written when the window had forty-nine commands and
+    // chords for thirty-five, and two chords later it still said so: the
+    // numbers moved together, the fourteen between them did not, and nothing
+    // read the sentence against the tables. This does.
+    const README: &str = include_str!("../../README.md");
+    let readme = README.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    let registered: Vec<&str> = crate::plugins::window::COMMANDS
+        .iter()
+        .map(|(name, ..)| *name)
+        .collect();
+    let bound_in = |table: &[(&str, &str)]| -> Vec<&str> {
+        registered
+            .iter()
+            .copied()
+            .filter(|name| {
+                table
+                    .iter()
+                    .any(|(_, command)| command.strip_prefix("crook/window/") == Some(*name))
+            })
+            .collect()
+    };
+    let bound = bound_in(DEFAULTS_MAC);
+    assert_eq!(
+        bound,
+        bound_in(DEFAULTS_OTHER),
+        "the platforms bind different commands"
+    );
+    let unbound: Vec<&str> = registered
+        .iter()
+        .copied()
+        .filter(|name| !bound.contains(name))
+        .collect();
+
+    let sentence = format!(
+        "registers {} commands of its own and ships chords for {}; the other {} are reached by \
+         name",
+        in_words(registered.len()),
+        in_words(bound.len()),
+        in_words(unbound.len())
+    );
+    assert!(
+        readme.contains(&sentence),
+        "the README should say: {sentence}"
+    );
+    for name in unbound {
+        assert!(
+            readme.contains(&format!("`{name}`")),
+            "`{name}` has no shipped chord and the README's by-name list leaves it out"
+        );
+    }
+}
+
+/// A count as the README spells it, for the counts it has.
+fn in_words(count: usize) -> String {
+    const ONES: [&str; 20] = [
+        "zero",
+        "one",
+        "two",
+        "three",
+        "four",
+        "five",
+        "six",
+        "seven",
+        "eight",
+        "nine",
+        "ten",
+        "eleven",
+        "twelve",
+        "thirteen",
+        "fourteen",
+        "fifteen",
+        "sixteen",
+        "seventeen",
+        "eighteen",
+        "nineteen",
+    ];
+    const TENS: [&str; 10] = [
+        "", "", "twenty", "thirty", "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+    ];
+    match count {
+        0..20 => ONES[count].to_owned(),
+        20..100 if count.is_multiple_of(10) => TENS[count / 10].to_owned(),
+        20..100 => format!("{}-{}", TENS[count / 10], ONES[count % 10]),
+        _ => count.to_string(),
+    }
+}

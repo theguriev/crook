@@ -496,7 +496,7 @@ Nineteen features, and the page that configures them:
   page tells you where it is.
 
 - **Everything the window does has a name, and most of it has a key.** The window registers
-  forty-nine commands of its own and ships chords for thirty-five; the other fourteen are
+  fifty-one commands of its own and ships chords for thirty-seven; the other fourteen are
   reached by name, from the palette or from a chord of your own. That split is deliberate — a
   shipped chord is a key taken away from the shell in every pane, forever, so it is spent on
   what is pressed often and not on what is done once a week.
@@ -520,9 +520,10 @@ Nineteen features, and the page that configures them:
   nothing at the prompt, where none is selected. A chord is never silently swallowed.
 
   Without a chord, by name: `split-left` and `split-up`, `grow-pane`, `shrink-pane` and
-  `even-panes`, every entry of a block's menu (`copy-block-command`, `copy-block-output`,
-  `copy-block-directory`, `copy-block-branch`, `rerun-block`, `scroll-to-block-top`), every
-  entry of a tab's (`crook/tabs/pin-tab`, `close-tab`, `open-menu`, `view-options`,
+  `even-panes`, a block's menu (`open-block-menu`) and every entry of it (`copy-block`,
+  `copy-block-command`, `copy-block-output`, `copy-block-directory`, `copy-block-branch`,
+  `rerun-block`, `scroll-to-block-top`, `scroll-to-block-bottom`), every entry of a tab's
+  (`crook/tabs/pin-tab`, `close-tab`, `open-menu`, `view-options`,
   `toggle-group`, `close-group`, the seven colours), the worktree list (`crook/worktrees/menu`)
   and every settings page (`crook/appearance/open-page` and its three neighbours). The block
   entries act on the block the menu is up on, or — with no menu — on the one the keyboard has
