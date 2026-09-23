@@ -297,6 +297,38 @@ fn a_detached_worktree_has_a_commit_and_no_branch() {
 }
 
 #[test]
+fn commits_a_detached_worktree_holds_on_no_branch_are_work_to_keep() {
+    // A checkout with no branch that somebody committed in: clean, so status
+    // says nothing, and `git worktree remove` takes it without a word — along
+    // with the worktree's own reflog, the one thing still pointing at those
+    // commits. So they are counted, and they hold it back from a sweep.
+    if without_git("commits_a_detached_worktree_holds_on_no_branch_are_work_to_keep") {
+        return;
+    }
+    let scratch = ScratchDir::new("local-stranded");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    let loose = scratch.spot("loose");
+    git(&repo, &["worktree", "add", "--detach", "../loose", "main"]);
+    assert_eq!(local_work(&loose).expect("git answered"), Local::default());
+
+    write(&loose.join("work.txt"), "an agent's afternoon\n");
+    git(&loose, &["add", "work.txt"]);
+    git(
+        &loose,
+        &["commit", "--no-verify", "-m", "work on no branch"],
+    );
+
+    let local = local_work(&loose).expect("git answered");
+    assert_eq!(local.stranded, 1);
+    assert!(!local.is_empty());
+    assert!(local.blocks_removal());
+
+    // And a checkout on a branch never counts its commits as stranded.
+    git(&loose, &["switch", "-c", "kept"]);
+    assert_eq!(local_work(&loose).expect("git answered").stranded, 0);
+}
+
+#[test]
 fn a_locked_worktree_carries_the_reason_it_was_locked_with() {
     if without_git("a_locked_worktree_carries_the_reason_it_was_locked_with") {
         return;
@@ -669,6 +701,7 @@ fn an_ignored_directory_is_deleted_by_a_removal_git_never_objects_to() {
             modified: 0,
             untracked: 0,
             ignored: 1,
+            stranded: 0,
         }
     );
     // Not empty, and yet nothing git will stand in the way of: a plain removal
@@ -716,6 +749,7 @@ fn a_renamed_file_is_one_change_rather_than_two() {
             modified: 1,
             untracked: 1,
             ignored: 1,
+            stranded: 0,
         }
     );
 }

@@ -1147,11 +1147,11 @@ fn confirmation(
     ui: FamilyId,
 ) -> Box<dyn Element> {
     let state = workspace.tab_menu();
-    let path = state
-        .worktrees()
-        .get(index)
+    let worktree = state.worktrees().get(index);
+    let path = worktree
         .map(|worktree| worktree.path.clone())
         .unwrap_or_default();
+    let on_a_branch = worktree.is_some_and(|worktree| worktree.branch.is_some());
 
     let mut column = Flex::column()
         .with_main_axis_size(MainAxisSize::Min)
@@ -1163,8 +1163,16 @@ fn confirmation(
         ))
         // The sentence that stops this reading as "delete my branch". git does
         // not delete it and neither does this, and somebody about to press a
-        // destructive button should not have to know git to know that.
-        .with_child(note("The branch is kept. Only the checkout goes.", ui));
+        // destructive button should not have to know git to know that. A
+        // checkout with no branch has none to keep, and saying it did would be
+        // the one reassurance here that was false.
+        .with_child(note(
+            match on_a_branch {
+                true => "The branch is kept. Only the checkout goes.",
+                false => "It is on no branch, so nothing keeps what it has committed.",
+            },
+            ui,
+        ));
 
     match local {
         // The count is one `git status`, and on a checkout with a fat build
@@ -1173,7 +1181,12 @@ fn confirmation(
             column.add_child(busy_line(state, "Looking in it…", None, ui));
         }
         Looked::Found(local) if !local.is_empty() => {
-            column.add_child(note(local_summary(&local), ui));
+            if local.stranded > 0 {
+                column.add_child(note(stranded_summary(local.stranded), ui));
+            }
+            if local.modified + local.untracked + local.ignored > 0 {
+                column.add_child(note(local_summary(&local), ui));
+            }
         }
         Looked::NotYet | Looked::Found(_) | Looked::Unknown => {}
     }
@@ -1197,6 +1210,17 @@ fn confirmation(
         ui,
     ));
     column.finish()
+}
+
+/// The commits a removal would lose, in one line.
+///
+/// git removes over them without refusing, so this line is the only warning
+/// there is: after the press, nothing but `git fsck` can find them.
+fn stranded_summary(stranded: usize) -> String {
+    match stranded {
+        1 => String::from("1 commit on no branch will be lost."),
+        many => format!("{many} commits on no branch will be lost."),
+    }
 }
 
 /// What is in a checkout, in one line.

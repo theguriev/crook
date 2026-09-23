@@ -159,23 +159,34 @@ pub struct Local {
     pub untracked: usize,
     /// Files and directories `.gitignore` covers.
     pub ignored: usize,
+    /// Commits the checkout's `HEAD` reaches that no branch, tag or remote
+    /// does — a detached checkout somebody committed in, or a rebase stopped
+    /// half way. The worktree's own reflog is the only thing that remembers
+    /// them, and a removal deletes it: git removes over them without a word,
+    /// and the next `gc` deletes the commits.
+    pub stranded: usize,
 }
 
 impl Local {
     /// Whether the worktree holds nothing loose at all — nothing to warn
     /// about, nothing to lose, nothing to say.
     pub fn is_empty(self) -> bool {
-        self.modified == 0 && self.untracked == 0 && self.ignored == 0
+        self.modified == 0 && self.untracked == 0 && self.ignored == 0 && self.stranded == 0
     }
 
-    /// Whether a plain [`remove`] would refuse.
+    /// Whether the checkout holds work that must not go without a person
+    /// saying so: what a plain [`remove`] would refuse over, and the commits
+    /// it would lose without refusing.
     ///
     /// Ignored files are deliberately left out: git removes over them without
     /// complaining, and counting them here would have a UI offering to force
     /// past an objection git was never going to raise — which is exactly the
-    /// crying wolf that makes people stop reading warnings.
+    /// crying wolf that makes people stop reading warnings. Stranded commits
+    /// are the opposite case: git raises no objection either, and they are
+    /// somebody's work, so a sweep that tidies checkouts away must pass over
+    /// them rather than trust git to stop it.
     pub fn blocks_removal(self) -> bool {
-        self.modified > 0 || self.untracked > 0
+        self.modified > 0 || self.untracked > 0 || self.stranded > 0
     }
 
     /// Counts one `git status --porcelain -z --ignored`.
@@ -486,7 +497,39 @@ pub fn local_work(worktree: &Path) -> Result<Local, Error> {
     if !finished.success {
         return Err(classify(&finished.stderr));
     }
-    Ok(Local::parse_status(&finished.stdout))
+    let mut local = Local::parse_status(&finished.stdout);
+    local.stranded = stranded(worktree)?;
+    Ok(local)
+}
+
+/// How many commits `HEAD` in `worktree` reaches that no branch, tag or
+/// remote does.
+///
+/// Not `--all`, which counts every worktree's `HEAD` as a ref — this one's
+/// included — and would find nothing stranded ever. A checkout on a branch
+/// comes to zero here by construction; a repository with no commit yet has
+/// no `HEAD` to count from, and nothing to lose.
+fn stranded(worktree: &Path) -> Result<usize, Error> {
+    let finished = run(
+        worktree,
+        &[
+            OsStr::new("rev-list"),
+            OsStr::new("--count"),
+            OsStr::new("HEAD"),
+            OsStr::new("--not"),
+            OsStr::new("--branches"),
+            OsStr::new("--tags"),
+            OsStr::new("--remotes"),
+        ],
+        Intent::Read,
+    )?;
+    if !finished.success {
+        return Ok(0);
+    }
+    Ok(String::from_utf8_lossy(&finished.stdout)
+        .trim()
+        .parse()
+        .unwrap_or(0))
 }
 
 // MARK: - Writing
