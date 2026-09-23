@@ -183,6 +183,26 @@ fn a_version_or_owner_windows_keeps_for_a_device_is_refused() {
 }
 
 #[test]
+fn a_module_that_says_it_is_one_of_crooks_own_is_refused() {
+    // The Store refused this before it got to writing; `--install-plugin`
+    // did not, and a module installed as `crook/tabs` shared every lookup
+    // by id with the real one — a card describing the built-in, a Remove
+    // that refused, a switch that turned both off.
+    let scratch = Scratch::new("install-builtin");
+    let module = scratch.path().join("tabs.wasm");
+    fs::write(&module, wasm_at("crook/tabs", "0.1.0")).expect("the module writes");
+
+    let refusal = into(scratch.path(), &module).expect_err("a built-in's id is refused");
+    assert!(refusal.contains("one of Crook's own"), "{refusal}");
+    assert!(!scratch.path().join("crook.tabs").exists());
+
+    // And only a built-in's: the owner is not reserved, the ids are.
+    let other = scratch.path().join("other.wasm");
+    fs::write(&other, wasm_at("crook/not-a-builtin", "0.1.0")).expect("the module writes");
+    into(scratch.path(), &other).expect("an id no built-in has installs");
+}
+
+#[test]
 fn uninstalling_takes_the_whole_plugin_and_not_one_version_of_it() {
     // A plugin whose last version was removed is not a plugin with an empty
     // directory: the row on the Plugins page comes from what is on disk.

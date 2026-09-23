@@ -74,6 +74,16 @@ pub(super) fn into(root: &Path, path: &Path) -> Result<PathBuf, String> {
 /// it was installing, and a second instantiation would leak a second copy of
 /// the manifest for as long as the process lives.
 pub fn write(root: &Path, bytes: &[u8], manifest: &Manifest) -> Result<PathBuf, String> {
+    // The same refusal the Store makes before it gets here, made where every
+    // way in meets — `--install-plugin` and `--update-plugins` never passed
+    // the Store's, and installed a module the Plugins page could then neither
+    // describe nor remove, and whose switch turned the built-in off with it.
+    if crate::plugins::is_builtin(&manifest.id) {
+        return Err(format!(
+            "{} is one of Crook's own, and a plugin cannot replace it",
+            manifest.id
+        ));
+    }
     let version = version_folder(manifest.version)?;
 
     // The owner is the stem of the home directory `owner.name`, so a reserved

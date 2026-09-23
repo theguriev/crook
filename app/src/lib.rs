@@ -2797,8 +2797,21 @@ fn installed_plugins_in(
 /// instead of it. A store plugin that wanted to come first has to say so.
 fn everything_installed() -> Vec<Box<dyn crate::plugin::Plugin>> {
     let mut plugins = crate::plugins::defaults();
+    let builtin = plugins.len();
     if let Some(directory) = crate::plugins::wasm::directory() {
-        plugins.extend(crate::plugins::wasm::installed(&directory));
+        for module in crate::plugins::wasm::installed(&directory) {
+            // Nothing that installs one lets it take a built-in's id, but a
+            // file copied into the directory by hand passed through nothing.
+            let id = &module.manifest().id;
+            if plugins[..builtin]
+                .iter()
+                .any(|carried| carried.manifest().id == *id)
+            {
+                log::warn!("{id} is one of Crook's own; the module installed as it is not loaded");
+                continue;
+            }
+            plugins.push(module);
+        }
     }
     plugins
 }
