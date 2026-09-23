@@ -190,15 +190,7 @@ impl Plugin for Store {
                 let named = plugin.clone();
                 let installed = workspace.install_plugin(
                     &bytes,
-                    move |manifest| {
-                        if manifest.id != named {
-                            return Err(format!(
-                                "the list offered {named} and the module says it is {}",
-                                manifest.id
-                            ));
-                        }
-                        index::promised(&release, manifest)
-                    },
+                    move |manifest| index::promised(&named, &release, manifest),
                     ctx,
                 );
 

@@ -338,13 +338,13 @@ fn a_module_that_is_not_what_the_list_promised_is_refused() {
         capabilities: &[crook_plugin_api::Capability::ReadWorkingDirectory],
     };
 
-    promised(&release, &manifest).expect("the module the list described");
+    promised(&manifest.id, &release, &manifest).expect("the module the list described");
 
     // A version that is not the version offered: what somebody read the
     // capability list *of* is that version, and this is another one.
     let mut newer = release.clone();
     newer.version = String::from("1.1.0");
-    let refusal = promised(&newer, &manifest).expect_err("a different version");
+    let refusal = promised(&manifest.id, &newer, &manifest).expect_err("a different version");
     assert!(
         refusal.contains("1.1.0") && refusal.contains("1.0.0"),
         "{refusal}"
@@ -353,7 +353,16 @@ fn a_module_that_is_not_what_the_list_promised_is_refused() {
     // And a module that wants something the row did not say it wanted.
     let mut quieter = release.clone();
     quieter.capabilities = Vec::new();
-    let refusal = promised(&quieter, &manifest).expect_err("more than was offered");
+    let refusal = promised(&manifest.id, &quieter, &manifest).expect_err("more than was offered");
     assert!(refusal.contains("cwd.read"), "{refusal}");
     assert!(refusal.contains("nothing"), "{refusal}");
+
+    // And a module that is another plugin altogether, whichever path asked:
+    // `--update-plugins` used to write it under the id it gave itself.
+    let offered = PluginId::parse("eugen/other").expect("a literal that parses");
+    let refusal = promised(&offered, &release, &manifest).expect_err("another plugin");
+    assert_eq!(
+        refusal,
+        "the list offered eugen/other and the module says it is eugen/probe"
+    );
 }

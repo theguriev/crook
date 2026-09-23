@@ -403,7 +403,21 @@ pub fn withdrawn(index: &Index, id: &PluginId, version: &str) -> Option<String> 
 /// The version is compared and not only the id, because a version is what a
 /// person read the capability list of, and the capability *keys* are compared
 /// as a set because that list is what they were being asked to allow.
-pub fn promised(release: &Release, manifest: &crook_plugin::Manifest) -> Result<(), String> {
+pub fn promised(
+    id: &PluginId,
+    release: &Release,
+    manifest: &crook_plugin::Manifest,
+) -> Result<(), String> {
+    // The id first, since a module that is another plugin is not a version
+    // of this one at all — and here rather than in each caller, because the
+    // one caller that checked it was the window, and `--update-plugins`
+    // would otherwise write whatever arrived under whatever it said it was.
+    if manifest.id != *id {
+        return Err(format!(
+            "the list offered {id} and the module says it is {}",
+            manifest.id
+        ));
+    }
     if manifest.version != release.version {
         return Err(format!(
             "the list offered {} and the module says it is {}",

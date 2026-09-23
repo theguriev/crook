@@ -100,7 +100,7 @@ pub fn update(only: Option<&PluginId>) -> Result<Vec<Outcome>, String> {
             .map(|(_, version)| version.clone())
             .unwrap_or_default();
         let to = release.version.clone();
-        let result = fetched_and_written(&agent, &directory, &release);
+        let result = fetched_and_written(&agent, &directory, &id, &release);
         outcomes.push(Outcome {
             id,
             from,
@@ -150,11 +150,12 @@ fn asked(cache: Option<&Cache>) -> Result<index::Index, String> {
 fn fetched_and_written(
     agent: &ureq::Agent,
     directory: &std::path::Path,
+    id: &PluginId,
     release: &index::Release,
 ) -> Result<(), String> {
     let bytes = fetch::module(agent, release)?;
     let plugin = wasm::opened(&bytes)?;
     let manifest = crate::plugin::Plugin::manifest(&plugin);
-    index::promised(release, manifest)?;
+    index::promised(id, release, manifest)?;
     wasm::write(directory, &bytes, manifest).map(|_| ())
 }
