@@ -172,12 +172,15 @@ fn a_shell_prints_what_it_was_asked_to_and_the_pane_learns_about_it() {
     // Printed by pieces, so that the line it prints is nowhere in the line it
     // types: a pty echoes what is typed into it, and a marker the command
     // itself contained was on screen before the shell had read a byte — the
-    // test passed whether or not anything ran.
-    app.read(|ctx| {
-        model
-            .as_ref(ctx)
-            .type_into(pane, "printf 'crook-%s\\n' was-here\n");
-    });
+    // test passed whether or not anything ran. On Windows the shell is
+    // `%ComSpec%`, cmd, which has no `printf` and never ran the old line
+    // either; its caret escapes the next character, and is gone from what
+    // `echo` prints.
+    let line = match cfg!(windows) {
+        true => "echo crook-^was-here\r",
+        false => "printf 'crook-%s\\n' was-here\n",
+    };
+    app.read(|ctx| model.as_ref(ctx).type_into(pane, line));
 
     let deadline = Instant::now() + REPLY_TIMEOUT;
     loop {
