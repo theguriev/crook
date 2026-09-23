@@ -1506,3 +1506,42 @@ fn a_colour_is_a_name_a_theme_resolves_rather_than_a_number() {
     }
     assert_eq!(TabColor::named("chartreuse"), None);
 }
+
+#[test]
+fn a_tab_opened_from_a_pinned_one_lands_after_the_pins() {
+    let mut strip = TabStrip::new();
+    strip.apply(TabAction::New);
+    strip.apply(TabAction::New);
+    let ids: Vec<TabId> = strip.iter().map(Tab::id).collect();
+    strip.apply(TabAction::TogglePin(ids[0]));
+    strip.apply(TabAction::TogglePin(ids[1]));
+    strip.apply(TabAction::Select(ids[0]));
+
+    strip.apply(TabAction::New);
+
+    let order: Vec<TabId> = strip.iter().map(Tab::id).collect();
+    assert_eq!(&order[..2], &ids[..2], "a new tab got in among the pins");
+    assert!(!strip.get(order[2]).is_some_and(Tab::is_pinned));
+    assert_eq!(
+        strip.active().map(Tab::id),
+        Some(order[2]),
+        "the new tab is not the active one"
+    );
+}
+
+#[test]
+fn a_hop_does_not_cross_the_line_between_pinned_and_unpinned() {
+    let mut strip = TabStrip::new();
+    strip.apply(TabAction::New);
+    let ids: Vec<TabId> = strip.iter().map(Tab::id).collect();
+    strip.apply(TabAction::TogglePin(ids[0]));
+
+    // The unpinned tab, one hop from above the pinned one.
+    strip.apply(TabAction::Select(ids[1]));
+    assert_eq!(strip.apply(TabAction::MoveLeft), TabEffect::Unchanged);
+    // The pinned tab, one hop from below the unpinned one.
+    strip.apply(TabAction::Select(ids[0]));
+    assert_eq!(strip.apply(TabAction::MoveRight), TabEffect::Unchanged);
+
+    assert_eq!(strip.iter().map(Tab::id).collect::<Vec<_>>(), ids);
+}
