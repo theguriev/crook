@@ -40,6 +40,13 @@ pub mod worktrees;
 
 use crate::plugin::Plugin;
 
+/// Whether `id` is one of the plugins [`defaults`] carries, which no module
+/// may be installed as: the host builds, unloads and looks up a plugin by its
+/// id, so a module under a built-in's would share every one of those with it.
+pub fn is_builtin(id: &crook_plugin::PluginId) -> bool {
+    defaults().iter().any(|plugin| plugin.manifest().id == *id)
+}
+
 /// Every plugin a release binary carries, in load order.
 pub fn defaults() -> Vec<Box<dyn Plugin>> {
     vec![
