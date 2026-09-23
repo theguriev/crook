@@ -154,7 +154,13 @@ fn a_shell_prints_what_it_was_asked_to_and_the_pane_learns_about_it() {
     let pane = pane();
 
     app.update(|ctx| {
-        model.update(ctx, |model, ctx| model.start(&[(pane, None)], ctx));
+        model.update(ctx, |model, ctx| {
+            // Without the marks, as the workspace's plain-grid tests run: with
+            // them, a finished command's output is harvested into a block,
+            // and the live grid this reads holds only the next prompt.
+            model.set_shell_marks(false);
+            model.start(&[(pane, None)], ctx)
+        });
     });
 
     let failure = app.read(|ctx| model.as_ref(ctx).failure(pane).map(str::to_owned));
@@ -163,10 +169,14 @@ fn a_shell_prints_what_it_was_asked_to_and_the_pane_learns_about_it() {
         return;
     }
 
+    // Printed by pieces, so that the line it prints is nowhere in the line it
+    // types: a pty echoes what is typed into it, and a marker the command
+    // itself contained was on screen before the shell had read a byte — the
+    // test passed whether or not anything ran.
     app.read(|ctx| {
         model
             .as_ref(ctx)
-            .type_into(pane, "printf 'crook-was-here\\n'\n");
+            .type_into(pane, "printf 'crook-%s\\n' was-here\n");
     });
 
     let deadline = Instant::now() + REPLY_TIMEOUT;
