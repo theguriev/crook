@@ -1667,3 +1667,38 @@ done"#,
         "{said}"
     );
 }
+
+#[test]
+fn test_a_repeated_subshell_line_keeps_its_status_where_history_skips_it() {
+    // bash runs no DEBUG trap for a top-level `( ... )`, so the snippet tells
+    // whether a line ran by a counter instead — and history's counter stands
+    // still for a line HISTCONTROL=ignoreboth leaves out, which is Debian's
+    // and Ubuntu's default: a repeated line, and one that starts with a space.
+    // Both used to finish with a bare D, their exit status lost.
+    let Some(seen) = RealShell {
+        name: "bash",
+        extra: &[("HISTCONTROL", "ignoreboth")],
+        command: "( exit 3 )\r( exit 3 )\r ( exit 5 )\rtrue",
+        ..RealShell::default()
+    }
+    .run()
+    .map(|ran| ran.seen) else {
+        return;
+    };
+    // Where bash is older than 4.4 the counter is history's, and this is
+    // exactly what it cannot see.
+    if !seen.contains("\x1b]133;D;5") && seen.contains("\x1b]133;D\x07") {
+        let version = crate::process::command("bash")
+            .args(["-c", "echo ${BASH_VERSINFO[0]}${BASH_VERSINFO[1]}"])
+            .output()
+            .ok()
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .and_then(|text| text.trim().parse::<u32>().ok());
+        if version.is_some_and(|version| version < 44) {
+            return;
+        }
+    }
+
+    assert_eq!(seen.matches("\x1b]133;D;3").count(), 2, "{seen:?}");
+    assert!(seen.contains("\x1b]133;D;5"), "{seen:?}");
+}

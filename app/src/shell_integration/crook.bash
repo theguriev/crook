@@ -166,8 +166,10 @@ __crook_running=1
 # reporting the completion of a command nobody typed.
 __crook_ran=''
 __crook_prompted=''
-# The history number as of the last prompt. See __crook_precmd.
+# The history number and the command number as of the last prompt. See
+# __crook_precmd.
 __crook_history=''
+__crook_number=''
 # Whatever DEBUG trap was already installed, so ours can call it rather than
 # replace it.
 __crook_prior_debug=''
@@ -191,13 +193,24 @@ __crook_precmd() {
 	__crook_running=1
 	# bash runs no DEBUG trap at all for a top-level `( ... )`, so the absence
 	# of a C mark does not mean nothing ran and would cost that line its exit
-	# status. The history number does mean it: bash advances it for every line
-	# it accepts and leaves it alone for an empty one. Except on bash 3.2, where
-	# HISTCMD never moves at all — there, and only there, a subshell line
-	# reports a bare D rather than its status.
+	# status. Two counters mean it, and neither moves for an empty line. The
+	# history number advances for every line history keeps — but not for one
+	# it leaves out, and HISTCONTROL=ignoreboth, Debian's and Ubuntu's default,
+	# leaves out a repeated line and one that starts with a space, so
+	# `(cd x && make)` run twice lost its status the second time. The command
+	# number, `\#`, advances for those too, though not always by the first
+	# prompt of a session, which history does see: either one moving is a line
+	# that ran. `${…@P}` is bash 4.4's; on bash 3.2, where HISTCMD never moves
+	# at all either, a subshell line reports a bare D rather than its status.
 	local entered=$HISTCMD
+	local number=''
+	if ((BASH_VERSINFO[0] > 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] >= 4))); then
+		number='\#'
+		number=${number@P}
+	fi
 	if [ -n "$__crook_ran" ] || \
-		{ [ -n "$__crook_prompted" ] && [ "$entered" != "$__crook_history" ]; }; then
+		{ [ -n "$__crook_prompted" ] && \
+			{ [ "$entered" != "$__crook_history" ] || [ "$number" != "$__crook_number" ]; }; }; then
 		__crook_mark "D;$exit_status"
 	elif [ -n "$__crook_prompted" ]; then
 		# An empty line, or one abandoned with ctrl-c: a boundary with no
@@ -206,6 +219,7 @@ __crook_precmd() {
 		__crook_mark D
 	fi
 	__crook_history=$entered
+	__crook_number=$number
 	__crook_ran=''
 	__crook_prompted=1
 	__crook_cwd
