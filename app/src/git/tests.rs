@@ -216,6 +216,17 @@ fn a_head_that_is_neither_form_is_no_branch_rather_than_a_branch_called_that() {
     assert_eq!(read_head(&scratch.path().join("nothing-here")), None);
 }
 
+#[test]
+fn a_reftable_repositorys_placeholder_head_is_no_branch_rather_than_a_branch_called_that() {
+    // `git init --ref-format=reftable` writes exactly this: the branch lives
+    // in the binary tables, and the file holds a ref that cannot exist.
+    let scratch = ScratchDir::new("head-reftable");
+    let git_dir = scratch.dir("git-dir");
+    write(&git_dir.join("HEAD"), "ref: refs/heads/.invalid\n");
+
+    assert_eq!(read_head(&git_dir), None);
+}
+
 // --- finding the repository ----------------------------------------------------
 
 #[test]
