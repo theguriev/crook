@@ -17441,6 +17441,16 @@ fn the_palette_s_waiting_tabs_are_the_panel_s_amber_rows() {
     // and neither surface counts it.
     let mut harness = Harness::new(4);
     let panes = harness.pane_ids();
+    // Somewhere short, for every pane. A row prints its directory beside its
+    // title, and a pane opened by the harness is in the directory the tests
+    // run from: from a checkout deep enough, the path is cut to fit and set
+    // hard against the title, the two read back as one line, and no title
+    // was found in the palette — on the machine and not in the code.
+    for pane in &panes {
+        harness.update_session(*pane, |session| {
+            session.working_directory = Some(PathBuf::from("/w"));
+        });
+    }
     harness.update_session(panes[0], |session| {
         session.derived_title = Some("kettle".to_owned());
         session.attention = Some(Attention::Bell);
