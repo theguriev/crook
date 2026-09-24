@@ -606,7 +606,7 @@ pub struct Workspace {
     /// Why the last session save did not land, while it has not: the tabs
     /// on screen will not be back next time, and the one place a person
     /// would learn that is the panel that lists them. Cleared by the next
-    /// save that lands. The settings' own is `save_problem`.
+    /// save that lands. The settings' own is `settings_save_problem`.
     session_problem: Option<String>,
 
     /// How big the window was when it was last laid out, in logical pixels.
@@ -800,13 +800,20 @@ pub struct Workspace {
     /// The same, for the keybindings file, which is written by the same rule
     /// and by a different set of clicks.
     keybinding_saves: Arc<SaveOrder>,
-    /// Why the last save of the settings or the keybindings did not land,
-    /// while it has not: a folder that cannot be written to, a full disk.
-    /// The option was applied to the window regardless, so without this the
-    /// person sees it work and finds it gone on the next launch, with the
-    /// only word about why in a log they may not know exists. Cleared by
-    /// the next save that lands.
-    save_problem: Option<String>,
+    /// Why the last save of the settings did not land, while it has not: a
+    /// folder that cannot be written to, a full disk. The option was applied
+    /// to the window regardless, so without this the person sees it work and
+    /// finds it gone on the next launch, with the only word about why in a
+    /// log they may not know exists. Cleared by the next *settings* save that
+    /// lands.
+    settings_save_problem: Option<String>,
+    /// The same, for the keybindings file.
+    ///
+    /// Apart from the settings' own because the two are different files
+    /// that fail apart: one field for both was cleared by whichever landed,
+    /// so a chord written to a keybindings file that could be written took
+    /// down the word that the settings were still going nowhere.
+    keybindings_save_problem: Option<String>,
     /// How far the tabs panel's list has been scrolled.
     ///
     /// On the workspace rather than inside the panel module for the reason
@@ -1000,7 +1007,8 @@ impl Workspace {
             worktrees_directory: worktree_store(),
             saves: Arc::default(),
             keybinding_saves: Arc::default(),
-            save_problem: None,
+            settings_save_problem: None,
+            keybindings_save_problem: None,
             panel_scroll: ScrollStateHandle::default(),
             panel_rows: RowGeometry::new(),
             panel_search: SearchState::default(),
@@ -1191,24 +1199,51 @@ impl Workspace {
     }
 
     /// The settings page's state.
-    /// Why the last save of the settings or the keybindings failed, while
-    /// changes are not reaching the disk. See `save_problem`.
+    /// Why a save of the settings or the keybindings failed, while changes
+    /// are not reaching the disk: the settings' first, since every page's
+    /// options go there. See `settings_save_problem`.
     pub(crate) fn save_problem(&self) -> Option<&str> {
-        self.save_problem.as_deref()
+        self.settings_save_problem
+            .as_deref()
+            .or(self.keybindings_save_problem.as_deref())
     }
 
-    /// Takes the word back from a save on the pool: a failure is shown, and
-    /// a save that landed clears the one before it. A save that was
-    /// overtaken says nothing, because the one that overtook it will.
-    fn note_save(&mut self, outcome: Option<Result<(), String>>, ctx: &mut ViewContext<Self>) {
-        let Some(outcome) = outcome else {
-            return;
-        };
-        let problem = outcome.err();
-        if problem != self.save_problem {
-            self.save_problem = problem;
+    /// Takes the word back from a settings save on the pool: a failure is
+    /// shown, and a save that landed clears the one before it. A save that
+    /// was overtaken says nothing, because the one that overtook it will.
+    fn note_settings_save(
+        &mut self,
+        outcome: Option<Result<(), String>>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if let Some(outcome) = outcome
+            && Self::took(&mut self.settings_save_problem, outcome)
+        {
             ctx.notify();
         }
+    }
+
+    /// The same, for a keybindings save, which answers for its own file
+    /// only.
+    fn note_keybindings_save(
+        &mut self,
+        outcome: Option<Result<(), String>>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if let Some(outcome) = outcome
+            && Self::took(&mut self.keybindings_save_problem, outcome)
+        {
+            ctx.notify();
+        }
+    }
+
+    /// Puts a save's outcome where its file's problem is kept, and says
+    /// whether that changed anything.
+    fn took(problem: &mut Option<String>, outcome: Result<(), String>) -> bool {
+        let now = outcome.err();
+        let changed = *problem != now;
+        *problem = now;
+        changed
     }
 
     /// Why the last session save failed, while the tabs are not being
@@ -1217,7 +1252,7 @@ impl Workspace {
         self.session_problem.as_deref()
     }
 
-    /// [`Self::note_save`], for the session file.
+    /// [`Self::note_settings_save`], for the session file.
     fn note_session_save(
         &mut self,
         outcome: Option<Result<(), String>>,
@@ -4381,7 +4416,7 @@ impl Workspace {
                 })
             })
         });
-        ctx.spawn(written, Self::note_save).detach();
+        ctx.spawn(written, Self::note_keybindings_save).detach();
     }
 
     /// Starts in a density the command line asked for, without adopting it.
@@ -6979,7 +7014,7 @@ impl Workspace {
     /// settings are cheap to clone, and the clone is what the background pool
     /// gets. A save that fails changes nothing about the option, which has
     /// already been applied; it says so on the settings page, through
-    /// `save_problem`, until one lands.
+    /// `settings_save_problem`, until one lands.
     ///
     /// Each save carries a complete snapshot and writes through its own
     /// temporary, so two of them racing is never a half-written file — and
@@ -7008,7 +7043,7 @@ impl Workspace {
                 })
             })
         });
-        ctx.spawn(written, Self::note_save).detach();
+        ctx.spawn(written, Self::note_settings_save).detach();
     }
 
     /// Writes what the window is showing, so the next one can come back to it.
