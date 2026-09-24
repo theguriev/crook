@@ -225,3 +225,33 @@ fn the_guard_puts_the_default_back() {
         "a test left its theme behind for the next one"
     );
 }
+
+#[test]
+fn a_mark_on_the_accent_reads_there_in_every_builtin_palette() {
+    // The knob of a switch that is on. At least 3:1 against the accent — the
+    // contrast WCAG asks of a control — in every palette that ships, and in a
+    // palette whose own text already reads there, that text, unchanged.
+    for available in builtins() {
+        let theme = available.theme;
+        let mark = theme.on_accent_mark();
+        let best = creator::contrast(theme.text_primary, theme.accent)
+            .max(creator::contrast(theme.surface, theme.accent));
+        assert!(
+            creator::contrast(mark, theme.accent) >= 3.
+                || creator::contrast(mark, theme.accent) >= best,
+            "{}: the mark is {:.2}:1 on its accent",
+            available.name,
+            creator::contrast(mark, theme.accent)
+        );
+        if creator::contrast(theme.text_primary, theme.accent) >= 3. {
+            assert_eq!(mark, theme.text_primary, "{}", available.name);
+        }
+    }
+    // The palette the change is for.
+    let light = builtins()
+        .into_iter()
+        .find(|available| available.name == "Crook Light")
+        .expect("Crook Light ships")
+        .theme;
+    assert_ne!(light.on_accent_mark(), light.text_primary);
+}

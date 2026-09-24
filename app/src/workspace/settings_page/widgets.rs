@@ -541,10 +541,11 @@ pub(crate) fn switch(on: bool, command: Command, state: MouseStateHandle) -> Box
             (false, true) if mouse.is_hovered() => theme().overlay_3,
             (false, _) => theme().overlay_2,
         };
-        let knob = if enabled {
-            theme().text_primary
-        } else {
-            theme().text_muted
+        let knob = match (on, enabled) {
+            // On the accent, which a light palette's text does not read on.
+            (true, true) => theme().on_accent_mark(),
+            (false, true) => theme().text_primary,
+            (_, false) => theme().text_muted,
         };
 
         let mut row = Flex::row()
