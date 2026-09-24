@@ -4030,11 +4030,20 @@ fn the_worktrees_entry_opens_the_list_beside_the_menu() {
         tab_menu_box(&scene).is_some(),
         "opening the submenu took the menu it hangs off down with it"
     );
+    // Beside is past the menu's right edge — two pixels of overlap are the
+    // submenu's own — and level with its top: a list hung under the menu, or
+    // over it, also starts at or right of its left edge.
     assert!(
-        list.min_x() >= menu.min_x(),
-        "the list opened at {} and the menu it hangs off starts at {}",
+        list.min_x() >= menu.max_x() - 2.,
+        "the list opened at {} and the menu it hangs off ends at {}",
         list.min_x(),
-        menu.min_x()
+        menu.max_x()
+    );
+    assert!(
+        (list.min_y() - menu.min_y()).abs() < 0.5,
+        "the list's top is at {} and the menu's at {}",
+        list.min_y(),
+        menu.min_y()
     );
 }
 
@@ -6489,9 +6498,13 @@ fn enter_selects_the_top_match_and_gives_the_keyboard_back() {
     // letters, one key, and you are in that tab with the keyboard back in the
     // shell. The query goes with it — what it was for has happened.
     let mut harness = Harness::panel(3);
-    let pane = harness.pane_ids()[0];
-    harness.update_session(pane, |session| {
-        session.derived_title = Some("kettle".to_owned());
+    // Two that match, so the top one is a choice rather than the only one.
+    let panes = harness.pane_ids();
+    harness.update_session(panes[0], |session| {
+        session.derived_title = Some("kettle a".to_owned());
+    });
+    harness.update_session(panes[1], |session| {
+        session.derived_title = Some("kettle b".to_owned());
     });
     harness.press_search_chord();
     harness.type_text("kettle");
@@ -10037,10 +10050,35 @@ fn a_switch_the_density_has_made_inert_is_drawn_and_does_nothing() {
 
 #[test]
 fn the_reset_button_puts_every_tab_option_back_and_then_goes_quiet() {
+    // Every option away from its default, not two of them: a reset that
+    // left the other seven alone came back equal to the defaults anyway.
     let mut harness = Harness::new(1);
-    harness.dispatch_option(OptionsAction::SetPrimaryInfo(PrimaryInfo::Branch));
-    harness.dispatch_option(OptionsAction::ToggleShowDiffStats);
-    assert_ne!(TabOptions::default(), harness.options());
+    let everything = TabOptions {
+        granularity: crate::settings::Granularity::Tabs,
+        density: crate::settings::Density::Expanded,
+        primary_info: PrimaryInfo::Branch,
+        subtitle: crate::settings::Subtitle::Command,
+        show_pr_link: false,
+        show_diff_stats: false,
+        show_details_on_hover: false,
+        show_tab_numbers: true,
+        status_marks: crate::settings::StatusMarks::Glyphs,
+    };
+    harness.set_options(everything);
+    assert_eq!(harness.options(), everything);
+    let defaults = TabOptions::default();
+    assert!(
+        defaults.granularity != everything.granularity
+            && defaults.density != everything.density
+            && defaults.primary_info != everything.primary_info
+            && defaults.subtitle != everything.subtitle
+            && defaults.show_pr_link != everything.show_pr_link
+            && defaults.show_diff_stats != everything.show_diff_stats
+            && defaults.show_details_on_hover != everything.show_details_on_hover
+            && defaults.show_tab_numbers != everything.show_tab_numbers
+            && defaults.status_marks != everything.status_marks,
+        "a field left at its default proves nothing about resetting it"
+    );
 
     harness.open_settings_page();
     harness.scroll_settings_page(-100.);
@@ -15037,11 +15075,48 @@ mod hiding_the_panel {
 
     #[test]
     fn the_settings_page_switch_is_the_same_toggle() {
+        // The switch itself, clicked on its row: dispatching the action the
+        // switch is meant to send only proved the action worked, and a switch
+        // wired to another one passed. What it writes is read rather than
+        // whether the column is showing, because the page it is on is a
+        // section of that column and keeps it showing until it closes.
         let mut harness = Harness::panel(1);
-        harness.dispatch_workspace_action(SettingsAction::ToggleTabsPanel.into());
-        assert!(!showing(&harness));
-        harness.dispatch_workspace_action(SettingsAction::ToggleTabsPanel.into());
-        assert!(showing(&harness));
+        let setting = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.general().show_tabs_panel
+            })
+        };
+        assert!(setting(&harness));
+        harness.open_settings_page();
+        // Searched for, so the row is at the top of the page and its switch
+        // the only one on it — at the foot of the page it is cut by the
+        // pane's edge, where a click does not land.
+        harness.type_text("tabs panel");
+        for expected in [false, true, false] {
+            let scene = harness.frame();
+            let (row, _) = page_line(&scene, "Show the tabs panel");
+            let switch = settings_switch_boxes(&scene)
+                .into_iter()
+                .min_by(|left, right| {
+                    (center(*left).y() - row.y())
+                        .abs()
+                        .total_cmp(&(center(*right).y() - row.y()).abs())
+                })
+                .expect("the page has switches on it");
+            harness.click(center(switch), MouseButton::Left);
+            assert_eq!(
+                setting(&harness),
+                expected,
+                "the switch did not toggle the panel"
+            );
+        }
+
+        // And off from the page is the column gone once the page is closed.
+        harness.dispatch_workspace_action(WorkspaceAction::ShowSection(None));
+        assert!(
+            !showing(&harness),
+            "the column stayed after the page closed"
+        );
     }
 }
 
