@@ -241,6 +241,75 @@ fn a_module_asking_for_more_memory_than_the_ceiling_never_gets_it() {
 }
 
 #[test]
+fn a_module_asking_for_a_table_past_the_ceiling_is_refused() {
+    // A table is the other thing a module declares and the host allocates,
+    // and it had no test at all: a whole, well-behaved module with a table
+    // over the ceiling is refused, and one at it opens.
+    let over = format!("(table 10001 funcref)\n{WELL_BEHAVED}");
+    let problem = refused(&module(&with_strings(&over), ABI_VERSION));
+    assert!(matches!(problem, Problem::Shape(_)), "{problem:?}");
+
+    let at = format!("(table 10000 funcref)\n{WELL_BEHAVED}");
+    open(&module(&with_strings(&at), ABI_VERSION)).expect("the ceiling itself opens");
+}
+
+/// A plugin that hands the host pointers into memory it does not have.
+///
+/// Every string a host import reads is read through one function, and this is
+/// every way a guest can get its bounds wrong: past the end of its memory,
+/// negative, and longer than any answer may be. One good contribution goes
+/// in after them, so that what is kept is known to be what was good.
+const POINTING_ELSEWHERE: &str = r#"
+    (func (export "crook_build") (result i32)
+      ;; Past the end of the one page this module has.
+      (call $contribute
+        (i32.const 65530) (i32.const 100)
+        (global.get $entry_at) (global.get $entry_len)
+        (i32.const 0))
+      ;; A negative pointer, and a negative length.
+      (call $contribute
+        (i32.const -1) (global.get $slot_len)
+        (global.get $entry_at) (global.get $entry_len)
+        (i32.const 0))
+      (call $contribute
+        (global.get $slot_at) (i32.const -1)
+        (global.get $entry_at) (global.get $entry_len)
+        (i32.const 0))
+      ;; Longer than anything the host reads, starting where memory is real.
+      (call $contribute
+        (global.get $slot_at) (i32.const 2147483647)
+        (global.get $entry_at) (global.get $entry_len)
+        (i32.const 0))
+      ;; And the same for an action's name.
+      (call $register_action
+        (i32.const 65535) (i32.const 2)
+        (global.get $title_at) (global.get $title_len))
+      (call $contribute
+        (global.get $slot_at) (global.get $slot_len)
+        (global.get $entry_at) (global.get $entry_len)
+        (i32.const 7))
+      (i32.const 0))
+    (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
+"#;
+
+#[test]
+fn a_pointer_outside_the_plugins_memory_is_read_as_nothing() {
+    // Not a trap and not a host panic: a bad pointer is a bug in the plugin,
+    // and a bug in the plugin must not be one in the window. The calls that
+    // point elsewhere record nothing; the good one after them is kept.
+    let (mut sandbox, _) =
+        open(&module(&with_strings(POINTING_ELSEWHERE), ABI_VERSION)).expect("it should open");
+
+    let registered = sandbox
+        .build()
+        .expect("a bad pointer is not a failed build");
+
+    assert_eq!(registered.contributions.len(), 1, "{registered:?}");
+    assert_eq!(registered.contributions[0].order, 7);
+    assert!(registered.actions.is_empty(), "{registered:?}");
+}
+
+#[test]
 fn a_plugin_that_grows_past_the_ceiling_is_told_no_rather_than_given_it() {
     // The other end of the same number, and the one that is not caught by any
     // check after the fact: a module declaring one page and growing to a
