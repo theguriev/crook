@@ -3157,6 +3157,7 @@ impl Workspace {
         self.tab_context_menu.explaining = false;
 
         let epoch = self.tab_menu.next_epoch();
+        self.tab_menu.opening = self.tab_menu.opening.wrapping_add(1);
         self.tab_menu.tab = Some(tab);
         self.tab_menu.pane_directory = Some(directory.clone());
         self.tab_menu.mode = WorktreeMode::Listing;
@@ -3943,6 +3944,7 @@ impl Workspace {
         ctx.notify();
 
         let opened_on = self.tab_menu.tab;
+        let opening = self.tab_menu.opening;
         let made = ctx.background().spawn({
             let path = path.clone();
             async move { crate::git::worktree::add(&repository, &path, &branch, None) }
@@ -3950,12 +3952,14 @@ impl Workspace {
 
         ctx.spawn(made, move |workspace, made, ctx| {
             // The menu this was asked for may have been taken down, or opened
-            // on another tab, while git was checking a working tree out. The
+            // on another tab or again on this one, while git was checking a
+            // working tree out. The
             // checkout still happened and the tab still opens — that is what
             // was asked for — but the *dialog's* state belongs to the menu
             // that asked, and writing "working = false" or a failure into a
             // different one is writing into somebody else's question.
-            let answering = workspace.tab_menu.tab == opened_on;
+            let answering =
+                workspace.tab_menu.tab == opened_on && workspace.tab_menu.opening == opening;
             if answering {
                 workspace.tab_menu.working = false;
             }
@@ -4265,13 +4269,16 @@ impl Workspace {
 
         let asked_about = index;
         let opened_on = self.tab_menu.tab;
+        let opening = self.tab_menu.opening;
         let removed = ctx.background().spawn({
             let path = path.clone();
             async move { crate::git::worktree::remove(&repository, &path, force) }
         });
 
         ctx.spawn(removed, move |workspace, removed, ctx| {
-            if workspace.tab_menu.tab != opened_on {
+            // The same tab is not the same menu: this one may have been taken
+            // down and opened again while git was at it. See `opening`.
+            if workspace.tab_menu.tab != opened_on || workspace.tab_menu.opening != opening {
                 if let Err(problem) = removed {
                     log::warn!("a removal nobody is waiting for failed: {problem}");
                 }
