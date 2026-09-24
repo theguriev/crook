@@ -25,7 +25,16 @@ fn the_newest_version_this_build_can_run_is_the_one_offered() {
     // Not the newest version there is: 0.11.0 speaks a vocabulary this build
     // does not, and offering it would be offering an install that ends in a
     // refusal nobody could have predicted from the list.
-    let index = parse(ONE.as_bytes()).expect("it should parse");
+    let mut index = parse(ONE.as_bytes()).expect("it should parse");
+    // In an order where neither answer is first or last, so that "the last
+    // one listed" — which the file's own order happened to make right — is
+    // not a way to pass: 0.9.0, 0.11.0, 0.10.0, 0.8.0.
+    let versions = &mut index.plugins[0].versions;
+    let mut oldest = versions[0].clone();
+    oldest.version = String::from("0.8.0");
+    let newest = versions.remove(2);
+    versions.insert(1, newest);
+    versions.push(oldest);
 
     let offers = offers(&index);
 
@@ -51,10 +60,12 @@ fn the_offers_are_by_name_and_a_lowercase_name_is_not_last() {
     };
     let text = format!(
         r#"{{"schema": 1, "plugins": [{}, {}, {}, {}]}}"#,
+        // Ids in another order than the names, so that sorting by id is not
+        // a way to come out right.
         plugin("a/worktree", "Worktree"),
-        plugin("a/dziling", "dziling"),
-        plugin("a/chips", "Chips"),
-        plugin("a/emoji", "Emoji")
+        plugin("z/dziling", "dziling"),
+        plugin("y/chips", "Chips"),
+        plugin("b/emoji", "Emoji")
     );
     let index = parse(text.as_bytes()).expect("it should parse");
 
@@ -97,8 +108,10 @@ fn a_plugin_whose_every_version_was_withdrawn_says_that_rather_than_nothing() {
     // built for this Crook" is somebody's to fix by publishing, and "it was
     // taken back, because —" is a thing to read.
     let mut index = parse(ONE.as_bytes()).expect("it should parse");
+    // Each with its own reason, and the one said is the newest's: the last
+    // thing taken back is why there is nothing now.
     for release in &mut index.plugins[0].versions {
-        release.yanked = Some(String::from("it read the wrong file"));
+        release.yanked = Some(format!("{} read the wrong file", release.version));
     }
 
     let offers = offers(&index);
@@ -106,7 +119,7 @@ fn a_plugin_whose_every_version_was_withdrawn_says_that_rather_than_nothing() {
     assert!(!offers[0].installable());
     assert_eq!(
         offers[0].withdrawn.as_deref(),
-        Some("it read the wrong file")
+        Some("0.10.0 read the wrong file")
     );
 }
 
@@ -356,6 +369,17 @@ fn a_module_that_is_not_what_the_list_promised_is_refused() {
     let refusal = promised(&manifest.id, &quieter, &manifest).expect_err("more than was offered");
     assert!(refusal.contains("cwd.read"), "{refusal}");
     assert!(refusal.contains("nothing"), "{refusal}");
+
+    // And as many capabilities as the row said, but not the ones it said: a
+    // count is not what a person was asked to allow.
+    let mut elsewhere = release.clone();
+    elsewhere.capabilities = vec![String::from("net:example.com")];
+    let refusal =
+        promised(&manifest.id, &elsewhere, &manifest).expect_err("other than was offered");
+    assert!(
+        refusal.contains("net:example.com") && refusal.contains("cwd.read"),
+        "{refusal}"
+    );
 
     // And a module that is another plugin altogether, whichever path asked:
     // `--update-plugins` used to write it under the id it gave itself.
