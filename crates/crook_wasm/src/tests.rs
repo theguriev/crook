@@ -76,6 +76,15 @@ fn module(body: &str, abi: u32) -> Vec<u8> {
 /// The same, for the one test whose subject is a module carrying a manifest
 /// that is not the one its exports claim.
 fn module_saying(manifest: &Manifest, body: &str, abi: u32) -> Vec<u8> {
+    assembled(manifest, body, abi, 1)
+}
+
+/// The same, declaring `pages` of memory rather than one.
+fn module_with_memory(body: &str, pages: u32) -> Vec<u8> {
+    assembled(&manifest(), body, ABI_VERSION, pages)
+}
+
+fn assembled(manifest: &Manifest, body: &str, abi: u32, pages: u32) -> Vec<u8> {
     let manifest = to_bytes(manifest).expect("a manifest should encode");
     let tree = to_bytes(&tree()).expect("a tree should encode");
     let tree_at = DATA + manifest.len() as u32;
@@ -91,7 +100,7 @@ fn module_saying(manifest: &Manifest, body: &str, abi: u32) -> Vec<u8> {
             (import "crook" "request" (func $request (param i32 i32) (result i32)))
             (import "crook" "timer" (func $timer (param i32) (result i32)))
             (import "crook" "now" (func $now (result i64)))
-            (memory (export "memory") 1)
+            (memory (export "memory") {pages})
             (global $next (mut i32) (i32.const {free}))
             (data (i32.const {DATA}) "{manifest_bytes}")
             (data (i32.const {tree_at}) "{tree_bytes}")
@@ -212,15 +221,23 @@ fn a_module_asking_for_more_memory_than_the_ceiling_never_gets_it() {
     // kilobytes of wasm saying `(memory 65536)` was four gigabytes the host
     // went and got before anything looked at it, and no amount of fuel catches
     // an allocation.
-    let wasm = wat::parse_str("(module (memory (export \"memory\") 20000))")
-        .expect("the test module should assemble");
+    //
+    // A whole, well-behaved module a page over the ceiling, and refused for
+    // that: a module missing its exports is refused too, whether or not any
+    // ceiling exists, and was all this used to try. And refused by the check
+    // made *before* the memory is handed over — the one after it names the
+    // page count, and a refusal that does has already paid for the pages.
+    let problem = refused(&module_with_memory(&with_strings(WELL_BEHAVED), 257));
 
-    let problem = refused(&wasm);
-
+    let Problem::Shape(why) = &problem else {
+        panic!("{problem:?} should be a refusal to run at all");
+    };
     assert!(
-        matches!(problem, Problem::Shape(_)),
-        "{problem:?} should be a refusal to run at all"
+        !why.contains("pages of memory and the limit"),
+        "refused only after the memory was allocated: {why}"
     );
+    // And the ceiling itself is a module like any other.
+    open(&module_with_memory(&with_strings(WELL_BEHAVED), 256)).expect("the ceiling itself opens");
 }
 
 #[test]
@@ -600,6 +617,27 @@ fn an_answer_that_is_not_what_it_should_be_is_refused() {
     assert!(matches!(problem, Problem::Answer(_)), "{problem:?}");
 }
 
+/// A render that works for a while before it answers: `$turns` times round
+/// a loop, then the tree.
+fn working(turns: u32) -> Vec<u8> {
+    let body = format!(
+        r#"
+        (func (export "crook_build") (result i32) (i32.const 0))
+        (func (export "crook_render") (param i32 i32) (result i64)
+          (local $count i32)
+          (block $done
+            (loop $again
+              (br_if $done (i32.ge_u (local.get $count) (i32.const {turns})))
+              (local.set $count (i32.add (local.get $count) (i32.const 1)))
+              (br $again)))
+          (i64.or
+            (i64.shl (i64.extend_i32_u (global.get $tree_at)) (i64.const 32))
+            (i64.extend_i32_u (global.get $tree_len))))
+        "#
+    );
+    module(&with_strings(&body), ABI_VERSION)
+}
+
 #[test]
 fn each_call_gets_its_own_budget() {
     // A budget spent over a session would be a plugin that stops working after
@@ -607,6 +645,39 @@ fn each_call_gets_its_own_budget() {
     // budgets, not one divided.
     let (mut sandbox, _) = open(&well_behaved()).expect("it should open");
     sandbox.build().expect("it should build");
+
+    // Renders that *spend* most of a budget, which is what shows it is one per
+    // call: a render of the well-behaved module costs next to nothing, and a
+    // hundred of them fitted in what the build left over whether or not any
+    // budget was ever reset. Sixty thousand turns is most of a million, so two
+    // calls on one shared budget cannot both finish.
+    let fuel = Fuel {
+        build: 1_000_000,
+        render: 1_000_000,
+        ..Fuel::default()
+    };
+    let (mut working_hard, _) = open_with(&working(60_000), fuel).expect("it should open");
+    working_hard.build().expect("it should build");
+    for call in 0..3 {
+        assert!(
+            working_hard.render(&for_slot("header.right")).is_ok(),
+            "render {call} ran out of a budget it should have had to itself"
+        );
+    }
+
+    // And the budget is the render's own, not the build's: the same work on a
+    // render budget it does not fit in is stopped, however much the build had.
+    let fuel = Fuel {
+        build: 50_000_000,
+        render: 400_000,
+        ..Fuel::default()
+    };
+    let (mut too_much, _) = open_with(&working(60_000), fuel).expect("it should open");
+    too_much.build().expect("it should build");
+    assert!(
+        too_much.render(&for_slot("header.right")).is_err(),
+        "a render ran on a budget that was not the render's"
+    );
 
     for _ in 0..100 {
         assert_eq!(
@@ -719,6 +790,43 @@ const PROLIFIC: &str = r#"
             (global.get $slot_at) (global.get $slot_len)
             (global.get $entry_at) (global.get $entry_len)
             (i32.const 0))
+          (local.set $count (i32.add (local.get $count) (i32.const 1)))
+          (br $again)))
+      (i32.const 0))
+    (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
+"#;
+
+/// The same, with actions: the ceiling is on everything the host holds, and
+/// an action is held as much as a contribution is.
+const PROLIFIC_ACTIONS: &str = r#"
+    (func (export "crook_build") (result i32)
+      (local $count i32)
+      (block $done
+        (loop $again
+          (br_if $done (i32.ge_u (local.get $count) (i32.const 300)))
+          (call $register_action
+            (global.get $action_at) (global.get $action_len)
+            (global.get $title_at) (global.get $title_len))
+          (local.set $count (i32.add (local.get $count) (i32.const 1)))
+          (br $again)))
+      (i32.const 0))
+    (func (export "crook_render") (param i32 i32) (result i64) (i64.const 0))
+"#;
+
+/// Two hundred of each, which is under the ceiling apiece and over it together.
+const PROLIFIC_BOTH: &str = r#"
+    (func (export "crook_build") (result i32)
+      (local $count i32)
+      (block $done
+        (loop $again
+          (br_if $done (i32.ge_u (local.get $count) (i32.const 200)))
+          (call $contribute
+            (global.get $slot_at) (global.get $slot_len)
+            (global.get $entry_at) (global.get $entry_len)
+            (i32.const 0))
+          (call $register_action
+            (global.get $action_at) (global.get $action_len)
+            (global.get $title_at) (global.get $title_len))
           (local.set $count (i32.add (local.get $count) (i32.const 1)))
           (br $again)))
       (i32.const 0))
@@ -885,6 +993,22 @@ fn a_plugin_may_only_register_so_much() {
     let registered = sandbox.build().expect("it should build");
 
     assert_eq!(registered.contributions.len(), 256);
+
+    // Actions are held too: a guest looping on `register_action` instead grew
+    // a host `Vec` for as long as it cared to, and nothing here noticed.
+    let (mut sandbox, _) =
+        open(&module(&with_strings(PROLIFIC_ACTIONS), ABI_VERSION)).expect("it should open");
+    let registered = sandbox.build().expect("it should build");
+    assert_eq!(registered.actions.len(), 256);
+
+    // And the two share the one ceiling, since both are what the host holds.
+    let (mut sandbox, _) =
+        open(&module(&with_strings(PROLIFIC_BOTH), ABI_VERSION)).expect("it should open");
+    let registered = sandbox.build().expect("it should build");
+    assert_eq!(
+        registered.contributions.len() + registered.actions.len(),
+        256
+    );
 }
 
 #[test]
