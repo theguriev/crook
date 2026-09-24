@@ -725,6 +725,14 @@ fn a_plugins_chord_is_underneath_everything_else() {
         "plugin",
         r#"[{ "key": "ctrl+shift+p", "command": "crook/window/new-tab" }]"#,
     );
+    // A chord the window ships, on whichever platform this runs: under the
+    // person's own line alone, a plugin layered above the defaults passed.
+    let new_tab = command("crook/window/new-tab");
+    let shipped = keybindings
+        .chords_for(&new_tab)
+        .into_iter()
+        .find(|chord| chord != "ctrl+shift+p")
+        .expect("the window ships a chord for a new tab");
     keybindings.set_plugin_rules(vec![
         rule_from(
             "ctrl+shift+p",
@@ -738,12 +746,19 @@ fn a_plugins_chord_is_underneath_everything_else() {
             Source::Plugin,
         )
         .expect("a chord"),
+        rule_from(&shipped, command("crook/palette/open"), Source::Plugin).expect("a chord"),
     ]);
 
     assert_eq!(
         keybindings.resolve(&keys("ctrl+shift+p"), &Context::new()),
         Resolution::Command(command("crook/window/new-tab"))
     );
+    assert_eq!(
+        keybindings.resolve(&keys(&shipped), &Context::new()),
+        Resolution::Command(new_tab.clone()),
+        "a plugin took {shipped} from the window"
+    );
+    assert!(keybindings.chords_for(&new_tab).contains(&shipped));
     assert_eq!(
         keybindings.resolve(&keys("ctrl+shift+o"), &Context::new()),
         Resolution::Command(command("crook/palette/open")),
