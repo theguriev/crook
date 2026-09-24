@@ -147,6 +147,29 @@ pub struct TerminalColors {
 }
 
 impl Theme {
+    /// A mark to draw on the accent — the knob of a switch that is on.
+    ///
+    /// `text_primary` wherever it reads there, which is every dark palette
+    /// shipped: a light knob on the accent. A light palette's `text_primary`
+    /// is near black, and near black on its accent was a knob at 2.6:1, under
+    /// the 3:1 WCAG asks of a control — the switch read as a dark blot rather
+    /// than as a knob. Where `text_primary` falls short the palette's own
+    /// ground is tried too, and whichever of the two reads better wins, so a
+    /// theme somebody else wrote still gets the legible one.
+    pub fn on_accent_mark(&self) -> Color {
+        const LEGIBLE: f32 = 3.;
+        if creator::contrast(self.text_primary, self.accent) >= LEGIBLE {
+            return self.text_primary;
+        }
+        [self.text_primary, self.surface]
+            .into_iter()
+            .max_by(|left, right| {
+                creator::contrast(*left, self.accent)
+                    .total_cmp(&creator::contrast(*right, self.accent))
+            })
+            .unwrap_or(self.text_primary)
+    }
+
     /// Fills in every role a theme file does not carry.
     ///
     /// Warp's theme files name a handful of colours — an accent, a background,
