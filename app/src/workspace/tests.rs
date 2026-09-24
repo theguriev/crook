@@ -1373,6 +1373,12 @@ impl Harness {
 /// for the shell to say something *before* typing at it, so that starting up
 /// and doing as it was told are two waits rather than one. Every test here
 /// that types does that.
+///
+/// And a command a test means to interrupt has to outlive it: those tests
+/// wait for the shell to run the *next* line, which a `sleep` shorter than
+/// this lets it do on its own — an interrupt that never arrived passed,
+/// thirty seconds late. They sleep for ten minutes; closing the pane at the
+/// end of the test hangs it up.
 const SHELL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The modifier that means "this is an application command" on this platform.
@@ -10729,7 +10735,7 @@ mod shells {
         };
         harness.frame();
 
-        harness.type_into(pane, "printf 'g%s\n' o; sleep 30\n");
+        harness.type_into(pane, "printf 'g%s\n' o; sleep 600\n");
         harness.wait_for("the shell never started the command", |harness| {
             harness.terminal_text(pane).contains("go")
         });
@@ -10759,7 +10765,7 @@ mod shells {
             "a copy interrupted the command it was copying from"
         );
 
-        // And now the shell is still waiting on `sleep 30`, so only an
+        // And now the shell is still waiting on `sleep 600`, so only an
         // interrupt can let the next command run.
         harness.press("c", ctrl, "c");
         harness.type_into(pane, "printf 'ba%s\n' ck\n");
@@ -11243,7 +11249,7 @@ mod shells {
         // The marker is printed by the command rather than named in it, so
         // finding it in the grid is evidence the shell *ran* the line rather
         // than evidence the tty echoed it.
-        harness.type_into(pane, "printf 'g%s\\n' o; sleep 30\n");
+        harness.type_into(pane, "printf 'g%s\\n' o; sleep 600\n");
         harness.wait_for("the shell never started the command", |harness| {
             harness.terminal_text(pane).contains("go")
         });
@@ -11254,7 +11260,7 @@ mod shells {
         };
         harness.press("c", ctrl, "c");
 
-        // A shell still waiting on `sleep 30` cannot run this, so the marker
+        // A shell still waiting on `sleep 600` cannot run this, so the marker
         // arriving at all is the interrupt having landed.
         harness.type_into(pane, "printf 'ba%s\\n' ck\n");
         harness.wait_for("ctrl-c never reached the shell", |harness| {
@@ -11553,7 +11559,7 @@ mod shells {
         };
         harness.frame();
 
-        harness.type_into(pane, "printf 'g%s\\n' o; sleep 30\n");
+        harness.type_into(pane, "printf 'g%s\\n' o; sleep 600\n");
         harness.wait_for("the shell never started the command", |harness| {
             harness.terminal_text(pane).contains("go")
         });
@@ -11568,7 +11574,7 @@ mod shells {
             "the abandoned line outlived the interrupt that abandoned it"
         );
 
-        // And the interrupt still landed: a shell waiting on `sleep 30` cannot
+        // And the interrupt still landed: a shell waiting on `sleep 600` cannot
         // run this.
         harness.type_into(pane, "printf 'ba%s\\n' ck\n");
         harness.wait_for("ctrl-c never reached the shell", |harness| {
@@ -11670,7 +11676,7 @@ mod shells {
         };
         harness.frame();
 
-        harness.type_into(pane, "printf 'g%s\\n' o; sleep 30\n");
+        harness.type_into(pane, "printf 'g%s\\n' o; sleep 600\n");
         harness.wait_for("the shell never started the command", |harness| {
             harness.terminal_text(pane).contains("go")
         });
@@ -13218,7 +13224,7 @@ mod shells {
 
                 // A command that will not end on its own, so only an interrupt
                 // can let the next one run.
-                harness.type_field(pane, "sleep 30");
+                harness.type_field(pane, "sleep 600");
                 harness.press("enter", Modifiers::default(), "\r");
                 harness.settle(NO_LEAK_PATIENCE);
 
@@ -13302,7 +13308,7 @@ mod shells {
                 }
                 // A command that keeps its block open, so the rows dragged
                 // across are the grid's rather than a store's.
-                harness.type_field(pane, "printf 'OPE%s\\n' N; sleep 30");
+                harness.type_field(pane, "printf 'OPE%s\\n' N; sleep 600");
                 harness.press("enter", Modifiers::default(), "\r");
                 harness.wait_for("the command never printed", |harness| {
                     harness.terminal_text(pane).contains("OPEN")
@@ -13515,7 +13521,7 @@ mod shells {
                 // Written straight to the pty: typing into the composer is one
                 // of the rules that lets go of a selection by itself, and what
                 // is under test is the surface changing.
-                harness.type_into(pane, "seq 1 400; sleep 30\n");
+                harness.type_into(pane, "seq 1 400; sleep 600\n");
                 // Four hundred lines into a pane forty rows tall: the block
                 // this command opened starts a long way above the viewport,
                 // which is what `pane_surface::of` falls back to the grid on.
