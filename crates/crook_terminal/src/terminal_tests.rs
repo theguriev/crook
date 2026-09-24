@@ -338,6 +338,27 @@ fn test_a_real_child_is_told_which_terminal_it_is_on() {
     );
 }
 
+/// A line of shell that prints the directory it started in, bracketed.
+///
+/// Bracketed because the check is otherwise a substring, and the directory
+/// these tests run from — the crate, under a checkout under `$HOME` on every
+/// machine that runs them — *contains* `$HOME`: a bare `pwd` of the wrong
+/// directory passed for the right one.
+const WHERE_IT_STARTED: &str = "printf '[%s]\\n' \"$(pwd)\"";
+
+/// What [`WHERE_IT_STARTED`] prints for a child that started in `dir`.
+///
+/// And a test that is itself running in `dir` cannot tell the child's
+/// directory from its own, so it says so rather than passing.
+fn started_at(dir: &Path) -> String {
+    assert_ne!(
+        std::env::current_dir().ok().as_deref(),
+        Some(dir),
+        "the test runs in the directory it expects the child in, so it proves nothing"
+    );
+    format!("[{}]", dir.to_string_lossy())
+}
+
 #[test]
 fn test_a_working_directory_that_is_gone_starts_the_child_at_home() {
     // What a restored session hands over after the worktree it named was
@@ -350,7 +371,7 @@ fn test_a_working_directory_that_is_gone_starts_the_child_at_home() {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return;
     };
-    let Some(program) = shell_command("pwd") else {
+    let Some(program) = shell_command(WHERE_IT_STARTED) else {
         return;
     };
     let gone = home.join("a-worktree-crook-never-made-and-that-is-not-there");
@@ -365,7 +386,7 @@ fn test_a_working_directory_that_is_gone_starts_the_child_at_home() {
     let output = read_on_a_thread(terminal.take_reader().expect("a reader"));
 
     assert!(
-        feed_until(&mut terminal, &output, &home.to_string_lossy()),
+        feed_until(&mut terminal, &output, &started_at(&home)),
         "a pane whose saved directory is gone should open at $HOME, got: {:?}",
         terminal.snapshot().text()
     );
@@ -379,7 +400,7 @@ fn test_a_child_with_no_working_directory_starts_where_a_new_window_would() {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
         return;
     };
-    let Some(program) = shell_command("pwd") else {
+    let Some(program) = shell_command(WHERE_IT_STARTED) else {
         return;
     };
     let mut terminal = Terminal::spawn(TerminalOptions {
@@ -393,7 +414,7 @@ fn test_a_child_with_no_working_directory_starts_where_a_new_window_would() {
     // Not the directory Crook itself was started in, which is whatever the
     // Finder or a launcher happened to leave: a new window opens at home.
     assert!(
-        feed_until(&mut terminal, &output, &home.to_string_lossy()),
+        feed_until(&mut terminal, &output, &started_at(&home)),
         "a pane with no directory of its own should open at $HOME, got: {:?}",
         terminal.snapshot().text()
     );
