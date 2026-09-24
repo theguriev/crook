@@ -247,3 +247,27 @@ fn an_action_that_is_not_offered_is_reachable_where_it_is_actually_reachable() {
         "and 4 more it does not offer, reachable by name from your keybindings file."
     );
 }
+
+#[test]
+fn a_decode_overtaken_by_another_plugins_does_not_take_its_place() {
+    // Two cards' pictures asked for in a row, the second landing first:
+    // the second is the one being looked at, and the first's late landing
+    // must not replace it.
+    let state = PluginsState::new();
+    let first = PluginId::parse("eugen/first").expect("a literal that parses");
+    let second = PluginId::parse("eugen/second").expect("a literal that parses");
+
+    state.opening(&first);
+    state.opening(&second);
+    state.landed(&second, Vec::new());
+    assert!(state.shown(&second).is_some());
+    assert!(!state.is_opening(&second));
+
+    state.landed(&first, Vec::new());
+
+    assert!(
+        state.shown(&second).is_some(),
+        "the first card's late pictures took the second's place"
+    );
+    assert!(state.shown(&first).is_none());
+}
