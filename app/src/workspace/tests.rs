@@ -16256,6 +16256,58 @@ fn record(harness: &mut Harness, command: &str) {
 }
 
 #[test]
+fn a_keybindings_save_that_lands_does_not_clear_a_failing_settings_save() {
+    // Two files, failing apart: the settings folder cannot be written and
+    // the keybindings file can. The notice used to be one for both, cleared
+    // by whichever save landed — so recording a chord took down the word
+    // that the options were still going nowhere, and the option was gone on
+    // the next launch with the page saying nothing.
+    let scratch = Scratch::new();
+    let blocked = scratch.path().join("blocked");
+    fs::write(&blocked, "not a folder\n").expect("writable scratch");
+    let mut harness = Harness::with_settings(1, Settings::load(blocked.join("settings.json")));
+    let path = keybindings_in(&mut harness, &scratch);
+    harness.open_settings_page();
+
+    harness.dispatch_option(OptionsAction::ToggleShowDetailsOnHover);
+    harness.wait_for("the failed save never reached the page", |harness| {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.save_problem().is_some()
+        })
+    });
+
+    record(&mut harness, "crook/window/new-tab");
+    harness.press(
+        "n",
+        Modifiers {
+            ctrl: true,
+            alt: true,
+            ..Modifiers::default()
+        },
+        "",
+    );
+    harness.press("enter", Modifiers::default(), "");
+    keybindings_written(&path, "ctrl+alt+n");
+    // And the keybindings save's own word taken back, which is what used to
+    // clear the notice.
+    for _ in 0..3 {
+        harness.wait_for("the queue never settled", |_| true);
+    }
+
+    let problem = harness.workspace.read(&harness.app, |workspace, _| {
+        workspace.save_problem().map(str::to_owned)
+    });
+    assert!(
+        problem
+            .as_deref()
+            .is_some_and(|problem| problem.contains("blocked")),
+        "a keybindings save that landed cleared the settings' failure: {problem:?}"
+    );
+    let text = frame_text(&harness.frame());
+    assert!(text.contains("not being saved"), "{text:?}");
+}
+
+#[test]
 fn a_chord_recorded_on_the_page_replaces_the_shipped_one_and_is_written_down() {
     // The whole gesture, end to end: click a chord, press the keys, press
     // Enter. What comes out is a window that answers to the new chord, does
