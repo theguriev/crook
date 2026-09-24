@@ -191,6 +191,10 @@ pub struct Keybindings {
     /// the headless snapshot, a machine with no configuration directory.
     /// Nothing can be edited without one, and the page says so.
     path: Option<PathBuf>,
+    /// Why the file reads as no bindings at all, when it does: not JSON, or
+    /// JSON that is not a list. Every chord in it is out of force while this
+    /// is set, and the page says so rather than only the log.
+    unreadable: Option<String>,
 }
 
 impl Default for Keybindings {
@@ -236,6 +240,7 @@ impl Keybindings {
             user: Vec::new(),
             document: Document::default(),
             path: None,
+            unreadable: None,
         }
     }
 
@@ -445,7 +450,17 @@ impl Keybindings {
     /// snapshot, a machine that has none — where the page draws its controls
     /// dead rather than pretending an edit was kept.
     pub fn is_editable(&self) -> bool {
-        self.path.is_some()
+        self.path.is_some() && self.unreadable.is_none()
+    }
+
+    /// Why the file reads as no bindings, if it does.
+    ///
+    /// A file that is not a list — a trailing comma, an object where the
+    /// array goes — used to take every chord in it out of force with nothing
+    /// but a line in the log, while the page went on offering to record new
+    /// ones that could never be written into it.
+    pub fn unreadable(&self) -> Option<&str> {
+        self.unreadable.as_deref()
     }
 
     /// The file this run read and writes, if it has one.
@@ -560,7 +575,16 @@ impl Keybindings {
     /// turns out not to parse, which is dropped here rather than believed.
     fn reread(&mut self) {
         let path = self.path.clone().unwrap_or_default();
-        self.user = read_rules(self.document.text(), &path, Source::User);
+        match read_rules(self.document.text(), &path, Source::User) {
+            Ok(rules) => {
+                self.user = rules;
+                self.unreadable = None;
+            }
+            Err(why) => {
+                self.user = Vec::new();
+                self.unreadable = Some(why);
+            }
+        }
     }
 
     /// The write this edit is asking for, for whoever has a thread to do it on.
@@ -729,23 +753,27 @@ pub fn user_keybindings_path() -> Option<PathBuf> {
 }
 
 /// Reads a keybindings document, dropping what cannot be read.
-fn read_rules(text: &str, path: &Path, source: Source) -> Vec<Rule> {
+fn read_rules(text: &str, path: &Path, source: Source) -> Result<Vec<Rule>, String> {
+    // An empty file is a file with nothing in it yet, not a broken one.
+    if strip_comments(text).trim().is_empty() {
+        return Ok(Vec::new());
+    }
     let document: Value = match serde_json::from_str(&strip_comments(text)) {
         Ok(document) => document,
         Err(error) => {
             log::warn!("could not read {}: {error}", path.display());
-            return Vec::new();
+            return Err(format!("it is not JSON: {error}"));
         }
     };
     let Value::Array(entries) = document else {
         log::warn!("{} is not a list of bindings", path.display());
-        return Vec::new();
+        return Err(String::from("it is JSON, but not a list of bindings"));
     };
 
-    entries
+    Ok(entries
         .iter()
         .filter_map(|entry| read_rule(entry, path, source))
-        .collect()
+        .collect())
 }
 
 /// One entry of the list, or `None` with a line in the log.

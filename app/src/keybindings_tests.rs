@@ -1324,3 +1324,47 @@ fn in_words(count: usize) -> String {
         _ => count.to_string(),
     }
 }
+
+#[test]
+fn a_file_that_does_not_read_says_why_and_takes_no_edits() {
+    // Every chord in a file that is not a list was out of force with nothing
+    // but a line in the log, and the page went on offering to record chords
+    // that could never be written into it. Now the file says why, and the
+    // page is not offered as editable until it reads.
+    for (name, text, why) in [
+        (
+            "trailing-comma",
+            r#"[{ "key": "ctrl+alt+n", "command": "crook/window/new-tab" },]"#,
+            "not JSON",
+        ),
+        (
+            "an-object",
+            r#"{ "key": "ctrl+alt+n", "command": "crook/window/new-tab" }"#,
+            "not a list",
+        ),
+    ] {
+        let keybindings = written(name, text);
+        let said = keybindings
+            .unreadable()
+            .unwrap_or_else(|| panic!("{name} read"));
+        assert!(said.contains(why), "{name}: {said}");
+        assert!(
+            !keybindings.is_editable(),
+            "{name} offered edits it cannot keep"
+        );
+        // And what is in force is the shipped table, not nothing.
+        assert!(
+            !keybindings
+                .chords_for(&command("crook/window/new-tab"))
+                .is_empty()
+        );
+    }
+
+    // An empty file is a file with nothing in it yet, not a broken one.
+    let empty = written("empty", "");
+    assert_eq!(empty.unreadable(), None);
+    assert!(empty.is_editable());
+    let commented = written("commented", "// my bindings\n");
+    assert_eq!(commented.unreadable(), None);
+    assert!(commented.is_editable());
+}
