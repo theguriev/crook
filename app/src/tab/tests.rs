@@ -1246,16 +1246,19 @@ mod groups {
     fn a_drop_into_a_group_lands_inside_it_however_far_the_pointer_got() {
         // The other half of the clamp: the group is believed and the gap is
         // moved, so a target computed from coarse geometry cannot break a run.
-        let (mut strip, ids, group) = grouped(3);
-        let outsider = *ids.last().expect("three tabs");
+        // Aimed a tab past the group's end, so the clamp has to move it:
+        // before the tab straight after the group, it would have landed at
+        // the end with no clamp at all.
+        let (mut strip, ids, group) = grouped(4);
+        let outsider = *ids.last().expect("four tabs");
 
         strip.apply(TabAction::MoveTab {
             tab: outsider,
             group: Some(group),
-            before: Some(ids[2]),
+            before: Some(ids[3]),
         });
 
-        assert_eq!(shape(&strip), vec![(Some(group), 3), (None, 1)]);
+        assert_eq!(shape(&strip), vec![(Some(group), 3), (None, 1), (None, 1)]);
     }
 
     #[test]
@@ -1305,14 +1308,21 @@ mod groups {
         let last = *ids.last().expect("two tabs");
         strip.apply(TabAction::NewInGroupOf(last));
         let second = strip.get(last).and_then(Tab::group).expect("grouped");
-        let second_member = strip.members(second).map(Tab::id).nth(1).expect("two");
 
-        strip.apply(TabAction::MoveGroup {
-            group: first,
-            before: Some(second_member),
-        });
+        // The second group dropped on the first one's second member: above
+        // the whole of it is somewhere else than it was, so the snap is what
+        // puts it there. The other way round, `first` is already above
+        // `second`, and a drop that refused did as well as one that landed.
+        let first_member = strip.members(first).map(Tab::id).nth(1).expect("two");
+        assert_eq!(
+            TabEffect::Changed,
+            strip.apply(TabAction::MoveGroup {
+                group: second,
+                before: Some(first_member),
+            })
+        );
 
-        assert_eq!(shape(&strip), vec![(Some(first), 2), (Some(second), 2)]);
+        assert_eq!(shape(&strip), vec![(Some(second), 2), (Some(first), 2)]);
     }
 
     #[test]
@@ -1437,7 +1447,14 @@ fn pinning_moves_a_tab_to_the_front_of_its_own_block() {
         strip.get(members[1]).is_some_and(Tab::is_pinned),
         "it did not come back pinned"
     );
-    assert_eq!(strip.len(), 4, "pinning lost or gained a tab");
+    // And the group is still one block where it was. `members` reads a group
+    // in strip order whether or not its tabs are together, so it could not
+    // see a member lifted to the front of the list and away from the other.
+    assert_eq!(
+        order(&strip),
+        [ids[0], members[1], members[0], ids[2]],
+        "pinning took the member out of its group's place"
+    );
 }
 
 #[test]
