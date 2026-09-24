@@ -243,6 +243,14 @@ fn test_a_paste_cannot_end_its_own_bracket() {
     // can contain the end marker, and a terminal that passed it through would
     // leave paste mode there and run whatever followed with nobody pressing
     // Enter.
+    //
+    // Not on Windows, whose console re-renders what the child writes rather
+    // than echoing it: the bytes themselves are checked for every platform
+    // in `tests/adversarial_review.rs`, and this is the whole path — the mode
+    // set, `Terminal::paste`, the pty — where a line discipline echoes.
+    if cfg!(windows) {
+        return;
+    }
     let Some(program) = shell_command("cat") else {
         return;
     };
@@ -264,13 +272,21 @@ fn test_a_paste_cannot_end_its_own_bracket() {
         .paste("safe\x1b[201~; echo PWNED\n")
         .expect("the paste should reach the child");
 
-    // `cat` echoes what it is given, so what comes back is what the shell on
-    // the far end would have parsed.
-    assert!(feed_until(&mut terminal, &output, "echo PWNED"));
+    // The pty echoes what the child was sent, with an escape spelled `^[` —
+    // which is how it can be seen at all: the grid never holds an ESC, since
+    // the parser takes every one, so asking the grid for one could not fail.
+    // What was sent ends its bracket once, after everything pasted; an end
+    // marker that got through would be a second one, before `echo PWNED`.
+    assert!(feed_until(&mut terminal, &output, "^[[201~"));
     let echoed = terminal.snapshot().text();
-    assert!(
-        !echoed.contains('\u{1b}'),
+    assert_eq!(
+        echoed.matches("^[[201~").count(),
+        1,
         "the escape that would end the bracket was passed through: {echoed:?}"
+    );
+    assert!(
+        echoed.find("echo PWNED") < echoed.find("^[[201~"),
+        "what was pasted after the marker fell outside the bracket: {echoed:?}"
     );
 
     terminal.shutdown().expect("the child should be endable");
