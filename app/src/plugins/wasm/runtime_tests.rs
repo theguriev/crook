@@ -596,6 +596,16 @@ fn a_listing_outside_every_granted_root_is_refused_by_the_sentence_it_wanted() {
         allowed(&granted, &list("/etc")).expect_err("nothing granted /etc and it is not under ~");
 
     assert_eq!(refusal, "See the names of the files in /etc");
+
+    // And "under" is by whole directory: a sibling that only *starts* with
+    // the root's name is somewhere else, which a comparison of the text would
+    // have let through.
+    assert!(allowed(&granted, &list("~/Workshop")).is_err());
+    assert!(allowed(&granted, &list("~/Work-secrets/keys")).is_err());
+    if let Some(home) = dirs::home_dir() {
+        let sibling = home.join("Workshop").to_string_lossy().into_owned();
+        assert!(allowed(&granted, &list(&sibling)).is_err());
+    }
 }
 
 #[test]
