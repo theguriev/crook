@@ -5854,6 +5854,57 @@ fn nothing_offers_to_tidy_a_checkout_a_tab_is_working_in() {
 }
 
 #[test]
+fn a_removal_answers_the_menu_that_asked_not_the_same_tabs_next_one() {
+    // The menu is taken down and opened again on the same tab while git is
+    // removing. The answer that lands afterwards is to a question the new menu
+    // never asked, and a tab is not enough to tell the two apart: it used to
+    // be handed git's refusal as its own problem.
+    let Some((scratch, mut harness)) = menu_over_checkout("side") else {
+        return;
+    };
+    let checkout = scratch.path().join("checkout");
+    // A refusal that is an error rather than a question: git will not remove
+    // a locked checkout without being told twice.
+    let locked = crate::process::command("git")
+        .args(["worktree", "lock", "--reason", "held for the test"])
+        .arg(&checkout)
+        .current_dir(scratch.path().join("repo"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    assert!(locked, "git would not lock the checkout");
+
+    let tab = harness.active_id();
+    let index = harness
+        .worktree_index_under(&checkout)
+        .expect("the checkout is not in the menu");
+    harness.dispatch_worktree(WorktreeAction::AskRemove(index));
+    harness.dispatch_worktree(WorktreeAction::Remove { force: false });
+    harness.dispatch_worktree(WorktreeAction::CloseMenu);
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+
+    // Nothing has pumped the foreground yet, so git's answer is still on its
+    // way; this is long enough for it to be waiting when the queue next runs.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    harness.wait_for("both checkouts to be read again", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    harness.queue.run_until_parked();
+
+    let text = frame_text(&harness.frame());
+    assert!(
+        !text.contains("held for the test"),
+        "the menu opened again was handed the old menu's refusal: {text:?}"
+    );
+    assert!(
+        !harness.worktree_menu_is_busy(),
+        "the menu opened again is still waiting on git"
+    );
+}
+
+#[test]
 fn enter_does_not_remove_a_checkout_git_has_already_refused() {
     // The second question, which the keyboard does not answer. git declines to
     // throw away work nobody asked it to throw away, and the button that then

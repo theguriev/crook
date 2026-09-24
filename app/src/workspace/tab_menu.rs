@@ -365,6 +365,19 @@ pub(super) struct TabMenuState {
     /// to do and is what a stepwise chain cannot do, since every step of it
     /// lands into the same state the last one left.
     pub(super) epoch: u64,
+    /// Which time the menu has been opened, counted up every time it is.
+    ///
+    /// Coarser than [`Self::epoch`], and for the two answers that must not be
+    /// dropped when the question changes: a checkout made or removed. Walking
+    /// back from the confirmation to the list while git is removing still
+    /// wants the answer — `working` is only put down by it, and the list has to
+    /// be read again once the checkout is gone — so those two cannot compare
+    /// epochs. They used to compare tabs instead, which cannot tell the menu
+    /// that asked from the same tab's menu taken down and opened again: that
+    /// one was handed a failure it never asked about, a creator thrown back to
+    /// the list, and "Remove anyway" armed on a confirmation git had not
+    /// answered.
+    pub(super) opening: u64,
     /// How many frames into the bite the pirate is.
     ///
     /// Counted up by the chain in `Workspace::keep_chomping` while
