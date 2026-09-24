@@ -131,12 +131,16 @@ impl PluginsState {
     /// the pictures of three plugins in a row is looking at one card, and
     /// the other two sets would be pixels held for nobody.
     pub(super) fn landed(&self, plugin: &PluginId, pictures: Decoded) {
-        // Only if this is still the decode being waited on: a second press
-        // that started another plugin's decode is the one whose landing
-        // ends the wait.
-        if self.is_opening(plugin) {
-            *self.opening.borrow_mut() = None;
+        // Only if this is still the decode being waited on. A second press
+        // that started another plugin's decode is the one that counts, and a
+        // decode that lands after it — a card of large screenshots overtaken
+        // by one of a single small one — used to take the one set's place
+        // anyway: the card being looked at lost its pictures and went back
+        // to its button, and the pixels were held for a card nobody had open.
+        if !self.is_opening(plugin) {
+            return;
         }
+        *self.opening.borrow_mut() = None;
         *self.pictures.borrow_mut() = Some((plugin.to_string(), pictures));
     }
 
