@@ -16308,6 +16308,31 @@ fn a_keybindings_save_that_lands_does_not_clear_a_failing_settings_save() {
 }
 
 #[test]
+fn a_keybindings_file_that_does_not_read_is_named_as_such_on_its_page() {
+    // A trailing comma in a hand-edited file took every chord in it out of
+    // force, and the page named the file as though nothing were wrong.
+    let mut harness = Harness::new(1);
+    let scratch = Scratch::new();
+    let path = scratch.path().join("keybindings.json");
+    fs::write(
+        &path,
+        r#"[{ "key": "ctrl+alt+n", "command": "crook/window/new-tab" },]"#,
+    )
+    .expect("writable scratch");
+    let keybindings = crate::keybindings::Keybindings::load(&path);
+    harness.workspace_update(|workspace, ctx| workspace.set_keybindings(keybindings, ctx));
+    harness.open_settings_page();
+    harness.select_settings_section("Keyboard Shortcuts");
+    harness.scroll_settings_page(-10_000.);
+
+    let text = frame_text(&harness.frame());
+    assert!(
+        text.contains("could not be read"),
+        "the page did not say the file does not read: {text:?}"
+    );
+}
+
+#[test]
 fn a_chord_recorded_on_the_page_replaces_the_shipped_one_and_is_written_down() {
     // The whole gesture, end to end: click a chord, press the keys, press
     // Enter. What comes out is a window that answers to the new chord, does

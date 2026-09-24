@@ -370,20 +370,33 @@ fn the_file(workspace: &Workspace) -> Category {
         None => "nowhere — this machine has no configuration directory".to_owned(),
     };
 
-    let mut entries = vec![
-        widgets::fact(
-            Words::new("Keybindings file").with_keywords(&[
-                "bindings",
-                "shortcuts",
-                "chords",
-                "rebind",
-                "keybindings.json",
-                "customise",
-            ]),
-            file,
-            true,
-            fonts,
-        ),
+    let mut entries = vec![widgets::fact(
+        Words::new("Keybindings file").with_keywords(&[
+            "bindings",
+            "shortcuts",
+            "chords",
+            "rebind",
+            "keybindings.json",
+            "customise",
+        ]),
+        file,
+        true,
+        fonts,
+    )];
+    // Under the file's own line, because it is the file's news: every chord
+    // in it is out of force, and the controls above are drawn dead until it
+    // reads again.
+    if let Some(why) = workspace.keybindings().unreadable() {
+        entries.push(widgets::warning_note(
+            &format!(
+                "It could not be read — {why} — so none of the chords in it are in force, \
+                 only the ones this build ships with. Put it right and it is read again while \
+                 this page is showing."
+            ),
+            ui,
+        ));
+    }
+    entries.extend([
         widgets::note(
             "A list of bindings, in VSCode's format and with VSCode's rules: \
              { \"key\": \"ctrl+shift+t\", \"command\": \"crook/window/new-tab\" }. The last rule \
@@ -420,7 +433,7 @@ fn the_file(workspace: &Workspace) -> Category {
              the keys below.",
             ui,
         ),
-    ];
+    ]);
 
     for (key, value) in workspace.key_context().keys() {
         entries.push(widgets::fact(

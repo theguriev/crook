@@ -1641,6 +1641,16 @@ pub(crate) fn note(text: &str, ui: FamilyId) -> Entry {
     )
 }
 
+/// The same paragraph in the warning's colour: something about the rows
+/// around it is wrong, and this says what.
+pub(crate) fn warning_note(text: &str, ui: FamilyId) -> Entry {
+    Entry::unsearchable(
+        Container::new(toned_note(text, Tone::Warning, ui))
+            .with_margin_bottom(NOTE_GAP)
+            .finish(),
+    )
+}
+
 /// The wrapped, muted lines a note is made of, with nothing around them.
 ///
 /// Inside an [`asked`] box the column owns the gaps, and a note that brought
