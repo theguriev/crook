@@ -1783,6 +1783,38 @@ fn an_argument_is_one_word_however_it_is_spelled() {
     let quoted = fill("cd {}", "it's here").expect("a template with a hole");
     assert!(quoted.starts_with("cd '") && quoted.ends_with('\''));
     assert_ne!(quoted, "cd 'it's here'", "the quote has to be dealt with");
+    // Spelled exactly, since a wrong spelling can still open and close with a
+    // quote: `'it\'s here'` does, and a backslash escapes nothing inside
+    // single quotes — the quoting ends at it, and the rest of the argument is
+    // a command.
+    let expected = match cfg!(windows) {
+        true => "cd 'it''s here'",
+        false => "cd 'it'\\''s here'",
+    };
+    assert_eq!(quoted, expected);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_quoted_argument_comes_back_out_of_a_real_shell_as_it_went_in() {
+    // The proof the spelling is right rather than a spelling this file
+    // agrees with: a shell reads the quoted word and prints what it read.
+    for argument in [
+        "it's here",
+        "x'; echo pwned; echo '",
+        "''",
+        "a\\b $HOME `id`",
+    ] {
+        let line = fill("printf %s {}", argument).expect("a template with a hole");
+        let Ok(output) = crate::process::command("sh").args(["-c", &line]).output() else {
+            return;
+        };
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            argument,
+            "{line:?} did not come back as one word"
+        );
+    }
 }
 
 #[test]
@@ -1899,4 +1931,18 @@ fn a_block_says_only_what_a_plugin_was_allowed_to_be_told() {
     .block(&menu, &who);
     assert!(placed.ran.is_none());
     assert!(placed.place.is_some());
+
+    // And the other half: what ran does not bring where it ran with it. A
+    // plugin allowed to read a block is not thereby allowed to know which
+    // directory and branch every block was in.
+    let ran_only = Sees {
+        block: true,
+        ..Sees::default()
+    }
+    .block(&menu, &who);
+    assert!(ran_only.ran.is_some());
+    assert!(
+        ran_only.place.is_none(),
+        "reading a block told the plugin where it ran"
+    );
 }
