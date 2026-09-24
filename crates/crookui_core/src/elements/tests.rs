@@ -93,6 +93,9 @@ struct TestView {
     /// here for the reason every other handle is: an element tree does not
     /// survive a repaint, and scrolling causes one.
     scroll: ScrollStateHandle,
+    /// A second offset, for the one test that puts a scrollable inside
+    /// another.
+    inner_scroll: ScrollStateHandle,
     actions: Vec<TestAction>,
 }
 
@@ -102,6 +105,7 @@ impl TestView {
             build: Box::new(build),
             mouse: MouseStateHandle::default(),
             scroll: ScrollStateHandle::default(),
+            inner_scroll: ScrollStateHandle::default(),
             actions: Vec::new(),
         }
     }
@@ -282,13 +286,15 @@ fn a_zero_flex_child_takes_no_share_rather_than_a_nan() {
     let mut harness = Harness::new(|_| {
         Flex::row()
             .with_main_axis_size(MainAxisSize::Max)
-            // A flex-2 spacer, then a flex-0 one, then a marker. The flex-2
-            // spacer takes all the surplus (90 of the 100, less the marker's
-            // 10); the flex-0 spacer takes none, so the marker lands right
-            // after it. With the old divide-by-zero the flex-0 spacer's size
-            // was NaN, and the marker's position with it.
-            .with_child(Expanded::new(2., Empty::new().finish()).finish())
+            // The flex-0 spacer first, with a marker after it, then a flex-2
+            // spacer and a second marker. Measured the other way round the
+            // flex-2 spacer had taken every pixel before the flex-0 one was
+            // asked, so any rule at all gave it nothing — including one that
+            // gave it everything that was left. With the old divide-by-zero
+            // its size was NaN, and the markers' positions with it.
             .with_child(Expanded::new(0., Empty::new().finish()).finish())
+            .with_child(marker(10., 10.))
+            .with_child(Expanded::new(2., Empty::new().finish()).finish())
             .with_child(marker(10., 10.))
             .finish()
     });
@@ -296,7 +302,30 @@ fn a_zero_flex_child_takes_no_share_rather_than_a_nan() {
     let scene = harness.build_scene(vec2f(100., 50.));
     let bounds: Vec<_> = rects(&scene).iter().map(|rect| rect.bounds).collect();
 
-    assert_eq!(bounds[0], RectF::new(vec2f(90., 0.), vec2f(10., 10.)));
+    assert_eq!(bounds[0], RectF::new(vec2f(0., 0.), vec2f(10., 10.)));
+    assert_eq!(bounds[1], RectF::new(vec2f(90., 0.), vec2f(10., 10.)));
+}
+
+#[test]
+fn expanded_children_share_the_space_by_their_flex() {
+    // The proportion itself, which nothing else here has two flexible
+    // children to show: of 80 free pixels, a flex-1 and a flex-3 spacer take
+    // 20 and 60.
+    let mut harness = Harness::new(|_| {
+        Flex::row()
+            .with_main_axis_size(MainAxisSize::Max)
+            .with_child(Expanded::new(1., Empty::new().finish()).finish())
+            .with_child(marker(10., 10.))
+            .with_child(Expanded::new(3., Empty::new().finish()).finish())
+            .with_child(marker(10., 10.))
+            .finish()
+    });
+
+    let scene = harness.build_scene(vec2f(100., 50.));
+    let bounds: Vec<_> = rects(&scene).iter().map(|rect| rect.bounds).collect();
+
+    assert_eq!(bounds[0].origin(), vec2f(20., 0.), "a quarter of the space");
+    assert_eq!(bounds[1].origin(), vec2f(90., 0.), "and three quarters");
 }
 
 #[test]
@@ -334,10 +363,19 @@ fn a_column_asked_not_to_overflow_lays_no_child_out_past_its_end() {
 #[test]
 fn a_container_grows_by_its_padding_and_border() {
     let mut harness = Harness::new(|_| {
+        // A different amount on every side, so that a side read for another
+        // — left for top, right for left — is a different number. The same
+        // five everywhere came out the same whichever way round it was read.
         Container::new(marker(10., 10.))
-            .with_uniform_padding(5.)
+            .with_padding_left(1.)
+            .with_padding_top(2.)
+            .with_padding_right(3.)
+            .with_padding_bottom(4.)
             .with_border(Border::all(2.).with_border_color(Color::WHITE))
-            .with_uniform_margin(1.)
+            .with_margin_left(5.)
+            .with_margin_top(6.)
+            .with_margin_right(7.)
+            .with_margin_bottom(8.)
             .finish()
     });
 
@@ -346,12 +384,12 @@ fn a_container_grows_by_its_padding_and_border() {
 
     assert_eq!(
         bounds[0],
-        RectF::new(vec2f(1., 1.), vec2f(24., 24.)),
+        RectF::new(vec2f(5., 6.), vec2f(18., 20.)),
         "the box is inset by the margin and grown by padding and border"
     );
     assert_eq!(
         bounds[1].origin(),
-        vec2f(8., 8.),
+        vec2f(8., 10.),
         "the child sits inside the margin, border and padding"
     );
 }
@@ -1201,6 +1239,43 @@ fn a_wheel_over_content_that_fits_is_left_for_something_else_to_handle() {
     let state = *harness.scroll_state().lock();
     assert!(!state.is_scrollable());
     assert_eq!(state.offset(), 0.);
+}
+
+#[test]
+fn a_wheel_an_inner_scrollable_cannot_use_scrolls_the_one_around_it() {
+    // What "left for something else" means, shown with the something else
+    // there: a list that fits, inside a page that does not. The inner one
+    // declining is the only way the page moves, and asserting the inner
+    // offset alone could not tell declining from swallowing the wheel.
+    let mut harness = Harness::new(|view| {
+        Scrollable::new(
+            view.scroll.clone(),
+            Flex::column()
+                .with_child(
+                    ConstrainedBox::new(
+                        Scrollable::new(view.inner_scroll.clone(), marker(80., 20.)).finish(),
+                    )
+                    .with_height(40.)
+                    .finish(),
+                )
+                .with_child(marker(80., 400.))
+                .finish(),
+        )
+        .finish()
+    });
+    harness.build_scene(vec2f(100., 100.));
+
+    harness.scroll(vec2f(40., 10.), -2.);
+    harness.build_scene(vec2f(100., 100.));
+
+    let inner = harness
+        .root
+        .read(&harness.app, |view, _| view.inner_scroll.clone());
+    assert_eq!(inner.lock().offset(), 0., "the list that fits did not move");
+    assert!(
+        harness.scroll_state().lock().offset() > 0.,
+        "the page around it did not get the wheel the list could not use"
+    );
 }
 
 #[test]
