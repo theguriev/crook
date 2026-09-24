@@ -441,14 +441,15 @@ fn a_group_puts_what_is_bound_first_and_then_the_alphabet() {
     // `crook/tabs` has three commands although only one of them survived the
     // query: the fold is decided by the plugin's whole size, so a group does
     // not become `Elsewhere` as somebody types.
-    let sizes: HashMap<&PluginId, usize> = HashMap::from([(&window, 4), (&tabs, 3)]);
+    let sizes: HashMap<&PluginId, usize> = HashMap::from([(&window, 5), (&tabs, 3)]);
 
     let rows = grouped(
         &host,
         &sizes,
         vec![
             (&window, entry("Zoom in"), Target::plain(an_id())),
-            (&window, bound("apply", "ctrl+a"), Target::plain(an_id())),
+            (&window, entry("apply"), Target::plain(an_id())),
+            (&window, bound("zap", "ctrl+z"), Target::plain(an_id())),
             (&window, entry("apply twice"), Target::plain(an_id())),
             (&tabs, entry("Next tab"), Target::plain(an_id())),
         ],
@@ -456,10 +457,13 @@ fn a_group_puts_what_is_bound_first_and_then_the_alphabet() {
 
     // The rows that *are* the keyboard in one block at the top, and the
     // alphabet under them lowercased, so `Zoom` does not sort before `add`.
+    // The bound row is the one the alphabet puts last, so that the order
+    // cannot come out right by name alone.
     assert_eq!(
         lines(&rows),
         [
             "# crook/window",
+            "zap",
             "apply",
             "apply twice",
             "Zoom in",
