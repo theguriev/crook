@@ -224,18 +224,26 @@ fn test_a_file_that_zooms_a_tab_of_one_pane_restores_a_tab_that_is_not() {
 
 #[test]
 fn test_the_split_axis_survives() {
-    let mut strip = TabStrip::new();
-    strip.apply(TabAction::Split(Direction::Down));
-    assert_eq!(
-        strip.active().expect("a tab").panes().axis(),
-        SplitAxis::Vertical
-    );
+    // Both ways. The file stores the axis as one flag, and a split downwards
+    // is what restoring it comes to when the flag is at its default — so a
+    // snapshot that lost the axis altogether put every side-by-side split
+    // back one above the other, and a test of the downward split alone
+    // could not see it.
+    for (direction, axis) in [
+        (Direction::Down, SplitAxis::Vertical),
+        (Direction::Right, SplitAxis::Horizontal),
+    ] {
+        let mut strip = TabStrip::new();
+        strip.apply(TabAction::Split(direction));
+        assert_eq!(strip.active().expect("a tab").panes().axis(), axis);
 
-    let restored = Session::of(&strip, None).restore().expect("restored");
-    assert_eq!(
-        restored.active().expect("a tab").panes().axis(),
-        SplitAxis::Vertical
-    );
+        let restored = Session::of(&strip, None).restore().expect("restored");
+        assert_eq!(
+            restored.active().expect("a tab").panes().axis(),
+            axis,
+            "a split {direction:?} came back on the other axis"
+        );
+    }
 }
 
 #[test]
