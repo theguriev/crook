@@ -476,13 +476,15 @@ impl TerminalElement {
     /// two different gestures with one button, and the release belongs to
     /// whichever of them was open.
     fn release(&self, button: MouseButton, position: Vector2F, modifiers: Modifiers) -> bool {
+        // A side button coming up is nothing to the program: its press was
+        // never reported. Letting it through ended the reporting a drag with
+        // another button had started — a release sent for a button still
+        // held, and the real one's release then never sent at all.
+        let Some(reported) = reported(button) else {
+            return self.output.is_reporting();
+        };
         if self.output.end_reporting() {
-            self.report(
-                MouseEventKind::Release,
-                reported(button),
-                position,
-                modifiers,
-            );
+            self.report(MouseEventKind::Release, Some(reported), position, modifiers);
             return true;
         }
         self.output.release()

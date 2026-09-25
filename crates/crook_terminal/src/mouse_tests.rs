@@ -291,3 +291,22 @@ fn test_alternate_scroll_is_not_the_mouse() {
     };
     assert!(!both.wants_alternate_scroll(true));
 }
+
+#[test]
+fn a_press_of_a_button_the_protocol_has_no_number_for_reports_nothing() {
+    // The side buttons of a five-button mouse arrive as no button at all, so
+    // that nothing is sent for them. A press with no button became code 3,
+    // which X10 reads as a release and SGR has no press for.
+    for modes in [sgr_clicks(), x10_clicks()] {
+        assert_eq!(
+            encoded(MouseEventKind::Press, None, 4, 9, Modifiers::NONE, modes),
+            None,
+            "a buttonless press was reported under {modes:?}"
+        );
+        assert_eq!(
+            encoded(MouseEventKind::Release, None, 4, 9, Modifiers::NONE, modes),
+            None,
+            "a buttonless release was reported under {modes:?}"
+        );
+    }
+}
