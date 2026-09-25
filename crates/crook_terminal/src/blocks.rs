@@ -590,6 +590,9 @@ pub(crate) struct BlockTracker {
     finished: Vec<Block>,
     evicted: usize,
     last_ignored: Option<IgnoreReason>,
+    /// A reflow that happened under a full-screen program, owed to the
+    /// shell's screen for when it comes back. See [`Self::reflowed`].
+    reflow_owed: bool,
 }
 
 impl BlockTracker {
@@ -610,6 +613,7 @@ impl BlockTracker {
             },
             finished: Vec::new(),
             evicted: 0,
+            reflow_owed: false,
             last_ignored: None,
         }
     }
@@ -752,7 +756,20 @@ impl BlockTracker {
     /// two empty lines starts at its third — which is the recoverable
     /// direction: nothing is duplicated and nothing that was printed
     /// disappears.
+    ///
+    /// Not while a full-screen program is up. The grid `Term` hands out then
+    /// is the program's, so the search would find vim's first row and anchor
+    /// the shell's block to it — blank rows kept above the prompt once vim
+    /// exits, or a top above the viewport that turns the pane into a plain
+    /// grid. The shell's screen is reflowed underneath all the same, and the
+    /// search is owed to it: [`Self::settle_reflow`] runs it once that screen
+    /// is the one on show again.
     pub(crate) fn reflowed<T>(&mut self, term: &Term<T>) {
+        if term.mode().contains(TermMode::ALT_SCREEN) {
+            self.reflow_owed = true;
+            return;
+        }
+        self.reflow_owed = false;
         let grid = term.grid();
         let oldest = -(grid.history_size() as i32);
         let newest = grid.screen_lines() as i32 - 1;
@@ -791,6 +808,14 @@ impl BlockTracker {
     /// have been erased with the rest.
     pub(crate) fn history_cleared<T>(&mut self, term: &Term<T>) {
         self.reflowed(term);
+    }
+
+    /// Runs the reflow a full-screen program was up for, if one is owed and
+    /// the shell's screen is back.
+    pub(crate) fn settle_reflow<T>(&mut self, term: &Term<T>) {
+        if self.reflow_owed && !term.mode().contains(TermMode::ALT_SCREEN) {
+            self.reflowed(term);
+        }
     }
 
     /// Looks the signal up in [`TABLE`] and does what the cell says.
