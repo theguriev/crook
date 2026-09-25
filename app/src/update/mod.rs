@@ -427,14 +427,54 @@ fn executable(path: &Path) -> Result<(), String> {
 }
 
 /// A directory of this run's own to unpack into.
+///
+/// Made here, now, and by nobody else. It used to be `crook-update-<pid>`,
+/// emptied and then made if it was not there — and on Linux the temporary
+/// directory is shared by every user of the machine: one who made that name
+/// first, with something in it this user cannot remove, was handed their own
+/// directory back, and the binary the update then copied into place was read
+/// out of it after the checksum had been checked, from a directory they could
+/// change it in. The name is now one no earlier run could have taken, and a
+/// directory that already exists is passed over rather than used.
 fn scratch() -> Result<PathBuf, String> {
-    let at = std::env::temp_dir().join(format!("crook-update-{}", std::process::id()));
-    // Fresh, in case a run that was killed left one: unpacking over somebody
-    // else's leftovers is how a stale binary gets installed.
-    let _ = std::fs::remove_dir_all(&at);
-    std::fs::create_dir_all(&at)
-        .map_err(|why| format!("{} could not be made: {why}", at.display()))?;
-    Ok(at)
+    static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let names = std::iter::repeat_with(|| {
+        let call = CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.subsec_nanos());
+        format!("crook-update-{}-{call}-{nanos:09}", std::process::id())
+    });
+    fresh_directory(&std::env::temp_dir(), names.take(16))
+}
+
+/// The first of `names` under `base` that could be made new, readable by this
+/// user alone.
+///
+/// Made with `create`, which fails on a path that is there already, where
+/// `create_dir_all` succeeds on one — the difference between a directory this
+/// run made and one somebody left for it.
+fn fresh_directory(base: &Path, names: impl Iterator<Item = String>) -> Result<PathBuf, String> {
+    #[cfg(unix)]
+    let builder = {
+        let mut builder = std::fs::DirBuilder::new();
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder
+    };
+    #[cfg(not(unix))]
+    let builder = std::fs::DirBuilder::new();
+    for name in names {
+        let at = base.join(name);
+        match builder.create(&at) {
+            Ok(()) => return Ok(at),
+            Err(why) if why.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(why) => return Err(format!("{} could not be made: {why}", at.display())),
+        }
+    }
+    Err(format!(
+        "no directory of this run's own could be made in {}",
+        base.display()
+    ))
 }
 
 /// One `GET`, read no further than `limit`.
@@ -579,5 +619,54 @@ cccc *crook-v0.2.0-x86_64-pc-windows-msvc.zip
             Ok(installed.file_name().map(ToOwned::to_owned)),
             "the file that is still there is the one to replace"
         );
+    }
+
+    #[test]
+    fn the_directory_an_update_unpacks_into_is_never_one_that_was_there() {
+        // Somebody else's directory under the name this run would have used,
+        // with a binary of theirs in it. It used to be emptied if it could be
+        // and used either way.
+        let base = std::env::temp_dir().join(format!("crook-update-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let taken = base.join("taken");
+        std::fs::create_dir_all(taken.join("crook-v9.9.9")).expect("the scratch is writable");
+        std::fs::write(taken.join("crook-v9.9.9").join("crook"), b"planted")
+            .expect("the scratch is writable");
+
+        let made = fresh_directory(&base, ["taken", "free"].map(String::from).into_iter());
+        let planted = taken.join("crook-v9.9.9").join("crook").exists();
+        let empty = made.as_ref().is_ok_and(|at| {
+            std::fs::read_dir(at).is_ok_and(|mut entries| entries.next().is_none())
+        });
+        #[cfg(unix)]
+        let private = made.as_ref().is_ok_and(|at| {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::metadata(at).is_ok_and(|meta| meta.permissions().mode() & 0o777 == 0o700)
+        });
+        let none_left = fresh_directory(&base, ["taken"].map(String::from).into_iter());
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert_eq!(
+            made,
+            Ok(base.join("free")),
+            "the existing directory was used"
+        );
+        assert!(planted, "what was in it was not this run's to delete");
+        assert!(empty, "the directory made is not a new one");
+        #[cfg(unix)]
+        assert!(private, "the directory made is readable by other users");
+        assert!(
+            none_left.is_err(),
+            "a directory that was there was handed back"
+        );
+    }
+
+    #[test]
+    fn two_updates_in_one_process_unpack_in_two_places() {
+        let first = scratch().expect("a directory is made");
+        let second = scratch().expect("a directory is made");
+        let _ = std::fs::remove_dir_all(&first);
+        let _ = std::fs::remove_dir_all(&second);
+        assert_ne!(first, second);
     }
 }
