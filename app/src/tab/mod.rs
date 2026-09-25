@@ -1119,9 +1119,16 @@ impl TabStrip {
     }
 
     /// The block a slot belongs to: a group's run, or the ungrouped run.
+    ///
+    /// A group with no tabs in the strip — which is what a group is while its
+    /// only member has been lifted out to be put back — is an empty block at
+    /// `at`, and not the ungrouped run beside it. Asked about the neighbours
+    /// instead, pinning the one tab left in a group put the group in front of
+    /// the ungrouped tabs above it, which is the group moved rather than the
+    /// tab brought to the front of its own block.
     fn block_around(&self, group: Option<GroupId>, at: usize) -> std::ops::Range<usize> {
-        match group.and_then(|group| self.run_of(group)) {
-            Some(run) => run,
+        match group {
+            Some(group) => self.run_of(group).unwrap_or(at..at),
             None => self.ungrouped_run_around(at),
         }
     }
