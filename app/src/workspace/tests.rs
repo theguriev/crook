@@ -11809,10 +11809,21 @@ mod shells {
         );
 
         harness.press("c", ctrl(), "c");
-        harness.type_into(pane, "printf 'ba%s\\n' ck\n");
-        harness.wait_for("ctrl-c never reached the shell", |harness| {
-            harness.terminal_text(pane).contains("back")
-        });
+        // Typed again until it runs, because a line typed while the shell is
+        // still coming back from the interrupt is not certain to reach it:
+        // macOS's bash dropped it now and then, and the test then waited a
+        // minute for a command nobody had given. Retyping proves as much as
+        // typing once did — with the `sleep` not interrupted, no line typed
+        // here runs for ten minutes, and every one of them waits behind it.
+        let back = |harness: &mut Harness| harness.terminal_text(pane).contains("back");
+        for _ in 0..10 {
+            harness.type_into(pane, "printf 'ba%s\\n' ck\n");
+            harness.settle_for(std::time::Duration::from_secs(3), back);
+            if back(&mut harness) {
+                break;
+            }
+        }
+        harness.wait_for("ctrl-c never reached the shell", back);
     }
 
     #[test]
