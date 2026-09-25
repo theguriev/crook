@@ -20109,6 +20109,48 @@ mod sandboxed {
         }
 
         #[test]
+        fn a_plugin_running_from_its_build_is_offered_no_update_in_the_store() {
+            // `--dev-plugin`, with the registry a version ahead. The Plugins
+            // card and the count at the foot of the list already leave it
+            // out; the Store card offered "Update to", and the press wrote a
+            // copy into the plugins directory under a plugin the next build
+            // carries back over it.
+            let plugins = Scratch::new("store-dev");
+            let index = Scratch::new("store-dev-index");
+            let cache = listing(&index, "0.2.0", ("", ""));
+            let mut opening = opening(&plugins, Default::default(), Default::default());
+            opening.plugins.push(Box::new(
+                crate::plugins::wasm::opened(&wasm("eugen/probe", "header.right", 10))
+                    .expect("the module should open"),
+            ));
+            let mut harness = Harness::with_store(1, opening, cache);
+            harness.workspace.read(&harness.app, |workspace, _| {
+                assert!(
+                    workspace.updates().is_empty(),
+                    "the count at the foot of the list offers it, so this compares nothing"
+                );
+            });
+
+            harness.show_section(STORE);
+            harness.click_plugin("Probe");
+            let scene = harness.frame();
+            let text = frame_text(&scene);
+            assert!(
+                !says(&scene, "Update to"),
+                "the card offers an update: {text}"
+            );
+            assert!(says(&scene, "running from where it was built"), "{text}");
+            assert!(
+                !says(&scene, "0.1.0 installed"),
+                "the card calls it installed: {text}"
+            );
+
+            // And by name, which is how a chord or the palette would ask.
+            harness.run_about("crook/store/update", "eugen/probe");
+            assert_eq!(harness.store_downloading(), None, "update fetched it");
+        }
+
+        #[test]
         fn fetching_the_pictures_of_a_plugin_not_here_says_what_it_costs_and_holds_their_room() {
             // The one button in the store that downloads without installing.
             // Before the press the note says it is the plugin itself being

@@ -344,6 +344,7 @@ fn row(
                 offer,
                 installed.as_deref(),
                 workspace.withdrawn(&offer.id).is_some(),
+                from_build(workspace, &offer.id, installed.as_deref()),
             ),
             selected,
             // Lit for what is on this machine, whatever the pointer is doing,
@@ -397,8 +398,13 @@ fn card(workspace: &Workspace, known: &Known, offer: &Offer, ui: FamilyId) -> Bo
 /// The line under the name: who owns it, which version, and its licence.
 fn facts(workspace: &Workspace, offer: &Offer, ui: FamilyId) -> Box<dyn Element> {
     let mut parts = vec![offer.id.to_string()];
-    if let Some(installed) = installed_version(workspace, &offer.id) {
-        parts.push(format!("{installed} installed"));
+    let installed = installed_version(workspace, &offer.id);
+    match installed.as_deref() {
+        Some(version) if from_build(workspace, &offer.id, installed.as_deref()) => {
+            parts.push(format!("{version} built here"));
+        }
+        Some(version) => parts.push(format!("{version} installed")),
+        None => {}
     }
     if let Some(release) = &offer.release {
         parts.push(format!("{} in the registry", release.version));
@@ -426,6 +432,7 @@ fn decision(workspace: &Workspace, known: &Known, offer: &Offer, ui: FamilyId) -
         installed.as_deref(),
         workspace.withdrawn(&offer.id),
         known.heard.busy(&offer.id),
+        from_build(workspace, &offer.id, installed.as_deref()),
     );
 
     // Install is about whatever the card is about, resolved the way the
@@ -580,12 +587,26 @@ struct Decided {
 /// the label from disagreeing: a person on a withdrawn 0.10.0 offered 0.9.0
 /// is offered a replacement and not an update, and a registry that is
 /// merely behind offers nothing.
+///
+/// Except for a module running `from_build`, which is offered nothing
+/// whatever the registry holds — see [`from_build`].
 fn decided(
     offer: &Offer,
     installed: Option<&str>,
     withdrawn: Option<&str>,
     busy: Option<Busy>,
+    from_build: bool,
 ) -> Decided {
+    if from_build {
+        return Decided {
+            label: format!(
+                "Version {}, running from where it was built",
+                installed.unwrap_or_default()
+            ),
+            button: String::from("Built here"),
+            press: Press::Nothing,
+        };
+    }
     let (label, button, press) = match busy {
         Some(Busy::Downloading) => (
             String::from("Downloading"),
@@ -653,7 +674,15 @@ fn decided(
 
 /// The word a row ends in, or nothing for a plugin that is simply there to
 /// be installed.
-fn standing(offer: &Offer, installed: Option<&str>, withdrawn: bool) -> Option<String> {
+fn standing(
+    offer: &Offer,
+    installed: Option<&str>,
+    withdrawn: bool,
+    from_build: bool,
+) -> Option<String> {
+    if from_build {
+        return Some(String::from("built here"));
+    }
     match change(offer, installed, withdrawn) {
         // Taken back, and nothing in its place: what the row's card says,
         // and not "newer Crook", which would be a row saying this build is
@@ -982,6 +1011,22 @@ pub(crate) fn ago(seconds: u64) -> String {
         1 => format!("1 {unit} ago"),
         count => format!("{count} {unit}s ago"),
     }
+}
+
+/// Whether the plugin running under this id is one somebody is writing, run
+/// from where it was built rather than installed as a file.
+///
+/// The rule [`Workspace::updates`] counts by and the Plugins card offers by:
+/// an update is not something that could be written over such a module — the
+/// Store would install a copy into the plugins directory, under a plugin the
+/// next build carries back over it — and a Store card offering what those two
+/// leave out would be a third answer to one question.
+pub(super) fn from_build(
+    workspace: &Workspace,
+    plugin: &PluginId,
+    installed: Option<&str>,
+) -> bool {
+    installed.is_some() && !workspace.is_installed(plugin)
 }
 
 /// Which version of this plugin is on this machine, if any.

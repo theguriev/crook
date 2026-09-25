@@ -44,7 +44,7 @@ fn card_says(
     withdrawn: Option<&str>,
     busy: Option<Busy>,
 ) -> (String, String, Press) {
-    let decided = decided(offered, installed, withdrawn, busy);
+    let decided = decided(offered, installed, withdrawn, busy, false);
     (decided.label, decided.button, decided.press)
 }
 
@@ -62,7 +62,7 @@ fn a_registry_that_is_behind_is_not_an_update() {
         ("Version 0.10.0".into(), "Installed".into(), Press::Nothing)
     );
     assert_eq!(
-        standing(&offered, Some("0.10.0"), false).as_deref(),
+        standing(&offered, Some("0.10.0"), false, false).as_deref(),
         Some("installed")
     );
 
@@ -81,7 +81,7 @@ fn a_registry_that_is_behind_is_not_an_update() {
         )
     );
     assert_eq!(
-        standing(&newer, Some("0.9.0"), false).as_deref(),
+        standing(&newer, Some("0.9.0"), false, false).as_deref(),
         Some("0.10.0")
     );
 }
@@ -94,7 +94,7 @@ fn a_plugin_not_on_this_machine_is_offered_and_its_row_says_nothing_after_its_na
         card_says(&offered, None, None, None),
         ("Version 0.9.0".into(), "Install".into(), Press::Install)
     );
-    assert_eq!(standing(&offered, None, false), None);
+    assert_eq!(standing(&offered, None, false, false), None);
 }
 
 #[test]
@@ -119,7 +119,7 @@ fn a_version_taken_back_is_offered_its_replacement_whatever_its_number() {
         )
     );
     assert_eq!(
-        standing(&offered, Some("0.10.0"), true).as_deref(),
+        standing(&offered, Some("0.10.0"), true, false).as_deref(),
         Some("0.9.0")
     );
 }
@@ -140,11 +140,11 @@ fn a_plugin_this_build_cannot_run_says_which_build_could() {
         )
     );
     assert_eq!(
-        standing(&newer_crook, None, false).as_deref(),
+        standing(&newer_crook, None, false, false).as_deref(),
         Some("newer Crook")
     );
     assert_eq!(
-        standing(&newer_crook, Some("1.0.0"), false).as_deref(),
+        standing(&newer_crook, Some("1.0.0"), false, false).as_deref(),
         Some("newer Crook")
     );
 
@@ -176,7 +176,7 @@ fn a_plugin_that_was_taken_back_says_why_rather_than_which_crook() {
         )
     );
     assert_eq!(
-        standing(&withdrawn, Some("0.9.0"), true).as_deref(),
+        standing(&withdrawn, Some("0.9.0"), true, false).as_deref(),
         Some("taken back")
     );
 }

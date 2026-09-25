@@ -388,6 +388,12 @@ fn update(
         return;
     };
     let installed = section::installed_version(workspace, plugin);
+    if section::from_build(workspace, plugin, installed.as_deref()) {
+        log::warn!(
+            "crook/store/update was run about {plugin}, which is running from where it was built"
+        );
+        return;
+    }
     let withdrawn = workspace.withdrawn(plugin).is_some();
     match change(offer, installed.as_deref(), withdrawn).fetchable() {
         Some(release) => {
