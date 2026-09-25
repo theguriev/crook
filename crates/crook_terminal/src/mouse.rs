@@ -208,6 +208,15 @@ pub fn encode(
     if button.is_some_and(MouseButton::is_wheel) && kind != MouseEventKind::Press {
         return None;
     }
+    // A press or release of a button the protocol has no number for — a
+    // mouse's side buttons, which the caller reports as no button at all. A
+    // press was sent as code 3, which X10 spells "a button came up" and SGR
+    // has no press for, and a program tracking its own buttons ended a drag
+    // nobody ended. Only motion is reported with no button: `?1003`'s
+    // pointer wandering with nothing held.
+    if button.is_none() && kind != MouseEventKind::Motion {
+        return None;
+    }
 
     let code = button_code(kind, button, modifiers, modes.sgr);
     // The protocol is one-based, and a cell of the viewport is not.
