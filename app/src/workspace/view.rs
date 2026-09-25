@@ -5055,12 +5055,29 @@ impl Workspace {
     /// vocabulary cannot carry — a `TabAction` holds no `String` — so it is a
     /// call rather than an action, the way `update_session` is for the other
     /// half of the same gesture.
+    ///
+    /// Saved at once, because a name somebody typed is what the session file
+    /// is for and nothing else is certain to come along and save it: a
+    /// rename followed by quitting came back under the old name.
     pub fn rename_tab(&mut self, id: TabId, name: Option<String>, ctx: &mut ViewContext<Self>) {
         let Some(tab) = self.tabs.get_mut(id) else {
             return;
         };
         tab.set_name(name);
+        self.save_session(ctx);
         ctx.notify();
+    }
+
+    /// Renames a pane, or takes the rename back, and saves it — the pane's
+    /// half of [`rename_tab`](Self::rename_tab).
+    ///
+    /// Not [`update_session`](Self::update_session) and a save after it at
+    /// every call: that is how an agent's progress reaches a pane, many
+    /// times a second, and a name is the one thing in there a person typed.
+    pub fn rename_pane(&mut self, id: PaneId, name: Option<String>, ctx: &mut ViewContext<Self>) {
+        if self.update_session(id, ctx, |session| session.custom_title = name) {
+            self.save_session(ctx);
+        }
     }
 
     pub fn update_session(
