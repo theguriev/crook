@@ -10655,9 +10655,17 @@ mod shells {
         };
         harness.frame();
 
+        // An empty line first, so the line the clicks land on never follows
+        // the command's own row. Whether it would be joined to it is a
+        // question about this machine's prompt: one that brings the command
+        // line to exactly the pane's width has readline wrap the cursor onto
+        // the next row, which marks the row a fold rather than an end — the
+        // output is then the tail of the command line, and a triple click
+        // rightly takes the two together. It failed on a checkout whose
+        // directory and branch name were just long enough.
         let row = run_and_find(
             &mut harness,
-            "echo 'ONE TWO THREE' | tr A-Z a-z",
+            "echo; echo 'ONE TWO THREE' | tr A-Z a-z",
             "one two three",
         );
         let column = harness
