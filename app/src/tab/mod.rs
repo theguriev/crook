@@ -830,11 +830,21 @@ impl TabStrip {
     ///
     /// The counter moves with it, so the first tab a person opens after a
     /// restore is named after the ones that came back rather than repeating
-    /// one of their names.
+    /// one of their names. Past every one of them, which is more than one a
+    /// tab: each of its panes took a number when it was split off, and the
+    /// numbers of tabs closed before the restore are gaps a count of what came
+    /// back does not see. `agent 1` and `agent 3` back, with the second
+    /// closed, went on to open another `agent 3`; one tab split in two came
+    /// back as `agent 1` and `agent 2`, and the next tab was `agent 2`.
     pub(crate) fn adopt(&mut self, tab: Tab) {
         let id = tab.id();
+        let highest = std::iter::once(tab.born_as.as_str())
+            .chain(tab.panes().iter().map(|pane| pane.session().title.as_str()))
+            .filter_map(|name| name.strip_prefix("agent ")?.parse::<u64>().ok())
+            .max()
+            .unwrap_or(0);
+        self.opened = (self.opened + tab.panes().len() as u64).max(highest);
         self.tabs.push(tab);
-        self.opened += 1;
         self.repair(Some(id));
     }
 
