@@ -205,3 +205,21 @@ fn test_a_row_the_block_does_not_have_is_answered_rather_than_indexed() {
         assert_eq!("", text(rows, 9), "{from}");
     });
 }
+
+#[test]
+fn test_a_tab_is_one_tab_and_not_the_blanks_it_jumped() {
+    // The terminal writes the tab into the cell it was typed at and leaves
+    // the columns up to the next stop blank; a copy that took those along
+    // pasted `a`, a tab, six spaces and `b`.
+    for_each("a\tb\r\nabcdefg\tx\r\na\t  y", 3, 20, |rows, from| {
+        assert_eq!("a\tb", text(rows, 0), "{from}");
+        // A tab one column short of a stop jumps nothing.
+        assert_eq!("abcdefg\tx", text(rows, 1), "{from}");
+        // Spaces printed after the stop are somebody's, and stay.
+        assert_eq!("a\t  y", text(rows, 2), "{from}");
+
+        let mut seen = String::new();
+        rows.visit_line(0, rows.line_length(0), |character, _| seen.push(character));
+        assert_eq!("a\tb", seen, "{from}: the scan agrees with the copy");
+    });
+}

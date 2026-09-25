@@ -38,6 +38,7 @@ use alacritty_terminal::grid::Dimensions;
 use alacritty_terminal::index::Line;
 use alacritty_terminal::term::Term;
 
+use crate::rows::TabPadding;
 use crate::snapshot::{self, CellFlags, Palette, Rgb, SnapshotCell};
 
 /// A run of neighbouring cells in a harvested row that are painted the same
@@ -266,6 +267,7 @@ impl BlockRows {
             )
         });
 
+        let mut padding = TabPadding::default();
         for (column, (character, spacer)) in self
             .text(row)
             .chars()
@@ -276,7 +278,7 @@ impl BlockRows {
             if column >= columns.end {
                 break;
             }
-            if spacer {
+            if spacer || padding.skips(column, character) {
                 continue;
             }
             out.push(character);
@@ -308,11 +310,12 @@ impl BlockRows {
                 usize::from(run.len),
             )
         });
+        let mut padding = TabPadding::default();
         for (column, (character, spacer)) in self.text(row).chars().zip(spacers).enumerate() {
             if column >= length {
                 break;
             }
-            if spacer {
+            if spacer || padding.skips(column, character) {
                 continue;
             }
             visit(character, column);
