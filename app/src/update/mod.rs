@@ -34,6 +34,7 @@
 //! instead — see [`Refusal`].
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use crate::Channel;
 
@@ -68,6 +69,30 @@ const SUMS_LIMIT: u64 = 1 << 16;
 /// A release archive is about twenty megabytes; sixty-four is room for a
 /// build that grew and a ceiling on a URL that turned into something else.
 const ARCHIVE_LIMIT: u64 = 64 << 20;
+
+/// How long the archive may take to arrive, all of it.
+///
+/// The agent every other request goes through gives a request twenty seconds
+/// start to finish, which is right for an answer of a few kilobytes and was
+/// wrong here: ten megabytes in twenty seconds is four megabits a second, and
+/// on a slower line — a train, a hotel, a phone — the update failed every time
+/// with the bytes still arriving. Fifteen minutes is ten megabytes on a line of
+/// ninety kilobits. A server that is not there is still found out in seconds:
+/// see [`Patience::Archive`].
+const ARCHIVE_DEADLINE: Duration = Duration::from_secs(15 * 60);
+
+/// How long to wait for a server that has not started answering.
+const FIRST_ANSWER: Duration = Duration::from_secs(20);
+
+/// Which of the two kinds of wait a request is.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum Patience {
+    /// Whatever the agent says: a question with a short answer.
+    Request,
+    /// A download whose size is the point: as long as it keeps arriving, up to
+    /// [`ARCHIVE_DEADLINE`], but no longer than [`FIRST_ANSWER`] to start.
+    Archive,
+}
 
 /// What this build is.
 pub fn running() -> &'static str {
@@ -344,10 +369,16 @@ pub fn install(tag: &str, binary: &Path, agent: &ureq::Agent) -> Result<(), Stri
         agent,
         &format!("{DOWNLOADS}/{tag}/{archive}"),
         ARCHIVE_LIMIT,
+        Patience::Archive,
     )
     .map_err(|why| format!("{archive} could not be downloaded: {why}"))?;
-    let sums = fetch(agent, &format!("{DOWNLOADS}/{tag}/SHA256SUMS"), SUMS_LIMIT)
-        .map_err(|why| format!("{tag} publishes no SHA256SUMS: {why}"))?;
+    let sums = fetch(
+        agent,
+        &format!("{DOWNLOADS}/{tag}/SHA256SUMS"),
+        SUMS_LIMIT,
+        Patience::Request,
+    )
+    .map_err(|why| format!("{tag} publishes no SHA256SUMS: {why}"))?;
     let sums = String::from_utf8(sums).map_err(|_| String::from("SHA256SUMS is not text"))?;
 
     let want =
@@ -478,8 +509,24 @@ fn fresh_directory(base: &Path, names: impl Iterator<Item = String>) -> Result<P
 }
 
 /// One `GET`, read no further than `limit`.
-fn fetch(agent: &ureq::Agent, url: &str, limit: u64) -> Result<Vec<u8>, String> {
-    let mut response = agent.get(url).call().map_err(|why| why.to_string())?;
+fn fetch(
+    agent: &ureq::Agent,
+    url: &str,
+    limit: u64,
+    patience: Patience,
+) -> Result<Vec<u8>, String> {
+    let request = agent.get(url);
+    let request = match patience {
+        Patience::Request => request,
+        Patience::Archive => request
+            .config()
+            .timeout_global(Some(ARCHIVE_DEADLINE))
+            .timeout_resolve(Some(FIRST_ANSWER))
+            .timeout_connect(Some(FIRST_ANSWER))
+            .timeout_recv_response(Some(FIRST_ANSWER))
+            .build(),
+    };
+    let mut response = request.call().map_err(|why| why.to_string())?;
     response
         .body_mut()
         .with_config()
@@ -668,5 +715,55 @@ cccc *crook-v0.2.0-x86_64-pc-windows-msvc.zip
         let _ = std::fs::remove_dir_all(&first);
         let _ = std::fs::remove_dir_all(&second);
         assert_ne!(first, second);
+    }
+
+    /// A server on this machine that sends `size` bytes a slice at a time, a
+    /// pause between each: a download that never stops arriving and takes a
+    /// while to finish. Plain HTTP, because a test holds no certificate.
+    fn trickle(size: usize, pause: Duration) -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port is free");
+        let port = listener.local_addr().expect("it has an address").port();
+        std::thread::spawn(move || {
+            use std::io::{Read as _, Write as _};
+            // One for each request the test makes.
+            for stream in listener.incoming().take(2) {
+                let Ok(mut stream) = stream else { return };
+                let mut request = [0u8; 4096];
+                let _ = stream.read(&mut request);
+                let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {size}\r\n\r\n");
+                let slice = vec![0u8; size / 4];
+                for _ in 0..4 {
+                    if stream.write_all(&slice).is_err() {
+                        break;
+                    }
+                    std::thread::sleep(pause);
+                }
+            }
+        });
+        format!("http://127.0.0.1:{port}/crook.tar.gz")
+    }
+
+    #[test]
+    fn an_archive_that_keeps_arriving_is_not_cut_off_by_the_request_deadline() {
+        // The agent's own deadline, shortened from twenty seconds to one so
+        // that the test takes seconds: the archive outlasts it and is still
+        // taken whole, and an ordinary request over the same line is not. A
+        // pause longer than what is left of a deadline is what a slow line
+        // is — a read that waits past it — so each slice waits most of one.
+        let agent = ureq::Agent::config_builder()
+            .timeout_global(Some(Duration::from_secs(1)))
+            .build()
+            .new_agent();
+        let url = trickle(10_000, Duration::from_millis(700));
+
+        let request = fetch(&agent, &url, ARCHIVE_LIMIT, Patience::Request);
+        assert!(
+            request.is_err(),
+            "the line is not slow enough to show anything: {:?}",
+            request.map(|bytes| bytes.len())
+        );
+
+        let archive = fetch(&agent, &url, ARCHIVE_LIMIT, Patience::Archive);
+        assert_eq!(archive.map(|bytes| bytes.len()), Ok(10_000));
     }
 }
