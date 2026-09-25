@@ -378,6 +378,10 @@ impl Emulator {
                 .advance_until_terminated(&mut self.osc_watcher, rest);
             let (piece, remaining) = rest.split_at(consumed);
             self.parser.advance(&mut self.term, piece);
+            // Before anything else reads the anchor: a piece that took a
+            // full-screen program down is the moment a reflow made under it
+            // can be done on the screen it was for.
+            self.blocks.settle_reflow(&self.term);
             // Before the mark, which the piece ends on and so comes after
             // anything else in it. On the alternate screen the erase is the
             // full-screen program's own and touches no history of the shell's.

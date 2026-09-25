@@ -710,6 +710,37 @@ fn test_a_full_screen_program_clearing_its_own_screen_moves_no_block() {
 }
 
 #[test]
+fn test_a_width_change_under_a_full_screen_program_leaves_the_block_where_it_was() {
+    // A split, or a dragged window edge, while vim is up. The reflow used to
+    // search vim's grid for the block's first row and anchor the shell's
+    // block to what it found there.
+    let run = |resize: bool| {
+        let mut emulator = emulator();
+        emulator.advance(format!("{A}$ {B}true\r\n{C}\x1b]133;D;0\x07").as_bytes());
+        emulator
+            .advance(format!("{A}$ {B}ls\r\n{C}a\r\nb\r\nc\r\nd\r\n\x1b]133;D;0\x07").as_bytes());
+        emulator.advance(format!("{A}$ {B}vim\r\n{C}").as_bytes());
+        emulator.advance(b"\x1b[?1049h\x1b[H~\r\n~\r\n~");
+        if resize {
+            emulator.resize(TerminalSize::new(30, 6));
+        }
+        emulator.advance(b"\x1b[?1049l");
+        let live = emulator.live_block();
+        let rows = (live.top_row, live.bottom_row);
+
+        emulator.advance(format!("\x1b]133;D;0\x07{A}$ {B}").as_bytes());
+        (rows, emulator.blocks()[2].rows.to_text())
+    };
+
+    let (rows, harvested) = run(false);
+    assert_eq!(
+        "$ vim", harvested,
+        "the control is not the case this expects"
+    );
+    assert_eq!(run(true), (rows, harvested));
+}
+
+#[test]
 fn test_the_prompt_end_is_the_cell_after_the_prompt_s_last_one() {
     // What a composer drawn on the prompt's own row needs: the cell the shell
     // would echo the first character of a command line into, which is one past
