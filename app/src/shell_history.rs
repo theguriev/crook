@@ -29,17 +29,21 @@
 //!
 //! * **zsh** writes `: <started>:<elapsed>;<command>` when `EXTENDED_HISTORY`
 //!   is on and a bare line when it is not, and both appear in one file when
-//!   the option is turned on part-way through a life.
+//!   the option is turned on part-way through a life. A newline inside a
+//!   command is written as a `\` ending the line, and the entry goes on on
+//!   the next one.
 //! * **bash** writes bare lines, with a `#<timestamp>` line before each when
 //!   `HISTTIMEFORMAT` is set.
 //! * **fish** writes YAML-ish records whose command is one `- cmd:` line with
 //!   `\\` and `\n` escaped.
 //!
-//! What none of them writes is a way to tell a multi-line command from two
-//! commands, so a command with a newline in it is read as its first line. It
-//! is offered as a suggestion that stops at the newline rather than not
-//! offered at all, which is the same trade every shell's own history search
-//! makes.
+//! bash alone writes no way to tell a multi-line command from two commands;
+//! zsh and fish do, and their entries are put back together before anything
+//! else is read out of them. Either way a command with a newline in it is
+//! read as its first line. It is offered as a suggestion that stops at the
+//! newline rather than not offered at all, which is the same trade every
+//! shell's own history search makes — and its other lines, which are not
+//! commands, are not offered at all.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -172,7 +176,11 @@ fn tail(path: &Path) -> Option<String> {
 /// use of each.
 pub fn parse(shell: Shell, text: &str) -> Vec<String> {
     let commands: Vec<String> = match shell {
-        Shell::Zsh => text.lines().filter_map(zsh_entry).collect(),
+        Shell::Zsh => zsh_entries(text)
+            .iter()
+            .map(String::as_str)
+            .filter_map(zsh_entry)
+            .collect(),
         Shell::Bash => text
             .lines()
             // `#1699999999` is a `HISTTIMEFORMAT` stamp, not a command. A real
@@ -186,6 +194,37 @@ pub fn parse(shell: Shell, text: &str) -> Vec<String> {
     };
 
     newest(commands)
+}
+
+/// A zsh history file's entries, each with its continuation lines joined back
+/// on.
+///
+/// zsh's `savehistfile` writes a newline inside a command as a `\` before it,
+/// and its reader joins a line ending in `\` to the next. Read line by line
+/// instead, the body and the `done` of a `for` loop were two more commands of
+/// their own: offered on the Up key and as suggestions, and not something
+/// anybody ever ran. A command that really ends in a backslash is written
+/// with a space after it, so a line ending in one is always a continuation.
+fn zsh_entries(text: &str) -> Vec<String> {
+    let mut entries = Vec::new();
+    let mut entry: Option<String> = None;
+    for line in text.lines() {
+        let whole = match entry.take() {
+            Some(mut started) => {
+                started.push('\n');
+                started.push_str(line);
+                started
+            }
+            None => line.to_owned(),
+        };
+        match whole.strip_suffix('\\') {
+            Some(going_on) => entry = Some(going_on.to_owned()),
+            None => entries.push(whole),
+        }
+    }
+    // A file cut off in the middle of an entry, which a tail read can be.
+    entries.extend(entry);
+    entries
 }
 
 /// One zsh entry, with the extended-history stamp taken off the front.
@@ -247,8 +286,8 @@ fn newest(commands: Vec<String>) -> Vec<String> {
     let mut kept: Vec<String> = Vec::new();
     for command in commands.into_iter().rev() {
         // A command with a newline in it is read as its first line — see this
-        // module's header — which is what a zsh entry's trailing `\` and a
-        // fish entry's `\n` both leave behind.
+        // module's header — which is what a zsh entry's continuation lines and
+        // a fish entry's `\n` both leave behind.
         let command = command.split('\n').next().unwrap_or_default();
         let command = command.trim_end_matches(['\r', ' ', '\t']);
         let command = command.trim_end_matches('\\');
