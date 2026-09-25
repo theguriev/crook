@@ -636,6 +636,80 @@ fn test_a_block_the_screen_was_wiped_under_keeps_its_command_as_its_row() {
 }
 
 #[test]
+fn test_what_a_command_prints_after_clearing_the_screen_is_its_own() {
+    // `clear; make`, in any block but the first: the erase leaves the history
+    // the size it was when the block opened, so an anchor that only follows
+    // the history's size went on naming the block's first row, below where
+    // the output now starts.
+    let mut emulator = emulator();
+    emulator.advance(format!("{A}$ {B}true\r\n{C}\x1b]133;D;0\x07").as_bytes());
+    emulator.advance(format!("{A}$ {B}clear; echo hi\r\n{C}").as_bytes());
+    emulator.advance(b"\x1b[H\x1b[2J\x1b[3Jhi\r\n");
+
+    let snapshot = emulator.snapshot();
+    let first: String = snapshot.row(0).iter().map(|cell| cell.c).collect();
+    assert_eq!(
+        "hi",
+        first.trim_end(),
+        "the output is not where this expects it"
+    );
+    assert_eq!(
+        "hi",
+        live_text(&mut emulator),
+        "the open block does not hold the output"
+    );
+
+    emulator.advance(format!("\x1b]133;D;0\x07{A}$ {B}").as_bytes());
+    let block = &emulator.blocks()[1];
+    assert_eq!(Some("clear; echo hi".to_owned()), block.command);
+    assert_eq!(
+        "hi",
+        block.rows.to_text(),
+        "the finished block lost the output"
+    );
+}
+
+#[test]
+fn test_erasing_only_the_history_keeps_the_block_where_it_was() {
+    // `CSI 3 J` on its own, with the screen left standing: the block is the
+    // prompt on its row and what follows, not the blank rows the block before
+    // it was erased from.
+    let mut emulator = emulator();
+    emulator.advance(format!("{A}$ {B}true\r\n{C}\x1b]133;D;0\x07").as_bytes());
+    emulator.advance(format!("{A}$ {B}forget\r\n{C}").as_bytes());
+    emulator.advance(b"\x1b[3Jgone\r\n");
+    emulator.advance(format!("\x1b]133;D;0\x07{A}$ {B}").as_bytes());
+
+    assert_eq!("$ forget\ngone", emulator.blocks()[1].rows.to_text());
+}
+
+#[test]
+fn test_a_full_screen_program_clearing_its_own_screen_moves_no_block() {
+    // The same bytes on the alternate screen are the program's business: the
+    // shell's history underneath is untouched, and so is the block — down to
+    // where its command line ends and its output begins, which an erase of
+    // the shell's own history would have to forget.
+    let finished = |frame: &[u8]| {
+        let mut emulator = emulator();
+        emulator.advance(format!("{A}$ {B}true\r\n{C}\x1b]133;D;0\x07").as_bytes());
+        emulator.advance(format!("{A}$ {B}vim\r\n{C}").as_bytes());
+        emulator.advance(b"\x1b[?1049h");
+        emulator.advance(frame);
+        emulator.advance(b"\x1b[?1049l");
+        emulator.advance(format!("\x1b]133;D;0\x07{A}$ {B}").as_bytes());
+        let block = &emulator.blocks()[1];
+        (block.rows.to_text(), block.output_from)
+    };
+
+    let cleared = finished(b"\x1b[H\x1b[2J\x1b[3J~\r\n~");
+    assert_eq!(finished(b"\x1b[H\x1b[2J~\r\n~"), cleared);
+    assert!(
+        cleared.1.is_some(),
+        "the control lost its boundary too, so this compares nothing"
+    );
+}
+
+#[test]
 fn test_the_prompt_end_is_the_cell_after_the_prompt_s_last_one() {
     // What a composer drawn on the prompt's own row needs: the cell the shell
     // would echo the first character of a command line into, which is one past
