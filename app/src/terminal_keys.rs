@@ -146,6 +146,24 @@ mod tests {
     }
 
     #[test]
+    fn alt_and_shift_on_a_letter_reach_the_shell_as_the_capital() {
+        // What the window hands over for Alt+Shift+H: the key by its
+        // lower-case name, and the capital as the text, which is set aside
+        // once Alt is held.
+        let alt_shift = UiModifiers {
+            alt: true,
+            shift: true,
+            ..Default::default()
+        };
+        let (key, modifiers) =
+            key_for(&keystroke("h", alt_shift), "H").expect("it reaches the shell");
+        assert_eq!(
+            crook_terminal::input::encode(key, modifiers, Default::default()),
+            Some(b"\x1bH".to_vec())
+        );
+    }
+
+    #[test]
     fn the_command_modifier_never_reaches_the_shell() {
         // `cmd-t` is handled before this is asked; `cmd-k` is not bound to
         // anything, and it must still not type a `k` into somebody's shell.

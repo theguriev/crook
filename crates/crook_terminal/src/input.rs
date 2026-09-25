@@ -451,8 +451,19 @@ fn with_alt(bytes: &[u8], modifiers: Modifiers) -> Vec<u8> {
 /// thirty-odd with a C0 code, so `Ctrl+1` and `1` are the same bytes. Dropping
 /// the key instead would make it do nothing at all, which is the one behaviour
 /// no terminal has.
+///
+/// With Alt held the character is the key's rather than the text the
+/// platform produced — Option on a Mac composes something else entirely — and
+/// a key is named in lower case, so Shift is put back here: Alt+Shift+H is
+/// `ESC H`, the capital the key types, as it is in xterm. Sent as `ESC h` it
+/// was Alt+H to every program that binds the two apart, tmux's `M-H` and
+/// vim's `<M-H>` among them. Not with Ctrl, whose code is the same either way.
 fn encode_char(character: char, modifiers: Modifiers) -> Option<Vec<u8>> {
     let mut encoded = Vec::with_capacity(5);
+    let character = match modifiers.alt && modifiers.shift && !modifiers.control {
+        true => shifted(character),
+        false => character,
+    };
     if modifiers.alt {
         encoded.push(0x1b);
     }
@@ -464,6 +475,16 @@ fn encode_char(character: char, modifiers: Modifiers) -> Option<Vec<u8>> {
         }
     }
     Some(encoded)
+}
+
+/// A letter in the case Shift gives it, when that is one character; anything
+/// else as it is.
+fn shifted(character: char) -> char {
+    let mut upper = character.to_uppercase();
+    match (upper.next(), upper.next()) {
+        (Some(capital), None) => capital,
+        _ => character,
+    }
 }
 
 /// The C0 code a Ctrl combination produces, or `None` for a combination that
