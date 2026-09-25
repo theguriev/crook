@@ -137,3 +137,35 @@ fn test_the_span_is_in_cells_so_a_highlight_lands_on_the_link() {
     assert!(!url.contains(1));
     assert!(!url.contains(url.end()));
 }
+
+#[test]
+fn test_a_url_that_carries_another_is_one_link_from_every_cell() {
+    // An archived page and a redirect both put a whole URL inside another.
+    // The link is the outer one wherever the pointer is — the inner scheme
+    // used to start a second link from its own cells onwards.
+    for row in [
+        "https://web.archive.org/web/2020/https://example.com/page",
+        "https://example.com/login?next=https://example.com/home",
+    ] {
+        for column in [3, 40, row.chars().count() - 1] {
+            assert_eq!(
+                uri_at(row, column).as_deref(),
+                Some(row),
+                "{row} at column {column}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_a_scheme_inside_a_word_starts_no_link() {
+    // `ftp://` is the tail of `sftp://`, and a click on it opened FTP — a
+    // different protocol, unencrypted — at the host that was printed.
+    let row = "sftp://files.example.com/pub/a.tar";
+    for column in [0, 1, 10] {
+        assert_eq!(uri_at(row, column), None, "column {column}");
+    }
+    // Punctuation is not a word: cargo's `git+https://…` is still a link.
+    let row = "git+https://github.com/o/r";
+    assert_eq!(uri_at(row, 10).as_deref(), Some("https://github.com/o/r"));
+}
