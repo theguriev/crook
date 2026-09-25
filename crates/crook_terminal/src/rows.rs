@@ -16,6 +16,41 @@ use std::ops::Range;
 use crate::harvest::BlockRows;
 use crate::snapshot::{CellFlags, Snapshot, SnapshotCell};
 
+/// Where a tab moves the cursor to: every eighth column, the stops a terminal
+/// starts with.
+///
+/// A stored block keeps no tab-stop table, so both halves of [`Rows`] use the
+/// default one rather than the live grid's — a program that set its own
+/// stops is the case this gets wrong, and it is the same wrong either side,
+/// which is what [`Rows`] promises.
+const TAB_STOP: usize = 8;
+
+/// The cells a tab filled on its way to the next stop, told apart from the
+/// ones somebody printed.
+///
+/// A tab is one character in a cell and the columns it jumped over are
+/// blanks after it, and copying those was copying the tab *and* the spaces
+/// it stood for: `a\tb` came back as `a\t` and six spaces and `b`, and code
+/// pasted from `cat` gained indentation. alacritty's own copy skips them the
+/// same way — a blank after a tab, short of the next stop, is the tab's.
+#[derive(Default)]
+pub(crate) struct TabPadding(bool);
+
+impl TabPadding {
+    /// Whether the cell at `column` holding `character` is padding a tab put
+    /// there, to be left out.
+    pub(crate) fn skips(&mut self, column: usize, character: char) -> bool {
+        if self.0 {
+            if character == ' ' && !column.is_multiple_of(TAB_STOP) {
+                return true;
+            }
+            self.0 = false;
+        }
+        self.0 = character == '\t';
+        false
+    }
+}
+
 /// The rows of one block.
 #[derive(Copy, Clone, Debug)]
 pub enum Rows<'a> {
@@ -184,8 +219,12 @@ impl<'a> Rows<'a> {
                 // highlight from one and a copy from the other disagreeing,
                 // which is the one thing this type exists to prevent.
                 let end = columns.end.min(self.line_length(row));
+                let mut padding = TabPadding::default();
                 for (column, cell) in cells[..end].iter().enumerate().skip(columns.start) {
                     if cell.flags.contains(CellFlags::WIDE_SPACER) {
+                        continue;
+                    }
+                    if padding.skips(column, cell.c) {
                         continue;
                     }
                     out.push(cell.c);
@@ -213,8 +252,12 @@ impl<'a> Rows<'a> {
             Self::Live { snapshot, top, .. } => {
                 let end = length.min(self.line_length(row));
                 let cells = snapshot.row(top + row);
+                let mut padding = TabPadding::default();
                 for (column, cell) in cells[..end].iter().enumerate() {
                     if cell.flags.contains(CellFlags::WIDE_SPACER) {
+                        continue;
+                    }
+                    if padding.skips(column, cell.c) {
                         continue;
                     }
                     visit(cell.c, column);
