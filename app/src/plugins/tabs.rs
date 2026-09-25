@@ -643,11 +643,7 @@ impl Plugin for Tabs {
                 let name = (!typed.is_empty()).then_some(typed);
                 match (what, workspace.menu_target()) {
                     (Renaming::Tab, Some((tab, _))) => workspace.rename_tab(tab, name, ctx),
-                    (Renaming::Pane, Some((_, pane))) => {
-                        workspace.update_session(pane, ctx, |session| {
-                            session.custom_title = name;
-                        });
-                    }
+                    (Renaming::Pane, Some((_, pane))) => workspace.rename_pane(pane, name, ctx),
                     (_, None) => {}
                 }
                 workspace.close_tab_context_menu(ctx);

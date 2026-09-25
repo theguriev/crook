@@ -8457,6 +8457,27 @@ fn session_written(scratch: &Scratch, needle: &str) -> String {
 }
 
 #[test]
+fn a_rename_is_in_the_session_file_before_anything_else_saves_it() {
+    // A name typed into the rename field and then the window closed. Nothing
+    // saves on quit, on purpose, and nothing else in this run comes along to
+    // save — so the rename has to have saved itself.
+    let scratch = Scratch::new();
+    let mut harness = Harness::with_settings(1, scratch.settings());
+    let tab = harness.tab_ids()[0];
+    let pane = harness.pane_ids()[0];
+
+    harness.workspace_update(|workspace, ctx| {
+        workspace.rename_tab(tab, Some("renamed-the-tab".to_owned()), ctx);
+    });
+    session_written(&scratch, "renamed-the-tab");
+
+    harness.workspace_update(|workspace, ctx| {
+        workspace.rename_pane(pane, Some("renamed-the-pane".to_owned()), ctx);
+    });
+    session_written(&scratch, "renamed-the-pane");
+}
+
+#[test]
 fn a_session_save_that_fails_says_so_under_the_tabs_until_one_lands() {
     // The file the next launch reads is written beside the settings, and a
     // write that failed was a line in the log: the window opened empty next
