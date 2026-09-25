@@ -771,6 +771,28 @@ impl BlockTracker {
         self.open.output_start = None;
     }
 
+    /// The scrollback was erased, and the open block now starts at the top of
+    /// what is left.
+    ///
+    /// An anchor corrects for history that grew or was trimmed, and for
+    /// nothing else. `clear` erases the display — which moves every row on it
+    /// into the history — and then erases the history, so its size ends where
+    /// it began and the anchor goes on naming the row the block opened on.
+    /// Whatever the command printed after that starts at the top of the
+    /// screen, above that row, and `clear; make` was a block that showed none
+    /// of `make` and kept none of it when it finished.
+    ///
+    /// Found again the way [`Self::reflowed`] finds it, as the first row the
+    /// grid holds that is not blank: nothing left on it is anybody else's — a
+    /// block opens on a grid its predecessor was harvested out of and erased
+    /// from, and the history is gone — and the rows that erase left blank
+    /// above a prompt are not this block's either. The boundaries inside it
+    /// go the same way, since the command line they were measured from may
+    /// have been erased with the rest.
+    pub(crate) fn history_cleared<T>(&mut self, term: &Term<T>) {
+        self.reflowed(term);
+    }
+
     /// Looks the signal up in [`TABLE`] and does what the cell says.
     fn apply<T: EventListener>(
         &mut self,

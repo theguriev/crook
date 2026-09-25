@@ -35,7 +35,7 @@ use alacritty_terminal::event::{Event, EventListener, WindowSize};
 use alacritty_terminal::grid::{Dimensions, Scroll};
 use alacritty_terminal::term::{Config, Term, TermMode};
 use alacritty_terminal::vte::ansi::Processor;
-use alacritty_terminal::vte::{Parser, Perform};
+use alacritty_terminal::vte::{Params, Parser, Perform};
 use parking_lot::Mutex;
 
 use crate::agent::{self, AgentReport, Reported};
@@ -161,9 +161,23 @@ struct OscWatcher {
     mark: Option<ShellMark>,
     completions: Option<u64>,
     agent: Option<Reported>,
+    /// Whether the chunk erased the scrollback — `CSI 3 J`, the third thing
+    /// `clear` prints.
+    history_cleared: bool,
 }
 
 impl Perform for OscWatcher {
+    fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
+        // Only the plain form: `CSI ? 3 J` is the selective erase, which
+        // leaves the history alone.
+        if action == 'J'
+            && intermediates.is_empty()
+            && params.iter().next().is_some_and(|param| param == [3])
+        {
+            self.history_cleared = true;
+        }
+    }
+
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
         match params.first() {
             Some(&b"7") if params.len() >= 2 => {
@@ -364,6 +378,14 @@ impl Emulator {
                 .advance_until_terminated(&mut self.osc_watcher, rest);
             let (piece, remaining) = rest.split_at(consumed);
             self.parser.advance(&mut self.term, piece);
+            // Before the mark, which the piece ends on and so comes after
+            // anything else in it. On the alternate screen the erase is the
+            // full-screen program's own and touches no history of the shell's.
+            if std::mem::take(&mut self.osc_watcher.history_cleared)
+                && !self.term.mode().contains(TermMode::ALT_SCREEN)
+            {
+                self.blocks.history_cleared(&self.term);
+            }
             if let Some(mark) = self.osc_watcher.mark.take() {
                 // A report earlier in this same read has to reach `self.agent`
                 // before the mark settles against it, or the same bytes settle
