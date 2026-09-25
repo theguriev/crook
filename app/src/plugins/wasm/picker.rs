@@ -312,8 +312,17 @@ impl Held {
     /// lets go and finds out by drawing: the next frame puts a picker back on
     /// screen and takes the keys again, and one that does not leaves them with
     /// the pane, which is where they belong.
+    ///
+    /// What the last frame showed goes with it, as it does in [`Self::shut`]:
+    /// a picker still up draws it back on the next frame. Left behind, it was
+    /// a picker that answered for itself after it had gone — the next *menu*
+    /// this plugin opened had Enter and the arrows claimed for rows nobody
+    /// could see, Enter re-running the last choice, and a click away from the
+    /// menu kept the keyboard, since a picker still seemed to be up under it.
+    /// Typing stopped reaching the shell until Escape was pressed.
     pub(super) fn released(&self) {
         if self.menu.borrow().is_none() {
+            self.shown.replace(Shown::default());
             self.set_open(false);
         }
     }
