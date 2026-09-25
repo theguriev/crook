@@ -21,6 +21,26 @@ fn test_a_zsh_line_that_only_looks_like_a_stamp_is_kept_whole() {
 }
 
 #[test]
+fn test_a_multi_line_zsh_entry_is_one_command() {
+    // zsh writes a newline inside a command as a backslash ending the line.
+    // The loop is one command, read as its first line; its body and its
+    // `done` are not commands anybody ran.
+    let text = concat!(
+        ": 1700000000:0;for f in a b; do\\\n",
+        "echo $f\\\n",
+        "done\n",
+        ": 1700000001:0;git status\n",
+        "printf 'bare\\n'\\\n",
+        "  | wc -l\n",
+    );
+
+    assert_eq!(
+        parse(Shell::Zsh, text),
+        vec!["for f in a b; do", "git status", "printf 'bare\\n'"]
+    );
+}
+
+#[test]
 fn test_a_bash_timestamp_is_not_a_command() {
     let text = "#1699999999\ngit push\n#1700000000\ncargo fmt\n";
 
