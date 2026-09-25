@@ -1493,6 +1493,55 @@ fn pinning_the_only_tab_left_in_a_group_leaves_the_group_where_it_is() {
 }
 
 #[test]
+fn a_group_closed_between_two_runs_leaves_one_run_with_its_pins_in_front() {
+    // Two ungrouped runs, each with a pin at its front, and a group between
+    // them. Closing the group joins the runs; each pin stays pinned and at
+    // the front of the one run they are now in.
+    let mut strip = TabStrip::new();
+    for _ in 0..4 {
+        strip.apply(TabAction::New);
+    }
+    let ids: Vec<TabId> = strip.iter().map(Tab::id).collect();
+    let [a, b, c, d, e] = [ids[0], ids[1], ids[2], ids[3], ids[4]];
+    strip.apply(TabAction::NewInGroupOf(c));
+    let group = strip
+        .get(c)
+        .and_then(Tab::group)
+        .expect("the two of them made a group");
+    strip.apply(TabAction::TogglePin(a));
+    strip.apply(TabAction::TogglePin(d));
+    assert_eq!(
+        order(&strip)[..2],
+        [a, b],
+        "the first run is not as this expects"
+    );
+    assert_eq!(
+        order(&strip)[4..],
+        [d, e],
+        "the second run is not as this expects"
+    );
+
+    assert_eq!(
+        strip.apply(TabAction::CloseGroup(group)),
+        TabEffect::Changed
+    );
+    assert_eq!(
+        order(&strip),
+        [a, d, b, e],
+        "the pinned tab of the second run was left under an unpinned one"
+    );
+
+    // And the run moves the way a run with its pins in front does.
+    strip.apply(TabAction::Select(e));
+    assert_eq!(
+        strip.apply(TabAction::MoveLeft),
+        TabEffect::Changed,
+        "an unpinned tab could not move past an unpinned one"
+    );
+    assert_eq!(order(&strip), [a, d, e, b]);
+}
+
+#[test]
 fn an_unpinned_tab_cannot_be_dropped_above_a_pinned_one() {
     // The clamp, which is pinning's whole enforcement: a drop is a pointer
     // position, and a pointer that stopped halfway up a block of pinned rows

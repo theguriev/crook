@@ -1138,12 +1138,39 @@ impl TabStrip {
     /// Sound as a *boundary* because the pinned ones are always at its front:
     /// every path that can change the order goes through
     /// [`slot_for`](Self::slot_for) or is refused by
-    /// [`pins_first`](Self::pins_first), which is what keeps that true.
+    /// [`pins_first`](Self::pins_first), and two runs joined by what stood
+    /// between them going are put in order by
+    /// [`settle_pins`](Self::settle_pins).
     fn pinned_in(&self, block: &std::ops::Range<usize>) -> usize {
         self.tabs[block.clone()]
             .iter()
             .filter(|tab| tab.pinned)
             .count()
+    }
+
+    /// Puts every block's pinned tabs back in front of its unpinned ones,
+    /// keeping the order inside each half.
+    ///
+    /// The one case the clamps cannot see coming: a block that goes from
+    /// between two ungrouped runs — a group closed, moved away, or emptied by
+    /// its last member leaving — joins them into one, and each brought its
+    /// own pins at its own front. `[a*, b, (group), d*, e]` became
+    /// `[a*, b, d*, e]`, a pinned tab under an unpinned one, and then every
+    /// move [`pins_first`](Self::pins_first) checks was refused inside that
+    /// run and [`pinned_in`](Self::pinned_in) counted a boundary that was not
+    /// there. Sorted here, where every change to the order ends, it is
+    /// `[a*, d*, b, e]`: both still pinned, both at the front of the one run
+    /// they are now in. A strip already in order is left exactly as it is.
+    fn settle_pins(&mut self) {
+        let mut start = 0;
+        while start < self.tabs.len() {
+            let block = self.block_around(self.tabs[start].group(), start);
+            if !self.pins_first(&block) {
+                // Stable, so each half keeps the order it had.
+                self.tabs[block.clone()].sort_by_key(|tab| !tab.pinned);
+            }
+            start = block.end.max(start + 1);
+        }
     }
 
     /// Whether a block's pinned tabs are all in front of its unpinned ones.
@@ -1641,6 +1668,8 @@ impl TabStrip {
     /// reorder did to anyone's position, which is exactly why none of them can
     /// get it wrong.
     fn repair(&mut self, preferred: Option<TabId>) {
+        self.settle_pins();
+
         let open: Vec<TabId> = self.tabs.iter().map(Tab::id).collect();
         self.mru.retain(|id| open.contains(id));
 
