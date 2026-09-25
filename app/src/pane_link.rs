@@ -37,6 +37,7 @@ use std::rc::Rc;
 
 use crook_terminal::Rows;
 use crook_terminal::url;
+use unicode_width::UnicodeWidthChar;
 
 /// A link under the pointer: the URL, and the cells it covers.
 ///
@@ -203,13 +204,20 @@ pub fn find(
         let mut cells = vec![' '; columns];
         // The marks stacked on a cell arrive after it, at its column, and the
         // scan counts cells: the cell's own character is the one that stands
-        // for it. A spacer column is visited by nothing and stays blank, as it
-        // is on the grid.
+        // for it. A wide character's spacer column is visited by nothing, and
+        // is given a stand-in that continues a URL — left blank, as it is on
+        // the grid, it ended one, and `https://ja.wikipedia.org/wiki/東京`
+        // was a link to `…/wiki/東`.
         let mut filled = None;
         rows.visit_line(folded, columns, |character, at| {
             if filled != Some(at) {
                 cells[at] = character;
                 filled = Some(at);
+                if character.width() == Some(2)
+                    && let Some(spacer) = cells.get_mut(at + 1)
+                {
+                    *spacer = SPACER;
+                }
             }
         });
         text.extend(cells);
@@ -230,9 +238,16 @@ pub fn find(
         .collect();
     Some(LinkSpan {
         cells,
-        uri: url.uri,
+        uri: url.uri.replace(SPACER, ""),
     })
 }
+
+/// What a wide character's spacer column reads as while a line is scanned
+/// for a URL: a character from the private use area, which nothing prints
+/// and nothing ends a URL on. Taken out of the address before it is handed
+/// back; the cells it stood for stay, so the underline covers the whole
+/// character.
+const SPACER: char = '\u{e000}';
 
 #[cfg(test)]
 mod tests {
@@ -282,6 +297,21 @@ mod tests {
             start,
             len,
         }
+    }
+
+    #[test]
+    fn a_url_with_wide_characters_in_it_is_one_link() {
+        // Each of these is two columns, and the column after it is a spacer
+        // the scan used to read as a blank — the end of the link, one
+        // character into the path.
+        let snapshot = grid("https://x.jp/\u{6771}\u{4eac}");
+        let link = link_at(&snapshot, 0, 2).expect("the row is a link");
+        assert_eq!(link.uri, "https://x.jp/\u{6771}\u{4eac}");
+        assert_eq!(link.cells, vec![cells(0, 0, 17)]);
+
+        // From the second half of a wide character as well as the first.
+        let link = link_at(&snapshot, 0, 16).expect("the spacer is part of it");
+        assert_eq!(link.uri, "https://x.jp/\u{6771}\u{4eac}");
     }
 
     #[test]
