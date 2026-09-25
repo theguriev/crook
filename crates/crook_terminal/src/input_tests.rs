@@ -78,6 +78,34 @@ fn test_alt_prefixes_with_escape() {
 }
 
 #[test]
+fn test_alt_and_shift_send_the_capital_the_key_types() {
+    // A key arrives by its lower-case name once Alt is held, and xterm's
+    // Meta+Shift+h is `ESC H`: sent as `ESC h`, it was Alt+H to tmux, vim and
+    // everything else that binds the two apart.
+    let alt_shift = Modifiers {
+        alt: true,
+        shift: true,
+        ..Modifiers::NONE
+    };
+    assert_eq!(b"\x1bH".to_vec(), held(Key::Char('h'), alt_shift));
+    assert_eq!(
+        "\x1b\u{416}".as_bytes().to_vec(),
+        held(Key::Char('\u{436}'), alt_shift),
+        "a letter that is not ASCII has a capital too"
+    );
+    // A symbol's key is already the shifted character, and a digit has no
+    // capital.
+    assert_eq!(b"\x1b!".to_vec(), held(Key::Char('!'), alt_shift));
+    assert_eq!(b"\x1b1".to_vec(), held(Key::Char('1'), alt_shift));
+    // Ctrl folds to the same code whichever case the letter is in.
+    let all = Modifiers {
+        control: true,
+        ..alt_shift
+    };
+    assert_eq!(b"\x1b\x08".to_vec(), held(Key::Char('h'), all));
+}
+
+#[test]
 fn test_the_arrows_follow_the_cursor_mode() {
     let normal = InputModes::default();
     let application = InputModes {
