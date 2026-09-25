@@ -761,3 +761,45 @@ fn test_a_pin_and_a_colour_come_back() {
         "the colour did not come back on the tab that had it"
     );
 }
+
+#[test]
+fn a_tab_opened_after_a_restore_is_named_past_every_pane_that_came_back() {
+    // One tab split in two is `agent 1` and `agent 2`; the counter was moved
+    // once for the one tab, and the next tab was `agent 2` again.
+    let strip = split(2);
+    let mut restored = Session::of(&strip, None).restore().expect("it restores");
+    let back: Vec<String> = titles(&restored).into_iter().flatten().collect();
+    assert_eq!(back, ["agent 1", "agent 2"], "the split did not come back");
+
+    restored.apply(TabAction::New);
+    let new = restored
+        .active()
+        .expect("a tab is active")
+        .name()
+        .to_owned();
+    assert_eq!(new, "agent 3");
+}
+
+#[test]
+fn a_tab_opened_after_a_restore_is_named_past_the_gap_a_closed_tab_left() {
+    // `agent 2` closed before the restore: `agent 1` and `agent 3` come back,
+    // and two of them counted to 2, which is the next name but one — and
+    // the one after that was `agent 3` again.
+    let mut strip = TabStrip::new();
+    strip.apply(TabAction::New);
+    strip.apply(TabAction::New);
+    let second = strip.iter().nth(1).expect("a second tab").id();
+    strip.apply(TabAction::Close(second));
+
+    let mut restored = Session::of(&strip, None).restore().expect("it restores");
+    let back: Vec<String> = restored.iter().map(|tab| tab.name().to_owned()).collect();
+    assert_eq!(back, ["agent 1", "agent 3"], "the strip did not come back");
+
+    restored.apply(TabAction::New);
+    let new = restored
+        .active()
+        .expect("a tab is active")
+        .name()
+        .to_owned();
+    assert_eq!(new, "agent 4");
+}
