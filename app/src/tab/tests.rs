@@ -1458,6 +1458,41 @@ fn pinning_moves_a_tab_to_the_front_of_its_own_block() {
 }
 
 #[test]
+fn pinning_the_only_tab_left_in_a_group_leaves_the_group_where_it_is() {
+    // What is left of a worktree group once one of its two checkouts is
+    // closed. Lifted out to be put back, the tab left its group with no run
+    // at all, and the block it was put back into was the ungrouped run above.
+    let mut strip = TabStrip::new();
+    strip.apply(TabAction::New);
+    strip.apply(TabAction::New);
+    let ids: Vec<TabId> = strip.iter().map(Tab::id).collect();
+    strip.apply(TabAction::NewInGroupOf(ids[2]));
+    let group = strip
+        .get(ids[2])
+        .and_then(Tab::group)
+        .expect("the two of them made a group");
+    let other = strip
+        .members(group)
+        .map(Tab::id)
+        .find(|id| *id != ids[2])
+        .expect("the group has a second member");
+    strip.apply(TabAction::Close(other));
+    assert!(
+        strip.group(group).is_some(),
+        "the group went with its second tab"
+    );
+    assert_eq!(order(&strip), ids, "closing the second member moved things");
+
+    strip.apply(TabAction::TogglePin(ids[2]));
+    assert!(strip.get(ids[2]).is_some_and(Tab::is_pinned));
+    assert_eq!(order(&strip), ids, "pinning its only tab moved the group");
+    assert_eq!(strip.get(ids[2]).and_then(Tab::group), Some(group));
+
+    strip.apply(TabAction::TogglePin(ids[2]));
+    assert_eq!(order(&strip), ids, "unpinning its only tab moved the group");
+}
+
+#[test]
 fn an_unpinned_tab_cannot_be_dropped_above_a_pinned_one() {
     // The clamp, which is pinning's whole enforcement: a drop is a pointer
     // position, and a pointer that stopped halfway up a block of pinned rows
