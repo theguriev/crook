@@ -199,10 +199,29 @@ impl Heights {
     /// Rebuilds the sums when the finished blocks changed, and rewrites the
     /// live block's height either way.
     ///
+    /// Answers how many lines went off the top: when the emulator evicted the
+    /// oldest blocks, the height they had in the sums being replaced, and
+    /// nothing otherwise. See [`PaneBlocks::sync_heights`], which is what a
+    /// fixed position is corrected by.
+    ///
     /// `identity` is what says the finished part is the same list it was last
     /// frame.
-    pub fn sync(&mut self, identity: Identity, finished: impl Iterator<Item = f32>, live: f32) {
+    pub fn sync(
+        &mut self,
+        identity: Identity,
+        finished: impl Iterator<Item = f32>,
+        live: f32,
+    ) -> f32 {
+        let mut dropped = 0.;
         if self.built_from != Some(identity) {
+            // Read off the old sums before they are replaced: the blocks that
+            // went are the first `gone` of the ones they were built from.
+            if let Some((_, _, before)) = self.built_from
+                && identity.2 > before
+            {
+                let finished_before = self.starts.len().saturating_sub(2);
+                dropped = self.start((identity.2 - before).min(finished_before));
+            }
             self.starts.clear();
             self.starts.push(0.);
             let mut total = 0.;
@@ -220,6 +239,7 @@ impl Heights {
         // nothing in a session with ten thousand blocks behind it.
         let items = self.starts.len();
         self.starts[items - 1] = self.starts[items - 2] + live;
+        dropped
     }
 }
 
@@ -511,6 +531,32 @@ impl PaneBlocks {
         }
         state.selected = block;
         true
+    }
+
+    /// Brings the prefix sums up to date with this frame's blocks and answers
+    /// the list's height.
+    ///
+    /// A position scrolled up is kept on the rows it was showing when the
+    /// oldest blocks are evicted from the front. It is a number of lines from
+    /// the top, and the lines above it just went: left as it was, the same
+    /// number named rows six hundred blocks further down, or none at all, and
+    /// somebody reading history in a long session was moved to output they
+    /// had never scrolled to — which a [`ScrollPosition::Fixed`] exists never
+    /// to do.
+    pub fn sync_heights(
+        &self,
+        identity: Identity,
+        finished: impl Iterator<Item = f32>,
+        live: f32,
+    ) -> f32 {
+        let mut state = self.0.borrow_mut();
+        let dropped = state.heights.sync(identity, finished, live);
+        if let ScrollPosition::Fixed(at) = state.position
+            && dropped > 0.
+        {
+            state.position = ScrollPosition::Fixed((at - dropped).max(0.));
+        }
+        state.heights.total()
     }
 
     /// Runs `use_heights` against this list's prefix sums.
