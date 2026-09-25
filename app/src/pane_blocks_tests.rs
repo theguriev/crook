@@ -257,3 +257,22 @@ fn a_control_is_clicked_only_where_it_was_pressed() {
     assert_eq!(list.release_control(), Some((block, Control::Menu)));
     assert_eq!(list.release_control(), None, "and the press is spent");
 }
+
+#[test]
+fn a_rebuild_after_an_eviction_says_how_many_lines_went_off_the_top() {
+    let mut heights = Heights::default();
+    assert_eq!(heights.sync((1, 3, 0), [4., 6., 2.].into_iter(), 5.), 0.);
+
+    // The oldest block went, and a new one arrived at the back.
+    assert_eq!(heights.sync((2, 3, 1), [6., 2., 3.].into_iter(), 5.), 4.);
+    // A block finishing is a rebuild with nothing gone from the front.
+    assert_eq!(
+        heights.sync((3, 4, 1), [6., 2., 3., 1.].into_iter(), 5.),
+        0.
+    );
+    // The live block growing is no rebuild at all.
+    assert_eq!(
+        heights.sync((3, 4, 1), [6., 2., 3., 1.].into_iter(), 9.),
+        0.
+    );
+}

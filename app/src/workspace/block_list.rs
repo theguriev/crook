@@ -441,14 +441,11 @@ impl BlockList {
         );
 
         let viewport = size.y() / metrics.height;
-        let content = self.view.with_heights(|heights| {
-            heights.sync(
-                identity,
-                self.blocks.iter().map(|block| block_height(block)),
-                live,
-            );
-            heights.total()
-        });
+        let content = self.view.sync_heights(
+            identity,
+            self.blocks.iter().map(|block| block_height(block)),
+            live,
+        );
 
         // Measured before the window is walked, because the offset the walk
         // starts from is resolved against exactly these numbers.

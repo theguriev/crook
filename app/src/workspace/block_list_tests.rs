@@ -424,3 +424,54 @@ fn a_folded_url_in_a_finished_block_is_one_link_on_both_of_its_rows() {
         );
     }
 }
+
+/// Past `MAX_BLOCKS` the emulator drops a batch off the front of the list. A
+/// list scrolled up is a number of lines from the top, and the lines above it
+/// have just gone: it stays on the block it was showing rather than on
+/// whatever that many lines now reaches.
+#[test]
+fn a_list_scrolled_up_keeps_its_block_when_the_oldest_are_evicted() {
+    use crookui_core::geometry::{Point, ZIndex, vec2f};
+    use std::sync::Arc;
+
+    let mut emulator = emulator();
+    for n in 0..10_000 {
+        cycle(&mut emulator, "c", &format!("{n}"), 0);
+    }
+    assert_eq!(emulator.blocks_evicted(), 0, "the cap was reached early");
+
+    let font = crate::terminal_font::CellFont::headless(12.);
+    let view = PaneBlocks::new();
+    let size = vec2f(400., 300.);
+    // The block at the top of the view, laid out the way a frame lays it out.
+    let first_in_view = |emulator: &mut Emulator| {
+        let history = Arc::new(BlockHistory::new(
+            emulator.blocks().iter().cloned().map(Arc::new).collect(),
+            emulator.blocks_evicted(),
+        ));
+        let mut list = BlockList::new(history, emulator.snapshot(), font.clone(), view.clone());
+        list.size = Some(size);
+        list.origin = Some(Point::from_vec2f(vec2f(0., 0.), ZIndex::Normal(0)));
+        list.measure(size);
+        let first = list.window.first().copied().expect("something is in view");
+        list.id(first.index)
+    };
+    first_in_view(&mut emulator);
+
+    // Scrolled up to somewhere in the middle of the history, a line into a
+    // block rather than on its edge.
+    let line = view.with_heights(|heights| heights.start(5_000)) + 1.;
+    view.apply(ScrollCause::ToLine(line));
+    let reading = first_in_view(&mut emulator);
+    assert_eq!(reading, emulator.blocks()[5_000].id);
+
+    cycle(&mut emulator, "c", "one more", 0);
+    assert!(emulator.blocks_evicted() > 0, "nothing was evicted");
+
+    assert_eq!(
+        first_in_view(&mut emulator),
+        reading,
+        "the view moved to other blocks, {} evicted, with nobody scrolling",
+        emulator.blocks_evicted()
+    );
+}
