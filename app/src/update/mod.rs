@@ -455,9 +455,14 @@ fn scratch() -> Result<PathBuf, String> {
 /// `create_dir_all` succeeds on one — the difference between a directory this
 /// run made and one somebody left for it.
 fn fresh_directory(base: &Path, names: impl Iterator<Item = String>) -> Result<PathBuf, String> {
-    let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    let builder = {
+        let mut builder = std::fs::DirBuilder::new();
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder
+    };
+    #[cfg(not(unix))]
+    let builder = std::fs::DirBuilder::new();
     for name in names {
         let at = base.join(name);
         match builder.create(&at) {
