@@ -109,26 +109,39 @@ pub fn at(text: &str, column: usize) -> Option<Url> {
         run_end += 1;
     }
 
-    // The last scheme that begins at or before the column. A URL does not have
+    // The first link in the run that covers the column. A URL does not have
     // to start the run it is in: `(https://example.com)` and `see:https://x`
     // are both things programs print, and in both the link begins partway
     // along.
-    let start = (run_start..=column)
-        .rev()
-        .find(|at| scheme_at(&cells, *at).is_some())?;
-    let scheme = scheme_at(&cells, start)?;
-
-    let end = trim_trailing(&cells, start, run_end);
-    // The scheme alone is not a link: `https://` with nothing after it points
-    // at nothing, and underlining it would be underlining punctuation.
-    if end <= start + scheme || !(start..end).contains(&column) {
-        return None;
-    }
-
-    Some(Url {
-        uri: cells[start..end].iter().collect(),
-        start,
-        len: end - start,
+    //
+    // The *first*, because a URL may carry another: an archived page is
+    // `https://web.archive.org/web/2020/https://example.com/page`, and a
+    // redirect puts one in its query. Taking the scheme nearest the column
+    // made those two links, the outer one or the inner one depending on
+    // where the pointer was — and a click on the second half opened an
+    // address that was not the one underlined a moment before.
+    (run_start..=column).find_map(|start| {
+        // A scheme glued to the word before it is part of that word's
+        // scheme: `ftp://` inside `sftp://` is not an FTP link, and opening
+        // it as one hands a different, unencrypted protocol to the browser.
+        // Punctuation is not a word — `git+https://…` is still a link from
+        // its `https`.
+        if start > 0 && cells[start - 1].is_ascii_alphanumeric() {
+            return None;
+        }
+        let scheme = scheme_at(&cells, start)?;
+        let end = trim_trailing(&cells, start, run_end);
+        // The scheme alone is not a link: `https://` with nothing after it
+        // points at nothing, and underlining it would be underlining
+        // punctuation.
+        if end <= start + scheme || !(start..end).contains(&column) {
+            return None;
+        }
+        Some(Url {
+            uri: cells[start..end].iter().collect(),
+            start,
+            len: end - start,
+        })
     })
 }
 
