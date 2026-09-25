@@ -1855,6 +1855,60 @@ fn a_chip_is_a_quiet_pill_and_a_badge_is_a_loud_one() {
 }
 
 #[test]
+fn a_menu_opened_after_a_picker_closed_gives_the_keyboard_back() {
+    // crook-chips, exactly: pick a directory in one chip's picker, then
+    // right-click the chip with a menu on it and click away from the menu.
+    use crookui_core::event::Keystroke;
+
+    let held = Rc::new(picker::Held::new(Voice::default()));
+    let rows = vec![Row {
+        key: String::from("/home/someone"),
+        label: String::from("home"),
+        icon: String::new(),
+        tone: Tone::Primary,
+    }];
+    let fonts = Fonts {
+        ui: FamilyId(0),
+        monospace: FamilyId(0),
+    };
+    let _ = picker::picker(
+        &held,
+        "Search\u{2026}",
+        &rows,
+        Some(an_action()),
+        fonts,
+        &Clipboard::new(),
+    );
+    assert!(
+        picker::open().is_some(),
+        "the picker did not take the keyboard"
+    );
+
+    // A row was chosen, which runs one of the plugin's actions — and the
+    // plugin's next frame draws no picker.
+    held.released();
+    assert!(picker::open().is_none(), "the chosen row kept the keyboard");
+
+    let items = vec![MenuItem {
+        label: String::from("Copy"),
+        action: String::from("copy"),
+        argument: String::new(),
+    }];
+    held.open_menu(&items);
+    let enter = Keystroke::new("enter", Modifiers::default());
+    assert!(
+        picker::claims(&enter).is_none(),
+        "enter over a menu was claimed for a picker that is not there"
+    );
+
+    held.close_menu();
+    assert!(
+        picker::open().is_none(),
+        "the menu is gone and the plugin still has the keyboard"
+    );
+}
+
+#[test]
 fn a_picker_outside_a_panel_draws_nothing_rather_than_dividing_infinity() {
     // The rule `Fill` and `Meter` follow, for the same reason: a picker is a
     // column in a field's width, and a slot offers no width. See `BOUNDED`.
