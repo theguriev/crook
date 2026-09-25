@@ -1,3 +1,5 @@
+use std::fs;
+
 use super::*;
 
 #[test]
@@ -93,4 +95,61 @@ fn test_no_more_than_the_limit_is_kept() {
         Some(format!("command {}", LIMIT + 49).as_str()),
         "the newest end is the end that is kept"
     );
+}
+
+/// `text` as zsh writes it: every byte from `0x83` to `0xa2`, and NUL, as
+/// `0x83` and the byte XOR `0x20`.
+fn metafied(text: &str) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    for byte in text.bytes() {
+        if byte == 0 || (0x83..=0xa2).contains(&byte) {
+            bytes.extend([0x83, byte ^ 0x20]);
+        } else {
+            bytes.push(byte);
+        }
+    }
+    bytes
+}
+
+#[test]
+fn test_a_zsh_history_is_read_back_the_way_zsh_wrote_it() {
+    // A dash, an emoji and Cyrillic, all three of which have a byte zsh
+    // metafies; read straight as UTF-8 each came back as something else.
+    let commands = [
+        "git commit -m 'a \u{2014} b'",
+        "echo \u{1f680}",
+        "cd \u{43f}\u{440}\u{43e}\u{435}\u{43a}\u{442}\u{44b}",
+    ];
+    let mut text = Vec::new();
+    for (at, command) in commands.iter().enumerate() {
+        text.extend(format!(": 170000000{at}:0;").bytes());
+        text.extend(metafied(command));
+        text.push(b'\n');
+    }
+    assert_ne!(
+        String::from_utf8_lossy(&text),
+        commands.map(|command| format!("{command}\n")).concat(),
+        "nothing here is metafied, so this reads nothing"
+    );
+
+    let path = std::env::temp_dir().join(format!("crook-zsh-history-{}", std::process::id()));
+    fs::write(&path, &text).expect("the history file is written");
+    let read = tail(&path, Shell::Zsh).expect("the history file is read");
+    let _ = fs::remove_file(&path);
+
+    assert_eq!(parse(Shell::Zsh, &read), commands);
+}
+
+#[test]
+fn test_only_zsh_is_unmetafied() {
+    // bash writes what it was given, and a byte of 0x83 in its file is a
+    // byte of somebody's command.
+    let bytes = vec![b'a', 0x83, 0xb4, b'b'];
+    assert_eq!(unmetafy(bytes.clone()), [b'a', 0x94, b'b']);
+
+    let path = std::env::temp_dir().join(format!("crook-bash-history-{}", std::process::id()));
+    fs::write(&path, &bytes).expect("the history file is written");
+    let read = tail(&path, Shell::Bash).expect("the history file is read");
+    let _ = fs::remove_file(&path);
+    assert_eq!(read, String::from_utf8_lossy(&bytes));
 }

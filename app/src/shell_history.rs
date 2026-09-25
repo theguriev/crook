@@ -92,7 +92,7 @@ pub fn user_history() -> &'static [String] {
             log::debug!("no history file for {shell:?}");
             return Vec::new();
         };
-        let Some(text) = tail(&path) else {
+        let Some(text) = tail(&path, shell) else {
             return Vec::new();
         };
         let lines = parse(shell, &text);
@@ -140,7 +140,9 @@ fn path(shell: Shell) -> Option<PathBuf> {
 /// be cut, because a seek into the middle of a file lands in the middle of a
 /// line — and half a command offered as a suggestion is worse than one command
 /// fewer.
-fn tail(path: &Path) -> Option<String> {
+///
+/// A zsh file is unmetafied first; see [`unmetafy`].
+fn tail(path: &Path, shell: Shell) -> Option<String> {
     let mut file = match File::open(path) {
         Ok(file) => file,
         Err(error) => {
@@ -161,15 +163,49 @@ fn tail(path: &Path) -> Option<String> {
         return None;
     }
 
-    // Lossy, because a history file is not necessarily UTF-8: zsh metafies
-    // bytes it cannot encode, and a single command somebody typed in another
-    // encoding must not throw away the file it is in.
+    if shell == Shell::Zsh {
+        bytes = unmetafy(bytes);
+    }
+    // Lossy, because a history file is not necessarily UTF-8: a single
+    // command somebody typed in another encoding must not throw away the file
+    // it is in.
     let mut text = String::from_utf8_lossy(&bytes).into_owned();
     if cut {
         let start = text.find('\n').map_or(text.len(), |at| at + 1);
         text.drain(..start);
     }
     Some(text)
+}
+
+/// Undoes what zsh does to a command's bytes before it writes them down.
+///
+/// zsh keeps its strings *metafied* — a byte from `0x83` to `0xa2`, or a NUL,
+/// is stored as `0x83` followed by that byte XOR `0x20` — and `savehistfile`
+/// writes them to the file that way; its reader unmetafies them again. Read as
+/// UTF-8 straight off the disk, every character with one of those bytes in it
+/// came back as something else: `—` is `E2 80 94`, and `git commit -m 'a — b'`
+/// was offered as `a \u{2003}\u{fffd} b`, which is what Enter would then have
+/// run. Emoji and much of Cyrillic are the same.
+///
+/// A cut through the middle of a pair can only be in the first line of a
+/// tail, which [`tail`] drops.
+fn unmetafy(bytes: Vec<u8>) -> Vec<u8> {
+    const META: u8 = 0x83;
+    if !bytes.contains(&META) {
+        return bytes;
+    }
+    let mut plain = Vec::with_capacity(bytes.len());
+    let mut bytes = bytes.into_iter();
+    while let Some(byte) = bytes.next() {
+        match byte {
+            META => match bytes.next() {
+                Some(next) => plain.push(next ^ 0x20),
+                None => plain.push(META),
+            },
+            byte => plain.push(byte),
+        }
+    }
+    plain
 }
 
 /// The commands in a history file, oldest first, deduplicated onto the newest
