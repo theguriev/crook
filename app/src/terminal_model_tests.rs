@@ -363,6 +363,31 @@ fn the_last_batch_of_a_burst_is_drawn_even_though_nothing_follows_it() {
 }
 
 #[test]
+fn a_burst_of_bells_is_handed_over_as_one() {
+    // Each bell the pane hands over reaches every plugin watching it, and a
+    // plugin that rings on a bell plays a sound for each; a program printing
+    // BEL in a loop would queue them by the dozen.
+    let Some(shared) = session() else {
+        eprintln!("skipped: no pty could be opened here");
+        return;
+    };
+    let bells = |events: &[TerminalEvent]| {
+        events
+            .iter()
+            .filter(|event| matches!(event, TerminalEvent::Bell))
+            .count()
+    };
+
+    shared.feed(b"\x07\x07\x07");
+    shared.feed(b"\x07");
+    assert_eq!(1, bells(&shared.take_events()), "one read, and the next");
+
+    // Once handed over, the next bell is news again.
+    shared.feed(b"\x07");
+    assert_eq!(1, bells(&shared.take_events()));
+}
+
+#[test]
 fn a_closed_pane_frees_its_terminal_even_while_its_reader_is_still_blocked() {
     // A `sleep 60 &` keeps the pty open after the pane is closed, so the read
     // cannot return — and the thread owns the object whose drop would return

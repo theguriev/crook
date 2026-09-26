@@ -1748,10 +1748,21 @@ impl Shared {
         if events.is_empty() {
             return;
         }
-        self.events
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend(events);
+        let mut pending = self.events.lock().unwrap_or_else(PoisonError::into_inner);
+        for event in events {
+            // A bell that has not been handed over yet stands for every bell
+            // after it: `yes $'\a'` rings thousands of times a second, and each
+            // one would reach every plugin watching the pane as a sound of its
+            // own, each holding a worker on the shared pool while it plays.
+            if matches!(event, TerminalEvent::Bell)
+                && pending
+                    .iter()
+                    .any(|pending| matches!(pending, TerminalEvent::Bell))
+            {
+                continue;
+            }
+            pending.push(event);
+        }
     }
 }
 
