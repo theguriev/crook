@@ -1683,14 +1683,15 @@ fn test_a_fish_that_marks_its_own_prompt_still_answers_crooks_completion() {
     )
     .expect("the snippet should be writable");
 
-    let probe = r#"source $argv[1]
+    // Whether this fish marks its own prompt at all comes first: one older
+    // than 4.0 has no `mark-prompt`, and there the snippet's marks belong
+    // whatever the features say.
+    let probe = r#"status features | string match --quiet --regex '^mark-prompt\s+on\b'; and echo fish-marks
+source $argv[1]
 functions --query __crook_complete; and echo completes
 bind | string match --quiet '*6339*__crook_complete*'; and echo bound
 functions --query __crook_mark; and echo marks"#;
-    for (features, want) in [
-        ("", &["completes", "bound"][..]),
-        ("no-mark-prompt", &["completes", "bound", "marks"][..]),
-    ] {
+    for features in ["", "no-mark-prompt"] {
         let Ok(output) = crate::process::command("fish")
             .args(["--no-config", "--interactive", "--command", probe])
             .arg(&script)
@@ -1702,8 +1703,17 @@ functions --query __crook_mark; and echo marks"#;
             return;
         };
         let said = String::from_utf8_lossy(&output.stdout);
+        let mut lines: Vec<&str> = said.lines().collect();
+        let fish_marks = lines.first() == Some(&"fish-marks");
+        if fish_marks {
+            lines.remove(0);
+        }
+        let want: &[&str] = match fish_marks {
+            true => &["completes", "bound"],
+            false => &["completes", "bound", "marks"],
+        };
         assert_eq!(
-            said.lines().collect::<Vec<_>>(),
+            lines,
             want,
             "fish_features={features:?}: {said}{}",
             String::from_utf8_lossy(&output.stderr)
