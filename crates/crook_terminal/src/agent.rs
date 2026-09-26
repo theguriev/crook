@@ -108,16 +108,53 @@ pub fn report(status: AgentReport, title: Option<&str>, message: Option<&str>) -
         .and_then(field)
         .map(|title| title.trim_matches(';').to_owned())
         .filter(|title| !title.is_empty());
+    let message = message.and_then(field);
+
+    // What `vte` will keep of it. The number and the status are two pieces,
+    // the cut before a message is one more, and a message needs at least one
+    // of its own; everything past the limit is dropped by the parser without
+    // a word, so it is cut here instead, where the cut can say so.
+    let mut budget = MAX_PIECES - 2;
     if let Some(title) = title {
+        let room = budget - if message.is_some() { 2 } else { 0 };
+        let title = within(&title, room);
+        budget -= pieces(&title);
         sequence.push(';');
         sequence.push_str(&title);
     }
-    if let Some(message) = message.and_then(field) {
+    if let Some(message) = message {
         sequence.push_str(";;");
-        sequence.push_str(&message);
+        sequence.push_str(&within(&message, budget - 1));
     }
     sequence.push('\x07');
     sequence
+}
+
+/// How many parameters of an OSC sequence `vte` keeps. Its own
+/// `MAX_OSC_PARAMS`, which it does not export: every `;` past the fifteenth
+/// starts a piece that is dropped on the floor.
+const MAX_PIECES: usize = 16;
+
+/// How many pieces `text` is once `vte` has split it on `;`.
+fn pieces(text: &str) -> usize {
+    text.matches(';').count() + 1
+}
+
+/// `text` cut to `room` pieces, and marked where it was cut.
+///
+/// A message that held more `;` than the sequence has room for — a chain of
+/// shell commands waiting for approval is the ordinary one — lost everything
+/// past the limit without a mark, and read as complete: the row asking for a
+/// person showed a question that was not the one being asked, and the part
+/// that went was the end of it. Cut at the last `;` that fits and ended with
+/// `…`, it is visibly not all of it. Written here rather than read around on
+/// the other side because the parser gives nothing back of what it dropped.
+fn within(text: &str, room: usize) -> String {
+    if pieces(text) <= room {
+        return text.to_owned();
+    }
+    let kept: Vec<&str> = text.splitn(room + 1, ';').take(room).collect();
+    format!("{}\u{2026}", kept.join(";"))
 }
 
 /// `text` as one field of the sequence, or `None` when it cannot be one.
