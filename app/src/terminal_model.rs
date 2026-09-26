@@ -77,7 +77,7 @@ use std::future::Future;
 use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, Weak};
 use std::task::{Context as TaskContext, Poll, Waker};
 use std::thread;
@@ -764,7 +764,7 @@ impl TerminalModel {
             blocks: Mutex::new(Arc::default()),
             events: Mutex::new(Vec::new()),
             wake: Arc::new(Wake::default()),
-            grid: AtomicU32::new(packed(INITIAL_GRID)),
+            grid: AtomicU64::new(packed(INITIAL_GRID)),
             resize_failing: AtomicBool::new(false),
             scroll_remainder: AtomicU32::new(0.0f32.to_bits()),
             publish: Mutex::new(PublishState::new()),
@@ -1433,7 +1433,7 @@ struct Shared {
     /// on every single frame — can answer "unchanged" without queueing behind a
     /// shell that is mid-burst. Only a resize that actually reached the pty is
     /// recorded, so one that failed is tried again on the next frame.
-    grid: AtomicU32,
+    grid: AtomicU64,
 
     /// Whether the last resize failed, so a pty that refuses every one of them
     /// is complained about once rather than sixty times a second.
@@ -1894,21 +1894,28 @@ fn reap(shared: &Shared) {
 ///
 /// A read rather than a swap, because the size is only recorded once it has
 /// actually been sent — see [`TerminalHandle::resize`].
-fn needs_resize(grid: &AtomicU32, size: TerminalSize) -> bool {
+fn needs_resize(grid: &AtomicU64, size: TerminalSize) -> bool {
     grid.load(Ordering::Relaxed) != packed(size)
 }
 
 /// Records a size the pty has been set to.
-fn record_resize(grid: &AtomicU32, size: TerminalSize) {
+fn record_resize(grid: &AtomicU64, size: TerminalSize) {
     grid.store(packed(size), Ordering::Relaxed);
 }
 
 /// A grid as one comparable integer, for the atomic layout asks on every frame.
 ///
-/// The cell size is deliberately not in it: it changes only when the font does,
-/// which cannot happen while the process runs.
-fn packed(size: TerminalSize) -> u32 {
-    u32::from(size.columns) << 16 | u32::from(size.rows)
+/// The cell size is in it. It was left out once, when the font could not
+/// change while the process ran; zooming changes it, and a zoom that happens
+/// to leave the column and row counts where they were — a small pane, or one
+/// at the floor — then never told the pty: `TIOCGWINSZ`'s pixel size and the
+/// answer to `CSI 14 t` kept the cell of the size before, for any program that
+/// sizes what it draws by pixels.
+fn packed(size: TerminalSize) -> u64 {
+    u64::from(size.columns) << 48
+        | u64::from(size.rows) << 32
+        | u64::from(size.cell_width) << 16
+        | u64::from(size.cell_height)
 }
 
 /// The terminal palette, in the colours of the theme in force.

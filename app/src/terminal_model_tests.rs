@@ -91,11 +91,30 @@ fn a_grid_is_packed_so_either_dimension_moving_is_a_resize() {
         packed(TerminalSize::new(80, 24)),
         packed(TerminalSize::new(80, 25))
     );
-    assert_eq!(
-        packed(TerminalSize::new(80, 24)),
+    assert_ne!(
         packed(TerminalSize::new(80, 24).with_cell_size(7, 15)),
-        "the cell size cannot change while the process runs, so it is not part \
-         of the comparison"
+        packed(TerminalSize::new(80, 24).with_cell_size(7, 17)),
+        "a zoom changes the cell and not the grid, and the pty has to hear it"
+    );
+}
+
+#[test]
+fn a_zoom_that_keeps_the_grid_still_tells_the_pty_the_new_cell_size() {
+    // A pane small enough that one step of zoom leaves it ten by three.
+    let Some(shared) = session() else {
+        return;
+    };
+    let handle = TerminalHandle(shared.clone());
+    let before = TerminalSize::new(10, 3).with_cell_size(8, 15);
+    let after = TerminalSize::new(10, 3).with_cell_size(8, 17);
+    assert!(handle.resize(before));
+    assert_eq!(before, shared.lock().size(), "the first size did not land");
+
+    handle.resize(after);
+    assert_eq!(
+        after,
+        shared.lock().size(),
+        "the pty still says the cell is the size it was before the zoom"
     );
 }
 
@@ -230,7 +249,7 @@ fn session() -> Option<Arc<Shared>> {
         blocks: Mutex::new(Arc::default()),
         events: Mutex::new(Vec::new()),
         wake: Arc::new(Wake::default()),
-        grid: AtomicU32::new(packed(INITIAL_GRID)),
+        grid: AtomicU64::new(packed(INITIAL_GRID)),
         resize_failing: AtomicBool::new(false),
         scroll_remainder: AtomicU32::new(0.0f32.to_bits()),
         publish: Mutex::new(PublishState::new()),
@@ -372,7 +391,7 @@ fn a_resize_is_recorded_only_once_it_has_reached_the_pty() {
     // `ioctl` — a flicker while a window edge is dragged — left the emulator at
     // the new geometry, the child at the old one, and every later frame
     // answering "unchanged" and never trying again.
-    let grid = AtomicU32::new(packed(INITIAL_GRID));
+    let grid = AtomicU64::new(packed(INITIAL_GRID));
     let wanted = TerminalSize::new(100, 30);
 
     assert!(needs_resize(&grid, wanted));
