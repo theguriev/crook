@@ -1712,6 +1712,64 @@ functions --query __crook_mark; and echo marks"#;
 }
 
 #[test]
+fn test_a_fish_completion_is_offered_the_way_it_has_to_be_typed() {
+    // `complete --do-complete` answers with names, and the answer is put on
+    // the line as it is: a space made two arguments of one file, a quote
+    // opened a string, a star a glob. Escaped the way fish's own Tab does,
+    // with a leading `~` left for fish to expand. Run through the snippet's
+    // own request and answer files, in a real fish; skipped where there is
+    // none, and on Windows, where there is no fish pane and `a*b` cannot be a
+    // file name.
+    if cfg!(windows) {
+        return;
+    }
+    let directory = TempDir::new("fish-typed");
+    fs::create_dir_all(directory.path().join("projects").join("src"))
+        .expect("the directories should be creatable");
+    for name in ["notes file.txt", "it's.txt", "a*b"] {
+        fs::write(directory.path().join(name), "").expect("the file should be writable");
+    }
+    let script = directory.path().join("crook.fish");
+    fs::write(
+        &script,
+        snippet(Shell::Fish).expect("fish has an integration"),
+    )
+    .expect("the snippet should be writable");
+
+    let probe = r#"source $argv[1]
+for line in "cat no" "cat it" "cat a" "cd proj" "ls ~/pro"
+    printf '1\n%s\n' $line >$CROOK_SCRATCH/complete.in
+    __crook_complete >/dev/null
+    string join '|' <$CROOK_SCRATCH/complete.out
+end"#;
+    let Ok(output) = crate::process::command("fish")
+        .args(["--no-config", "--interactive", "--command", probe])
+        .arg(&script)
+        .current_dir(directory.path())
+        .env("HOME", directory.path())
+        .env("CROOK_SCRATCH", directory.path())
+        .stdin(std::process::Stdio::null())
+        .output()
+    else {
+        return;
+    };
+
+    let said = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        said.lines().collect::<Vec<_>>(),
+        [
+            "notes\\ file.txt",
+            "it\\'s.txt",
+            "a\\*b",
+            "projects/",
+            "~/projects/"
+        ],
+        "{said}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn test_a_repeated_subshell_line_keeps_its_status_where_history_skips_it() {
     // bash runs no DEBUG trap for a top-level `( ... )`, so the snippet tells
     // whether a line ran by a counter instead — and history's counter stands

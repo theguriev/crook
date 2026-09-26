@@ -58,9 +58,29 @@ and begin
         # `complete --do-complete` answers with `completion<TAB>description`,
         # and each completion is the whole word rather than the part that is
         # missing — which is what Crook wants, because it is replacing a word.
+        #
+        # Escaped, because what it answers is a *name* and Crook puts it on the
+        # line as it is: `notes file.txt` went in as two arguments, `it's.txt`
+        # opened a quote, `a*b` a glob. fish's own Tab escapes them; this does
+        # it the same way. A leading `~` or `~user/` is left bare, since that
+        # is the part fish is meant to expand.
         complete --do-complete="$line" 2>/dev/null \
-            | string replace --regex '\t.*$' '' >"$answer"
+            | string replace --regex '\t.*$' '' \
+            | __crook_typed >"$answer"
         printf '\e]6339;%s\a' $serial
+    end
+
+    # Each name on stdin as it has to be typed to stay one word.
+    function __crook_typed
+        while read --local candidate
+            set --local home (string match --regex -- '^~[^/]*/?' $candidate)
+            if test -n "$home"
+                set --local rest (string sub --start (math (string length -- $home) + 1) -- $candidate)
+                printf '%s%s\n' $home (string escape --no-quoted -- $rest)
+            else
+                string escape --no-quoted -- $candidate
+            end
+        end
     end
 
     bind \e\[6339~ __crook_complete
