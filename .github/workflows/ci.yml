@@ -94,17 +94,29 @@ jobs:
       # completion on a fish that marks its own prompt, completions escaped as
       # words. Ubuntu's fish predates fish's own prompt marks and Homebrew's
       # has them, so the two runners cover both halves of the fish snippet.
-      # macOS ships zsh; Windows has no pane these snippets are for.
+      # zsh is installed on Linux as well, where no system rc sets HISTFILE for
+      # it the way macOS's does; macOS ships its own. Windows has no pane these
+      # snippets are for.
       - name: Shells the tests run for real
         if: runner.os != 'Windows'
         shell: bash
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
-            sudo apt-get update -q && sudo apt-get install -y -q fish
+            sudo apt-get update -q && sudo apt-get install -y -q fish zsh
+            # Ubuntu's /etc/zsh/zshrc runs compinit, and the runner leaves
+            # directories on zsh's fpath writable by its group — so every zsh
+            # the tests start stops at "Ignore insecure directories and
+            # continue [y] or abort compinit [n]?" and never reaches a prompt.
+            # A machine of somebody's own does not look like this; the runner
+            # is made to.
+            insecure=$(zsh -fc 'autoload -Uz compaudit; compaudit' 2>/dev/null || true)
+            echo "compaudit: ${insecure:-nothing}"
+            [ -z "$insecure" ] || echo "$insecure" | xargs sudo chmod g-w,o-w
           else
             brew install fish
           fi
           fish --version
+          zsh --version
 
       - name: cargo test
         shell: bash
