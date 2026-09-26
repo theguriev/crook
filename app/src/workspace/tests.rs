@@ -17604,6 +17604,40 @@ fn open_palette(harness: &mut Harness, query: &str) {
 }
 
 #[test]
+fn a_setting_chosen_in_the_palette_opens_its_page_with_the_row_found() {
+    // A page is thirty rows tall; the row is reached by the rail's own box
+    // holding its name, on the page it lives on. Seeding the box before the
+    // page is open seeds a field that arriving at the page then empties.
+    let mut harness = Harness::new(1);
+    open_palette(&mut harness, "#show tab numbers");
+    harness.frame();
+    harness.press("enter", Modifiers::default(), "");
+    let text = frame_text(&harness.frame());
+
+    assert!(
+        !text.contains(PALETTE_PLACEHOLDER),
+        "the palette stayed up: {text}"
+    );
+    assert_eq!("Appearance", harness.settings_section());
+    assert_eq!("Show tab numbers", harness.search_text());
+    assert!(
+        text.contains("Show tab numbers"),
+        "the row is not on screen: {text}"
+    );
+
+    // And from a page that is already open, to a row on another one.
+    harness.press("escape", Modifiers::default(), "");
+    harness.frame();
+    open_palette(&mut harness, "#version");
+    harness.frame();
+    harness.press("enter", Modifiers::default(), "");
+    let text = frame_text(&harness.frame());
+
+    assert_eq!("About", harness.settings_section(), "{text}");
+    assert_eq!("Version", harness.search_text());
+}
+
+#[test]
 fn each_kind_of_answer_gets_a_heading_when_there_is_another_kind() {
     // The rule the everything list is built on: a heading is drawn when there
     // is something to tell apart. `agent` is answered by a command and by a
