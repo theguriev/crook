@@ -6466,6 +6466,20 @@ fn a_tab_is_found_by_a_pane_its_row_does_not_name() {
     );
 }
 
+/// Puts every pane of the window in `/`.
+///
+/// A row says where its pane is working, and a search is a search of what the
+/// row says: a test that searches for a status word would otherwise find it in
+/// the path of the checkout it runs in — a branch called `…-waiting-…` had
+/// every row kept.
+fn in_the_root(harness: &mut Harness) {
+    for pane in harness.pane_ids() {
+        harness.update_session(pane, |session| {
+            session.working_directory = Some(PathBuf::from("/"));
+        });
+    }
+}
+
 #[test]
 fn waiting_finds_only_the_rows_the_wash_paints() {
     // An operator with ten tabs typing `waiting` means the amber rows and
@@ -6474,6 +6488,7 @@ fn waiting_finds_only_the_rows_the_wash_paints() {
     // on screen is asking too and is not found — it waits for nobody, and its
     // row is not amber. `needs-input` is the same rule under the dot's name.
     let mut harness = Harness::panel(4);
+    in_the_root(&mut harness);
     let panes = harness.pane_ids();
     harness.update_session(panes[0], |session| {
         session.derived_title = Some("kettle".to_owned());
@@ -6518,6 +6533,7 @@ fn running_finds_a_running_row_and_still_a_row_called_that() {
     // whose title happens to say `running` is found exactly as it was before
     // there was a status to search by.
     let mut harness = Harness::panel(3);
+    in_the_root(&mut harness);
     let panes = harness.pane_ids();
     harness.update_session(panes[0], |session| {
         session.derived_title = Some("kettle".to_owned());
