@@ -788,3 +788,57 @@ fn test_a_failure_outlives_its_command_and_goes_with_the_next_one() {
     assert_eq!(AgentReport::Idle, emulator.agent());
     assert_eq!(1, emulator.take_events().len());
 }
+
+#[test]
+fn test_a_report_too_long_for_the_parser_says_where_it_was_cut() {
+    // `vte` keeps sixteen parameters of an OSC and drops the rest without a
+    // word. A message that is a chain of commands waiting for approval ran
+    // past that, and the row read as the whole question with its end gone.
+    // Written through `report` and read back through the real parser.
+    let arrived = |title: Option<&str>, message: Option<&str>| {
+        let mut emulator = emulator();
+        let sequence = crate::agent::report(AgentReport::NeedsInput, title, message);
+        emulator.advance(sequence.as_bytes());
+        match emulator.take_events().as_slice() {
+            [TerminalEvent::Agent(reported)] => (reported.title.clone(), reported.message.clone()),
+            other => panic!("one report should have arrived, got {other:?}"),
+        }
+    };
+    let commands = |count: usize| {
+        (1..=count)
+            .map(|at| format!("step {at}"))
+            .collect::<Vec<_>>()
+            .join(";")
+    };
+
+    // Exactly as much as there is room for, with a title of one piece:
+    // sixteen, less the number, the status, the title and the cut.
+    let fits = commands(12);
+    assert_eq!(
+        (Some("port the tab bar".to_owned()), Some(fits.clone())),
+        arrived(Some("port the tab bar"), Some(&fits)),
+        "a message that fits was cut"
+    );
+
+    // One more than that, and more still: cut at the last `;` that fits, and
+    // marked as cut rather than passed off as the whole of it.
+    for count in [13, 15, 40] {
+        assert_eq!(
+            (
+                Some("port the tab bar".to_owned()),
+                Some(format!("{}\u{2026}", commands(12)))
+            ),
+            arrived(Some("port the tab bar"), Some(&commands(count))),
+            "{count} pieces"
+        );
+    }
+
+    // A title that would take the message's room leaves it some.
+    let (title, message) = arrived(Some(&commands(30)), Some("approve?"));
+    assert_eq!(title, Some(format!("{}\u{2026}", commands(12))));
+    assert_eq!(message.as_deref(), Some("approve?"));
+
+    // And a title with no message after it has the whole of the room.
+    let (title, _) = arrived(Some(&commands(30)), None);
+    assert_eq!(title, Some(format!("{}\u{2026}", commands(14))));
+}
