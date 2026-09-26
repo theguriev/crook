@@ -7776,6 +7776,61 @@ fn a_searched_group_s_heading_counts_the_group_and_says_what_the_search_left() {
     );
 }
 
+/// How many boxes in the scene wear the waiting wash.
+fn washed_rows(scene: &Scene) -> usize {
+    visible_rects(scene)
+        .filter(|(rect, _)| rect.background == Fill::Solid(tabs_panel::waiting_wash()))
+        .count()
+}
+
+#[test]
+fn a_tab_row_is_washed_for_a_waiting_pane_it_does_not_name() {
+    // A split tab in the background, and the pane that is not its focused one
+    // rings. One row a pane finds it; one row a tab named only the focused
+    // pane, and the header's "1 waiting" had no amber row anywhere under it.
+    let mut harness = Harness::panel(2);
+    let tabs = harness.tab_ids();
+    harness.dispatch_action(TabAction::Select(tabs[0]));
+    let asking = harness.active_pane_ids()[0];
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    harness.dispatch_action(TabAction::Select(tabs[1]));
+    let update = crate::terminal_model::TerminalUpdate::Bell {
+        pane: asking,
+        while_running: false,
+    };
+    harness.workspace_update(|workspace, ctx| workspace.apply_terminal_update(&update, ctx));
+
+    let scene = harness.frame();
+    assert!(
+        frame_text(&scene).contains("1 waiting"),
+        "nothing is waiting"
+    );
+    assert_eq!(
+        washed_rows(&scene),
+        1,
+        "a row a pane: the asking row is not amber"
+    );
+
+    harness.set_granularity(Granularity::Tabs);
+    let scene = harness.frame();
+    assert!(frame_text(&scene).contains("1 waiting"));
+    assert_eq!(
+        washed_rows(&scene),
+        1,
+        "a row a tab: the header says one is waiting and no row is amber"
+    );
+
+    // Brought up, the tab has every pane on screen, the asking one beside the
+    // one in focus, and its row — the selected one — is not washed.
+    harness.dispatch_action(TabAction::Select(tabs[0]));
+    let scene = harness.frame();
+    assert_eq!(
+        washed_rows(&scene),
+        0,
+        "the tab on screen was washed for a pane beside the one in focus"
+    );
+}
+
 /// Whether the heading is washed in the amber a waiting row wears: a box
 /// in the wash's own colour that the chevron sits inside.
 fn heading_is_washed(scene: &Scene, heading: RectF) -> bool {

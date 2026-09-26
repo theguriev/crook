@@ -168,7 +168,23 @@ pub(super) fn render(
     let is_selected = strip.is_active(tab) && tab_data.panes().is_focused(pane);
     // Waiting is a fact about a pane nobody is looking at, so the selected
     // row never is — which is what keeps the two washes from ever meeting.
-    let is_waiting = session.is_waiting(is_selected);
+    //
+    // Under `Tabs` a row stands for its whole tab and names only its focused
+    // pane, so it is washed for any of the tab's panes that is asking: a
+    // split's other pane rang, the header said "1 waiting", and no row in the
+    // panel was amber — the request was nowhere a person could find it, the
+    // case `group_rollup` exists for when a fold hides the row. The active
+    // tab's panes are all on screen, so its row still never is.
+    let is_waiting = match options.granularity {
+        Granularity::Panes => session.is_waiting(is_selected),
+        Granularity::Tabs => {
+            !strip.is_active(tab)
+                && tab_data
+                    .panes()
+                    .iter()
+                    .any(|pane| pane.session().is_waiting(false))
+        }
+    };
 
     // Under `Tabs` the row stands for its whole tab, so its close button
     // closes the tab. Under `Panes` it closes the pane it names, and the tab
