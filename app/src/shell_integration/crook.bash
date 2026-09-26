@@ -63,21 +63,28 @@ __crook_complete() {
 
 # What `line` could become, into the `candidates` array of the caller.
 #
-# The word being completed is everything after the last unquoted space, which is
-# an approximation and a deliberate one: bash's own splitting is
-# `COMP_WORDBREAKS` and a parser nobody wants twice. It is right for every line
-# that does not quote a space, which is nearly all of them, and wrong in a way
-# that offers too *few* completions rather than the wrong ones.
+# The word being completed is the run at the end of the line that no unescaped
+# space breaks, which is an approximation and a deliberate one: bash's own
+# splitting is `COMP_WORDBREAKS` and a parser nobody wants twice. A space with a
+# backslash before it is part of the word — that is how an answer from here
+# writes a name with a space in it, and cutting there made the next Tab ask
+# about the fragment after it — and the same rule Crook's `word_at_end` follows.
+# Quotes are not read, which offers too *few* completions rather than the wrong
+# ones.
 __crook_candidates() {
 	local line=$1
-	local word=${line##* }
+	local word='' at='(\\.|[^[:space:]\\])*$'
+	[[ $line =~ $at ]] && word=${BASH_REMATCH[0]}
 	local prefix=${line%"$word"}
+	# `compgen` is asked about a name, not about how it is typed.
+	local name=''
+	__crook_unescaped "$word"
 
 	# The first word of the line is a command; everything after it is an
 	# argument. `compgen -c` reads the same hash and PATH the shell completes
 	# from, so this is the shell's answer rather than an imitation of it.
 	if [ -z "${prefix//[[:space:]]/}" ]; then
-		mapfile -t candidates < <(builtin compgen -c -- "$word" 2>/dev/null)
+		mapfile -t candidates < <(builtin compgen -c -- "$name" 2>/dev/null)
 		return 0
 	fi
 
@@ -86,10 +93,27 @@ __crook_candidates() {
 		\$*) mapfile -t candidates < <(builtin compgen -P '$' -v -- "${word#\$}" 2>/dev/null) ;;
 		# Files and directories, the way readline would offer them.
 		*)
-			mapfile -t candidates < <(builtin compgen -o default -- "$word" 2>/dev/null)
+			mapfile -t candidates < <(builtin compgen -o default -- "$name" 2>/dev/null)
 			__crook_as_typed
 			;;
 	esac
+}
+
+# `$1` with each backslash escape taken off, into `name` of the caller: the
+# name a word typed as `with\ sp` spells. A loop rather than a `sed`, because
+# this runs on every Tab and a process for it is a process for nothing.
+__crook_unescaped() {
+	local rest=$1 character
+	name=
+	while [ -n "$rest" ]; do
+		character=${rest:0:1}
+		rest=${rest:1}
+		if [ "$character" = '\' ] && [ -n "$rest" ]; then
+			character=${rest:0:1}
+			rest=${rest:1}
+		fi
+		name+=$character
+	done
 }
 
 # The `candidates` array as they have to be typed.

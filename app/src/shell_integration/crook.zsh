@@ -71,7 +71,13 @@ __crook_complete() {
 	line=${content#*$'\n'}
 	[[ $line == "$content" ]] && line=''
 
-	local word=${line##* }
+	# The word is the run at the end of the line that no unescaped space
+	# breaks: a space with a backslash before it is part of the name, which is
+	# how an answer from here writes one, and cutting there made the next Tab
+	# ask about the fragment after it. The same rule Crook's `word_at_end`
+	# follows, so the word the answer replaces is the word it was for.
+	setopt localoptions extendedglob
+	local word=${(M)line%%(\\?|[^[:space:]\\])#}
 	# Quoted, so the word is taken off the line as itself and not as a glob:
 	# `ls *.txt` makes the word `*.txt`, and an unquoted removal would match a
 	# different suffix. The globbing this line does not want is where the file
@@ -106,12 +112,26 @@ __crook_complete() {
 		# is two arguments and `it's.txt` opens a string. A leading `~` or
 		# `~user` is taken off before quoting and put back after — the glob
 		# expands it, and `~/pro` came back as the whole path it stands for.
-		local home='' expanded='' found
+		#
+		# A word that holds a backslash is a name written out, the way these
+		# answers write one, and is looked for as exactly the name it spells:
+		# `(Q)` takes the escapes off and `(b)` makes what is left literal. A
+		# backslash in a glob that came out of a variable escapes nothing, so
+		# `with\ sp` matched no file at all. A word without one is still a
+		# glob, so `*.tx` goes on finding `notes.txt`.
+		local home='' expanded='' rest pattern found
 		if [[ $word == \~* ]]; then
 			home=${word%%/*}
 			expanded=${~home}
 		fi
-		for found in ${~word}*(N-M); do
+		rest=${word#$home}
+		if [[ $rest == *\\* ]]; then
+			pattern=${(b)${(Q)rest}}
+		else
+			pattern=$rest
+		fi
+		[[ -n $home ]] && pattern=${(b)expanded}$pattern
+		for found in ${~pattern}*(N-M); do
 			if [[ -n $home && $found == $expanded* ]]; then
 				candidates+=("$home${(q)${found#$expanded}}")
 			else

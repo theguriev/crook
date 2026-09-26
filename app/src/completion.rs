@@ -213,11 +213,29 @@ pub fn request_text(serial: u64, line_to_caret: &str) -> String {
 /// suffix of what the shell split off — on an ordinary line, with no tab or
 /// newline before the caret, the very same word. The caller splices the shell's
 /// answer back where this word was, so the two agreeing on where it began is
-/// what keeps the result a line both of them meant. Quoting is not parsed — a
-/// path with a space in it completes as the fragment after the space — which
-/// offers too *few* completions rather than the wrong ones.
+/// what keeps the result a line both of them meant.
+///
+/// **A space with a backslash before it is part of the word**, the way every
+/// shell reads it — and the way all three snippets write a name with a space
+/// in it when they answer. Breaking there made the next Tab after such a name
+/// ask about the fragment after the space and find nothing: `cd with\ space/`
+/// could not be completed any further. A backslash that is itself escaped is
+/// not one, so `a\\ b` still breaks. Quotes are not parsed — `"with sp`
+/// completes as `sp` — which offers too *few* completions rather than the
+/// wrong ones.
 pub fn word_at_end(line_to_caret: &str) -> &str {
-    match line_to_caret.rfind([' ', '\t', '\n']) {
+    let bytes = line_to_caret.as_bytes();
+    let separator = (0..bytes.len()).rev().find(|&at| {
+        matches!(bytes[at], b' ' | b'\t' | b'\n')
+            && bytes[..at]
+                .iter()
+                .rev()
+                .take_while(|&&byte| byte == b'\\')
+                .count()
+                % 2
+                == 0
+    });
+    match separator {
         Some(at) => &line_to_caret[at + 1..],
         None => line_to_caret,
     }
