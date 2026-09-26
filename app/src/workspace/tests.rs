@@ -18062,6 +18062,47 @@ mod sandboxed {
         crook_plugin::PluginId::parse("eugen/probe").expect("a literal that parses")
     }
 
+    #[test]
+    fn a_plugin_renamed_and_back_under_dev_is_asked_again_and_its_card_says_so() {
+        // `--dev-plugin` forgets a plugin whose module renamed itself. The
+        // grant went from the host alone: renamed back, the card read the
+        // settings' copy and said "Allowed" over a plugin refused everything,
+        // and the next launch — which starts from the settings — would have
+        // handed the grant back with nobody answering for it.
+        let scratch = Scratch::new("dev-rename");
+        let mut harness = harness(&scratch);
+        let first = wasm("eugen/probe", "header.right", 10);
+        let renamed = wasm("eugen/other", "header.right", 10);
+        harness.workspace_update(|workspace, ctx| {
+            workspace
+                .run_dev_plugin(&first, ctx)
+                .expect("the first build runs");
+            workspace.set_plugin_granted(&probe(), vec![String::from("tabs.read")], ctx);
+            workspace
+                .run_dev_plugin(&renamed, ctx)
+                .expect("the renamed build runs");
+            workspace.forget_plugin(&probe(), ctx);
+            workspace
+                .run_dev_plugin(&first, ctx)
+                .expect("the build renamed back runs");
+        });
+
+        let (card, runtime) = harness.workspace.read(&harness.app, |workspace, _| {
+            (
+                workspace.settings().granted_to("eugen/probe").to_vec(),
+                workspace.host().granted(&probe()).to_vec(),
+            )
+        });
+        assert_eq!(
+            card, runtime,
+            "the card says one grant and the running plugin is held to another"
+        );
+        assert!(
+            runtime.is_empty(),
+            "the grant came back unasked: {runtime:?}"
+        );
+    }
+
     /// Whether the sidebar's list has a row reading `name`.
     fn listed(scene: &Scene, name: &str) -> bool {
         let column = settings_field_boxes(scene)
