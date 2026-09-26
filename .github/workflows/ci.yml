@@ -103,6 +103,15 @@ jobs:
         run: |
           if [ "$RUNNER_OS" = Linux ]; then
             sudo apt-get update -q && sudo apt-get install -y -q fish zsh
+            # Ubuntu's /etc/zsh/zshrc runs compinit, and the runner leaves
+            # directories on zsh's fpath writable by its group — so every zsh
+            # the tests start stops at "Ignore insecure directories and
+            # continue [y] or abort compinit [n]?" and never reaches a prompt.
+            # A machine of somebody's own does not look like this; the runner
+            # is made to.
+            insecure=$(zsh -fc 'autoload -Uz compaudit; compaudit' 2>/dev/null || true)
+            echo "compaudit: ${insecure:-nothing}"
+            [ -z "$insecure" ] || echo "$insecure" | xargs sudo chmod g-w,o-w
           else
             brew install fish
           fi
