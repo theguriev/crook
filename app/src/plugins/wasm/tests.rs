@@ -1799,21 +1799,41 @@ fn an_argument_is_one_word_however_it_is_spelled() {
 fn a_quoted_argument_comes_back_out_of_a_real_shell_as_it_went_in() {
     // The proof the spelling is right rather than a spelling this file
     // agrees with: a shell reads the quoted word and prints what it read.
-    for argument in [
-        "it's here",
-        "x'; echo pwned; echo '",
-        "''",
-        "a\\b $HOME `id`",
+    //
+    // Every shell a pane can run that is on this machine, because they do not
+    // agree about single quotes: fish reads `\'` and `\\` inside them as
+    // escapes, and the one argument below that closed its own quotes there
+    // ran `echo PWNED` as a command of its own.
+    for (shell, flags) in [
+        ("sh", &["-c"][..]),
+        ("bash", &["-c"][..]),
+        ("zsh", &["-f", "-c"][..]),
+        ("fish", &["--no-config", "-c"][..]),
     ] {
-        let line = fill("printf %s {}", argument).expect("a template with a hole");
-        let Ok(output) = crate::process::command("sh").args(["-c", &line]).output() else {
-            return;
-        };
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout),
-            argument,
-            "{line:?} did not come back as one word"
-        );
+        for argument in [
+            "it's here",
+            "x'; echo pwned; echo '",
+            "''",
+            "a\\b $HOME `id`",
+            "x\\' ; echo PWNED ; echo \\'",
+            "\\",
+            "\\'",
+        ] {
+            let line = fill("printf %s {}", argument).expect("a template with a hole");
+            let Ok(output) = crate::process::command(shell)
+                .args(flags)
+                .arg(&line)
+                .output()
+            else {
+                // Not on this machine.
+                break;
+            };
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                argument,
+                "{shell}: {line:?} did not come back as one word"
+            );
+        }
     }
 }
 
