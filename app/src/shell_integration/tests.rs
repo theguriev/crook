@@ -1718,7 +1718,11 @@ fn test_a_fish_completion_is_offered_the_way_it_has_to_be_typed() {
     // opened a string, a star a glob. Escaped the way fish's own Tab does,
     // with a leading `~` left for fish to expand. Run through the snippet's
     // own request and answer files, in a real fish; skipped where there is
-    // none.
+    // none, and on Windows, where there is no fish pane and `a*b` cannot be a
+    // file name.
+    if cfg!(windows) {
+        return;
+    }
     let directory = TempDir::new("fish-typed");
     fs::create_dir_all(directory.path().join("projects").join("src"))
         .expect("the directories should be creatable");
