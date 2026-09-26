@@ -1663,7 +1663,7 @@ fn test_a_bash_completion_is_offered_the_way_it_has_to_be_typed() {
         .arg(
             r#"[ "${BASH_VERSINFO[0]}" -ge 4 ] || exit 77
 . "$1"
-for line in "cd proj" "cat no" "cd projects/" "ls ~/pro"; do
+for line in "cd proj" "cat no" "cd projects/" "ls ~/pro" "cat notes\\ f"; do
     candidates=()
     __crook_candidates "$line"
     printf '%s|' "${candidates[@]}"
@@ -1690,7 +1690,10 @@ done"#,
             "projects/|",
             "notes\\ file.txt|",
             "projects/src/|",
-            "~/projects/|"
+            "~/projects/|",
+            // Past the escaped space its own answer wrote, rather than asking
+            // about the fragment after it.
+            "notes\\ file.txt|"
         ],
         "{said}"
     );
@@ -1775,7 +1778,7 @@ fn test_a_fish_completion_is_offered_the_way_it_has_to_be_typed() {
     .expect("the snippet should be writable");
 
     let probe = r#"source $argv[1]
-for line in "cat no" "cat it" "cat a" "cd proj" "ls ~/pro"
+for line in "cat no" "cat it" "cat a" "cd proj" "ls ~/pro" "cat notes\\ f"
     printf '1\n%s\n' $line >$CROOK_SCRATCH/complete.in
     __crook_complete >/dev/null
     string join '|' <$CROOK_SCRATCH/complete.out
@@ -1800,7 +1803,8 @@ end"#;
             "it\\'s.txt",
             "a\\*b",
             "projects/",
-            "~/projects/"
+            "~/projects/",
+            "notes\\ file.txt"
         ],
         "{said}{}",
         String::from_utf8_lossy(&output.stderr)
@@ -1833,7 +1837,7 @@ fn test_a_zsh_completion_is_offered_the_way_it_has_to_be_typed() {
     .expect("the snippet should be writable");
 
     let probe = r#"source $1 2>/dev/null
-for line in "cat no" "cat it" "cd proj" "cd projects/" "ls ~/pro" "(" "\$CROOK_TEST_PROB"; do
+for line in "cat no" "cat it" "cd proj" "cd projects/" "ls ~/pro" "(" "\$CROOK_TEST_PROB" "cat notes\\ f"; do
     printf '1\n%s\n' "$line" >$CROOK_SCRATCH/complete.in
     __crook_complete >/dev/null
     print -r -- "${(j:|:)${(f)"$(<$CROOK_SCRATCH/complete.out)"}}"
@@ -1867,6 +1871,8 @@ done"#;
             // this test sets, since a runner's environment has its own
             // `HOMEBREW_*` beside `HOME`.
             "$CROOK_TEST_PROBE",
+            // Past the escaped space its own answer wrote.
+            "notes\\ file.txt",
         ],
         "{said}{}",
         String::from_utf8_lossy(&output.stderr)

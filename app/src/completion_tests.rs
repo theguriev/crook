@@ -73,6 +73,18 @@ fn test_the_word_a_completion_replaces_is_the_one_after_the_last_space() {
 }
 
 #[test]
+fn test_a_space_with_a_backslash_before_it_is_part_of_the_word() {
+    // What the snippets write for a name with a space in it, and so what the
+    // next Tab has to ask about whole.
+    assert_eq!(word_at_end("cd with\\ sp"), "with\\ sp");
+    assert_eq!(word_at_end("cat notes\\ file\\ "), "notes\\ file\\ ");
+    // An escaped backslash escapes nothing after it.
+    assert_eq!(word_at_end("echo a\\\\ b"), "b");
+    // And quotes are still not read.
+    assert_eq!(word_at_end("cat \"notes f"), "f");
+}
+
+#[test]
 fn test_an_answer_is_one_candidate_per_line_with_the_blanks_dropped() {
     // A shell that found nothing prints one empty line — that is what
     // `printf '%s\n' ${empty[@]}` does — and an empty candidate would insert
