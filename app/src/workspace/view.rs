@@ -1625,7 +1625,16 @@ impl Workspace {
     /// under a name its source no longer has. Nothing is uninstalled — there
     /// is nothing installed — and the grant goes with it for the reason
     /// `Host::forget` gives.
+    ///
+    /// The grant goes from the settings as well as from the host. The host's
+    /// copy is what the running plugin is held to and the settings' is what
+    /// its card reads and the next launch starts from: gone from the first
+    /// alone, a plugin renamed and renamed back had a card saying "Allowed"
+    /// over a plugin refused everything, and the next launch handed the grant
+    /// back with nobody having answered for it again.
     pub fn forget_plugin(&mut self, plugin: &PluginId, ctx: &mut ViewContext<Self>) {
+        self.settings.set_granted(plugin.as_str(), Vec::new());
+        self.save_settings(ctx);
         self.host.forget(plugin, ctx);
         self.withdrawn.remove(plugin.as_str());
         self.sync_input_keys();
