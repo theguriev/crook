@@ -79,12 +79,20 @@ __crook_complete() {
 	local prefix=${line%"$word"}
 	local -a candidates=()
 
-	if [[ -z ${prefix//[[:space:]]/} ]]; then
+	# The word is text in the two hash lookups below, not a pattern: `(b)`
+	# quotes whatever in it a pattern would read. Unquoted, a `(` or a `[`
+	# typed at the start of a line was a pattern zsh could not parse, and what
+	# came back was the bodies of this shell's functions, line by line, offered
+	# as completions to put on the command line.
+	#
+	# A `$` is looked at first, because `$EDITOR` is as much a word at the
+	# start of a line as anywhere after it, and was completed as a command.
+	if [[ $word == \$* ]]; then
+		candidates=(\$${^${(k)parameters[(I)${(b)word#\$}*]}})
+	elif [[ -z ${prefix//[[:space:]]/} ]]; then
 		# Commands: the same hash, functions, builtins and PATH zsh completes
 		# from. `(k)` takes the keys of the hash rather than its paths.
-		candidates=(${(k)commands[(I)$word*]} ${(k)functions[(I)$word*]} ${(k)builtins[(I)$word*]})
-	elif [[ $word == \$* ]]; then
-		candidates=(\$${^${(k)parameters[(I)${word#\$}*]}})
+		candidates=(${(k)commands[(I)${(b)word}*]} ${(k)functions[(I)${(b)word}*]} ${(k)builtins[(I)${(b)word}*]})
 	else
 		# The files and directories the word could name. `(N)` makes a glob
 		# that matches nothing expand to nothing rather than to itself, and
