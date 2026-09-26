@@ -1812,7 +1812,8 @@ fn test_a_zsh_completion_is_offered_the_way_it_has_to_be_typed() {
     // The answer is put on the line as it is, and zsh's globs answered with
     // bare names: a space made two arguments of one file, a quote opened a
     // string, a directory came back without the slash that lets the next Tab
-    // go into it, and `~/pro` came back as the whole path it stands for. Run
+    // go into it, and `~/pro` came back as the whole path it stands for. The
+    // word is text to the command and variable lookups, not a pattern. Run
     // through the snippet's own request and answer files, in a real zsh;
     // skipped where there is none.
     if cfg!(windows) {
@@ -1832,7 +1833,7 @@ fn test_a_zsh_completion_is_offered_the_way_it_has_to_be_typed() {
     .expect("the snippet should be writable");
 
     let probe = r#"source $1 2>/dev/null
-for line in "cat no" "cat it" "cd proj" "cd projects/" "ls ~/pro"; do
+for line in "cat no" "cat it" "cd proj" "cd projects/" "ls ~/pro" "(" "\$CROOK_TEST_PROB"; do
     printf '1\n%s\n' "$line" >$CROOK_SCRATCH/complete.in
     __crook_complete >/dev/null
     print -r -- "${(j:|:)${(f)"$(<$CROOK_SCRATCH/complete.out)"}}"
@@ -1843,6 +1844,7 @@ done"#;
         .current_dir(directory.path())
         .env("HOME", directory.path())
         .env("CROOK_SCRATCH", directory.path())
+        .env("CROOK_TEST_PROBE", "1")
         .stdin(std::process::Stdio::null())
         .output()
     else {
@@ -1857,7 +1859,14 @@ done"#;
             "it\\'s.txt",
             "projects/",
             "projects/src/",
-            "~/projects/"
+            "~/projects/",
+            // A `(` read as the start of a pattern answered with the bodies
+            // of the snippet's own functions; it names no command.
+            "",
+            // And a variable is a variable at the start of a line too. One
+            // this test sets, since a runner's environment has its own
+            // `HOMEBREW_*` beside `HOME`.
+            "$CROOK_TEST_PROBE",
         ],
         "{said}{}",
         String::from_utf8_lossy(&output.stderr)
