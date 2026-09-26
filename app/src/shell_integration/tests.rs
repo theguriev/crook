@@ -1284,20 +1284,38 @@ fn test_a_real_fish_emits_the_four_marks() {
 
 #[test]
 fn test_a_real_fish_that_marks_its_own_prompt_is_left_alone() {
+    // Asked of fish rather than read off what came back. A fish older than
+    // 4.0 has no marks of its own, and the snippet marks for it — so marks in
+    // the output say nothing about which of the two wrote them, and fish 3.7,
+    // the first to run this in CI, looked like a fish marking its own prompt.
+    // The test above covers that case; this one has nothing to say about it.
+    if fish_marks_its_own_prompt() != Some(true) {
+        return;
+    }
     let Some(seen) = run_a_real_shell("fish", &[]) else {
         return;
     };
-    if !seen.contains("\x1b]133;") {
-        // A fish old enough to have no marks of its own. The test above covers
-        // that case; this one has nothing to say about it.
-        return;
-    }
     assert!(
         !seen.contains("\x1b]133;A\x07"),
         "the snippet terminates its marks with BEL and fish does not, so a BEL \
          mark here means both are marking and every block has two of each; \
          what fish wrote was {seen:?}"
     );
+}
+
+/// Whether the fish on `PATH` writes its own prompt marks, or `None` when
+/// there is no fish to ask.
+fn fish_marks_its_own_prompt() -> Option<bool> {
+    let output = crate::process::command("fish")
+        .args([
+            "--no-config",
+            "--command",
+            r"status features | string match --quiet --regex '^mark-prompt\s+on\b'",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    Some(output.status.success())
 }
 
 /// The one line that prints `$HISTFILE`, and the label [`printed`] finds it by.
