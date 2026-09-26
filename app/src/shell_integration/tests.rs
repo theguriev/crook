@@ -1669,6 +1669,49 @@ done"#,
 }
 
 #[test]
+fn test_a_fish_that_marks_its_own_prompt_still_answers_crooks_completion() {
+    // fish 4 writes its own prompt marks and the snippet stands down for them,
+    // and completion used to stand down with them: it sat behind the same
+    // guard, and on every fish with `mark-prompt` on — the default since 4.0 —
+    // Crook's question went to a shell with no binding to answer it. Run in a
+    // real fish, both ways; skipped where there is no fish.
+    let directory = TempDir::new("fish-completion");
+    let script = directory.path().join("crook.fish");
+    fs::write(
+        &script,
+        snippet(Shell::Fish).expect("fish has an integration"),
+    )
+    .expect("the snippet should be writable");
+
+    let probe = r#"source $argv[1]
+functions --query __crook_complete; and echo completes
+bind | string match --quiet '*6339*__crook_complete*'; and echo bound
+functions --query __crook_mark; and echo marks"#;
+    for (features, want) in [
+        ("", &["completes", "bound"][..]),
+        ("no-mark-prompt", &["completes", "bound", "marks"][..]),
+    ] {
+        let Ok(output) = crate::process::command("fish")
+            .args(["--no-config", "--interactive", "--command", probe])
+            .arg(&script)
+            .env("fish_features", features)
+            .env("HOME", directory.path())
+            .stdin(std::process::Stdio::null())
+            .output()
+        else {
+            return;
+        };
+        let said = String::from_utf8_lossy(&output.stdout);
+        assert_eq!(
+            said.lines().collect::<Vec<_>>(),
+            want,
+            "fish_features={features:?}: {said}{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
 fn test_a_repeated_subshell_line_keeps_its_status_where_history_skips_it() {
     // bash runs no DEBUG trap for a top-level `( ... )`, so the snippet tells
     // whether a line ran by a counter instead — and history's counter stands

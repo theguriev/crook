@@ -8,59 +8,29 @@
 # over ssh, inside a container, on a machine that is not this one — paste it at
 # the END of ~/.config/fish/config.fish.
 
-# Three conditions, and the third is the one that matters most here. fish 4.0
-# emits all four marks itself, from its own reader, behind the `mark-prompt`
-# feature flag; installing these hooks on top of that gives every block two of
-# every mark, which is worse than having none. Where fish is already doing the
-# job, do nothing — and where a person has turned it off, or fish is older than
-# the flag, do it for them.
+# Two halves. The marks and the working directory are what fish 4.0 does
+# itself, from its own reader, behind the `mark-prompt` feature flag — on by
+# default — and installing hooks on top of that gives every block two of every
+# mark, which is worse than having none; so they are installed only where fish
+# is not doing the job. Completion is Crook's own question and fish has
+# nothing that answers it, so it is installed everywhere.
 #
-# The second condition's guard is deliberately `set --global` and not
-# `set --export`: sourcing this twice in one shell must not install the hooks
-# twice, but `exec fish` replaces the shell with one that has no hooks at all,
-# and an exported guard would tell that new shell the work was already done.
+# The guard is deliberately `set --global` and not `set --export`: sourcing
+# this twice in one shell must not install the hooks twice, but `exec fish`
+# replaces the shell with one that has no hooks at all, and an exported guard
+# would tell that new shell the work was already done.
 status is-interactive
 and not set --query CROOK_SHELL_INTEGRATION
-and not status features | string match --quiet --regex '^mark-prompt\s+on\b'
 and begin
     set --global CROOK_SHELL_INTEGRATION 1
 
-    function __crook_mark
-        printf '\e]133;%s\a' $argv[1]
-    end
-
-    # Where the shell is, reported the way every terminal reads it: OSC 7. See
-    # the zsh integration for why nothing else tells Crook, and why the
-    # authority is left empty and both `%` and `;` are escaped — `%` first, so
-    # the `%` in `%3B` is not escaped a second time.
-    #
-    # Fired on the variable rather than on the prompt, which is fish's own way
-    # of saying it and costs nothing on a prompt where nothing moved.
-    function __crook_cwd --on-variable PWD --on-event fish_prompt
-        printf '\e]7;file://%s\a' (string replace --all '%' '%25' -- $PWD | string replace --all ';' '%3B')
-    end
-
-    function __crook_preexec --on-event fish_preexec
-        __crook_mark C
-    end
-
-    function __crook_postexec --on-event fish_postexec
-        # $status first, before anything else in this function: a test, a
-        # printf, anything at all here replaces the status of the command the
-        # user ran.
-        set --local exit_status $status
-        __crook_mark "D;$exit_status"
-    end
-
-    # ctrl-c on a line that was typed but never run. A boundary with no command
-    # behind it, and so no status to report — the standard spells that as a
-    # bare D. fish is the only one of the three shells that reports it.
-    function __crook_cancel --on-event fish_cancel
-        __crook_mark D
-    end
-
-    # Completion, which is the one thing the marks above cannot do: they are an
-    # announcement, and this is a question with an answer.
+    # Completion, which is the one thing the marks below cannot do: they are an
+    # announcement, and this is a question with an answer. Installed whatever
+    # fish marks for itself — fish 4 writes its own prompt marks and its own
+    # OSC 7, and nothing of its own answers Crook's question. It used to sit
+    # behind the same guard as the marks, and on every fish from 4.0 on,
+    # where `mark-prompt` is on by default, Crook's completion asked a shell
+    # that had no binding to answer it.
     #
     # The line does not arrive in the key sequence. It is in a file Crook wrote
     # — a command line can hold a semicolon, a newline and bytes that are not
@@ -98,38 +68,75 @@ and begin
     # mode types in insert mode.
     bind --mode insert \e\[6339~ __crook_complete 2>/dev/null
 
-    function __crook_has_mode_prompt --description 'Whether fish_mode_prompt prints anything'
-        functions --query fish_mode_prompt
-        and functions fish_mode_prompt | string match --regex --invert --quiet '^ *(#|function |end$|$)'
-    end
+    # Where fish marks its own prompts, the rest is fish's already.
+    if not status features | string match --quiet --regex '^mark-prompt\s+on\b'
+        function __crook_mark
+            printf '\e]133;%s\a' $argv[1]
+        end
 
-    # Deferred to the first prompt rather than done here. Crook installs this
-    # through vendor_conf.d, which fish reads before config.fish, so at this
-    # point fish_prompt is still fish's own and wrapping it would wrap the one
-    # the user is about to replace. By the time the fish_prompt event fires,
-    # config.fish has run and fish_prompt is theirs.
-    function __crook_install_prompt --on-event fish_prompt
-        functions --erase __crook_install_prompt
-        functions --query fish_prompt
-        or return
-        functions --copy fish_prompt __crook_inner_prompt
-        if __crook_has_mode_prompt
-            # fish_mode_prompt prints before fish_prompt, so A belongs at the
-            # top of it or the vi-mode indicator lands outside the block.
-            functions --copy fish_mode_prompt __crook_inner_mode_prompt
-            function fish_mode_prompt
-                __crook_mark A
-                __crook_inner_mode_prompt
-            end
-            function fish_prompt
-                __crook_inner_prompt
-                __crook_mark B
-            end
-        else
-            function fish_prompt
-                __crook_mark A
-                __crook_inner_prompt
-                __crook_mark B
+        # Where the shell is, reported the way every terminal reads it: OSC 7. See
+        # the zsh integration for why nothing else tells Crook, and why the
+        # authority is left empty and both `%` and `;` are escaped — `%` first, so
+        # the `%` in `%3B` is not escaped a second time.
+        #
+        # Fired on the variable rather than on the prompt, which is fish's own way
+        # of saying it and costs nothing on a prompt where nothing moved.
+        function __crook_cwd --on-variable PWD --on-event fish_prompt
+            printf '\e]7;file://%s\a' (string replace --all '%' '%25' -- $PWD | string replace --all ';' '%3B')
+        end
+
+        function __crook_preexec --on-event fish_preexec
+            __crook_mark C
+        end
+
+        function __crook_postexec --on-event fish_postexec
+            # $status first, before anything else in this function: a test, a
+            # printf, anything at all here replaces the status of the command the
+            # user ran.
+            set --local exit_status $status
+            __crook_mark "D;$exit_status"
+        end
+
+        # ctrl-c on a line that was typed but never run. A boundary with no command
+        # behind it, and so no status to report — the standard spells that as a
+        # bare D. fish is the only one of the three shells that reports it.
+        function __crook_cancel --on-event fish_cancel
+            __crook_mark D
+        end
+
+        function __crook_has_mode_prompt --description 'Whether fish_mode_prompt prints anything'
+            functions --query fish_mode_prompt
+            and functions fish_mode_prompt | string match --regex --invert --quiet '^ *(#|function |end$|$)'
+        end
+
+        # Deferred to the first prompt rather than done here. Crook installs this
+        # through vendor_conf.d, which fish reads before config.fish, so at this
+        # point fish_prompt is still fish's own and wrapping it would wrap the one
+        # the user is about to replace. By the time the fish_prompt event fires,
+        # config.fish has run and fish_prompt is theirs.
+        function __crook_install_prompt --on-event fish_prompt
+            functions --erase __crook_install_prompt
+            functions --query fish_prompt
+            or return
+            functions --copy fish_prompt __crook_inner_prompt
+            if __crook_has_mode_prompt
+                # fish_mode_prompt prints before fish_prompt, so A belongs at the
+                # top of it or the vi-mode indicator lands outside the block.
+                functions --copy fish_mode_prompt __crook_inner_mode_prompt
+                function fish_mode_prompt
+                    __crook_mark A
+                    __crook_inner_mode_prompt
+                end
+                function fish_prompt
+                    __crook_inner_prompt
+                    __crook_mark B
+                end
+            else
+                function fish_prompt
+                    __crook_mark A
+                    __crook_inner_prompt
+                    __crook_mark B
+                end
             end
         end
     end
