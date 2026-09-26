@@ -1798,6 +1798,63 @@ end"#;
 }
 
 #[test]
+fn test_a_zsh_completion_is_offered_the_way_it_has_to_be_typed() {
+    // The answer is put on the line as it is, and zsh's globs answered with
+    // bare names: a space made two arguments of one file, a quote opened a
+    // string, a directory came back without the slash that lets the next Tab
+    // go into it, and `~/pro` came back as the whole path it stands for. Run
+    // through the snippet's own request and answer files, in a real zsh;
+    // skipped where there is none.
+    if cfg!(windows) {
+        return;
+    }
+    let directory = TempDir::new("zsh-typed");
+    fs::create_dir_all(directory.path().join("projects").join("src"))
+        .expect("the directories should be creatable");
+    for name in ["notes file.txt", "it's.txt"] {
+        fs::write(directory.path().join(name), "").expect("the file should be writable");
+    }
+    let script = directory.path().join("crook.zsh");
+    fs::write(
+        &script,
+        snippet(Shell::Zsh).expect("zsh has an integration"),
+    )
+    .expect("the snippet should be writable");
+
+    let probe = r#"source $1 2>/dev/null
+for line in "cat no" "cat it" "cd proj" "cd projects/" "ls ~/pro"; do
+    printf '1\n%s\n' "$line" >$CROOK_SCRATCH/complete.in
+    __crook_complete >/dev/null
+    print -r -- "${(j:|:)${(f)"$(<$CROOK_SCRATCH/complete.out)"}}"
+done"#;
+    let Ok(output) = crate::process::command("zsh")
+        .args(["-f", "-i", "-c", probe, "crook-test"])
+        .arg(&script)
+        .current_dir(directory.path())
+        .env("HOME", directory.path())
+        .env("CROOK_SCRATCH", directory.path())
+        .stdin(std::process::Stdio::null())
+        .output()
+    else {
+        return;
+    };
+
+    let said = String::from_utf8_lossy(&output.stdout);
+    assert_eq!(
+        said.lines().collect::<Vec<_>>(),
+        [
+            "notes\\ file.txt",
+            "it\\'s.txt",
+            "projects/",
+            "projects/src/",
+            "~/projects/"
+        ],
+        "{said}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn test_a_repeated_subshell_line_keeps_its_status_where_history_skips_it() {
     // bash runs no DEBUG trap for a top-level `( ... )`, so the snippet tells
     // whether a line ran by a counter instead — and history's counter stands
