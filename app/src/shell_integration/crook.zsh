@@ -86,14 +86,34 @@ __crook_complete() {
 	elif [[ $word == \$* ]]; then
 		candidates=(\$${^${(k)parameters[(I)${word#\$}*]}})
 	else
-		# `(N)` makes a glob that matches nothing expand to nothing rather than
-		# to itself, and `-/` puts a slash on a directory — which is what makes
-		# an inserted completion carry on being completable.
-		candidates=(${~word}*(N) ${~word}*(N-/))
+		# The files and directories the word could name. `(N)` makes a glob
+		# that matches nothing expand to nothing rather than to itself, and
+		# `-M` marks a directory, or a link to one, with a slash — which is
+		# what makes an inserted completion carry on being completable. (This
+		# said `-/` did that once; `/` only picks directories out, and every
+		# directory came back without its slash.)
+		#
+		# What comes back is put on the line as it is, so it is written the
+		# way zsh's own Tab writes it: quoted with `(q)`, or `notes file.txt`
+		# is two arguments and `it's.txt` opens a string. A leading `~` or
+		# `~user` is taken off before quoting and put back after — the glob
+		# expands it, and `~/pro` came back as the whole path it stands for.
+		local home='' expanded='' found
+		if [[ $word == \~* ]]; then
+			home=${word%%/*}
+			expanded=${~home}
+		fi
+		for found in ${~word}*(N-M); do
+			if [[ -n $home && $found == $expanded* ]]; then
+				candidates+=("$home${(q)${found#$expanded}}")
+			else
+				candidates+=("${(q)found}")
+			fi
+		done
 	fi
 
-	# Sorted and de-duplicated: the two globs above overlap on directories, and
-	# the caller shows this list to a person.
+	# Sorted and de-duplicated: the caller shows this list to a person, and
+	# the three hashes the commands come from can name one command twice.
 	builtin printf '%s\n' ${(ou)candidates} >"$answer"
 	builtin printf '\e]6339;%s\a' "$serial"
 }
