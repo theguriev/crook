@@ -1355,8 +1355,18 @@ fn test_a_real_zsh_writes_its_history_where_a_zsh_started_by_hand_writes_it() {
     .and_then(|out| printed(&out, HISTFILE_LABEL))
     .expect("a zsh started by hand should print its HISTFILE");
 
+    // Where the person's own zsh names no history file at all — a zsh with
+    // no system rc that sets one, which is Linux's — the stub gives it the one
+    // every framework's guard gives an empty HISTFILE, `~/.zsh_history`, and
+    // that is the answer here rather than none. This used to expect the two to
+    // be equal whatever they were, which only a system that sets HISTFILE
+    // itself, macOS's, could pass.
+    let expected = match outside.is_empty() {
+        true => ran.home.path().join(".zsh_history").display().to_string(),
+        false => outside,
+    };
     assert_eq!(
-        inside, outside,
+        inside, expected,
         "the history has to go where this person's history goes. A HISTFILE \
          inside Crook's scratch directory is deleted with the pane: up-arrow \
          shows nothing from yesterday, and nothing typed today survives"
