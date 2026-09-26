@@ -755,14 +755,32 @@ fn fill(template: &str, argument: &str) -> Option<String> {
 
 /// One argument, as a shell will read it as one word.
 ///
-/// Single quotes, because inside them every shell this can reach treats every
-/// character as itself — no expansion, no globbing, no command substitution.
-/// The two families differ only in how a single quote is written inside them:
-/// POSIX shells end the quoting, escape it and start again; PowerShell doubles
-/// it.
+/// Single quotes, because inside them no shell this can reach expands,
+/// globs or substitutes anything. The two families differ in how a single
+/// quote is written inside them: POSIX shells end the quoting, escape it and
+/// start again; PowerShell doubles it.
+///
+/// **And a backslash is taken out of the quotes too.** sh, bash and zsh read
+/// one inside single quotes as itself, and fish does not: there `\'` is a
+/// quote that does not end the quoting and `\\` is one backslash. So an
+/// argument of `x\' ; echo PWNED ; echo \'` closed its own quotes under fish,
+/// and a plugin allowed to type `cd {}` ran whatever it liked. Written as
+/// `'\\'` — out of the quotes, one escaped backslash, back in — it is a
+/// backslash to all four, and nothing inside the quotes is ever a backslash
+/// for fish to read as an escape.
 #[cfg(not(windows))]
 fn quote(argument: &str) -> String {
-    format!("'{}'", argument.replace('\'', "'\\''"))
+    let mut quoted = String::with_capacity(argument.len() + 2);
+    quoted.push('\'');
+    for character in argument.chars() {
+        match character {
+            '\'' => quoted.push_str("'\\''"),
+            '\\' => quoted.push_str("'\\\\'"),
+            character => quoted.push(character),
+        }
+    }
+    quoted.push('\'');
+    quoted
 }
 
 /// See the other one.
