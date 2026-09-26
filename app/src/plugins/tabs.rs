@@ -575,6 +575,12 @@ impl Plugin for Tabs {
                         return;
                     };
                     workspace.close_tab_context_menu(ctx);
+                    // The tabs first, the way "Tab menu" brings them up. From
+                    // the settings or the Plugins page the chip is still in
+                    // the header, and focusing the pane behind the page
+                    // answered the request — its bell cleared, the count went
+                    // down — without the pane ever being on screen.
+                    workspace.handle_action(&WorkspaceAction::ShowSection(None), ctx);
                     workspace.handle_action(&WorkspaceAction::Tab(TabAction::FocusPane(pane)), ctx);
                 }
             });

@@ -6674,6 +6674,38 @@ fn the_query_goes_when_the_sidebar_shows_something_else() {
 }
 
 #[test]
+fn the_waiting_chord_from_the_settings_shows_the_pane_it_answers() {
+    // The header's chip is there on every page, and pressing it — or the
+    // chord — focused the waiting pane behind the settings: its bell was
+    // answered and the count went down with nobody having looked at it.
+    let mut harness = Harness::new(2);
+    let here = harness.focused_pane_id().expect("a pane has the focus");
+    let ringing = harness
+        .pane_ids()
+        .into_iter()
+        .find(|pane| *pane != here)
+        .expect("a second pane");
+    let update = crate::terminal_model::TerminalUpdate::Bell {
+        pane: ringing,
+        while_running: false,
+    };
+    harness.workspace_update(|workspace, ctx| workspace.apply_terminal_update(&update, ctx));
+    harness.open_settings_page();
+    assert!(
+        frame_text(&harness.frame()).contains("1 waiting"),
+        "nothing is waiting, so this shows nothing"
+    );
+
+    harness.run_command("crook/tabs/next-waiting");
+
+    assert_eq!(harness.focused_pane_id(), Some(ringing));
+    assert!(
+        !harness.is_settings_page_open(),
+        "the pane that asked was focused behind the settings page"
+    );
+}
+
+#[test]
 fn the_chord_comes_back_to_the_tabs_from_another_section() {
     // One gesture rather than two. The box is drawn over the tabs and nowhere
     // else, so a chord pressed on the settings has to bring the tabs back
