@@ -1312,7 +1312,6 @@ mod tests {
         assert_eq!(StatusMarks::Dots, options.status_marks);
     }
 
-    #[cfg(unix)]
     // `/dev/full` answers every write with "no space left on device", which
     // is the way a save really fails; reached through a link, so what the
     // failed save removes is the link and never the device.
@@ -1333,6 +1332,7 @@ mod tests {
         assert!(!scratch.settings_file().exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn test_a_settings_file_that_is_a_link_stays_one_and_its_target_is_written() {
         // A dotfiles repository linked into place: the save lands in the file
