@@ -387,7 +387,7 @@ impl Document {
     fn flow(text: &str, block: &str, nested: &mut Vec<(String, String, String)>) -> Result<()> {
         let inside = text
             .strip_prefix('{')
-            .and_then(|rest| rest.trim_end().strip_suffix('}'))
+            .and_then(closed)
             .with_context(|| format!("`{block}` opens a `{{` it never closes"))?;
 
         for entry in split_flow(inside) {
@@ -488,6 +488,32 @@ impl Document {
 
 /// The entries of a flow mapping's inside, split on the commas that are its
 /// own: not one inside a nested `{}`, and not one inside quotes.
+/// What is inside a flow mapping, given the text after its opening `{`: up
+/// to the `}` that closes it, with nothing after that but a comment.
+///
+/// The `}` is found by depth, outside quotes, rather than by being the last
+/// character on the line, because `normal: {...}  # dim` is YAML too and a
+/// trailing comment was refusing the whole theme.
+fn closed(rest: &str) -> Option<&str> {
+    let mut depth = 0usize;
+    let mut quote: Option<char> = None;
+    for (at, character) in rest.char_indices() {
+        match (quote, character) {
+            (Some(open), c) if c == open => quote = None,
+            (Some(_), _) => {}
+            (None, '"' | '\'') => quote = Some(character),
+            (None, '{') => depth += 1,
+            (None, '}') if depth == 0 => {
+                let after = rest[at + 1..].trim();
+                return (after.is_empty() || after.starts_with('#')).then(|| &rest[..at]);
+            }
+            (None, '}') => depth -= 1,
+            _ => {}
+        }
+    }
+    None
+}
+
 fn split_flow(inside: &str) -> Vec<&str> {
     let mut entries = Vec::new();
     let mut depth = 0usize;
@@ -563,6 +589,15 @@ fn value_of(value: &str) -> String {
         // what every lenient parser does, and the value is about to be checked
         // for being a colour anyway.
         return inside;
+    }
+
+    // Nothing but a comment: `terminal_colors: # the sixteen` is a key that
+    // opens a block, and read as the value `# the sixteen` it made every
+    // line under it "indented under nothing". A `#` with a word straight
+    // after it is left alone, since an unquoted `#002b36` is what a colour
+    // written by hand usually looks like.
+    if value == "#" || value.starts_with("# ") || value.starts_with("#\t") {
+        return String::new();
     }
 
     match value.split_once(" #") {
