@@ -62,7 +62,7 @@
 
 use std::ops::Range;
 
-use crook_terminal::{Block, BlockId, CellSide, Rows, SelectionKind, Snapshot};
+use crook_terminal::{Block, BlockId, CellFlags, CellSide, Rows, SelectionKind, Snapshot};
 
 use crate::editor::text;
 use crate::terminal_model::BlockHistory;
@@ -311,6 +311,12 @@ impl Region {
                 // folded them.
                 folded =
                     !self.block && columns.end >= item.rows.columns() && item.rows.wraps(local);
+                if folded {
+                    let blanks = blanks_before_a_fold(&item.rows, local)
+                        .filter(|column| *column >= columns.start)
+                        .count();
+                    text.extend(std::iter::repeat_n(' ', blanks));
+                }
                 written = true;
             }
         }
@@ -589,6 +595,9 @@ impl<'a> Blocks<'a> {
                 item.rows.visit_line(local, length, |character, column| {
                     visit(character, Place::new(id, row, column));
                 });
+                for column in blanks_before_a_fold(&item.rows, local) {
+                    visit(' ', Place::new(id, row, column));
+                }
                 folded = item.rows.wraps(local);
                 ended = Some(Place::new(
                     item.id,
@@ -598,6 +607,30 @@ impl<'a> Blocks<'a> {
             }
         }
     }
+}
+
+/// The columns of a folded row past its last printed character, which were
+/// spaces the program printed rather than the rest of the grid.
+///
+/// A row only folds once something is written past its last column, so
+/// every cell of it was printed into — but both stores trim the blanks at the
+/// end of a row, and a fold puts no line break there to stand for them. So
+/// `aaaaaaaaa bbb` folded at ten columns read as `aaaaaaaaabbb`: a search
+/// for `a bbb` missed it, `abbb` matched text that was never there, and a
+/// copy of the line lost the space. The blank a wide character leaves when
+/// it does not fit in the last column is not one of these: it is where the
+/// character would have gone, not a space anybody printed.
+fn blanks_before_a_fold<'a>(rows: &'a Rows<'_>, row: usize) -> impl Iterator<Item = usize> + 'a {
+    let from = if rows.wraps(row) {
+        rows.line_length(row)
+    } else {
+        rows.columns()
+    };
+    (from..rows.columns()).filter(move |column| {
+        !rows
+            .cell(row, *column)
+            .is_some_and(|cell| cell.flags.contains(CellFlags::WIDE_SPACER))
+    })
 }
 
 /// The item a finished block is.
