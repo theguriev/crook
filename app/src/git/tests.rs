@@ -455,6 +455,55 @@ fn a_submodule_under_a_directory_named_worktrees_is_not_a_linked_worktree() {
     assert_eq!(branches(&lib), vec![String::from("main")]);
 }
 
+#[cfg(unix)]
+#[test]
+fn a_directory_symlinked_into_a_repository_has_its_branch() {
+    // `~/notes -> ~/Work/repo/docs`: the shell's `$PWD` is the link, whose
+    // parents are not the repository's, and git still names the branch.
+    if without_git("a_directory_symlinked_into_a_repository_has_its_branch") {
+        return;
+    }
+    let scratch = ScratchDir::new("dir-symlink");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    let docs = repo.join("docs");
+    std::fs::create_dir_all(&docs).expect("a directory in the repository");
+    let link = scratch.dir("elsewhere").join("notes");
+    std::os::unix::fs::symlink(&docs, &link).expect("a link");
+
+    assert_eq!(git(&link, &["rev-parse", "--abbrev-ref", "HEAD"]), "main");
+    assert_eq!(current_branch(&link), Some(Head::Branch("main".to_owned())));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_submodule_opened_through_a_symlink_keeps_its_branch() {
+    // Its `.git` file points at `../.git/modules/lib`, which is beside the
+    // submodule on disk and not beside the link.
+    if without_git("a_submodule_opened_through_a_symlink_keeps_its_branch") {
+        return;
+    }
+    let scratch = ScratchDir::new("submodule-symlink");
+    let upstream = repo_with_a_commit(&scratch, "upstream");
+    let outer = repo_with_a_commit(&scratch, "outer");
+    let source = upstream.to_str().expect("a UTF-8 scratch path");
+    git(
+        &outer,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            source,
+            "lib",
+        ],
+    );
+    let link = scratch.path().join("lib-link");
+    std::os::unix::fs::symlink(outer.join("lib"), &link).expect("a link");
+
+    assert_eq!(git(&link, &["rev-parse", "--abbrev-ref", "HEAD"]), "main");
+    assert_eq!(current_branch(&link), Some(Head::Branch("main".to_owned())));
+}
+
 #[test]
 fn a_bare_repository_is_recognised_by_its_own_name() {
     if without_git("a_bare_repository_is_recognised_by_its_own_name") {
