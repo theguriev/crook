@@ -828,6 +828,13 @@ impl TabStrip {
 
     /// Appends a tab built elsewhere, making it the active one.
     ///
+    /// Nothing is settled yet: the restoring path adopts every tab before any
+    /// group exists, and pins settled then treat the whole strip as one
+    /// ungrouped run — a pinned tab in the second group was sorted to the
+    /// very front, and its group gathered there after it. So the order is
+    /// left exactly as the file wrote it, and [`Self::finish_restore`] settles
+    /// it once, with every group in place.
+    ///
     /// The counter moves with it, so the first tab a person opens after a
     /// restore is named after the ones that came back rather than repeating
     /// one of their names. Past every one of them, which is more than one a
@@ -845,19 +852,18 @@ impl TabStrip {
             .unwrap_or(0);
         self.opened = (self.opened + tab.panes().len() as u64).max(highest);
         self.tabs.push(tab);
-        self.repair(Some(id));
+        self.active = id;
+        self.mru.insert(0, id);
     }
 
-    /// Selects a tab by its position in the bar.
+    /// Settles a strip [`Self::adopt`] and [`Self::adopt_group`] built, with
+    /// `active` selected.
     ///
-    /// Out of range selects nothing, which leaves whatever `adopt` last made
-    /// active. Positions are the session file's vocabulary and nothing else's:
-    /// every other caller names a tab by identity, for the reason the module
-    /// docs give at length.
-    pub(crate) fn select_index(&mut self, index: usize) {
-        if let Some(id) = self.tabs.get(index).map(Tab::id) {
-            self.repair(Some(id));
-        }
+    /// By identity rather than by position, like every other caller: gathering
+    /// a group a hand-edited file scattered moves tabs, and a position counted
+    /// before that names a different tab after it.
+    pub(crate) fn finish_restore(&mut self, active: TabId) {
+        self.repair(Some(active));
     }
 
     /// How many tabs there are. Never zero.
@@ -1087,7 +1093,8 @@ impl TabStrip {
         for (offset, tab) in moving.into_iter().enumerate() {
             self.tabs.insert(at + offset, tab);
         }
-        self.repair(None);
+        // Not settled here, for the reason `adopt` is not: a later group's
+        // pinned tab would still be seen as ungrouped.
     }
 
     /// The half-open range of the vector a group's members occupy.
