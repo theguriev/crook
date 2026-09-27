@@ -98,15 +98,36 @@ impl Head {
 /// The walk stops *before* the home directory, so a dotfiles repository
 /// checked out at `~` does not claim every directory beneath it. A repository
 /// anywhere under `~` is found normally.
+///
+/// The directory a pane reports is the shell's `$PWD`, symlinks and all, and
+/// its parents are not the parents on disk: `~/notes -> ~/Work/repo/docs`
+/// walked up through `~` and found nothing, where git — which works from the
+/// resolved path — names the branch. So a walk that finds nothing is tried
+/// once more from the resolved directory. Second rather than first, so that
+/// whenever the directory as typed already works, the paths found are
+/// spelled the way the person sees them.
 pub fn discover(start: &Path) -> Option<RepoLayout> {
     // Relative paths would make the parent walk terminate on the empty path
     // after one step, finding at most the process's own cwd.
     let start = std::path::absolute(start).ok()?;
     let home = std::env::home_dir();
+    if let Some(layout) = walk_up(&start, home.as_deref()) {
+        return Some(layout);
+    }
 
-    let mut current = start.as_path();
+    let resolved = std::fs::canonicalize(&start).ok()?;
+    if resolved == start {
+        return None;
+    }
+    let home = home.map(|home| std::fs::canonicalize(&home).unwrap_or(home));
+    walk_up(&resolved, home.as_deref())
+}
+
+/// The first repository at or above `start`, stopping before `home`.
+fn walk_up(start: &Path, home: Option<&Path>) -> Option<RepoLayout> {
+    let mut current = start;
     loop {
-        if home.as_deref() == Some(current) {
+        if home == Some(current) {
             return None;
         }
         if let Some(layout) = layout_at(current) {
@@ -232,8 +253,24 @@ fn read_git_dir_pointer(file: &Path, base: &Path) -> Option<PathBuf> {
         return None;
     }
 
-    let git_dir = resolve_against(base, Path::new(pointer));
-    is_git_dir(&git_dir).then_some(git_dir)
+    resolve_to_git_dir(base, Path::new(pointer))
+}
+
+/// A `gitdir:` or `commondir` pointer, resolved to the repository it names.
+///
+/// Lexically first, which keeps the path in the spelling it was reached by.
+/// But `..` taken off lexically is not the parent on disk when `base` was
+/// reached through a symlink — a submodule opened as `~/lib-link`, whose
+/// `../.git/modules/lib` is beside where it really is — and git, which
+/// resolves the path, finds the repository there. So does this, when the
+/// lexical reading names none.
+fn resolve_to_git_dir(base: &Path, pointer: &Path) -> Option<PathBuf> {
+    let lexical = resolve_against(base, pointer);
+    if is_git_dir(&lexical) {
+        return Some(lexical);
+    }
+    let resolved = std::fs::canonicalize(base.join(pointer)).ok()?;
+    is_git_dir(&resolved).then_some(resolved)
 }
 
 /// The `git_dir` every worktree of this repository shares.
@@ -251,7 +288,8 @@ fn common_dir_of(git_dir: &Path) -> PathBuf {
     if let Ok(contents) = std::fs::read_to_string(git_dir.join("commondir")) {
         let pointer = contents.trim();
         if !pointer.is_empty() {
-            return resolve_against(git_dir, Path::new(pointer));
+            return resolve_to_git_dir(git_dir, Path::new(pointer))
+                .unwrap_or_else(|| resolve_against(git_dir, Path::new(pointer)));
         }
     }
 
