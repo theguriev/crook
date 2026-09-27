@@ -524,6 +524,37 @@ fn test_a_file_that_did_not_read_whole_is_kept_as_it_was_before_the_salvage() {
 }
 
 #[test]
+fn test_a_file_that_is_not_utf8_is_kept_and_its_other_tabs_come_back() {
+    // One byte that is not UTF-8, in one tab's name. The read used to fail
+    // outright and take the first-run path: nothing logged, nothing kept, and
+    // the next save wrote an empty window over both tabs.
+    let directory = scratch("not-utf8");
+    let path = directory.join("session.json");
+    let mut bytes = br#"{"tabs": [{"name": "caf"#.to_vec();
+    bytes.push(0xE9);
+    bytes.extend_from_slice(
+        br#"", "panes": [{"title": "x", "flex": 1.0}]}, {"name": "kept", "panes": [{"title": "kept", "flex": 1.0}]}], "active": 1}"#,
+    );
+    fs::write(&path, &bytes).expect("writable");
+
+    let session = Session::load(&path);
+    assert_eq!(
+        session.tabs.len(),
+        2,
+        "both tabs read, the bad byte replaced"
+    );
+    assert_eq!(session.active, 1);
+
+    let kept = backups(&directory);
+    assert_eq!(kept.len(), 1, "one copy, and only one: {kept:?}");
+    assert_eq!(
+        fs::read(&kept[0]).expect("readable"),
+        bytes,
+        "the copy is the file as it was"
+    );
+}
+
+#[test]
 fn test_a_fourth_backup_removes_the_oldest() {
     let directory = scratch("backup-prune");
     let path = directory.join("session.json");
