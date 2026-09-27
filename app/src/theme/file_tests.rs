@@ -129,6 +129,50 @@ fn a_comment_after_a_value_is_not_part_of_it() {
 }
 
 #[test]
+fn a_comment_after_a_key_that_opens_a_block_leaves_it_a_block() {
+    // Read as a value, `# the sixteen` closed the block before it opened, and
+    // every indented line under it refused the whole theme.
+    let annotated = SOLARIZED
+        .replace("terminal_colors:\n", "terminal_colors: # the sixteen\n")
+        .replace("  normal:\n", "  normal:  #\n");
+    let annotated = parse(&annotated).expect("a comment on a block key is only a comment");
+    assert_eq!(annotated.theme, parse(SOLARIZED).expect("parses").theme);
+
+    // And a colour written without quotes is still a colour.
+    let bare = SOLARIZED.replace("background: \"#002b36\"", "background: #002b36");
+    assert_eq!(
+        parse(&bare).expect("parses").theme,
+        parse(SOLARIZED).expect("parses").theme
+    );
+}
+
+#[test]
+fn a_comment_after_a_block_on_one_line_is_not_part_of_it() {
+    let flow = r##"
+name: Solarized Dark
+background: "#002b36"
+foreground: "#f8f8f2"
+accent: "#cb4b16"
+cursor: "#ffcc00"
+details: darker
+terminal_colors:
+  normal: {black: "#073642", red: "#dc322f", green: "#859900", yellow: "#b58900", blue: "#268bd2", magenta: "#d33682", cyan: "#2aa198", white: "#eee8d5"}  # dim
+  bright: {black: "#002b36", red: "#cb4b16", green: "#586e75", yellow: "#657b83", blue: "#839496", magenta: "#6c71c4", cyan: "#93a1a1", white: "#fdf6e3"} # {not: "#000000"}
+"##;
+    let flow = parse(flow).expect("a comment after the closing brace is only a comment");
+    assert_eq!(flow.theme, parse(SOLARIZED).expect("parses").theme);
+
+    // Something other than a comment after the brace is still the file's
+    // mistake, and so is a `}` inside quotes that looks like the end.
+    for broken in [
+        "terminal_colors:\n  normal: {black: \"#000000\"} red\n",
+        "terminal_colors:\n  normal: {black: \"#000}\"\n",
+    ] {
+        assert!(parse(broken).is_err(), "{broken:?} was read as a theme");
+    }
+}
+
+#[test]
 fn the_fields_warp_has_and_crook_does_not_are_skipped_rather_than_refused() {
     // `details` is in the file above and nothing here reads it. A theme file
     // is something people copy off the internet: one that carries a key this
