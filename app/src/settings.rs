@@ -1120,26 +1120,33 @@ fn temporary_path(path: &Path) -> PathBuf {
 }
 
 /// Writes `contents` to `temporary` and moves it onto `destination`.
+///
+/// Whatever step fails, the temporary goes: nothing ever reads a leftover,
+/// and one per failed save accumulates forever. A full disk is the usual
+/// way a save fails, and it fails at the write, not at the rename — so the
+/// write has to be covered as well.
 fn write_then_rename(temporary: &Path, destination: &Path, contents: &[u8]) -> Result<()> {
-    // Scoped so the handle is closed before the rename: Windows will not move
-    // a file that is still open.
-    {
-        let mut file = fs::File::create(temporary)
-            .with_context(|| format!("could not create {}", temporary.display()))?;
+    let mut file = fs::File::create(temporary)
+        .with_context(|| format!("could not create {}", temporary.display()))?;
+
+    let written = (|| {
         file.write_all(contents)
             .with_context(|| format!("could not write {}", temporary.display()))?;
-        // The rename is atomic with respect to the directory, not to the data:
-        // without this, a machine that loses power just after the rename can
-        // come back to a settings file full of zeroes.
+        // The rename is atomic with respect to the directory, not to the
+        // data: without this, a machine that loses power just after the
+        // rename can come back to a settings file full of zeroes.
         file.sync_all()
-            .with_context(|| format!("could not flush {}", temporary.display()))?;
-    }
+            .with_context(|| format!("could not flush {}", temporary.display()))
+    })();
+    // Closed before the rename, or before the removal: Windows will do
+    // neither to a file that is still open.
+    drop(file);
 
-    rename_replacing(temporary, destination).inspect_err(|_| {
-        // Nothing ever reads a leftover temporary, and one per failed save
-        // accumulates forever.
-        let _ = fs::remove_file(temporary);
-    })
+    written
+        .and_then(|()| rename_replacing(temporary, destination))
+        .inspect_err(|_| {
+            let _ = fs::remove_file(temporary);
+        })
 }
 
 /// Moves `from` onto `to`, replacing whatever is there.
@@ -1303,6 +1310,26 @@ mod tests {
         // Crook's own, and off: a fresh install opens looking like Warp.
         assert!(!options.show_tab_numbers);
         assert_eq!(StatusMarks::Dots, options.status_marks);
+    }
+
+    // `/dev/full` answers every write with "no space left on device", which
+    // is the way a save really fails; reached through a link, so what the
+    // failed save removes is the link and never the device.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_a_save_that_fails_at_the_write_leaves_no_temporary_behind() {
+        let scratch = ScratchDirectory::new("full-disk");
+        let temporary = temporary_path(&scratch.settings_file());
+        std::os::unix::fs::symlink("/dev/full", &temporary).expect("a link can be made");
+
+        let saved = write_then_rename(&temporary, &scratch.settings_file(), b"{}");
+
+        assert!(saved.is_err(), "a write to a full disk succeeded");
+        assert!(
+            fs::symlink_metadata(&temporary).is_err(),
+            "the temporary outlived the failed save"
+        );
+        assert!(!scratch.settings_file().exists());
     }
 
     #[cfg(unix)]
