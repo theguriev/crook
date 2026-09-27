@@ -1368,3 +1368,21 @@ fn a_file_that_does_not_read_says_why_and_takes_no_edits() {
     assert_eq!(commented.unreadable(), None);
     assert!(commented.is_editable());
 }
+
+#[test]
+fn the_notes_above_the_only_binding_survive_binding_it_again() {
+    // Re-binding takes the old entry out first, which leaves an array of
+    // nothing but the comments that were written above it — and the entry
+    // that went in next used to take their place.
+    let file = "\
+[
+    // Find, where my old editor had it:
+    { \"key\": \"ctrl+alt+g\", \"command\": \"crook/window/find\" }
+]
+";
+    let (_, mut keybindings) = editable("notes-above-the-only-binding", file);
+    let text = saved(keybindings.bind(&command("crook/window/find"), &keys("ctrl+alt+f")));
+
+    assert!(text.contains("where my old editor had it"), "{text}");
+    assert!(text.contains("ctrl+alt+f"), "{text}");
+}
