@@ -667,3 +667,56 @@ fn find_all_finds_every_occurrence_across_blocks_and_folds_ascii_case() {
     assert!(session.blocks().find_all("nowhere").is_empty());
     assert!(session.blocks().find_all("").is_empty());
 }
+
+/// Ten columns, with `line` printed as the output of one command, finished
+/// or still running.
+fn folded(line: &str, finished: bool) -> Session {
+    let mut emulator = Emulator::new(TerminalSize::new(10, 6), 100, Palette::default());
+    emulator.advance(format!("{A}{B}x\r\n{C}{line}\r\n").as_bytes());
+    if finished {
+        emulator.advance(format!("{D}{A}$ ").as_bytes());
+    }
+    Session {
+        finished: BlockHistory::new(emulator.blocks().iter().cloned().map(Arc::new).collect(), 0),
+        snapshot: emulator.snapshot(),
+    }
+}
+
+#[test]
+fn a_space_in_the_last_column_of_a_fold_is_still_a_space() {
+    // "aaaaaaaaa bbb" folds with its space in the last column. Both stores
+    // trim a row's trailing blanks and a fold adds no line break, so the line
+    // read as "aaaaaaaaabbb": a search for what it says missed it, and one for
+    // what it does not say found it.
+    for finished in [true, false] {
+        let session = folded("aaaaaaaaa bbb", finished);
+        let blocks = session.blocks();
+        assert_eq!(1, blocks.find_all("a bbb").len(), "finished: {finished}");
+        assert_eq!(0, blocks.find_all("abbb").len(), "finished: {finished}");
+        // And a copy of the line is the line.
+        assert_eq!(
+            Some(String::from("aaaaaaaaa bbb")),
+            session.dragged((0, 1, 0), (0, 2, 2)),
+            "finished: {finished}"
+        );
+    }
+}
+
+#[test]
+fn a_wide_character_carried_over_a_fold_leaves_no_space_behind() {
+    // Too wide for the last column, so the terminal leaves it blank and
+    // folds: that blank is where the character did not fit, not a space.
+    for finished in [true, false] {
+        let session = folded("aaaaaaaaa漢b", finished);
+        assert_eq!(
+            1,
+            session.blocks().find_all("a漢b").len(),
+            "finished: {finished}"
+        );
+        assert_eq!(
+            Some(String::from("aaaaaaaaa漢b")),
+            session.dragged((0, 1, 0), (0, 2, 2)),
+            "finished: {finished}"
+        );
+    }
+}
