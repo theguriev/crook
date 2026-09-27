@@ -1386,3 +1386,21 @@ fn the_notes_above_the_only_binding_survive_binding_it_again() {
     assert!(text.contains("where my old editor had it"), "{text}");
     assert!(text.contains("ctrl+alt+f"), "{text}");
 }
+
+#[test]
+fn altgr_is_a_modifier_being_held_rather_than_a_key() {
+    // What the window calls the keys a layout holds down on the way to a
+    // character — AltGr before the `]` a German keyboard types with it.
+    for key in ["altgraph", "hyper", "fn", "symbol", "shift", "cmd"] {
+        assert!(
+            Recording::is_a_modifier(&Keystroke::new(key, Modifiers::default())),
+            "{key} was recorded as a key"
+        );
+    }
+    for key in ["]", "a", "f1", "escape"] {
+        assert!(
+            !Recording::is_a_modifier(&Keystroke::new(key, Modifiers::default())),
+            "{key}"
+        );
+    }
+}
