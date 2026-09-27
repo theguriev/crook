@@ -514,6 +514,30 @@ impl Drop for Scratch {
 }
 
 #[test]
+fn a_double_quoted_name_reads_its_backslash_escapes() {
+    // Single quotes escape by doubling, double quotes with a backslash; read
+    // the second like the first, and a name ended at its first `\"`.
+    for (written, meant) in [
+        (r#""The \"Best\" Theme""#, "The \"Best\" Theme"),
+        (r#""back\\slash""#, "back\\slash"),
+        (r#""caf\u00e9 \x41""#, "café A"),
+        (r#""tab\there""#, "tab\there"),
+        // What is not an escape is kept as written rather than dropped.
+        (r#""C:\Themes""#, "C:\\Themes"),
+        (r#""half \u00e""#, "half \\u00e"),
+        // An escaped quote is not the closing one; with none after it, the
+        // rest of the line, as for any quote left open.
+        (r#""open \""#, "open \""),
+        // Single quotes know no backslash.
+        (r#"'it\'s'"#, "it\\"),
+    ] {
+        let text = SOLARIZED.replace("name: Solarized Dark", &format!("name: {written}"));
+        let parsed = parse(&text).expect("parses");
+        assert_eq!(parsed.name.as_deref(), Some(meant), "{written}");
+    }
+}
+
+#[test]
 fn a_theme_written_out_is_a_theme_that_reads_back() {
     // The one property the writer has to have, and the one a hand-written
     // emitter against a hand-written parser can lose silently: a name with a
