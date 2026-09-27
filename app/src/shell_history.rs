@@ -324,9 +324,21 @@ fn newest(commands: Vec<String>) -> Vec<String> {
         // A command with a newline in it is read as its first line — see this
         // module's header — which is what a zsh entry's continuation lines and
         // a fish entry's `\n` both leave behind.
-        let command = command.split('\n').next().unwrap_or_default();
-        let command = command.trim_end_matches(['\r', ' ', '\t']);
-        let command = command.trim_end_matches('\\');
+        let mut lines = command.split('\n');
+        let mut command = lines
+            .next()
+            .unwrap_or_default()
+            .trim_end_matches(['\r', ' ', '\t']);
+        // The first line of a command that went on with a typed `\` ends in
+        // that one backslash, and a suggestion offering it would be half a
+        // line continuation. Only then, and only the one: a command that
+        // really ends in backslashes — `echo \\` — lost every one of them,
+        // and accepting the suggestion ran something else.
+        if lines.next().is_some()
+            && let Some(going_on) = command.strip_suffix('\\')
+        {
+            command = going_on.trim_end_matches([' ', '\t']);
+        }
         if command.trim().is_empty() || kept.iter().any(|seen| seen == command) {
             continue;
         }
