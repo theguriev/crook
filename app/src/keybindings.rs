@@ -681,10 +681,28 @@ impl Recording {
     /// The platform reports a press for Shift itself on the way to
     /// `shift+cmd+k`, and a recorder that wrote those down would record
     /// "shift" every time somebody reached for a chord.
+    ///
+    /// AltGr among them, which the window names `altgraph`: on a German or a
+    /// Nordic layout it is how `[`, `]`, `{` and `\` are typed at all, and
+    /// recorded as a key it made every such chord a sequence of two. `hyper`,
+    /// `fn` and `symbol` are held the same way, on the keyboards that have
+    /// them.
     pub fn is_a_modifier(keystroke: &Keystroke) -> bool {
         matches!(
             keystroke.key.as_str(),
-            "shift" | "control" | "ctrl" | "alt" | "option" | "super" | "meta" | "cmd" | "command"
+            "shift"
+                | "control"
+                | "ctrl"
+                | "alt"
+                | "altgraph"
+                | "option"
+                | "super"
+                | "meta"
+                | "hyper"
+                | "fn"
+                | "symbol"
+                | "cmd"
+                | "command"
         )
     }
 }
