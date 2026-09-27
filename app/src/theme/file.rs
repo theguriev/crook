@@ -571,6 +571,14 @@ fn value_of(value: &str) -> String {
         let mut inside = String::new();
         let mut characters = rest.chars().peekable();
         while let Some(character) = characters.next() {
+            // Inside double quotes a backslash is YAML's escape, and `\"` is
+            // how a name with a double quote in it is written. Read as a
+            // literal, `"The \"Best\" Theme"` ended at the escaped quote and
+            // came back as `The \`.
+            if quote == '"' && character == '\\' {
+                escape(&mut characters, &mut inside);
+                continue;
+            }
             if character != quote {
                 inside.push(character);
                 continue;
@@ -603,6 +611,58 @@ fn value_of(value: &str) -> String {
     match value.split_once(" #") {
         Some((before, _)) => before.trim_end().to_owned(),
         None => value.to_owned(),
+    }
+}
+
+/// The character a backslash escape in a double-quoted YAML scalar stands
+/// for, pushed onto `inside`, with the characters after the `\\` taken off
+/// `characters`.
+///
+/// The escapes a name could plausibly hold. Anything else — an unknown
+/// letter, a code point that is not one — is kept as written, backslash and
+/// all, since a lenient reader that drops text it does not understand is
+/// worse than one that shows it.
+fn escape(characters: &mut std::iter::Peekable<std::str::Chars<'_>>, inside: &mut String) {
+    let Some(next) = characters.next() else {
+        inside.push('\\');
+        return;
+    };
+    let digits = match next {
+        '"' | '\\' | '/' => return inside.push(next),
+        'n' => return inside.push('\n'),
+        't' => return inside.push('\t'),
+        'r' => return inside.push('\r'),
+        '0' => return inside.push('\0'),
+        'x' => 2,
+        'u' => 4,
+        'U' => 8,
+        other => {
+            inside.push('\\');
+            return inside.push(other);
+        }
+    };
+
+    let mut hex = String::new();
+    while hex.len() < digits {
+        match characters.peek() {
+            Some(digit) if digit.is_ascii_hexdigit() => {
+                hex.push(*digit);
+                characters.next();
+            }
+            _ => break,
+        }
+    }
+    match u32::from_str_radix(&hex, 16)
+        .ok()
+        .filter(|_| hex.len() == digits)
+        .and_then(char::from_u32)
+    {
+        Some(character) => inside.push(character),
+        None => {
+            inside.push('\\');
+            inside.push(next);
+            inside.push_str(&hex);
+        }
     }
 }
 
