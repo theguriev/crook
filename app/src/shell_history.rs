@@ -184,10 +184,29 @@ fn tail(path: &Path, shell: Shell) -> Option<String> {
     // it is in.
     let mut text = String::from_utf8_lossy(&bytes).into_owned();
     if cut {
-        let start = text.find('\n').map_or(text.len(), |at| at + 1);
+        let start = text.len() - after_the_cut(&text, shell).len();
         text.drain(..start);
     }
     Some(text)
+}
+
+/// What is left of a tail once the entry the seek landed in is dropped.
+///
+/// The first line, for bash and fish. For zsh, every line up to the end of
+/// that entry: a zsh entry with a newline in it is written as lines ending in
+/// `\`, so a cut inside a loop dropped only the partial line and read the
+/// rest — its body, its `done` — as commands of their own, which the
+/// module's header says they are not.
+fn after_the_cut(text: &str, shell: Shell) -> &str {
+    let mut rest = text;
+    loop {
+        let (line, after) = rest.split_once('\n').unwrap_or((rest, ""));
+        rest = after;
+        let goes_on = shell == Shell::Zsh && line.trim_end_matches('\r').ends_with('\\');
+        if !goes_on || rest.is_empty() {
+            return rest;
+        }
+    }
 }
 
 /// Undoes what zsh does to a command's bytes before it writes them down.
