@@ -303,9 +303,28 @@ impl Session {
     /// Reads the session file, defaulting past anything unusable.
     pub fn load(path: impl AsRef<Path>) -> Self {
         let path = path.as_ref();
-        let Ok(text) = fs::read_to_string(path) else {
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
             // The ordinary case on a first run, so not worth a line.
-            return Self::default();
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Self::default(),
+            Err(error) => {
+                log::warn!("could not read {}: {error}", path.display());
+                return Self::default();
+            }
+        };
+
+        // A byte that is not UTF-8 — a crash mid-write, a disk that lost a
+        // sector — used to fail the read itself, which took the first-run
+        // path above: no line, no copy, and the next save wrote an empty
+        // window over every tab. Kept first, then read with the bad bytes
+        // replaced, so the tabs they are not in still come back.
+        let (text, backed_up) = match String::from_utf8(bytes) {
+            Ok(text) => (text, false),
+            Err(error) => {
+                log::warn!("{} is not UTF-8: {}", path.display(), error.utf8_error());
+                back_up_unreadable(error.as_bytes(), path);
+                (String::from_utf8_lossy(error.as_bytes()).into_owned(), true)
+            }
         };
 
         match serde_json::from_str(&text) {
@@ -314,7 +333,9 @@ impl Session {
                 // Before the salvage, not after: the first save that follows
                 // writes a file that parses over the only evidence of what
                 // was dropped.
-                back_up_unreadable(text.as_bytes(), path);
+                if !backed_up {
+                    back_up_unreadable(text.as_bytes(), path);
+                }
                 Self::salvage(&text, path, &error)
             }
         }
