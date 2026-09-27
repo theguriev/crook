@@ -118,10 +118,18 @@ impl Document {
                     .insert_str(span.end, &format!(",\n{indent}{entry}"));
             }
             // An array with nothing in it may be written `[]`, and an entry
-            // pushed straight into that would leave the file on one line.
-            None => self
-                .text
-                .replace_range(array.body.clone(), &format!("\n{INDENT}{entry}\n")),
+            // pushed straight into that would leave the file on one line. It
+            // may also hold nothing *but* comments — bindings commented out,
+            // or the notes above one that `forget` just took away — and those
+            // stay: the entry goes after them, in place of only the blank
+            // space before the `]`.
+            None => {
+                let written = self.text[array.body.clone()].trim_end().len();
+                self.text.replace_range(
+                    array.body.start + written..array.body.end,
+                    &format!("\n{INDENT}{entry}\n"),
+                );
+            }
         }
         true
     }

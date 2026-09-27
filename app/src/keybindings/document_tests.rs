@@ -39,6 +39,29 @@ fn an_entry_added_to_an_empty_array_does_not_leave_the_file_on_one_line() {
 }
 
 #[test]
+fn an_entry_added_to_an_array_of_only_comments_goes_after_them() {
+    // Bindings commented out while somebody tries the defaults: no entries,
+    // and nothing in the array an edit is allowed to lose.
+    let mut document = Document::new(
+        "[\n    // Off for now:\n    // { \"key\": \"ctrl+t\", \"command\": \"a/b/c\" }\n]\n",
+    );
+    document.append(r#"{ "command": "a/b/d" }"#);
+
+    assert_eq!(
+        document.text(),
+        "[\n    // Off for now:\n    // { \"key\": \"ctrl+t\", \"command\": \"a/b/c\" }\n    { \"command\": \"a/b/d\" }\n]\n"
+    );
+
+    // And a block comment on the bracket's own line.
+    let mut document = Document::new("[ /* none yet */ ]\n");
+    document.append(r#"{ "command": "a/b/d" }"#);
+    assert_eq!(
+        document.text(),
+        "[ /* none yet */\n    { \"command\": \"a/b/d\" }\n]\n"
+    );
+}
+
+#[test]
 fn everything_a_person_wrote_around_the_entries_survives_an_edit() {
     // The whole point of editing the text rather than a `Vec<Value>`: the
     // comments, the blank line and the ordering are all still there
