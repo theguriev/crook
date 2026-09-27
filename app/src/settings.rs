@@ -648,7 +648,11 @@ impl Settings {
             .unwrap_or_default();
 
         // Read the way the list above is: one unusable entry costs that
-        // plugin's grant and not everybody's.
+        // plugin's grant and not everybody's. But not trimmed, as a name is:
+        // a key is the capability's own text, compared to what the plugin
+        // asks for byte for byte, and `type:git commit -m {} ` trimmed was a
+        // grant for a command nobody asks for — the dialog came back on
+        // every launch for the one that was allowed.
         let plugin_grants = document
             .get(PLUGIN_GRANTS_KEY)
             .and_then(Value::as_object)
@@ -660,7 +664,6 @@ impl Settings {
                             .as_array()?
                             .iter()
                             .filter_map(Value::as_str)
-                            .map(str::trim)
                             .filter(|key| !key.is_empty())
                             .map(str::to_owned)
                             .collect();
@@ -1833,6 +1836,25 @@ mod tests {
         if let Some(path) = user_settings_path() {
             assert!(path.ends_with(Path::new(CONFIG_DIRECTORY).join(SETTINGS_FILE)));
         }
+    }
+
+    #[test]
+    fn test_a_grant_is_read_back_exactly_as_it_was_written() {
+        // The space at the end of a command template is part of the command:
+        // the plugin asks for `type:git commit -m {} `, and a grant read back
+        // as anything else is not a grant for that.
+        let scratch = ScratchDirectory::new("grant-exactly");
+        let mut settings = Settings::load(scratch.settings_file());
+        let keys = vec![
+            String::from("type:git commit -m {} "),
+            String::from("file: leading space.txt"),
+            String::from("net:api.github.com"),
+        ];
+        settings.set_granted("someone/git", keys.clone());
+        settings.save_blocking().expect("the save should succeed");
+
+        let loaded = Settings::load(scratch.settings_file());
+        assert_eq!(loaded.granted_to("someone/git"), &keys[..]);
     }
 
     #[test]
