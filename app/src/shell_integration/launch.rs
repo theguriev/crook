@@ -65,8 +65,9 @@ impl HostEnv {
         }
     }
 
-    /// The directory the user's own zsh startup files live in.
-    fn user_zdotdir(&self) -> Option<&Path> {
+    /// The directory the user's own zsh startup files live in — and, unless
+    /// they named another, their history: see `ZSHRC_STUB`.
+    pub(crate) fn user_zdotdir(&self) -> Option<&Path> {
         self.zdotdir.as_deref().or(self.home.as_deref())
     }
 }

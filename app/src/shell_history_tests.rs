@@ -232,3 +232,37 @@ fn test_a_cut_inside_a_zsh_entry_drops_the_whole_entry() {
         "echo \\\\\n"
     );
 }
+
+#[test]
+fn test_zsh_history_is_the_file_the_panes_zsh_writes() {
+    // The integration points a pane's HISTFILE at `$USER_ZDOTDIR`, which is
+    // `$ZDOTDIR` when there is one. Read from `~/.zsh_history` regardless,
+    // the suggestions came out of a file nothing was writing to.
+    let root = std::env::temp_dir();
+    let host = HostEnv {
+        home: Some(root.join("home")),
+        zdotdir: Some(root.join("zdot")),
+        ..HostEnv::default()
+    };
+    assert_eq!(
+        zsh_history(None, &host),
+        Some(root.join("zdot").join(".zsh_history"))
+    );
+
+    let no_zdotdir = HostEnv {
+        zdotdir: None,
+        ..host.clone()
+    };
+    assert_eq!(
+        zsh_history(None, &no_zdotdir),
+        Some(root.join("home").join(".zsh_history"))
+    );
+
+    // An exported HISTFILE is where they moved it; an empty one is not.
+    let moved = root.join("elsewhere");
+    assert_eq!(zsh_history(Some(moved.clone()), &host), Some(moved));
+    assert_eq!(
+        zsh_history(Some(PathBuf::new()), &host),
+        Some(root.join("zdot").join(".zsh_history"))
+    );
+}

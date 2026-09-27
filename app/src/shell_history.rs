@@ -50,7 +50,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use crate::shell_integration::Shell;
+use crate::shell_integration::{HostEnv, Shell};
 
 /// How many commands a pane starts with.
 ///
@@ -120,15 +120,31 @@ fn user_shell() -> Shell {
 fn path(shell: Shell) -> Option<PathBuf> {
     let named = |variable: &str| std::env::var_os(variable).map(PathBuf::from);
     match shell {
-        Shell::Zsh => {
-            named("HISTFILE").or_else(|| Some(std::env::home_dir()?.join(".zsh_history")))
-        }
+        Shell::Zsh => zsh_history(named("HISTFILE"), &HostEnv::current()),
         Shell::Bash => {
             named("HISTFILE").or_else(|| Some(std::env::home_dir()?.join(".bash_history")))
         }
         Shell::Fish => fish_history(named("XDG_DATA_HOME"), std::env::home_dir()),
         Shell::Other => None,
     }
+}
+
+/// Where zsh keeps its history, given an exported `$HISTFILE` and the
+/// environment Crook starts its panes with.
+///
+/// The same file the zsh in a pane writes: when nothing else named one, the
+/// integration's `.zshrc` stub sets `HISTFILE=$USER_ZDOTDIR/.zsh_history`,
+/// and `USER_ZDOTDIR` is [`HostEnv::user_zdotdir`] — `$ZDOTDIR`, or the home.
+/// Read from `~/.zsh_history` regardless, a person with a `ZDOTDIR` had every
+/// command their panes ran written to one file and suggestions read out of
+/// another.
+fn zsh_history(histfile: Option<PathBuf>, host: &HostEnv) -> Option<PathBuf> {
+    histfile
+        .filter(|file| !file.as_os_str().is_empty())
+        .or_else(|| {
+            let directory = host.user_zdotdir().map(Path::to_path_buf);
+            Some(directory.or_else(std::env::home_dir)?.join(".zsh_history"))
+        })
 }
 
 /// Where fish keeps its history, given `$XDG_DATA_HOME` and the home.
