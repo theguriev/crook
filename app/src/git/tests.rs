@@ -402,6 +402,60 @@ fn a_linked_worktree_finds_the_repository_it_was_added_from() {
 }
 
 #[test]
+fn a_worktree_that_lost_its_commondir_is_still_found_by_where_it_lives() {
+    // The fallback for an admin directory with no `commondir` in it: the
+    // `<main>/.git/worktrees/<name>` shape still gives it away.
+    if without_git("a_worktree_that_lost_its_commondir_is_still_found_by_where_it_lives") {
+        return;
+    }
+    let scratch = ScratchDir::new("worktree-no-commondir");
+    let main = repo_with_a_commit(&scratch, "main");
+    git(&main, &["worktree", "add", "-b", "side", "../side"]);
+    let admin = main.join(".git").join("worktrees").join("side");
+    std::fs::remove_file(admin.join("commondir")).expect("git writes one");
+
+    let layout = discover(&scratch.path().join("side")).expect("still a repository");
+    assert_eq!(layout.common_dir, main.join(".git"));
+}
+
+#[test]
+fn a_submodule_under_a_directory_named_worktrees_is_not_a_linked_worktree() {
+    // Its repository is `.git/modules/worktrees/lib`, which has the shape of
+    // a linked worktree's admin directory without being one.
+    if without_git("a_submodule_under_a_directory_named_worktrees_is_not_a_linked_worktree") {
+        return;
+    }
+    let scratch = ScratchDir::new("submodule-worktrees");
+    let upstream = repo_with_a_commit(&scratch, "upstream");
+    let outer = repo_with_a_commit(&scratch, "outer");
+    let source = upstream.to_str().expect("a UTF-8 scratch path");
+    git(
+        &outer,
+        &[
+            "-c",
+            "protocol.file.allow=always",
+            "submodule",
+            "add",
+            source,
+            "worktrees/lib",
+        ],
+    );
+    let lib = outer.join("worktrees").join("lib");
+
+    let layout = discover(&lib).expect("a submodule is a repository");
+    assert_eq!(layout.git_dir, outer.join(".git/modules/worktrees/lib"));
+    assert_eq!(
+        layout.common_dir, layout.git_dir,
+        "a submodule owns its refs"
+    );
+    assert!(
+        !facts_without_diff(&lib).worktree,
+        "a submodule is not a worktree"
+    );
+    assert_eq!(branches(&lib), vec![String::from("main")]);
+}
+
+#[test]
 fn a_bare_repository_is_recognised_by_its_own_name() {
     if without_git("a_bare_repository_is_recognised_by_its_own_name") {
         return;

@@ -239,9 +239,14 @@ fn read_git_dir_pointer(file: &Path, base: &Path) -> Option<PathBuf> {
 /// The `git_dir` every worktree of this repository shares.
 ///
 /// A linked worktree records it explicitly in a `commondir` file; failing
-/// that, a `git_dir` of the form `<main>/.git/worktrees/<name>` gives it away.
-/// Everything else — an ordinary checkout, a bare repository, a submodule,
-/// which owns its refs — is its own common directory.
+/// that, a `git_dir` of the form `<main>/.git/worktrees/<name>` gives it away —
+/// when `<main>/.git` really is a repository. A directory called `worktrees`
+/// is not enough on its own: a submodule checked out at `worktrees/lib` keeps
+/// its repository at `.git/modules/worktrees/lib`, and was taken for a
+/// worktree of `.git/modules`, which is no repository at all — its branch
+/// dropped from the group heading and its branch list read from refs that are
+/// not there. Everything else — an ordinary checkout, a bare repository, a
+/// submodule, which owns its refs — is its own common directory.
 fn common_dir_of(git_dir: &Path) -> PathBuf {
     if let Ok(contents) = std::fs::read_to_string(git_dir.join("commondir")) {
         let pointer = contents.trim();
@@ -255,6 +260,7 @@ fn common_dir_of(git_dir: &Path) -> PathBuf {
         .and_then(Path::file_name)
         .is_some_and(|name| name == "worktrees")
         && let Some(main) = parent.and_then(Path::parent)
+        && is_git_dir(main)
     {
         return main.to_path_buf();
     }
