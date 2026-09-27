@@ -71,6 +71,25 @@ fn test_a_fish_record_is_one_command() {
 }
 
 #[test]
+fn test_a_command_ending_in_a_backslash_keeps_it() {
+    // `echo \\` prints one backslash. Every trailing backslash used to be
+    // taken off every command, and the suggestion was `echo `.
+    assert_eq!(parse(Shell::Bash, "echo \\\\\n"), vec!["echo \\\\"]);
+    // fish writes each of the two doubled.
+    assert_eq!(
+        parse(Shell::Fish, "- cmd: echo \\\\\\\\\n  when: 1\n"),
+        vec!["echo \\\\"]
+    );
+
+    // A line continuation a person typed is still not offered half-done: the
+    // first line of `echo a \` + `b` is `echo a`.
+    assert_eq!(
+        parse(Shell::Fish, "- cmd: echo a \\\\\\nb\n"),
+        vec!["echo a"]
+    );
+}
+
+#[test]
 fn test_a_command_run_twice_is_kept_where_it_was_run_last() {
     // What makes the Up key agree with a person's sense of recency.
     let text = "cargo test\ngit status\ncargo test\n";
