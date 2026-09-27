@@ -172,3 +172,36 @@ fn test_only_zsh_is_unmetafied() {
     let _ = fs::remove_file(&path);
     assert_eq!(read, String::from_utf8_lossy(&bytes));
 }
+
+#[test]
+fn test_fish_history_is_under_the_xdg_data_home_on_every_platform() {
+    // fish does not ask the platform: on a Mac the history is in
+    // `~/.local/share` too, not in `~/Library/Application Support`. Rooted
+    // in the temporary directory only so that the paths are absolute on
+    // Windows as well.
+    let root = std::env::temp_dir();
+    let home = root.join("home");
+    let default = home
+        .join(".local")
+        .join("share")
+        .join("fish")
+        .join("fish_history");
+
+    assert_eq!(
+        fish_history(None, Some(home.clone())),
+        Some(default.clone())
+    );
+    assert_eq!(
+        fish_history(Some(root.join("data")), Some(home.clone())),
+        Some(root.join("data").join("fish").join("fish_history"))
+    );
+    // Empty or relative is no setting at all.
+    for ignored in ["", "relative/share"] {
+        assert_eq!(
+            fish_history(Some(PathBuf::from(ignored)), Some(home.clone())),
+            Some(default.clone()),
+            "{ignored:?}"
+        );
+    }
+    assert_eq!(fish_history(None, None), None);
+}

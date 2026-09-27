@@ -126,12 +126,25 @@ fn path(shell: Shell) -> Option<PathBuf> {
         Shell::Bash => {
             named("HISTFILE").or_else(|| Some(std::env::home_dir()?.join(".bash_history")))
         }
-        // fish keeps its own, under the data directory rather than the home,
-        // and names it after the session — `fish_history` being the default
-        // session's.
-        Shell::Fish => Some(dirs::data_dir()?.join("fish").join("fish_history")),
+        Shell::Fish => fish_history(named("XDG_DATA_HOME"), std::env::home_dir()),
         Shell::Other => None,
     }
+}
+
+/// Where fish keeps its history, given `$XDG_DATA_HOME` and the home.
+///
+/// fish keeps its own, under the XDG data directory rather than the home, and
+/// names it after the session — `fish_history` being the default session's.
+/// The XDG directory on *every* platform, macOS included: fish does not ask
+/// the platform where data goes, and `dirs::data_dir()` — which answers
+/// `~/Library/Application Support` there — found no history at all for
+/// anybody running fish on a Mac. An `XDG_DATA_HOME` that is empty or
+/// relative is ignored, as the XDG spec says and fish does.
+fn fish_history(xdg_data_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+    let data = xdg_data_home
+        .filter(|data| data.is_absolute())
+        .or_else(|| Some(home?.join(".local").join("share")))?;
+    Some(data.join("fish").join("fish_history"))
 }
 
 /// The last [`TAIL`] bytes of a file, as text.
