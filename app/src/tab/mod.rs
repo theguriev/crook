@@ -1239,11 +1239,13 @@ impl TabStrip {
         match group {
             // Into a group that still has members: inside its run, wherever
             // in it the pointer got to. A group whose only member is the tab
-            // being moved has no run left, and the raw slot is as good an
-            // answer as there is.
+            // being moved has no run left, which puts the tab where a tab
+            // joining no group is: anywhere but between two members of
+            // somebody else's. The raw slot, taken as it was, could be there,
+            // and the group split around it drew as two.
             Some(group) => match self.run_of(group) {
                 Some(run) => raw.clamp(run.start, run.end),
-                None => raw,
+                None => self.slot_in_block(None, raw),
             },
             // Into no group: never between two members of one. The nearer end
             // wins, so a drop just past a group's first member lands above the
