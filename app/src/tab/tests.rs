@@ -1646,3 +1646,42 @@ fn a_hop_does_not_cross_the_line_between_pinned_and_unpinned() {
 
     assert_eq!(strip.iter().map(Tab::id).collect::<Vec<_>>(), ids);
 }
+
+#[test]
+fn a_lone_member_moved_within_its_own_group_cannot_split_another() {
+    // `a` is the only member of its group, so once it is lifted out to move
+    // the group has no run to clamp the drop into — and the drop named a row
+    // in the middle of `b`'s group.
+    let (mut strip, ids) = strip(2);
+    let (a, b) = (ids[0], ids[1]);
+    strip.apply(TabAction::NewInGroupOf(a));
+    let own = strip.get(a).and_then(Tab::group).expect("a is grouped");
+    let c = order(&strip)[1];
+    strip.apply(TabAction::MoveTab {
+        tab: c,
+        group: None,
+        before: None,
+    });
+    strip.apply(TabAction::NewInGroupOf(b));
+    let other = strip.get(b).and_then(Tab::group).expect("b is grouped");
+    let d = order(&strip)[2];
+    assert_eq!(order(&strip), vec![a, b, d, c]);
+
+    strip.apply(TabAction::MoveTab {
+        tab: a,
+        group: Some(own),
+        before: Some(d),
+    });
+
+    let blocks: Vec<Option<GroupId>> = strip.blocks().iter().map(|block| block.group).collect();
+    assert_eq!(
+        blocks.iter().filter(|group| **group == Some(other)).count(),
+        1,
+        "`b`'s group was split in two: {blocks:?}"
+    );
+    assert_eq!(
+        strip.get(a).and_then(Tab::group),
+        Some(own),
+        "and `a` is still in its own"
+    );
+}
