@@ -205,3 +205,30 @@ fn test_fish_history_is_under_the_xdg_data_home_on_every_platform() {
     }
     assert_eq!(fish_history(None, None), None);
 }
+
+#[test]
+fn test_a_cut_inside_a_zsh_entry_drops_the_whole_entry() {
+    // Where a seek into a long file lands: inside a loop. Its body and its
+    // `done` used to be read as commands of their own.
+    let tail = "b; do\\\necho continuation-line\\\ndone\n: 1700000001:0;git status\n";
+    assert_eq!(
+        after_the_cut(tail, Shell::Zsh),
+        ": 1700000001:0;git status\n"
+    );
+    assert_eq!(
+        parse(Shell::Zsh, after_the_cut(tail, Shell::Zsh)),
+        vec!["git status"]
+    );
+
+    // An entry of one line costs only that line, as before.
+    assert_eq!(after_the_cut("tatus\nls\n", Shell::Zsh), "ls\n");
+    // A cut through the last entry of the file leaves nothing.
+    assert_eq!(after_the_cut("o\\\ndone", Shell::Zsh), "");
+
+    // bash has no continuation lines to follow: a line ending in `\\` is a
+    // command of its own, and only the partial first line goes.
+    assert_eq!(
+        after_the_cut("x \\\necho \\\\\n", Shell::Bash),
+        "echo \\\\\n"
+    );
+}
