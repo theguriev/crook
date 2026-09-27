@@ -3496,6 +3496,22 @@ mod tests {
             flags.contains(&"agent") && flags.contains(&"agent-hooks"),
             "the skill teaches the status report: {flags:?}"
         );
+        // The other way round, for the status report's own options: the skill
+        // says it is the whole of what a pane can do, and it went without
+        // `--message` from the day that flag arrived, so an agent following
+        // it never said what it was waiting for.
+        let report = help
+            .lines()
+            .find_map(|line| line.trim_start().strip_prefix("--agent <STATUS>"))
+            .expect("--help lists the status report");
+        for option in report.split('[').filter_map(|part| part.split(' ').next()) {
+            if !option.is_empty() {
+                assert!(
+                    agent::SKILL.contains(option),
+                    "--help gives `--agent` {option}, which the skill never mentions"
+                );
+            }
+        }
         for flag in flags {
             assert!(
                 table.contains(&flag),
