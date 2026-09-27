@@ -794,6 +794,71 @@ fn test_a_pin_and_a_colour_come_back() {
 }
 
 #[test]
+fn a_pinned_tab_in_a_group_that_is_not_first_keeps_its_group_in_place() {
+    // Every tab was adopted before any group existed, and each adoption
+    // settled the pins across what looked like one ungrouped run: the pinned
+    // tab went to the very front of the strip, its group was gathered there,
+    // and the tab that was selected by position was a different tab.
+    let mut strip = TabStrip::new();
+    strip.apply(TabAction::New);
+    let second = strip.iter().nth(1).expect("a second tab").id();
+    strip.apply(TabAction::NewInGroupOf(second));
+    let third = strip.active_id();
+    strip.apply(TabAction::TogglePin(third));
+    strip.apply(TabAction::New);
+    let fourth = strip.active_id();
+    strip.apply(TabAction::NewInGroupOf(fourth));
+    strip.apply(TabAction::TogglePin(strip.active_id()));
+    let first = strip.iter().next().expect("a first tab").id();
+    strip.apply(TabAction::Select(first));
+    let before = shape(&strip);
+    assert_eq!(before.len(), 3, "one lone tab, then two groups: {before:?}");
+
+    let restored = Session::of(&strip, None)
+        .restore()
+        .expect("there was something to restore");
+
+    assert_eq!(shape(&restored), before, "the order did not come back");
+    assert_eq!(
+        restored.active().expect("a tab").name(),
+        strip.active().expect("a tab").name(),
+        "a different tab came back selected"
+    );
+}
+
+#[test]
+fn a_tab_dropped_ahead_of_the_selected_one_does_not_move_the_selection() {
+    let session: Session = serde_json::from_str(
+        r#"{
+            "tabs": [
+                {"name": "a", "panes": []},
+                {"name": "b", "panes": [{"title": "b", "flex": 1.0}]},
+                {"name": "c", "panes": [{"title": "c", "flex": 1.0}]}
+            ],
+            "active": 1
+        }"#,
+    )
+    .expect("reads whole");
+
+    let restored = session.restore().expect("two tabs");
+    assert_eq!(restored.active().expect("a tab").name(), "b");
+
+    // And an index past the end is the last tab, as it was.
+    let past = Session {
+        active: 9,
+        ..session
+    };
+    assert_eq!(
+        past.restore()
+            .expect("two tabs")
+            .active()
+            .expect("a tab")
+            .name(),
+        "c"
+    );
+}
+
+#[test]
 fn a_tab_opened_after_a_restore_is_named_past_every_pane_that_came_back() {
     // One tab split in two is `agent 1` and `agent 2`; the counter was moved
     // once for the one tab, and the next tab was `agent 2` again.

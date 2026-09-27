@@ -268,14 +268,23 @@ impl Session {
         // Which tabs each group named, gathered as they come back so that a
         // group can be made once out of the tabs that actually restored.
         let mut members: Vec<Vec<TabId>> = vec![Vec::new(); self.groups.len()];
+        // The tab the file had selected, or the first after it to come back
+        // when it did not: a tab dropped ahead of it no longer shifts the
+        // selection onto its neighbour.
+        let mut active = None;
+        let mut last = None;
 
-        for snapshot in self.tabs.iter().take(MAX_TABS) {
+        for (position, snapshot) in self.tabs.iter().take(MAX_TABS).enumerate() {
             let Some(tab) = snapshot.restore() else {
                 continue;
             };
             let id = tab.id();
             strip.adopt(tab);
             opened += 1;
+            if position >= self.active && active.is_none() {
+                active = Some(id);
+            }
+            last = Some(id);
 
             if let Some(group) = snapshot.group
                 && let Some(members) = members.get_mut(group)
@@ -294,9 +303,12 @@ impl Session {
             strip.adopt_group(group.name.clone(), group.collapsed, &members);
         }
 
-        // Clamped rather than refused: the index names the tab that would have
-        // been selected, and the first one is a better answer than no window.
-        strip.select_index(self.active.min(opened.saturating_sub(1)));
+        // Clamped rather than refused: an index past the end names the tab
+        // that would have been selected, and the last one is a better answer
+        // than no window.
+        if let Some(active) = active.or(last) {
+            strip.finish_restore(active);
+        }
         Some(strip)
     }
 
