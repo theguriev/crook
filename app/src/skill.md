@@ -34,7 +34,7 @@ The dot on a tab's row is written by the program in the pane:
 
 ```sh
 crook --agent running --title "port the tab bar"
-crook --agent needs-input
+crook --agent needs-input --message "wants to run rm -rf build"
 crook --agent failed
 crook --agent idle
 ```
@@ -49,6 +49,12 @@ crook --agent idle
 
 `--title` names the work and becomes the tab's title. Keep it short: a row is one line and
 cuts a title at about sixty characters.
+
+`--message` says what you are waiting for, and only means something beside `needs-input`:
+while you wait, the row's second line is that sentence rather than the directory or the
+branch, since what you are asking is what decides whether the person comes now. It goes the
+moment you report anything else. `--message -` reads it from standard input, for a hook
+that is handed a notification's text there.
 
 The report is one escape sequence (`OSC 6340`) written to the terminal the command runs in,
 not to standard output, so it works from a hook whose output belongs to someone else. There
