@@ -2,13 +2,12 @@
 //!
 //! A row is amber, and nothing on it says whether the agent asked for an
 //! answer, the shell rang, a program sent a notification, a person marked it
-//! to come back to, or a command
-//! ended under an agent that never said it stopped. Every one of those is a
-//! fact the session already holds — see [`AgentSession`] — and this is the
-//! one place they are read out in words. herdr answers the same question with
-//! `herdr agent explain <target>`; Crook has no socket to ask over, so the
-//! answer is an entry on the row's own menu, "Why this status", contributed by
-//! [`crook/tabs`](crate::plugins::tabs).
+//! to come back to, or a command ended under an agent that never said it
+//! stopped. Every one of those is a fact the session already holds — see
+//! [`AgentSession`] — and this is the one place they are read out in words.
+//! herdr answers the same question with `herdr agent explain <target>`; Crook
+//! has no socket to ask over, so the answer is an entry on the row's own menu,
+//! "Why this status", contributed by [`crook/tabs`](crate::plugins::tabs).
 //!
 //! # Where it hangs
 //!
