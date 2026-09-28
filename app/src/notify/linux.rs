@@ -166,7 +166,7 @@ fn arguments(notice: &Notice) -> Vec<String> {
 }
 
 /// The body with the three characters markup gives a meaning written as the
-/// entities for them.
+/// entities for them, and every backslash doubled.
 ///
 /// The specification lets a server read a body as a small subset of HTML,
 /// and the ones in use do. The body is a program's words, so its `<a href>`
@@ -175,6 +175,13 @@ fn arguments(notice: &Notice) -> Vec<String> {
 /// as markup and is left alone. A server that does not read markup shows the
 /// entities as written, which is the rarer and the cheaper of the two
 /// mistakes.
+///
+/// The backslashes are `notify-send`'s own: it reads the body, and not the
+/// title, through `g_strcompress`, which takes C escapes out of it. A
+/// question with a Windows path or a regex in it — `C:\new`, `\bfoo\b` —
+/// would arrive with a line break, a lost backslash, or cut short at a
+/// `\0`; `\\` is the one escape that gives back the backslash that was
+/// written.
 fn escaped(body: &str) -> String {
     let mut escaped = String::with_capacity(body.len());
     for character in body.chars() {
@@ -182,6 +189,7 @@ fn escaped(body: &str) -> String {
             '&' => escaped.push_str("&amp;"),
             '<' => escaped.push_str("&lt;"),
             '>' => escaped.push_str("&gt;"),
+            '\\' => escaped.push_str(r"\\"),
             other => escaped.push(other),
         }
     }

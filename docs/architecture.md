@@ -1215,7 +1215,8 @@ a test and a snapshot keep `Silent`. On Linux that is `notify::linux::NotifySend
 of its own, which is `plugins::wasm::sound`'s arrangement with `pw-play` — no D-Bus crate,
 because `zbus` is a whole bus client for one method call and `dbus` binds libdbus. It passes
 only the flags every `notify-send` has, the two texts after `--`, and the body with `&`, `<`
-and `>` escaped, since servers read a body as markup and a program's words are not Crook's. A
+and `>` escaped, since servers read a body as markup and a program's words are not Crook's, and
+its backslashes doubled, since `notify-send` reads C escapes out of the body. A
 machine without `notify-send` is one warning and then nothing is started again. There is no
 click: `--action` implies `--wait`, one process held for as long as each notification lives,
 and a click heard could switch the pane but not bring the window forward — winit's

@@ -83,6 +83,28 @@ fn markup_in_an_agents_question_is_shown_rather_than_read() {
 }
 
 #[test]
+fn a_backslash_in_an_agents_question_is_shown_as_written() {
+    // `notify-send` reads the body, and not the title, through
+    // `g_strcompress`: an unescaped `\n` is a line break again, `\d` loses
+    // its backslash and `\0` ends the body there. Each one is doubled, which
+    // `g_strcompress` turns back into the one that was written.
+    let arguments = arguments(&Notice {
+        title: r"Crook — C:\new".to_owned(),
+        body: r#"Allow grep -E "\bfoo\b" in C:\Users\me\0?"#.to_owned(),
+    });
+
+    assert_eq!(
+        arguments.last().map(String::as_str),
+        Some(r#"Allow grep -E "\\bfoo\\b" in C:\\Users\\me\\0?"#)
+    );
+    assert_eq!(
+        arguments[arguments.len() - 2],
+        r"Crook — C:\new",
+        "the title is passed on as it is, so it is left as it was"
+    );
+}
+
+#[test]
 fn a_program_that_is_not_installed_is_tried_once() {
     let missing = AtomicBool::new(false);
 
