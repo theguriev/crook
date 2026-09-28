@@ -5,8 +5,9 @@ name: Commit titles
 # Commit without saying so. This is the same check as the local commit-msg
 # hook, run where a title can still be fixed: on every commit a pull request
 # brings, and on the pull request's own title, since a squash merge makes that
-# the commit main gets. Seconds on one runner, so it is automatic where the
-# build matrix is not.
+# the commit main gets. A workflow of its own rather than a job in ci.yml,
+# because a title edited on the website is a change to check that brings no
+# commit, and it should not start the build matrix over.
 on:
   pull_request:
     types: [opened, edited, synchronize, reopened]

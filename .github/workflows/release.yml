@@ -188,10 +188,10 @@ jobs:
           retention-days: 7
 
 
-  # The same build a `Crook CI` dispatch runs, so the floor it is held to has
-  # been seen to hold on a branch before a tag asks for it. The artifact it
-  # uploads is named the way the matrix names its own, and the release job
-  # collects it with them.
+  # The same build `Crook CI` runs on every pull request to main and every
+  # push to it, so the floor it is held to has been seen to hold on main
+  # before a tag asks for it. The artifact it uploads is named the way the
+  # matrix names its own, and the release job collects it with them.
   linux:
     name: Build Linux (x86_64)
     needs: version
