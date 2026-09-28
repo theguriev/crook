@@ -125,8 +125,9 @@ impl Proxy {
     /// For something in the window that wants a person who is somewhere
     /// else, so it does nothing while the window has the focus. It is not a
     /// notification: it says nothing but "this window", and the platform
-    /// decides how. The request is taken back when the window next gains the
-    /// focus, which is the look it asked for; the caller has nothing to undo.
+    /// decides how. The request is over when the window next gains the focus,
+    /// which is the look it asked for — taken back then on the desktop that
+    /// needs it, X11 — so the caller has nothing to undo.
     pub fn request_attention(&self) {
         self.send(CrookEvent::RequestAttention);
     }
@@ -365,8 +366,9 @@ impl ApplicationHandler<CrookEvent> for App {
                 }
             }
             CrookEvent::RequestAttention => {
-                if let Some(window) = self.window.as_mut() {
-                    window.request_attention();
+                if let Some(window) = self.window.as_mut()
+                    && window.request_attention()
+                {
                     self.attention_requested = true;
                 }
             }
@@ -406,10 +408,10 @@ impl ApplicationHandler<CrookEvent> for App {
 
             // The look a request for attention asked for, so the request is
             // over. Taken back here rather than left to the application,
-            // because only some desktops need taking back — X11 keeps its
-            // urgency hint until somebody removes it — and nothing above this
-            // line should have to know which. Then on to the delegate like
-            // any other focus change.
+            // because only X11 needs taking back — it keeps its urgency hint
+            // until somebody removes it — and nothing above this line should
+            // have to know which desktop it is on. Then on to the delegate
+            // like any other focus change.
             WindowEvent::Focused(true) if self.attention_requested => {
                 self.attention_requested = false;
                 self.with_window(|window| window.withdraw_attention_request());
