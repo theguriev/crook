@@ -5,6 +5,128 @@ lifted into the notes on the [releases page](https://github.com/theguriev/crook/
 by `release.yml`. Sections start at the first release cut that way; the ones
 before it were described on their release pages and are listed here by tag.
 
+## v0.1.13
+
+[compare changes](https://github.com/theguriev/crook/compare/v0.1.12...v0.1.13)
+
+### Performance
+
+- **about:** Ask whether the binary is writable only when there is an update ([#279](https://github.com/theguriev/crook/pull/279))
+- **find:** Count up to each match once, not from the start every time ([#285](https://github.com/theguriev/crook/pull/285))
+
+### Fixes
+
+- **update:** Refuse to write over a binary that is already gone ([#278](https://github.com/theguriev/crook/pull/278))
+- **tabs:** Keep a new or hopped tab out from among the pinned ones ([#280](https://github.com/theguriev/crook/pull/280))
+- **about:** Say a plugin built for any other ABI is refused, not only a later one ([#281](https://github.com/theguriev/crook/pull/281))
+- **agent:** Keep a semicolon at a title's edge from forging the message cut ([#282](https://github.com/theguriev/crook/pull/282))
+- **keybindings:** Find an entry's comma past comments when cutting it out ([#283](https://github.com/theguriev/crook/pull/283))
+- **keybindings:** Stop printing a chord that a longer or shorter one shadows ([#284](https://github.com/theguriev/crook/pull/284))
+- **settings:** Write through a symlinked settings or keybindings file ([#286](https://github.com/theguriev/crook/pull/286))
+- **completion:** Offer bash file names with a directory's slash and quoted spaces ([#287](https://github.com/theguriev/crook/pull/287))
+- **shell:** Keep a subshell line's exit status when history skips the line ([#288](https://github.com/theguriev/crook/pull/288))
+- **cli:** Refuse a flag --agent does not read instead of dropping it ([#289](https://github.com/theguriev/crook/pull/289))
+- **worktrees:** Keep a detached checkout's commits from going with it ([#290](https://github.com/theguriev/crook/pull/290))
+- **git:** Read a reftable repository's placeholder HEAD as no branch ([#291](https://github.com/theguriev/crook/pull/291))
+- **plugins:** Refuse a module installed under one of Crook's own ids ([#294](https://github.com/theguriev/crook/pull/294))
+- **store:** Check a downloaded module is the plugin the list offered, on every path ([#295](https://github.com/theguriev/crook/pull/295))
+- **ui:** Draw a switch's knob in a colour that reads on the accent ([#312](https://github.com/theguriev/crook/pull/312))
+- **plugins:** Keep a card's pictures when an older decode lands after them ([#313](https://github.com/theguriev/crook/pull/313))
+- **settings:** Keep a failing settings save on the page past a keybindings save ([#314](https://github.com/theguriev/crook/pull/314))
+- **keybindings:** Say on the page when the keybindings file cannot be read ([#315](https://github.com/theguriev/crook/pull/315))
+- **worktrees:** Hand a removal's answer only to the menu that asked ([#316](https://github.com/theguriev/crook/pull/316))
+- **blocks:** Keep what a command prints after clearing the screen ([#317](https://github.com/theguriev/crook/pull/317))
+- **blocks:** Reflow the shell's block when its screen comes back ([#318](https://github.com/theguriev/crook/pull/318))
+- **store:** Offer no update to a plugin running from its build ([#319](https://github.com/theguriev/crook/pull/319))
+- **plugins:** Forget a closed picker when its row is chosen ([#321](https://github.com/theguriev/crook/pull/321))
+- **tabs:** Pin the only tab left in a group without moving the group ([#322](https://github.com/theguriev/crook/pull/322))
+- **tabs:** Keep pins in front when two ungrouped runs join ([#323](https://github.com/theguriev/crook/pull/323))
+- **session:** Save a tab or pane rename as soon as it is made ([#324](https://github.com/theguriev/crook/pull/324))
+- **session:** Name a new tab past every name that came back ([#325](https://github.com/theguriev/crook/pull/325))
+- **history:** Read a multi-line zsh command as one entry ([#326](https://github.com/theguriev/crook/pull/326))
+- **history:** Unmetafy a zsh history before reading it as UTF-8 ([#327](https://github.com/theguriev/crook/pull/327))
+- **links:** One link from every cell, and none from inside a word ([#329](https://github.com/theguriev/crook/pull/329))
+- **keys:** Send the capital for Alt+Shift+letter ([#330](https://github.com/theguriev/crook/pull/330))
+- **mouse:** Send nothing for a mouse's side buttons ([#331](https://github.com/theguriev/crook/pull/331))
+- **links:** Keep a URL whole across a wide character in it ([#332](https://github.com/theguriev/crook/pull/332))
+- **copy:** Copy a tab as one tab, not the blanks it jumped ([#333](https://github.com/theguriev/crook/pull/333))
+- **blocks:** Keep a scrolled-up list on its rows when old blocks go ([#334](https://github.com/theguriev/crook/pull/334))
+- **update:** Unpack into a directory this run made, and nobody else ([#335](https://github.com/theguriev/crook/pull/335))
+- **update:** Let the archive take as long as it keeps arriving ([#336](https://github.com/theguriev/crook/pull/336))
+- **zoom:** Tell the pty the new cell size even when the grid holds ([#337](https://github.com/theguriev/crook/pull/337))
+- **tabs:** Bring the tabs up before going to the pane that is waiting ([#339](https://github.com/theguriev/crook/pull/339))
+- **tabs:** Wash a tab's row for any of its panes that is asking ([#341](https://github.com/theguriev/crook/pull/341))
+- **plugins:** Quote a typed argument so fish reads it as one word too ([#342](https://github.com/theguriev/crook/pull/342))
+- **plugins:** Forget a plugin's grant from the settings as well ([#343](https://github.com/theguriev/crook/pull/343))
+- **fish:** Install Crook's completion on a fish that marks its own prompt ([#344](https://github.com/theguriev/crook/pull/344))
+- **fish:** Escape a completion the way fish's own Tab does ([#345](https://github.com/theguriev/crook/pull/345))
+- **zsh:** Offer a completion the way it has to be typed ([#347](https://github.com/theguriev/crook/pull/347))
+- **zsh:** Read a completion's word as text, not as a pattern ([#349](https://github.com/theguriev/crook/pull/349))
+- **completion:** Complete past a space with a backslash before it ([#350](https://github.com/theguriev/crook/pull/350))
+- **agent:** Cut a report where the parser would, and say so ([#351](https://github.com/theguriev/crook/pull/351))
+- **bell:** Hand a burst of bells over as one ([#352](https://github.com/theguriev/crook/pull/352))
+- **theme:** Let a trailing comment on a block line be a comment ([#353](https://github.com/theguriev/crook/pull/353))
+- **theme:** Read backslash escapes in a double-quoted value ([#354](https://github.com/theguriev/crook/pull/354))
+- **keybindings:** Keep the comments in an array with no entries ([#355](https://github.com/theguriev/crook/pull/355))
+- **keybindings:** Let the recorder skip AltGr as a held modifier ([#356](https://github.com/theguriev/crook/pull/356))
+- **settings:** Read a plugin grant back exactly as it was written ([#357](https://github.com/theguriev/crook/pull/357))
+- **settings:** Remove the temporary when a save fails at the write ([#358](https://github.com/theguriev/crook/pull/358))
+- **find:** Keep a space printed in the last column of a folded row ([#359](https://github.com/theguriev/crook/pull/359))
+- **session:** Keep a session file that is not UTF-8 ([#360](https://github.com/theguriev/crook/pull/360))
+- **session:** Restore a pinned tab's group in place, and the selection with it ([#361](https://github.com/theguriev/crook/pull/361))
+- **history:** Keep the backslash a command really ends in ([#362](https://github.com/theguriev/crook/pull/362))
+- **history:** Find fish's history where fish keeps it on macOS ([#363](https://github.com/theguriev/crook/pull/363))
+- **history:** Drop the whole zsh entry a tail read starts inside ([#364](https://github.com/theguriev/crook/pull/364))
+- **history:** Read zsh history from the file the pane's zsh writes ([#365](https://github.com/theguriev/crook/pull/365))
+- **git:** Stop taking a submodule under worktrees/ for a linked worktree ([#367](https://github.com/theguriev/crook/pull/367))
+- **git:** Find the repository a symlinked directory is in ([#368](https://github.com/theguriev/crook/pull/368))
+- **tabs:** Keep a lone member's move from splitting another group ([#369](https://github.com/theguriev/crook/pull/369))
+- **editor:** Leave the caret after a character an edit joined ([#370](https://github.com/theguriev/crook/pull/370))
+- **editor:** Keep word motion on character boundaries ([#371](https://github.com/theguriev/crook/pull/371))
+- **completion:** Drop an answer about a line that has since changed ([#372](https://github.com/theguriev/crook/pull/372))
+- **completion:** Keep the space a candidate escaped at its end ([#373](https://github.com/theguriev/crook/pull/373))
+- **input:** Send F3 and report text the way the kitty protocol says ([#374](https://github.com/theguriev/crook/pull/374))
+- **osc7:** Refuse a working directory that is not a path ([#375](https://github.com/theguriev/crook/pull/375))
+
+### Documentation
+
+- **readme:** Count the window's commands as the tables do, and check it ([#292](https://github.com/theguriev/crook/pull/292))
+- **plugin api:** Say what a tally's grant is, and what crook_run is handed ([#293](https://github.com/theguriev/crook/pull/293))
+- **skill:** Teach --message, and fail the test when the skill drops a flag ([#366](https://github.com/theguriev/crook/pull/366))
+- **readme:** Say OSC 52 writes reach the clipboard, and reads do not ([#376](https://github.com/theguriev/crook/pull/376))
+
+### Tests
+
+- **shells:** Wait for a quarter second of quiet, not four quiet reads ([#296](https://github.com/theguriev/crook/pull/296))
+- **terminal:** Prove the shell printed, not that the pty echoed the command ([#297](https://github.com/theguriev/crook/pull/297))
+- **workspace:** Sleep past the timeout where only an interrupt may end it ([#298](https://github.com/theguriev/crook/pull/298))
+- **terminal:** Check a child started at $HOME, not somewhere under it ([#299](https://github.com/theguriev/crook/pull/299))
+- **terminal:** Check a paste's bracket in the echo, where an escape can be seen ([#300](https://github.com/theguriev/crook/pull/300))
+- **tabs:** Make three tab-strip tests fail when what they name breaks ([#301](https://github.com/theguriev/crook/pull/301))
+- **session:** Restore a side-by-side split as well as a stacked one ([#302](https://github.com/theguriev/crook/pull/302))
+- **keybindings:** Check a plugin's chord cannot take one the window ships ([#303](https://github.com/theguriev/crook/pull/303))
+- **palette:** Bind the row the alphabet puts last, not first ([#304](https://github.com/theguriev/crook/pull/304))
+- **store:** Make four index tests fail when what they name breaks ([#305](https://github.com/theguriev/crook/pull/305))
+- **palette:** Pin the panes' directory in the waiting-rows test ([#306](https://github.com/theguriev/crook/pull/306))
+- **plugins:** Make three sandbox boundary tests fail when the boundary breaks ([#307](https://github.com/theguriev/crook/pull/307))
+- **workspace:** Make four window tests fail when what they name breaks ([#308](https://github.com/theguriev/crook/pull/308))
+- **plugin host:** Make three sandbox limit tests fail when the limit goes ([#309](https://github.com/theguriev/crook/pull/309))
+- **plugin host:** Cover the table ceiling and the host's reads of guest pointers ([#310](https://github.com/theguriev/crook/pull/310))
+- **ui:** Make the flex, container and nested-scroll tests fail when those break ([#311](https://github.com/theguriev/crook/pull/311))
+- **selection:** Keep the triple-click line off the command's row ([#320](https://github.com/theguriev/crook/pull/320))
+- **shells:** Retype the line after ctrl-c until the shell runs it ([#328](https://github.com/theguriev/crook/pull/328))
+- **palette:** A setting chosen in the palette opens with its row found ([#338](https://github.com/theguriev/crook/pull/338))
+- **search:** Keep the checkout's path out of the status-word searches ([#340](https://github.com/theguriev/crook/pull/340))
+
+### CI
+
+- Install fish so the fish tests run instead of skipping ([#346](https://github.com/theguriev/crook/pull/346))
+- Run the zsh tests on Linux too, and expect Linux's history file ([#348](https://github.com/theguriev/crook/pull/348))
+
+### ❤️ Contributors
+
+- Eugen Guriev ([@theguriev](https://github.com/theguriev))
+
 ## v0.1.12
 
 [compare changes](https://github.com/theguriev/crook/compare/v0.1.11...v0.1.12)
