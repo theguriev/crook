@@ -221,6 +221,153 @@ fn a_wait_that_is_poked_ends_early_rather_than_at_its_own_time() {
     assert!(ticked, "a poked wait did not come back inside a second");
 }
 
+/// A runtime over a module with somewhere to put an answer, allowed to ask
+/// where a pane is working — which is a deed, served by the window.
+fn allowed_to_ask_where() -> (App, Arc<LocalQueue>, ModelHandle<Runtime>) {
+    let queue = LocalQueue::new();
+    let mut app = App::new(queue.foreground(), Arc::new(Background::new(1)));
+
+    let module = crate::plugins::wasm::tests::wasm_asking_where("eugen/probe", 0, 0, 0);
+    let (sandbox, _) = Sandbox::open(&module, Fuel::default()).expect("the test module opens");
+    let runtime = app.update(|ctx| {
+        ctx.add_model(|_| {
+            Runtime::new(
+                PluginId::parse("eugen/probe").expect("a literal that parses"),
+                Rc::new(RefCell::new(sandbox)),
+                Rc::new(Cell::new(0)),
+                vec![String::from("cwd.read")],
+            )
+        })
+    });
+
+    (app, queue, runtime)
+}
+
+/// Asks where the pane is once per ticket, as a guest's calls would.
+fn ask_where(app: &mut App, runtime: &ModelHandle<Runtime>, tickets: std::ops::Range<u32>) {
+    app.update(|ctx| {
+        runtime.update(ctx, |runtime, ctx| {
+            for ticket in tickets {
+                runtime.start(ticket, Request::Where, Gesture::None, ctx);
+            }
+        })
+    });
+}
+
+/// The tickets the observer would be handed, one list per turn, until nothing
+/// is left waiting.
+///
+/// A turn is everything `deeds` hands out before it hands out nothing, which
+/// is what the observer's loop takes; the next one starts when the pause the
+/// last one booked is over and its task has run.
+fn served_in_turns(
+    app: &mut App,
+    queue: &LocalQueue,
+    runtime: &ModelHandle<Runtime>,
+) -> Vec<Vec<u32>> {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    let mut turns = Vec::new();
+    loop {
+        queue.run_until_parked();
+        let mut turn = Vec::new();
+        loop {
+            let deeds = app.update(|ctx| runtime.update(ctx, |runtime, ctx| runtime.deeds(ctx)));
+            if deeds.is_empty() {
+                break;
+            }
+            turn.extend(deeds.into_iter().map(|(ticket, _)| ticket));
+        }
+        if !turn.is_empty() {
+            turns.push(turn);
+        }
+
+        let waiting = runtime.read(app, |runtime, _| runtime.deeds.len());
+        if waiting == 0 {
+            return turns;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{waiting} deeds were left waiting and no turn came for them"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn deeds_past_a_turn_wait_for_the_next_and_none_is_lost_or_served_twice() {
+    // What the budget must not do. `deeds` drains, and a deed taken out and
+    // not served is a ticket a guest waits on for the rest of the session —
+    // so what one turn has no room for stays where it was, in the order it
+    // was asked, and the next turn starts with it.
+    let (mut app, queue, runtime) = allowed_to_ask_where();
+    let asked = 3 * DEEDS_PER_TURN + 5;
+    ask_where(&mut app, &runtime, 1..asked + 1);
+
+    let turns = served_in_turns(&mut app, &queue, &runtime);
+
+    let full = DEEDS_PER_TURN as usize;
+    assert_eq!(
+        turns.iter().map(Vec::len).collect::<Vec<_>>(),
+        [full, full, full, 5],
+        "the turns were not a turn's worth each"
+    );
+    assert_eq!(
+        turns.concat(),
+        (1..asked + 1).collect::<Vec<_>>(),
+        "a ticket was dropped, served twice or served out of order"
+    );
+}
+
+#[test]
+fn a_burst_that_ends_is_forgiven_the_turns_it_took() {
+    // "In a row" is the whole rule: a turn that finds nothing left waiting
+    // ended a chain, and a chain that ends was not the loop. A plugin whose
+    // bursts are each a little more than a turn, more times than a plugin may
+    // overrun, is served every one of them.
+    let (mut app, queue, runtime) = allowed_to_ask_where();
+    let burst = DEEDS_PER_TURN + 1;
+
+    for round in 0..=OVERRUNS_ALLOWED {
+        let first = round * burst + 1;
+        ask_where(&mut app, &runtime, first..first + burst);
+
+        let served = served_in_turns(&mut app, &queue, &runtime).concat();
+
+        assert_eq!(
+            served,
+            (first..first + burst).collect::<Vec<_>>(),
+            "burst {round} was not served whole"
+        );
+    }
+}
+
+#[test]
+fn a_plugin_still_asking_after_its_turns_run_out_stops_being_served() {
+    // The loop's end. Every deed waiting at once is a chain that never finds
+    // the queue empty, which is what a guest asking again from every answer
+    // looks like from here: it is served for as many turns as it is allowed
+    // to overrun, and one more, and then what it asks for is not kept for
+    // anybody — a queue that went on growing would be the loop again, in
+    // memory.
+    let (mut app, queue, runtime) = allowed_to_ask_where();
+    let asked = (OVERRUNS_ALLOWED + 3) * DEEDS_PER_TURN;
+    ask_where(&mut app, &runtime, 1..asked + 1);
+
+    let served = served_in_turns(&mut app, &queue, &runtime).concat();
+
+    assert_eq!(
+        served,
+        (1..(OVERRUNS_ALLOWED + 1) * DEEDS_PER_TURN + 1).collect::<Vec<_>>(),
+        "it was not served its turns and then stopped"
+    );
+    ask_where(&mut app, &runtime, asked + 1..asked + 2);
+    assert_eq!(
+        runtime.read(&app, |runtime, _| runtime.deeds.len()),
+        0,
+        "what it asked for afterwards was kept"
+    );
+}
+
 /// A directory of line-delimited JSON, written for one test.
 fn transcripts(name: &str) -> PathBuf {
     let root = std::env::temp_dir().join(format!(

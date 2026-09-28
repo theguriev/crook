@@ -810,6 +810,18 @@ reason to ask before somebody allows it, and few enough that the loop stops bein
 allowed request resets the count, because a plugin nobody has answered for yet is in the
 ordinary state and not in a bad one.
 
+**So is what the window does for one.** Where the active pane is, what Crook can do, typing a
+line and running a command are answered by the window itself, on the thread that draws, and
+the answer is delivered there too — so a plugin that asks again from inside every answer would
+be served for as long as it kept asking, and the window would freeze until it was killed. So
+one plugin is served thirty-two of those and then the window draws before it carries on.
+Thirty-two is as many requests as the sandbox holds for a guest at once, so everything one call
+asked for is served in the turn it asked, and only a chain of answers that keep asking ever
+waits. What waits is left where it was, in order, and served on the next turn: a request taken
+and never answered is a plugin waiting for the rest of the session. A chain that runs out of
+turns sixteen times in a row stops being served until Crook is restarted, the count refusals
+get; one that ends by itself starts the count again.
+
 **Isolation.** Fuel-metered execution (wasmi has it) with a per-call deadline; a trap or an
 exhausted budget drops that contribution and counts toward self-disable; memory capped per
 instance; one instance per plugin, on the pool, never on the foreground; results come home

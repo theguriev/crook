@@ -17996,7 +17996,8 @@ mod sandboxed {
     use super::*;
     use crate::picture::tests::{header_only, icon_png, preview_png};
     use crate::plugins::wasm::tests::{
-        Scratch, install, manifest, wasm, wasm_asking, wasm_at, wasm_carrying, wasm_saying,
+        BURST, EVERY_ANSWER, Scratch, install, manifest, wasm, wasm_asking, wasm_asking_where,
+        wasm_at, wasm_carrying, wasm_saying,
     };
     use crate::workspace::settings_page::widgets;
     use crook_plugin_api::Capability;
@@ -19852,6 +19853,97 @@ mod sandboxed {
                 )),
             "the plugin was thrown away over one contribution"
         );
+    }
+
+    /// A window holding one plugin, `module`, allowed to see where the tabs
+    /// are working — which is the whole of what a guest needs to ask the window
+    /// something the window answers itself.
+    fn asking_where(scratch: &Scratch, module: &[u8]) -> Harness {
+        install(scratch.path(), "eugen.probe", module);
+        let mut opening = opening(scratch, Default::default(), Default::default());
+        opening
+            .settings
+            .set_granted("eugen/probe", vec![String::from("cwd.read")]);
+        Harness::with_opening(1, opening)
+    }
+
+    /// Pumps the queue, drawing after anything runs on it, until nothing has
+    /// for half a second — and says whether that happened within `patience`.
+    ///
+    /// Half a second is thirty times the pause the window takes between two
+    /// turns of one plugin's deeds, so a chain of those that is still going is
+    /// not mistaken for one that stopped.
+    fn falls_quiet(harness: &mut Harness, patience: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + patience;
+        let mut quiet_since = std::time::Instant::now();
+        while std::time::Instant::now() < deadline {
+            if harness.queue.run_until_parked() > 0 {
+                harness.frame();
+                quiet_since = std::time::Instant::now();
+            } else if quiet_since.elapsed() >= std::time::Duration::from_millis(500) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        false
+    }
+
+    #[test]
+    fn a_plugin_that_asks_again_from_every_answer_hands_the_window_back() {
+        // The freeze this is about. Where a pane is working is answered by the
+        // window itself, on the thread that draws, and the answer is delivered
+        // there too — so a guest that asks again from inside every answer kept
+        // the observer serving it for ever, and the window had to be killed
+        // over a plugin holding one ordinary grant.
+        //
+        // On a thread of its own, because what fails is a call that never
+        // returns: a test that hung would say nothing, and this one says which
+        // call it was.
+        let (said, heard) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let scratch = Scratch::new("asks-forever");
+            let mut harness =
+                asking_where(&scratch, &wasm_asking_where("eugen/probe", 1, 1, u32::MAX));
+            let _ = said.send("opened");
+            // And a loop that ends: past its allowance the plugin stops being
+            // served, and the window is left with nothing to do.
+            if falls_quiet(&mut harness, std::time::Duration::from_secs(20)) {
+                let _ = said.send("quiet");
+            }
+        });
+
+        assert_eq!(
+            heard.recv_timeout(std::time::Duration::from_secs(20)),
+            Ok("opened"),
+            "the window never came back from building a plugin that asks from every answer"
+        );
+        assert_eq!(
+            heard.recv_timeout(std::time::Duration::from_secs(30)),
+            Ok("quiet"),
+            "a plugin that never stops asking went on being served"
+        );
+    }
+
+    #[test]
+    fn a_burst_bigger_than_a_turn_still_gets_every_answer() {
+        // The other half, and why the bound is a turn and not a ceiling: what
+        // one turn has no room for waits for the next rather than being
+        // dropped, because a ticket taken and not served is a guest waiting
+        // for the rest of the session. Three turns' worth — each answer in the
+        // first asking twice, so the second turn is handed half of what is
+        // waiting and has to leave the rest — lands every answer, and none of
+        // them twice, which the guest would draw instead.
+        let scratch = Scratch::new("asks-a-burst");
+        let mut harness =
+            asking_where(&scratch, &wasm_asking_where("eugen/probe", BURST, 2, BURST));
+
+        assert!(
+            falls_quiet(&mut harness, std::time::Duration::from_secs(20)),
+            "the window was still busy with the burst"
+        );
+
+        let text = frame_text(&harness.frame());
+        assert!(text.contains(EVERY_ANSWER), "{text}");
     }
 
     /// The Store, opened on a scratch index: what its rows and its card say

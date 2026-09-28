@@ -32,6 +32,13 @@
 //! are served by the observer in `wasm::mod`, which is handed the workspace
 //! the moment anything here notifies.
 //!
+//! **They are served a turn at a time.** Served on the thread that draws, and
+//! answered there, so a guest that asks again from every answer would be
+//! served for as long as it kept asking — and the window with it. Past
+//! [`DEEDS_PER_TURN`] what is left waits here, untouched, for a turn booked
+//! after the window has drawn, and a plugin that is still asking after
+//! [`OVERRUNS_ALLOWED`] of those in a row stops being served at all.
+//!
 //! **And two of them may only happen because somebody pressed something.**
 //! A plugin that could type into a shell from a timer is a plugin that types
 //! while nobody is looking, so a request that *changes* something is taken
@@ -108,6 +115,46 @@ const REFUSALS_ALLOWED: u32 = 16;
 /// an answer that was quietly thrown away and never polls again. Retrying is
 /// cheap; a chip frozen on a number from an hour ago is not.
 const RETRY_AFTER: Duration = Duration::from_millis(16);
+
+/// How many deeds one plugin is handed before the window takes a turn of its
+/// own.
+///
+/// A deed is served on the thread that draws, and its answer is delivered
+/// there too, so a guest that asks again from inside every answer is a loop
+/// with nothing in it that waits — and serving until nothing was left waiting
+/// was a window that never came back and had to be killed, over a plugin with
+/// one ordinary grant. Nothing else in that loop is finite: each deed is
+/// answered before the next is asked, so the sandbox's ceiling on what a guest
+/// may have outstanding never fills.
+///
+/// Thirty-two because that is as many requests as the sandbox holds for a
+/// guest at once, so everything any one call raised is served in the turn
+/// that raised it, and only a chain — answers that keep asking — ever spans
+/// turns. The plugins that exist ask for two at most: where the pane is and
+/// what Crook can do, from `build`, or what a command printed and then the
+/// clipboard, one after the other.
+pub(super) const DEEDS_PER_TURN: u32 = 32;
+
+/// How many turns in a row a plugin may end with deeds still waiting before
+/// they stop being served until Crook is restarted.
+///
+/// The rule [`REFUSALS_ALLOWED`] is, for the same kind of loop. A burst bigger
+/// than a turn is carried on with in the next one, and a chain that ends — a
+/// turn that finds nothing left waiting — is forgiven its count, but a plugin
+/// still asking after sixteen full turns is asking because it asks, and each
+/// turn it is given is thirty-two calls into it on the thread that draws.
+const OVERRUNS_ALLOWED: u32 = 16;
+
+/// How long the window is left to itself before a plugin's waiting deeds are
+/// carried on with.
+///
+/// About a frame, and a sleep on the pool rather than a task queued straight
+/// back onto the foreground: on X11 and macOS the event loop runs every task
+/// it has been handed before it draws anything, so a task that queued the
+/// next one at once would run in the same pass, and the turn this is for
+/// would never come. Booked only while deeds are waiting, so it is not a
+/// clock — a plugin with nothing left to be served books nothing.
+const RESUME_AFTER: Duration = Duration::from_millis(16);
 
 /// How many files one walk will look at before it stops.
 ///
@@ -199,6 +246,16 @@ pub(super) struct Runtime {
     /// Every one of these has already been checked against the grant: what is
     /// waiting is the *doing*, and a request nobody allowed never gets here.
     deeds: Vec<(u32, Request)>,
+    /// How many deeds have been handed out this turn: since the window last
+    /// took one of its own, or since nothing was left waiting. See
+    /// [`DEEDS_PER_TURN`].
+    served: u32,
+    /// How many turns in a row have ended with deeds still waiting. See
+    /// [`OVERRUNS_ALLOWED`].
+    overruns: u32,
+    /// Whether the turn that carries on with what is still waiting has been
+    /// booked — once, however often the observer asks in the meantime.
+    resuming: bool,
 }
 
 impl Entity for Runtime {
@@ -223,16 +280,86 @@ impl Runtime {
             waiting: None,
             wake: None,
             deeds: Vec::new(),
+            served: 0,
+            overruns: 0,
+            resuming: false,
         }
     }
 
-    /// Everything waiting for a workspace, taken.
+    /// What is waiting for a workspace, taken, as far as this turn goes.
     ///
     /// Drained rather than read, for the reason the sandbox drains what a
     /// guest asked for: a deed served twice is a line typed into a shell
     /// twice, and the second one would be the host's fault.
-    pub(super) fn deeds(&mut self) -> Vec<(u32, Request)> {
-        std::mem::take(&mut self.deeds)
+    ///
+    /// **And taken no further than [`DEEDS_PER_TURN`].** What is past it stays
+    /// here, in the order it was asked, for the turn that is booked to carry
+    /// on with it: a ticket taken and not served is a guest waiting for the
+    /// rest of the session, so the budget decides what is *taken* and never
+    /// what is dropped. Once the turn is spent the answer is nothing at all,
+    /// which is what ends the observer's loop.
+    pub(super) fn deeds(&mut self, ctx: &mut ModelContext<Self>) -> Vec<(u32, Request)> {
+        if self.no_longer_served() {
+            return Vec::new();
+        }
+        if self.deeds.is_empty() {
+            // The chain ended by itself, and however long it ran it was not
+            // the loop: the loop always has something waiting.
+            self.served = 0;
+            self.overruns = 0;
+            return Vec::new();
+        }
+
+        let room = DEEDS_PER_TURN.saturating_sub(self.served) as usize;
+        if room == 0 {
+            self.overran(ctx);
+            return Vec::new();
+        }
+        let taken: Vec<(u32, Request)> = self.deeds.drain(..room.min(self.deeds.len())).collect();
+        self.served += taken.len() as u32;
+        taken
+    }
+
+    /// Books the turn that carries on with what is still waiting — or, for a
+    /// plugin that has needed one [`OVERRUNS_ALLOWED`] times in a row, stops
+    /// serving its deeds.
+    fn overran(&mut self, ctx: &mut ModelContext<Self>) {
+        if self.resuming {
+            return;
+        }
+        self.overruns += 1;
+        if self.no_longer_served() {
+            log::warn!(
+                "{} has asked the window for more than {DEEDS_PER_TURN} things a turn, \
+                 {OVERRUNS_ALLOWED} turns in a row, and will not be served again until Crook \
+                 is restarted",
+                self.id
+            );
+            // Dropped, as a request past `REFUSALS_ALLOWED` is: answering
+            // these would be delivering to the loop, which asks again.
+            for (ticket, _) in std::mem::take(&mut self.deeds) {
+                self.pressed.retain(|raised| *raised != ticket);
+            }
+            return;
+        }
+
+        self.resuming = true;
+        self.later(
+            RESUME_AFTER,
+            |runtime, ctx| {
+                runtime.resuming = false;
+                runtime.served = 0;
+                // The observer is what serves them, and it runs when this
+                // model notifies; nothing else would.
+                ctx.notify();
+            },
+            ctx,
+        );
+    }
+
+    /// Whether this plugin has run out of turns. See [`OVERRUNS_ALLOWED`].
+    fn no_longer_served(&self) -> bool {
+        self.overruns > OVERRUNS_ALLOWED
     }
 
     /// Takes everything the guest asked for and starts it.
@@ -324,6 +451,14 @@ impl Runtime {
                 )
             });
 
+        let deed = refused.is_none() && declined.is_none() && needs_the_workspace(&request);
+        // Dropped, the way a refusal past its allowance is: this plugin was
+        // caught asking the window for things without end. See
+        // [`OVERRUNS_ALLOWED`].
+        if deed && self.no_longer_served() {
+            return;
+        }
+
         // Written down before anything can answer it: what this ticket's
         // answer may go on to ask for is decided by what raised it. See the
         // field.
@@ -335,7 +470,7 @@ impl Runtime {
         // it waits for somewhere that holds one. Notified, because the thing
         // that serves it is an observer of this model and nothing else would
         // say there is anything to serve.
-        if refused.is_none() && declined.is_none() && needs_the_workspace(&request) {
+        if deed {
             self.deeds.push((ticket, request));
             ctx.notify();
             return;
@@ -426,7 +561,11 @@ impl Runtime {
                 // ticket and will wait for the rest of the session if nobody
                 // ever answers it. See [`RETRY_AFTER`].
                 log::warn!("{} was answered while it was running", self.id);
-                self.later(move |runtime, ctx| runtime.answer(ticket, answer, ctx), ctx);
+                self.later(
+                    RETRY_AFTER,
+                    move |runtime, ctx| runtime.answer(ticket, answer, ctx),
+                    ctx,
+                );
                 return;
             }
         };
@@ -502,13 +641,15 @@ impl Runtime {
     /// Does something to this runtime a moment from now.
     ///
     /// A sleep on the pool, like every other wait here. What it is for is the
-    /// one case a borrow of the guest can fail — see [`RETRY_AFTER`].
-    fn later<F>(&mut self, what: F, ctx: &mut ModelContext<Self>)
+    /// one case a borrow of the guest can fail — see [`RETRY_AFTER`] — and the
+    /// turn the window takes between two batches of one plugin's deeds — see
+    /// [`RESUME_AFTER`].
+    fn later<F>(&mut self, after: Duration, what: F, ctx: &mut ModelContext<Self>)
     where
         F: FnOnce(&mut Self, &mut ModelContext<Self>) + 'static,
     {
         let sleeping = ctx.background().spawn(async move {
-            std::thread::sleep(RETRY_AFTER);
+            std::thread::sleep(after);
         });
         ctx.spawn(sleeping, move |runtime, (), ctx| what(runtime, ctx))
             .detach();
@@ -533,7 +674,7 @@ impl Runtime {
             // asks for one timer at a time, so a tick that never arrives is a
             // plugin that stops polling for good.
             Err(_) => {
-                self.later(Runtime::tick, ctx);
+                self.later(RETRY_AFTER, Runtime::tick, ctx);
                 return;
             }
         };
