@@ -372,7 +372,10 @@ Nineteen features, and the page that configures them:
   OSC 133 marks that say where a prompt starts, where a command starts and how it ended. There
   is nothing to install and nothing to configure: Crook writes a scratch `ZDOTDIR`, `--rcfile`
   or `vendor_conf.d` stub, chains onto whatever hooks are already there, never touches
-  `~/.zshrc`, and removes the stub when the pane closes. Set `CROOK_NO_SHELL_INTEGRATION` to
+  `~/.zshrc`, and removes the stub when the pane closes. The stubs sit in a directory only you
+  can read — `$XDG_RUNTIME_DIR/crook`, or `crook-<uid>` in the temporary directory — and a pane
+  whose directory turns out to be someone else's runs without the marks rather than use it.
+  Set `CROOK_NO_SHELL_INTEGRATION` to
   anything but `0` to turn it off. It reaches only shells Crook itself starts — not the far
   side of an `ssh`, not a container, and not a shell it has no snippet for (`pwsh`, `nu`,
   `ksh`, `tcsh`) — and on those machines `crook --shell-integration zsh` prints the same text

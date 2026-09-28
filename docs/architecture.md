@@ -775,6 +775,23 @@ plays the login shell itself — `/etc/profile`, then the first of `~/.bash_prof
 profile in it — and plays the logout shell too, chaining an `EXIT` trap onto whatever it finds
 so `~/.bash_logout` still runs and `logout` still closes the pane.
 
+**Where the scratch lives, and who can read it.** Every pane's directory — the stubs, and the
+`complete.in` that holds the command line as far as the caret — sits in one root that is this
+user's alone: `$XDG_RUNTIME_DIR/crook` when the runtime directory is set, absolute, and a real
+directory the user owns; otherwise `crook-<uid>` in the temporary directory; on Windows,
+`crook-shell-integration` in a temporary directory that is per user already. It used to be one
+`crook-shell-integration` in `/tmp` for everybody, made `0755` by whoever came first, so any
+user on the machine could read what another had half typed, or make the directory before them
+and own it. Now the root is made `0700` in one step (`DirBuilder` with its mode, never made and
+then narrowed), and one that is already there is checked with `lstat` — a directory, not a link,
+owned by this uid, no group or other bits — and refused otherwise. A refused root is what an
+unwritable temporary directory always was: that pane runs without marks, and one line in the
+log says why. Inside it, directories are `0700` and every file Crook writes is `0600`, written under
+another name and renamed into place, because the completion request is rewritten on every Tab
+while the shell may still be reading the last one. `shell_integration::scratch::Root` is the
+checked root, and it is the only thing the sweep of dead sessions' directories accepts: the
+sweep deletes, and a root it had not checked could be a link to anywhere.
+
 **What the child is told beside that.** `TERM=xterm-256color` and `COLORTERM=truecolor`,
 because `alacritty_terminal` implements those sequences and the entry is in every terminfo
 database old enough to matter. `LINES` and `COLUMNS` are *removed* rather than set: whatever
@@ -1569,7 +1586,8 @@ since grown, and one it closed but for a corner:
   and the three snippets.
 
   The question is a **file**: Crook writes the line up to the caret into the session's own
-  scratch and sends `ESC [ 6339 ~`, a key the snippet has bound. The answer is a file too, and
+  scratch — private to the user, and renamed into place whole (see "Where the scratch lives"
+  in §7) — and sends `ESC [ 6339 ~`, a key the snippet has bound. The answer is a file too, and
   the `ESC ] 6339 ; n BEL` that says it is ready carries nothing but the request's number. A
   command line can hold a semicolon, a newline and bytes that are not UTF-8, and escaping every
   one of them past a shell *and* past an OSC parser — twice, on the way back — is a protocol

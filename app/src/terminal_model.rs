@@ -640,18 +640,18 @@ impl TerminalModel {
         let Some(session) = self.sessions.get(&pane) else {
             return false;
         };
-        let Some(request) = session._integration.completion_request() else {
-            return false;
-        };
-
         // Written before the key is sent, and that ordering is the whole of the
         // handshake: the snippet reads the file the moment the key arrives.
-        if let Err(error) = std::fs::write(
-            &request,
-            completion::request_text(serial, line_to_caret).as_bytes(),
-        ) {
-            log::debug!("could not write a completion request: {error}");
-            return false;
+        match session
+            ._integration
+            .write_completion_request(&completion::request_text(serial, line_to_caret))
+        {
+            Some(Ok(())) => {}
+            None => return false,
+            Some(Err(error)) => {
+                log::debug!("could not write a completion request: {error}");
+                return false;
+            }
         }
 
         session.shared.request_completions()
