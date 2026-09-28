@@ -514,3 +514,50 @@ mod keypad {
         );
     }
 }
+
+#[test]
+fn a_modified_f3_is_not_a_cursor_position_report_under_the_kitty_protocol() {
+    // `CSI 1;2R` is what xterm sends for Shift+F3 and what a program that asked
+    // where the cursor is reads as the answer. The protocol keeps `CSI 13 ~`.
+    let kitty = InputModes {
+        keyboard: KeyboardModes {
+            disambiguate: true,
+            ..KeyboardModes::NONE
+        },
+        ..InputModes::default()
+    };
+    let sent =
+        |key, modifiers, modes| String::from_utf8(encode(key, modifiers, modes).unwrap()).unwrap();
+
+    assert_eq!(
+        sent(Key::Function(3), Modifiers::SHIFT, kitty),
+        "\x1b[13;2~"
+    );
+    assert_eq!(sent(Key::Function(3), Modifiers::NONE, kitty), "\x1bOR");
+    // Legacy xterm is xterm, CPR clash and all.
+    assert_eq!(
+        sent(Key::Function(3), Modifiers::SHIFT, InputModes::default()),
+        "\x1b[1;2R"
+    );
+}
+
+#[test]
+fn kitty_report_text_carries_no_control_codes() {
+    // Text reported with a key is text the program may insert; a CR or a TAB
+    // there was typed into the line as well as acted on.
+    let modes = InputModes {
+        keyboard: KeyboardModes {
+            disambiguate: true,
+            report_all: true,
+            report_text: true,
+            ..KeyboardModes::NONE
+        },
+        ..InputModes::default()
+    };
+    let sent = |key| String::from_utf8(encode(key, Modifiers::NONE, modes).unwrap()).unwrap();
+
+    assert_eq!(sent(Key::Enter), "\x1b[13u");
+    assert_eq!(sent(Key::Tab), "\x1b[9u");
+    // A printable key still reports its text.
+    assert_eq!(sent(Key::Char('a')), "\x1b[97;1;97u");
+}

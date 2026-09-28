@@ -344,10 +344,20 @@ fn kitty(key: Key, modifiers: Modifiers, keyboard: KeyboardModes) -> Option<Vec<
         // The four keys the protocol exists for. Their numbers are the
         // codepoints of the control characters they used to send, which is how
         // a program that knows neither still recognises them.
+        // None of them reports text: text a program is handed is text it may
+        // insert, and the protocol forbids a control code there — a CR or a
+        // TAB would be typed into the line as well as acted on.
         Key::Escape => (27, None),
-        Key::Enter => (13, Some('\r')),
-        Key::Tab => (9, Some('\t')),
+        Key::Enter => (13, None),
+        Key::Tab => (9, None),
         Key::Backspace => (127, None),
+
+        // Modified F3 is `CSI 1;m R` in the legacy encoding, which is also the
+        // shape of a cursor position report — a program listening for one reads
+        // row 1, column m. The protocol dropped that form for exactly this
+        // reason and keeps only `CSI 13 ~`. Unmodified, F3 is `SS3 R`, which
+        // collides with nothing.
+        Key::Function(3) if modifiers.parameter() > 1 => return Some(tilde_key(13, modifiers)),
 
         // A character is only ever escaped when something makes it ambiguous:
         // Ctrl, which would otherwise fold it to a C0 code and lose which key
@@ -369,6 +379,8 @@ fn kitty(key: Key, modifiers: Modifiers, keyboard: KeyboardModes) -> Option<Vec<
     // A key with no modifier and no text to report is written as bare as it
     // can be: `CSI 27u` rather than `CSI 27;1u`. Both are legal and the short
     // form is what kitty itself sends.
+    // And never a control character, whatever the key: see the four above.
+    let text = text.filter(|text| !text.is_control());
     let wants_text = keyboard.report_text && text.is_some();
     if parameter > 1 || wants_text {
         encoded.push_str(&format!(";{parameter}"));
