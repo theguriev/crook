@@ -1126,6 +1126,24 @@ fn a_restored_agent_is_forgotten_once_anything_runs_in_its_pane() {
     assert!(other.set_running_command(Some("ls".to_owned())));
     assert_eq!(other.agent(), None);
     assert!(!other.set_running_command(None));
+
+    // Something too quick to be seen running, seen only finishing: spent
+    // all the same.
+    let mut restored = session.restore().expect("restored");
+    let pane = restored.focused_pane_id().expect("a pane");
+    let quick = restored.pane_mut(pane).expect("the pane").session_mut();
+    assert!(quick.command_finished(), "a finished `cd` changed nothing");
+    assert_eq!(quick.agent(), None);
+
+    // But a command finishing does not end an agent the pane is running
+    // now: the mark can be an earlier command's, read in the same breath as
+    // the agent starting.
+    let mut restored = session.restore().expect("restored");
+    let pane = restored.focused_pane_id().expect("a pane");
+    let resumed = restored.pane_mut(pane).expect("the pane").session_mut();
+    resumed.set_running_command(Some("claude --continue".to_owned()));
+    assert!(!resumed.command_finished());
+    assert_eq!(resumed.agent(), Some("claude"));
 }
 
 #[test]

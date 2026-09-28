@@ -258,7 +258,8 @@ pub struct AgentSession {
     /// directory came back: the process is gone, but the conversation is
     /// still on disk, keyed by that directory, and this is what lets the
     /// pane offer it back. Kept until a command runs — the resume line, or
-    /// whatever a person runs instead — so that a window closed again before
+    /// whatever a person runs instead, seen running or only seen finishing
+    /// (see [`Self::command_finished`]) — so that a window closed again before
     /// anybody pressed Enter still remembers what it was offering, rather
     /// than the first save after the restore writing the agent out of the
     /// file.
@@ -340,6 +341,22 @@ impl AgentSession {
             self.restored_agent = None;
         }
         self.running_command = command;
+        before.as_deref() != self.agent()
+    }
+
+    /// Ends [`Self::restored_agent`] because a command finished in the pane,
+    /// answering whether that changed the agent it names.
+    ///
+    /// [`Self::set_running_command`] alone is not enough. What a pane is
+    /// running is read off it at rest, so a command that starts and ends
+    /// between two reads — `cd`, `ls`, `git status` — is never seen running,
+    /// and a pane that ran only commands like those would go on naming the
+    /// agent, against whatever directory the `cd` left it in. The shell marks
+    /// the end of every command, however quick, and that mark is what calls
+    /// this. An agent the pane is running now stays named.
+    pub fn command_finished(&mut self) -> bool {
+        let before = self.agent().map(str::to_owned);
+        self.restored_agent = None;
         before.as_deref() != self.agent()
     }
 

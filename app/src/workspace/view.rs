@@ -5374,6 +5374,7 @@ impl Workspace {
                 while_running,
             } => self.ring(*pane, *while_running, ctx),
             TerminalUpdate::CommandFinished { pane, exit, took } => {
+                self.spend_restored_agent(*pane, ctx);
                 self.command_finished(*pane, *exit, *took, ctx);
                 true
             }
@@ -5416,6 +5417,29 @@ impl Workspace {
             // The pane closed between the shell saying something and the main
             // thread hearing it. Nothing to write it into, and nothing wrong.
             log::debug!("a terminal reported {update:?} for a pane that has gone");
+        }
+    }
+
+    /// Spends what a restore left in a pane once a command has finished
+    /// there: the offer of its resume line, and the agent's name.
+    ///
+    /// The `Running` update spends them too, but only for a command it saw
+    /// running, and it reads the pane at rest: `cd`, `ls` or `git status`
+    /// can start and end between two reads. The shell's end-of-command mark
+    /// arrives for every command, however quick, so this is what makes a
+    /// `cd` out of the directory end the agent's claim on the pane — which is
+    /// what keeps the file from naming the agent against a directory its
+    /// conversation was never had in. A pane whose agent changed is saved
+    /// straight away, for the reason the `Running` update saves one.
+    fn spend_restored_agent(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        self.resume_offers.remove(&pane);
+        let forgotten = self
+            .tabs
+            .pane_mut(pane)
+            .is_some_and(|pane| pane.session_mut().command_finished());
+        if forgotten {
+            ctx.notify();
+            self.save_session(ctx);
         }
     }
 

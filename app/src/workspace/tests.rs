@@ -11354,7 +11354,7 @@ mod shells {
     }
 
     /// Types `text` a key at a time, the way a person does.
-    fn type_line(harness: &mut Harness, text: &str) {
+    pub(super) fn type_line(harness: &mut Harness, text: &str) {
         for character in text.chars() {
             harness.press(
                 &character.to_lowercase().to_string(),
@@ -15098,6 +15098,113 @@ mod restoring {
         assert!(
             !resume_is_offered(&harness),
             "a line that has been sent is still offered"
+        );
+    }
+
+    /// The agent a pane's session names, which is what the file is written
+    /// from.
+    fn named_agent(harness: &Harness, pane: PaneId) -> Option<String> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .pane(pane)
+                .and_then(|pane| pane.session().agent().map(str::to_owned))
+        })
+    }
+
+    #[test]
+    fn a_command_only_seen_finishing_still_spends_the_restored_agent() {
+        // `cd`, `ls`, `git status`: over between two reads of the pane, so
+        // no `Running` ever says they ran. The shell's end-of-command mark
+        // does, and it has to be enough, or a pane a person has moved on in
+        // goes on offering the agent — against whatever directory a `cd`
+        // left it in, where the conversation was never had.
+        use crate::terminal_model::TerminalUpdate;
+
+        let scratch = Scratch::new();
+        let mut harness = restored(
+            &remembered(&[(scratch.path(), Some("claude"))]),
+            scratch.settings(),
+        );
+        let pane = harness.pane_ids()[0];
+        let update = |harness: &mut Harness, update: TerminalUpdate| {
+            harness.workspace_update(|workspace, ctx| {
+                workspace.apply_terminal_update(&update, ctx);
+            });
+        };
+
+        // The shell's first report of where it is saves the window, and the
+        // agent a restore brought back is in what it writes.
+        update(
+            &mut harness,
+            TerminalUpdate::WorkingDirectory(pane, scratch.path().to_path_buf()),
+        );
+        session_written(&scratch, "\"agent\": \"claude\"");
+
+        update(
+            &mut harness,
+            TerminalUpdate::CommandFinished {
+                pane,
+                exit: Some(0),
+                took: None,
+            },
+        );
+        assert_eq!(named_agent(&harness, pane), None);
+        assert!(
+            !resume_is_offered(&harness),
+            "a pane something has run in is still offering its resume line"
+        );
+        session_written(&scratch, "\"agent\": null");
+    }
+
+    #[test]
+    fn a_cd_out_of_a_restored_agent_s_directory_forgets_the_agent() {
+        // The same, through a real shell: a `cd` is the quick command that
+        // matters most, because the directory is the whole of how the
+        // conversation is found again.
+        let scratch = Scratch::new();
+        let [kept, moved] = ["kept", "moved-on"].map(|name| {
+            let directory = scratch.path().join(name);
+            fs::create_dir_all(&directory).expect("a scratch directory");
+            directory
+        });
+        let mut harness = restored(
+            &remembered(&[(&kept, Some("claude"))]),
+            Settings::ephemeral(),
+        );
+        let Some(pane) = super::shells::marked_shell(&mut harness) else {
+            return;
+        };
+        super::shells::await_prompt(&mut harness, pane);
+        assert_eq!(
+            named_agent(&harness, pane).as_deref(),
+            Some("claude"),
+            "the agent was forgotten before anything ran"
+        );
+
+        // The person's own line instead of the offered one, typed as they
+        // would type it.
+        harness.workspace_update(|workspace, ctx| {
+            workspace.input(pane).expect("a field").abandon();
+            ctx.notify();
+        });
+        super::shells::type_line(&mut harness, &format!("cd {}", moved.display()));
+        harness.press("enter", Modifiers::default(), "");
+
+        harness.wait_for("the shell never said it moved", |harness| {
+            harness
+                .working_directory(pane)
+                .is_some_and(|directory| directory.ends_with("moved-on"))
+        });
+        harness.wait_for("the cd never spent the restored agent", |harness| {
+            named_agent(harness, pane).is_none()
+        });
+        let written = harness.workspace.read(&harness.app, |workspace, _| {
+            Session::of(workspace.tabs(), None)
+        });
+        assert_eq!(
+            written.tabs[0].panes[0].agent, None,
+            "the file would name the agent against the directory the cd went to"
         );
     }
 }
