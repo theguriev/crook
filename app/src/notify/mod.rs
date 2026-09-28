@@ -32,7 +32,7 @@
 //! Notification Center — see [`macos`] — but only from Crook.app: macOS
 //! delivers notifications to an application bundle and to nothing else, so
 //! the binary `script/install` puts on `PATH`, and `cargo run`'s, post none
-//! and have the dock's bounce and badge instead. Windows posts nothing
+//! and have the dock's bounce instead. Windows posts nothing
 //! ([`Silent`]) until it is its own piece of work. Where nothing is posted
 //! the Notifications page says so rather than offering switches that do
 //! nothing.
@@ -304,8 +304,8 @@ pub enum Service {
     /// macOS's Notification Center, from Crook.app.
     NotificationCenter,
     /// macOS, from a binary that is not inside an application bundle, which
-    /// macOS delivers no notification to. The dock bounces and counts
-    /// instead.
+    /// macOS delivers no notification to. The dock bounces instead, and is
+    /// given the count, which it may or may not draw for such a binary.
     OutsideTheApp,
     /// Nowhere: Windows, and any other system this builds on.
     Nowhere,
@@ -345,6 +345,37 @@ impl Service {
             Self::OutsideTheApp | Self::Nowhere => false,
         }
     }
+
+    /// Whether the dock icon's badge waits on a person's leave, asked for
+    /// as a notification's is: Notification Center's alone, since macOS badges
+    /// an application with a bundle identifier only once it has asked, and a
+    /// binary outside one has nothing to ask as.
+    pub fn badges_with_leave(self) -> bool {
+        match self {
+            Self::NotificationCenter => true,
+            Self::NotifySend | Self::OutsideTheApp | Self::Nowhere => false,
+        }
+    }
+}
+
+/// Asks for the leave the dock icon's badge is drawn with, where it needs
+/// one — Crook.app — and calls `allowed` once it is given, from a queue of the
+/// system's; nothing anywhere else.
+///
+/// For the first count there is to show, since macOS, by the accounts of the
+/// applications that ran into it, drops a badge set before the application
+/// asked: the window's `Beacon` asks then, and `allowed` sets the badge again
+/// for the dock to draw. It is the same leave as a banner's,
+/// so this may be the prompt a person sees first, with a pane waiting.
+pub fn ask_to_badge(allowed: impl Fn() + Send + 'static) {
+    if !Service::here().badges_with_leave() {
+        return;
+    }
+    #[cfg(target_os = "macos")]
+    macos::ask_to_badge(allowed);
+    // Never reached: only macOS has a bundle to ask as.
+    #[cfg(not(target_os = "macos"))]
+    let _ = allowed;
 }
 
 /// Whether this build posts notifications where it is running.
@@ -377,8 +408,8 @@ pub fn for_this_desktop() -> Rc<dyn Notifier> {
             // the log and not a warning.
             log::info!(
                 "this Crook is not running from Crook.app, and macOS delivers notifications \
-                 only to an application, so it posts none; the dock icon bounces and counts \
-                 the waiting panes instead"
+                 only to an application, so it posts none; the dock icon bounces for a \
+                 waiting pane instead"
             );
             Rc::new(Silent)
         }

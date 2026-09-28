@@ -1192,8 +1192,12 @@ wgpu refuses to present to an occluded window on macOS. That covers the window's
 too: registering the callback is itself an update, and its flush runs the callback for
 everything the window opened with, since no frame has taken any of it yet. On macOS `Beacon`
 also puts the title's count on the dock icon as its badge when the count moves
-(`Proxy::set_badge`, the dock tile's `badgeLabel` in `crookui::windowing::dock`, none at zero),
-which needs no bundle, so a binary outside Crook.app shows it too.
+(`Proxy::set_badge`, the dock tile's `badgeLabel` in `crookui::windowing::dock`, none at zero).
+Since macOS 12, by the reports of the apps that hit it, the dock draws a bundled app's badge
+only once the app has asked Notification Center for leave to badge, and then only as its
+Badges switch says, so with the first count above zero `Beacon` asks
+(`notify::ask_to_badge`) and a yes sets the badge again (`Proxy::show_badge_again`); whether
+the dock draws one for a binary outside Crook.app, which cannot ask, is unverified.
 
 **And in words, on Linux and macOS.** When a pane's row turns to needs-input while the window
 is behind another one — its agent asking, its agent saying it is done while nobody is looking,
@@ -1227,10 +1231,10 @@ click: `--action` implies `--wait`, one process held for as long as each notific
 and a click heard could switch the pane but not bring the window forward — winit's
 `focus_window` does nothing on Wayland, with no way to hand it the activation token a server
 sends. On macOS it is `notify::macos::NotificationCenter`, `UNUserNotificationCenter` through
-the objc2 bindings, asking leave with each post — macOS prompts the first time and answers from
-the setting after — and made only for a process with a bundle identifier
-(`notify::Service::of`), because asking for the center without one throws; a click brings
-Crook forward and not the pane. A binary outside Crook.app and Windows post nothing; the page
+the objc2 bindings, asking leave with each post and with the dock's first badge — macOS
+prompts the first time and answers from the setting after — and made only for a process with
+a bundle identifier (`notify::Service::of`), because asking for the center without one throws;
+a click brings Crook forward and not the pane. A binary outside Crook.app and Windows post nothing; the page
 says so and its switches have no handler there. The session bus is a socket on this machine
 and Notification Center a daemon on it, so nothing of this reaches a network.
 

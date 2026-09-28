@@ -2211,6 +2211,9 @@ trait Desktop {
     /// Puts the count of waiting panes on the application's icon, or takes
     /// it off at zero.
     fn set_badge(&self, waiting: usize);
+    /// Asks, where the icon's badge is drawn only with a person's leave, for
+    /// that leave, and sets the badge again once it is given.
+    fn ask_to_badge(&self);
 }
 
 impl Desktop for Proxy {
@@ -2225,6 +2228,11 @@ impl Desktop for Proxy {
     fn set_badge(&self, waiting: usize) {
         Proxy::set_badge(self, waiting);
     }
+
+    fn ask_to_badge(&self) {
+        let proxy = self.clone();
+        crate::notify::ask_to_badge(move || proxy.show_badge_again());
+    }
 }
 
 /// What the window tells the desktop about the workspace: its name, with the
@@ -2237,7 +2245,10 @@ impl Desktop for Proxy {
 /// the flaky test — Crook" is the difference between finding the right Crook
 /// and opening each in turn. The badge is that count where a minimised
 /// window still shows it — the dock icon, on macOS — and it is the title's
-/// count exactly, so the two never disagree about who is waiting.
+/// count exactly, so the two never disagree about who is waiting. Crook.app's
+/// is drawn only with the leave its notifications are posted with, which is
+/// asked for the first time there is a count to show — a pane can wait with
+/// the window in front, where nothing is posted to ask with.
 ///
 /// Followed on every change to the window's views — the same invalidation
 /// that asks for a frame — rather than on the frame, because the window
@@ -2269,6 +2280,10 @@ struct Beacon<D> {
     /// `title`: the dock redraws the tile for every one. Zero until then,
     /// which is the badge an application opens with — none.
     badge: usize,
+    /// Whether the desktop has been asked for leave to badge the icon: once,
+    /// with the first count above zero, since after the first time the answer
+    /// is the person's setting, which the dock follows by itself.
+    asked_to_badge: bool,
     desktop: D,
 }
 
@@ -2279,6 +2294,7 @@ impl<D: Desktop> Beacon<D> {
             title: None,
             urgency: Urgency::default(),
             badge: 0,
+            asked_to_badge: false,
             desktop,
         }
     }
@@ -2297,6 +2313,10 @@ impl<D: Desktop> Beacon<D> {
         if self.badge != waiting {
             self.desktop.set_badge(waiting);
             self.badge = waiting;
+            if waiting > 0 && !self.asked_to_badge {
+                self.desktop.ask_to_badge();
+                self.asked_to_badge = true;
+            }
         }
         if self.urgency.asks(waiting, workspace.is_window_focused()) {
             self.desktop.request_attention();

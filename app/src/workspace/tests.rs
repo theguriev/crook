@@ -16365,6 +16365,7 @@ mod the_agent {
         Title(String),
         Look,
         Badge(usize),
+        AskedToBadge,
     }
 
     impl crate::Desktop for Notebook {
@@ -16378,6 +16379,10 @@ mod the_agent {
 
         fn set_badge(&self, waiting: usize) {
             self.0.borrow_mut().push(Said::Badge(waiting));
+        }
+
+        fn ask_to_badge(&self) {
+            self.0.borrow_mut().push(Said::AskedToBadge);
         }
     }
 
@@ -16393,7 +16398,7 @@ mod the_agent {
         fn title(&self) -> Option<String> {
             self.0.borrow().iter().rev().find_map(|said| match said {
                 Said::Title(title) => Some(title.clone()),
-                Said::Look | Said::Badge(_) => None,
+                Said::Look | Said::Badge(_) | Said::AskedToBadge => None,
             })
         }
 
@@ -16404,9 +16409,18 @@ mod the_agent {
                 .iter()
                 .filter_map(|said| match said {
                     Said::Badge(waiting) => Some(*waiting),
-                    Said::Title(_) | Said::Look => None,
+                    Said::Title(_) | Said::Look | Said::AskedToBadge => None,
                 })
                 .collect()
+        }
+
+        /// How many times the desktop was asked for leave to badge the icon.
+        fn asks_to_badge(&self) -> usize {
+            self.0
+                .borrow()
+                .iter()
+                .filter(|said| **said == Said::AskedToBadge)
+                .count()
         }
     }
 
@@ -16504,6 +16518,44 @@ mod the_agent {
     }
 
     #[test]
+    fn leave_to_badge_is_asked_for_with_the_first_count_and_not_again() {
+        // Crook.app's badge is drawn only once the leave has been asked for,
+        // and a pane can wait with the window in front, where no banner is
+        // posted to ask with. So the first count there is to show asks — after
+        // the badge it is for, which the answer sets again — and nothing
+        // else does: not a window with nothing waiting, and not a later count,
+        // when the answer is already the person's setting.
+        let mut harness = Harness::new(2);
+        let front = harness.focused_pane_id().expect("the window has a pane");
+        let behind = background_of(&harness);
+        let said = watched(&mut harness);
+        assert_eq!(
+            0,
+            said.asks_to_badge(),
+            "nothing waiting, nothing to ask for"
+        );
+
+        report(&mut harness, behind, AgentStatus::NeedsInput, None);
+        assert_eq!(
+            said.0.borrow().iter().rev().take(2).collect::<Vec<_>>(),
+            [&Said::AskedToBadge, &Said::Badge(1)],
+            "asked with the window in front, right after the badge it is for"
+        );
+
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+        report(&mut harness, front, AgentStatus::NeedsInput, None);
+        report(&mut harness, behind, AgentStatus::Running, None);
+        report(&mut harness, front, AgentStatus::Running, None);
+        report(&mut harness, behind, AgentStatus::NeedsInput, None);
+        assert_eq!(said.badges(), [1, 2, 1, 0, 1]);
+        assert_eq!(
+            1,
+            said.asks_to_badge(),
+            "once, for as long as the window is open"
+        );
+    }
+
+    #[test]
     fn a_window_is_named_as_it_is_watched_with_no_frame_drawn() {
         // `Shell::new` opens the window, restores the session into it and
         // only then starts watching it, all before a first frame, and no
@@ -16538,6 +16590,7 @@ mod the_agent {
             [
                 Said::Title("(1 waiting) bisect the flaky test — Crook".to_owned()),
                 Said::Badge(1),
+                Said::AskedToBadge,
             ],
             said.0.borrow().as_slice(),
             "named as it is watched, with nothing changed and nothing drawn since"

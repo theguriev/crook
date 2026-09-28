@@ -150,8 +150,13 @@ impl Proxy {
     ///
     /// The count of panes waiting for a person, the number the window's
     /// title starts with, somewhere it is seen with the window out of sight.
-    /// Unlike a notification it needs no bundle and no permission, so a
-    /// binary started from a shell shows it as surely as Crook.app does.
+    /// It is set here and drawn by the dock, which for an application with a
+    /// bundle identifier — Crook.app — draws it only after the application
+    /// has asked Notification Center for leave to badge, and only while the
+    /// person's Badges switch allows it. Asking is the caller's, with
+    /// [`Self::show_badge_again`] once the answer is yes. For a binary
+    /// started from a shell, which has no identifier to ask as, it is set all
+    /// the same, and whether the dock draws it is not established.
     ///
     /// macOS only, and nothing is sent anywhere else: a Linux desktop has no
     /// badge its docks agree on, and a Windows taskbar's overlay icon is a
@@ -161,6 +166,19 @@ impl Proxy {
     pub fn set_badge(&self, waiting: usize) {
         if cfg!(target_os = "macos") {
             self.send(CrookEvent::SetBadge(waiting));
+        }
+    }
+
+    /// Sets the dock icon's badge again as it stands, for a dock that may
+    /// have dropped it while the application had no leave to badge.
+    ///
+    /// For the moment that leave arrives, which is on a queue of the
+    /// system's: whatever count [`Self::set_badge`] last sent is the one
+    /// shown, since both go through the event loop in the order they were
+    /// sent. Nothing when there is no badge, and nothing is sent off macOS.
+    pub fn show_badge_again(&self) {
+        if cfg!(target_os = "macos") {
+            self.send(CrookEvent::ShowBadgeAgain);
         }
     }
 
@@ -237,6 +255,8 @@ enum CrookEvent {
     RequestAttention,
     /// Put this many waiting panes on the dock icon's badge.
     SetBadge(usize),
+    /// Set the dock icon's badge again, as it stands.
+    ShowBadgeAgain,
     /// Leave the event loop.
     Exit,
 }
@@ -412,6 +432,7 @@ impl ApplicationHandler<CrookEvent> for App {
                 }
             }
             CrookEvent::SetBadge(waiting) => dock::set_badge(dock::label(waiting).as_deref()),
+            CrookEvent::ShowBadgeAgain => dock::show_again(),
             CrookEvent::Exit => event_loop.exit(),
         }
     }

@@ -177,13 +177,13 @@ fn how_it_works(service: Service) -> String {
         ),
         Service::NotificationCenter => format!(
             "{WHEN} It goes to Notification Center, on this Mac and nowhere else. macOS asks \
-             whether Crook may post the first time it has something to post, and System \
-             Settings → Notifications → Crook is where that answer changes."
+             whether Crook may post the first time a pane waits for you, and System Settings \
+             → Notifications → Crook is where that answer changes. The same answer, and its \
+             Badges switch, decide whether the dock icon shows the count of waiting panes."
         ),
         Service::OutsideTheApp => "This copy of Crook is not running from Crook.app, and \
              macOS posts notifications only for an app, so it posts none. The window's title \
-             and the dock icon's badge count the panes waiting for you, and the icon bounces \
-             when one more starts."
+             counts the panes waiting for you, and the dock icon bounces when one more starts."
             .to_owned(),
         Service::Nowhere => "Crook posts desktop notifications on Linux and macOS only for \
              now. Here the window's title counts the panes waiting for you, and the taskbar \

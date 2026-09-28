@@ -15,11 +15,11 @@
 //! it raises an Objective-C exception rather than returning an error, and an
 //! exception that unwinds into Rust ends the process. So [`bundle_identifier`]
 //! is asked first, by [`Service::here`](super::Service::here), and a
-//! `NotificationCenter` is made only when there is one. The binary
-//! `script/install` puts on `PATH` has none, and has the dock's bounce and
-//! badge instead, which need no bundle.
+//! `NotificationCenter` is made, or leave to badge asked for, only when there
+//! is one. The binary `script/install` puts on `PATH` has none, and has the
+//! dock's bounce instead, and a badge the dock may or may not draw.
 //!
-//! # Asking with the first banner
+//! # Asking with the first banner, or the first badge
 //!
 //! macOS asks the person whether an application may post the first time the
 //! application asks for leave, and this asks with each notification rather
@@ -30,6 +30,12 @@
 //! later in System Settings, and nothing is kept here to go stale. The answer
 //! arrives on a queue of the system's, and the banner is handed over from
 //! there. A refusal is said once, in the log.
+//!
+//! The same leave covers the dock icon's badge, which the dock draws for
+//! Crook.app only once it has been asked for, and a pane can wait with the
+//! window in front, where nothing is posted. So the window asks too, through
+//! [`super::ask_to_badge`], the first time there is a count to show, and is
+//! handed the yes so that the badge set before it is set again.
 
 /// The identifier of the bundle this process was started from — Crook.app's
 /// — or `None` for a binary outside one.
@@ -53,7 +59,7 @@ pub fn bundle_identifier() -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-pub use center::NotificationCenter;
+pub use center::{NotificationCenter, ask_to_badge};
 
 /// The half that calls the framework, which is on macOS alone.
 #[cfg(target_os = "macos")]
@@ -121,8 +127,26 @@ mod center {
         }
     }
 
+    /// Asks for the leave the dock needs before it draws Crook.app's badge,
+    /// and calls `allowed`, on a queue of the system's, if it is given.
+    ///
+    /// The whole of `leave`, not the badge alone: one prompt, the first
+    /// time either is asked, covers the banners as well. A refusal is not
+    /// logged here — [`NotificationCenter`] says it, the first time it has
+    /// something to post — and a badge refused is one the dock leaves off.
+    pub fn ask_to_badge(allowed: impl Fn() + 'static) {
+        let answered = RcBlock::new(move |granted: Bool, _: *mut NSError| {
+            if granted.as_bool() {
+                allowed();
+            }
+        });
+        UNUserNotificationCenter::currentNotificationCenter()
+            .requestAuthorizationWithOptions_completionHandler(leave(), &answered);
+    }
+
     /// What Crook asks leave for: a banner, the sound it comes with, and the
-    /// badge the dock icon shows the count of waiting panes in.
+    /// badge the dock icon shows the count of waiting panes in — which, for an
+    /// application with a bundle, the dock draws only with this leave.
     fn leave() -> UNAuthorizationOptions {
         UNAuthorizationOptions::Alert
             | UNAuthorizationOptions::Sound

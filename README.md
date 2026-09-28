@@ -311,11 +311,12 @@ Nineteen features, and the page that configures them:
   agent stops to ask or says it is done, or a program rings the bell — also posts a desktop
   notification, titled `Crook — <tab>` with the agent's question under it, at most once every
   thirty seconds for a pane nobody has come back to, through `notify-send` on the session bus or
-  a Mac's Notification Center (which asks you once, with the first) and nowhere else; the
-  **Notifications** settings page turns it off, and turns on the same for an agent that failed
-  or a command that ran ten seconds or more. A click on one does not bring the pane forward.
-  Windows posts none yet, and nor does a Mac binary outside Crook.app, since macOS delivers only
-  to an app; on macOS the dock icon also carries the waiting count as a badge, from any binary.
+  a Mac's Notification Center (which asks you once, the first time a pane waits) and nowhere
+  else; the **Notifications** settings page turns it off, and turns on the same for an agent
+  that failed or a command that ran ten seconds or more. A click on one does not bring the pane
+  forward. Windows posts none yet, and nor does a Mac binary outside Crook.app, since macOS
+  delivers only to an app. On macOS the dock icon also carries the waiting count as a badge,
+  which Crook.app shows under the same permission as the notifications, and its Badges switch.
   A program that turns on focus reporting (`?1004`) is told `CSI I` and `CSI O` as the keyboard
   reaches its pane and leaves it, the window's own focus included, so an agent can tell whether
   anybody is watching.
