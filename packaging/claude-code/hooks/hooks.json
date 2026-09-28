@@ -1,12 +1,12 @@
 {
-  "description": "Tell the Crook tab Claude Code runs in what it is doing: running when a prompt is sent and around every tool, needs-input with the notification's text whenever it stops to ask, idle when it is done. Each command does nothing unless it runs in a Crook pane with the crook binary reachable ($CROOK_BIN, else crook on PATH).",
+  "description": "Tell the Crook tab Claude Code runs in what it is doing: running when a prompt is sent and around every tool, needs-input with the notification's text whenever it stops to ask, idle when it is done. Each command does nothing unless it runs in a Crook pane with the crook binary reachable ($CROOK_BIN, else crook on PATH), and exits 0 even when the report fails, so a Crook that cannot be reached is a line in Claude Code's debug log rather than a notice on every prompt and tool call.",
   "hooks": {
     "UserPromptSubmit": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; exec \"$crook\" --agent running --title -"
+            "command": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent running --title - || exit 0"
           }
         ]
       }
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; exec \"$crook\" --agent running"
+            "command": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent running || exit 0"
           }
         ]
       }
@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; exec \"$crook\" --agent running"
+            "command": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent running || exit 0"
           }
         ]
       }
@@ -36,7 +36,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; exec \"$crook\" --agent needs-input --message -"
+            "command": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent needs-input --message - || exit 0"
           }
         ]
       }
@@ -46,7 +46,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; exec \"$crook\" --agent idle"
+            "command": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent idle || exit 0"
           }
         ]
       }
@@ -56,7 +56,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; exec \"$crook\" --agent idle"
+            "command": "[ \"$TERM_PROGRAM\" = Crook ] || [ -n \"$CROOK_PANE_ID\" ] || exit 0; crook=$CROOK_BIN; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \"$crook\" --agent idle || exit 0"
           }
         ]
       }

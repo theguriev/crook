@@ -275,15 +275,18 @@ Nineteen features, and the page that configures them:
   you know whether to come now or later without switching to the tab; `--message -` reads it
   from stdin, a hook's JSON `message` or the whole line. No socket and no pane id — the
   terminal it has *is* the pane — so it works from a hook, over `ssh` and inside a container,
-  and every other terminal drops the sequence unread. Claude Code says all of it by itself —
-  running when a prompt is sent and around every tool, needing input whenever it stops to ask,
-  with the notification's own text as the message, idle when it is done — once Crook's plugin
-  is installed: `claude plugin marketplace add theguriev/crook`, then
-  `claude plugin install crook@crook`. That is Claude Code writing its own settings, not
-  anyone merging JSON; the plugin's hooks call `$CROOK_BIN` and do nothing in any other
-  terminal, and it carries the skill below. `crook --agent-hooks claude` prints those two
-  commands, then the same hooks as JSON for a person who would rather merge them into
-  `~/.claude/settings.json` by hand.
+  and every other terminal drops the sequence unread. A hook with no terminal of its own —
+  every hook Claude Code runs — writes to the terminal of the program that ran it: the same
+  pane. Claude Code says all of it by itself — running when a prompt is sent and around every
+  tool, needing input whenever it stops to ask, with the notification's own text as the
+  message, idle when it is done — once Crook's plugin is installed:
+  `claude plugin marketplace add theguriev/crook`, then `claude plugin install crook@crook`,
+  with a Crook newer than 0.1.13. That is Claude Code writing its own settings, not anyone
+  merging JSON; the plugin's hooks call `$CROOK_BIN`, do nothing in any other terminal, and
+  exit 0 even when a report fails, so a Crook that cannot be reached is a line in Claude
+  Code's debug log rather than a notice on every prompt; it carries the skill below too.
+  `crook --agent-hooks claude` prints those two commands, then the same hooks as JSON for a
+  person who would rather merge them into `~/.claude/settings.json` by hand.
   `codex`, `gemini` and `copilot` print the same for Codex CLI, Gemini CLI and GitHub
   Copilot CLI in each one's own hooks file, `opencode` prints the plugin OpenCode loads
   instead, and `aider`, which has no hooks, gets a sentence saying what to do instead.

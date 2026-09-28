@@ -1036,7 +1036,18 @@ them.
 **The CLI writes it.** `crook --agent running --title "port the tab bar"` opens `/dev/tty` —
 `CONOUT$` on Windows — and writes the sequence there, not to standard output. The caller is a
 hook, and a hook's standard output belongs to the program that ran it: Claude Code reads what
-its hooks print. `--message "run rm -rf build?"` is what a `needs-input` is waiting for, cut to
+its hooks print. A hook often has no `/dev/tty` either: Claude Code starts every command hook
+in a session of its own, with no controlling terminal, on macOS and Linux alike. The pane is
+still one or two processes up, as the terminal of the program that ran the hook, so a process
+that cannot open its own writes to the controlling terminal of its nearest ancestor that has
+one — `tty_nr` in `/proc/<pid>/stat` on Linux, `e_tdev` from `proc_pidinfo` on macOS, and the
+character device under `/dev` with that number (`app/src/agent/ancestors.rs`). It is a
+fallback and never a second route: with a terminal of its own the process writes there, and a
+process with none anywhere above it — `cron`, a CI runner — fails the way it always did. A
+test that hands a hook a stand-in binary, one that never opens a terminal, passes while every
+real report fails, so `app/tests/claude_code_hooks.rs` runs each of the plugin's commands, and
+each one `--agent-hooks claude` prints, with the real binary under `sh -c` in a session of its
+own below a process on a pty, and reads the report off the pty. `--message "run rm -rf build?"` is what a `needs-input` is waiting for, cut to
 one line of 200 characters in the writer so the sequence never carries a novel; `--message -`
 reads it from standard input, the `message` of a hook's JSON when the input is one and the
 whole input otherwise. `crook --agent-hooks claude` prints the fragment of Claude Code's settings
@@ -1052,9 +1063,11 @@ hooks and the skill, and `claude plugin marketplace add theguriev/crook` with
 everybody cannot name one person's binary, so the plugin's hooks call `"$CROOK_BIN"` — `crook`
 on `PATH` for a Crook older than the variable — behind a guard that exits 0 unless
 `TERM_PROGRAM` is Crook or `CROOK_PANE_ID` is set, since a UserPromptSubmit hook that fails is a
-notice on every prompt and one that prints is text the model reads. Tests in `agent.rs` build
-the plugin's `hooks/hooks.json` from `CLAUDE_EVENTS` and run each of its commands under `sh`,
-and hold its `SKILL.md` byte for byte to `skill.md`. Codex CLI and Gemini
+notice on every prompt and one that prints is text the model reads. For the same reason each
+command exits 0 after the report too, whatever the report did: a Crook too old to reach the
+pane from a hook is a line of stderr in Claude Code's debug log, not a notice on every prompt
+and tool call. Tests in `agent.rs` build the plugin's `hooks/hooks.json` from `CLAUDE_EVENTS`
+and run each of its commands under `sh`, and hold its `SKILL.md` byte for byte to `skill.md`. Codex CLI and Gemini
 CLI read the same object under their own event names, and GitHub Copilot CLI a versioned
 cousin of it with `bash` for the command, so `--agent-hooks codex`, `gemini` and `copilot`
 are the same table with a different first column; OpenCode has no command hooks, and

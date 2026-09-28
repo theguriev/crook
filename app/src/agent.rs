@@ -11,7 +11,10 @@
 //! Its own terminal rather than standard output, because the thing calling
 //! it is usually a hook, and a hook's standard output belongs to whoever ran
 //! the hook. Claude Code reads what its hooks print; a status printed there
-//! would be read as an answer and never reach the screen.
+//! would be read as an answer and never reach the screen. A hook often has
+//! no terminal of its own either — Claude Code starts each one in a session
+//! of its own — and then the pane is the terminal of the program that ran
+//! it, which `ancestors` finds one or two processes up on macOS and Linux.
 //!
 //! `--agent-hooks claude` prints the hooks that make Claude Code say all of
 //! this by itself: running when a prompt is sent and while tools run,
@@ -25,12 +28,13 @@
 //! `packaging/claude-code`, carries them and the skill, and installing it is
 //! Claude Code writing its own settings. The plugin's hooks call
 //! `"$CROOK_BIN"` — every pane is told its binary — behind a guard that makes
-//! them nothing outside Crook, and the tests here hold its files to the
-//! table of Claude Code's events and to [`SKILL`]. `codex`, `gemini` and
-//! `copilot` print the same object under each one's own event names, which
-//! is how those three read their hooks too; `opencode` has no command hooks
-//! and gets the plugin its plugin directory loads instead; `aider` has no
-//! hooks, and gets the sentence that says so and what to do instead.
+//! them nothing outside Crook, and they exit 0 whatever the report did; the
+//! tests here hold its files to the table of Claude Code's events and to
+//! [`SKILL`]. `codex`, `gemini` and `copilot` print the same object under
+//! each one's own event names, which is how those three read their hooks
+//! too; `opencode` has no command hooks and gets the plugin its plugin
+//! directory loads instead; `aider` has no hooks, and gets the sentence that
+//! says so and what to do instead.
 //!
 //! `--skill` prints [`SKILL`], the file that teaches an agent the rest of
 //! this: how it tells it is in a pane, what the four words do to the row,
@@ -45,6 +49,9 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 use crook_terminal::AgentReport;
 use serde_json::{Value, json};
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod ancestors;
 
 /// The longest title a prompt is cut down to, in characters.
 ///
@@ -125,14 +132,36 @@ pub fn report(status: &str, title: Option<&str>, message: Option<&str>) -> Resul
 /// The terminal this process is attached to, opened for writing.
 ///
 /// Not standard output, which a hook's parent has taken; the controlling
-/// terminal, which is the pane. A process with none — `cron`, a CI runner, a
-/// detached service — has nowhere to report to, and says so.
+/// terminal, which is the pane. A hook with none of its own is the ordinary
+/// case rather than the odd one — Claude Code starts every command hook in a
+/// session of its own, where `/dev/tty` is no such device — and the pane is
+/// still there one process up, as the terminal of the program that ran the
+/// hook, which is where `ancestors::terminal` finds it. A process with no
+/// terminal anywhere above it — `cron`, a CI runner, a detached service — has
+/// nowhere to report to, and says so.
 fn terminal() -> io::Result<std::fs::File> {
     #[cfg(unix)]
     let path = "/dev/tty";
     #[cfg(windows)]
     let path = "CONOUT$";
-    OpenOptions::new().write(true).open(path)
+    OpenOptions::new()
+        .write(true)
+        .open(path)
+        .or_else(an_ancestors_terminal)
+}
+
+/// The terminal of the nearest process above this one that has one, for a
+/// process that could not open its own; `error` when there is none.
+///
+/// `error` is what opening its own said, and it is kept because when no
+/// ancestor has a terminal either, "no such device" is still what went wrong.
+/// Only macOS and Linux are walked; anywhere else it is always the error.
+fn an_ancestors_terminal(error: io::Error) -> io::Result<std::fs::File> {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    if let Some(terminal) = ancestors::terminal() {
+        return terminal;
+    }
+    Err(error)
 }
 
 /// The title a hook's input names: the first line of its `prompt`, cut to
@@ -907,7 +936,8 @@ mod tests {
     const MARKETPLACE: &str = include_str!("../../.claude-plugin/marketplace.json");
 
     /// What the plugin runs for `arguments`: the `--agent` report, behind the
-    /// guard that makes it nothing outside Crook.
+    /// guard that makes it nothing outside Crook, and exiting 0 whatever the
+    /// report did.
     ///
     /// Built from the names the code gives the three variables, so renaming
     /// one without the plugin is this test failing rather than hooks gating on
@@ -917,7 +947,7 @@ mod tests {
         format!(
             "[ \"$TERM_PROGRAM\" = {TERM_PROGRAM} ] || [ -n \"${PANE_ID_VARIABLE}\" ] || exit 0; \
 crook=${BIN_VARIABLE}; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \
-exec \"$crook\" --agent {arguments}"
+\"$crook\" --agent {arguments} || exit 0"
         )
     }
 
@@ -965,11 +995,19 @@ exec \"$crook\" --agent {arguments}"
             record.display()
         );
         let binary = scratch.join("crook-dev");
-        for path in [&binary, &on_path.join("crook")] {
-            std::fs::write(path, &fake).unwrap();
+        // And one that fails the way a report with nowhere to go does.
+        let broken = scratch.join("crook-broken");
+        let failing = "#!/bin/sh\necho 'crook: no terminal' >&2\nexit 1\n";
+        for (path, script) in [
+            (&binary, fake.as_str()),
+            (&on_path.join("crook"), fake.as_str()),
+            (&broken, failing),
+        ] {
+            std::fs::write(path, script).unwrap();
             std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         let binary = binary.to_str().unwrap();
+        let broken = broken.to_str().unwrap();
 
         let shipped: Value = serde_json::from_str(PLUGIN_HOOKS).unwrap();
         let events = shipped["hooks"].as_object().unwrap();
@@ -1067,6 +1105,15 @@ exec \"$crook\" --agent {arguments}"
                 (true, String::new(), String::new(), None),
                 run(&[("TERM_PROGRAM", "Crook"), ("CROOK_BIN", "/nowhere/crook")]),
                 "{event} with no binary"
+            );
+            // And so is a report that fails — a Crook too old to find the
+            // pane from a hook with no terminal: exit 0, so it is not a
+            // notice on every prompt and tool call, with what went wrong on
+            // stderr, which Claude Code keeps in its debug log.
+            assert_eq!(
+                (true, String::new(), "crook: no terminal\n".to_owned(), None),
+                run(&[("TERM_PROGRAM", "Crook"), ("CROOK_BIN", broken)]),
+                "{event} with a report that fails"
             );
         }
         let _ = std::fs::remove_dir_all(&scratch);

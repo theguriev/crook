@@ -61,8 +61,10 @@ moment you report anything else. `--message -` reads it from standard input, for
 that is handed a notification's text there.
 
 The report is one escape sequence (`OSC 6340`) written to the terminal the command runs in,
-not to standard output, so it works from a hook whose output belongs to someone else. There
-is no socket and no pane id: the terminal you have is the pane. The same sequence reaches the
+not to standard output, so it works from a hook whose output belongs to someone else. A
+command with no terminal of its own, such as a hook Claude Code starts in a session of its
+own, writes to the terminal of the program that ran it, which is the same pane. There is no
+socket and no pane id: the terminal you have is the pane. The same sequence reaches the
 pane over `ssh` and from inside a container, and every other terminal drops it unread. A
 status never taken back goes when the shell's own marks say the command ended.
 
