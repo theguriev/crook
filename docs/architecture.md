@@ -1746,7 +1746,8 @@ table — so that the restored pane can offer that agent's resume line (`claude 
 `codex resume --last`) in its composer, unsent. The directory is the session key: those lines
 resume the most recent conversation *in the directory they run in*, and Crook's worktrees give
 each agent a directory of its own, so no session id, hook or wire change is needed. Two panes of
-one agent in one directory are offered the agent's picker instead, and a CLI whose "most
+one agent in one directory are offered the agent's picker instead, or nothing where it has none,
+and a CLI whose "most
 recent" is the repository's rather than the directory's is offered its picker or nothing. The
 rule above still holds: nothing old is redrawn, and a new process starts only when a person
 presses Enter, or "Resume every agent" for every line nobody has touched.

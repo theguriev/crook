@@ -436,8 +436,9 @@ export const CrookPlugin = async ({ $ }) => {
 /// repository shares, so it gets its picker for both. OpenCode's `--continue`
 /// is the newest session across a repository's root-level worktrees — an
 /// open bug, anomalyco/opencode#41562 — and it has no picker flag, so it
-/// gets neither, and aider keeps no conversation to go back to. A person can
-/// give any of them a line in the settings; see
+/// gets neither. Aider gets none by default either, though
+/// `aider --restore-chat-history`, which reloads its chat history file, is a
+/// line to give it. Any of them can be given a line in the settings; see
 /// [`Settings::resume_line`](crate::settings::Settings::resume_line).
 const AGENTS: &[Agent] = &[
     Agent {

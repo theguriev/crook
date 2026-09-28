@@ -182,15 +182,18 @@ Nineteen features, and the page that configures them:
   latest`, each the most recent conversation in that directory, and Copilot its `copilot
   --resume` picker, since its most recent is the repository's rather than the worktree's. Two
   panes of one agent in one directory are offered its picker instead (`claude --resume`,
-  `codex resume`), because the directory names one conversation and they had two. **Resume
+  `codex resume`), because the directory names one conversation and they had two; Gemini CLI
+  has no picker on its command line, so two of its panes in one directory are offered nothing.
+  Any command that runs in a pane first, even a `cd`, ends the offer there. **Resume
   every agent** in the palette (`resume-agents`) sends every line a restore typed that you
   have not touched, in one press. What is remembered is the program's name and nothing after
   it, so a prompt typed on the command line never reaches the file, and it needs the shell
   integration, which is what says what a pane is running. A line of your own goes in
   `settings.json` under `resume_lines`, keyed by program — `{"claude": "claude --continue
-  --model opus"}` — and an empty one offers nothing; OpenCode has no line until you give it
-  one, because its `--continue` reaches across a repository's worktrees. No output comes back,
-  and no process does.
+  --model opus"}` — and an empty one offers nothing. OpenCode and aider have no line until you
+  give them one: OpenCode's `--continue` reaches across a repository's worktrees, and aider's
+  `--restore-chat-history` is left for you to choose. No output comes back, and no process
+  does.
 - **The window's own title bar.** There is no strip of system chrome above Crook. The window is
   opened with the application's frame, so the header *is* the title bar: dragging its empty
   space moves the window and a double click maximises it. On macOS that surface carries
