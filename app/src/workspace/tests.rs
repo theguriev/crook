@@ -17996,8 +17996,9 @@ mod sandboxed {
     use super::*;
     use crate::picture::tests::{header_only, icon_png, preview_png};
     use crate::plugins::wasm::tests::{
-        BURST, EVERY_ANSWER, Scratch, install, manifest, wasm, wasm_asking, wasm_asking_where,
-        wasm_at, wasm_carrying, wasm_running, wasm_saying,
+        BURST, EVERY_ANSWER, FINISHED, Scratch, install, manifest, wasm, wasm_asking,
+        wasm_asking_where, wasm_asking_where_at_every_command, wasm_at, wasm_carrying,
+        wasm_running, wasm_saying,
     };
     use crate::workspace::settings_page::widgets;
     use crook_plugin_api::Capability;
@@ -19978,9 +19979,7 @@ mod sandboxed {
         // for the rest of the session. Three turns' worth — each answer in the
         // first asking twice, so the second turn is handed half of what is
         // waiting and has to leave the rest — lands every answer, and none of
-        // them twice, which the guest would draw instead. The sixty-four left
-        // after the first turn are also as many as a plugin may have waiting
-        // at once, so this burst is at that ceiling and not past it.
+        // them twice, which the guest would draw instead.
         let scratch = Scratch::new("asks-a-burst");
         let mut harness =
             asking_where(&scratch, &wasm_asking_where("eugen/probe", BURST, 2, BURST));
@@ -19990,6 +19989,53 @@ mod sandboxed {
             "the window was still busy with the burst"
         );
 
+        let text = frame_text(&harness.frame());
+        assert!(text.contains(EVERY_ANSWER), "{text}");
+    }
+
+    #[test]
+    fn a_burst_of_finished_commands_bigger_than_may_wait_still_gets_every_answer() {
+        // A plugin asking where the pane is from every command that finishes,
+        // and a pane that reports a run of them in one read — `cat` a
+        // transcript that holds the shell's marks, or the lines of a paste
+        // that each run in no time. Each is an event of its own in one update,
+        // and every one is delivered before the first thing they asked for is
+        // served: what serves them runs once, at the back of the update. So
+        // the plugin has as many waiting as there were commands before
+        // anything is served, which is the window's doing and not a queue the
+        // plugin is growing — and a ceiling on how many may wait stopped it
+        // past sixty-four, with every ticket it had waiting dropped unanswered.
+        let scratch = Scratch::new("asks-at-every-command");
+        install(
+            scratch.path(),
+            "eugen.probe",
+            &wasm_asking_where_at_every_command("eugen/probe", FINISHED),
+        );
+        let mut opening = opening(&scratch, Default::default(), Default::default());
+        opening.settings.set_granted(
+            "eugen/probe",
+            vec![String::from("cwd.read"), String::from("commands.watch")],
+        );
+        let mut harness = Harness::with_opening(1, opening);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+
+        harness.workspace_update(|workspace, ctx| {
+            for _ in 0..FINISHED {
+                workspace.apply_terminal_update(
+                    &crate::terminal_model::TerminalUpdate::CommandFinished {
+                        pane,
+                        exit: Some(0),
+                        took: None,
+                    },
+                    ctx,
+                );
+            }
+        });
+
+        assert!(
+            falls_quiet(&mut harness, std::time::Duration::from_secs(20)),
+            "the window was still busy with the commands"
+        );
         let text = frame_text(&harness.frame());
         assert!(text.contains(EVERY_ANSWER), "{text}");
     }

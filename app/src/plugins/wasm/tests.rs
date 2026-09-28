@@ -526,8 +526,34 @@ pub(crate) const BURST: u32 = 3 * runtime::DEEDS_PER_TURN;
 /// plugin's runtime alive after `build` is what it registered holding on to
 /// it, and a runtime that is gone serves nothing at all.
 pub(crate) fn wasm_asking_where(id: &str, first: u32, again: u32, total: u32) -> Vec<u8> {
+    asking_where(id, first, again, 0, total)
+}
+
+/// Twice as many finished commands as a plugin may have things to type, run
+/// or copy waiting, so that a burst of them is past that ceiling and not at it.
+pub(crate) const FINISHED: u32 = 2 * runtime::MAX_WAITING as u32;
+
+/// [`wasm_asking_where`]'s guest, watching commands finish and asking where
+/// it is once from each, until it has asked `total` times.
+///
+/// The shape a real plugin could have — "where was that command run?" — and
+/// the one with the most waiting before anything is served: every command a
+/// pane reports finished in one read is an event of its own in one update,
+/// and all of them are delivered before the first thing they asked for is
+/// served. Commands rather than bells because bells come one to a read: a
+/// pane hands over a burst of them as one.
+pub(crate) fn wasm_asking_where_at_every_command(id: &str, total: u32) -> Vec<u8> {
+    asking_where(id, 0, 0, 1, total)
+}
+
+/// [`wasm_asking_where`], asking `per_event` times from every event it is told
+/// of as well, and watching commands finish so that there are some.
+fn asking_where(id: &str, first: u32, again: u32, per_event: u32, total: u32) -> Vec<u8> {
     let mut manifest = manifest(id);
     manifest.capabilities = vec![Capability::ReadWorkingDirectory];
+    if per_event > 0 {
+        manifest.capabilities.push(Capability::WatchCommands);
+    }
     let manifest = to_bytes(&manifest).expect("a manifest should encode");
     let request = to_bytes(&Request::Where).expect("a request should encode");
     let saying = |text: &str| {
@@ -552,6 +578,18 @@ pub(crate) fn wasm_asking_where(id: &str, first: u32, again: u32, total: u32) ->
     // A render's answer is a pointer and a length packed into one i64, and
     // these three are constants, so they are packed here.
     let packed = |at: u32, bytes: &[u8]| ((u64::from(at) << 32) | bytes.len() as u64) as i64;
+    // Left out rather than exported to do nothing, so that the guests which
+    // never hear of an event are the modules they were before there was one.
+    let event = if per_event > 0 {
+        format!(
+            r#"(func (export "crook_event") (param i32 i32) (result i32)
+              (call $ask (i32.const {per_event}))
+              (i32.const 0))"#,
+            per_event = per_event as i32,
+        )
+    } else {
+        String::new()
+    };
 
     let text = format!(
         r#"(module
@@ -605,7 +643,8 @@ pub(crate) fn wasm_asking_where(id: &str, first: u32, again: u32, total: u32) ->
             (func (export "crook_deliver") (param i32 i32 i32) (result i32)
               (global.set $answered (i32.add (global.get $answered) (i32.const 1)))
               (call $ask (i32.const {again}))
-              (i32.const 0)))"#,
+              (i32.const 0))
+            {event})"#,
         manifest_bytes = escaped(&manifest),
         manifest_len = manifest.len(),
         request_bytes = escaped(&request),

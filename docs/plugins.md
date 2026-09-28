@@ -822,9 +822,14 @@ asked, and only a chain of answers that keep asking ever waits. What waits is le
 was, in order, and served on the next turn: a request taken and never answered is a plugin
 waiting for the rest of the session. A plugin whose turns run out sixteen times in a row, the
 count refusals get, stops being served until Crook is restarted; one whose chain ends starts
-the count again. A plugin with more than sixty-four waiting at once stops being served straight
-away: that is twice a turn's worth, a queue that is growing rather than being served, and each
-thing in it may be a megabyte to type or copy.
+the count again. A plugin with more than sixty-four lines to type, commands to run or things to
+copy waiting at once stops being served straight away: that is twice a turn's worth, a queue
+that is growing rather than being served, and each thing in it may be a megabyte. Asking where
+the pane is, what Crook can do or what a command printed is not counted. None of it carries
+anything to keep, and the first two are all an event may ask for — and events arrive in
+batches, every command a pane reports finished in one read delivered before the first thing
+they asked for is served, so a plugin that asks once from each has as many waiting as there
+were commands, through nothing it did.
 
 **Isolation.** Fuel-metered execution (wasmi has it) with a per-call deadline; a trap or an
 exhausted budget drops that contribution and counts toward self-disable; memory capped per

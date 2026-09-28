@@ -224,6 +224,11 @@ fn a_wait_that_is_poked_ends_early_rather_than_at_its_own_time() {
 /// A runtime over a module with somewhere to put an answer, allowed to ask
 /// where a pane is working — which is a deed, served by the window.
 fn allowed_to_ask_where() -> (App, Arc<LocalQueue>, ModelHandle<Runtime>) {
+    runtime_allowed(&["cwd.read"])
+}
+
+/// The same runtime, allowed `granted`.
+fn runtime_allowed(granted: &[&str]) -> (App, Arc<LocalQueue>, ModelHandle<Runtime>) {
     let queue = LocalQueue::new();
     let mut app = App::new(queue.foreground(), Arc::new(Background::new(1)));
 
@@ -235,7 +240,7 @@ fn allowed_to_ask_where() -> (App, Arc<LocalQueue>, ModelHandle<Runtime>) {
                 PluginId::parse("eugen/probe").expect("a literal that parses"),
                 Rc::new(RefCell::new(sandbox)),
                 Rc::new(Cell::new(0)),
-                vec![String::from("cwd.read")],
+                granted.iter().copied().map(String::from).collect(),
             )
         })
     });
@@ -255,6 +260,19 @@ fn ask_where(
         runtime.update(ctx, |runtime, ctx| {
             for ticket in tickets {
                 runtime.start(ticket, Request::Where, gesture, ctx);
+            }
+        })
+    });
+}
+
+/// Asks for something to be put on the clipboard once per ticket, out of a
+/// press: a deed that carries text, which only a press may ask for.
+fn ask_to_copy(app: &mut App, runtime: &ModelHandle<Runtime>, tickets: std::ops::Range<u32>) {
+    app.update(|ctx| {
+        runtime.update(ctx, |runtime, ctx| {
+            for ticket in tickets {
+                let text = format!("copied {ticket}");
+                runtime.start(ticket, Request::Copy { text }, Gesture::Pressed, ctx);
             }
         })
     });
@@ -421,38 +439,82 @@ fn a_plugin_still_asking_after_its_turns_run_out_stops_being_served() {
 }
 
 #[test]
-fn a_plugin_with_more_waiting_than_two_turns_stops_being_served_at_once() {
+fn a_plugin_with_more_to_copy_waiting_than_two_turns_stops_being_served_at_once() {
     // A turn bounds what is served and not what is kept. A guest that asks
     // for thirty-two from every answer leaves a thousand behind after one
-    // turn, and a copy or a line to type may be a megabyte each, so the
-    // queue itself has a ceiling — as many as may wait are kept, one more is
-    // the plugin caught, and nothing it had waiting is kept or remembered as
-    // pressed after that.
-    let (mut app, _queue, runtime) = allowed_to_ask_where();
+    // turn, and a copy or a line to type may be a megabyte each, so what
+    // carries text has a ceiling: as many as may wait are kept, a turn served
+    // makes room for as many again, one more is the plugin caught, and
+    // nothing it had waiting is kept or remembered as pressed after that.
+    let (mut app, _queue, runtime) = runtime_allowed(&["cwd.read", "clipboard"]);
     let most = MAX_WAITING as u32;
-    ask_where(&mut app, &runtime, 1..most + 1, Gesture::Pressed);
+    ask_to_copy(&mut app, &runtime, 1..most + 1);
     assert_eq!(
         waiting(&app, &runtime),
         MAX_WAITING,
         "as many as may wait were not all kept"
     );
 
-    ask_where(&mut app, &runtime, most + 1..most + 2, Gesture::Pressed);
+    let served = one_turn(&mut app, &runtime);
+    let next = most + 1 + served.len() as u32;
+    ask_to_copy(&mut app, &runtime, most + 1..next);
+    // A question carries nothing, so it does not take a copy's room.
+    ask_where(&mut app, &runtime, next..next + 1, Gesture::Pressed);
+    assert_eq!(
+        waiting(&app, &runtime),
+        MAX_WAITING + 1,
+        "what a turn served did not make room for as much again"
+    );
+
+    ask_to_copy(&mut app, &runtime, next + 1..next + 2);
 
     assert_eq!(waiting(&app, &runtime), 0, "what was waiting was kept");
-    assert!(
-        runtime.read(&app, |runtime, _| runtime.pressed.is_empty()),
+    assert_eq!(
+        runtime.read(&app, |runtime, _| runtime.pressed.clone()),
+        served,
         "a ticket nobody will answer is still remembered as pressed"
     );
     assert!(
         one_turn(&mut app, &runtime).is_empty(),
         "it was still served"
     );
-    ask_where(&mut app, &runtime, most + 2..most + 3, Gesture::None);
+    ask_where(&mut app, &runtime, next + 2..next + 3, Gesture::None);
     assert_eq!(
         waiting(&app, &runtime),
         0,
         "what it asked for afterwards was kept"
+    );
+}
+
+#[test]
+fn a_burst_of_questions_bigger_than_may_wait_is_served_whole() {
+    // Where the pane is carries nothing to keep, and it is what an event may
+    // ask the window for — and events come in batches, every one delivered
+    // before the first thing they asked for is served. A plugin that asks
+    // once from each of a burst has as many waiting as the burst, none of
+    // them raised by an answer, and they are served a turn at a time rather
+    // than taken for a queue that is growing.
+    let (mut app, _queue, runtime) = allowed_to_ask_where();
+    let full = DEEDS_PER_TURN as usize;
+    let burst = 2 * MAX_WAITING as u32 + 1;
+    ask_where(&mut app, &runtime, 1..burst + 1, Gesture::None);
+    assert_eq!(
+        waiting(&app, &runtime),
+        burst as usize,
+        "some of the burst was not kept"
+    );
+
+    let turns = served_in_turns(&mut app, &runtime);
+
+    assert_eq!(
+        turns.iter().map(Vec::len).collect::<Vec<_>>(),
+        [full, full, full, full, 1],
+        "the burst was not served a turn's worth at a time"
+    );
+    assert_eq!(
+        turns.concat(),
+        (1..burst + 1).collect::<Vec<_>>(),
+        "a ticket was dropped, served twice or served out of order"
     );
 }
 

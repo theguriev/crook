@@ -38,7 +38,7 @@
 //! [`DEEDS_PER_TURN`] what is left waits here, untouched, for a turn booked
 //! after the window has drawn. A plugin whose turns run out
 //! [`OVERRUNS_ALLOWED`] times in a row, or that has more than [`MAX_WAITING`]
-//! waiting at once, stops being served at all.
+//! things to type, run or copy waiting at once, stops being served at all.
 //!
 //! **And two of them may only happen because somebody pressed something.**
 //! A plugin that could type into a shell from a timer is a plugin that types
@@ -152,18 +152,34 @@ pub(super) const DEEDS_PER_TURN: u32 = 32;
 /// each turn it is given is thirty-two calls into it on the thread that draws.
 const OVERRUNS_ALLOWED: u32 = 16;
 
-/// How many deeds one plugin may have waiting at once; one more and it stops
-/// being served until Crook is restarted.
+/// How many deeds that carry text — a line to type, a command to run and what
+/// to hand it, something to copy — one plugin may have waiting at once; one
+/// more and it stops being served until Crook is restarted.
 ///
 /// A turn bounds what is *served*, and nothing about that bounds what is
 /// *kept*: each answer in a turn may ask for as many things as the sandbox
 /// holds for a guest at once, so a plugin that asks for thirty-two from every
 /// answer leaves a thousand behind after one turn and sixteen thousand by the
-/// time its turns run out — and a line to type or copy may be a megabyte.
-/// Twice a turn's worth is what a full turn leaves when every answer in it
-/// asks for two things more, which is the most any plugin that exists asks
-/// for from one call; a queue longer than that is growing, not being served.
-const MAX_WAITING: usize = 2 * DEEDS_PER_TURN as usize;
+/// time its turns run out — and each of these may be a megabyte. Twice a
+/// turn's worth is what a full turn leaves when every answer in it asks for
+/// two things more, which is the most any plugin that exists asks for from
+/// one call; a queue of these longer than that is growing, not being served.
+/// Only a press, or what came of one, may ask for them, and a press is one
+/// call, so it raises a turn's worth at most.
+///
+/// **The rest are not counted: they carry nothing to keep, and a burst of
+/// them is the window's doing.** Where the pane is and what Crook can do are
+/// all an event may ask the window for, and events come in batches: every
+/// command a pane reports finished in one read is an event of its own in one
+/// update, and all of them are delivered before the first thing they asked for
+/// is served. A plugin asking once from each has as many waiting as there
+/// were commands without a single answer having asked for anything, and a
+/// ceiling on those would stop it and drop every ticket it held unanswered.
+/// What they cost waiting is an entry each, and a plugin that keeps asking for
+/// them from its answers is the one [`OVERRUNS_ALLOWED`] stops — as is one
+/// handed more than sixteen turns' worth in one update, which that rule cannot
+/// tell from a loop.
+pub(super) const MAX_WAITING: usize = 2 * DEEDS_PER_TURN as usize;
 
 /// How long the window is left to itself before a plugin's waiting deeds are
 /// carried on with.
@@ -266,6 +282,8 @@ pub(super) struct Runtime {
     /// Every one of these has already been checked against the grant: what is
     /// waiting is the *doing*, and a request nobody allowed never gets here.
     deeds: Vec<(u32, Request)>,
+    /// How many of `deeds` carry text, which is what [`MAX_WAITING`] counts.
+    carrying: usize,
     /// Which of the window's turns `served` is counting. See
     /// [`DEEDS_PER_TURN`].
     turn: u64,
@@ -307,6 +325,7 @@ impl Runtime {
             waiting: None,
             wake: None,
             deeds: Vec::new(),
+            carrying: 0,
             turn: 0,
             served: 0,
             overran: false,
@@ -356,6 +375,10 @@ impl Runtime {
         }
         let taken: Vec<(u32, Request)> = self.deeds.drain(..room.min(self.deeds.len())).collect();
         self.served += taken.len() as u32;
+        self.carrying -= taken
+            .iter()
+            .filter(|(_, request)| carries_text(request))
+            .count();
         taken
     }
 
@@ -399,14 +422,15 @@ impl Runtime {
     /// What is waiting is dropped, as a request past [`REFUSALS_ALLOWED`] is:
     /// answering it would be delivering to the loop, which asks again. Its
     /// tickets go from `pressed` too — in one pass, because a queue this is
-    /// called on can be as long as [`MAX_WAITING`] — since none of them is
-    /// ever going to be answered.
+    /// called on can hold thousands — since none of them is ever going to be
+    /// answered.
     fn stop(&mut self, why: &str) {
         log::warn!(
             "{} {why} and will not be served again until Crook is restarted",
             self.id
         );
         self.stopped = true;
+        self.carrying = 0;
         let dropped: HashSet<u32> = self.deeds.drain(..).map(|(ticket, _)| ticket).collect();
         self.pressed.retain(|ticket| !dropped.contains(ticket));
     }
@@ -507,9 +531,11 @@ impl Runtime {
         if deed && self.stopped {
             return;
         }
-        if deed && self.deeds.len() >= MAX_WAITING {
+        let carrying = deed && carries_text(&request);
+        if carrying && self.carrying >= MAX_WAITING {
             self.stop(&format!(
-                "has asked the window for more than {MAX_WAITING} things at once,"
+                "has asked the window to type, run or copy more than {MAX_WAITING} things \
+                 at once,"
             ));
             return;
         }
@@ -527,6 +553,7 @@ impl Runtime {
         // say there is anything to serve.
         if deed {
             self.deeds.push((ticket, request));
+            self.carrying += usize::from(carrying);
             ctx.notify();
             return;
         }
@@ -837,6 +864,18 @@ fn needs_the_workspace(request: &Request) -> bool {
             | Request::Run { .. }
             | Request::Output
             | Request::Copy { .. }
+    )
+}
+
+/// Whether this is a deed with text in it for the window to keep until it is
+/// served, which is what [`MAX_WAITING`] counts.
+///
+/// Every one of them is also one [`only_from_a_gesture`] names; what a command
+/// printed is the one of those that is asked for with nothing in it.
+fn carries_text(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Type { .. } | Request::Run { .. } | Request::Copy { .. }
     )
 }
 
