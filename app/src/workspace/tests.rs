@@ -8668,6 +8668,36 @@ fn a_shell_s_cd_is_written_into_the_session_file_beside_the_settings() {
 }
 
 #[test]
+fn an_agent_starting_and_stopping_is_written_into_the_session_file() {
+    // Every Crook update is a restart, and a restart ends every agent; the
+    // name is what the next window offers back. Saved when the agent changes
+    // rather than on the way out, because there is no reliable way out — and
+    // only its name, never the prompt typed after it.
+    let scratch = Scratch::new();
+    let mut harness = Harness::with_settings(1, scratch.settings());
+    let pane = harness.pane_ids()[0];
+    let running = |harness: &mut Harness, command: Option<&str>| {
+        let command = command.map(str::to_owned);
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(
+                &crate::terminal_model::TerminalUpdate::Running(pane, command),
+                ctx,
+            );
+        });
+    };
+
+    running(&mut harness, Some("claude \"fix the login bug\""));
+    let written = session_written(&scratch, "\"agent\": \"claude\"");
+    assert!(
+        !written.contains("fix the login bug"),
+        "the prompt was written into the session file: {written}"
+    );
+
+    running(&mut harness, None);
+    session_written(&scratch, "\"agent\": null");
+}
+
+#[test]
 fn a_resize_is_written_into_the_session_file_too() {
     // The next window opens the size this one was, said the file — at the
     // size of the last tab action, which a person who resized the window
@@ -14862,6 +14892,212 @@ mod restoring {
         assert!(
             harness.pane_takes_keys(),
             "the restored pane's field was never told it has the keyboard"
+        );
+    }
+
+    /// A window's worth of panes as a file would describe them: one tab split
+    /// once per pane given, each in its directory, each naming its agent.
+    fn remembered(panes: &[(&Path, Option<&str>)]) -> Session {
+        use crate::session::{PaneSnapshot, TabSnapshot};
+
+        Session {
+            tabs: vec![TabSnapshot {
+                name: "work".to_owned(),
+                horizontal: true,
+                panes: panes
+                    .iter()
+                    .map(|(directory, agent)| PaneSnapshot {
+                        title: "agent".to_owned(),
+                        working_directory: Some(directory.to_path_buf()),
+                        flex: 1.,
+                        agent: agent.map(str::to_owned),
+                        ..PaneSnapshot::default()
+                    })
+                    .collect(),
+                ..TabSnapshot::default()
+            }],
+            ..Session::default()
+        }
+    }
+
+    /// A harness on `settings` showing what `session` describes.
+    fn restored(session: &Session, settings: Settings) -> Harness {
+        let mut harness = Harness::with_settings(1, settings);
+        let strip = session.restore().expect("there was something to restore");
+        harness.workspace_update(|workspace, ctx| workspace.restore(strip, ctx));
+        harness.frame();
+        harness
+    }
+
+    /// Whether the window has a resume for its palette command to send.
+    fn resume_is_offered(harness: &Harness) -> bool {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .command(crate::input_keys::Binding::ResumeAgents)
+                .is_some()
+        })
+    }
+
+    #[test]
+    fn a_restored_agent_s_resume_line_waits_in_its_composer_unsent() {
+        let scratch = Scratch::new();
+        let harness = restored(
+            &remembered(&[(scratch.path(), Some("claude")), (scratch.path(), None)]),
+            Settings::ephemeral(),
+        );
+        let panes = harness.pane_ids();
+
+        assert_eq!(harness.field_text(panes[0]), "claude --continue");
+        assert_eq!(
+            harness.field_text(panes[1]),
+            "",
+            "a pane that ran no agent is offered nothing"
+        );
+        let running = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .pane(panes[0])
+                .and_then(|pane| pane.session().running_command.clone())
+        });
+        assert_eq!(running, None, "the line was run rather than offered");
+    }
+
+    #[test]
+    fn two_restored_panes_of_one_agent_in_one_directory_are_offered_its_picker() {
+        let scratch = Scratch::new();
+        let other = scratch.path().join("other");
+        fs::create_dir_all(&other).expect("a scratch directory");
+        let harness = restored(
+            &remembered(&[
+                (scratch.path(), Some("claude")),
+                (scratch.path(), Some("claude")),
+                (&other, Some("claude")),
+            ]),
+            Settings::ephemeral(),
+        );
+        let fields: Vec<String> = harness
+            .pane_ids()
+            .into_iter()
+            .map(|pane| harness.field_text(pane))
+            .collect();
+
+        assert_eq!(
+            fields,
+            ["claude --resume", "claude --resume", "claude --continue"]
+        );
+    }
+
+    #[test]
+    fn a_resume_line_a_person_wrote_is_the_one_offered() {
+        let scratch = Scratch::new();
+        fs::write(
+            scratch.path().join("settings.json"),
+            r#"{"resume_lines": {"claude": "claude --continue --model opus"}}"#,
+        )
+        .expect("writable scratch");
+        let harness = restored(
+            &remembered(&[(scratch.path(), Some("claude"))]),
+            scratch.settings(),
+        );
+
+        assert_eq!(
+            harness.field_text(harness.pane_ids()[0]),
+            "claude --continue --model opus"
+        );
+    }
+
+    #[test]
+    fn resume_every_agent_is_there_only_while_a_restored_line_is_waiting() {
+        // A command with nothing to do declines, the way every chord of the
+        // window's does, so a chord a person binds to it goes on to the shell.
+        let fresh = Harness::new(1);
+        assert!(
+            !resume_is_offered(&fresh),
+            "a window nothing was restored into"
+        );
+
+        let scratch = Scratch::new();
+        let mut harness = restored(
+            &remembered(&[(scratch.path(), Some("claude"))]),
+            Settings::ephemeral(),
+        );
+        assert!(resume_is_offered(&harness));
+
+        // Edited, the line is the person's, and the command has nothing of
+        // Crook's left to send.
+        let pane = harness.pane_ids()[0];
+        harness.type_field(pane, " --model opus");
+        assert!(!resume_is_offered(&harness));
+    }
+
+    #[test]
+    fn resume_every_agent_sends_only_the_lines_nobody_has_touched() {
+        // Lines that print rather than start anything: a test that pressed
+        // Enter on `claude --continue` would start whatever Claude Code is on
+        // the machine running it.
+        let scratch = Scratch::new();
+        fs::write(
+            scratch.path().join("settings.json"),
+            r#"{"resume_lines": {"claude": "echo resumed-claude", "codex": "echo resumed-codex"}}"#,
+        )
+        .expect("writable scratch");
+        let [one, two] = ["one", "two"].map(|name| {
+            let directory = scratch.path().join(name);
+            fs::create_dir_all(&directory).expect("a scratch directory");
+            directory
+        });
+        let mut harness = restored(
+            &remembered(&[(&one, Some("claude")), (&two, Some("codex"))]),
+            scratch.settings(),
+        );
+        let panes = harness.pane_ids();
+        harness.type_field(panes[1], " --by-hand");
+
+        if super::shells::marked_shell(&mut harness).is_none() {
+            return;
+        }
+        for pane in &panes {
+            super::shells::await_prompt(&mut harness, *pane);
+        }
+        harness.run_command("crook/window/resume-agents");
+
+        let commands = |harness: &Harness, pane: PaneId| -> Vec<String> {
+            harness
+                .workspace
+                .read(&harness.app, |workspace, app| {
+                    Some(
+                        workspace
+                            .terminal_blocks(pane, app)?
+                            .iter()
+                            .filter_map(|block| block.command.clone())
+                            .collect(),
+                    )
+                })
+                .unwrap_or_default()
+        };
+        harness.wait_for("the untouched line was never sent", |harness| {
+            commands(harness, panes[0]).contains(&"echo resumed-claude".to_owned())
+        });
+        harness.settle(std::time::Duration::from_millis(200));
+
+        assert_eq!(
+            harness.field_text(panes[0]),
+            "",
+            "the sent line is still waiting"
+        );
+        assert!(
+            commands(&harness, panes[1]).is_empty(),
+            "the edited line was sent: {:?}",
+            commands(&harness, panes[1])
+        );
+        assert_eq!(
+            harness.field_text(panes[1]),
+            "echo resumed-codex --by-hand",
+            "the person's line was taken out of their field"
+        );
+        assert!(
+            !resume_is_offered(&harness),
+            "a line that has been sent is still offered"
         );
     }
 }

@@ -899,3 +899,292 @@ fn a_tab_opened_after_a_restore_is_named_past_the_gap_a_closed_tab_left() {
         .to_owned();
     assert_eq!(new, "agent 4");
 }
+
+/// A strip of one tab split once per pane given, each pane working in its
+/// directory and running its command.
+fn running(panes: &[(&Path, Option<&str>)]) -> TabStrip {
+    let mut strip = split(panes.len());
+    let ids: Vec<crate::tab::PaneId> = strip.panes().map(|(_, pane)| pane.id()).collect();
+    for (id, (directory, command)) in ids.into_iter().zip(panes) {
+        let session = strip.pane_mut(id).expect("the pane is open").session_mut();
+        session.working_directory = Some(directory.to_path_buf());
+        session.set_running_command(command.map(str::to_owned));
+    }
+    strip
+}
+
+/// The agent every pane of a strip names, in strip order.
+fn agents(strip: &TabStrip) -> Vec<Option<String>> {
+    strip
+        .panes()
+        .map(|(_, pane)| pane.session().agent().map(str::to_owned))
+        .collect()
+}
+
+/// What each pane of a session's first tab says its agent was.
+fn written_agents(session: &Session) -> Vec<Option<&str>> {
+    session.tabs[0]
+        .panes
+        .iter()
+        .map(|pane| pane.agent.as_deref())
+        .collect()
+}
+
+/// The lines a restored strip offers, with the built-in spellings.
+fn offers(strip: &TabStrip) -> Vec<(crate::tab::PaneId, String)> {
+    resume_offers(strip, |program, resume| {
+        crate::agent::resume_line(program, resume).map(str::to_owned)
+    })
+}
+
+#[test]
+fn a_pane_running_an_agent_is_remembered_by_the_agent_s_name() {
+    let directory = scratch("agent-name");
+    let strip = running(&[
+        (&directory, Some("claude")),
+        (&directory, Some("cargo test")),
+        (&directory, None),
+    ]);
+
+    assert_eq!(
+        written_agents(&Session::of(&strip, None)),
+        [Some("claude"), None, None],
+        "only the pane running an agent names one"
+    );
+}
+
+#[test]
+fn only_the_program_is_written_and_never_the_prompt_after_it() {
+    // The rest of the command line is where a person types the prompt, and
+    // the session file is a file anybody with the home directory can read.
+    let directory = scratch("agent-prompt");
+    let path = directory.join("session.json");
+    let strip = running(&[
+        (&directory, Some("claude \"fix the bug\"")),
+        (
+            &directory,
+            Some("/usr/local/bin/codex --model o4 'port the tab bar'"),
+        ),
+    ]);
+    Session::of(&strip, None)
+        .save_blocking(&path)
+        .expect("writable");
+
+    let written = fs::read_to_string(&path).expect("readable");
+    assert!(written.contains("\"agent\": \"claude\""), "{written}");
+    assert!(written.contains("\"agent\": \"codex\""), "{written}");
+    for kept_out in [
+        "fix the bug",
+        "port the tab bar",
+        "--model",
+        "/usr/local/bin",
+    ] {
+        assert!(
+            !written.contains(kept_out),
+            "the file holds {kept_out:?}: {written}"
+        );
+    }
+}
+
+#[test]
+fn a_program_that_is_not_a_known_agent_is_not_remembered() {
+    let directory = scratch("agent-unknown");
+    let strip = running(&[
+        (&directory, Some("vim claude.md")),
+        (&directory, Some("claudette")),
+        (&directory, Some("cargo test")),
+    ]);
+
+    assert_eq!(
+        written_agents(&Session::of(&strip, None)),
+        [None, None, None]
+    );
+}
+
+#[test]
+fn a_remembered_agent_survives_the_round_trip_and_is_still_remembered_before_it_runs() {
+    let directory = scratch("agent-round-trip");
+    let path = directory.join("session.json");
+    let session = Session::of(&running(&[(&directory, Some("claude"))]), None);
+    session.save_blocking(&path).expect("writable");
+
+    let reread = Session::load(&path);
+    assert_eq!(reread, session);
+    assert_eq!(written_agents(&reread), [Some("claude")]);
+
+    let restored = reread.restore().expect("restored");
+    assert_eq!(agents(&restored), [Some("claude".to_owned())]);
+    // The restored window saves the moment its shell reports a directory,
+    // long before anybody has pressed Enter on the resume line; a file
+    // written then that had forgotten the agent would come back from a
+    // second restart with nothing to offer.
+    assert_eq!(
+        written_agents(&Session::of(&restored, None)),
+        [Some("claude")]
+    );
+}
+
+#[test]
+fn a_file_from_before_agents_were_remembered_reads_whole() {
+    let directory = scratch("agent-old-file");
+    let path = directory.join("session.json");
+    fs::write(
+        &path,
+        r#"{"tabs": [{"name": "old", "panes": [{"title": "old", "flex": 1.0}]}]}"#,
+    )
+    .expect("writable");
+
+    let session = Session::load(&path);
+    assert_eq!(written_agents(&session), [None]);
+    assert!(
+        backups(&directory).is_empty(),
+        "a file missing the new key was treated as one that did not read"
+    );
+}
+
+#[test]
+fn an_agent_that_is_not_a_name_costs_its_resume_line_and_not_its_tab() {
+    let directory = scratch("agent-salvage");
+    let path = directory.join("session.json");
+    let elsewhere = scratch("agent-salvage-directory");
+    fs::write(
+        &path,
+        serde_json::json!({
+            "tabs": [
+                {"name": "kept", "panes": [{"title": "kept", "flex": 1.0, "agent": 7}]},
+                {"name": "also", "panes": [{"title": "also", "flex": 1.0, "agent": "claude",
+                    "working_directory": elsewhere}]},
+                {"name": "edited", "panes": [{"title": "edited", "flex": 1.0,
+                    "agent": "rm -rf ~", "working_directory": elsewhere}]},
+            ]
+        })
+        .to_string(),
+    )
+    .expect("writable");
+
+    let session = Session::load(&path);
+    assert_eq!(
+        session
+            .tabs
+            .iter()
+            .map(|tab| tab.name.as_str())
+            .collect::<Vec<_>>(),
+        ["kept", "also", "edited"],
+        "a bad agent cost a tab"
+    );
+    assert_eq!(session.tabs[0].panes[0].agent, None);
+    assert_eq!(session.tabs[1].panes[0].agent.as_deref(), Some("claude"));
+
+    // A name no agent answers to is kept in the file as it was written and
+    // restored as nothing: what is offered comes from the table, never from
+    // the file.
+    let restored = session.restore().expect("restored");
+    assert_eq!(agents(&restored), [None, Some("claude".to_owned()), None]);
+}
+
+#[test]
+fn an_agent_whose_directory_is_gone_comes_back_offering_nothing() {
+    // Its conversation is keyed by that directory, and the shell comes back
+    // somewhere else: a resume line there would resume some other
+    // directory's conversation, or none.
+    let directory = scratch("agent-gone");
+    let mut session = Session::of(&running(&[(&directory, Some("claude"))]), None);
+    session.tabs[0].panes[0].working_directory = Some(PathBuf::from("/nowhere/at/all"));
+
+    let restored = session.restore().expect("restored");
+    assert_eq!(agents(&restored), [None]);
+    assert!(offers(&restored).is_empty());
+}
+
+#[test]
+fn a_restored_agent_is_forgotten_once_anything_runs_in_its_pane() {
+    let directory = scratch("agent-forgotten");
+    let session = Session::of(&running(&[(&directory, Some("claude"))]), None);
+
+    // The resume line itself: the agent is still claude, now running.
+    let mut restored = session.restore().expect("restored");
+    let pane = restored.focused_pane_id().expect("a pane");
+    let resumed = restored.pane_mut(pane).expect("the pane").session_mut();
+    assert!(
+        !resumed.set_running_command(Some("claude --continue".to_owned())),
+        "resuming the agent is not a change of agent"
+    );
+    assert!(
+        resumed.set_running_command(None),
+        "the agent it resumed ending is"
+    );
+    assert_eq!(
+        resumed.agent(),
+        None,
+        "the agent was quit, so nothing is offered"
+    );
+
+    // Something else instead: the offer is spent.
+    let mut restored = session.restore().expect("restored");
+    let pane = restored.focused_pane_id().expect("a pane");
+    let other = restored.pane_mut(pane).expect("the pane").session_mut();
+    assert!(other.set_running_command(Some("ls".to_owned())));
+    assert_eq!(other.agent(), None);
+    assert!(!other.set_running_command(None));
+}
+
+#[test]
+fn a_restored_pane_is_offered_its_agent_s_resume_line() {
+    let [a, b, c, d, e] = ["a", "b", "c", "d", "e"].map(|name| scratch(&format!("offer-{name}")));
+    let session = Session::of(
+        &running(&[
+            (&a, Some("claude")),
+            (&b, Some("codex")),
+            (&c, Some("gemini")),
+            (&d, Some("opencode")),
+            (&e, Some("cargo test")),
+        ]),
+        None,
+    );
+
+    let restored = session.restore().expect("restored");
+    let panes: Vec<_> = restored.panes().map(|(_, pane)| pane.id()).collect();
+    assert_eq!(
+        offers(&restored),
+        [
+            (panes[0], "claude --continue".to_owned()),
+            (panes[1], "codex resume --last".to_owned()),
+            (panes[2], "gemini --resume latest".to_owned()),
+        ],
+        "each agent's own line, and nothing for one with no line or no agent"
+    );
+}
+
+#[test]
+fn two_panes_of_one_agent_in_one_directory_are_each_offered_the_picker() {
+    // The directory is the key, and it names one conversation where the two
+    // panes had two: the most recent would put the same one in both.
+    let [shared, alone, gemini] =
+        ["shared", "alone", "gemini"].map(|name| scratch(&format!("pick-{name}")));
+    let session = Session::of(
+        &running(&[
+            (&shared, Some("claude")),
+            (&shared, Some("claude --model opus")),
+            (&alone, Some("claude")),
+            (&shared, Some("codex")),
+            (&gemini, Some("gemini")),
+            (&gemini, Some("gemini")),
+        ]),
+        None,
+    );
+
+    let restored = session.restore().expect("restored");
+    let panes: Vec<_> = restored.panes().map(|(_, pane)| pane.id()).collect();
+    assert_eq!(
+        offers(&restored),
+        [
+            (panes[0], "claude --resume".to_owned()),
+            (panes[1], "claude --resume".to_owned()),
+            (panes[2], "claude --continue".to_owned()),
+            // Another agent in the same directory keeps its own key.
+            (panes[3], "codex resume --last".to_owned()),
+            // Gemini has no picker to offer, and its newest twice is worse
+            // than nothing.
+        ]
+    );
+}

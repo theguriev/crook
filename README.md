@@ -172,6 +172,25 @@ Nineteen features, and the page that configures them:
   and shows the slot it will drop into, and a group whose last tab leaves it goes away by
   itself. A group is not a split screen — the tabs in it are still one at a time, and splitting
   a tab is still `cmd-d` (`ctrl-shift-d` off macOS), asked for on purpose.
+
+  **The window comes back the way it was closed**: the tabs with their names, pins, colours
+  and groups, the splits, the directory each shell was in — and, for a pane that was running a
+  coding agent, that agent's name. Every Crook update is a restart and a restart ends every
+  process in the window, so a pane that had Claude Code in it comes back as a shell in the same
+  directory with `claude --continue` waiting in its command line, **unsent**: nothing runs
+  until you press Enter. Codex is offered `codex resume --last` and Gemini CLI `gemini --resume
+  latest`, each the most recent conversation in that directory, and Copilot its `copilot
+  --resume` picker, since its most recent is the repository's rather than the worktree's. Two
+  panes of one agent in one directory are offered its picker instead (`claude --resume`,
+  `codex resume`), because the directory names one conversation and they had two. **Resume
+  every agent** in the palette (`resume-agents`) sends every line a restore typed that you
+  have not touched, in one press. What is remembered is the program's name and nothing after
+  it, so a prompt typed on the command line never reaches the file, and it needs the shell
+  integration, which is what says what a pane is running. A line of your own goes in
+  `settings.json` under `resume_lines`, keyed by program — `{"claude": "claude --continue
+  --model opus"}` — and an empty one offers nothing; OpenCode has no line until you give it
+  one, because its `--continue` reaches across a repository's worktrees. No output comes back,
+  and no process does.
 - **The window's own title bar.** There is no strip of system chrome above Crook. The window is
   opened with the application's frame, so the header *is* the title bar: dragging its empty
   space moves the window and a double click maximises it. On macOS that surface carries
@@ -464,7 +483,7 @@ Nineteen features, and the page that configures them:
   written to `<config>/crook/settings.json`, which is the same eight keys that menu writes, the
   status marks, the theme, the light and dark pair it follows the desktop between, the
   terminal's type size, whether the tabs come back, and — set in the file rather than on the
-  page — its font family.
+  page — its font family and the line each agent is resumed with.
   The type size is also on `cmd/ctrl-plus`, `-minus` and `-0`, and every pane resizes with it:
   a pane's columns and rows are its box divided by a cell, so the ptys follow.
   It is the one pane with no shell under it and no field: every control on it is a click.
@@ -496,7 +515,7 @@ Nineteen features, and the page that configures them:
   page tells you where it is.
 
 - **Everything the window does has a name, and most of it has a key.** The window registers
-  fifty-one commands of its own and ships chords for thirty-seven; the other fourteen are
+  fifty-two commands of its own and ships chords for thirty-seven; the other fifteen are
   reached by name, from the palette or from a chord of your own. That split is deliberate — a
   shipped chord is a key taken away from the shell in every pane, forever, so it is spent on
   what is pressed often and not on what is done once a week.
@@ -522,7 +541,8 @@ Nineteen features, and the page that configures them:
   Without a chord, by name: `split-left` and `split-up`, `grow-pane`, `shrink-pane` and
   `even-panes`, a block's menu (`open-block-menu`) and every entry of it (`copy-block`,
   `copy-block-command`, `copy-block-output`, `copy-block-directory`, `copy-block-branch`,
-  `rerun-block`, `scroll-to-block-top`, `scroll-to-block-bottom`), every entry of a tab's
+  `rerun-block`, `scroll-to-block-top`, `scroll-to-block-bottom`), `resume-agents` (the
+  agents a restart ended — see Tabs), every entry of a tab's
   (`crook/tabs/pin-tab`, `close-tab`, `open-menu`, `view-options`,
   `toggle-group`, `close-group`, the seven colours), the worktree list (`crook/worktrees/menu`)
   and every settings page (`crook/appearance/open-page` and its three neighbours). The block

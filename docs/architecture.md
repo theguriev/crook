@@ -1711,9 +1711,10 @@ keeping was already kept: keyboard and mouse produce the *same* action values, s
 sits above every handler and touches none of them.
 
 **Persistence is in**, in `app/src/session.rs`, and it is exactly the shape this paragraph used
-to prescribe: snapshot types entirely separate from the live ones, holding a title, a directory
-and a share of a split and nothing else — a `Vec<TabSnapshot>` plus an active index and a
-window size, `serde_json` to a file beside the settings.
+to prescribe: snapshot types entirely separate from the live ones, holding a title, a directory,
+a share of a split and the name of the agent a pane ran, and nothing else — a
+`Vec<TabSnapshot>` plus an active index and a window size, `serde_json` to a file beside the
+settings.
 
 Three decisions in it are worth naming. It is written **on every change rather than on the way
 out**, because there is no reliable way out: a window closed by the window manager, a process
@@ -1738,6 +1739,17 @@ What is *not* remembered is the point: no scrollback, no output, no process. A w
 redrew yesterday's output over a shell that had never run any of it would be lying about the
 state of the machine. The settings section is left out too — it is something somebody opened to
 change a setting, not work in progress.
+
+What *is* remembered of a process is one word: the program name of a coding agent a pane was
+running — `claude`, never the prompt typed after it, and only for a program in `agent.rs`'s
+table — so that the restored pane can offer that agent's resume line (`claude --continue`,
+`codex resume --last`) in its composer, unsent. The directory is the session key: those lines
+resume the most recent conversation *in the directory they run in*, and Crook's worktrees give
+each agent a directory of its own, so no session id, hook or wire change is needed. Two panes of
+one agent in one directory are offered the agent's picker instead, and a CLI whose "most
+recent" is the repository's rather than the directory's is offered its picker or nothing. The
+rule above still holds: nothing old is redrawn, and a new process starts only when a person
+presses Enter, or "Resume every agent" for every line nobody has touched.
 
 **Telemetry, crash reporting, autoupdate.** All absent. Worth noting that adding Sentry on
 macOS is not a `Cargo.toml` line: Warp's build script downloads an `xcframework` and its

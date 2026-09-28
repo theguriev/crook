@@ -119,6 +119,9 @@ pub enum WorkspaceAction {
     /// and it is the model that knows where this session's scratch directory
     /// is. See [`crate::completion`].
     Complete(PaneId),
+    /// Send the resume lines a restore left in the composers, where nobody
+    /// has touched them. See `Workspace::resume_every_agent`.
+    ResumeAgents,
 }
 
 /// Something an action is about, as something `Copy`.
