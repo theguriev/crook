@@ -1075,7 +1075,12 @@ pane nobody is looking at is a program saying exactly that. A person can ask for
 look by hand — "Mark as waiting" on the row's menu, `crook/tabs/mark-waiting` — and that
 `marked` flag outlives every glance and every running report, going only when they arrive at
 the pane or clear it from the same entry. `is_waiting` is the three combined, and it is what
-the count in the header and the "next waiting" chord read.
+the count in the header and the "next waiting" chord read. "Why this status" on the same menu,
+`crook/tabs/explain-status`, reads all of it out in words — the status and whether the agent
+said it or the shell's `D` took it back (`AgentSession::source`, an `Instant` subtracted when
+the panel is drawn and never ticked), the title and the question, which of the bell or a
+status change set `attention` and whether `marked` is set, and what the shell is running —
+on a read-only panel that hangs off the menu's corner where the worktree list does.
 
 **Looking needs the window in front.** "Nobody was looking" meant "the pane without the
 keyboard", and that made the one-pane window the one that could never be waiting: its pane
@@ -1086,12 +1091,14 @@ to ask there never reached the count, the title or the chip. crookui forwards wi
 focus, and nothing while it does not — is the one answer `ring`, `agent_reported`, `attend`
 and the tabs plugin's count, chord and group roll-up read. A window starts out focused, which
 is what every window was before the bit existed, so a desktop that never says changes nothing.
-Coming back to the window is a glance at the pane with the keyboard: it runs `attend`, which
-answers the attention asked for while nobody was there and nothing else, and since the strip
-did not move it is not arriving, so a person's mark stays. `attend` does nothing while the
-window is behind another, because a pane the strip moves to then is a pane nobody saw. The
-panel's rows keep asking only whether a row is the selected one: the selected row is painted
-as selected whether or not it is waiting, so the window's focus would change nothing on it.
+`attend` does nothing while the window is behind another, because a pane the strip moves to
+then is a pane nobody saw. Coming back to the window runs it for the pane with the keyboard,
+with the pane that had it on leaving as `before`: the same pane is a glance, which answers the
+attention asked for while nobody was there and leaves a person's mark, since the strip did
+not move; a pane the strip moved to in the meantime — a shell that exited closed the one in
+front — is arrived at, and its mark goes as it would have on the move itself. The panel's
+rows keep asking only whether a row is the selected one: the selected row is painted as
+selected whether or not it is waiting, so the window's focus would change nothing on it.
 
 **Focus reports ride the same bit.** A program that sets `?1004` is sent xterm's `CSI I` and
 `CSI O` (`crook_terminal::input::focus`, read against the emulator's mode by
@@ -1100,12 +1107,7 @@ another and coming back is out and in for the looked-at pane, and a tab switch o
 focus move inside a window in front is out for the pane left and in for the pane reached,
 in that order. `Workspace::report_focus` compares the looked-at pane before and after, from
 `set_window_focused` and from `settle`, so no gesture has a path of its own. Nothing is sent
-until a program asks, which is what keeps `[I` off a shell's command line. "Why this status" on the same menu,
-`crook/tabs/explain-status`, reads all of it out in words — the status and whether the agent
-said it or the shell's `D` took it back (`AgentSession::source`, an `Instant` subtracted when
-the panel is drawn and never ticked), the title and the question, which of the bell or a
-status change set `attention` and whether `marked` is set, and what the shell is running —
-on a read-only panel that hangs off the menu's corner where the worktree list does.
+until a program asks, which is what keeps `[I` off a shell's command line.
 
 **The strip answers.** A waiting row is washed in the amber its dot shows, faintly, because a
 dot is nine pixels and a person scanning a long list wants the row to say it. A group folded

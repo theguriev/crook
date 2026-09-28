@@ -671,6 +671,13 @@ pub struct Workspace {
     /// this was recorded: a desktop that never says leaves the strip exactly
     /// as it always behaved.
     window_focused: bool,
+    /// The pane that had the keyboard when the window last went behind
+    /// something else, until the window comes back.
+    ///
+    /// What coming back is measured against: the same pane in front again is
+    /// a glance, and a pane the strip moved to while nobody was there is
+    /// arrived at. See [`Self::set_window_focused`].
+    looked_at_when_left: Option<PaneId>,
     interactions: HashMap<PaneId, PaneInteraction>,
     /// What the mouse is doing to each tab's chrome in the panel.
     ///
@@ -987,6 +994,7 @@ impl Workspace {
             window_size: Rc::new(std::cell::Cell::new(Vector2F::zero())),
             system_is_dark: true,
             window_focused: true,
+            looked_at_when_left: None,
             interactions: HashMap::new(),
             tab_chrome: HashMap::new(),
             group_chrome: HashMap::new(),
@@ -1155,12 +1163,16 @@ impl Workspace {
     ///
     /// Window focus is half of looking — see [`Self::looking_at`] — so a
     /// window going behind another takes its focused pane out of sight with
-    /// it, and coming back is looking at that pane again: the attention it
-    /// asked for while nobody was there is answered, as a tab switch answers
-    /// it, and nothing else is. The strip did not move, so this is not
-    /// *arriving* at the pane and a person's own mark on it stays, which is
-    /// `attend`'s rule for every settle. A program in the pane that asked for
-    /// focus reports hears the keyboard go and come back.
+    /// it, and coming back is looking at whichever pane has the keyboard
+    /// then: the attention it asked for while nobody was there is answered,
+    /// as a tab switch answers it. Coming back is measured against the pane
+    /// that had the keyboard on leaving, which is `attend`'s rule for every
+    /// settle: when it is the same pane the strip did not move, this is not
+    /// *arriving* and a person's own mark on it stays; when the strip moved
+    /// while nobody was there — a shell exiting closed the pane, a plugin
+    /// switched tabs — the pane in front now is arrived at, mark and all. A
+    /// program in the pane that asked for focus reports hears the keyboard go
+    /// and come back.
     pub fn set_window_focused(&mut self, focused: bool, ctx: &mut ViewContext<Self>) {
         if self.window_focused == focused {
             return;
@@ -1168,7 +1180,12 @@ impl Workspace {
         let before = self.looking_at();
         self.window_focused = focused;
         self.report_focus(before, ctx);
-        self.attend(self.tabs.focused_pane_id(), ctx);
+        if focused {
+            let left = self.looked_at_when_left.take();
+            self.attend(left, ctx);
+        } else {
+            self.looked_at_when_left = before;
+        }
         // The count in the header changes with it even when no attention
         // does: the focused pane's own question is on it only while the
         // window is behind something else.
@@ -5272,8 +5289,9 @@ impl Workspace {
     /// is exactly the state the mark exists to survive.
     ///
     /// Nothing is attended while the window is behind something else: a pane
-    /// the strip moves to then is a pane nobody saw, and coming back to the
-    /// window runs this again for whichever pane has the keyboard by then.
+    /// the strip moves to then is a pane nobody saw. Coming back to the
+    /// window runs this for whichever pane has the keyboard by then, with
+    /// the pane that had it on leaving as `before`.
     fn attend(&mut self, before: Option<PaneId>, ctx: &mut ViewContext<Self>) {
         let Some(pane) = self.looking_at() else {
             return;

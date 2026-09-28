@@ -15706,6 +15706,38 @@ mod the_agent {
     }
 
     #[test]
+    fn a_marked_pane_the_strip_moves_to_behind_another_window_is_arrived_at_when_the_window_is() {
+        // A shell that exits while nobody is at the window closes its pane,
+        // and the keyboard lands on the tab the person marked to come back
+        // to. Nobody arrived at it then. Coming back to the window with that
+        // tab in front of them is arriving, and the mark goes, as the move
+        // itself would have taken it in a window in front.
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let marked_pane = harness.panes_of(tabs[0])[0];
+        let exiting = harness.focused_pane_id().expect("the window has a pane");
+        harness.open_tab_menu_on(tabs[0], marked_pane);
+        harness.run_command("crook/tabs/mark-waiting");
+        assert!(marked(&harness, marked_pane));
+
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(&TerminalUpdate::Closed(exiting), ctx);
+        });
+        assert_eq!(harness.focused_pane_id(), Some(marked_pane));
+        assert!(
+            marked(&harness, marked_pane),
+            "the keyboard reached the pane and nobody was there to see it"
+        );
+
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(true, ctx));
+        assert!(
+            !marked(&harness, marked_pane),
+            "coming back to a pane the strip moved to is arriving at it"
+        );
+    }
+
+    #[test]
     fn a_title_in_the_report_is_the_agents_name_for_its_work() {
         let mut harness = Harness::new(1);
         let pane = harness.focused_pane_id().expect("the window has a pane");
