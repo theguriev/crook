@@ -17255,6 +17255,61 @@ mod desktop_notifications {
     }
 
     #[test]
+    fn a_pane_with_no_name_that_stops_is_posted_under_the_name_its_row_shows() {
+        // The same row reached through a turn to needs-input: an agent that
+        // never called its work anything, whose command ended while nobody
+        // was looking. The shell took its status back to idle, which turns
+        // the row amber, and what it was running went a moment before.
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        apply(
+            &mut harness,
+            TerminalUpdate::WorkingDirectory(pane, PathBuf::from("/work/crook/app")),
+        );
+        apply(
+            &mut harness,
+            TerminalUpdate::Running(pane, Some("claude".to_owned())),
+        );
+        report(&mut harness, pane, AgentStatus::Running, None);
+        leave(&mut harness);
+
+        apply(&mut harness, TerminalUpdate::Running(pane, None));
+        apply(&mut harness, TerminalUpdate::AgentSettled(pane));
+
+        let titles: Vec<String> = posted
+            .all()
+            .into_iter()
+            .map(|notice| notice.title)
+            .collect();
+        assert_eq!(titles, ["Crook — app"]);
+    }
+
+    #[test]
+    fn a_pane_with_no_name_that_fails_is_posted_under_the_name_its_row_shows() {
+        // An agent reporting over the wire from a shell whose integration
+        // says nothing of what it runs: no title, no command, only a
+        // directory, which is what its row shows.
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        switch(&mut harness, Occasion::Failed);
+        apply(
+            &mut harness,
+            TerminalUpdate::WorkingDirectory(pane, PathBuf::from("/work/crook/app")),
+        );
+        report(&mut harness, pane, AgentStatus::Running, None);
+        leave(&mut harness);
+
+        report(&mut harness, pane, AgentStatus::Failed, None);
+
+        let titles: Vec<String> = posted
+            .all()
+            .into_iter()
+            .map(|notice| notice.title)
+            .collect();
+        assert_eq!(titles, ["Crook — app"]);
+    }
+
+    #[test]
     fn a_second_pane_asking_is_not_held_up_by_the_first() {
         let (mut harness, posted) = window(2);
         let front = harness.focused_pane_id().expect("the window has a pane");
