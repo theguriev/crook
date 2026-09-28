@@ -15737,6 +15737,98 @@ mod the_agent {
         );
     }
 
+    /// What a window told the desktop, in order, standing in for the event
+    /// loop a real window says it through.
+    #[derive(Clone, Default)]
+    struct Notebook(Rc<RefCell<Vec<Said>>>);
+
+    #[derive(Clone, Debug, PartialEq)]
+    enum Said {
+        Title(String),
+        Look,
+    }
+
+    impl crate::Desktop for Notebook {
+        fn set_title(&self, title: String) {
+            self.0.borrow_mut().push(Said::Title(title));
+        }
+
+        fn request_attention(&self) {
+            self.0.borrow_mut().push(Said::Look);
+        }
+    }
+
+    impl Notebook {
+        fn looks(&self) -> usize {
+            self.0
+                .borrow()
+                .iter()
+                .filter(|said| **said == Said::Look)
+                .count()
+        }
+
+        fn title(&self) -> Option<String> {
+            self.0.borrow().iter().rev().find_map(|said| match said {
+                Said::Title(title) => Some(title.clone()),
+                Said::Look => None,
+            })
+        }
+    }
+
+    /// Watches the window the way a real one is watched: every change to its
+    /// views runs the callback the shell registers, with a notebook where the
+    /// event loop would be.
+    fn watched(harness: &mut Harness) -> Notebook {
+        let notebook = Notebook::default();
+        let beacon = Rc::new(RefCell::new(crate::Beacon::new(
+            "Crook".to_owned(),
+            notebook.clone(),
+        )));
+        let callback = crate::on_every_change(beacon, harness.workspace.clone(), || {});
+        harness
+            .app
+            .on_window_invalidated(harness.window_id, callback);
+        notebook
+    }
+
+    #[test]
+    fn a_question_behind_another_window_reaches_the_desktop_without_a_frame() {
+        // A window nobody can see may be given no frames: a Wayland
+        // compositor sends no frame callback to a surface it is not showing,
+        // and winit holds every redraw back until one comes. So nothing below
+        // draws one, and the title and the request for a look still go out.
+        let mut harness = Harness::new(2);
+        let front = harness.focused_pane_id().expect("the window has a pane");
+        let behind = background_of(&harness);
+        let said = watched(&mut harness);
+
+        report(&mut harness, front, AgentStatus::NeedsInput, None);
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+        assert_eq!(
+            0,
+            said.looks(),
+            "the question on screen as the person left is one they saw"
+        );
+        assert!(
+            said.title()
+                .is_some_and(|title| title.starts_with("(1 waiting)")),
+            "the title counts it all the same: {:?}",
+            said.title()
+        );
+
+        report(&mut harness, behind, AgentStatus::NeedsInput, None);
+        assert_eq!(1, said.looks(), "a second question, with nobody there");
+        assert!(
+            said.title()
+                .is_some_and(|title| title.starts_with("(2 waiting)")),
+            "{:?}",
+            said.title()
+        );
+
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(true, ctx));
+        assert_eq!(1, said.looks(), "coming back asks for nothing");
+    }
+
     #[test]
     fn a_title_in_the_report_is_the_agents_name_for_its_work() {
         let mut harness = Harness::new(1);

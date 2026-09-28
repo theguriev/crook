@@ -1131,13 +1131,17 @@ asks the desktop to point at it through `Proxy::request_attention`, winit's
 hint on X11, an xdg-activation request on Wayland, a taskbar flash on Windows, all from winit
 and no dependency of Crook's own. A rise rather than a count above zero, because the panes
 waiting as a person leaves are panes they just saw — the pane they leave with a question on
-it joins the count at that moment without being news — so leaving sets the mark the count
-has to pass (`Urgency` in `app/src/lib.rs`). crookui takes the request back itself when the
-window next gains the focus, since only some desktops need it taken back and nothing above
-the window layer should know which. It is not a notification: it names only the window. Both
-the title and the request follow the frame when it is *built*, not when it reaches the
-screen, because wgpu refuses to present to an occluded window on macOS and the covered window
-is the one they are for.
+it joins the count at that moment without being news — so the count on leaving is the mark
+the next one has to pass (`Urgency` in `app/src/lib.rs`). crookui asks only while the window
+does not have the focus, checked when the request reaches the window rather than trusted to
+the platform, and takes the request back itself when the window next gains the focus, which
+only X11 needs: Windows stops its flash when the window comes to the front, macOS bounces
+once and a Wayland compositor clears its own. It is not a notification: it names only the
+window. Both the title and the request follow every change to the window's views — the
+invalidation callback that asks for a frame, through `Beacon` — and not the frame, because
+the window they are for may get no frames: a Wayland compositor sends no frame callback to a
+surface it is not showing and winit holds every redraw back until that callback comes, and
+wgpu refuses to present to an occluded window on macOS.
 
 What is deliberately not here is a plugin. `docs/plugins.md` planned this seam as an `Agent`
 service a plugin provides, and that is still the right shape for anything that *drives* an
