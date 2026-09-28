@@ -1,0 +1,80 @@
+# readelf -W --dyn-syms -V crook, on the v0.1.13 Linux release: the build that
+# would not start on Ubuntu 22.04. Cut to the symbols above glibc 2.31 and a few
+# beside them; the version needs are whole.
+
+Symbol table '.dynsym' contains 207 entries:
+   Num:    Value          Size Type    Bind   Vis      Ndx Name
+     0: 0000000000000000     0 NOTYPE  LOCAL  DEFAULT  UND
+     1: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND __libc_start_main@GLIBC_2.34 (2)
+     2: 0000000000000000     0 NOTYPE  WEAK   DEFAULT  UND __gmon_start__
+     3: 0000000000000000     0 NOTYPE  WEAK   DEFAULT  UND _ITM_deregisterTMCloneTable
+     4: 0000000000000000     0 NOTYPE  WEAK   DEFAULT  UND _ITM_registerTMCloneTable
+     5: 0000000000000000     0 FUNC    WEAK   DEFAULT  UND __cxa_finalize@GLIBC_2.2.5 (3)
+     6: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND malloc@GLIBC_2.2.5 (3)
+    10: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND memcpy@GLIBC_2.14 (4)
+    22: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND pthread_setname_np@GLIBC_2.34 (2)
+    24: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND pthread_detach@GLIBC_2.34 (2)
+    26: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND pthread_join@GLIBC_2.34 (2)
+    27: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND dlopen@GLIBC_2.34 (2)
+    28: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND dlerror@GLIBC_2.34 (2)
+    29: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND dlsym@GLIBC_2.34 (2)
+    30: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND dlclose@GLIBC_2.34 (2)
+    31: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND lstat64@GLIBC_2.33 (6)
+    32: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND fstat64@GLIBC_2.33 (6)
+    45: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND fstatat64@GLIBC_2.33 (6)
+    53: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND hypotf@GLIBC_2.35 (11)
+    89: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND hypot@GLIBC_2.35 (11)
+   104: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND openpty@GLIBC_2.34 (2)
+   115: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND pthread_getattr_np@GLIBC_2.32 (14)
+   116: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND pthread_attr_getstack@GLIBC_2.34 (2)
+   129: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND pthread_key_create@GLIBC_2.34 (2)
+   130: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND pthread_key_delete@GLIBC_2.34 (2)
+   131: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND pthread_setspecific@GLIBC_2.34 (2)
+   140: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND stat64@GLIBC_2.33 (6)
+   154: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND pthread_attr_getguardsize@GLIBC_2.34 (2)
+   161: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND pthread_attr_setstacksize@GLIBC_2.34 (2)
+   162: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND pthread_create@GLIBC_2.34 (2)
+   164: 0000000000000000     0 FUNC    WEAK   DEFAULT  UND pidfd_getpid@GLIBC_2.39 (23)
+   165: 0000000000000000     0 FUNC    WEAK   DEFAULT  UND pidfd_spawnp@GLIBC_2.39 (23)
+   201: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND _Unwind_GetLanguageSpecificData@GCC_3.0 (5)
+   206: 0000000000000000     0 FUNC    GLOBAL DEFAULT  UND __stack_chk_fail@GLIBC_2.4 (16)
+
+Version symbols section '.gnu.version' contains 207 entries:
+ Addr: 0x00000000000016a8  Offset: 0x000016a8  Link: 4 (.dynsym)
+  000:   0 (*local*)       2 (GLIBC_2.34)    1 (*global*)      1 (*global*)
+  004:   1 (*global*)      3 (GLIBC_2.2.5)   3 (GLIBC_2.2.5)   3 (GLIBC_2.2.5)
+
+Version needs section '.gnu.version_r' contains 4 entries:
+ Addr: 0x0000000000001848  Offset: 0x00001848  Link: 8 (.dynstr)
+  000000: Version: 1  File: libgcc_s.so.1  Cnt: 3
+  0x0040:   Name: GCC_3.0  Flags: none  Version: 5
+  0x0050:   Name: GCC_3.3  Flags: none  Version: 28
+  0x0060:   Name: GCC_4.2.0  Flags: none  Version: 29
+  0x0010: Version: 1  File: libm.so.6  Cnt: 4
+  0x0070:   Name: GLIBC_2.2.5  Flags: none  Version: 9
+  0x0080:   Name: GLIBC_2.27  Flags: none  Version: 8
+  0x0090:   Name: GLIBC_2.29  Flags: none  Version: 10
+  0x00a0:   Name: GLIBC_2.35  Flags: none  Version: 11
+  0x0020: Version: 1  File: libc.so.6  Cnt: 20
+  0x00b0:   Name: GLIBC_2.2.5  Flags: none  Version: 3
+  0x00c0:   Name: GLIBC_2.3  Flags: none  Version: 7
+  0x00d0:   Name: GLIBC_2.3.4  Flags: none  Version: 13
+  0x00e0:   Name: GLIBC_2.4  Flags: none  Version: 16
+  0x00f0:   Name: GLIBC_2.5  Flags: none  Version: 18
+  0x0100:   Name: GLIBC_2.9  Flags: none  Version: 26
+  0x0110:   Name: GLIBC_2.14  Flags: none  Version: 4
+  0x0120:   Name: GLIBC_2.15  Flags: none  Version: 25
+  0x0130:   Name: GLIBC_2.16  Flags: none  Version: 20
+  0x0140:   Name: GLIBC_2.17  Flags: none  Version: 21
+  0x0150:   Name: GLIBC_2.18  Flags: none  Version: 15
+  0x0160:   Name: GLIBC_2.25  Flags: none  Version: 22
+  0x0170:   Name: GLIBC_2.27  Flags: none  Version: 19
+  0x0180:   Name: GLIBC_2.28  Flags: none  Version: 17
+  0x0190:   Name: GLIBC_2.29  Flags: none  Version: 24
+  0x01a0:   Name: GLIBC_2.30  Flags: none  Version: 27
+  0x01b0:   Name: GLIBC_2.32  Flags: none  Version: 14
+  0x01c0:   Name: GLIBC_2.33  Flags: none  Version: 6
+  0x01d0:   Name: GLIBC_2.34  Flags: none  Version: 2
+  0x01e0:   Name: GLIBC_2.39  Flags: none  Version: 23
+  0x0030: Version: 1  File: ld-linux-x86-64.so.2  Cnt: 1
+  0x01f0:   Name: GLIBC_2.3  Flags: none  Version: 12

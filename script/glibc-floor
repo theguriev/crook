@@ -1,0 +1,133 @@
+#!/bin/sh
+#
+# Fail when a Linux binary needs a newer glibc than the floor it promises.
+#
+#   ./script/glibc-floor 2.31 dist/linux/crook
+#   readelf -W --dyn-syms -V crook | ./script/glibc-floor 2.31 -
+#
+# A binary linked against glibc records, for each library it uses, every
+# symbol version it was linked to: GLIBC_2.2.5, GLIBC_2.34, and so on. The
+# dynamic loader reads that list before main and refuses to start the binary
+# on a glibc that lacks any one of them. The list comes from the machine the
+# binary was linked on, not from the code: v0.1.13 was linked on an Ubuntu
+# 24.04 runner, and Rust std's weak references to pidfd_spawnp and
+# pidfd_getpid recorded a GLIBC_2.39 need. The symbols were weak but the need
+# was not, so the binary died on Ubuntu 22.04 and Debian 12 with "version
+# `GLIBC_2.39' not found" before it could do anything.
+#
+# So the release builds its Linux binary on the oldest glibc it promises, and
+# this reads the result and fails if any need is above that floor. Every need
+# counts, including one flagged weak: nothing above the floor can appear in a
+# binary linked at the floor, so one that does means the build ran somewhere
+# else, and that is what this is here to catch.
+#
+# `-` reads a listing already made (the output of the readelf command above)
+# from standard input, for a binary on another machine.
+#
+# Exit status: 0 when every need is at or below the floor; 1 when one is
+# above it, with each such version and the symbols that asked for it; 2 when
+# no check could be made, which includes a listing with no GLIBC needs in it
+# at all, since reading nothing is how a wrong path or a changed readelf
+# would look.
+
+set -eu
+
+usage() {
+  echo "usage: script/glibc-floor <floor, e.g. 2.31> <binary | ->" >&2
+  exit 2
+}
+
+[ $# -eq 2 ] || usage
+floor=$1
+binary=$2
+
+# Checked here rather than in awk, where an empty or malformed floor would
+# compare as 0 and fail everything, or be skipped and pass everything.
+case "$floor" in
+  '' | *[!0-9.]* | .* | *. | *..*)
+    echo "glibc-floor: '$floor' is not a glibc version like 2.31" >&2
+    usage
+    ;;
+esac
+
+if [ "$binary" = - ]; then
+  name="standard input"
+  listing=$(cat)
+else
+  name=$binary
+  if ! command -v readelf >/dev/null 2>&1; then
+    echo "glibc-floor: readelf not found; it is part of binutils" >&2
+    exit 2
+  fi
+  if ! listing=$(readelf -W --dyn-syms -V "$binary"); then
+    echo "glibc-floor: readelf could not read $binary" >&2
+    exit 2
+  fi
+fi
+
+# Two parts of the listing are read. The version needs section is the list
+# the loader checks, so it alone decides the answer. The dynamic symbol table
+# only says which symbols asked for each version, for the message: a bare
+# "GLIBC_2.39" does not say where in a Rust binary it came from.
+printf '%s\n' "$listing" | awk -v floor="$floor" -v name="$name" '
+  # Whether version a is newer than version b, number by number, so that
+  # 2.10 is above 2.9 and 2.3.4 is above 2.3.
+  function newer(a, b,    x, y, n, m, i, p, q) {
+    n = split(a, x, ".")
+    m = split(b, y, ".")
+    for (i = 1; i <= n || i <= m; i++) {
+      p = (i <= n) ? x[i] + 0 : 0
+      q = (i <= m) ? y[i] + 0 : 0
+      if (p != q) return p > q
+    }
+    return 0
+  }
+
+  /^Symbol table /         { part = "symbols"; next }
+  /^Version needs section/ { part = "needs"; next }
+  /^Version /              { part = ""; next }
+
+  part == "symbols" && match($0, /[^ ]+@GLIBC_[0-9][0-9.]*/) {
+    at = index(substr($0, RSTART, RLENGTH), "@")
+    symbol = substr($0, RSTART, at - 1)
+    version = substr($0, RSTART + at + 6, RLENGTH - at - 6)
+    if ($5 == "WEAK") symbol = symbol " (weak)"
+    if (!((version, symbol) in listed)) {
+      listed[version, symbol] = 1
+      asked[version] = asked[version] " " symbol
+    }
+    next
+  }
+
+  part == "needs" && match($0, /Name: GLIBC_[0-9][0-9.]*/) {
+    version = substr($0, RSTART + 12, RLENGTH - 12)
+    if (!(version in seen)) {
+      seen[version] = 1
+      count++
+      if (highest == "" || newer(version, highest)) highest = version
+      if (newer(version, floor)) above[++over] = version
+    }
+  }
+
+  END {
+    if (count == 0) {
+      printf "glibc-floor: found no GLIBC version needs in %s\n", name > "/dev/stderr"
+      exit 2
+    }
+    if (over == 0) {
+      printf "glibc-floor: %s needs at most GLIBC_%s, within the floor of %s\n", name, highest, floor
+      exit 0
+    }
+    # Oldest first, the order a person reads a list of versions in.
+    for (i = 2; i <= over; i++) {
+      v = above[i]
+      for (j = i - 1; j >= 1 && newer(above[j], v); j--) above[j + 1] = above[j]
+      above[j + 1] = v
+    }
+    printf "glibc-floor: %s needs a newer glibc than %s:\n", name, floor > "/dev/stderr"
+    for (i = 1; i <= over; i++) {
+      printf "  GLIBC_%s:%s\n", above[i], asked[above[i]] > "/dev/stderr"
+    }
+    exit 1
+  }
+'
