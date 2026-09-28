@@ -665,6 +665,12 @@ impl Emulator {
         }
     }
 
+    /// Whether the child asked to be told when the keyboard arrives and
+    /// leaves — `?1004h`, xterm's focus reporting.
+    pub fn focus_reporting(&self) -> bool {
+        self.term.mode().contains(TermMode::FOCUS_IN_OUT)
+    }
+
     /// Whether the child asked for pasted text to be bracketed, so it can tell
     /// a paste from typing.
     pub fn bracketed_paste(&self) -> bool {
