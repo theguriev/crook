@@ -52,6 +52,7 @@ pub mod git;
 pub mod git_model;
 pub mod input_keys;
 pub mod keybindings;
+pub mod notify;
 pub mod order;
 pub mod pane_blocks;
 pub mod pane_find;
@@ -3148,6 +3149,10 @@ impl Shell {
                 // a density the command line asked for has to be in place by
                 // then or the first cycle gathers the wrong half.
                 apply_overrides(workspace, &launch.overrides, ctx);
+                // This window is on a desktop, which is the one place a
+                // notification is for: a snapshot and a test keep the silent
+                // one the workspace opens with.
+                workspace.set_notifier(crate::notify::for_this_desktop());
                 workspace.start_git_poll(ctx);
                 workspace.start_caret_blink(ctx);
                 // Last, and not yet: the shells open after the first frame,

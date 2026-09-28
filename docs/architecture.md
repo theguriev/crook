@@ -1192,6 +1192,35 @@ wgpu refuses to present to an occluded window on macOS. That covers the window's
 too: registering the callback is itself an update, and its flush runs the callback for
 everything the window opened with, since no frame has taken any of it yet.
 
+**And in words, on Linux.** When a pane's row turns to needs-input while the window is behind
+another one — its agent asking, its agent saying it is done while nobody is looking, or a bell
+in a pane with nothing else to say, which is how Codex asks in a terminal it does not
+recognise — `Workspace::tell_the_desktop` posts a desktop
+notification: `Crook — <the pane's name>`, with the agent's question on one line and cut to
+`notify::MESSAGE_CHARS` under it. A *turn* of the row's status rather than a report: the agent
+saying needs-input again with another word in its question is the same stop, and the question
+on screen as a person leaves is one they saw — the rule `Urgency` gives the request for a look.
+An agent that failed and a command that ran `notify::LONG_COMMAND` or longer take the same
+path and are off out of the box. The three switches are `GeneralOptions::notify_on_*`, on the
+Notifications page `crook/notifications` owns, and the workspace posts only while that plugin
+is loaded, so the Plugins page's switch for it is a switch for the feature. `notify::Cooldown`
+keeps a pane quiet for `notify::QUIET` after it posts, counted from the post and not from the
+refusals, so an agent whose hooks flap posts once: #352's rule for the bell, one level up.
+Posting is a `Notifier` the window that runs on a desktop hands in (`Workspace::set_notifier`);
+a test and a snapshot keep `Silent`. On Linux that is `notify::linux::NotifySend`,
+`notify-send` started on the pool through `crate::process::command` and waited on by a thread
+of its own, which is `plugins::wasm::sound`'s arrangement with `pw-play` — no D-Bus crate,
+because `zbus` is a whole bus client for one method call and `dbus` binds libdbus. It passes
+only the flags every `notify-send` has, the two texts after `--`, and the body with `&`, `<`
+and `>` escaped, since servers read a body as markup and a program's words are not Crook's. A
+machine without `notify-send` is one warning and then nothing is started again. There is no
+click: `--action` implies `--wait`, one process held for as long as each notification lives,
+and a click heard could switch the pane but not bring the window forward — winit's
+`focus_window` does nothing on Wayland, with no way to hand it the activation token a server
+sends. macOS, which delivers only to a signed bundle after asking, and Windows post nothing
+yet; the page says so and its switches have no handler there. The session bus is a socket on
+this machine, so nothing of this reaches a network.
+
 What is deliberately not here is a plugin. `docs/plugins.md` planned this seam as an `Agent`
 service a plugin provides, and that is still the right shape for anything that *drives* an
 agent — spending its budget, reading its transcript. Saying what it is doing needed none of

@@ -10227,10 +10227,10 @@ fn the_rail_switches_pages_and_the_pane_shows_the_one_it_names() {
     harness.open_settings_page();
 
     let rail = settings_rail_boxes(&harness.frame());
-    assert_eq!(rail.len(), 4, "four pages in the rail");
+    assert_eq!(rail.len(), 5, "five pages in the rail");
 
-    // The third: Keyboard Shortcuts.
-    harness.click(center(rail[2]), MouseButton::Left);
+    // The fourth: Keyboard Shortcuts.
+    harness.click(center(rail[3]), MouseButton::Left);
     assert_eq!("Keyboard Shortcuts", harness.settings_section());
 
     let text = frame_text(&harness.frame());
@@ -10493,7 +10493,13 @@ fn no_settings_page_paints_a_rect_with_a_negative_side_in_a_small_window() {
     // squeeze every row, and not one rect the wrong way round.
     let mut harness = Harness::new(1);
     harness.open_settings_page();
-    for page in ["Appearance", "Shell", "Keyboard Shortcuts", "About"] {
+    for page in [
+        "Appearance",
+        "Shell",
+        "Notifications",
+        "Keyboard Shortcuts",
+        "About",
+    ] {
         harness.select_settings_section(page);
         let scene = harness.frame_sized(vec2f(480., 360.));
         assert_no_rect_the_wrong_way_round(&scene, page);
@@ -16974,6 +16980,361 @@ mod the_agent {
     }
 }
 
+/// The desktop notification: posted when a pane's row turns to needs-input
+/// while the window is behind another one, and at no moment the switches did
+/// not ask for. The notifier is a list, so nothing reaches the desktop of
+/// whoever runs the suite.
+mod desktop_notifications {
+    use std::time::Duration;
+
+    use crook_plugin::PluginId;
+
+    use super::*;
+    use crate::notify::{LONG_COMMAND, Notice, Notifier, Occasion};
+    use crate::terminal_model::TerminalUpdate;
+
+    /// What the workspace posted, in order, where the desktop would be.
+    #[derive(Clone, Default)]
+    struct Posted(Rc<RefCell<Vec<Notice>>>);
+
+    impl Notifier for Posted {
+        fn post(&self, notice: Notice, _: &Background) {
+            self.0.borrow_mut().push(notice);
+        }
+    }
+
+    impl Posted {
+        fn all(&self) -> Vec<Notice> {
+            self.0.borrow().clone()
+        }
+
+        fn count(&self) -> usize {
+            self.0.borrow().len()
+        }
+    }
+
+    /// A window of `tabs` tabs whose notifications go to a list, and the list.
+    fn window(tabs: usize) -> (Harness, Posted) {
+        let mut harness = Harness::new(tabs);
+        let posted = Posted::default();
+        let notifier = Rc::new(posted.clone());
+        harness.workspace_update(|workspace, _| workspace.set_notifier(notifier));
+        (harness, posted)
+    }
+
+    /// The person goes to another application.
+    fn leave(harness: &mut Harness) {
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+    }
+
+    /// Applies one update the way the model's subscription does.
+    fn apply(harness: &mut Harness, update: TerminalUpdate) {
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(&update, ctx);
+        });
+    }
+
+    fn report(harness: &mut Harness, pane: PaneId, status: AgentStatus, message: Option<&str>) {
+        apply(
+            harness,
+            TerminalUpdate::Agent {
+                pane,
+                status,
+                title: None,
+                message: message.map(str::to_owned),
+            },
+        );
+    }
+
+    fn name(harness: &mut Harness, pane: PaneId, name: &str) {
+        harness.workspace_update(|workspace, ctx| {
+            workspace.rename_pane(pane, Some(name.to_owned()), ctx);
+        });
+    }
+
+    fn switch(harness: &mut Harness, occasion: Occasion) {
+        harness.dispatch_workspace_action(WorkspaceAction::Settings(
+            SettingsAction::ToggleNotification(occasion),
+        ));
+    }
+
+    /// The pane of the tab that is *not* active.
+    fn background_of(harness: &Harness) -> PaneId {
+        let active = harness.focused_pane_id().expect("the window has a pane");
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| {
+                workspace
+                    .tabs()
+                    .panes()
+                    .map(|(_, pane)| pane.id())
+                    .find(|id| *id != active)
+            })
+            .expect("two tabs have two panes")
+    }
+
+    #[test]
+    fn an_agent_that_stops_to_ask_behind_another_window_posts_its_question() {
+        // The one-pane person's case, and the one this is for: their agent
+        // stopped while they were reading something else, and the banner
+        // says which tab and what it wants.
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        name(&mut harness, pane, "port the tab bar");
+        leave(&mut harness);
+
+        report(
+            &mut harness,
+            pane,
+            AgentStatus::NeedsInput,
+            Some("run rm -rf build?"),
+        );
+
+        assert_eq!(
+            posted.all(),
+            [Notice {
+                title: "Crook — port the tab bar".to_owned(),
+                body: "run rm -rf build?".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn an_agent_that_finishes_behind_another_window_posts_that_it_is_done() {
+        // Done while nobody was looking turns the row amber like a question
+        // does, and it is the stop a person who walked away from a long task
+        // is waiting to hear about.
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        name(&mut harness, pane, "bisect");
+        report(&mut harness, pane, AgentStatus::Running, None);
+        leave(&mut harness);
+
+        report(&mut harness, pane, AgentStatus::Idle, None);
+
+        assert_eq!(
+            posted.all(),
+            [Notice {
+                title: "Crook — bisect".to_owned(),
+                body: "Done, waiting for a prompt".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn nothing_is_posted_while_the_window_is_in_front() {
+        // A pane in another tab of a window somebody is at is an amber row
+        // and a count on the chip, both in front of them already.
+        let (mut harness, posted) = window(2);
+        let behind = background_of(&harness);
+
+        report(&mut harness, behind, AgentStatus::NeedsInput, Some("go?"));
+
+        assert_eq!(posted.count(), 0, "{:?}", posted.all());
+    }
+
+    #[test]
+    fn the_question_on_screen_as_the_person_leaves_is_not_posted() {
+        // They saw it; leaving is not news, and the agent saying it again —
+        // with another word in the question — is not a new stop either.
+        let (mut harness, posted) = window(2);
+        let behind = background_of(&harness);
+        report(&mut harness, behind, AgentStatus::NeedsInput, Some("go?"));
+        leave(&mut harness);
+
+        report(
+            &mut harness,
+            behind,
+            AgentStatus::NeedsInput,
+            Some("go now?"),
+        );
+
+        assert_eq!(posted.count(), 0, "{:?}", posted.all());
+    }
+
+    #[test]
+    fn a_pane_that_asks_twice_within_the_quiet_posts_once() {
+        // An agent whose hooks flap between running and needs-input would
+        // otherwise post a banner a flap.
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        leave(&mut harness);
+
+        report(&mut harness, pane, AgentStatus::NeedsInput, Some("first?"));
+        report(&mut harness, pane, AgentStatus::Running, None);
+        report(&mut harness, pane, AgentStatus::NeedsInput, Some("second?"));
+
+        assert_eq!(posted.count(), 1, "{:?}", posted.all());
+        assert_eq!(posted.all()[0].body, "first?");
+    }
+
+    #[test]
+    fn a_second_pane_asking_is_not_held_up_by_the_first() {
+        let (mut harness, posted) = window(2);
+        let front = harness.focused_pane_id().expect("the window has a pane");
+        let behind = background_of(&harness);
+        leave(&mut harness);
+
+        report(&mut harness, front, AgentStatus::NeedsInput, None);
+        report(&mut harness, behind, AgentStatus::NeedsInput, None);
+
+        assert_eq!(posted.count(), 2, "{:?}", posted.all());
+    }
+
+    #[test]
+    fn switched_off_a_question_posts_nothing() {
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        switch(&mut harness, Occasion::NeedsInput);
+        assert!(!harness.general().notify_on_needs_input);
+        leave(&mut harness);
+
+        report(&mut harness, pane, AgentStatus::NeedsInput, Some("go?"));
+
+        assert_eq!(posted.count(), 0, "{:?}", posted.all());
+        assert_eq!(
+            AgentStatus::NeedsInput,
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace
+                    .tabs()
+                    .pane(pane)
+                    .map(Pane::status))
+                .expect("the pane is open"),
+            "the row still says so: only the banner is off"
+        );
+    }
+
+    #[test]
+    fn a_failure_posts_nothing_until_somebody_asks_for_it() {
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        name(&mut harness, pane, "bisect");
+        leave(&mut harness);
+
+        report(&mut harness, pane, AgentStatus::Failed, None);
+        assert_eq!(posted.count(), 0, "failed is off out of the box");
+
+        switch(&mut harness, Occasion::Failed);
+        report(&mut harness, pane, AgentStatus::Running, None);
+        report(&mut harness, pane, AgentStatus::Failed, None);
+
+        assert_eq!(
+            posted.all(),
+            [Notice {
+                title: "Crook — bisect".to_owned(),
+                body: "Stopped: something went wrong".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_bell_behind_another_window_posts_that_it_rang() {
+        // A bell in a pane with nothing else to say turns its row to
+        // needs-input, and for an agent without Crook's hooks — Codex, in a
+        // terminal it does not recognise — it is how it asks.
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        leave(&mut harness);
+
+        apply(
+            &mut harness,
+            TerminalUpdate::Bell {
+                pane,
+                while_running: true,
+            },
+        );
+
+        assert_eq!(posted.count(), 1, "{:?}", posted.all());
+        assert_eq!(posted.all()[0].body, "Rang the bell");
+    }
+
+    #[test]
+    fn a_long_command_posts_when_it_ends_only_once_asked_to() {
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        leave(&mut harness);
+        let finished = |took: Duration| TerminalUpdate::CommandFinished {
+            pane,
+            exit: Some(2),
+            took: Some(took),
+        };
+
+        apply(&mut harness, finished(LONG_COMMAND * 3));
+        assert_eq!(posted.count(), 0, "a long command is off out of the box");
+
+        switch(&mut harness, Occasion::LongCommand);
+        apply(
+            &mut harness,
+            finished(LONG_COMMAND - Duration::from_secs(1)),
+        );
+        assert_eq!(posted.count(), 0, "a short one is not worth a banner");
+
+        apply(&mut harness, finished(LONG_COMMAND));
+        assert_eq!(posted.count(), 1, "{:?}", posted.all());
+        assert_eq!(
+            posted.all()[0].body,
+            format!("A command exited 2 after {}s", LONG_COMMAND.as_secs())
+        );
+    }
+
+    #[test]
+    fn with_the_notifications_plugin_off_nothing_is_posted() {
+        // The Plugins page's switch for it is a switch for the feature, not
+        // only for the page its settings are on.
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        let plugin = PluginId::parse("crook/notifications").expect("a literal");
+        harness.workspace_update(|workspace, ctx| workspace.toggle_plugin(&plugin, ctx));
+        leave(&mut harness);
+
+        report(&mut harness, pane, AgentStatus::NeedsInput, Some("go?"));
+
+        assert_eq!(posted.count(), 0, "{:?}", posted.all());
+    }
+
+    #[test]
+    fn the_notifications_page_has_a_switch_for_each_occasion() {
+        let mut harness = Harness::new(1);
+        harness.open_settings_page();
+        harness.select_settings_section("Notifications");
+        let scene = harness.frame();
+        let text = text_where(&scene, |position| {
+            settings_pane_box(&scene).contains_point(position)
+        });
+        for row in [
+            "When a pane needs you",
+            "When an agent fails",
+            "When a long command finishes",
+        ] {
+            assert!(text.contains(row), "no {row:?} on the page: {text:?}");
+        }
+
+        let switches = settings_switch_boxes(&scene);
+        assert_eq!(switches.len(), 3, "one switch an occasion");
+        harness.click(center(switches[0]), MouseButton::Left);
+
+        // Inert where this build posts nothing, the way every control with
+        // nothing to do is: see `notify::posts_here`.
+        assert_eq!(
+            harness.general().notify_on_needs_input,
+            !crate::notify::posts_here(),
+            "the first switch is the question's"
+        );
+    }
+
+    #[test]
+    fn the_palette_finds_the_notifications_page() {
+        let mut harness = Harness::new(1);
+        open_palette(&mut harness, "#notify");
+        harness.frame();
+        harness.press("enter", Modifiers::default(), "");
+        harness.frame();
+
+        assert_eq!("Notifications", harness.settings_section());
+    }
+}
+
 // ---------------------------------------------------------------- ADVERSARIAL
 /// The title bar's two halves, checked against each other: every control in
 /// the header still answers a click, and every gap between them still picks
@@ -17209,7 +17570,7 @@ fn the_shortcuts_page_lists_what_a_plugin_registered_and_the_chord_that_reaches_
     harness.bind(r#"[{ "key": "shift+cmd+u", "command": "crook/window/new-tab" }]"#);
     harness.open_settings_page();
     let rail = settings_rail_boxes(&harness.frame());
-    harness.click(center(rail[2]), MouseButton::Left);
+    harness.click(center(rail[3]), MouseButton::Left);
     assert_eq!("Keyboard Shortcuts", harness.settings_section());
 
     let text = frame_text(&harness.frame());
@@ -18875,7 +19236,7 @@ fn the_settings_rail_lists_the_pages_the_plugins_contributed() {
     let scene = harness.frame();
 
     let rail = settings_rail_boxes(&scene);
-    assert_eq!(rail.len(), 4, "four pages in the rail");
+    assert_eq!(rail.len(), 5, "five pages in the rail");
     // Top to bottom, which is the `order` each plugin asked for.
     assert_eq!(harness.settings_section(), "Appearance");
 
@@ -19703,22 +20064,37 @@ mod sandboxed {
             .into_iter()
             .next()
             .expect("the Plugins section has a field of its own");
-        // The name and the word after it are set in two sizes and can sit
-        // on two baselines, so the row is read by its y rather than as one
-        // line: everything in the column within a row's height of the name.
         let lines = text_lines(scene, |at| {
             at.x() >= column.min_x() && at.x() <= column.max_x()
         });
+        row_named(&lines, "Probe")
+    }
+
+    /// The list's row whose name starts with `name`, read left to right:
+    /// every line within a row's height of the name, in the order they sit
+    /// across the row.
+    ///
+    /// By position rather than as one line of text, because the name and the
+    /// word after it are set in two sizes and sit on baselines a fraction of
+    /// a pixel apart. Which whole pixel each rounds to — one line or two —
+    /// depends on where the row lands in the list, and that moves whenever a
+    /// plugin joins the box: `crook/notifications` put the probe's name on
+    /// 491 and its word on 490, and the row read "not allowed Probe".
+    fn row_named(lines: &[(Vector2F, String)], name: &str) -> String {
         let (at, _) = lines
             .iter()
-            .find(|(_, line)| line.trim().starts_with("Probe"))
-            .expect("the list has a row for the probe");
-        lines
+            .find(|(_, line)| line.trim().starts_with(name))
+            .unwrap_or_else(|| panic!("the list has no row for {name:?}: {lines:?}"));
+        let mut pieces: Vec<&(Vector2F, String)> = lines
             .iter()
             .filter(|(other, _)| (other.y() - at.y()).abs() < 8.)
+            .collect();
+        pieces.sort_by(|left, right| left.0.x().total_cmp(&right.0.x()));
+        pieces
+            .iter()
             .map(|(_, line)| line.trim())
             .collect::<Vec<_>>()
-            .join(" ")
+            .concat()
     }
 
     #[test]
@@ -20192,13 +20568,9 @@ mod sandboxed {
         let lines = text_lines(&scene, |at| {
             at.x() >= column.min_x() && at.x() <= column.max_x()
         });
-        // The name and its "not allowed" share a baseline, so they read as one
-        // line here — the gap between them is a margin, not a space.
-        let row = lines
-            .iter()
-            .find(|(_, line)| line.starts_with("A Plugin With A"))
-            .map(|(_, line)| line.clone())
-            .unwrap_or_else(|| panic!("no row for the long name: {lines:?}"));
+        // The gap between the name and its "not allowed" is a margin, not a
+        // space, so the two read as one run of text.
+        let row = row_named(&lines, "A Plugin With A");
         assert!(
             row.contains('\u{2026}'),
             "the cut name has no mark: {row:?}"

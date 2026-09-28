@@ -50,10 +50,10 @@ description of something that was never built.
     behind `tab`; the plugin still asks for exactly one chord, the one that opens the box.
   - The settings pages come from a slot. `crook/settings` owns the rail; every page belongs
     to the plugin whose feature it configures — `crook/appearance`, `crook/shell`,
-    `crook/shortcuts`, `crook/about` — so disabling a plugin takes its page off the rail with
-    the rest of it, and removing a plugin takes it off for good. The rail was five pages while
-    `crook/usage` was in the box and is four without it, and not a line of `crook/settings`
-    knew either number. `--settings <name>` matches a page's title, so a plugin's page is as
+    `crook/notifications`, `crook/shortcuts`, `crook/about` — so disabling a plugin takes its
+    page off the rail with the rest of it, and removing a plugin takes it off for good. The
+    rail was five pages while `crook/usage` was in the box, four without it, and five again
+    with `crook/notifications`, and not a line of `crook/settings` knew any of those numbers. `--settings <name>` matches a page's title, so a plugin's page is as
     reachable as one of Crook's.
   - The **Plugins page** is a list beside a card, which is VS Code's shape: a field and every
     plugin this Crook has — in the box or installed as a file — on the left, and on the right
