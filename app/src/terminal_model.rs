@@ -296,6 +296,20 @@ pub enum TerminalUpdate {
     /// say which of the two happened: the agent finished, or something ended
     /// it before it could say so.
     AgentSettled(PaneId),
+    /// A program in the pane asked for a look, in a notification sequence
+    /// another terminal would have shown — OSC 9, 777 or 99.
+    ///
+    /// Carried up with its two texts apart rather than joined here, because
+    /// the row has one line for them and a desktop notification has a line
+    /// for each: how they are put together is the reader's to decide.
+    Notification {
+        /// Which pane it came from.
+        pane: PaneId,
+        /// What is asking, when the sequence named it.
+        title: Option<String>,
+        /// What it said.
+        body: Option<String>,
+    },
 }
 
 /// The finished blocks of one pane, as the surface holds them.
@@ -1030,6 +1044,13 @@ impl TerminalModel {
                     message: reported.message,
                 }),
                 TerminalEvent::AgentSettled => updates.push(TerminalUpdate::AgentSettled(pane)),
+                TerminalEvent::Notification(notification) => {
+                    updates.push(TerminalUpdate::Notification {
+                        pane,
+                        title: notification.title,
+                        body: notification.body,
+                    });
+                }
                 // The enum is `#[non_exhaustive]`. A shell asking for something
                 // a later version of the emulator learned to report is not an
                 // error here; it is a line in the log and a feature to add.
@@ -1760,6 +1781,12 @@ impl Shared {
                     .any(|pending| matches!(pending, TerminalEvent::Bell))
             {
                 continue;
+            }
+            // The same for a notification, except that the newer one takes
+            // the older one's place: each carries words, and the ones worth
+            // a row are the last the program said.
+            if matches!(event, TerminalEvent::Notification(_)) {
+                pending.retain(|pending| !matches!(pending, TerminalEvent::Notification(_)));
             }
             pending.push(event);
         }

@@ -4,8 +4,9 @@
 //! scrollback, the cursor, the alternate screen and the mode flags. This module
 //! supplies the three things `Term` does not: the event listener it reports
 //! through, a reader for the OSC sequences `vte` throws away — OSC 7 for the
-//! working directory and OSC 133 for command boundaries — and the translation
-//! of both into a [`Snapshot`] and a queue of [`TerminalEvent`]s.
+//! working directory, OSC 133 for command boundaries, the notifications other
+//! terminals show — and the translation of all of it into a [`Snapshot`] and
+//! a queue of [`TerminalEvent`]s.
 //!
 //! It owns no pty and no thread, so it is the whole emulator under test: feed
 //! it bytes with [`Emulator::advance`] and read [`Emulator::snapshot`]. The pty
@@ -44,6 +45,7 @@ use crate::harvest::{self, BlockRows};
 use crate::input::{InputModes, KeyboardModes};
 use crate::marks::ShellMark;
 use crate::mouse::MouseModes;
+use crate::notify::{self, Notification};
 use crate::pty::ChildExit;
 use crate::snapshot::{self, Palette, Snapshot, TerminalSize};
 
@@ -113,6 +115,15 @@ pub enum TerminalEvent {
     /// for an agent that was interrupted and never got to. The rule for
     /// which marks end which statuses is `Emulator::settle_agent`'s.
     AgentSettled,
+    /// A program in the pane asked for a look, in one of the notification
+    /// sequences other terminals read — OSC 9, 777 or 99; see
+    /// [`crate::notify`].
+    ///
+    /// Not a status, and it changes none: an agent that is running and
+    /// says "tests passed" is still running. Every one is news, so none is
+    /// dropped as a repeat; the last one in a read stands for the others,
+    /// because it is the last thing the program said.
+    Notification(Notification),
 }
 
 /// Collects `Term`'s events so they can be handled after parsing, rather than
@@ -143,6 +154,8 @@ impl EventListener for EventProxy {
 /// instead — a route that needs per-platform process introspection this crate
 /// deliberately does not have — and OSC 133 because `vte::ansi::Handler` has no
 /// hook for it at all, so no amount of implementing that trait can see one.
+/// The notifications other terminals read — OSC 9, 99 and 777 — reach no hook
+/// either, and are logged as unhandled.
 ///
 /// So the bytes get a second pass through `vte`'s own parser with a `Perform`
 /// that implements nothing but `osc_dispatch`. That costs one extra walk of the
@@ -161,6 +174,9 @@ struct OscWatcher {
     mark: Option<ShellMark>,
     completions: Option<u64>,
     agent: Option<Reported>,
+    /// Keeps a kitty notification that is arriving in chunks.
+    notifications: notify::Reader,
+    notification: Option<Notification>,
     /// Whether the chunk erased the scrollback — `CSI 3 J`, the third thing
     /// `clear` prints.
     history_cleared: bool,
@@ -194,6 +210,15 @@ impl Perform for OscWatcher {
                 self.completions = str::from_utf8(params[1])
                     .ok()
                     .and_then(|serial| serial.parse().ok());
+            }
+            // Position-independent like a status below, and the last one in
+            // a chunk wins the same way. Every one is read, even the ones
+            // that finish nothing: a kitty notification sent in chunks is
+            // put back together across them.
+            Some(&(b"9" | b"99" | b"777")) => {
+                if let Some(notification) = self.notifications.read(params) {
+                    self.notification = Some(notification);
+                }
             }
             // Position-independent like OSC 7: a status means the same thing
             // wherever in the chunk the program wrote it. The last one in a
@@ -763,6 +788,10 @@ impl Emulator {
         }
 
         self.apply_agent_report();
+
+        if let Some(notification) = self.osc_watcher.notification.take() {
+            self.events.push(TerminalEvent::Notification(notification));
+        }
 
         if let Some(directory) = self.osc_watcher.working_directory.take()
             && self.working_directory.as_deref() != Some(directory.as_path())

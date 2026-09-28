@@ -1082,6 +1082,28 @@ the panel is drawn and never ticked), the title and the question, which of the b
 status change set `attention` and whether `marked` is set, and what the shell is running —
 on a read-only panel that hangs off the menu's corner where the worktree list does.
 
+**Other terminals' notifications ask for the same look.** OSC 6340 is spoken only by a program
+that has been told about Crook, and the ones that have not already say "look here" in three
+sequences other terminals show: OSC 9, iTerm2's; OSC 777 `notify`, rxvt's, which Ghostty
+reads; and OSC 99, kitty's. Claude Code writes one of them when it stops to ask, in whichever
+form its notification channel names, and it does so on a remote box with no Crook binary as
+readily as next door. The same watcher reads them, in `crates/crook_terminal/src/notify.rs`,
+into a `Notification` of a title and a body, putting a message `vte` split on `;` back
+together and marking one that ran past `vte`'s sixteen pieces with `…`, the way a report cut in
+the writer is. ConEmu's commands on OSC 9 — `9;4` progress, which winget among others
+writes, and the rest of `9;1` to `9;12` — are not notifications and are dropped; a kitty
+notification sent in chunks is put back together by its `i=`, and a payload in base64 is
+skipped rather than shown as it arrived. It is not a status, and the status is left as it was:
+an agent that says it is running is still running after it notifies. What it sets is
+`attention` — `Attention::Notification`, which carries the text, joined `title: body` since
+the row has one line for both — in a pane without the keyboard, exactly where a bell would:
+the row washes, counts as waiting, and prints the text on its second line in place of the
+table's, ahead of a `needs-input` message since it is the newer of the two. Whatever clears a
+bell's attention clears it — a look, an agent reporting running — and the text goes with it; a
+bell after it keeps it, because Claude Code's `iterm2_with_bell` channel sends that pair. A
+burst is handed over as its last one, beside the bell's rule. Nothing here posts a desktop
+notification.
+
 **The strip answers.** A waiting row is washed in the amber its dot shows, faintly, because a
 dot is nine pixels and a person scanning a long list wants the row to say it. A group folded
 away carries the worst of the rows it hides on its heading — the same wash when any member is
