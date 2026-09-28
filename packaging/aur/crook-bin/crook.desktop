@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Crook
+GenericName=Terminal
+Comment=A terminal whose unit of work is an agent
+Exec=crook
+Icon=crook
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=terminal;shell;agent;prompt;command;
+StartupWMClass=crook
