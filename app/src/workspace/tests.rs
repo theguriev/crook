@@ -6231,14 +6231,20 @@ fn closing_a_pane_in_a_checkout_another_crook_locked_leaves_its_lock() {
 }
 
 #[test]
-fn quitting_takes_off_the_locks_the_window_still_holds() {
+fn release_all_takes_off_every_lock_the_window_still_holds() {
     // Closing the window closes no pane — the strip keeps its last tab and
     // the window goes instead — so nothing working in a checkout ever
-    // "leaves" it. The window hands its locks to its delegate, and they come
-    // off as the event loop stops: a lock left on would hold
-    // the checkout against a hand-typed `git worktree remove` for good, since
-    // a session brought back does not lock again, and with "Restore session"
-    // off nothing comes back to it at all.
+    // "leaves" it, and whatever the window still holds has to come off in
+    // one go: a lock left on would hold the checkout against a hand-typed
+    // `git worktree remove` for good, since a session brought back does not
+    // lock again, and with "Restore session" off nothing comes back to it at
+    // all.
+    //
+    // This is `release_all` alone, called the way the window's delegate calls
+    // it and in the order the process does things on the way out: the
+    // release, then the window and its background pool. The wiring that
+    // gets there — `Shell`'s `exiting`, and crookui's `App` handing winit's
+    // `exiting` to it — needs an event loop, and no test here has one.
     let scratch = Scratch::new();
     let Some((harness, repository, checkout, _)) = window_with_a_checkout_it_made(&scratch) else {
         return;
@@ -6252,15 +6258,15 @@ fn quitting_takes_off_the_locks_the_window_still_holds() {
     let held = harness
         .workspace
         .read(&harness.app, |workspace, _| workspace.held_locks());
-    drop(harness);
     held.release_all(std::time::Duration::from_secs(30));
+    drop(harness);
 
     assert_eq!(
         lock_on(&repository, &checkout),
         None,
         "the lock outlived the window"
     );
-    assert!(checkout.is_dir(), "quitting took the checkout too");
+    assert!(checkout.is_dir(), "releasing took the checkout too");
 }
 
 #[test]
