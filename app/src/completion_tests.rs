@@ -184,3 +184,11 @@ fn test_a_candidate_the_shell_repeats_is_offered_once() {
 
     assert_eq!(answer.matching("py"), vec!["python3", "python3-config"]);
 }
+
+#[test]
+fn a_candidate_ending_in_an_escaped_space_keeps_it() {
+    // What every shell writes for a file named `trail ` — and for `back\`,
+    // a name ending in a backslash, followed by padding it did not escape.
+    let answer = parse_answer("trail\\ \nplain   \nback\\\\ \n\n");
+    assert_eq!(answer.candidates, ["trail\\ ", "plain", "back\\\\"]);
+}

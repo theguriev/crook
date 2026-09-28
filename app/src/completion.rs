@@ -182,7 +182,7 @@ pub fn read_answer(path: &Path) -> Option<Completions> {
 pub fn parse_answer(text: &str) -> Completions {
     let mut candidates: Vec<String> = text
         .lines()
-        .map(|line| line.trim_end_matches(char::is_whitespace))
+        .map(without_trailing_blanks)
         .filter(|line| !line.is_empty())
         .take(MAX_CANDIDATES + 1)
         .map(str::to_owned)
@@ -193,6 +193,23 @@ pub fn parse_answer(text: &str) -> Completions {
     Completions {
         candidates,
         truncated,
+    }
+}
+
+/// A line of an answer with the blanks after it taken off — but not a blank
+/// the candidate escaped.
+///
+/// A file whose name ends in a space is written `trail\ ` by all three
+/// shells, and trimmed as if the space were padding it came back `trail\`:
+/// a backslash left to escape whatever is typed next, and a different word
+/// from the one completed. So a run of backslashes an odd number long keeps
+/// the one blank it escapes.
+fn without_trailing_blanks(line: &str) -> &str {
+    let trimmed = line.trim_end_matches(char::is_whitespace);
+    let backslashes = trimmed.len() - trimmed.trim_end_matches('\\').len();
+    match line[trimmed.len()..].chars().next() {
+        Some(escaped) if backslashes % 2 == 1 => &line[..trimmed.len() + escaped.len_utf8()],
+        _ => trimmed,
     }
 }
 
