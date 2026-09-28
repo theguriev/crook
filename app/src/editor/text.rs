@@ -117,7 +117,11 @@ pub fn prev_word(text: &str, offset: usize) -> usize {
             start = index;
         }
     }
-    start
+    // A word boundary is not always a grapheme boundary: word breaking has no
+    // rule for a prepended mark (U+0D4E, the Malayalam dot reph), which is
+    // one character with what follows it, so a word can end or start inside
+    // that character. Moved out of it, the way the invariant above promises.
+    snap(text, start)
 }
 
 /// The end of the word after `offset`, or the end of the text when there is
@@ -127,10 +131,20 @@ pub fn next_word(text: &str, offset: usize) -> usize {
     for (index, segment) in text.split_word_bound_indices() {
         let end = index + segment.len();
         if end > offset && is_word(segment) {
-            return end;
+            return forward(text, end);
         }
     }
     text.len()
+}
+
+/// `offset`, or the end of the grapheme cluster it is inside — the forward
+/// counterpart of [`snap`], for an end that must not cut a character short.
+fn forward(text: &str, offset: usize) -> usize {
+    if snap(text, offset) == offset {
+        offset
+    } else {
+        next_grapheme(text, offset)
+    }
 }
 
 /// The offset just after the newline that precedes `offset`, or 0.
@@ -179,7 +193,7 @@ pub fn word_range_at(text: &str, offset: usize) -> Range<usize> {
             break;
         }
     }
-    last
+    snap(text, last.start)..forward(text, last.end)
 }
 
 /// The range a triple click selects: the line holding `offset`, without its
