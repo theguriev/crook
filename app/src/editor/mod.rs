@@ -619,9 +619,19 @@ impl Editor {
     /// Rewrites the text and leaves the caret after what was written. The one
     /// place the text is mutated, so no edit can forget the caret or the goal
     /// column.
+    ///
+    /// After what was written *as it now reads*: an edit can join the text
+    /// either side of it into one character — an `e` typed in front of a
+    /// combining accent, 🇺 in front of a lone 🇸, a newline deleted from
+    /// between the two — and the offset just past the edit is then inside
+    /// that character, which is the one place the caret is never to be. So it
+    /// goes to the end of the character it landed in.
     fn replace_range(&mut self, range: Range<usize>, replacement: &str) {
-        let caret = range.start + replacement.len();
+        let mut caret = range.start + replacement.len();
         self.text.replace_range(range, replacement);
+        if text::snap(&self.text, caret) != caret {
+            caret = text::next_grapheme(&self.text, caret);
+        }
         self.selection = Selection::caret(caret);
         self.goal_column = None;
     }

@@ -877,3 +877,23 @@ fn text_left_with_nothing_printable_in_it_inserts_nothing() {
     assert_eq!(editor.text(), "abc");
     assert!(!editor.undo(), "and it is not an undo step either");
 }
+
+#[test]
+fn an_edit_that_joins_two_characters_leaves_the_caret_after_the_one_they_make() {
+    // Typed in front of a combining accent, an `e` becomes `é` with it, and
+    // the caret belongs after the `é` — not between the letter and its accent,
+    // where the next keystroke would split them again.
+    let mut editor = at("\u{301}", 0);
+    editor.insert("e");
+    assert_eq!((editor.text(), editor.caret()), ("e\u{301}", 3));
+
+    // Two regional indicators are one flag.
+    let mut editor = at("\u{1f1f8}", 0);
+    editor.paste("\u{1f1fa}");
+    assert_eq!((editor.text(), editor.caret()), ("\u{1f1fa}\u{1f1f8}", 8));
+
+    // And deleting what kept two apart joins them the same way.
+    let mut editor = at("e\n\u{301}", 2);
+    editor.backspace();
+    assert_eq!((editor.text(), editor.caret()), ("e\u{301}", 3));
+}
