@@ -15207,6 +15207,46 @@ mod restoring {
             "the file would name the agent against the directory the cd went to"
         );
     }
+
+    #[test]
+    fn a_launch_that_types_into_the_field_finds_it_empty_and_the_agent_still_named() {
+        // `--run` and `--type` type after whatever the field holds, so a
+        // resume line left there would be the front half of what they send:
+        // `claude --continuegit status`.
+        let scratch = Scratch::new();
+        let [one, two] = ["one", "two"].map(|name| {
+            let directory = scratch.path().join(name);
+            fs::create_dir_all(&directory).expect("a scratch directory");
+            directory
+        });
+        let mut harness = restored(
+            &remembered(&[(&one, Some("claude")), (&two, Some("codex"))]),
+            Settings::ephemeral(),
+        );
+        let panes = harness.pane_ids();
+        harness.type_field(panes[1], " --by-hand");
+
+        harness.workspace_update(|workspace, ctx| {
+            for pane in &panes {
+                workspace.withdraw_resume_offer(*pane, ctx);
+            }
+        });
+        harness.type_field(panes[0], "git status");
+
+        assert_eq!(harness.field_text(panes[0]), "git status");
+        assert_eq!(
+            harness.field_text(panes[1]),
+            "codex resume --last --by-hand",
+            "a line somebody has edited is theirs, and stays"
+        );
+        assert!(
+            !resume_is_offered(&harness),
+            "a withdrawn line is still offered"
+        );
+        // Typing a line is not running one: the pane still came back from
+        // an agent, and a window closed now should still say so.
+        assert_eq!(named_agent(&harness, panes[0]).as_deref(), Some("claude"));
+    }
 }
 
 /// Following the desktop's light or dark setting.

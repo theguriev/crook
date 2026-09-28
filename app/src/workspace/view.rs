@@ -7278,6 +7278,26 @@ impl Workspace {
             self.resume_offers.insert(pane, line);
         }
     }
+
+    /// Takes a restore's resume line back out of a pane's field, if the field
+    /// still holds it exactly as the restore typed it.
+    ///
+    /// For a launch that types into the pane itself — `--run`, `--type` —
+    /// and so needs the field empty: the line would otherwise be the front
+    /// half of whatever it typed. The agent stays named. A command the launch
+    /// runs spends it the way any command does, and a line it only types
+    /// leaves the pane what it was.
+    pub fn withdraw_resume_offer(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        let Some(line) = self.resume_offers.remove(&pane) else {
+            return;
+        };
+        if let Some(input) = self.inputs.get(&pane)
+            && input.editor().text() == line
+        {
+            input.abandon();
+            ctx.notify();
+        }
+    }
 }
 
 /// Whether anything on screen would print a diff stat.

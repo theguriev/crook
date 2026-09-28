@@ -463,6 +463,12 @@ impl Overrides {
             || self.block_menu.is_some()
             || self.scroll_blocks.is_some()
     }
+
+    /// Whether this run types into the focused pane's field: `--run`, which
+    /// sends what it types, and `--type`, which leaves it there.
+    fn types_into_the_field(&self) -> bool {
+        !self.run.is_empty() || self.type_text.is_some()
+    }
 }
 
 /// Runs Crook.
@@ -3003,6 +3009,17 @@ impl Shell {
                 // a density the command line asked for has to be in place by
                 // then or the first cycle gathers the wrong half.
                 apply_overrides(workspace, &launch.overrides, ctx);
+                // `--run` and `--type` type into the focused pane's field as
+                // though it were empty, and a restore may have left an
+                // agent's resume line there: typed after it, `--run 'git
+                // status'` would send `claude --continuegit status`. After
+                // the overrides, because the pane they type into is the one
+                // focused once those have run.
+                if launch.overrides.types_into_the_field()
+                    && let Some(pane) = workspace.tabs().focused_pane_id()
+                {
+                    workspace.withdraw_resume_offer(pane, ctx);
+                }
                 workspace.start_git_poll(ctx);
                 workspace.start_caret_blink(ctx);
                 // Last, and not yet: the shells open after the first frame,
@@ -4059,6 +4076,36 @@ mod tests {
                 ..Overrides::default()
             }
             .wants_shells()
+        );
+    }
+
+    #[test]
+    fn a_run_that_types_into_the_field_is_told_apart_from_one_that_does_not() {
+        // The two flags a restored resume line is taken out of the field
+        // for, because both type after whatever the field already holds.
+        assert!(!Overrides::default().types_into_the_field());
+        assert!(
+            Overrides {
+                run: vec!["git status".to_owned()],
+                ..Overrides::default()
+            }
+            .types_into_the_field()
+        );
+        assert!(
+            Overrides {
+                type_text: Some("x".to_owned()),
+                ..Overrides::default()
+            }
+            .types_into_the_field()
+        );
+        // Selecting output types nothing, and leaves the field's line alone.
+        assert!(
+            !Overrides {
+                select_output: Some("x".to_owned()),
+                find_output: Some("x".to_owned()),
+                ..Overrides::default()
+            }
+            .types_into_the_field()
         );
     }
 
