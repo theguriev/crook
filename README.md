@@ -275,10 +275,15 @@ Nineteen features, and the page that configures them:
   you know whether to come now or later without switching to the tab; `--message -` reads it
   from stdin, a hook's JSON `message` or the whole line. No socket and no pane id — the
   terminal it has *is* the pane — so it works from a hook, over `ssh` and inside a container,
-  and every other terminal drops the sequence unread. `crook --agent-hooks claude` prints the
-  hooks that make Claude Code say all of it by itself: running when a prompt is sent and
-  around every tool, needing input whenever it stops to ask — with the notification's own
-  text as the message — idle when it is done; merge them into `~/.claude/settings.json`.
+  and every other terminal drops the sequence unread. Claude Code says all of it by itself —
+  running when a prompt is sent and around every tool, needing input whenever it stops to ask,
+  with the notification's own text as the message, idle when it is done — once Crook's plugin
+  is installed: `claude plugin marketplace add theguriev/crook`, then
+  `claude plugin install crook@crook`. That is Claude Code writing its own settings, not
+  anyone merging JSON; the plugin's hooks call `$CROOK_BIN` and do nothing in any other
+  terminal, and it carries the skill below. `crook --agent-hooks claude` prints those two
+  commands, then the same hooks as JSON for a person who would rather merge them into
+  `~/.claude/settings.json` by hand.
   `codex`, `gemini` and `copilot` print the same for Codex CLI, Gemini CLI and GitHub
   Copilot CLI in each one's own hooks file, `opencode` prints the plugin OpenCode loads
   instead, and `aider`, which has no hooks, gets a sentence saying what to do instead.
@@ -381,7 +386,9 @@ Nineteen features, and the page that configures them:
   `crook --shell <path>` starts another shell in every pane, for trying one out. Marks or no
   marks, every shell Crook starts has `TERM_PROGRAM=Crook` and `CROOK_PANE_ID` set to the
   pane's number — what WezTerm's `WEZTERM_PANE` is — so a script or an agent can tell it is
-  inside Crook and which pane, and name a log file after it.
+  inside Crook and which pane, and name a log file after it. `CROOK_BIN` is beside them: the
+  absolute path of the `crook` binary the pane belongs to, so a hook can call it from a `PATH`
+  it is not on — a Crook.app nobody linked, a build under `target/`.
 
   It also **answers**, which is what makes Tab work. Command marks are an announcement and
   completion is a question, so there is a second channel beside them: Crook writes the line

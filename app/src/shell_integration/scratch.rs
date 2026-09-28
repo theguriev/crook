@@ -15,14 +15,14 @@
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::Once;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Once};
 use std::time::{Duration, SystemTime};
 
 use crook_terminal::{Program, TerminalOptions, default_shell};
 
 use super::launch::{HostEnv, Launch, ScratchFile, plain, plan};
-use super::{Options, PANE_ID_VARIABLE, Shell, opted_out};
+use super::{BIN_VARIABLE, Options, PANE_ID_VARIABLE, Shell, opted_out};
 use crate::tab::PaneId;
 
 /// The one directory under the platform's temporary directory that every
@@ -185,6 +185,12 @@ impl Session {
         // not the pane, and every session — marked, unmarked, opted out —
         // passes through this one constructor, so no path can forget it.
         environment.push((PANE_ID_VARIABLE.to_owned(), pane.as_u64().to_string()));
+        // The binary beside it for the second half of that reason: it reaches
+        // every session from here, and the planners stay functions of what
+        // they are handed rather than of the process they run in.
+        if let Some(binary) = running_binary() {
+            environment.push((BIN_VARIABLE.to_owned(), binary.to_owned()));
+        }
         // The snippet has to be told where to look, and an environment
         // variable is the only channel that reaches it: the file it reads is
         // in a directory whose name is minted per session.
@@ -211,6 +217,24 @@ impl Drop for Session {
             remove(scratch);
         }
     }
+}
+
+/// The absolute path of the binary this process is, for [`BIN_VARIABLE`];
+/// `None` when it has none that is text.
+///
+/// Read once, at the first pane, rather than at each: on Linux the path of a
+/// binary an upgrade has replaced while it runs reads back as
+/// `/usr/bin/crook (deleted)`, and the path it was started from is where the
+/// upgrade put the new one. Made absolute and not canonical: macOS hands back
+/// the path the binary was started by, which can be relative, and resolving
+/// a `/usr/local/bin/crook` link to the versioned directory behind it would
+/// name a path the next upgrade removes.
+fn running_binary() -> Option<&'static str> {
+    static BINARY: LazyLock<Option<String>> = LazyLock::new(|| {
+        let path = std::env::current_exe().and_then(std::path::absolute).ok()?;
+        path.into_os_string().into_string().ok()
+    });
+    BINARY.as_deref()
 }
 
 /// The directory every session's scratch directory sits in.

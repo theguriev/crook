@@ -19,11 +19,18 @@
 //! the notification's own text — idle when it is done. What it prints
 //! is a fragment of Claude Code's own settings file, to be merged into it by
 //! the person whose file it is — Crook does not write a file it does not own,
-//! and that one it has never opened. `codex`, `gemini` and `copilot` print
-//! the same object under each one's own event names, which is how those
-//! three read their hooks too; `opencode` has no command hooks and gets the
-//! plugin its plugin directory loads instead; `aider` has no hooks, and gets
-//! the sentence that says so and what to do instead.
+//! and that one it has never opened. It leads with the other way to the same
+//! hooks, which needs no merging: this repository is a Claude Code plugin
+//! marketplace (`.claude-plugin/marketplace.json`) whose one plugin,
+//! `packaging/claude-code`, carries them and the skill, and installing it is
+//! Claude Code writing its own settings. The plugin's hooks call
+//! `"$CROOK_BIN"` — every pane is told its binary — behind a guard that makes
+//! them nothing outside Crook, and the tests here hold its files to the
+//! table of Claude Code's events and to [`SKILL`]. `codex`, `gemini` and
+//! `copilot` print the same object under each one's own event names, which
+//! is how those three read their hooks too; `opencode` has no command hooks
+//! and gets the plugin its plugin directory loads instead; `aider` has no
+//! hooks, and gets the sentence that says so and what to do instead.
 //!
 //! `--skill` prints [`SKILL`], the file that teaches an agent the rest of
 //! this: how it tells it is in a pane, what the four words do to the row,
@@ -215,6 +222,11 @@ fn one_line(text: &str, chars: usize) -> Option<String> {
 /// What `--agent-hooks` prints for one agent.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Hooks {
+    /// The lead, for standard error before the fragment: the commands that
+    /// install Crook's plugin for the agent, which carries the same hooks,
+    /// so the fragment after it is for a person who would rather merge by
+    /// hand. `None` for an agent Crook ships no plugin for.
+    pub lead: Option<String>,
     /// The fragment, for standard output: a settings file's `hooks` object,
     /// a plugin file, or — for an agent with no hooks — the sentence that
     /// says so and what to do instead.
@@ -233,6 +245,9 @@ struct Agent {
     program: &'static str,
     /// How the fragment is spelled, and where it goes.
     fragment: Fragment,
+    /// The commands that install Crook's own plugin for this agent, which
+    /// carries the fragment's hooks; empty when there is none.
+    plugin: &'static [&'static str],
 }
 
 /// The shapes a fragment comes in.
@@ -287,6 +302,18 @@ const CLAUDE_EVENTS: &[(&str, &str)] = &[
     ("Notification", "needs-input --message -"),
     ("Stop", "idle"),
     ("SessionEnd", "idle"),
+];
+
+/// The commands that install Crook's Claude Code plugin: this repository as
+/// a marketplace, then the one plugin in it.
+///
+/// `claude plugin install` writes Claude Code's own settings, which is what
+/// lets a person connect it without merging JSON and without Crook opening a
+/// file it does not own. The names are the ones
+/// `.claude-plugin/marketplace.json` gives, and a test holds them to it.
+const CLAUDE_PLUGIN: &[&str] = &[
+    "claude plugin marketplace add theguriev/crook",
+    "claude plugin install crook@crook",
 ];
 
 /// The Codex CLI hooks: the same object as Claude Code's, in
@@ -400,6 +427,7 @@ const AGENTS: &[Agent] = &[
             events: CLAUDE_EVENTS,
             missing: "",
         },
+        plugin: CLAUDE_PLUGIN,
     },
     Agent {
         name: "codex",
@@ -410,6 +438,7 @@ const AGENTS: &[Agent] = &[
             missing: " Codex has no notification hook: the row says needs-input for a \
 permission, and a question the model asks ends its turn as idle.",
         },
+        plugin: &[],
     },
     Agent {
         name: "gemini",
@@ -420,6 +449,7 @@ permission, and a question the model asks ends its turn as idle.",
             missing: " Gemini CLI notifies for a tool permission only: a question the \
 model asks ends its turn as idle.",
         },
+        plugin: &[],
     },
     Agent {
         name: "copilot",
@@ -428,6 +458,7 @@ model asks ends its turn as idle.",
             file: "~/.copilot/hooks/crook.json, or a project's .github/hooks/crook.json",
             events: COPILOT_EVENTS,
         },
+        plugin: &[],
     },
     Agent {
         name: "opencode",
@@ -436,6 +467,7 @@ model asks ends its turn as idle.",
             file: "~/.config/opencode/plugins/crook.ts, or a project's .opencode/plugins/crook.ts",
             source: OPENCODE_PLUGIN,
         },
+        plugin: &[],
     },
     Agent {
         name: "aider",
@@ -446,6 +478,7 @@ ends and it waits for you, so `aider --notifications --notifications-command \"B
 --agent idle\"` reports idle there and nothing else; for running, start it from a \
 wrapper script that runs `BINARY --agent running` first.",
         ),
+        plugin: &[],
     },
 ];
 
@@ -462,7 +495,9 @@ pub fn names_listed() -> String {
 /// The binary is named by its full path, because a hook runs in whatever
 /// `PATH` the agent was started with and a development build is on nobody's.
 /// The fragment is printed rather than installed: Crook does not write a file
-/// it does not own, and it has never opened any of these.
+/// it does not own, and it has never opened any of these. Where Crook ships
+/// a plugin that carries the same hooks, [`Hooks::lead`] names the commands
+/// that install it, which is the agent writing its own settings.
 pub fn hooks_text(agent: &str, binary: &Path) -> Result<Hooks> {
     let Some(known) = AGENTS.iter().find(|known| known.name == agent) else {
         let known: Vec<_> = AGENTS
@@ -487,14 +522,7 @@ pub fn hooks_text(agent: &str, binary: &Path) -> Result<Hooks> {
             events,
             missing,
         } => {
-            let hooks: serde_json::Map<String, Value> = events
-                .iter()
-                .map(|(event, arguments)| {
-                    let hook =
-                        json!([{ "hooks": [{ "type": "command", "command": run(arguments) }] }]);
-                    ((*event).to_owned(), hook)
-                })
-                .collect();
+            let hooks = hooks_object(events, run);
             let text = serde_json::to_string_pretty(&json!({ "hooks": hooks }))
                 .context("could not write the hooks as JSON")?;
             let note = format!(
@@ -536,7 +564,39 @@ doing.",
         }
         Fragment::None(sentence) => (sentence.replace("BINARY", &quoted(binary)), None),
     };
-    Ok(Hooks { text, note })
+    // Comment lines and the commands and nothing else, so a person who pastes
+    // the whole of it into a shell runs exactly the two.
+    let lead = (!known.plugin.is_empty()).then(|| {
+        format!(
+            "# {} can install these hooks, and the skill beside them, as Crook's plugin:\n{}\n\
+# Or merge the `hooks` below by hand instead; with both, every report is made twice.",
+            known.program,
+            known.plugin.join("\n")
+        )
+    });
+    Ok(Hooks { lead, text, note })
+}
+
+/// A `hooks` object in the shape Claude Code, Codex and Gemini CLI read:
+/// each event over one matcher group, with no matcher so it fires every
+/// time, running the one command `command` spells for its `--agent`
+/// arguments.
+///
+/// One function for two spellings: the binary's quoted path in the fragment
+/// a person merges, and the guarded `"$CROOK_BIN"` of the Claude Code
+/// plugin's `hooks/hooks.json`, which the tests build here to hold the file
+/// to [`CLAUDE_EVENTS`].
+fn hooks_object(
+    events: &[(&str, &str)],
+    command: impl Fn(&str) -> String,
+) -> serde_json::Map<String, Value> {
+    events
+        .iter()
+        .map(|(event, arguments)| {
+            let hook = json!([{ "hooks": [{ "type": "command", "command": command(arguments) }] }]);
+            ((*event).to_owned(), hook)
+        })
+        .collect()
 }
 
 /// `path`, quoted for the shell a hook runs in.
@@ -830,6 +890,239 @@ mod tests {
         assert!(message.contains("cursor"));
         for agent in AGENTS {
             assert!(message.contains(agent.name), "{message}");
+        }
+    }
+
+    /// The Claude Code plugin's hooks, as the repository ships them.
+    const PLUGIN_HOOKS: &str = include_str!("../../packaging/claude-code/hooks/hooks.json");
+
+    /// The plugin's copy of the skill.
+    const PLUGIN_SKILL: &str = include_str!("../../packaging/claude-code/skills/crook/SKILL.md");
+
+    /// The plugin's own manifest.
+    const PLUGIN_MANIFEST: &str =
+        include_str!("../../packaging/claude-code/.claude-plugin/plugin.json");
+
+    /// The marketplace the repository is, which lists the plugin.
+    const MARKETPLACE: &str = include_str!("../../.claude-plugin/marketplace.json");
+
+    /// What the plugin runs for `arguments`: the `--agent` report, behind the
+    /// guard that makes it nothing outside Crook.
+    ///
+    /// Built from the names the code gives the three variables, so renaming
+    /// one without the plugin is this test failing rather than hooks gating on
+    /// a variable no pane has.
+    fn plugin_command(arguments: &str) -> String {
+        use crate::shell_integration::{BIN_VARIABLE, PANE_ID_VARIABLE, TERM_PROGRAM};
+        format!(
+            "[ \"$TERM_PROGRAM\" = {TERM_PROGRAM} ] || [ -n \"${PANE_ID_VARIABLE}\" ] || exit 0; \
+crook=${BIN_VARIABLE}; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0; \
+exec \"$crook\" --agent {arguments}"
+        )
+    }
+
+    #[test]
+    fn the_plugin_hooks_are_the_printed_hooks_behind_a_guard() {
+        // The plugin is a second copy of CLAUDE_EVENTS, in a file Claude Code
+        // reads and Rust does not, so nothing but this keeps the two saying
+        // the same thing: an event added to the table and not the file would
+        // be a status the plugin never reports.
+        let shipped: Value =
+            serde_json::from_str(PLUGIN_HOOKS).expect("the plugin's hooks.json is JSON");
+        let expected = Value::Object(hooks_object(CLAUDE_EVENTS, plugin_command));
+        assert_eq!(
+            expected,
+            shipped["hooks"],
+            "packaging/claude-code/hooks/hooks.json has drifted from CLAUDE_EVENTS; its \
+`hooks` should be\n{}",
+            serde_json::to_string_pretty(&expected).unwrap()
+        );
+        assert!(
+            shipped["description"].as_str().is_some(),
+            "a plugin's hooks file says what its hooks are for"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_plugin_hooks_run_crook_inside_crook_and_nothing_anywhere_else() {
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::process::Stdio;
+
+        let scratch =
+            std::env::temp_dir().join(format!("crook-plugin-hooks-{}", std::process::id()));
+        let empty = scratch.join("empty");
+        let on_path = scratch.join("on-path");
+        std::fs::create_dir_all(&empty).unwrap();
+        std::fs::create_dir_all(&on_path).unwrap();
+        // A stand-in for the binary: it writes down what it was run with and
+        // what it was handed on stdin, which is the whole of what a hook does
+        // with it. `cat` by its path, because the hooks run with a PATH that
+        // holds nothing unless a case puts a `crook` on it.
+        let record = scratch.join("record");
+        let fake = format!(
+            "#!/bin/sh\nprintf '%s ' \"$@\" > '{0}'\n/bin/cat >> '{0}'\n",
+            record.display()
+        );
+        let binary = scratch.join("crook-dev");
+        for path in [&binary, &on_path.join("crook")] {
+            std::fs::write(path, &fake).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let binary = binary.to_str().unwrap();
+
+        let shipped: Value = serde_json::from_str(PLUGIN_HOOKS).unwrap();
+        let events = shipped["hooks"].as_object().unwrap();
+        assert!(!events.is_empty());
+        let input = r#"{"hook_event_name": "Stop", "prompt": "port the tab bar"}"#;
+        for (event, groups) in events {
+            let command = groups[0]["hooks"][0]["command"].as_str().unwrap();
+            let arguments = CLAUDE_EVENTS
+                .iter()
+                .find(|(name, _)| name == event)
+                .map(|(_, arguments)| *arguments)
+                .unwrap();
+            // What `sh -c` makes of the command in an environment that holds
+            // only `variables`: its exit, its stdout and stderr, and what the
+            // stand-in was run with, if it was.
+            let run = |variables: &[(&str, &str)]| {
+                let _ = std::fs::remove_file(&record);
+                let mut shell = crate::process::command("/bin/sh");
+                shell
+                    .arg("-c")
+                    .arg(command)
+                    .env_clear()
+                    .env("PATH", &empty)
+                    .envs(variables.iter().copied())
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+                let mut child = shell.spawn().expect("/bin/sh runs");
+                // A hook that never reads its input is allowed to exit before
+                // this is written, so a broken pipe here is not a failure.
+                let _ = child.stdin.take().unwrap().write_all(input.as_bytes());
+                let output = child.wait_with_output().unwrap();
+                let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+                let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+                (
+                    output.status.success(),
+                    stdout,
+                    stderr,
+                    std::fs::read_to_string(&record).ok(),
+                )
+            };
+            let reported = Some(format!("--agent {arguments} {input}"));
+
+            // Another terminal: Claude Code runs the hook and it does nothing
+            // at all — no binary started, not a byte written, exit 0, since a
+            // failing UserPromptSubmit hook is a notice on every prompt and
+            // anything it prints is added to what the model reads.
+            for outside in [
+                &[][..],
+                &[("TERM_PROGRAM", "iTerm.app"), ("CROOK_BIN", binary)][..],
+            ] {
+                assert_eq!(
+                    (true, String::new(), String::new(), None),
+                    run(outside),
+                    "{event} outside Crook, with {outside:?}"
+                );
+            }
+            // A pane: the binary the pane names, handed the hook's input.
+            assert_eq!(
+                (true, String::new(), String::new(), reported.clone()),
+                run(&[("TERM_PROGRAM", "Crook"), ("CROOK_BIN", binary)]),
+                "{event} in a pane"
+            );
+            // tmux in a pane says TERM_PROGRAM=tmux; the pane's id is still
+            // there.
+            assert_eq!(
+                (true, String::new(), String::new(), reported.clone()),
+                run(&[
+                    ("TERM_PROGRAM", "tmux"),
+                    ("CROOK_PANE_ID", "7"),
+                    ("CROOK_BIN", binary)
+                ]),
+                "{event} in tmux in a pane"
+            );
+            // A Crook from before CROOK_BIN, or a binary an upgrade has moved
+            // from under a running one: the `crook` on PATH.
+            let path = on_path.to_str().unwrap();
+            for stale in [
+                &[("TERM_PROGRAM", "Crook"), ("PATH", path)][..],
+                &[
+                    ("TERM_PROGRAM", "Crook"),
+                    ("CROOK_BIN", "/nowhere/crook"),
+                    ("PATH", path),
+                ][..],
+            ] {
+                assert_eq!(
+                    (true, String::new(), String::new(), reported.clone()),
+                    run(stale),
+                    "{event} with {stale:?}"
+                );
+            }
+            // A pane with no binary to reach is quiet too, rather than a
+            // "not found" on every prompt.
+            assert_eq!(
+                (true, String::new(), String::new(), None),
+                run(&[("TERM_PROGRAM", "Crook"), ("CROOK_BIN", "/nowhere/crook")]),
+                "{event} with no binary"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+
+    #[test]
+    fn the_plugin_skill_is_the_skill_crook_prints() {
+        // Byte for byte: the plugin's copy is what Claude Code loads, and a
+        // skill that says one thing from `--skill` and another from the
+        // plugin is two answers to what a pane can do.
+        assert!(
+            PLUGIN_SKILL == SKILL,
+            "packaging/claude-code/skills/crook/SKILL.md is not app/src/skill.md; copy it over"
+        );
+    }
+
+    #[test]
+    fn the_claude_hooks_lead_with_the_commands_that_install_the_plugin_the_repository_ships() {
+        let marketplace: Value =
+            serde_json::from_str(MARKETPLACE).expect("the marketplace is JSON");
+        let manifest: Value =
+            serde_json::from_str(PLUGIN_MANIFEST).expect("the plugin's manifest is JSON");
+        let name = marketplace["name"].as_str().unwrap();
+        let plugins = marketplace["plugins"].as_array().unwrap();
+        assert_eq!(1, plugins.len(), "{plugins:?}");
+        let plugin = plugins[0]["name"].as_str().unwrap();
+        // The directory the tests above read is the one the entry names, or
+        // they pin a copy nobody installs.
+        assert_eq!(
+            Some("./packaging/claude-code"),
+            plugins[0]["source"].as_str()
+        );
+        // Claude Code's rule: an install by a name the manifest does not
+        // share is "not found in marketplace".
+        assert_eq!(Some(plugin), manifest["name"].as_str());
+
+        let printed = hooks_text("claude", Path::new("/usr/bin/crook")).unwrap();
+        let lead = printed.lead.expect("claude's hooks come as a plugin too");
+        let lines: Vec<&str> = lead.lines().filter(|line| !line.starts_with('#')).collect();
+        assert_eq!(
+            vec![
+                "claude plugin marketplace add theguriev/crook".to_owned(),
+                format!("claude plugin install {plugin}@{name}"),
+            ],
+            lines,
+            "the lead is comments and the commands, so pasting all of it runs just those"
+        );
+        // And the fragment is still what it was, for merging by hand.
+        let parsed: Value = serde_json::from_str(&printed.text).unwrap();
+        assert!(parsed["hooks"]["Notification"].is_array());
+        assert!(printed.note.unwrap().contains("~/.claude/settings.json"));
+
+        // Only Claude Code has a plugin to lead with.
+        for agent in AGENTS.iter().filter(|agent| agent.name != "claude") {
+            let printed = hooks_text(agent.name, Path::new("/usr/bin/crook")).unwrap();
+            assert_eq!(None, printed.lead, "{}", agent.name);
         }
     }
 

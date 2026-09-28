@@ -785,7 +785,10 @@ and so does `CROOK_PANE_ID`, the pane's bare number — the same one a plugin is
 `shell_integration::Session` because the session is the one thing that is per pane where the
 launch planners are per shell. It is what `WEZTERM_PANE` and `KITTY_WINDOW_ID` are: a fact a
 script or an agent gates on or names a log after, not an address anything routes by — the agent
-status channel writes to its own tty and needs no pane id.
+status channel writes to its own tty and needs no pane id. `CROOK_BIN`, the absolute path of the
+running binary, is set in the same place, read once at the first pane: a hook runs in whatever
+`PATH` its agent was started with, where a Crook.app nobody linked is not, and on Linux a binary
+an upgrade has replaced reads its own path back as `… (deleted)`.
 
 **The pty opens at the pane's size.** A shell prints its whole startup — a `~/.zprofile`
 banner, a greeting sized with `tput cols` — before any resize can reach it, and what it
@@ -1041,7 +1044,17 @@ that makes it say all of this by itself — running on a prompt and around every
 input on every notification with the notification's text piped in as the message, idle on
 stop — naming the binary by its full path, since a hook
 runs in whatever `PATH` Claude Code was started with. It is printed rather than installed:
-Crook writes no file it does not own, and it has never opened that one. Codex CLI and Gemini
+Crook writes no file it does not own, and it has never opened that one. What it prints first is
+the way that needs no merging at all: the repository is a Claude Code plugin marketplace
+(`.claude-plugin/marketplace.json`) whose one plugin, `packaging/claude-code`, carries the same
+hooks and the skill, and `claude plugin marketplace add theguriev/crook` with
+`claude plugin install crook@crook` is Claude Code writing its own settings. A file shipped to
+everybody cannot name one person's binary, so the plugin's hooks call `"$CROOK_BIN"` — `crook`
+on `PATH` for a Crook older than the variable — behind a guard that exits 0 unless
+`TERM_PROGRAM` is Crook or `CROOK_PANE_ID` is set, since a UserPromptSubmit hook that fails is a
+notice on every prompt and one that prints is text the model reads. Tests in `agent.rs` build
+the plugin's `hooks/hooks.json` from `CLAUDE_EVENTS` and run each of its commands under `sh`,
+and hold its `SKILL.md` byte for byte to `skill.md`. Codex CLI and Gemini
 CLI read the same object under their own event names, and GitHub Copilot CLI a versioned
 cousin of it with `bash` for the command, so `--agent-hooks codex`, `gemini` and `copilot`
 are the same table with a different first column; OpenCode has no command hooks, and
