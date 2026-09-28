@@ -1196,10 +1196,12 @@ everything the window opened with, since no frame has taken any of it yet.
 another one — its agent asking, its agent saying it is done while nobody is looking, or a bell
 in a pane with nothing else to say, which is how Codex asks in a terminal it does not
 recognise — `Workspace::tell_the_desktop` posts a desktop
-notification: `Crook — <the pane's name>`, with the agent's question on one line and cut to
-`notify::MESSAGE_CHARS` under it. A *turn* of the row's status rather than a report: the agent
-saying needs-input again with another word in its question is the same stop, and the question
-on screen as a person leaves is one they saw — the rule `Urgency` gives the request for a look.
+notification: `Crook — <the pane's name>`, the name its row shows (`row_content::row_name`, so
+a shell at a prompt is its directory and not `agent 1`), with the agent's question on one line
+and cut to `notify::MESSAGE_CHARS` under it. A *turn* of the row's status rather than a
+report: the agent saying needs-input again with another word in its question is the same stop,
+and the question on screen as a person leaves is one they saw — the rule `Urgency` gives the
+request for a look.
 An agent that failed and a command that ran `notify::LONG_COMMAND` or longer take the same
 path and are off out of the box. The three switches are `GeneralOptions::notify_on_*`, on the
 Notifications page `crook/notifications` owns, and the workspace posts only while that plugin

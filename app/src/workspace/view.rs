@@ -70,6 +70,7 @@ use super::action::{
 };
 use super::block_list::block_text;
 use super::held_locks::{HeldLock, HeldLocks};
+use super::row_content::row_name;
 use super::settings_page::SettingsState;
 use super::tab_context_menu::TabContextMenuState;
 use super::tab_menu::{Contents, Going, Looked, Mode as WorktreeMode, Sweep, TabMenuState};
@@ -5447,12 +5448,10 @@ impl Workspace {
             return;
         }
         let session = open.session();
+        let name = row_name(session, self.home());
         let (occasion, notice) = match now {
-            AgentStatus::NeedsInput => (
-                Occasion::NeedsInput,
-                Notice::needs_input(open.title(), session),
-            ),
-            AgentStatus::Failed => (Occasion::Failed, Notice::failed(open.title())),
+            AgentStatus::NeedsInput => (Occasion::NeedsInput, Notice::needs_input(&name, session)),
+            AgentStatus::Failed => (Occasion::Failed, Notice::failed(&name)),
             AgentStatus::Idle | AgentStatus::Running => return,
         };
         self.notify(pane, occasion, notice, ctx);
@@ -5474,7 +5473,10 @@ impl Workspace {
         let Some(open) = self.tabs.pane(pane) else {
             return;
         };
-        let notice = Notice::finished(open.title(), exit, took);
+        // What the pane was running is already gone by now — the model hears
+        // it stop before it hears it finish — so the name is the row's, which
+        // falls back to the directory rather than to `agent 1`.
+        let notice = Notice::finished(&row_name(open.session(), self.home()), exit, took);
         self.notify(pane, Occasion::LongCommand, notice, ctx);
     }
 

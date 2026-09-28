@@ -17218,6 +17218,43 @@ mod desktop_notifications {
     }
 
     #[test]
+    fn a_pane_with_no_name_is_posted_under_the_name_its_row_shows() {
+        // A shell at a prompt that set no title has no name of its own, and
+        // its row says the directory it is in; by the time its command's end
+        // is heard, what it was running is gone too. The banner names the row
+        // a person can find, not the `agent 1` it was born as.
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        switch(&mut harness, Occasion::LongCommand);
+        apply(
+            &mut harness,
+            TerminalUpdate::WorkingDirectory(pane, PathBuf::from("/work/crook/app")),
+        );
+        apply(
+            &mut harness,
+            TerminalUpdate::Running(pane, Some("cargo build".to_owned())),
+        );
+        leave(&mut harness);
+
+        apply(&mut harness, TerminalUpdate::Running(pane, None));
+        apply(
+            &mut harness,
+            TerminalUpdate::CommandFinished {
+                pane,
+                exit: Some(0),
+                took: Some(LONG_COMMAND * 6),
+            },
+        );
+
+        let titles: Vec<String> = posted
+            .all()
+            .into_iter()
+            .map(|notice| notice.title)
+            .collect();
+        assert_eq!(titles, ["Crook — app"]);
+    }
+
+    #[test]
     fn a_second_pane_asking_is_not_held_up_by_the_first() {
         let (mut harness, posted) = window(2);
         let front = harness.focused_pane_id().expect("the window has a pane");
