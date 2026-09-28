@@ -1141,7 +1141,9 @@ window. Both the title and the request follow every change to the window's views
 invalidation callback that asks for a frame, through `Beacon` — and not the frame, because
 the window they are for may get no frames: a Wayland compositor sends no frame callback to a
 surface it is not showing and winit holds every redraw back until that callback comes, and
-wgpu refuses to present to an occluded window on macOS.
+wgpu refuses to present to an occluded window on macOS. That covers the window's opening
+too: registering the callback is itself an update, and its flush runs the callback for
+everything the window opened with, since no frame has taken any of it yet.
 
 What is deliberately not here is a plugin. `docs/plugins.md` planned this seam as an `Agent`
 service a plugin provides, and that is still the right shape for anything that *drives* an

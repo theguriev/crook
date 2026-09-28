@@ -235,6 +235,14 @@ impl Harness {
 
     /// A window opened with `opening` as it stands, store and all.
     fn opened(tabs: usize, opening: Opening) -> Self {
+        let mut harness = Self::undrawn(tabs, opening);
+        harness.frame();
+        harness
+    }
+
+    /// The same, before its first frame: the window `Shell::new` starts
+    /// watching, whose every view is still a change no frame has taken.
+    fn undrawn(tabs: usize, opening: Opening) -> Self {
         assert!(
             opening.plugins_directory.as_deref().is_none_or(
                 |directory| Some(directory) != crate::plugins::wasm::directory().as_deref()
@@ -286,7 +294,6 @@ impl Harness {
         for _ in 1..tabs {
             harness.dispatch_action(TabAction::New);
         }
-        harness.frame();
         harness
     }
 
@@ -15780,10 +15787,7 @@ mod the_agent {
     /// event loop would be.
     fn watched(harness: &mut Harness) -> Notebook {
         let notebook = Notebook::default();
-        let beacon = Rc::new(RefCell::new(crate::Beacon::new(
-            "Crook".to_owned(),
-            notebook.clone(),
-        )));
+        let beacon = crate::Beacon::new("Crook".to_owned(), notebook.clone());
         let callback = crate::on_every_change(beacon, harness.workspace.clone(), || {});
         harness
             .app
@@ -15827,6 +15831,45 @@ mod the_agent {
 
         harness.workspace_update(|workspace, ctx| workspace.set_window_focused(true, ctx));
         assert_eq!(1, said.looks(), "coming back asks for nothing");
+    }
+
+    #[test]
+    fn a_window_is_named_as_it_is_watched_with_no_frame_drawn() {
+        // `Shell::new` opens the window, restores the session into it and
+        // only then starts watching it, all before a first frame, and no
+        // frame follows the workspace afterwards. So registering the callback
+        // is what names the window: its flush runs the callback for every
+        // change no frame has taken, which in a window that has drawn nothing
+        // is everything it opened with.
+        let mut harness = Harness::undrawn(
+            2,
+            Opening {
+                settings: Settings::ephemeral(),
+                channel: Channel::Dev,
+                plugins: Vec::new(),
+                withdrawn: Default::default(),
+                heard: Default::default(),
+                plugins_directory: None,
+            },
+        );
+        let front = harness.focused_pane_id().expect("the window has a pane");
+        let behind = background_of(&harness);
+        report(
+            &mut harness,
+            front,
+            AgentStatus::Running,
+            Some("bisect the flaky test"),
+        );
+        report(&mut harness, behind, AgentStatus::NeedsInput, None);
+
+        let said = watched(&mut harness);
+        assert_eq!(
+            [Said::Title(
+                "(1 waiting) bisect the flaky test — Crook".to_owned()
+            )],
+            said.0.borrow().as_slice(),
+            "named as it is watched, with nothing changed and nothing drawn since"
+        );
     }
 
     #[test]

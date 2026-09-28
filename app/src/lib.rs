@@ -80,7 +80,6 @@ pub mod update;
 pub mod window_controls;
 pub mod workspace;
 
-use std::cell::RefCell;
 use std::fs::File;
 use std::io::BufWriter;
 use std::path::PathBuf;
@@ -2213,14 +2212,29 @@ impl Desktop for Proxy {
 /// What the window tells the desktop about the workspace: its name, with the
 /// count of waiting panes in front, and when to point at it.
 ///
+/// The name is the active tab's, the way every terminal names its window
+/// after the shell's title and Warp after the tab's, because it is what the
+/// taskbar, the dock and the switcher show: with an agent per tab, "bisect
+/// the flaky test — Crook" is the difference between finding the right Crook
+/// and opening each in turn.
+///
 /// Followed on every change to the window's views — the same invalidation
 /// that asks for a frame — rather than on the frame, because the window
 /// these are for is the one that may get no frames at all. A Wayland
 /// compositor sends no frame callback to a surface it is not showing, and
 /// winit holds every redraw back until the callback comes, so a window on
 /// another workspace builds nothing; macOS refuses to present to an
-/// occluded window. The first frame follows it as well, since whatever the
-/// workspace did before the window was watched was not seen here.
+/// occluded window.
+///
+/// Nothing the window did before it was watched goes unseen: registering the
+/// callback is an update like any other, and its flush runs the callback of
+/// every window holding changes no frame has taken yet — for a window that
+/// has drawn nothing, every view it opened with. So the window is named, and
+/// [`Urgency`] has the count its first rise is measured from, the moment the
+/// callback is registered. The frame does not follow the workspace as well:
+/// the title and the count read what the strip and the header's chip draw, so
+/// a change to them that invalidated no view would be missing from the
+/// window's own frame too, and that is where it would want fixing.
 struct Beacon<D> {
     /// The application's own name for the window — "Crook", or the channel's
     /// spelling of it — which the active tab's title goes in front of.
@@ -2262,16 +2276,17 @@ impl<D: Desktop> Beacon<D> {
 
 /// What runs on every change to the window's views: a frame is asked for, and
 /// the [`Beacon`] follows the workspace without waiting for that frame.
+///
+/// The callback owns the beacon outright: the frame does not follow the
+/// workspace too (see [`Beacon`]), so nothing else has a use for it.
 fn on_every_change<D: Desktop + 'static>(
-    beacon: Rc<RefCell<Beacon<D>>>,
+    mut beacon: Beacon<D>,
     workspace: ViewHandle<Workspace>,
     redraw: impl Fn() + 'static,
 ) -> impl FnMut(WindowId, &mut AppContext) + 'static {
     move |_, ctx| {
         redraw();
-        workspace.read(&*ctx, |workspace, _| {
-            beacon.borrow_mut().follow(workspace);
-        });
+        workspace.read(&*ctx, |workspace, _| beacon.follow(workspace));
     }
 }
 
@@ -2535,9 +2550,6 @@ struct Shell {
     /// The rectangle the input method was last told the caret occupies, so a
     /// frame that did not move it sends no message.
     ime_area: Option<crookui_core::geometry::RectF>,
-    /// The window's name and its requests for a look, shared with the
-    /// callback that follows every change. See [`Beacon`].
-    beacon: Rc<RefCell<Beacon<Proxy>>>,
     /// Where the workspace reads the window's size from.
     ///
     /// The size is an argument to `build_scene` and reaches nothing in the
@@ -3139,15 +3151,14 @@ impl Shell {
         // The only thing that makes a frame happen: a view said it changed.
         // And, beside it, what tells the desktop the window's name and when
         // to point at it, which cannot wait for a frame a hidden window may
-        // never be given.
-        let beacon = Rc::new(RefCell::new(Beacon::new(
-            launch.channel.window_title(),
-            proxy.clone(),
-        )));
+        // never be given. No frame has taken anything the window opened with
+        // or the update above changed, so this call already runs it once and
+        // names the window.
+        let beacon = Beacon::new(launch.channel.window_title(), proxy.clone());
         let redraw = proxy.clone();
         app.on_window_invalidated(
             window_id,
-            on_every_change(beacon.clone(), workspace.clone(), move || {
+            on_every_change(beacon, workspace.clone(), move || {
                 redraw.request_redraw();
             }),
         );
@@ -3179,7 +3190,6 @@ impl Shell {
             frame_budget: launch.frames,
             run,
             ime_area: None,
-            beacon,
             window_size,
             window,
             window_state: WindowState::default(),
@@ -3330,22 +3340,6 @@ impl Shell {
         log::info!("the shell printed:\n{}", printed.trim_end());
     }
 
-    /// Names the window after the tab it is showing, the way every terminal
-    /// names its window after the shell's title and Warp after the tab's, and
-    /// asks the desktop for a look when one more pane is waiting.
-    ///
-    /// What the taskbar, the dock and the switcher show for a window: with an
-    /// agent per tab, "bisect the flaky test — Crook" is the difference
-    /// between finding the right Crook and opening each in turn. Every change
-    /// to the window's views already does this, without waiting for a frame
-    /// (see [`Beacon`]); the frame does it too because the changes made while
-    /// the window was being opened came before anything was watching.
-    fn follow_the_workspace_with_the_beacon(&self) {
-        self.workspace.read(&self.app, |workspace, _| {
-            self.beacon.borrow_mut().follow(workspace);
-        });
-    }
-
     /// Moves the rectangle an input method puts its candidate list beside, so
     /// that a half-composed word and the list of things it could become are in
     /// the same place on screen.
@@ -3416,13 +3410,11 @@ impl WindowDelegate for Shell {
         let window_id = self.window_id;
         let presenter = &mut self.presenter;
 
-        let scene = self.app.update(|ctx| {
+        self.app.update(|ctx| {
             let invalidation = ctx.take_all_invalidations_for_window(window_id);
             presenter.invalidate(invalidation, ctx);
             presenter.build_scene(size, scale_factor, ctx)
-        });
-        self.follow_the_workspace_with_the_beacon();
-        scene
+        })
     }
 
     fn handle_event(&mut self, event: Event) -> bool {
