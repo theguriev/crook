@@ -1165,3 +1165,61 @@ fn test_the_last_notification_in_a_read_stands_for_the_others() {
         notified(b"\x1b]9;one\x07\x1b]777;notify;;two\x07")
     );
 }
+
+#[test]
+fn test_a_notification_and_a_report_keep_their_order_in_one_read() {
+    // The workspace reads the two against each other: `running` takes away
+    // the look a notification asked for, a notification after it asks again,
+    // and a status change after one takes its place. So one read has to hand
+    // them over in the order they were written, as one read per sequence
+    // does, or the same bytes settle differently depending on where a pty
+    // split them.
+    let running = b"\x1b]6340;running\x07".as_slice();
+    let done = b"\x1b]9;done\x07".as_slice();
+    let end = b"\x1b]133;D;0\x07".as_slice();
+    let started = || {
+        let mut emulator = emulator();
+        emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07claude\r\n\x1b]133;C\x07");
+        emulator.take_events();
+        emulator
+    };
+    // How long the command took is timed, and is no part of the order.
+    let events = |emulator: &mut Emulator| -> Vec<TerminalEvent> {
+        emulator
+            .take_events()
+            .into_iter()
+            .map(|event| match event {
+                TerminalEvent::CommandFinished { exit, .. } => {
+                    TerminalEvent::CommandFinished { exit, took: None }
+                }
+                other => other,
+            })
+            .collect()
+    };
+
+    for sequences in [
+        [done, running].as_slice(),
+        &[running, done],
+        &[done, end],
+        &[running, done, end],
+        &[done, running, end],
+        &[running, end, done],
+    ] {
+        let mut split = started();
+        let mut whole = started();
+        for sequence in sequences {
+            split.advance(sequence);
+        }
+        whole.advance(&sequences.concat());
+
+        assert_eq!(
+            events(&mut split),
+            events(&mut whole),
+            "{:?} in one read",
+            sequences
+                .iter()
+                .map(|sequence| String::from_utf8_lossy(sequence))
+                .collect::<Vec<_>>()
+        );
+    }
+}

@@ -122,7 +122,9 @@ pub enum TerminalEvent {
     /// Not a status, and it changes none: an agent that is running and
     /// says "tests passed" is still running. Every one is news, so none is
     /// dropped as a repeat; the last one in a read stands for the others,
-    /// because it is the last thing the program said.
+    /// because it is the last thing the program said. It keeps its place
+    /// among the [`Self::Agent`] and [`Self::AgentSettled`] around it,
+    /// because a status after it answers it and one before it does not.
     Notification(Notification),
 }
 
@@ -177,6 +179,10 @@ struct OscWatcher {
     /// Keeps a kitty notification that is arriving in chunks.
     notifications: notify::Reader,
     notification: Option<Notification>,
+    /// Whether [`Self::notification`] was written after [`Self::agent`],
+    /// which only means anything while both are waiting to be handed over:
+    /// [`Emulator::apply_reports`] hands them over in that order.
+    notified_last: bool,
     /// Whether the chunk erased the scrollback — `CSI 3 J`, the third thing
     /// `clear` prints.
     history_cleared: bool,
@@ -218,6 +224,7 @@ impl Perform for OscWatcher {
             Some(&(b"9" | b"99" | b"777")) => {
                 if let Some(notification) = self.notifications.read(params) {
                     self.notification = Some(notification);
+                    self.notified_last = true;
                 }
             }
             // Position-independent like OSC 7: a status means the same thing
@@ -226,6 +233,7 @@ impl Perform for OscWatcher {
             _ => {
                 if let Some(reported) = agent::parse(params) {
                     self.agent = Some(reported);
+                    self.notified_last = false;
                 }
             }
         }
@@ -431,8 +439,10 @@ impl Emulator {
                 // before the mark settles against it, or the same bytes settle
                 // differently depending on where a pty split them: `drain`
                 // alone applies the report after the loop, too late for a `D`
-                // that ends the very command the report was about.
-                self.apply_agent_report();
+                // that ends the very command the report was about. A
+                // notification in the piece was written before the mark too,
+                // and goes out ahead of what the mark settles.
+                self.apply_reports();
                 self.settle_agent(mark);
                 let finished = self.blocks.mark(
                     mark,
@@ -787,11 +797,7 @@ impl Emulator {
             self.events.push(TerminalEvent::Completions(serial));
         }
 
-        self.apply_agent_report();
-
-        if let Some(notification) = self.osc_watcher.notification.take() {
-            self.events.push(TerminalEvent::Notification(notification));
-        }
+        self.apply_reports();
 
         if let Some(directory) = self.osc_watcher.working_directory.take()
             && self.working_directory.as_deref() != Some(directory.as_path())
@@ -804,6 +810,33 @@ impl Emulator {
         // on the way out belongs to the block that is still open.
         if let Some(exit) = exited {
             self.child_exited(exit);
+        }
+    }
+
+    /// Hands over the pending agent report and notification, in the order
+    /// the program wrote them.
+    ///
+    /// Each is the last of its kind so far in the read, and the two are read
+    /// against each other: a `running` takes away the look a notification
+    /// asked for, a notification after it asks again, and a status change
+    /// after one takes its place. Handing them over in a fixed order would
+    /// make the same bytes settle one way in one read and another way split
+    /// across two. Idempotent, like [`Self::apply_agent_report`].
+    fn apply_reports(&mut self) {
+        let notified_last = std::mem::take(&mut self.osc_watcher.notified_last);
+        if !notified_last {
+            self.apply_notification();
+        }
+        self.apply_agent_report();
+        if notified_last {
+            self.apply_notification();
+        }
+    }
+
+    /// Emits a pending notification. Idempotent: it takes it.
+    fn apply_notification(&mut self) {
+        if let Some(notification) = self.osc_watcher.notification.take() {
+            self.events.push(TerminalEvent::Notification(notification));
         }
     }
 

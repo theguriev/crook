@@ -1101,8 +1101,10 @@ the row washes, counts as waiting, and prints the text on its second line in pla
 table's, ahead of a `needs-input` message since it is the newer of the two. Whatever clears a
 bell's attention clears it — a look, an agent reporting running — and the text goes with it; a
 bell after it keeps it, because Claude Code's `iterm2_with_bell` channel sends that pair. A
-burst is handed over as its last one, beside the bell's rule. Nothing here posts a desktop
-notification.
+burst is handed over as its last one, beside the bell's rule. In one read it keeps its place
+among the reports and marks around it, so a status written after it — a `running`, or the `D`
+that ends a running agent — takes it away and one written before it does not, wherever the
+pty split the bytes. Nothing here posts a desktop notification.
 
 **The strip answers.** A waiting row is washed in the amber its dot shows, faintly, because a
 dot is nine pixels and a person scanning a long list wants the row to say it. A group folded
