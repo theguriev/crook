@@ -2150,6 +2150,47 @@ fn window_title(active: Option<&str>, waiting: usize, base: &str) -> String {
     title
 }
 
+/// When a window behind something else should ask the desktop for a look.
+///
+/// When the count of waiting panes *rises* while the window is unfocused, and
+/// not whenever it is above zero: the panes waiting as a person leaves are
+/// panes they just saw, and the pane they leave with a question on it joins
+/// the count at that moment without being news. So leaving sets the mark the
+/// count has to rise past, and every frame moves the mark to wherever the
+/// count is — which is what makes a pane that stops waiting and starts again
+/// ask again, and a count that holds still ask once.
+#[derive(Debug, Default)]
+struct Urgency {
+    /// The count as of the last frame, or of the moment the window was left.
+    waiting: usize,
+}
+
+impl Urgency {
+    /// The window lost the focus with `waiting` panes waiting, all of which
+    /// the person had in front of them as they went.
+    fn left_with(&mut self, waiting: usize) {
+        self.waiting = waiting;
+    }
+
+    /// Whether a frame with `waiting` panes waiting, in a window that does or
+    /// does not have the focus, is one to ask for a look over.
+    fn asks(&mut self, waiting: usize, focused: bool) -> bool {
+        let rose = !focused && waiting > self.waiting;
+        self.waiting = waiting;
+        rose
+    }
+}
+
+/// The window's name for the workspace as it stands: [`window_title`] of its
+/// active tab and of the panes waiting in it.
+fn window_title_of(workspace: &Workspace, base: &str) -> String {
+    window_title(
+        workspace.tabs().active().map(|tab| tab.title()),
+        crate::plugins::tabs::waiting_count(workspace),
+        base,
+    )
+}
+
 /// Presses one key on the window, exactly as the platform would.
 ///
 /// Crook's own bindings would be consumed before this in the delegate; none of
@@ -2415,6 +2456,8 @@ struct Shell {
     base_title: String,
     /// The name the window was last given, for the same reason as `ime_area`.
     window_title: Option<String>,
+    /// When to ask the desktop to point at the window. See [`Urgency`].
+    urgency: Urgency,
     /// Where the workspace reads the window's size from.
     ///
     /// The size is an argument to `build_scene` and reaches nothing in the
@@ -3046,6 +3089,7 @@ impl Shell {
             ime_area: None,
             base_title: launch.channel.window_title(),
             window_title: None,
+            urgency: Urgency::default(),
             window_size,
             window,
             window_state: WindowState::default(),
@@ -3202,23 +3246,41 @@ impl Shell {
     /// What the taskbar, the dock and the switcher show for a window: with an
     /// agent per tab, "bisect the flaky test — Crook" is the difference
     /// between finding the right Crook and opening each in turn. After the
-    /// frame, because the title is whatever the frame drew on the active row
-    /// — a rename, an agent's own name for its work — and sent only when it
-    /// changed, because every window system takes this as a message.
+    /// frame is built, because the title is whatever the frame drew on the
+    /// active row — a rename, an agent's own name for its work — and not
+    /// after it is drawn: a window that is covered draws nothing, since wgpu
+    /// refuses to present to an occluded window on macOS, and a covered
+    /// window is the one whose title is the only thing anybody sees of it.
+    /// Sent only when it changed, because every window system takes this as
+    /// a message.
     fn follow_the_active_tab_with_the_title(&mut self) {
-        let (active, waiting) = self.workspace.read(&self.app, |workspace, _| {
-            let strip = workspace.tabs();
-            (
-                strip.active().map(|tab| tab.title().to_owned()),
-                crate::plugins::tabs::waiting_count(strip),
-            )
+        let title = self.workspace.read(&self.app, |workspace, _| {
+            window_title_of(workspace, &self.base_title)
         });
-        let title = window_title(active.as_deref(), waiting, &self.base_title);
         if self.window_title.as_deref() == Some(title.as_str()) {
             return;
         }
         self.proxy.set_title(title.clone());
         self.window_title = Some(title);
+    }
+
+    /// Asks the desktop to point at the window when one more pane has
+    /// started waiting while the window is behind something else. See
+    /// [`Urgency`] for what counts as more.
+    ///
+    /// Beside the title and for the same reason: after the frame is built
+    /// rather than after it is drawn, because the window this is for is the
+    /// covered one that draws nothing.
+    fn ask_for_a_look_when_more_are_waiting(&mut self) {
+        let (waiting, focused) = self.workspace.read(&self.app, |workspace, _| {
+            (
+                crate::plugins::tabs::waiting_count(workspace),
+                workspace.is_window_focused(),
+            )
+        });
+        if self.urgency.asks(waiting, focused) {
+            self.proxy.request_attention();
+        }
     }
 
     /// Moves the rectangle an input method puts its candidate list beside, so
@@ -3291,11 +3353,14 @@ impl WindowDelegate for Shell {
         let window_id = self.window_id;
         let presenter = &mut self.presenter;
 
-        self.app.update(|ctx| {
+        let scene = self.app.update(|ctx| {
             let invalidation = ctx.take_all_invalidations_for_window(window_id);
             presenter.invalidate(invalidation, ctx);
             presenter.build_scene(size, scale_factor, ctx)
-        })
+        });
+        self.follow_the_active_tab_with_the_title();
+        self.ask_for_a_look_when_more_are_waiting();
+        scene
     }
 
     fn handle_event(&mut self, event: Event) -> bool {
@@ -3309,6 +3374,27 @@ impl WindowDelegate for Shell {
             self.app.update(|ctx| {
                 workspace.update(ctx, |workspace, ctx| workspace.set_system_dark(dark, ctx));
             });
+            return self
+                .app
+                .read(|ctx| ctx.has_window_invalidations(self.window_id));
+        }
+
+        // The same for the window's focus: it is about the window rather than
+        // anything in it, and it is half of what looking at a pane means,
+        // which is the workspace's to decide.
+        if let Event::WindowFocused(focused) = event {
+            let workspace = &self.workspace;
+            self.app.update(|ctx| {
+                workspace.update(ctx, |workspace, ctx| {
+                    workspace.set_window_focused(focused, ctx);
+                });
+            });
+            if !focused {
+                let waiting = self.workspace.read(&self.app, |workspace, _| {
+                    crate::plugins::tabs::waiting_count(workspace)
+                });
+                self.urgency.left_with(waiting);
+            }
             return self
                 .app
                 .read(|ctx| ctx.has_window_invalidations(self.window_id));
@@ -3338,7 +3424,6 @@ impl WindowDelegate for Shell {
             self.proxy.request_redraw();
             return;
         }
-        self.follow_the_active_tab_with_the_title();
         self.follow_caret_with_the_input_method();
         self.type_pending_run();
         self.compose_pending_pane();
@@ -3595,6 +3680,34 @@ mod tests {
         );
         assert_eq!(window_title(None, 3, "Crook"), "(3 waiting) Crook");
         assert_eq!(window_title(Some("x"), 0, "Crook"), "x — Crook");
+    }
+
+    #[test]
+    fn a_window_in_front_never_asks_the_desktop_for_a_look() {
+        // Winit ignores a request from a window that has the focus, and the
+        // person is at this one: a pane starting to wait is on the chip.
+        let mut urgency = Urgency::default();
+        assert!(!urgency.asks(1, true));
+        assert!(!urgency.asks(3, true));
+    }
+
+    #[test]
+    fn leaving_with_a_question_on_screen_is_not_asked_about_and_the_next_one_is() {
+        // The person left with the focused pane waiting; the count that now
+        // includes it is what they saw, and a bounce as they switched away
+        // would be the desktop telling them what they were just looking at.
+        let mut urgency = Urgency::default();
+        assert!(!urgency.asks(0, true));
+        urgency.left_with(1);
+        assert!(!urgency.asks(1, false), "the question they left with");
+
+        assert!(urgency.asks(2, false), "a second pane stopped to ask");
+        assert!(!urgency.asks(2, false), "and it asks once, not every frame");
+
+        // A pane that went back to work and then stopped again is a new
+        // question, and asks again.
+        assert!(!urgency.asks(1, false));
+        assert!(urgency.asks(2, false));
     }
 
     #[test]

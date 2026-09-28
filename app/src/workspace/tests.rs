@@ -10876,6 +10876,67 @@ mod shells {
     }
 
     #[test]
+    fn a_program_that_asked_for_focus_reports_hears_the_keyboard_come_and_go() {
+        // xterm's `?1004`, with a pane standing in for xterm's window: the
+        // window going behind another and coming back is out and in for the
+        // pane with the keyboard, and moving the keyboard between two panes
+        // of a window in front is out for one and in for the other. `cat`,
+        // in a line discipline that echoes, shows what each pane was sent,
+        // with the escape spelled `^[` — the grid never holds an ESC.
+        let mut harness = Harness::panel(1);
+        let Some(first) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.dispatch_action(TabAction::Split(Direction::Right));
+        harness.frame();
+        let second = harness.focused_pane_id().expect("the split focused a pane");
+        assert_ne!(first, second);
+
+        // Printed by pieces, so the echo of the typed line is not the marker.
+        for pane in [first, second] {
+            harness.type_into(pane, "printf '\\033[?1004h%s-%s\\n' focus asked; cat\n");
+        }
+        harness.wait_for("the programs never asked for focus reports", |harness| {
+            [first, second]
+                .iter()
+                .all(|pane| harness.terminal_text(*pane).contains("focus-asked"))
+        });
+
+        let window = |harness: &mut Harness, focused| {
+            harness.workspace_update(|workspace, ctx| workspace.set_window_focused(focused, ctx));
+        };
+        window(&mut harness, false);
+        harness.wait_for(
+            "the pane with the keyboard never heard it leave",
+            |harness| harness.terminal_text(second).contains("^[[O"),
+        );
+        window(&mut harness, true);
+        harness.wait_for(
+            "the pane with the keyboard never heard it come back",
+            |harness| harness.terminal_text(second).contains("^[[O^[[I"),
+        );
+
+        harness.dispatch_action(TabAction::FocusPane(first));
+        harness.wait_for("the pane the keyboard left never heard it go", |harness| {
+            harness.terminal_text(second).contains("^[[O^[[I^[[O")
+        });
+        harness.wait_for(
+            "the pane the keyboard reached never heard it arrive",
+            |harness| harness.terminal_text(first).contains("^[[I"),
+        );
+
+        // A pty keeps its order, so a report the first pane was never owed —
+        // the window's leaving and coming back — would have been echoed
+        // ahead of the one it was.
+        let heard = harness.terminal_text(first);
+        assert_eq!(
+            (heard.matches("^[[I").count(), heard.matches("^[[O").count()),
+            (1, 0),
+            "the pane without the keyboard heard about the window: {heard:?}"
+        );
+    }
+
+    #[test]
     fn the_shell_printing_does_not_let_go_of_a_selection() {
         // The one thing that must *not* clear it. Output arriving is exactly
         // when somebody is reading what is already on screen, and a highlight
@@ -15391,6 +15452,58 @@ mod the_bell {
     }
 
     #[test]
+    fn a_bell_in_the_pane_with_the_keyboard_of_a_window_behind_another_asks_for_a_look() {
+        // The keyboard alone is not somebody typing. With the window behind
+        // another application nobody is at the prompt to be interrupted, and
+        // the bell is a program asking for a person who is somewhere else.
+        let mut harness = Harness::new(1);
+        let focused = harness.focused_pane_id().expect("the window has a pane");
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+
+        report(
+            &mut harness,
+            TerminalUpdate::Bell {
+                pane: focused,
+                while_running: false,
+            },
+        );
+
+        assert_eq!(status_of(&harness, focused), Some(AgentStatus::NeedsInput));
+    }
+
+    #[test]
+    fn a_pane_the_strip_moves_to_behind_another_window_is_seen_when_the_window_is() {
+        // The strip can move while nobody is at the window — a plugin's
+        // command, a pane closing under the one with the keyboard. Arriving
+        // there then is arriving where nobody is looking, so the bell stays
+        // until the window is in front again, and then it goes.
+        let mut harness = Harness::new(2);
+        let ringing = background_of(&harness);
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+        report(
+            &mut harness,
+            TerminalUpdate::Bell {
+                pane: ringing,
+                while_running: false,
+            },
+        );
+
+        harness.dispatch_action(TabAction::FocusPane(ringing));
+        assert_eq!(
+            status_of(&harness, ringing),
+            Some(AgentStatus::NeedsInput),
+            "the keyboard reached the pane and nobody saw it"
+        );
+
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(true, ctx));
+        assert_eq!(
+            status_of(&harness, ringing),
+            Some(AgentStatus::Idle),
+            "the window coming back is the look the bell asked for"
+        );
+    }
+
+    #[test]
     fn looking_at_a_pane_is_what_quiets_it() {
         let mut harness = Harness::new(2);
         let ringing = background_of(&harness);
@@ -15517,6 +15630,79 @@ mod the_agent {
 
         report(&mut harness, pane, AgentStatus::NeedsInput, None);
         assert_eq!(AgentStatus::NeedsInput, session_of(&harness, pane).0);
+    }
+
+    #[test]
+    fn an_agent_that_stops_to_ask_in_a_window_behind_another_is_waiting() {
+        // The one-pane person's whole case. Their pane has the keyboard the
+        // entire time they are in another application, so while the pane
+        // with the keyboard counted as looked at, their agent's question
+        // never reached the count or the title — the one thing a window
+        // behind another says to a switcher and a taskbar.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+
+        report(
+            &mut harness,
+            pane,
+            AgentStatus::NeedsInput,
+            Some("port the tab bar"),
+        );
+
+        let (count, title) = harness.workspace.read(&harness.app, |workspace, _| {
+            (
+                crate::plugins::tabs::waiting_count(workspace),
+                crate::window_title_of(workspace, "Crook"),
+            )
+        });
+        assert_eq!(
+            1, count,
+            "the pane with the keyboard is nobody's to look at"
+        );
+        assert!(
+            title.starts_with("(1 waiting)"),
+            "the window's name has to say it: {title}"
+        );
+        assert!(
+            session_of(&harness, pane).1,
+            "and the stop asked for a look, which the person has not given it"
+        );
+    }
+
+    #[test]
+    fn coming_back_to_the_window_is_a_look_and_answers_only_what_a_look_answers() {
+        // The window's focus is the other half of looking, so regaining it is
+        // a glance at the pane with the keyboard: the attention the stop
+        // asked for goes, as a tab switch would take it. The agent's question
+        // stays, since looking answers no question; and so does the person's
+        // own mark, since the strip did not move and nobody arrived anywhere.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        harness.run_command("crook/tabs/mark-waiting");
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+        report(&mut harness, pane, AgentStatus::NeedsInput, None);
+        assert_eq!(
+            (AgentStatus::NeedsInput, true, None),
+            session_of(&harness, pane)
+        );
+        assert!(frame_text(&harness.frame()).contains("1 waiting"));
+
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(true, ctx));
+
+        assert_eq!(
+            (AgentStatus::NeedsInput, false, None),
+            session_of(&harness, pane),
+            "coming back answered the look and nothing else"
+        );
+        assert!(
+            marked(&harness, pane),
+            "coming back to the window is not arriving at the pane"
+        );
+        assert!(
+            !frame_text(&harness.frame()).contains(" waiting"),
+            "the pane being looked at can wait for nobody"
+        );
     }
 
     #[test]
@@ -15987,7 +16173,7 @@ mod the_agent {
         report(&mut harness, third, AgentStatus::NeedsInput, None);
         report(&mut harness, first, AgentStatus::Failed, None);
         let count = harness.workspace.read(&harness.app, |workspace, _| {
-            crate::plugins::tabs::waiting_count(workspace.tabs())
+            crate::plugins::tabs::waiting_count(workspace)
         });
         assert_eq!(2, count);
 

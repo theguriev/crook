@@ -118,6 +118,19 @@ impl Proxy {
         self.send(CrookEvent::SetTitle(title));
     }
 
+    /// Asks the desktop to point at the window: a bounce of the dock icon, an
+    /// urgency hint, a flash of the taskbar button — whichever the platform
+    /// has.
+    ///
+    /// For something in the window that wants a person who is somewhere
+    /// else, so it does nothing while the window has the focus. It is not a
+    /// notification: it says nothing but "this window", and the platform
+    /// decides how. The request is taken back when the window next gains the
+    /// focus, which is the look it asked for; the caller has nothing to undo.
+    pub fn request_attention(&self) {
+        self.send(CrookEvent::RequestAttention);
+    }
+
     /// Says where the text being composed is, so the platform can put an input
     /// method's candidate list beside it rather than in a corner.
     ///
@@ -168,8 +181,10 @@ pub struct Platform {
 /// Everything that reaches the main thread from somewhere else.
 ///
 /// A handful of variants rather than Warp's thirty, because Crook has one
-/// window and no menu bar, no global hotkeys and no notifications. Adding one
-/// is how any future off-thread capability should arrive.
+/// window and no menu bar, no global hotkeys and no notifications — asking
+/// for attention is not one: it names only the window, and the desktop says
+/// it however it says it. Adding one is how any future off-thread capability
+/// should arrive.
 enum CrookEvent {
     /// Poll a foreground task.
     RunTask(ManuallyDrop<Runnable>),
@@ -184,6 +199,8 @@ enum CrookEvent {
     },
     /// Name the window.
     SetTitle(String),
+    /// Ask the desktop to point at the window.
+    RequestAttention,
     /// Leave the event loop.
     Exit,
 }
@@ -227,6 +244,7 @@ pub fn run(
         window: None,
         controls,
         input: InputState::default(),
+        attention_requested: false,
         replay_requested_redraw: false,
         frame_retry: None,
     };
@@ -243,6 +261,10 @@ struct App {
     window: Option<Window>,
     controls: WindowControls,
     input: InputState,
+
+    /// Whether the desktop has been asked to point at the window since it
+    /// last had the focus, so that gaining it can take the request back.
+    attention_requested: bool,
 
     /// Whether the redraw now pending is the one the hover replay itself asked
     /// for. Without it, a delegate that repaints in response to the replay
@@ -342,6 +364,12 @@ impl ApplicationHandler<CrookEvent> for App {
                     window.set_title(&title);
                 }
             }
+            CrookEvent::RequestAttention => {
+                if let Some(window) = self.window.as_mut() {
+                    window.request_attention();
+                    self.attention_requested = true;
+                }
+            }
             CrookEvent::Exit => event_loop.exit(),
         }
     }
@@ -374,6 +402,17 @@ impl ApplicationHandler<CrookEvent> for App {
             WindowEvent::RedrawRequested => {
                 self.redraw(event_loop);
                 return;
+            }
+
+            // The look a request for attention asked for, so the request is
+            // over. Taken back here rather than left to the application,
+            // because only some desktops need taking back — X11 keeps its
+            // urgency hint until somebody removes it — and nothing above this
+            // line should have to know which. Then on to the delegate like
+            // any other focus change.
+            WindowEvent::Focused(true) if self.attention_requested => {
+                self.attention_requested = false;
+                self.with_window(|window| window.withdraw_attention_request());
             }
 
             _ => {}

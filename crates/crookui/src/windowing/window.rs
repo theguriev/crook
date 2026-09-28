@@ -149,6 +149,28 @@ impl Window {
         self.window.set_title(title);
     }
 
+    /// Asks the desktop to point at the window, the way it does for any
+    /// application that wants a look: once, and without taking the keyboard.
+    ///
+    /// Winit's informational kind, whose spelling is the platform's — the
+    /// dock icon bounces once on macOS, the window manager's urgency hint is
+    /// set on X11, an activation request goes to a Wayland compositor that
+    /// takes them, and the taskbar button flashes on Windows. A window that
+    /// already has the focus is not asked about at all.
+    pub(super) fn request_attention(&self) {
+        self.window
+            .request_user_attention(Some(winit::window::UserAttentionType::Informational));
+    }
+
+    /// Takes a request for attention back.
+    ///
+    /// X11's urgency hint stays until it is taken down and Windows keeps
+    /// flashing; macOS and Wayland have nothing to take back, and winit makes
+    /// this nothing there.
+    pub(super) fn withdraw_attention_request(&self) {
+        self.window.request_user_attention(None);
+    }
+
     /// Whether a frame is already built and waiting to be drawn.
     pub(super) fn has_scene(&self) -> bool {
         self.scene.is_some()
