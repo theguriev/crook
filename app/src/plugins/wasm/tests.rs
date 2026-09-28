@@ -1080,6 +1080,48 @@ fn a_name_this_build_has_no_icon_for_draws_nothing() {
     assert_eq!(marks(&known.scene()), [Mark::Icon(Lucide::GitBranch)]);
 }
 
+/// A mark with `rows` rows around it, each holding the next.
+fn a_mark_inside(rows: usize) -> Node {
+    let mark = Node::Icon {
+        name: "git-branch".to_owned(),
+        tone: Tone::Primary,
+    };
+    (0..rows).fold(mark, |inner, _| Node::Row(vec![inner]))
+}
+
+#[test]
+fn a_tree_is_drawn_as_deep_as_a_guest_can_send_one_and_no_deeper() {
+    // Drawing recurses once per node, as decoding does, and a tree built on
+    // this side of the wire has no decode in front of it to refuse it. So the
+    // renderer stops too — and where it stops has to be past anything a guest
+    // can send, or it would be cutting short a tree a plugin was allowed to
+    // draw. The deepest a guest can send is found by asking the decoder, rather
+    // than worked out here, so the two limits cannot drift apart unnoticed.
+    let sendable = (0..)
+        .take_while(|&rows| {
+            let bytes = to_bytes(&a_mark_inside(rows)).expect("a tree should encode");
+            crook_plugin_api::from_bytes::<Node>(&bytes).is_ok()
+        })
+        .last()
+        .expect("a mark on its own decodes");
+    let mut sent = Frame::new(a_mark_inside(sendable));
+    assert_eq!(
+        marks(&sent.scene()),
+        [Mark::Icon(Lucide::GitBranch)],
+        "a tree {sendable} rows deep decodes and was not drawn to the bottom"
+    );
+
+    // And a tree built here stops where the renderer's limit says: the mark
+    // is the deepest node of each, drawn at the limit and not past it.
+    let mut deepest = Frame::new(a_mark_inside(render::DEEPEST - 1));
+    assert_eq!(marks(&deepest.scene()), [Mark::Icon(Lucide::GitBranch)]);
+    let mut deeper = Frame::new(a_mark_inside(render::DEEPEST));
+    assert!(
+        marks(&deeper.scene()).is_empty(),
+        "a node past the limit was drawn"
+    );
+}
+
 #[test]
 fn a_stale_reading_greys_the_face_and_leaves_the_face_a_face() {
     // `Muted` is what a plugin says when the figure beside the mark is not
