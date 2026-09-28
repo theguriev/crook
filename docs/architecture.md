@@ -823,9 +823,13 @@ window is always the *last* one of a burst, and without it the final screenful o
 would sit invisible until the shell next said something.
 
 The emulator's mutex is never held across a frame. The reader takes it to parse, and again to
-build a snapshot, and publishes the `Arc` into a slot of its own; painting clones that `Arc`
-and walks owned data. Layout — which asks "did the grid move?" on every single frame —
-answers from an atomic before it ever asks for the lock.
+build a snapshot, and publishes the `Arc` into a slot of its own before it lets go; painting
+clones that `Arc` and walks owned data. The UI thread publishes too, after a keystroke or a
+resize, and both writers keep the mutex until their snapshot is in the slot: one that
+installed it after letting go could be overtaken in the gap and put an older snapshot back
+beside a newer block list, which painted a finished command twice. Layout — which asks "did
+the grid move?" on every single frame — answers from an atomic before it ever asks for the
+lock.
 
 ### Blocks: the output is a list of commands
 

@@ -46,10 +46,13 @@
 //!
 //! One mutex per terminal, and **it is never held across a frame**. The reader
 //! takes it to feed bytes, and again to build a snapshot, and publishes the
-//! `Arc` into a slot of its own; painting clones that `Arc` and walks owned
-//! data. Layout takes the lock only when the computed grid actually changed,
-//! which it establishes first with an atomic — so a window being dragged does
-//! not contend with a shell that is printing.
+//! `Arc` into a slot of its own before letting go; painting clones that `Arc`
+//! and walks owned data. The UI thread publishes too, after a keystroke or a
+//! resize, and doing it under the same lock is what stops either writer from
+//! putting an older snapshot back over the other's newer one — see
+//! `Shared::latest`. Layout takes the lock only when the computed grid
+//! actually changed, which it establishes first with an atomic — so a window
+//! being dragged does not contend with a shell that is printing.
 //!
 //! # What a closed pane costs
 //!
@@ -1391,9 +1394,11 @@ impl TerminalHandle {
         let outcome = work(&mut terminal);
         let snapshot = terminal.snapshot();
         self.0.sync_blocks(&terminal);
-        drop(terminal);
-
+        // Installed before the terminal is let go, never after: the reader
+        // could otherwise publish a newer snapshot in between and have this
+        // older one put back over it. See `Shared::latest` for the lock order.
         *self.0.latest.lock().unwrap_or_else(PoisonError::into_inner) = snapshot;
+        drop(terminal);
         outcome
     }
 }
@@ -1415,6 +1420,24 @@ struct Shared {
 
     /// The most recent snapshot the reader built, so painting never waits on
     /// parsing.
+    ///
+    /// **Written only while `terminal` is locked**, by the same acquisition
+    /// that built the snapshot and synced the block list beside it. There are
+    /// two writers, the reader's `publish` and the UI thread's
+    /// [`TerminalHandle::drive`], and a writer that installed its snapshot
+    /// after letting go of the terminal could be overtaken in that gap: the
+    /// other one published a newer snapshot and block list, and the first then
+    /// put its older snapshot back beside the newer list. A command that
+    /// finished during a resize was painted twice, as its block and again in
+    /// the live viewport, and its tab stayed labelled running until the next
+    /// key press.
+    ///
+    /// So the lock order is `terminal`, then this, and it cannot deadlock
+    /// because nothing takes the two the other way round. [`Self::snapshot`] is
+    /// the one reader, and it holds this slot for a clone and takes nothing
+    /// else. Nothing is locked while it is held apart from `terminal`, either:
+    /// [`Self::sync_blocks`] has let go of the block list before this is taken,
+    /// and the snapshot it replaces is plain data whose drop takes no lock.
     latest: Mutex<Arc<Snapshot>>,
 
     /// The finished blocks, rebuilt beside every snapshot and for the same
@@ -1737,9 +1760,12 @@ impl Shared {
         let snapshot = terminal.snapshot();
         let events = terminal.take_events();
         self.sync_blocks(&terminal);
+        // Under the terminal's lock for the same reason `TerminalHandle::drive`
+        // is: a keystroke landing in the gap would otherwise be overwritten by
+        // this older snapshot. See `latest` for the lock order.
+        *self.latest.lock().unwrap_or_else(PoisonError::into_inner) = snapshot;
         drop(terminal);
 
-        *self.latest.lock().unwrap_or_else(PoisonError::into_inner) = snapshot;
         self.collect(events);
         self.wake.raise();
     }
