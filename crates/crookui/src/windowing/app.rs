@@ -36,6 +36,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy}
 use crate::rendering::init_wgpu_instance;
 
 use super::chrome::{RESIZE_GRAB, WindowChrome, WindowControls, edge_at};
+use super::dock;
 use super::event::InputState;
 use super::window::Window;
 
@@ -144,6 +145,25 @@ impl Proxy {
         self.send(CrookEvent::RequestAttention);
     }
 
+    /// Puts `waiting` on the application's dock icon as a badge, or takes
+    /// the badge off at zero.
+    ///
+    /// The count of panes waiting for a person, the number the window's
+    /// title starts with, somewhere it is seen with the window out of sight.
+    /// Unlike a notification it needs no bundle and no permission, so a
+    /// binary started from a shell shows it as surely as Crook.app does.
+    ///
+    /// macOS only, and nothing is sent anywhere else: a Linux desktop has no
+    /// badge its docks agree on, and a Windows taskbar's overlay icon is a
+    /// picture rather than a number. Sending the same count twice is
+    /// harmless; a caller that sends one only when it changes saves the
+    /// dock a redraw.
+    pub fn set_badge(&self, waiting: usize) {
+        if cfg!(target_os = "macos") {
+            self.send(CrookEvent::SetBadge(waiting));
+        }
+    }
+
     /// Says where the text being composed is, so the platform can put an input
     /// method's candidate list beside it rather than in a corner.
     ///
@@ -196,8 +216,9 @@ pub struct Platform {
 /// A handful of variants rather than Warp's thirty, because Crook has one
 /// window and no menu bar, no global hotkeys and no notifications — asking
 /// for attention is not one: it names only the window, and the desktop says
-/// it however it says it. Adding one is how any future off-thread capability
-/// should arrive.
+/// it however it says it; nor is the dock's badge, a number on the icon. The
+/// application posts its notifications itself. Adding one is how any future
+/// off-thread capability should arrive.
 enum CrookEvent {
     /// Poll a foreground task.
     RunTask(ManuallyDrop<Runnable>),
@@ -214,6 +235,8 @@ enum CrookEvent {
     SetTitle(String),
     /// Ask the desktop to point at the window.
     RequestAttention,
+    /// Put this many waiting panes on the dock icon's badge.
+    SetBadge(usize),
     /// Leave the event loop.
     Exit,
 }
@@ -388,6 +411,7 @@ impl ApplicationHandler<CrookEvent> for App {
                     self.attention_requested = true;
                 }
             }
+            CrookEvent::SetBadge(waiting) => dock::set_badge(dock::label(waiting).as_deref()),
             CrookEvent::Exit => event_loop.exit(),
         }
     }

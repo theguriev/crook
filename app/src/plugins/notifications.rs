@@ -15,7 +15,7 @@ use crookui_core::prelude::*;
 
 use crook_plugin::{Manifest, PluginId, Tier};
 
-use crate::notify::{LONG_COMMAND, Occasion, posts_here};
+use crate::notify::{LONG_COMMAND, Occasion, Service};
 use crate::plugin::{BuildError, Host, Plugin};
 use crate::workspace::settings_page::keyed;
 use crate::workspace::settings_page::search::Words;
@@ -68,15 +68,17 @@ fn manifest() -> &'static Manifest {
 
 /// The page: a switch per occasion, and what they do.
 ///
-/// On a platform this build does not post on, the switches are drawn without
-/// a handler — a control with nothing to do is inert, not live and ignored —
-/// and the note says why, so that a person on macOS looking for why nothing
-/// arrived finds the answer where they would look for the setting.
+/// Where this build posts nothing, the switches are drawn without a handler —
+/// a control with nothing to do is inert, not live and ignored — and the note
+/// says why, so that a person on Windows, or running a Mac binary outside
+/// Crook.app, who is looking for why nothing arrived finds the answer where
+/// they would look for the setting.
 fn notifications(workspace: &Workspace, _: &AppContext) -> Vec<Category> {
     let ui = workspace.fonts().ui;
     let state = workspace.settings_page();
     let general = workspace.general();
-    let live = posts_here();
+    let service = Service::here();
+    let live = service.posts();
 
     let switch = |occasion: Occasion, words: Words| {
         widgets::row(
@@ -151,28 +153,41 @@ fn notifications(workspace: &Workspace, _: &AppContext) -> Vec<Category> {
             ]),
     );
 
-    let note = if live {
-        widgets::note(
-            "Only while the Crook window is behind another one: a pane in front of you \
-             already has your attention. At most one for each pane every half minute, \
-             however often its agent stops, unless you have looked at the pane since. The \
-             title names Crook and the tab, and the text is the agent's question when it \
-             asked one. It goes to your desktop's notification \
-             service through notify-send, on this machine and nowhere else; with no \
-             notify-send installed, nothing is shown.",
-            ui,
-        )
-    } else {
-        widgets::note(
-            "Crook posts desktop notifications on Linux only for now. Here the window's \
-             title counts the panes waiting for you, and the dock or the taskbar points at \
-             the window when one more starts.",
-            ui,
-        )
-    };
-
     vec![
         widgets::category("Notify me", vec![needs_input, failed, long_command]),
-        widgets::category("How it works", vec![note]),
+        widgets::category(
+            "How it works",
+            vec![widgets::note(&how_it_works(service), ui)],
+        ),
     ]
+}
+
+/// The page's note: when a notification is posted and where it goes through
+/// `service` — or, where nothing is posted, what points at the window instead.
+fn how_it_works(service: Service) -> String {
+    const WHEN: &str = "Only while the Crook window is behind another one: a pane in front of \
+                        you already has your attention. At most one for each pane every half \
+                        minute, however often its agent stops, unless you have looked at the \
+                        pane since. The title names Crook and the tab, and the text is the \
+                        agent's question when it asked one.";
+    match service {
+        Service::NotifySend => format!(
+            "{WHEN} It goes to your desktop's notification service through notify-send, on \
+             this machine and nowhere else; with no notify-send installed, nothing is shown."
+        ),
+        Service::NotificationCenter => format!(
+            "{WHEN} It goes to Notification Center, on this Mac and nowhere else. macOS asks \
+             whether Crook may post the first time it has something to post, and System \
+             Settings → Notifications → Crook is where that answer changes."
+        ),
+        Service::OutsideTheApp => "This copy of Crook is not running from Crook.app, and \
+             macOS posts notifications only for an app, so it posts none. The window's title \
+             and the dock icon's badge count the panes waiting for you, and the icon bounces \
+             when one more starts."
+            .to_owned(),
+        Service::Nowhere => "Crook posts desktop notifications on Linux and macOS only for \
+             now. Here the window's title counts the panes waiting for you, and the taskbar \
+             points at the window when one more starts."
+            .to_owned(),
+    }
 }

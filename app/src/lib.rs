@@ -2208,6 +2208,9 @@ trait Desktop {
     fn set_title(&self, title: String);
     /// Asks the desktop to point at the window.
     fn request_attention(&self);
+    /// Puts the count of waiting panes on the application's icon, or takes
+    /// it off at zero.
+    fn set_badge(&self, waiting: usize);
 }
 
 impl Desktop for Proxy {
@@ -2218,16 +2221,23 @@ impl Desktop for Proxy {
     fn request_attention(&self) {
         Proxy::request_attention(self);
     }
+
+    fn set_badge(&self, waiting: usize) {
+        Proxy::set_badge(self, waiting);
+    }
 }
 
 /// What the window tells the desktop about the workspace: its name, with the
-/// count of waiting panes in front, and when to point at it.
+/// count of waiting panes in front, the same count on the application's icon,
+/// and when to point at it.
 ///
 /// The name is the active tab's, the way every terminal names its window
 /// after the shell's title and Warp after the tab's, because it is what the
 /// taskbar, the dock and the switcher show: with an agent per tab, "bisect
 /// the flaky test — Crook" is the difference between finding the right Crook
-/// and opening each in turn.
+/// and opening each in turn. The badge is that count where a minimised
+/// window still shows it — the dock icon, on macOS — and it is the title's
+/// count exactly, so the two never disagree about who is waiting.
 ///
 /// Followed on every change to the window's views — the same invalidation
 /// that asks for a frame — rather than on the frame, because the window
@@ -2255,6 +2265,10 @@ struct Beacon<D> {
     title: Option<String>,
     /// When to ask the desktop to point at the window.
     urgency: Urgency,
+    /// The count the icon's badge was last given, for the same reason as
+    /// `title`: the dock redraws the tile for every one. Zero until then,
+    /// which is the badge an application opens with — none.
+    badge: usize,
     desktop: D,
 }
 
@@ -2264,13 +2278,14 @@ impl<D: Desktop> Beacon<D> {
             base_title,
             title: None,
             urgency: Urgency::default(),
+            badge: 0,
             desktop,
         }
     }
 
-    /// Says whatever the workspace as it now stands changes: a new name, and
-    /// a request for a look when one more pane has started waiting while the
-    /// window is behind something else.
+    /// Says whatever the workspace as it now stands changes: a new name, a
+    /// new count on the badge, and a request for a look when one more pane
+    /// has started waiting while the window is behind something else.
     fn follow(&mut self, workspace: &Workspace) {
         let title = window_title_of(workspace, &self.base_title);
         if self.title.as_deref() != Some(title.as_str()) {
@@ -2279,6 +2294,10 @@ impl<D: Desktop> Beacon<D> {
         }
 
         let waiting = crate::plugins::tabs::waiting_count(workspace);
+        if self.badge != waiting {
+            self.desktop.set_badge(waiting);
+            self.badge = waiting;
+        }
         if self.urgency.asks(waiting, workspace.is_window_focused()) {
             self.desktop.request_attention();
         }

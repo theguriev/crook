@@ -24,19 +24,32 @@
 //! rule the plugins directory follows: a window that found a real notifier
 //! for itself would be one every test posted from.
 //!
-//! # Linux only, in this build
+//! # Linux, and macOS from Crook.app
 //!
-//! There a notification goes to the desktop's notification service over the
-//! session bus, by way of `notify-send` — see [`linux`]. macOS delivers
-//! notifications only to a signed application bundle, after asking the
-//! person, and Windows has never opened a window; both post nothing
-//! ([`Silent`]) until each is its own piece of work, and the Notifications
-//! page says so rather than offering switches that do nothing.
+//! Which [`Service`] a notification goes through is the process's to answer.
+//! On Linux it goes to the desktop's notification service over the session
+//! bus, by way of `notify-send` — see [`linux`]. On macOS it goes to
+//! Notification Center — see [`macos`] — but only from Crook.app: macOS
+//! delivers notifications to an application bundle and to nothing else, so
+//! the binary `script/install` puts on `PATH`, and `cargo run`'s, post none
+//! and have the dock's bounce and badge instead. Windows posts nothing
+//! ([`Silent`]) until it is its own piece of work. Where nothing is posted
+//! the Notifications page says so rather than offering switches that do
+//! nothing.
 //!
 //! Nothing here reaches a network. The session bus is a socket on this
-//! machine, and what crosses it is the tab's name and the agent's question.
+//! machine, Notification Center a daemon on it, and what crosses either is
+//! the tab's name and the agent's question.
 //!
 //! # A click does not bring the pane forward
+//!
+//! On macOS a click brings Crook forward, which macOS does for the
+//! application a banner came from without being asked, and nothing more:
+//! taking the pane there too needs a delegate for the center, answering on
+//! a queue of the system's, and a way to hand the pane it names back through
+//! the event loop to a workspace that has none yet. That is its own piece of
+//! work. Until it is, the title names the tab, as on Linux, and `cmd-j` is
+//! one key away.
 //!
 //! `notify-send` hears a click only with `--action`, and `--action` implies
 //! `--wait`: a process held open per notification for as long as the
@@ -52,6 +65,7 @@
 
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use crookui_core::executor::Background;
@@ -59,6 +73,7 @@ use crookui_core::executor::Background;
 use crate::tab::{AgentSession, AgentStatus, Attention, PaneId, StatusSource};
 
 pub mod linux;
+pub mod macos;
 
 #[cfg(test)]
 mod tests;
@@ -281,24 +296,92 @@ impl Notifier for Silent {
     fn post(&self, _: Notice, _: &Background) {}
 }
 
-/// Whether this build posts notifications on the platform it is running on.
+/// What a notification goes through, on the machine a process is running on.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Service {
+    /// A Linux desktop's notification service, by way of `notify-send`.
+    NotifySend,
+    /// macOS's Notification Center, from Crook.app.
+    NotificationCenter,
+    /// macOS, from a binary that is not inside an application bundle, which
+    /// macOS delivers no notification to. The dock bounces and counts
+    /// instead.
+    OutsideTheApp,
+    /// Nowhere: Windows, and any other system this builds on.
+    Nowhere,
+}
+
+impl Service {
+    /// The service this process posts through.
+    ///
+    /// Asked once: the answer is the process's own — which system, and
+    /// whether it was started from inside an application bundle — and the
+    /// Notifications page asks on every frame it draws.
+    pub fn here() -> Self {
+        static HERE: OnceLock<Service> = OnceLock::new();
+        *HERE.get_or_init(|| Self::of(std::env::consts::OS, macos::bundle_identifier().as_deref()))
+    }
+
+    /// The service a process on `os` posts through, when its main bundle
+    /// has `bundle_identifier` — which is `None` for a binary outside one.
+    ///
+    /// The identifier and not the bundle, because it is what Notification
+    /// Center knows an application by: its permission, its settings and its
+    /// banners are all filed under it, and one that is empty files nothing.
+    pub fn of(os: &str, bundle_identifier: Option<&str>) -> Self {
+        let identified = bundle_identifier.is_some_and(|identifier| !identifier.trim().is_empty());
+        match os {
+            "linux" => Self::NotifySend,
+            "macos" if identified => Self::NotificationCenter,
+            "macos" => Self::OutsideTheApp,
+            _ => Self::Nowhere,
+        }
+    }
+
+    /// Whether anything is posted through it.
+    pub fn posts(self) -> bool {
+        match self {
+            Self::NotifySend | Self::NotificationCenter => true,
+            Self::OutsideTheApp | Self::Nowhere => false,
+        }
+    }
+}
+
+/// Whether this build posts notifications where it is running.
 ///
 /// What the Notifications page asks before it offers a switch: a switch that
 /// can change nothing here is drawn without a handler, as every control with
 /// nothing to do is.
 pub fn posts_here() -> bool {
-    cfg!(target_os = "linux")
+    Service::here().posts()
 }
 
 /// The notifier for the desktop this is running on.
 ///
-/// Asked at runtime rather than compiled out, so that the Linux half is built
-/// and its tests run on every platform's CI: what it does before the spawn is
-/// where the mistakes are, and none of it is Linux's.
+/// Asked at runtime rather than compiled out where it can be, so that the
+/// Linux half is built and its tests run on every platform's CI: what it
+/// does before the spawn is where the mistakes are, and none of it is
+/// Linux's. The macOS half is compiled on macOS alone, because the framework
+/// it calls is only there.
 pub fn for_this_desktop() -> Rc<dyn Notifier> {
-    if posts_here() {
-        Rc::new(linux::NotifySend::new())
-    } else {
-        Rc::new(Silent)
+    match Service::here() {
+        Service::NotifySend => Rc::new(linux::NotifySend::new()),
+        #[cfg(target_os = "macos")]
+        Service::NotificationCenter => Rc::new(macos::NotificationCenter::new()),
+        // Never the answer off macOS, where there is no bundle to ask about.
+        #[cfg(not(target_os = "macos"))]
+        Service::NotificationCenter => Rc::new(Silent),
+        Service::OutsideTheApp => {
+            // Once, since this is asked once for the one window: it is how
+            // every copy installed from the tarball runs, so it is news in
+            // the log and not a warning.
+            log::info!(
+                "this Crook is not running from Crook.app, and macOS delivers notifications \
+                 only to an application, so it posts none; the dock icon bounces and counts \
+                 the waiting panes instead"
+            );
+            Rc::new(Silent)
+        }
+        Service::Nowhere => Rc::new(Silent),
     }
 }

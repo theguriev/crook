@@ -1190,11 +1190,14 @@ the window they are for may get no frames: a Wayland compositor sends no frame c
 surface it is not showing and winit holds every redraw back until that callback comes, and
 wgpu refuses to present to an occluded window on macOS. That covers the window's opening
 too: registering the callback is itself an update, and its flush runs the callback for
-everything the window opened with, since no frame has taken any of it yet.
+everything the window opened with, since no frame has taken any of it yet. On macOS `Beacon`
+also puts the title's count on the dock icon as its badge when the count moves
+(`Proxy::set_badge`, the dock tile's `badgeLabel` in `crookui::windowing::dock`, none at zero),
+which needs no bundle, so a binary outside Crook.app shows it too.
 
-**And in words, on Linux.** When a pane's row turns to needs-input while the window is behind
-another one — its agent asking, its agent saying it is done while nobody is looking, or a bell
-in a pane with nothing else to say, which is how Codex asks in a terminal it does not
+**And in words, on Linux and macOS.** When a pane's row turns to needs-input while the window
+is behind another one — its agent asking, its agent saying it is done while nobody is looking,
+or a bell in a pane with nothing else to say, which is how Codex asks in a terminal it does not
 recognise — `Workspace::tell_the_desktop` posts a desktop
 notification: `Crook — <the pane's name>`, the name its row shows (`row_content::row_name`, so
 a shell at a prompt is its directory and not `agent 1`), with the agent's question on one line
@@ -1223,9 +1226,13 @@ machine without `notify-send` is one warning and then nothing is started again. 
 click: `--action` implies `--wait`, one process held for as long as each notification lives,
 and a click heard could switch the pane but not bring the window forward — winit's
 `focus_window` does nothing on Wayland, with no way to hand it the activation token a server
-sends. macOS, which delivers only to a signed bundle after asking, and Windows post nothing
-yet; the page says so and its switches have no handler there. The session bus is a socket on
-this machine, so nothing of this reaches a network.
+sends. On macOS it is `notify::macos::NotificationCenter`, `UNUserNotificationCenter` through
+the objc2 bindings, asking leave with each post — macOS prompts the first time and answers from
+the setting after — and made only for a process with a bundle identifier
+(`notify::Service::of`), because asking for the center without one throws; a click brings
+Crook forward and not the pane. A binary outside Crook.app and Windows post nothing; the page
+says so and its switches have no handler there. The session bus is a socket on this machine
+and Notification Center a daemon on it, so nothing of this reaches a network.
 
 What is deliberately not here is a plugin. `docs/plugins.md` planned this seam as an `Agent`
 service a plugin provides, and that is still the right shape for anything that *drives* an

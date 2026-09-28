@@ -306,16 +306,19 @@ Nineteen features, and the page that configures them:
   behind something else, Crook asks the desktop to point at it: the dock icon bounces once on
   macOS, the urgency hint goes up on X11, an activation request goes to a Wayland compositor
   that takes them and the taskbar button flashes on Windows — a request for a look, not a
-  notification, and it is taken back when the window comes to the front. On Linux a pane whose
-  row turns amber while the window is behind something else — its agent stops to ask or says it
-  is done, or a program rings the bell — also posts a desktop notification, titled
-  `Crook — <tab>` with the agent's question under it, at most once every thirty seconds for a
-  pane nobody has come back to, through `notify-send` on the session bus and nowhere else; the
+  notification, and it is taken back when the window comes to the front. On Linux, and on macOS
+  from Crook.app, a pane whose row turns amber while the window is behind something else — its
+  agent stops to ask or says it is done, or a program rings the bell — also posts a desktop
+  notification, titled `Crook — <tab>` with the agent's question under it, at most once every
+  thirty seconds for a pane nobody has come back to, through `notify-send` on the session bus or
+  a Mac's Notification Center (which asks you once, with the first) and nowhere else; the
   **Notifications** settings page turns it off, and turns on the same for an agent that failed
-  or a command that ran ten seconds or more. A click on one does not bring the pane forward,
-  and macOS and Windows post none yet. A program that turns on focus reporting (`?1004`) is
-  told `CSI I` and `CSI O` as the keyboard reaches its pane and leaves it, the window's own
-  focus included, so an agent can tell whether anybody is watching.
+  or a command that ran ten seconds or more. A click on one does not bring the pane forward.
+  Windows posts none yet, and nor does a Mac binary outside Crook.app, since macOS delivers only
+  to an app; on macOS the dock icon also carries the waiting count as a badge, from any binary.
+  A program that turns on focus reporting (`?1004`) is told `CSI I` and `CSI O` as the keyboard
+  reaches its pane and leaves it, the window's own focus included, so an agent can tell whether
+  anybody is watching.
 - **A shell in every pane.** A real pseudo-terminal and a real xterm-compatible emulator:
   colour, bold and italic faces, underline and strikeout, the alternate screen, ten thousand
   lines of scrollback, `SIGWINCH` on resize, and titles and working directories the shell
