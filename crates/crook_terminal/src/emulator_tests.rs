@@ -1174,12 +1174,24 @@ fn test_a_notification_and_a_report_keep_their_order_in_one_read() {
     // them over in the order they were written, as one read per sequence
     // does, or the same bytes settle differently depending on where a pty
     // split them.
+    //
+    // Two reports with a notification between them are two reports, not the
+    // last of them: kept in one slot, `needs-input` and `running` around a
+    // notification went out as the `running` alone, which from `running` is
+    // no change at all, and a `running` repeated after one went out behind
+    // the notification it was written before.
     let running = b"\x1b]6340;running\x07".as_slice();
+    let needs_input = b"\x1b]6340;needs-input\x07".as_slice();
+    let idle = b"\x1b]6340;idle\x07".as_slice();
     let done = b"\x1b]9;done\x07".as_slice();
+    // Ended by ST, the watcher stops on its ESC, and the `\` is the next
+    // piece's first byte.
+    let done_st = b"\x1b]9;done\x1b\\".as_slice();
     let end = b"\x1b]133;D;0\x07".as_slice();
-    let started = || {
+    let started = |from: &[u8]| {
         let mut emulator = emulator();
         emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07claude\r\n\x1b]133;C\x07");
+        emulator.advance(from);
         emulator.take_events();
         emulator
     };
@@ -1197,16 +1209,24 @@ fn test_a_notification_and_a_report_keep_their_order_in_one_read() {
             .collect()
     };
 
-    for sequences in [
-        [done, running].as_slice(),
-        &[running, done],
-        &[done, end],
-        &[running, done, end],
-        &[done, running, end],
-        &[running, end, done],
+    for (from, sequences) in [
+        (idle, [done, running].as_slice()),
+        (idle, &[running, done]),
+        (idle, &[done, end]),
+        (idle, &[running, done, end]),
+        (idle, &[done, running, end]),
+        (idle, &[running, end, done]),
+        (idle, &[running, done, running]),
+        (idle, &[running, done, idle]),
+        (idle, &[running, done, running, end]),
+        (running, &[idle, done, running]),
+        (running, &[needs_input, done, running]),
+        (running, &[needs_input, done, done, running]),
+        (running, &[done, needs_input, done, running]),
+        (running, &[needs_input, done_st, running]),
     ] {
-        let mut split = started();
-        let mut whole = started();
+        let mut split = started(from);
+        let mut whole = started(from);
         for sequence in sequences {
             split.advance(sequence);
         }
@@ -1215,11 +1235,12 @@ fn test_a_notification_and_a_report_keep_their_order_in_one_read() {
         assert_eq!(
             events(&mut split),
             events(&mut whole),
-            "{:?} in one read",
+            "{:?} in one read, from {:?}",
             sequences
                 .iter()
                 .map(|sequence| String::from_utf8_lossy(sequence))
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
+            String::from_utf8_lossy(from),
         );
     }
 }
