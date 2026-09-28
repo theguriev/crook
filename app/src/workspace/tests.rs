@@ -17997,7 +17997,7 @@ mod sandboxed {
     use crate::picture::tests::{header_only, icon_png, preview_png};
     use crate::plugins::wasm::tests::{
         BURST, EVERY_ANSWER, Scratch, install, manifest, wasm, wasm_asking, wasm_asking_where,
-        wasm_at, wasm_carrying, wasm_saying,
+        wasm_at, wasm_carrying, wasm_running, wasm_saying,
     };
     use crate::workspace::settings_page::widgets;
     use crook_plugin_api::Capability;
@@ -19925,6 +19925,52 @@ mod sandboxed {
     }
 
     #[test]
+    fn two_plugins_that_run_each_other_hand_the_window_back() {
+        // The same loop through two plugins. Each is allowed to run the
+        // other's action and runs it from its own, so one press is a chain
+        // that never ends — and neither plugin ever has anything waiting when
+        // its own queue is looked at, because what it asked for is served at
+        // once and what that raised is waiting on the other one. A turn that
+        // ended whenever a plugin's queue was found empty never ended here.
+        let (said, heard) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let scratch = Scratch::new("run-each-other");
+            for (me, other) in [("ping", "pong"), ("pong", "ping")] {
+                install(
+                    scratch.path(),
+                    &format!("eugen.{me}"),
+                    &wasm_running(&format!("eugen/{me}"), &format!("eugen/{other}/poke")),
+                );
+            }
+            let mut opening = opening(&scratch, Default::default(), Default::default());
+            opening
+                .settings
+                .set_granted("eugen/ping", vec![String::from("run:eugen/pong/poke")]);
+            opening
+                .settings
+                .set_granted("eugen/pong", vec![String::from("run:eugen/ping/poke")]);
+            let mut harness = Harness::with_opening(1, opening);
+
+            harness.run_command("eugen/ping/poke");
+            let _ = said.send("pressed");
+            if falls_quiet(&mut harness, std::time::Duration::from_secs(20)) {
+                let _ = said.send("quiet");
+            }
+        });
+
+        assert_eq!(
+            heard.recv_timeout(std::time::Duration::from_secs(20)),
+            Ok("pressed"),
+            "the window never came back from a press that two plugins pass back and forth"
+        );
+        assert_eq!(
+            heard.recv_timeout(std::time::Duration::from_secs(30)),
+            Ok("quiet"),
+            "two plugins running each other went on being served"
+        );
+    }
+
+    #[test]
     fn a_burst_bigger_than_a_turn_still_gets_every_answer() {
         // The other half, and why the bound is a turn and not a ceiling: what
         // one turn has no room for waits for the next rather than being
@@ -19932,7 +19978,9 @@ mod sandboxed {
         // for the rest of the session. Three turns' worth — each answer in the
         // first asking twice, so the second turn is handed half of what is
         // waiting and has to leave the rest — lands every answer, and none of
-        // them twice, which the guest would draw instead.
+        // them twice, which the guest would draw instead. The sixty-four left
+        // after the first turn are also as many as a plugin may have waiting
+        // at once, so this burst is at that ceiling and not past it.
         let scratch = Scratch::new("asks-a-burst");
         let mut harness =
             asking_where(&scratch, &wasm_asking_where("eugen/probe", BURST, 2, BURST));

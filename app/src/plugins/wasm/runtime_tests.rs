@@ -243,54 +243,60 @@ fn allowed_to_ask_where() -> (App, Arc<LocalQueue>, ModelHandle<Runtime>) {
     (app, queue, runtime)
 }
 
-/// Asks where the pane is once per ticket, as a guest's calls would.
-fn ask_where(app: &mut App, runtime: &ModelHandle<Runtime>, tickets: std::ops::Range<u32>) {
+/// Asks where the pane is once per ticket, as a guest's calls would, on
+/// `gesture`'s behalf.
+fn ask_where(
+    app: &mut App,
+    runtime: &ModelHandle<Runtime>,
+    tickets: std::ops::Range<u32>,
+    gesture: Gesture,
+) {
     app.update(|ctx| {
         runtime.update(ctx, |runtime, ctx| {
             for ticket in tickets {
-                runtime.start(ticket, Request::Where, Gesture::None, ctx);
+                runtime.start(ticket, Request::Where, gesture, ctx);
             }
         })
     });
 }
 
-/// The tickets the observer would be handed, one list per turn, until nothing
-/// is left waiting.
-///
-/// A turn is everything `deeds` hands out before it hands out nothing, which
-/// is what the observer's loop takes; the next one starts when the pause the
-/// last one booked is over and its task has run.
-fn served_in_turns(
-    app: &mut App,
-    queue: &LocalQueue,
-    runtime: &ModelHandle<Runtime>,
-) -> Vec<Vec<u32>> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+/// The tickets one of the window's turns hands the observer: everything
+/// `deeds` hands out, inside one update, before it hands out nothing — which
+/// is what the observer's loop takes.
+fn one_turn(app: &mut App, runtime: &ModelHandle<Runtime>) -> Vec<u32> {
+    app.update(|ctx| {
+        runtime.update(ctx, |runtime, ctx| {
+            let mut turn = Vec::new();
+            loop {
+                let deeds = runtime.deeds(ctx);
+                if deeds.is_empty() {
+                    return turn;
+                }
+                turn.extend(deeds.into_iter().map(|(ticket, _)| ticket));
+            }
+        })
+    })
+}
+
+/// Turn after turn, until one hands out nothing.
+fn served_in_turns(app: &mut App, runtime: &ModelHandle<Runtime>) -> Vec<Vec<u32>> {
     let mut turns = Vec::new();
     loop {
-        queue.run_until_parked();
-        let mut turn = Vec::new();
-        loop {
-            let deeds = app.update(|ctx| runtime.update(ctx, |runtime, ctx| runtime.deeds(ctx)));
-            if deeds.is_empty() {
-                break;
-            }
-            turn.extend(deeds.into_iter().map(|(ticket, _)| ticket));
-        }
-        if !turn.is_empty() {
-            turns.push(turn);
-        }
-
-        let waiting = runtime.read(app, |runtime, _| runtime.deeds.len());
-        if waiting == 0 {
+        let turn = one_turn(app, runtime);
+        if turn.is_empty() {
             return turns;
         }
+        turns.push(turn);
         assert!(
-            std::time::Instant::now() < deadline,
-            "{waiting} deeds were left waiting and no turn came for them"
+            turns.len() < 100,
+            "the turns never ran out of things to hand out"
         );
-        std::thread::sleep(Duration::from_millis(5));
     }
+}
+
+/// How many deeds are waiting to be served.
+fn waiting(app: &App, runtime: &ModelHandle<Runtime>) -> usize {
+    runtime.read(app, |runtime, _| runtime.deeds.len())
 }
 
 #[test]
@@ -298,40 +304,82 @@ fn deeds_past_a_turn_wait_for_the_next_and_none_is_lost_or_served_twice() {
     // What the budget must not do. `deeds` drains, and a deed taken out and
     // not served is a ticket a guest waits on for the rest of the session —
     // so what one turn has no room for stays where it was, in the order it
-    // was asked, and the next turn starts with it.
-    let (mut app, queue, runtime) = allowed_to_ask_where();
-    let asked = 3 * DEEDS_PER_TURN + 5;
-    ask_where(&mut app, &runtime, 1..asked + 1);
+    // was asked, and the next turn starts with it, ahead of what the answers
+    // in between asked for.
+    let (mut app, _queue, runtime) = allowed_to_ask_where();
+    let full = DEEDS_PER_TURN;
+    ask_where(&mut app, &runtime, 1..full + 9, Gesture::None);
 
-    let turns = served_in_turns(&mut app, &queue, &runtime);
+    let first = one_turn(&mut app, &runtime);
+    ask_where(&mut app, &runtime, full + 9..2 * full + 17, Gesture::None);
+    let rest = served_in_turns(&mut app, &runtime);
 
-    let full = DEEDS_PER_TURN as usize;
+    assert_eq!(first, (1..full + 1).collect::<Vec<_>>());
     assert_eq!(
-        turns.iter().map(Vec::len).collect::<Vec<_>>(),
-        [full, full, full, 5],
+        rest.iter().map(Vec::len).collect::<Vec<_>>(),
+        [full as usize, 16],
         "the turns were not a turn's worth each"
     );
     assert_eq!(
-        turns.concat(),
-        (1..asked + 1).collect::<Vec<_>>(),
+        [first, rest.concat()].concat(),
+        (1..2 * full + 17).collect::<Vec<_>>(),
         "a ticket was dropped, served twice or served out of order"
     );
 }
 
 #[test]
+fn a_queue_found_empty_is_not_the_end_of_a_turn() {
+    // Two plugins that run each other, as this one sees it: each thing it
+    // asks for is served at once, so its queue is empty every time it is
+    // looked at, and the next thing arrives in the same turn because the other
+    // plugin asked for it. A budget that started again whenever the queue was
+    // empty was never spent, and the window never got its turn.
+    let (mut app, _queue, runtime) = allowed_to_ask_where();
+    let asked = DEEDS_PER_TURN + 8;
+
+    let handed = app.update(|ctx| {
+        runtime.update(ctx, |runtime, ctx| {
+            let mut handed = Vec::new();
+            for ticket in 1..asked + 1 {
+                runtime.start(ticket, Request::Where, Gesture::None, ctx);
+                handed.extend(runtime.deeds(ctx).into_iter().map(|(ticket, _)| ticket));
+                assert!(runtime.deeds(ctx).is_empty(), "a ticket was handed twice");
+            }
+            handed
+        })
+    });
+
+    assert_eq!(
+        handed,
+        (1..DEEDS_PER_TURN + 1).collect::<Vec<_>>(),
+        "one turn was handed more than a turn's worth"
+    );
+    assert_eq!(
+        waiting(&app, &runtime),
+        8,
+        "what the turn had no room for was not left waiting"
+    );
+    assert_eq!(
+        one_turn(&mut app, &runtime),
+        (DEEDS_PER_TURN + 1..asked + 1).collect::<Vec<_>>(),
+        "the next turn did not start with what was left"
+    );
+}
+
+#[test]
 fn a_burst_that_ends_is_forgiven_the_turns_it_took() {
-    // "In a row" is the whole rule: a turn that finds nothing left waiting
-    // ended a chain, and a chain that ends was not the loop. A plugin whose
-    // bursts are each a little more than a turn, more times than a plugin may
-    // overrun, is served every one of them.
-    let (mut app, queue, runtime) = allowed_to_ask_where();
+    // "In a row" is the whole rule: a turn that ends with nothing left
+    // waiting ended a chain, and a chain that ends was not the loop. A plugin
+    // whose bursts are each a little more than a turn, more times than a
+    // plugin may overrun, is served every one of them.
+    let (mut app, _queue, runtime) = allowed_to_ask_where();
     let burst = DEEDS_PER_TURN + 1;
 
     for round in 0..=OVERRUNS_ALLOWED {
         let first = round * burst + 1;
-        ask_where(&mut app, &runtime, first..first + burst);
+        ask_where(&mut app, &runtime, first..first + burst, Gesture::None);
 
-        let served = served_in_turns(&mut app, &queue, &runtime).concat();
+        let served = served_in_turns(&mut app, &runtime).concat();
 
         assert_eq!(
             served,
@@ -343,26 +391,66 @@ fn a_burst_that_ends_is_forgiven_the_turns_it_took() {
 
 #[test]
 fn a_plugin_still_asking_after_its_turns_run_out_stops_being_served() {
-    // The loop's end. Every deed waiting at once is a chain that never finds
-    // the queue empty, which is what a guest asking again from every answer
-    // looks like from here: it is served for as many turns as it is allowed
-    // to overrun, and one more, and then what it asks for is not kept for
-    // anybody — a queue that went on growing would be the loop again, in
-    // memory.
-    let (mut app, queue, runtime) = allowed_to_ask_where();
-    let asked = (OVERRUNS_ALLOWED + 3) * DEEDS_PER_TURN;
-    ask_where(&mut app, &runtime, 1..asked + 1);
+    // The loop's end, as the observer sees a guest that asks again from every
+    // answer: each turn is spent with something still waiting, because the
+    // answers asked for as much again. The turn that runs out for the
+    // sixteenth time in a row is the last it is served, and what it asks for
+    // afterwards is not kept for anybody.
+    let (mut app, _queue, runtime) = allowed_to_ask_where();
+    let full = DEEDS_PER_TURN;
+    ask_where(&mut app, &runtime, 1..full + 2, Gesture::None);
 
-    let served = served_in_turns(&mut app, &queue, &runtime).concat();
+    let mut served = Vec::new();
+    let mut next = full + 2;
+    for _ in 0..OVERRUNS_ALLOWED + 3 {
+        served.extend(one_turn(&mut app, &runtime));
+        ask_where(&mut app, &runtime, next..next + full, Gesture::None);
+        next += full;
+    }
 
     assert_eq!(
         served,
-        (1..(OVERRUNS_ALLOWED + 1) * DEEDS_PER_TURN + 1).collect::<Vec<_>>(),
-        "it was not served its turns and then stopped"
+        (1..OVERRUNS_ALLOWED * full + 1).collect::<Vec<_>>(),
+        "it was not served its sixteen turns and then stopped"
     );
-    ask_where(&mut app, &runtime, asked + 1..asked + 2);
     assert_eq!(
-        runtime.read(&app, |runtime, _| runtime.deeds.len()),
+        waiting(&app, &runtime),
+        0,
+        "what it asked for afterwards was kept"
+    );
+}
+
+#[test]
+fn a_plugin_with_more_waiting_than_two_turns_stops_being_served_at_once() {
+    // A turn bounds what is served and not what is kept. A guest that asks
+    // for thirty-two from every answer leaves a thousand behind after one
+    // turn, and a copy or a line to type may be a megabyte each, so the
+    // queue itself has a ceiling — as many as may wait are kept, one more is
+    // the plugin caught, and nothing it had waiting is kept or remembered as
+    // pressed after that.
+    let (mut app, _queue, runtime) = allowed_to_ask_where();
+    let most = MAX_WAITING as u32;
+    ask_where(&mut app, &runtime, 1..most + 1, Gesture::Pressed);
+    assert_eq!(
+        waiting(&app, &runtime),
+        MAX_WAITING,
+        "as many as may wait were not all kept"
+    );
+
+    ask_where(&mut app, &runtime, most + 1..most + 2, Gesture::Pressed);
+
+    assert_eq!(waiting(&app, &runtime), 0, "what was waiting was kept");
+    assert!(
+        runtime.read(&app, |runtime, _| runtime.pressed.is_empty()),
+        "a ticket nobody will answer is still remembered as pressed"
+    );
+    assert!(
+        one_turn(&mut app, &runtime).is_empty(),
+        "it was still served"
+    );
+    ask_where(&mut app, &runtime, most + 2..most + 3, Gesture::None);
+    assert_eq!(
+        waiting(&app, &runtime),
         0,
         "what it asked for afterwards was kept"
     );

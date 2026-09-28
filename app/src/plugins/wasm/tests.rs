@@ -168,6 +168,35 @@ pub(crate) fn wasm_asking(
     order: i32,
     request: &Request,
 ) -> Vec<u8> {
+    let text = asking_text(manifest, slot, order, request);
+    wat::parse_str(&text).expect("the test module should assemble")
+}
+
+/// A module whose one action asks the window to run `name` — another
+/// plugin's action — for the tests about two plugins that run each other.
+///
+/// [`wasm_asking`], with an allocator that hands out the same buffer every
+/// time: a bump allocator runs its page out after some thousands of calls,
+/// and a guest that traps is switched off, which would end a loop between two
+/// of them that the host is the one supposed to end.
+pub(crate) fn wasm_running(id: &str, name: &str) -> Vec<u8> {
+    let mut manifest = manifest(id);
+    manifest.capabilities = vec![Capability::RunCommands(vec![name.to_owned()])];
+    let request = Request::Run {
+        name: name.to_owned(),
+        argument: String::new(),
+    };
+    let bump = "(global.set $next (i32.add (global.get $next) (local.get $len)))";
+    let text = asking_text(&manifest, "header.right", 10, &request);
+    assert!(
+        text.contains(bump),
+        "the module text changed under this helper"
+    );
+    wat::parse_str(text.replace(bump, "")).expect("the test module should assemble")
+}
+
+/// The text of [`wasm_asking`]'s module, before it is assembled.
+fn asking_text(manifest: &Manifest, slot: &str, order: i32, request: &Request) -> String {
     let request = to_bytes(request).expect("a request should encode");
     // Between the tree and the strings, which `module_text` lays out at 16
     // and 4096.
@@ -214,7 +243,7 @@ pub(crate) fn wasm_asking(
         text.contains("$request"),
         "the module text changed under this helper"
     );
-    wat::parse_str(&text).expect("the test module should assemble")
+    text
 }
 
 /// The text of the test module, before it is assembled.

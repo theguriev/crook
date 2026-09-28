@@ -814,13 +814,17 @@ ordinary state and not in a bad one.
 line and running a command are answered by the window itself, on the thread that draws, and
 the answer is delivered there too — so a plugin that asks again from inside every answer would
 be served for as long as it kept asking, and the window would freeze until it was killed. So
-one plugin is served thirty-two of those and then the window draws before it carries on.
-Thirty-two is as many requests as the sandbox holds for a guest at once, so everything one call
-asked for is served in the turn it asked, and only a chain of answers that keep asking ever
-waits. What waits is left where it was, in order, and served on the next turn: a request taken
-and never answered is a plugin waiting for the rest of the session. A chain that runs out of
-turns sixteen times in a row stops being served until Crook is restarted, the count refusals
-get; one that ends by itself starts the count again.
+one plugin is served thirty-two of those in one of the window's turns — one update and
+everything it sets off, which counts a chain that runs through another plugin's action and back
+as well — and then the window draws before it carries on. Thirty-two is as many requests as the
+sandbox holds for a guest at once, so everything one call asked for is served in the turn it
+asked, and only a chain of answers that keep asking ever waits. What waits is left where it
+was, in order, and served on the next turn: a request taken and never answered is a plugin
+waiting for the rest of the session. A plugin whose turns run out sixteen times in a row, the
+count refusals get, stops being served until Crook is restarted; one whose chain ends starts
+the count again. A plugin with more than sixty-four waiting at once stops being served straight
+away: that is twice a turn's worth, a queue that is growing rather than being served, and each
+thing in it may be a megabyte to type or copy.
 
 **Isolation.** Fuel-metered execution (wasmi has it) with a per-call deadline; a trap or an
 exhausted budget drops that contribution and counts toward self-disable; memory capped per
