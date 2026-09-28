@@ -1,0 +1,56 @@
+# Maintainer: Eugen Guriev <gurievcreative@gmail.com>
+#
+# The release build, as the release page ships it. Built from the tag's own
+# archive, checked against the SHA256SUMS that release carries; the icons come
+# from the same tag. `script/aur` bumps pkgver and the sums after a release.
+
+pkgname=crook-bin
+pkgver=0.1.13
+pkgrel=1
+pkgdesc='A terminal whose unit of work is an agent'
+arch=('x86_64')
+url='https://crook.id'
+license=('MIT' 'ISC')
+# Linked against nothing but libc; the window, the input and the GPU are
+# opened at run time. Wayland is what Omarchy and most Arch desktops run.
+depends=('gcc-libs' 'glibc' 'libglvnd' 'libxkbcommon' 'wayland')
+optdepends=(
+  'libx11: an X11 session'
+  'libxcursor: the pointer under X11'
+  'libxi: input under X11'
+  'libxkbcommon-x11: the keyboard under X11'
+)
+# A release binary, already stripped: nothing here for a debug package to hold.
+options=('!debug' '!strip')
+provides=('crook')
+conflicts=('crook')
+_tag="v${pkgver}"
+_archive="crook-${_tag}-x86_64-unknown-linux-gnu"
+_assets="https://raw.githubusercontent.com/theguriev/crook/${_tag}/assets/Crook.iconset"
+source=(
+  "${_archive}.tar.gz::https://github.com/theguriev/crook/releases/download/${_tag}/${_archive}.tar.gz"
+  "crook-${pkgver}-32.png::${_assets}/icon_32x32.png"
+  "crook-${pkgver}-128.png::${_assets}/icon_128x128.png"
+  "crook-${pkgver}-256.png::${_assets}/icon_256x256.png"
+  "crook-${pkgver}-512.png::${_assets}/icon_512x512.png"
+  'crook.desktop'
+)
+sha256sums=('79ac080bfc376af23a4b821917c61aa890eb16a54d3b1d70d6acbffb3706483d'
+            '99b55d841a27fdc7e2d1952d904491e1420d1a477b4b84b873a5743a133a0abb'
+            '54264aa7ce6f975c9a74c09585a5caa6994b1104473169e32333f921b3a55ef4'
+            'd9e8b30e5e6eeff61933343366a2b9ef9a1ee537c4ee250b17fb4148983e28dd'
+            '80f130cd265aa887ec4b896f7be3fc310bbd1a586bc4826551260b5475d83486'
+            'e27aad219554e74efa6387a35be86863a4db3219a52401e19600ab55c16dbe8f')
+
+package() {
+  install -Dm755 "${_archive}/crook" "${pkgdir}/usr/bin/crook"
+  install -Dm644 "${_archive}/LICENSE-MIT" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE-MIT"
+  install -Dm644 "${_archive}/LICENSE-ISC-lucide" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE-ISC-lucide"
+  install -Dm644 "${_archive}/README.md" "${pkgdir}/usr/share/doc/${pkgname}/README.md"
+  install -Dm644 crook.desktop "${pkgdir}/usr/share/applications/crook.desktop"
+  local size
+  for size in 32 128 256 512; do
+    install -Dm644 "crook-${pkgver}-${size}.png" \
+      "${pkgdir}/usr/share/icons/hicolor/${size}x${size}/apps/crook.png"
+  done
+}

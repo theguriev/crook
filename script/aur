@@ -1,0 +1,112 @@
+#!/bin/sh
+#
+# Bring the AUR package, crook-bin, up to a release that is already out.
+#
+#   ./script/aur 0.1.14            # rewrite packaging/aur/crook-bin for v0.1.14 and build it
+#   ./script/aur 0.1.14 --push     # and push it to aur.archlinux.org
+#
+# What one bump is, in order:
+#
+#   1. The release exists: its Linux archive and its SHA256SUMS are downloaded,
+#      and the archive's digest is the one SHA256SUMS names — the package is
+#      pinned to the bytes the release page vouches for, not to whatever a
+#      download happened to return.
+#   2. pkgver becomes the new version, pkgrel goes back to 1, and every source
+#      is summed again with `makepkg -g` (the icons come from the tag too).
+#   3. The package is built with `makepkg` in a scratch directory and the
+#      binary in it asked for its version, so a PKGBUILD that no longer builds
+#      is found here rather than by the first person to `yay -S` it.
+#   4. .SRCINFO is regenerated; the AUR refuses a push whose .SRCINFO disagrees
+#      with the PKGBUILD.
+#   5. With --push: the AUR repository is cloned over SSH, the three files are
+#      copied in, committed as `crook-bin X.Y.Z-1` and pushed. That needs an
+#      AUR account whose SSH key is this machine's.
+#
+# Arch only: makepkg is the one tool that reads a PKGBUILD the way the AUR's
+# users will. Nothing is installed; the build is thrown away.
+
+set -eu
+
+fail() {
+  echo "aur: $*" >&2
+  exit 1
+}
+
+[ $# -ge 1 ] || fail "usage: script/aur X.Y.Z [--push]"
+version=${1#v}
+push=false
+[ "${2:-}" = --push ] && push=true
+echo "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || fail "$1 is not X.Y.Z"
+command -v makepkg >/dev/null || fail "makepkg is needed, which means Arch"
+
+root=$(cd "$(dirname "$0")/.." && pwd)
+package="$root/packaging/aur/crook-bin"
+archive="crook-v$version-x86_64-unknown-linux-gnu.tar.gz"
+release="https://github.com/theguriev/crook/releases/download/v$version"
+
+scratch=$(mktemp -d)
+trap 'rm -rf "$scratch"' EXIT
+
+echo "==> Checking v$version's Linux archive against its SHA256SUMS"
+curl -fsSL -o "$scratch/SHA256SUMS" "$release/SHA256SUMS" ||
+  fail "v$version has no SHA256SUMS; is it released?"
+listed=$(awk -v name="$archive" '$2 == name { print $1 }' "$scratch/SHA256SUMS")
+[ -n "$listed" ] || fail "SHA256SUMS for v$version does not name $archive"
+curl -fsSL -o "$scratch/$archive" "$release/$archive"
+actual=$(sha256sum "$scratch/$archive" | awk '{ print $1 }')
+[ "$listed" = "$actual" ] || fail "$archive is $actual, and SHA256SUMS says $listed"
+
+echo "==> Setting the PKGBUILD to $version-1"
+sed -i -e "s/^pkgver=.*/pkgver=$version/" -e "s/^pkgrel=.*/pkgrel=1/" "$package/PKGBUILD"
+
+cp "$package/PKGBUILD" "$package/crook.desktop" "$scratch/"
+(
+  cd "$scratch"
+  sums=$(makepkg -g 2>/dev/null)
+  [ -n "$sums" ] || fail "makepkg -g summed nothing"
+  # Replace the whole sha256sums=(...) array, however many lines it spans.
+  printf '%s\n' "$sums" >sums
+  awk '
+    FNR == NR { replacement = replacement $0 "\n"; next }
+    /^sha256sums=\(/ { printf "%s", replacement; skipping = !/\)$/; next }
+    skipping { if (/\)$/) skipping = 0; next }
+    { print }
+  ' sums PKGBUILD >PKGBUILD.new
+  mv PKGBUILD.new PKGBUILD
+)
+grep -q "$listed" "$scratch/PKGBUILD" || fail "the new sums do not include the archive's"
+cp "$scratch/PKGBUILD" "$package/PKGBUILD"
+
+echo "==> Building it"
+(
+  cd "$scratch"
+  makepkg -f --noconfirm >makepkg.log 2>&1 || { tail -20 makepkg.log >&2; fail "makepkg failed"; }
+  mkdir unpacked
+  tar -xf "crook-bin-$version-1-x86_64.pkg.tar.zst" -C unpacked
+  said=$(unpacked/usr/bin/crook --version)
+  case $said in
+    "crook $version "*) echo "  ok $said" ;;
+    *) fail "the packaged binary says '$said'" ;;
+  esac
+  makepkg --printsrcinfo >"$package/.SRCINFO"
+)
+
+if ! $push; then
+  echo "==> packaging/aur/crook-bin is at $version; commit it, then --push to publish"
+  exit 0
+fi
+
+echo "==> Pushing crook-bin $version-1 to the AUR"
+git clone -q ssh://aur@aur.archlinux.org/crook-bin.git "$scratch/aur"
+cp "$package/PKGBUILD" "$package/.SRCINFO" "$package/crook.desktop" "$scratch/aur/"
+(
+  cd "$scratch/aur"
+  git add PKGBUILD .SRCINFO crook.desktop
+  if git diff --cached --quiet; then
+    echo "  the AUR already has exactly this"
+    exit 0
+  fi
+  git commit -q -m "crook-bin $version-1"
+  git push -q origin HEAD:master
+)
+echo "==> https://aur.archlinux.org/packages/crook-bin"
