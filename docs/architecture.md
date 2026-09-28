@@ -1039,15 +1039,22 @@ hook, and a hook's standard output belongs to the program that ran it: Claude Co
 its hooks print. A hook often has no `/dev/tty` either: Claude Code starts every command hook
 in a session of its own, with no controlling terminal, on macOS and Linux alike. The pane is
 still one or two processes up, as the terminal of the program that ran the hook, so a process
-that cannot open its own writes to the controlling terminal of its nearest ancestor that has
-one — `tty_nr` in `/proc/<pid>/stat` on Linux, `e_tdev` from `proc_pidinfo` on macOS, and the
-character device under `/dev` with that number (`app/src/agent/ancestors.rs`). It is a
-fallback and never a second route: with a terminal of its own the process writes there, and a
-process with none anywhere above it — `cron`, a CI runner — fails the way it always did. A
-test that hands a hook a stand-in binary, one that never opens a terminal, passes while every
-real report fails, so `app/tests/claude_code_hooks.rs` runs each of the plugin's commands, and
-each one `--agent-hooks claude` prints, with the real binary under `sh -c` in a session of its
-own below a process on a pty, and reads the report off the pty. `--message "run rm -rf build?"` is what a `needs-input` is waiting for, cut to
+that cannot open its own writes to the controlling terminal of the program that started its
+session: the first ancestor outside that session, past the shells inside it — `session` and
+`tty_nr` in `/proc/<pid>/stat` on Linux, `getsid` and `e_tdev` from `proc_pidinfo` on macOS,
+and the character device under `/dev` with that number (`app/src/agent/ancestors.rs`). The
+walk stops at that program whether or not it has a terminal. One with none is an agent that
+another agent's Bash tool runs, in a session of its own, or one whose pane has hung up, which
+takes the terminal from its whole session; the next terminal up is the outer agent's tab, which
+a nested `claude -p` would call idle mid tool call, or the terminal Crook was started from. It
+is a fallback and never a second route: with a terminal of its own the process writes there,
+and a process whose session was started by one with no terminal — `cron`, a CI runner — fails
+the way it always did. A test that hands a hook a stand-in binary, one that never opens a
+terminal, passes while every real report fails, so `app/tests/claude_code_hooks.rs` runs each
+of the plugin's commands, and each one `--agent-hooks claude` prints, with the real binary
+under `sh -c` in a session of its own below a process on a pty, and reads the report off the
+pty; and runs the plugin's once more below a shell with no terminal, where nothing may arrive.
+`--message "run rm -rf build?"` is what a `needs-input` is waiting for, cut to
 one line of 200 characters in the writer so the sequence never carries a novel; `--message -`
 reads it from standard input, the `message` of a hook's JSON when the input is one and the
 whole input otherwise. `crook --agent-hooks claude` prints the fragment of Claude Code's settings

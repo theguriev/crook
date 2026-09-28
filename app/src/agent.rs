@@ -136,9 +136,10 @@ pub fn report(status: &str, title: Option<&str>, message: Option<&str>) -> Resul
 /// case rather than the odd one — Claude Code starts every command hook in a
 /// session of its own, where `/dev/tty` is no such device — and the pane is
 /// still there one process up, as the terminal of the program that ran the
-/// hook, which is where `ancestors::terminal` finds it. A process with no
-/// terminal anywhere above it — `cron`, a CI runner, a detached service — has
-/// nowhere to report to, and says so.
+/// hook, which is where `ancestors::terminal` finds it. A process whose
+/// session was started by a program with no terminal — `cron`, a CI runner, a
+/// detached service, an agent another agent's Bash tool runs — has nowhere
+/// to report to, and says so.
 fn terminal() -> io::Result<std::fs::File> {
     #[cfg(unix)]
     let path = "/dev/tty";
@@ -150,11 +151,11 @@ fn terminal() -> io::Result<std::fs::File> {
         .or_else(an_ancestors_terminal)
 }
 
-/// The terminal of the nearest process above this one that has one, for a
-/// process that could not open its own; `error` when there is none.
+/// The terminal of the program that started this process's session, for a
+/// process that could not open its own; `error` when that program has none.
 ///
-/// `error` is what opening its own said, and it is kept because when no
-/// ancestor has a terminal either, "no such device" is still what went wrong.
+/// `error` is what opening its own said, and it is kept because when that
+/// program has no terminal either, "no such device" is still what went wrong.
 /// Only macOS and Linux are walked; anywhere else it is always the error.
 fn an_ancestors_terminal(error: io::Error) -> io::Result<std::fs::File> {
     #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -27,7 +27,8 @@ run under `sh` inside and outside a pane; `SKILL.md` has to be `app/src/skill.md
 byte. Edit those, then copy the result here — the failing test prints the `hooks` it expects.
 `app/tests/claude_code_hooks.rs` runs each command the way Claude Code does, with the real
 binary in a session of its own below a process on a pty, and fails unless the report arrives
-on that pty.
+on that pty — and once more below a program with no terminal, the way `claude -p` is when
+another agent runs it, and fails if anything arrives.
 
 There is no `version` in `plugin.json` on purpose: without one, Claude Code takes the commit
 the plugin was installed from as its version, so `claude plugin update crook@crook` picks up

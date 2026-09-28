@@ -9,7 +9,10 @@
 //! which is how the plugin's first version was checked. These run each
 //! command under `sh -c` in a new session, below a process that holds a pty
 //! as its terminal the way `claude` holds the pane's, and read what arrives
-//! on the pty's other end.
+//! on the pty's other end. And once below a program with no terminal of its
+//! own, the way `claude -p` is when another agent's Bash tool runs it, where
+//! nothing may arrive: that program is not on the pane, and its hooks'
+//! reports are not the pane's agent's.
 
 #![cfg(unix)]
 
@@ -55,11 +58,29 @@ const DONE: &str = "crook-hook-done";
 /// files the way Claude Code's are on pipes. Beside it, under the same
 /// `setsid`, the question the test would be pointless without: whether a hook
 /// started this way has a terminal of its own.
-const SCRIPT: &str = r#"detach() { perl -MPOSIX -e 'defined POSIX::setsid() or die "setsid: $!\n"; exec @ARGV or die "exec: $!\n"' /bin/sh -c "$@"; }
+const SCRIPT: &str = r#"detach() { perl -MPOSIX -e 'POSIX::setsid() > 0 or die "setsid: $!\n"; exec @ARGV or die "exec: $!\n"' /bin/sh -c "$@"; }
 detach 'if (: >/dev/tty) 2>/dev/null; then echo attached; else echo detached; fi' >"$HOOK_DIR/probe" 2>&1
 detach "$HOOK_COMMAND" <"$HOOK_DIR/input" >"$HOOK_DIR/stdout" 2>"$HOOK_DIR/stderr"
 echo "$?" >"$HOOK_DIR/status"
 echo crook-hook-done"#;
+
+/// What [`Agent::Detached`] runs as the hook's command: the real command,
+/// in a session further down, below a shell that stands in for an agent with
+/// no terminal. The `exit` after it keeps that shell from `exec`ing `perl`,
+/// which would leave no agent between and make `setsid` fail, the process
+/// already leading a session.
+const UNDER_A_DETACHED_AGENT: &str = r#"perl -MPOSIX -e 'POSIX::setsid() > 0 or die "setsid: $!\n"; exec @ARGV or die "exec: $!\n"' /bin/sh -c "$AGENT_HOOK_COMMAND"; exit $?"#;
+
+/// Where the program that runs the hook is.
+#[derive(Clone, Copy, Debug)]
+enum Agent {
+    /// On the pty, the way Claude Code is on the pane.
+    OnThePane,
+    /// In a session of its own below the pty, with no terminal, the way
+    /// `claude -p` is when the pane's Claude Code runs it through its Bash
+    /// tool, which starts every command that way.
+    Detached,
+}
 
 /// A directory that removes itself.
 struct Scratch(PathBuf);
@@ -123,16 +144,25 @@ fn perl_is_here() -> bool {
     found
 }
 
-/// Runs `command` the way Claude Code runs a hook in a Crook pane: `sh -c`,
-/// a session of its own, [`INPUT`] on stdin, and the pane's `TERM_PROGRAM`
-/// and `CROOK_BIN` in its environment.
-fn run_as_a_hook(command: &str) -> Ran {
+/// Runs `command` the way Claude Code runs a hook in a Crook pane, with
+/// Claude Code where `agent` says: `sh -c`, a session of its own, [`INPUT`] on
+/// stdin, and the pane's `TERM_PROGRAM` and `CROOK_BIN` in its environment.
+///
+/// With [`Agent::Detached`] the probe is the question for the agent rather
+/// than the hook: the agent's session, like the probe's, is started from the
+/// pty's process.
+fn run_as_a_hook(command: &str, agent: Agent) -> Ran {
     let scratch = Scratch::new();
     fs::write(scratch.0.join("input"), INPUT).expect("the input should be writable");
+    let (hook, under_the_agent) = match agent {
+        Agent::OnThePane => (command, ""),
+        Agent::Detached => (UNDER_A_DETACHED_AGENT, command),
+    };
     let environment = [
         ("TERM_PROGRAM", "Crook"),
         ("CROOK_BIN", CROOK),
-        ("HOOK_COMMAND", command),
+        ("HOOK_COMMAND", hook),
+        ("AGENT_HOOK_COMMAND", under_the_agent),
         (
             "HOOK_DIR",
             scratch.0.to_str().expect("the scratch path is text"),
@@ -210,7 +240,7 @@ fn expected_report(command: &str) -> String {
 /// Asserts that `command`, run as a hook, told the pane what its arguments
 /// say, exited 0, and printed nothing Claude Code would read.
 fn assert_reaches_the_pane(event: &str, command: &str) {
-    let ran = run_as_a_hook(command);
+    let ran = run_as_a_hook(command, Agent::OnThePane);
     assert_eq!(
         "detached\n", ran.probe,
         "{event}: a hook here has to be where Claude Code puts one, with no terminal of its own"
@@ -220,6 +250,34 @@ fn assert_reaches_the_pane(event: &str, command: &str) {
         ran.pane.contains(&report),
         "{event}: the pane never got {report:?}; it got {:?}, and the hook said {:?}",
         ran.pane,
+        ran.stderr
+    );
+    assert_eq!("0\n", ran.status, "{event} failed: {}", ran.stderr);
+    assert_eq!(
+        "", ran.stdout,
+        "{event} printed what Claude Code would read"
+    );
+}
+
+/// Asserts that `command`, run as a hook of an agent with no terminal, told
+/// no terminal anything, failed saying so, and still exited 0 and printed
+/// nothing Claude Code would read.
+fn assert_reaches_nothing_from_a_detached_agent(event: &str, command: &str) {
+    let ran = run_as_a_hook(command, Agent::Detached);
+    assert_eq!(
+        "detached\n", ran.probe,
+        "{event}: the agent here has to have no terminal of its own, as under a Bash tool"
+    );
+    assert!(
+        !ran.pane.contains("\x1b]6340;"),
+        "{event}: an agent that is not on the pane reported on it: {:?}",
+        ran.pane
+    );
+    // Proof that `crook` ran and found nowhere to write, rather than that the
+    // guard stopped it before it could.
+    assert!(
+        ran.stderr.contains("there is none"),
+        "{event}: `crook --agent` did not fail for want of a terminal; it said {:?}",
         ran.stderr
     );
     assert_eq!("0\n", ran.status, "{event} failed: {}", ran.stderr);
@@ -261,5 +319,21 @@ fn the_hooks_merged_by_hand_reach_the_pane_from_a_session_with_no_terminal() {
             .as_str()
             .expect("a hook has a command");
         assert_reaches_the_pane(event, command);
+    }
+}
+
+#[test]
+fn no_plugin_hook_of_an_agent_with_no_terminal_reports_on_the_pane_above_it() {
+    if !perl_is_here() {
+        return;
+    }
+    let shipped: Value = serde_json::from_str(PLUGIN_HOOKS).expect("hooks.json is JSON");
+    let events = shipped["hooks"].as_object().expect("hooks.json has hooks");
+    assert!(!events.is_empty());
+    for (event, groups) in events {
+        let command = groups[0]["hooks"][0]["command"]
+            .as_str()
+            .expect("a hook has a command");
+        assert_reaches_nothing_from_a_detached_agent(event, command);
     }
 }
