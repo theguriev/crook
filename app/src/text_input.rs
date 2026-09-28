@@ -99,6 +99,9 @@ struct Inner {
 struct CompletionState {
     /// The number of the last request sent. Zero before any.
     asked: u64,
+    /// The line up to the caret when it was sent, which is what the shell
+    /// is answering about.
+    asked_about: String,
     /// What the shell offered that Tab has not typed yet, if anything.
     offered: Option<Offer>,
 }
@@ -229,7 +232,9 @@ impl TextInput {
     /// Counts up and never resets, so an answer to a request two keystrokes
     /// ago cannot be mistaken for the answer to this one.
     pub fn ask_for_completions(&self) -> u64 {
+        let line = self.line_to_caret();
         let mut completion = self.0.completion.borrow_mut();
+        completion.asked_about = line;
         completion.asked += 1;
         completion.offered = None;
         completion.asked
@@ -244,11 +249,16 @@ impl TextInput {
     /// to the next. No list, on purpose: see [`Offer`].
     ///
     /// An answer whose number is not the one this field is waiting for is
-    /// dropped: it is about a line that has since been typed past.
+    /// dropped: it is about a line that has since been typed past. So is one
+    /// that arrives after the line itself changed — typing, a paste, the
+    /// caret moved — which the number alone cannot see, since only a Tab, an
+    /// Enter or an abandoned line moves it on: the shell answered about a
+    /// word that is no longer the one at the caret, and `build/` completed
+    /// for `echo bu` was typed into a line that had become `bu`.
     pub fn take_completions(&self, serial: u64, answer: Completions) -> bool {
         {
             let completion = self.0.completion.borrow();
-            if completion.asked != serial {
+            if completion.asked != serial || completion.asked_about != self.line_to_caret() {
                 return false;
             }
         }
@@ -732,6 +742,26 @@ mod tests {
         let one = holding("read");
         answered(&one, &["README.md"]);
         assert_eq!(one.editor().text(), "README.md");
+    }
+
+    #[test]
+    fn an_answer_about_a_line_that_has_since_changed_is_dropped() {
+        // Tab on `echo bu`, and before the shell answers the line is typed
+        // over. The answer is about `bu` as an argument; typed into the new
+        // line it would put `build/` where a command goes.
+        let input = holding("echo bu");
+        let clipboard = Clipboard::new();
+        let serial = input.ask_for_completions();
+        input.apply(Intent::SelectAll, &clipboard);
+        input.apply(Intent::Insert("bu".to_owned()), &clipboard);
+
+        assert!(!input.take_completions(serial, answer(&["build/"])));
+        assert_eq!(input.editor().text(), "bu");
+
+        // A line still as it was asked about takes its answer.
+        let serial = input.ask_for_completions();
+        assert!(input.take_completions(serial, answer(&["build/"])));
+        assert_eq!(input.editor().text(), "build/");
     }
 
     #[test]
