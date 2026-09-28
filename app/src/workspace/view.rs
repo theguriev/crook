@@ -2040,6 +2040,25 @@ impl Workspace {
             .collect()
     }
 
+    /// Whether any pane in the window is working in `checkout` or anywhere
+    /// under it.
+    ///
+    /// The one question asked before Crook takes its own lock off a checkout,
+    /// wherever that happens — a pane closing, a removal, a sweep. A plain
+    /// prefix rather than [`tab_menu::holding`](super::tab_menu::holding)'s
+    /// longest match, because this needs no listing to answer and it errs the
+    /// right way: a pane in a checkout nested inside this one counts as being
+    /// in this one too, and all that costs is a lock left standing that the
+    /// menu recognises as Crook's own anyway.
+    pub(super) fn a_pane_is_in(&self, checkout: &Path) -> bool {
+        self.tabs.panes().any(|(_, pane)| {
+            pane.session()
+                .working_directory
+                .as_deref()
+                .is_some_and(|directory| directory.starts_with(checkout))
+        })
+    }
+
     /// Whether any popup is up.
     ///
     /// One question, asked in five places, because the answer is what decides
@@ -3956,7 +3975,19 @@ impl Workspace {
         let opening = self.tab_menu.opening;
         let made = ctx.background().spawn({
             let path = path.clone();
-            async move { crate::git::worktree::add(&repository, &path, &branch, None) }
+            async move {
+                crate::git::worktree::add(&repository, &path, &branch, None)?;
+                // Locked here, before the answer lands and the tab opens, so
+                // there is no moment in which an agent is working in a
+                // checkout nothing else has been told about. A lock that
+                // fails costs that protection and not the checkout, which
+                // is made and is what was asked for.
+                let reason = crate::git::worktree::lock_reason(&branch);
+                if let Err(problem) = crate::git::worktree::lock(&repository, &path, &reason) {
+                    log::warn!("{} was made but not locked: {problem}", path.display());
+                }
+                Ok::<_, crate::git::worktree::Error>(())
+            }
         });
 
         ctx.spawn(made, move |workspace, made, ctx| {
@@ -4229,10 +4260,19 @@ impl Workspace {
             return;
         };
 
+        // Asked again at each step rather than once when the list was made: a
+        // pane that moved into one of these since is working in it now, and
+        // Crook's own lock is then what makes git leave it standing.
+        let release = !self.a_pane_is_in(&going.path);
         let removing = ctx.background().spawn({
             let repository = repository.clone();
             let path = going.path.clone();
-            async move { crate::git::worktree::remove(&repository, &path, false) }
+            async move {
+                if release {
+                    crate::git::worktree::release(&repository, &path)?;
+                }
+                crate::git::worktree::remove(&repository, &path, false)
+            }
         });
 
         ctx.spawn(removing, move |workspace, removed, ctx| {
@@ -4279,9 +4319,18 @@ impl Workspace {
         let asked_about = index;
         let opened_on = self.tab_menu.tab;
         let opening = self.tab_menu.opening;
+        // Decided here, where the panes are, rather than trusted to the × that
+        // led here: a removal dispatched at a checkout a pane is working in
+        // must meet Crook's own lock, which is what the lock is for.
+        let release = !self.a_pane_is_in(&path);
         let removed = ctx.background().spawn({
             let path = path.clone();
-            async move { crate::git::worktree::remove(&repository, &path, force) }
+            async move {
+                if release {
+                    crate::git::worktree::release(&repository, &path)?;
+                }
+                crate::git::worktree::remove(&repository, &path, force)
+            }
         });
 
         ctx.spawn(removed, move |workspace, removed, ctx| {
@@ -5411,8 +5460,88 @@ impl Workspace {
     /// "the window is dirty" the same statement rather than two.
     pub fn apply(&mut self, action: TabAction, ctx: &mut ViewContext<Self>) -> TabEffect {
         let before = self.tabs.focused_pane_id();
+        // Where every pane was, for the three actions that can close one: a
+        // pane that is gone afterwards may have been the last one working in
+        // a checkout Crook locked. Not taken for anything else, which is
+        // every keystroke that moves the selection.
+        let closing = matches!(
+            action,
+            TabAction::ClosePane(_) | TabAction::Close(_) | TabAction::CloseGroup(_)
+        )
+        .then(|| self.pane_directories());
         let effect = self.tabs.apply(action);
-        self.settle(effect, before, ctx)
+        let effect = self.settle(effect, before, ctx);
+        if let Some(panes) = closing {
+            self.release_checkouts_left(panes, ctx);
+        }
+        effect
+    }
+
+    /// Takes Crook's own lock off each checkout a pane that has just closed
+    /// was the last one working in.
+    ///
+    /// `panes` is every pane and its directory from before the strip moved;
+    /// the ones still open are skipped. Which checkout a directory is in, and
+    /// whose lock is on it, are git's answers and come back from the
+    /// background pool. Whether a pane is still working in it is the window's,
+    /// and is asked when the answer lands rather than when the pane closed, so
+    /// a tab opened in the checkout in the meantime keeps its lock. The unlock
+    /// itself is one more trip, through [`release`](crate::git::worktree::release),
+    /// which reads whose the lock is again rather than trusting a listing a
+    /// moment old.
+    ///
+    /// A pane the window closed along with itself never comes through here,
+    /// and that is deliberate: the session brings it back on the next launch,
+    /// in a checkout that has stayed locked for it.
+    fn release_checkouts_left(
+        &mut self,
+        panes: Vec<(PaneId, PathBuf)>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let mut left: Vec<PathBuf> = panes
+            .into_iter()
+            .filter(|(pane, _)| self.tabs.pane(*pane).is_none())
+            .map(|(_, directory)| directory)
+            .collect();
+        left.sort();
+        left.dedup();
+
+        for directory in left {
+            let reading = ctx.background().spawn(async move {
+                // Only a linked worktree can be locked, and finding out takes
+                // a walk up for `.git` rather than a process: a pane closing
+                // in a directory that is in no repository asks git nothing.
+                crate::git::discover(&directory).filter(|layout| layout.is_linked_worktree())?;
+                let worktrees = crate::git::worktree::list(&directory).ok()?;
+                let index = super::tab_menu::holding(&worktrees, Some(&directory))?;
+                let checkout = worktrees.get(index)?;
+                // Run from the main checkout, which is not the one about to
+                // lose its lock and, a moment later, perhaps its directory.
+                let repository = worktrees.first()?.path.clone();
+                checkout
+                    .is_locked_by_crook()
+                    .then(|| (repository, checkout.path.clone()))
+            });
+
+            ctx.spawn(reading, |workspace, found, ctx| {
+                let Some((repository, checkout)) = found else {
+                    return;
+                };
+                if workspace.a_pane_is_in(&checkout) {
+                    return;
+                }
+                // Nothing on screen waits for this, so nothing hears back.
+                ctx.background()
+                    .spawn(async move {
+                        if let Err(problem) = crate::git::worktree::release(&repository, &checkout)
+                        {
+                            log::warn!("could not unlock {}: {problem}", checkout.display());
+                        }
+                    })
+                    .detach();
+            })
+            .detach();
+        }
     }
 
     /// Opens a tab whose shell starts in `directory`.

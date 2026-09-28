@@ -30,7 +30,8 @@
 //! * the repository's worktrees, each of which opens a tab in it *in the group
 //!   the tab the menu was opened on belongs to* — or brings forward the pane
 //!   already there;
-//! * a way to make one, which asks for a branch name and nothing else;
+//! * a way to make one, which asks for a branch name and nothing else, and
+//!   locks the checkout it makes until the last pane working in it closes;
 //! * a way to remove one, offered only for a checkout nothing is working in;
 //! * a way to remove all of those at once, for the day a repository has eight
 //!   of them and seven are finished.
@@ -622,19 +623,29 @@ fn listing(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
 
 /// Whether a checkout is one this menu may take away.
 ///
-/// Never the main checkout, never one somebody is working in, never a locked
-/// one, and never one git has already noticed is not there. git refuses all
-/// four, and an × that always fails is worse than no × at all — the locked
-/// case especially, because Crook's own agent worktrees are locked by the
-/// session that holds them, and that lock is exactly what stops one agent
-/// tidying away another's work.
+/// Never the main checkout, never one somebody is working in, never one
+/// somebody else has locked, and never one git has already noticed is not
+/// there. git refuses all four, and an × that always fails is worse than no ×
+/// at all — the locked case especially, because a lock is somebody saying an
+/// agent is working in there, which is exactly what stops one agent tidying
+/// away another's work.
+///
+/// A lock Crook took is the exception, and the reason is the second
+/// conjunct. Crook locks a checkout it makes until the last pane in it
+/// closes, so its own lock on a checkout nothing in the window is working in
+/// is one a Crook that crashed or was killed left behind — and holding the
+/// checkout against Crook's own menu for ever would make the lock a trap
+/// rather than a statement. Removing it takes that lock off first.
 ///
 /// One function rather than the same four conjuncts written twice, because
 /// the × on a row and the row that sweeps all of them have to mean the same
 /// thing by "free": a person who has read what the × is offered for should not
 /// have to find out that the other one goes further.
 fn removable(worktree: &Worktree, occupied: bool) -> bool {
-    !worktree.is_main && !occupied && worktree.locked.is_none() && worktree.prunable.is_none()
+    !worktree.is_main
+        && !occupied
+        && !worktree.is_locked_by_another()
+        && worktree.prunable.is_none()
 }
 
 /// Every free checkout, as its path and the name the list calls it by.
@@ -684,7 +695,9 @@ fn worktree_row(
         Some("this tab")
     } else if elsewhere {
         Some("open")
-    } else if worktree.locked.is_some() {
+    } else if worktree.is_locked_by_another() {
+        // Crook's own lock says nothing here: with no pane in the checkout it
+        // is one left behind, and the row offers the × instead.
         Some("locked")
     } else if worktree.prunable.is_some() {
         // Registered, and its directory is gone. Saying so is the difference

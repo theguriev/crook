@@ -968,10 +968,27 @@ directory stops being authoritative the instant the shell reports a different on
 **Removal asks, and asks about the right thing.** `git worktree remove` refuses over modified
 and untracked files — and, measured rather than assumed, *not* over ignored ones, which it
 deletes without a word. So the ignored count is the one most worth showing before the button,
-and it is the one git will never raise on its own. A checkout that is locked, that is the main
-worktree, or that a tab is open in is not offered for removal at all: Crook's own agent
-worktrees are locked by the session holding them, and that lock is what stops one agent tidying
-away another's work.
+and it is the one git will never raise on its own. A checkout that is the main worktree, that a
+tab is open in, or that somebody else has locked is not offered for removal at all.
+
+**A checkout Crook makes is locked until the last pane in it closes.** Right after `git
+worktree add`, and before the tab opens, it runs `git worktree lock --reason "crook: <branch>"`;
+when the last pane working in the checkout closes, it takes that lock off again. Opening the
+checkout again later from the list does not lock it again: the lock covers the stretch from
+making a checkout to first leaving it, which is the agent it was made for. The lock is what tells
+everything outside Crook that touches the repository — `git worktree remove` typed by hand,
+`git worktree prune`, another agent's tidy-up — that an agent is in there, and it is what stops
+one of them taking the checkout from under it. Crook tells its own lock from anybody else's by
+that `crook: ` prefix alone, and it treats the two differently: somebody else's lock (Claude
+Code's `claude session …`, a person's own) is never taken off and keeps its checkout out of the
+× and the sweep; Crook's own lock on a checkout no pane in the window is working in is taken
+for one a crashed or killed Crook left behind, so that checkout is free, and removing it takes
+the lock off first. That reading has one blind spot, which the menu had before there was a lock
+at all: a window knows only its own panes, so a second Crook window's checkout looks the same as
+an abandoned one. A removal aimed at a checkout a pane of *this* window is in meets Crook's
+own lock like any other, and git refuses it. Quitting takes no lock off, because the session
+brings the tabs back into the checkouts they were in. All of it — the lock, reading whose a lock
+is, the unlock — runs on the background pool like the rest of the menu's git.
 
 **A sweep asks once and never forces.** The same offer made about the list — remove every
 checkout nothing is working in — is deliberately the weaker one. A confirmation about a single
