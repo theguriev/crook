@@ -3,7 +3,7 @@
 # Fail when a Linux binary needs a newer glibc than the floor it promises.
 #
 #   ./script/glibc-floor 2.31 dist/linux/crook
-#   readelf -W --dyn-syms -V crook | ./script/glibc-floor 2.31 -
+#   LC_ALL=C readelf -W --dyn-syms -V crook | ./script/glibc-floor 2.31 -
 #
 # A binary linked against glibc records, for each library it uses, every
 # symbol version it was linked to: GLIBC_2.2.5, GLIBC_2.34, and so on. The
@@ -22,7 +22,10 @@
 # else, and that is what this is here to catch.
 #
 # `-` reads a listing already made (the output of the readelf command above)
-# from standard input, for a binary on another machine.
+# from standard input, for a binary on another machine. It has to be made in
+# the C locale, as above: the parts of it are found by their English
+# headings, and readelf translates those into the reader's language (binutils
+# ships Russian, Ukrainian and French among others).
 #
 # Exit status: 0 when every need is at or below the floor; 1 when one is
 # above it, with each such version and the symbols that asked for it; 2 when
@@ -52,14 +55,18 @@ esac
 
 if [ "$binary" = - ]; then
   name="standard input"
+  piped=1
   listing=$(cat)
 else
   name=$binary
+  piped=0
   if ! command -v readelf >/dev/null 2>&1; then
     echo "glibc-floor: readelf not found; it is part of binutils" >&2
     exit 2
   fi
-  if ! listing=$(readelf -W --dyn-syms -V "$binary"); then
+  # C, whatever the caller's language: in a translated listing the needs
+  # section goes unseen, and the binary reads as needing no glibc at all.
+  if ! listing=$(LC_ALL=C readelf -W --dyn-syms -V "$binary"); then
     echo "glibc-floor: readelf could not read $binary" >&2
     exit 2
   fi
@@ -69,7 +76,7 @@ fi
 # the loader checks, so it alone decides the answer. The dynamic symbol table
 # only says which symbols asked for each version, for the message: a bare
 # "GLIBC_2.39" does not say where in a Rust binary it came from.
-printf '%s\n' "$listing" | awk -v floor="$floor" -v name="$name" '
+printf '%s\n' "$listing" | awk -v floor="$floor" -v name="$name" -v piped="$piped" '
   # Whether version a is newer than version b, number by number, so that
   # 2.10 is above 2.9 and 2.3.4 is above 2.3.
   function newer(a, b,    x, y, n, m, i, p, q) {
@@ -112,6 +119,12 @@ printf '%s\n' "$listing" | awk -v floor="$floor" -v name="$name" '
   END {
     if (count == 0) {
       printf "glibc-floor: found no GLIBC version needs in %s\n", name > "/dev/stderr"
+      # A listing made with its headings in another language looks exactly
+      # like this, and only a piped one can have been.
+      if (piped == 1) {
+        print "glibc-floor: a listing is read by its English headings; make one with" > "/dev/stderr"
+        print "  LC_ALL=C readelf -W --dyn-syms -V" > "/dev/stderr"
+      }
       exit 2
     }
     if (over == 0) {

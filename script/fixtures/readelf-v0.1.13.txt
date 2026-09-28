@@ -1,6 +1,6 @@
-# readelf -W --dyn-syms -V crook, on the v0.1.13 Linux release: the build that
-# would not start on Ubuntu 22.04. Cut to the symbols above glibc 2.31 and a few
-# beside them; the version needs are whole.
+# LC_ALL=C readelf -W --dyn-syms -V crook, on the v0.1.13 Linux release: the
+# build that would not start on Ubuntu 22.04. Cut to the symbols above glibc
+# 2.31 and a few beside them; the version needs are whole.
 
 Symbol table '.dynsym' contains 207 entries:
    Num:    Value          Size Type    Bind   Vis      Ndx Name

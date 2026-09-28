@@ -12,7 +12,8 @@
 //! Unix only: the script is `sh`, and so is what runs it.
 
 use std::io::Write as _;
-use std::process::Stdio;
+use std::path::PathBuf;
+use std::process::{Output, Stdio};
 
 /// `readelf -W --dyn-syms -V` of the v0.1.13 Linux binary, cut to the rows
 /// that matter; the version needs are whole.
@@ -25,14 +26,28 @@ struct Verdict {
     stderr: String,
 }
 
-/// Runs `script/glibc-floor <floor> -` with `listing` on its standard input.
-fn checked(floor: &str, listing: &str) -> Verdict {
-    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+impl From<Output> for Verdict {
+    fn from(output: Output) -> Self {
+        Verdict {
+            code: output.status.code(),
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        }
+    }
+}
+
+/// Where the script is in this checkout.
+fn script() -> PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("the workspace root")
-        .join("script/glibc-floor");
+        .join("script/glibc-floor")
+}
+
+/// Runs `script/glibc-floor <floor> -` with `listing` on its standard input.
+fn checked(floor: &str, listing: &str) -> Verdict {
     let mut child = crate::process::command("sh")
-        .arg(&script)
+        .arg(script())
         .arg(floor)
         .arg("-")
         .stdin(Stdio::piped())
@@ -51,12 +66,34 @@ fn checked(floor: &str, listing: &str) -> Verdict {
     if let Err(error) = written {
         assert_eq!(error.kind(), std::io::ErrorKind::BrokenPipe, "{error}");
     }
-    let output = child.wait_with_output().expect("the script should finish");
-    Verdict {
-        code: output.status.code(),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+    child
+        .wait_with_output()
+        .expect("the script should finish")
+        .into()
+}
+
+/// `listing` as readelf prints it to someone who reads Russian: binutils
+/// ships a Russian catalog, and it translates the headings the script finds
+/// the parts of a listing by. The rows under them keep their English.
+fn in_russian(listing: &str) -> String {
+    let mut translated = listing.to_owned();
+    for (english, russian) in [
+        ("\nSymbol table ", "\nТаблица символов "),
+        ("\nVersion needs section ", "\nРаздел Version needs "),
+    ] {
+        assert!(translated.contains(english), "no {english:?} to translate");
+        translated = translated.replace(english, russian);
     }
+    translated
+}
+
+/// A scratch directory of this test's own.
+fn scratch(name: &str) -> PathBuf {
+    let directory =
+        std::env::temp_dir().join(format!("crook-glibc-floor-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("the temporary directory is writable");
+    directory
 }
 
 /// A version needs section for `libc.so.6` holding `versions`, laid out the
@@ -185,4 +222,68 @@ fn a_floor_that_is_not_a_version_is_refused() {
         let verdict = checked(floor, V0_1_13);
         assert_eq!(verdict.code, Some(2), "{floor:?} was taken as a floor");
     }
+}
+
+#[test]
+fn readelf_is_run_in_the_c_locale_whatever_language_the_caller_reads() {
+    // A stand-in for readelf with its catalogs installed: the English listing
+    // in the C locale, the Russian one in any other. The real one run under
+    // LANG=ru_RU.UTF-8 hid the needs section from the script, which then said
+    // the binary needed no glibc at all instead of which one it needed.
+    let bin = scratch("readelf");
+    std::fs::write(bin.join("listing.C"), V0_1_13).expect("a scratch listing");
+    std::fs::write(bin.join("listing.ru"), in_russian(V0_1_13)).expect("a scratch listing");
+    let readelf = bin.join("readelf");
+    std::fs::write(
+        &readelf,
+        "#!/bin/sh\n\
+         if [ \"${LC_ALL-}\" = C ]; then exec cat \"${0%/*}/listing.C\"; fi\n\
+         exec cat \"${0%/*}/listing.ru\"\n",
+    )
+    .expect("a scratch readelf");
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&readelf, std::fs::Permissions::from_mode(0o755))
+            .expect("the scratch readelf can be made runnable");
+    }
+    let path = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )))
+    .expect("a PATH made of paths that were on one");
+
+    let verdict: Verdict = crate::process::command("sh")
+        .arg(script())
+        .arg("2.31")
+        .arg(bin.join("crook"))
+        .env("PATH", path)
+        .env("LC_ALL", "ru_RU.UTF-8")
+        .env("LANGUAGE", "ru")
+        .stdin(Stdio::null())
+        .output()
+        .expect("sh should start")
+        .into();
+    let _ = std::fs::remove_dir_all(&bin);
+
+    assert_eq!(verdict.code, Some(1), "{}", verdict.stderr);
+    assert!(verdict.stderr.contains("GLIBC_2.39"), "{}", verdict.stderr);
+    assert!(
+        verdict.stderr.contains("pidfd_spawnp"),
+        "{}",
+        verdict.stderr
+    );
+}
+
+#[test]
+fn a_listing_made_in_another_language_is_refused_with_how_to_make_one() {
+    // Piped in, the listing was made before the script ran, in whatever
+    // locale the person had. The script cannot read it, and must neither pass
+    // it nor leave them thinking the binary has no glibc needs.
+    let verdict = checked("2.31", &in_russian(V0_1_13));
+
+    assert_eq!(verdict.code, Some(2), "{}", verdict.stdout);
+    assert!(
+        verdict.stderr.contains("LC_ALL=C readelf"),
+        "{}",
+        verdict.stderr
+    );
 }
