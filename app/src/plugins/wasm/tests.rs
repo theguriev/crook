@@ -1080,13 +1080,20 @@ fn a_name_this_build_has_no_icon_for_draws_nothing() {
     assert_eq!(marks(&known.scene()), [Mark::Icon(Lucide::GitBranch)]);
 }
 
-/// A mark with `rows` rows around it, each holding the next.
-fn a_mark_inside(rows: usize) -> Node {
-    let mark = Node::Icon {
-        name: "git-branch".to_owned(),
-        tone: Tone::Primary,
-    };
-    (0..rows).fold(mark, |inner, _| Node::Row(vec![inner]))
+/// A rule with `rows` rows around it, each holding the next.
+///
+/// A rule because it is the cheapest node there is to decode — a variant with
+/// nothing in it, one level, where a mark's fields and tone cost it three —
+/// so the deepest run of these that decodes is the deepest tree a guest can
+/// send at all. And because it paints, so whether the renderer reached the
+/// bottom is in the scene.
+fn a_rule_inside(rows: usize) -> Node {
+    (0..rows).fold(Node::Rule, |inner, _| Node::Row(vec![inner]))
+}
+
+/// How many rects the rule at the bottom of `node` painted, if it was reached.
+fn rules_painted(node: Node) -> usize {
+    rects_of(&Frame::new(node).scene(), theme().overlay_2).len()
 }
 
 #[test]
@@ -1097,28 +1104,33 @@ fn a_tree_is_drawn_as_deep_as_a_guest_can_send_one_and_no_deeper() {
     // can send, or it would be cutting short a tree a plugin was allowed to
     // draw. The deepest a guest can send is found by asking the decoder, rather
     // than worked out here, so the two limits cannot drift apart unnoticed.
-    let sendable = (0..)
+    let deepest = (0..)
         .take_while(|&rows| {
-            let bytes = to_bytes(&a_mark_inside(rows)).expect("a tree should encode");
+            let bytes = to_bytes(&a_rule_inside(rows)).expect("a tree should encode");
             crook_plugin_api::from_bytes::<Node>(&bytes).is_ok()
         })
         .last()
-        .expect("a mark on its own decodes");
-    let mut sent = Frame::new(a_mark_inside(sendable));
-    assert_eq!(
-        marks(&sent.scene()),
-        [Mark::Icon(Lucide::GitBranch)],
-        "a tree {sendable} rows deep decodes and was not drawn to the bottom"
-    );
+        .expect("a rule on its own decodes");
+    let shallow = rules_painted(a_rule_inside(1));
+    assert!(shallow > 0, "a rule in a row paints nothing to look for");
 
-    // And a tree built here stops where the renderer's limit says: the mark
-    // is the deepest node of each, drawn at the limit and not past it.
-    let mut deepest = Frame::new(a_mark_inside(render::DEEPEST - 1));
-    assert_eq!(marks(&deepest.scene()), [Mark::Icon(Lucide::GitBranch)]);
-    let mut deeper = Frame::new(a_mark_inside(render::DEEPEST));
-    assert!(
-        marks(&deeper.scene()).is_empty(),
-        "a node past the limit was drawn"
+    // The deepest tree a guest can send is drawn to the bottom...
+    assert_eq!(
+        rules_painted(a_rule_inside(deepest)),
+        shallow,
+        "a tree {deepest} rows deep decodes, and the renderer, which stops at \
+         {} nodes, did not draw the rule at its bottom",
+        render::DEEPEST,
+    );
+    // ...and one row deeper, which only this side of the wire can build, is
+    // where the renderer stops.
+    assert_eq!(
+        rules_painted(a_rule_inside(deepest + 1)),
+        0,
+        "a tree {} rows deep cannot be sent, and the renderer, which stops at \
+         {} nodes, drew the rule at its bottom",
+        deepest + 1,
+        render::DEEPEST,
     );
 }
 
