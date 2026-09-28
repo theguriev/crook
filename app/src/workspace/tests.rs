@@ -17169,6 +17169,55 @@ mod desktop_notifications {
     }
 
     #[test]
+    fn a_question_after_the_person_came_back_and_left_again_is_posted() {
+        // The permission rhythm: a banner, a switch over to approve, a switch
+        // back, and the agent's next question a few seconds later. The
+        // person answered the first one, so the second is news however soon
+        // it comes; the quiet is for a pane nobody has looked at since.
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        report(&mut harness, pane, AgentStatus::Running, None);
+        leave(&mut harness);
+        report(&mut harness, pane, AgentStatus::NeedsInput, Some("first?"));
+
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(true, ctx));
+        report(&mut harness, pane, AgentStatus::Running, None);
+        leave(&mut harness);
+        report(&mut harness, pane, AgentStatus::NeedsInput, Some("second?"));
+
+        let bodies: Vec<String> = posted.all().into_iter().map(|notice| notice.body).collect();
+        assert_eq!(bodies, ["first?", "second?"]);
+    }
+
+    #[test]
+    fn a_pane_the_person_did_not_look_at_stays_quiet_after_they_came_back() {
+        // Coming back to the window is looking at the pane in front, and only
+        // that one: a pane in another tab that posted is still unseen.
+        let (mut harness, posted) = window(2);
+        let behind = background_of(&harness);
+        report(&mut harness, behind, AgentStatus::Running, None);
+        leave(&mut harness);
+        report(
+            &mut harness,
+            behind,
+            AgentStatus::NeedsInput,
+            Some("first?"),
+        );
+
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(true, ctx));
+        leave(&mut harness);
+        report(&mut harness, behind, AgentStatus::Running, None);
+        report(
+            &mut harness,
+            behind,
+            AgentStatus::NeedsInput,
+            Some("second?"),
+        );
+
+        assert_eq!(posted.count(), 1, "{:?}", posted.all());
+    }
+
+    #[test]
     fn a_second_pane_asking_is_not_held_up_by_the_first() {
         let (mut harness, posted) = window(2);
         let front = harness.focused_pane_id().expect("the window has a pane");

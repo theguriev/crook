@@ -155,8 +155,9 @@ fn notifications(workspace: &Workspace, _: &AppContext) -> Vec<Category> {
         widgets::note(
             "Only while the Crook window is behind another one: a pane in front of you \
              already has your attention. At most one for each pane every half minute, \
-             however often its agent stops. The title names Crook and the tab, and the text \
-             is the agent's question when it asked one. It goes to your desktop's notification \
+             however often its agent stops, unless you have looked at the pane since. The \
+             title names Crook and the tab, and the text is the agent's question when it \
+             asked one. It goes to your desktop's notification \
              service through notify-send, on this machine and nowhere else; with no \
              notify-send installed, nothing is shown.",
             ui,

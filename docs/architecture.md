@@ -1206,6 +1206,9 @@ Notifications page `crook/notifications` owns, and the workspace posts only whil
 is loaded, so the Plugins page's switch for it is a switch for the feature. `notify::Cooldown`
 keeps a pane quiet for `notify::QUIET` after it posts, counted from the post and not from the
 refusals, so an agent whose hooks flap posts once: #352's rule for the bell, one level up.
+The quiet also ends when somebody looks at the pane (`Workspace::attend` calls
+`Cooldown::seen`), so the next question of an agent a person just answered is posted however
+soon it comes.
 Posting is a `Notifier` the window that runs on a desktop hands in (`Workspace::set_notifier`);
 a test and a snapshot keep `Silent`. On Linux that is `notify::linux::NotifySend`,
 `notify-send` started on the pool through `crate::process::command` and waited on by a thread

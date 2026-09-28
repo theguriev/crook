@@ -309,13 +309,13 @@ Nineteen features, and the page that configures them:
   notification, and it is taken back when the window comes to the front. On Linux a pane whose
   row turns amber while the window is behind something else — its agent stops to ask or says it
   is done, or a program rings the bell — also posts a desktop notification, titled
-  `Crook — <tab>` with the agent's question under it, at most once a pane every thirty seconds,
-  through `notify-send` on the session bus and nowhere else; the **Notifications** settings page
-  turns it off, and turns on the same for an agent that failed or a command that ran ten
-  seconds or more. A click on one does not bring the pane forward, and macOS and Windows post
-  none yet. A program that turns on focus reporting (`?1004`) is told `CSI I` and `CSI O` as
-  the keyboard reaches its pane and leaves it, the window's own focus included, so an agent can
-  tell whether anybody is watching.
+  `Crook — <tab>` with the agent's question under it, at most once every thirty seconds for a
+  pane nobody has come back to, through `notify-send` on the session bus and nowhere else; the
+  **Notifications** settings page turns it off, and turns on the same for an agent that failed
+  or a command that ran ten seconds or more. A click on one does not bring the pane forward,
+  and macOS and Windows post none yet. A program that turns on focus reporting (`?1004`) is
+  told `CSI I` and `CSI O` as the keyboard reaches its pane and leaves it, the window's own
+  focus included, so an agent can tell whether anybody is watching.
 - **A shell in every pane.** A real pseudo-terminal and a real xterm-compatible emulator:
   colour, bold and italic faces, underline and strikeout, the alternate screen, ten thousand
   lines of scrollback, `SIGWINCH` on resize, and titles and working directories the shell

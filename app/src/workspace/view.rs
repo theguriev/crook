@@ -5481,7 +5481,7 @@ impl Workspace {
     /// Posts `notice` about `pane` when everything that decides it says yes:
     /// the window is behind another one, the person asked for `occasion`, the
     /// Notifications plugin is on, and the pane has been quiet for
-    /// [`QUIET`](crate::notify::QUIET).
+    /// [`QUIET`](crate::notify::QUIET) or looked at since it last posted.
     ///
     /// Only while the window is behind another one, because a pane in front
     /// of somebody already has their attention — the row, the chip and the
@@ -5520,10 +5520,16 @@ impl Workspace {
     /// the strip moves to then is a pane nobody saw. Coming back to the
     /// window runs this for whichever pane has the keyboard by then, with
     /// the pane that had it on leaving as `before`.
+    ///
+    /// Looking also ends the pane's desktop-notification quiet, whether or
+    /// not it had asked for anything: the banner it posted has been answered
+    /// by the person coming to it, so what it says next is news however soon
+    /// it comes. See [`Cooldown::seen`].
     fn attend(&mut self, before: Option<PaneId>, ctx: &mut ViewContext<Self>) {
         let Some(pane) = self.looking_at() else {
             return;
         };
+        self.notified.seen(pane);
         let arrived = before != Some(pane);
         let asked = self
             .tabs

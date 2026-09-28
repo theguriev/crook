@@ -80,7 +80,9 @@ pub const APPLICATION: &str = "Crook";
 /// nothing new; and quiet is per pane, so a second agent stopping in another
 /// tab is never held up by the first. It is the bell's rule one level up:
 /// `terminal_model` drops a bell while the one before it has not been taken
-/// (#352), and this drops a notification while the one before it is fresh.
+/// (#352), and this drops a notification while the one before it is fresh
+/// and nobody has come to the pane since: looking at the pane ends its
+/// quiet at once ([`Cooldown::seen`]).
 pub const QUIET: Duration = Duration::from_secs(30);
 
 /// How long a command has to have run for its end to be worth a notification.
@@ -225,7 +227,8 @@ fn spoken(duration: Duration) -> String {
 ///
 /// Per pane, and nothing global: one agent asking over and over is the spam
 /// this is for, and five agents each stopping once is five things a person
-/// wants to know.
+/// wants to know. A pane's quiet ends after [`QUIET`], or sooner when
+/// somebody looks at the pane ([`Self::seen`]).
 #[derive(Debug, Default)]
 pub struct Cooldown {
     /// When each pane last posted, for as long as that is within [`QUIET`].
@@ -245,6 +248,16 @@ impl Cooldown {
         }
         self.posted.insert(pane, now);
         true
+    }
+
+    /// Ends `pane`'s quiet, because somebody is looking at it.
+    ///
+    /// The quiet stands in for a person who has not seen the banner yet.
+    /// Once they have come to the pane, whatever it says next is news however
+    /// soon it comes: the agent they just answered asking its next question
+    /// is the rhythm of a permission prompt, not a flap.
+    pub fn seen(&mut self, pane: PaneId) {
+        self.posted.remove(&pane);
     }
 }
 

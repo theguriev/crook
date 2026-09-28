@@ -165,6 +165,21 @@ fn a_refused_post_does_not_lengthen_the_quiet() {
 }
 
 #[test]
+fn a_pane_somebody_looked_at_is_heard_again_at_once() {
+    let mut cooldown = Cooldown::default();
+    let (seen, unseen) = (PaneId::next(), PaneId::next());
+    let start = Instant::now();
+    assert!(cooldown.admits(seen, start));
+    assert!(cooldown.admits(unseen, start));
+
+    cooldown.seen(seen);
+
+    let soon = start + Duration::from_secs(5);
+    assert!(cooldown.admits(seen, soon), "its next stop is news");
+    assert!(!cooldown.admits(unseen, soon), "and no other pane's is");
+}
+
+#[test]
 fn panes_quiet_for_long_enough_are_forgotten() {
     let mut cooldown = Cooldown::default();
     let start = Instant::now();
