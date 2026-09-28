@@ -136,10 +136,11 @@ pub struct Worktree {
     /// locked without one. `None` is unlocked.
     ///
     /// A checkout Crook makes is locked with [`lock_reason`] — `crook: ` and
-    /// the branch — from the moment it is made until the last pane working in
-    /// it closes, which is what tells git and every other tool that an agent is
-    /// in there. [`Self::is_locked_by_crook`] and
-    /// [`Self::is_locked_by_another`] tell that lock from anybody else's.
+    /// the branch — from the moment it is made until no pane in the window
+    /// that made it is working in it, or that window closes, which is what
+    /// tells git and every other tool that an agent is in there.
+    /// [`Self::is_locked_by_crook`] and [`Self::is_locked_by_another`] tell
+    /// that lock from anybody else's.
     pub locked: Option<String>,
     /// git's reason for thinking the entry could be pruned — most often that
     /// its directory is gone — with the same `Some("")` convention as
@@ -641,12 +642,14 @@ pub fn remove(repository: &Path, path: &Path, force: bool) -> Result<(), Error> 
 ///
 /// git records a lock as a sentence in a file and nothing about who wrote it,
 /// so the sentence has to say. This is how Crook tells its own lock from
-/// anybody else's: its own it may take off once nothing in the window is
-/// working in the checkout — including one a Crook that crashed or was killed
-/// left behind, which would otherwise hold the checkout against Crook's own
-/// menu for ever. Any other reason is somebody else's — Claude Code's
-/// `claude session …`, a person's own `git worktree lock` — and nothing here
-/// ever takes one of those off.
+/// anybody else's. Its own the worktree menu may take off before removing a
+/// checkout nothing in the window is working in — one a Crook that crashed or
+/// was killed left behind, which would otherwise hold the checkout against
+/// Crook's own menu for ever. The prefix does not say *which* Crook, so a
+/// window closing its panes takes off only the locks it remembers taking.
+/// Any other reason is somebody else's — Claude Code's `claude session …`, a
+/// person's own `git worktree lock` — and nothing here ever takes one of
+/// those off.
 pub const LOCK_PREFIX: &str = "crook: ";
 
 /// The reason Crook locks the checkout it made for `branch` with.
@@ -712,9 +715,10 @@ pub fn lock(repository: &Path, path: &Path, reason: &str) -> Result<(), Error> {
 /// Private, because "whoever" is the whole danger: [`release`] is the way
 /// in, and it reads whose the lock is first.
 ///
-/// A checkout that is not locked is not an error. The two panes of one
-/// checkout can close together and both ask, and the second finding the work
-/// done is the state they were both asking for.
+/// A checkout that is not locked is not an error. Two asks can overlap — the
+/// last pane leaving a checkout as the window closes, or as the menu removes
+/// it — and the second finding the work done is the state they were both
+/// asking for.
 fn unlock(repository: &Path, path: &Path) -> Result<(), Error> {
     let finished = run(
         repository,
@@ -745,7 +749,8 @@ fn unlock(repository: &Path, path: &Path) -> Result<(), Error> {
 /// `path` is matched against git's own listing, so it should be a path git
 /// printed. Whether nothing is working in the checkout any more is the
 /// caller's question to answer before asking this: a lock is taken off
-/// because the last pane left, and only the window knows where its panes are.
+/// because the last pane left, and only the window knows where its panes are
+/// and which locks it took.
 pub fn release(repository: &Path, path: &Path) -> Result<bool, Error> {
     let ours = list(repository)?
         .iter()

@@ -31,7 +31,8 @@
 //!   the tab the menu was opened on belongs to* — or brings forward the pane
 //!   already there;
 //! * a way to make one, which asks for a branch name and nothing else, and
-//!   locks the checkout it makes until the last pane working in it closes;
+//!   locks the checkout it makes until no pane in the window is working in it
+//!   or the window closes;
 //! * a way to remove one, offered only for a checkout nothing is working in;
 //! * a way to remove all of those at once, for the day a repository has eight
 //!   of them and seven are finished.
@@ -631,11 +632,15 @@ fn listing(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
 /// away another's work.
 ///
 /// A lock Crook took is the exception, and the reason is the second
-/// conjunct. Crook locks a checkout it makes until the last pane in it
-/// closes, so its own lock on a checkout nothing in the window is working in
-/// is one a Crook that crashed or was killed left behind — and holding the
-/// checkout against Crook's own menu for ever would make the lock a trap
-/// rather than a statement. Removing it takes that lock off first.
+/// conjunct. A window takes its own lock off a checkout once none of its
+/// panes is working in it, and the rest when it closes, so Crook's lock on a
+/// checkout nothing in the window is working in is one a Crook that crashed
+/// or was killed left behind — and holding the checkout against Crook's own
+/// menu for ever would make the lock a trap rather than a statement. Removing
+/// it takes that lock off first. The prefix cannot say which Crook took it,
+/// so a second Crook window's checkout reads the same; that is the one thing
+/// this cannot tell apart, and it is no more than the menu offered before
+/// there was a lock.
 ///
 /// One function rather than the same four conjuncts written twice, because
 /// the × on a row and the row that sweeps all of them have to mean the same
