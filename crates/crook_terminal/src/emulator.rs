@@ -244,7 +244,12 @@ fn parse_working_directory(value: &[u8]) -> Option<PathBuf> {
         decoded
     };
 
-    (!decoded.is_empty()).then(|| PathBuf::from(decoded))
+    // Anything else is not a directory anybody could be in. A URL of another
+    // scheme — `kitty-shell-cwd://host/tmp`, which kitty's and Ghostty's own
+    // integrations write — or a stray word came through as a *relative* path,
+    // and everything that uses the directory resolved it against Crook's own.
+    let rooted = decoded.starts_with(['/', '\\']) || Path::new(&decoded).is_absolute();
+    rooted.then(|| PathBuf::from(decoded))
 }
 
 /// Whether a URL path is a Windows path with its leading slash still attached.
@@ -265,7 +270,13 @@ fn percent_decode(value: &str) -> Option<String> {
     while index < bytes.len() {
         match bytes[index] {
             b'%' if index + 2 < bytes.len() => {
-                let digits = str::from_utf8(&bytes[index + 1..index + 3]).ok()?;
+                // Two hex digits and nothing else: `from_str_radix` also takes
+                // a sign, and `%+1` decoded to a control byte in a path.
+                let digits = &bytes[index + 1..index + 3];
+                if !digits.iter().all(u8::is_ascii_hexdigit) {
+                    return None;
+                }
+                let digits = str::from_utf8(digits).ok()?;
                 decoded.push(u8::from_str_radix(digits, 16).ok()?);
                 index += 3;
             }

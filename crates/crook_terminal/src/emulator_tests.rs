@@ -421,6 +421,14 @@ fn a_hostile_working_directory_url_is_refused_rather_than_believed() {
     // whole update is dropped rather than a corrupt path believed.
     assert_eq!(None, parse_working_directory(b"/a%zzb"));
     assert_eq!(None, parse_working_directory(b"/a%2Gb"));
+    // Nor is a signed number, which the integer parser underneath takes.
+    assert_eq!(None, parse_working_directory(b"/a%+1b"));
+
+    // What is not a path something could be in is not one: another scheme's
+    // URL, or a word, used to come through as a relative path, resolved
+    // against Crook's own directory by everything that read it.
+    assert_eq!(None, parse_working_directory(b"kitty-shell-cwd://host/tmp"));
+    assert_eq!(None, parse_working_directory(b"foo"));
 
     // Escapes that decode to bytes that are not UTF-8 are refused the same way
     // — a lone continuation byte is no path.
