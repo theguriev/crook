@@ -4032,12 +4032,19 @@ impl Workspace {
         let opening = self.tab_menu.opening;
         let made = ctx.background().spawn({
             let path = path.clone();
+            let held = self.held.clone();
             async move {
                 crate::git::worktree::add(&repository, &path, &branch, None)?;
                 // Locked here, before the answer lands and the tab opens, so
                 // there is no moment in which an agent is working in a
-                // checkout nothing else has been told about.
-                Ok::<_, crate::git::worktree::Error>(HeldLock::take(&repository, &path, &branch))
+                // checkout nothing else has been told about. And handed in
+                // from here rather than with the answer, because the answer
+                // never lands in a window closed while git was busy: this
+                // task is then the one thing left to take the lock off.
+                if let Some(lock) = HeldLock::take(&repository, &path, &branch) {
+                    held.admit(lock);
+                }
+                Ok::<_, crate::git::worktree::Error>(())
             }
         });
 
@@ -4057,7 +4064,7 @@ impl Workspace {
             match made {
                 // Creating one opens it, which is the whole point: a worktree
                 // nobody is working in is a directory.
-                Ok(locked) => {
+                Ok(()) => {
                     if answering {
                         workspace.close_tab_menu(ctx);
                     }
@@ -4065,14 +4072,12 @@ impl Workspace {
                     // `open_tab_in_group_of` falls back out of if that tab has
                     // closed in the meantime.
                     match opened_on {
-                        Some(tab) => workspace.open_tab_in_group_of(tab, path, ctx),
-                        None => workspace.open_tab_in(path, ctx),
+                        Some(tab) => workspace.open_tab_in_group_of(tab, path.clone(), ctx),
+                        None => workspace.open_tab_in(path.clone(), ctx),
                     };
                     // Held once its pane is in it, and from then on until no
                     // pane in the window is.
-                    if let Some(lock) = locked {
-                        workspace.held.hold(lock);
-                    }
+                    workspace.held.opened(&path);
                 }
                 Err(problem) => {
                     if answering {

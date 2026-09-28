@@ -5931,24 +5931,8 @@ fn window_with_a_checkout_it_made(
         eprintln!("skipped: no git here to make a repository with");
         return None;
     };
-    let store = scratch.path().join("store");
 
-    let mut harness = Harness::seeded();
-    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
-    let tab = harness.active_id();
-    let pane = harness.pane_ids()[0];
-    harness.update_session(pane, |session| {
-        session.working_directory = Some(repository.clone());
-    });
-    harness.record_git(pane, "main", None);
-    harness.frame();
-
-    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
-    harness.wait_for("the repository to be read", |harness| {
-        harness.worktrees_listed().is_some()
-    });
-    harness.dispatch_worktree(WorktreeAction::StartCreating);
-    harness.dispatch_worktree(WorktreeAction::Create);
+    let mut harness = window_making_a_checkout(scratch, &repository);
     harness.wait_for("the worktree to be checked out", |harness| {
         harness.pane_ids().len() > 1
     });
@@ -5959,6 +5943,66 @@ fn window_with_a_checkout_it_made(
         .working_directory(opened)
         .expect("the pane that opened does not know where it is");
     Some((harness, repository, checkout, opened))
+}
+
+/// A window that has just asked its worktree menu for a new checkout of
+/// `repository`, the way a person asks for one, and has not heard back yet.
+fn window_making_a_checkout(scratch: &Scratch, repository: &Path) -> Harness {
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let tab = harness.active_id();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.to_owned());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    harness.dispatch_worktree(WorktreeAction::Create);
+    harness
+}
+
+/// Makes every checkout of `repository` slow to finish, the way a
+/// post-checkout hook that runs `npm ci` does: git runs the hook before
+/// `worktree add` returns, and this one writes `started` and then takes two
+/// seconds.
+fn slow_post_checkout(repository: &Path, started: &Path) {
+    let hooks = repository.join(".git").join("hooks");
+    fs::create_dir_all(&hooks).expect("the repository is writable");
+    let hook = hooks.join("post-checkout");
+    // Forward slashes, which the sh Git for Windows runs its hooks with reads
+    // as readily as any other.
+    let forward = |path: &Path| path.to_string_lossy().replace('\\', "/");
+    fs::write(
+        &hook,
+        format!("#!/bin/sh\n: > '{}'\nsleep 2\n", forward(started)),
+    )
+    .expect("the hook is writable");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
+            .expect("the hook can be made executable");
+    }
+
+    // Named in the repository's own config, so that a hooks directory set for
+    // the whole machine does not pass this one by.
+    let configured = crate::process::command("git")
+        .args(["config", "core.hooksPath", &forward(&hooks)])
+        .current_dir(repository)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    assert!(configured, "git would not point the repository at the hook");
 }
 
 /// The checkouts whose lock the window says it still holds.
@@ -6267,6 +6311,105 @@ fn release_all_takes_off_every_lock_the_window_still_holds() {
         "the lock outlived the window"
     );
     assert!(checkout.is_dir(), "releasing took the checkout too");
+}
+
+#[test]
+fn a_checkout_still_being_made_as_the_window_closes_takes_its_own_lock_off() {
+    // git can take a while over a checkout — a post-checkout hook running
+    // `npm ci` is why its write deadline is two minutes — and a window closed
+    // in that time holds nothing yet: the lock is taken once `add` returns,
+    // on the background pool. The process joins that pool on its way out
+    // *after* the window's delegate has taken off everything the window held,
+    // so the creation finishing then is the only thing left that can take its
+    // lock off. This runs in that order: the release, then the pool.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let started = scratch.path().join("hook-started");
+    slow_post_checkout(&repository, &started);
+
+    let mut harness = window_making_a_checkout(&scratch, &repository);
+    harness.wait_for("git to be running the post-checkout hook", |_| {
+        started.exists()
+    });
+    let held = harness
+        .workspace
+        .read(&harness.app, |workspace, _| workspace.held_locks());
+    held.release_all(std::time::Duration::from_secs(30));
+    // Dropping the window drops its background pool, and dropping the pool
+    // waits for the worker that is still making the checkout — which is
+    // what the process does as it ends.
+    drop(harness);
+
+    let checkout = crate::git::worktree::list(&repository)
+        .expect("the repository lists")
+        .into_iter()
+        .find(|worktree| !worktree.is_main)
+        .expect("the checkout was never made")
+        .path;
+    assert_eq!(
+        lock_on(&repository, &checkout),
+        None,
+        "a checkout finished after its window closed kept Crook's lock"
+    );
+    assert!(checkout.is_dir(), "releasing took the checkout too");
+}
+
+#[test]
+fn a_lock_handed_in_before_its_tab_opens_is_not_taken_for_one_nobody_is_in() {
+    // The creation hands its lock in from the background pool as soon as git
+    // has taken it, and the tab opens a moment later, on the main thread. A
+    // session report in between — any pane's shell saying anything — asks
+    // which held checkouts nothing is working in any more, and this one has
+    // no pane in it yet only because its tab has not opened.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let started = scratch.path().join("hook-started");
+    slow_post_checkout(&repository, &started);
+
+    let mut harness = window_making_a_checkout(&scratch, &repository);
+    harness.wait_for("git to be running the post-checkout hook", |_| {
+        started.exists()
+    });
+    // Without pumping the queue from here on, so the answer cannot land and
+    // the tab cannot open.
+    let deadline = std::time::Instant::now() + SHELL_TIMEOUT;
+    while held_checkouts(&harness).is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the creation never handed its lock in"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let checkout = held_checkouts(&harness)[0].clone();
+    assert_eq!(
+        harness.pane_ids().len(),
+        1,
+        "the tab opened before a report could come in between"
+    );
+
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |_| {});
+    // Long enough for a release to have gone through twice over.
+    harness.settle(std::time::Duration::from_secs(1));
+    assert!(
+        lock_on(&repository, &checkout).is_some(),
+        "the lock came off a checkout whose tab had not opened yet"
+    );
+
+    harness.wait_for("the checkout's tab to open", |harness| {
+        harness.pane_ids().len() > 1
+    });
+    assert_eq!(
+        held_checkouts(&harness),
+        vec![checkout],
+        "the window let go of the lock its new tab is working under"
+    );
 }
 
 #[test]

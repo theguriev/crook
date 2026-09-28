@@ -977,9 +977,12 @@ after `git worktree add`, and before the tab opens, it runs `git worktree lock -
 pane in the window is working in the checkout — the last one there closes, or its shell `cd`s
 out — and whatever it still holds when the window closes, since closing a window closes no pane:
 those come off as the event loop stops, whatever stopped it — the last tab, the title bar's ×,
-the window manager, macOS's Quit — with a few seconds' patience for a git that hangs. Opening the checkout again later, from the list or from a restored session, does not lock
-it again: the lock covers the stretch from making a checkout to leaving it, which is the agent
-it was made for. The lock is what tells everything outside Crook that touches the repository —
+the window manager, macOS's Quit — with a few seconds' patience for a git that hangs. A checkout
+git is still making as the window closes is locked only once it is made, which is after all of
+that, so the creation takes its own lock straight back off. Opening the checkout again later, from
+the list or from a restored session, does not lock it again: the lock covers the stretch from
+making a checkout to leaving it, which is the agent it was made for. The lock is what tells
+everything outside Crook that touches the repository —
 `git worktree remove` typed by hand, `git worktree prune`, another agent's tidy-up — that an
 agent is in there, and it is what stops one of them taking the checkout from under it. A lock
 does not record which Crook took it, which is why a window takes off only the ones it remembers:

@@ -6,19 +6,39 @@
 //! window remembers the locks it took itself, and those are the only ones it
 //! takes off on its own: when no pane in the window is working in the checkout
 //! any more, and, for whatever is still held when the window goes, on the way
-//! out of the process. A checkout another Crook window made keeps its lock
-//! however many of this window's panes pass through it.
+//! out of the process. A checkout git is still making when the window goes
+//! takes its own lock straight back off once it is made, since by then
+//! nothing else is left to. A checkout another Crook window made keeps its
+//! lock however many of this window's panes pass through it.
 //!
 //! The one other place a `crook: ` lock comes off is the worktree menu, which
 //! reads one on a checkout nothing in the window is working in as left behind
 //! by a Crook that crashed; see `tab_menu::removable`.
 
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use crate::git::worktree;
+
+/// Where a held lock is, between being taken and being taken off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// Taken by a creation whose tab has not opened yet.
+    ///
+    /// No pane is in the checkout, and none is meant to be until the tab
+    /// opens, so a lock at this stage is not one for
+    /// [`HeldLocks::start_releasing`] to find vacated.
+    Opening,
+    /// Its tab has opened, and it stays on until no pane in the window is
+    /// working in the checkout.
+    Held,
+    /// The unlock has been asked for and has not answered yet.
+    ///
+    /// Kept in the list until it answers, so that a window closing in the
+    /// meantime takes it off too rather than leaving it half done.
+    Releasing,
+}
 
 /// A lock this window took on a checkout it made.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,11 +55,7 @@ pub(crate) struct HeldLock {
     /// tab opened. The same as `checkout` unless the way to the store runs
     /// through a link, or through a short name on Windows.
     pub(crate) opened_at: PathBuf,
-    /// Whether the unlock has been asked for and has not answered yet.
-    ///
-    /// Kept in the list until it answers, so that a window closing in the
-    /// meantime takes it off too rather than leaving it half done.
-    releasing: bool,
+    stage: Stage,
 }
 
 impl HeldLock {
@@ -78,7 +94,7 @@ impl HeldLock {
             repository: main.unwrap_or_else(|| repository.to_owned()),
             checkout: checkout.unwrap_or_else(|| path.to_owned()),
             opened_at: path.to_owned(),
-            releasing: false,
+            stage: Stage::Opening,
         })
     }
 
@@ -91,30 +107,85 @@ impl HeldLock {
 
 /// Every lock a window holds.
 ///
-/// Shared, because the workspace is not the last thing to need it: the locks
-/// still held when the window closes are taken off as the event loop stops,
-/// by [`Self::release_all`], from the delegate the platform tells — which
-/// every way of closing a window reaches, and the workspace's own quit does
-/// not.
+/// Shared, and across threads, because the workspace is not the only thing
+/// that needs it. The creation that takes a lock hands it in from the
+/// background pool, in `admit`, and the locks still held when the window
+/// closes are taken off as the event loop stops, by [`Self::release_all`],
+/// from the delegate the platform tells. Every way of closing a window
+/// reaches that delegate. Only some of them pass through the workspace's own
+/// quit first — the last tab closing, the header's × — and the window
+/// manager's close and macOS's Quit do not.
 #[derive(Debug, Clone, Default)]
-pub struct HeldLocks(Rc<RefCell<Vec<HeldLock>>>);
+pub struct HeldLocks(Arc<Mutex<Held>>);
+
+/// What [`HeldLocks`] guards.
+#[derive(Debug, Default)]
+struct Held {
+    locks: Vec<HeldLock>,
+    /// Whether [`HeldLocks::release_all`] has run. The window has gone then,
+    /// and a lock handed in after it is one nothing would ever take off.
+    closed: bool,
+}
 
 impl HeldLocks {
-    /// Remembers a lock the window has just taken.
-    pub(crate) fn hold(&self, lock: HeldLock) {
-        self.0.borrow_mut().push(lock);
+    /// The list, for one change or one question.
+    fn held(&self) -> MutexGuard<'_, Held> {
+        // Every change to the list is one push, one retain or one field set in
+        // place, so a panic in the middle of one leaves a list that is still
+        // true, and the locks in it still need taking off.
+        self.0.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Remembers a lock a creation has just taken, until its tab opens — or,
+    /// when the window closed while git was making the checkout, takes it
+    /// straight back off.
+    ///
+    /// **Blocking** in the second case, for the unlock. Called on the
+    /// background pool by the creation that took the lock, which the process
+    /// waits for on its way out. Once the window has gone, that creation is
+    /// the one thing still running, so it is the one thing that can take its
+    /// lock off.
+    ///
+    /// Decided under the lock [`Self::release_all`] closes the list under, so
+    /// a lock is either in the list when that runs or finds it closed.
+    pub(crate) fn admit(&self, lock: HeldLock) {
+        {
+            let mut held = self.held();
+            if !held.closed {
+                held.locks.push(lock);
+                return;
+            }
+        }
+        if let Err(problem) = worktree::release(&lock.repository, &lock.checkout) {
+            log::warn!("could not unlock {}: {problem}", lock.checkout.display());
+        }
+    }
+
+    /// Holds the lock on the checkout whose tab has just opened at
+    /// `opened_at`: from here on it comes off when no pane in the window is
+    /// working in the checkout.
+    ///
+    /// Nothing when there is no such lock, because git would not lock the
+    /// checkout.
+    pub(crate) fn opened(&self, opened_at: &Path) {
+        for lock in &mut self.held().locks {
+            if lock.stage == Stage::Opening && lock.opened_at == opened_at {
+                lock.stage = Stage::Held;
+            }
+        }
     }
 
     /// Marks every held lock `vacated` says nothing is working in any more as
     /// being taken off, and hands those back to be.
     ///
-    /// A lock already on its way off is not handed back twice.
+    /// A lock already on its way off is not handed back twice, and a lock
+    /// whose tab has not opened yet is not handed back at all.
     pub(crate) fn start_releasing(&self, vacated: impl Fn(&HeldLock) -> bool) -> Vec<HeldLock> {
-        let mut held = self.0.borrow_mut();
+        let mut held = self.held();
         let mut going = Vec::new();
-        for lock in held.iter_mut() {
-            if !lock.releasing && vacated(lock) {
-                lock.releasing = true;
+        for lock in &mut held.locks {
+            if lock.stage == Stage::Held && vacated(lock) {
+                lock.stage = Stage::Releasing;
                 going.push(lock.clone());
             }
         }
@@ -128,28 +199,30 @@ impl HeldLocks {
     /// recognises it as Crook's own, and a retry at every keystroke would be
     /// a subprocess a keystroke.
     pub(crate) fn released(&self, checkout: &Path) {
-        self.0
-            .borrow_mut()
-            .retain(|lock| !(lock.releasing && lock.checkout == checkout));
+        self.held()
+            .locks
+            .retain(|lock| !(lock.stage == Stage::Releasing && lock.checkout == checkout));
     }
 
     /// Whether the window holds no lock at all, which is almost always, and
     /// is what lets every check of them cost nothing then.
     pub(crate) fn is_empty(&self) -> bool {
-        self.0.borrow().is_empty()
+        self.held().locks.is_empty()
     }
 
     /// The checkouts whose lock the window still holds, as git lists them.
     #[cfg(test)]
     pub(crate) fn checkouts(&self) -> Vec<PathBuf> {
-        self.0
-            .borrow()
+        self.held()
+            .locks
             .iter()
             .map(|lock| lock.checkout.clone())
             .collect()
     }
 
-    /// Takes off every lock still held, for a window that is closing.
+    /// Takes off every lock still held, for a window that is closing, and
+    /// closes the list: a creation that takes its lock after this takes it
+    /// straight back off, in `admit`.
     ///
     /// **Blocking**, for at most `patience`. Every pane has gone with the
     /// window, so nothing is working in any of these checkouts, and a lock
@@ -162,7 +235,11 @@ impl HeldLocks {
     /// wait and not the exit. A lock git has not taken off by then stays, and
     /// is what the menu reads as one a crashed Crook left behind.
     pub fn release_all(&self, patience: Duration) {
-        let held = std::mem::take(&mut *self.0.borrow_mut());
+        let held = {
+            let mut held = self.held();
+            held.closed = true;
+            std::mem::take(&mut held.locks)
+        };
         if held.is_empty() {
             return;
         }
