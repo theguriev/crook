@@ -897,3 +897,26 @@ fn an_edit_that_joins_two_characters_leaves_the_caret_after_the_one_they_make() 
     editor.backspace();
     assert_eq!((editor.text(), editor.caret()), ("e\u{301}", 3));
 }
+
+#[test]
+fn word_motion_never_stops_inside_a_character() {
+    // U+0D4E binds to the character after it, but word breaking has no rule
+    // for that and ends a word between the two. Every offset a word motion
+    // returns is still to be a place the caret may stand.
+    let prepend = "\u{d4e} x";
+    for offset in [0, prepend.len()] {
+        for found in [
+            text::next_word(prepend, offset),
+            text::prev_word(prepend, offset),
+        ] {
+            assert_eq!(text::snap(prepend, found), found, "{found} from {offset}");
+        }
+        let range = text::word_range_at(prepend, offset);
+        assert_eq!(text::snap(prepend, range.start), range.start);
+        assert_eq!(text::snap(prepend, range.end), range.end);
+    }
+
+    let mut editor = at(prepend, 0);
+    editor.move_caret(Motion::WordRight);
+    assert_eq!(text::snap(editor.text(), editor.caret()), editor.caret());
+}
