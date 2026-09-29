@@ -43,7 +43,8 @@ use crate::window_controls::{Recorder, Request, WindowState};
 
 use super::{
     BlockAction, Fonts, Opening, OptionsAction, QuitRequest, SettingsAction, TabMenuAction,
-    ThemeAction, Workspace, WorkspaceAction, WorktreeAction, tab_options_menu, tabs_panel,
+    ThemeAction, WindowAction, Workspace, WorkspaceAction, WorktreeAction, tab_options_menu,
+    tabs_panel,
 };
 
 /// Big enough that two tabs both reach their maximum width, so the geometry
@@ -1331,6 +1332,25 @@ impl Harness {
         self.quit_requests.get()
     }
 
+    /// The panes the question a close asks is about, while it is up.
+    fn asking_about(&self) -> Option<Vec<PaneId>> {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace
+                .closing_question()
+                .map(|question| question.working().to_vec())
+        })
+    }
+
+    /// Presses the question's button that says `label`, on a fresh frame.
+    ///
+    /// By its label rather than by a box, because the two buttons are the
+    /// same box twice and what tells them apart on screen is what they say.
+    fn press_closing_button(&mut self, label: &str) {
+        let scene = self.frame();
+        let at = word_in(&scene, RectF::new(Vector2F::zero(), WINDOW), label);
+        self.click(at + vec2f(2., -3.), MouseButton::Left);
+    }
+
     /// Where a pane's session says it is working.
     fn working_directory(&self, pane: PaneId) -> Option<PathBuf> {
         self.workspace.read(&self.app, |workspace, _| {
@@ -1847,6 +1867,323 @@ fn closing_the_last_tab_asks_the_shell_to_quit_instead_of_emptying_the_strip() {
 
     assert_eq!(harness.quit_requests.get(), 1);
     assert_eq!(harness.tab_ids(), ids);
+}
+
+#[test]
+fn closing_the_window_while_an_agent_is_running_asks_rather_than_quitting() {
+    // Every agent is a child of the window, so the title bar's close is also
+    // the end of whatever each of them was halfway through.
+    let mut harness = Harness::new(2);
+    let working = harness.pane_ids()[0];
+    harness.update_session(working, |session| {
+        session.status = AgentStatus::Running;
+        session.derived_title = Some("bisect the flaky test".to_owned());
+    });
+
+    harness.dispatch_workspace_action(WindowAction::Close.into());
+
+    assert_eq!(
+        harness.quit_requests(),
+        0,
+        "the window went with an agent still running in it"
+    );
+    assert_eq!(harness.asking_about(), Some(vec![working]));
+    let scene = harness.frame();
+    for phrase in [
+        "1 agent is still working",
+        "bisect the flaky test",
+        "Quitting Crook ends it.",
+        "End it and quit",
+        "Cancel",
+    ] {
+        assert!(says(&scene, phrase), "the question does not say {phrase:?}");
+    }
+    assert!(
+        !harness.pane_takes_keys(),
+        "a shell under the question kept the keyboard"
+    );
+}
+
+#[test]
+fn cancelling_the_question_leaves_every_agent_running_and_the_window_open() {
+    // Three ways to say no — Escape, the button, a press off the card — and
+    // every one of them is only the card going.
+    let mut harness = Harness::new(2);
+    let tabs = harness.tab_ids();
+    let panes = harness.pane_ids();
+    harness.update_session(panes[1], |session| session.status = AgentStatus::Running);
+
+    harness.dispatch_workspace_action(WindowAction::Close.into());
+    assert!(harness.press_key("escape", Modifiers::default()));
+    assert_eq!(harness.asking_about(), None, "Escape left the question up");
+
+    harness.dispatch_workspace_action(WindowAction::Close.into());
+    harness.press_closing_button("Cancel");
+    assert_eq!(harness.asking_about(), None, "Cancel left the question up");
+
+    harness.dispatch_workspace_action(WindowAction::Close.into());
+    harness.frame();
+    harness.click(vec2f(4., WINDOW.y() - 4.), MouseButton::Left);
+    assert_eq!(
+        harness.asking_about(),
+        None,
+        "a press off the card left the question up"
+    );
+
+    assert_eq!(harness.quit_requests(), 0);
+    assert_eq!(harness.tab_ids(), tabs);
+    assert_eq!(harness.pane_ids(), panes);
+    assert!(
+        !says(&harness.frame(), "still working"),
+        "the card outlived its question"
+    );
+    assert!(
+        harness.pane_takes_keys(),
+        "the shell never got the keyboard back"
+    );
+}
+
+#[test]
+fn enter_under_the_question_cancels_rather_than_ending_them() {
+    // The one key a person presses to be rid of a box they did not read. It
+    // must not be the one that ends the conversation behind it.
+    let mut harness = Harness::new(1);
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| session.status = AgentStatus::NeedsInput);
+
+    harness.dispatch_workspace_action(WindowAction::Close.into());
+    assert!(harness.press_key("enter", Modifiers::default()));
+
+    assert_eq!(harness.quit_requests(), 0, "Enter ended the agent");
+    assert_eq!(harness.asking_about(), None);
+}
+
+#[test]
+fn ending_them_from_the_question_quits() {
+    let mut harness = Harness::new(2);
+    let panes = harness.pane_ids();
+    for pane in &panes {
+        harness.update_session(*pane, |session| session.status = AgentStatus::Running);
+    }
+
+    harness.dispatch_workspace_action(WindowAction::Close.into());
+    assert!(says(&harness.frame(), "2 agents are still working"));
+    harness.press_closing_button("End them and quit");
+
+    assert_eq!(harness.quit_requests(), 1);
+    assert_eq!(harness.asking_about(), None);
+}
+
+#[test]
+fn a_window_with_nothing_working_in_it_closes_at_once() {
+    // A prompt that rang and an agent that failed are both stopped: neither
+    // is something a close can take from anyone.
+    let mut harness = Harness::new(3);
+    let panes = harness.pane_ids();
+    harness.update_session(panes[0], |session| {
+        session.attention = Some(Attention::Bell)
+    });
+    harness.update_session(panes[1], |session| session.status = AgentStatus::Failed);
+
+    harness.dispatch_workspace_action(WindowAction::Close.into());
+
+    assert_eq!(harness.quit_requests(), 1);
+    assert_eq!(harness.asking_about(), None);
+}
+
+#[test]
+fn closing_a_tab_whose_agent_is_waiting_asks_and_an_idle_tab_closes_at_once() {
+    let mut harness = Harness::new(3);
+    let tabs = harness.tab_ids();
+    let waiting = harness.panes_of(tabs[0])[0];
+    harness.update_session(waiting, |session| {
+        session.status = AgentStatus::NeedsInput;
+    });
+
+    harness.dispatch_action(TabAction::Close(tabs[1]));
+    assert_eq!(
+        harness.tab_ids(),
+        [tabs[0], tabs[2]],
+        "an idle tab waited for an answer"
+    );
+    assert_eq!(harness.asking_about(), None);
+
+    harness.dispatch_action(TabAction::Close(tabs[0]));
+    assert_eq!(
+        harness.tab_ids(),
+        [tabs[0], tabs[2]],
+        "a tab whose agent was waiting on a person closed with no question"
+    );
+    assert_eq!(harness.asking_about(), Some(vec![waiting]));
+    assert!(says(&harness.frame(), "Closing the tab ends it."));
+
+    harness.press_closing_button("End it and close");
+    assert_eq!(harness.tab_ids(), [tabs[2]]);
+    assert_eq!(harness.quit_requests(), 0, "one tab was left to show");
+}
+
+#[test]
+fn closing_a_pane_asks_about_that_pane_alone() {
+    // A command with no agent report behind it — a build — is work the pane's
+    // pty would end all the same.
+    let mut harness = Harness::new(1);
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let panes = harness.active_pane_ids();
+    harness.update_session(panes[2], |session| {
+        session.running_command = Some("cargo build".to_owned());
+    });
+
+    harness.dispatch_action(TabAction::ClosePane(panes[0]));
+    assert_eq!(harness.active_pane_ids(), [panes[1], panes[2]]);
+
+    harness.dispatch_action(TabAction::ClosePane(panes[2]));
+    assert_eq!(harness.asking_about(), Some(vec![panes[2]]));
+    let scene = harness.frame();
+    assert!(says(&scene, "Closing the pane ends it."));
+    assert!(says(&scene, "cargo build"));
+
+    harness.press_closing_button("End it and close");
+    assert_eq!(harness.active_pane_ids(), [panes[1]]);
+    assert_eq!(harness.quit_requests(), 0);
+}
+
+#[test]
+fn closing_a_group_asks_when_any_tab_in_it_is_working() {
+    let mut harness = Harness::new(2);
+    let tabs = harness.tab_ids();
+    harness.dispatch_action(TabAction::NewInGroupOf(tabs[1]));
+    let group = harness
+        .group_of(tabs[1])
+        .expect("a worktree tab makes a group");
+    let members = harness.members_of(group);
+    let working = harness.panes_of(members[1])[0];
+    harness.update_session(working, |session| session.status = AgentStatus::Running);
+
+    harness.dispatch_action(TabAction::CloseGroup(group));
+    assert_eq!(
+        harness.members_of(group),
+        members,
+        "the group closed unasked"
+    );
+    assert_eq!(harness.asking_about(), Some(vec![working]));
+    assert!(says(&harness.frame(), "Closing the group ends it."));
+
+    harness.press_closing_button("End it and close");
+    assert_eq!(harness.tab_ids(), [tabs[0]]);
+    assert_eq!(harness.quit_requests(), 0);
+}
+
+#[test]
+fn closing_the_last_tab_with_its_agent_running_asks_as_quitting() {
+    // The strip never empties: the last tab going is the window going, and a
+    // card that said "close" over it would be wrong about the one thing it
+    // is there to say.
+    let mut harness = Harness::new(1);
+    let tab = harness.tab_ids()[0];
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| session.status = AgentStatus::Running);
+
+    harness.dispatch_action(TabAction::Close(tab));
+    assert_eq!(harness.quit_requests(), 0);
+    assert!(says(&harness.frame(), "Quitting Crook ends it."));
+
+    harness.press_closing_button("End it and quit");
+    assert_eq!(harness.quit_requests(), 1);
+}
+
+#[test]
+fn the_question_names_three_of_them_and_counts_the_rest() {
+    let mut harness = Harness::new(5);
+    let panes = harness.pane_ids();
+    for (index, pane) in panes.iter().enumerate() {
+        harness.update_session(*pane, |session| {
+            session.status = AgentStatus::Running;
+            session.derived_title = Some(format!("task number {index}"));
+        });
+    }
+
+    harness.dispatch_workspace_action(WindowAction::Close.into());
+
+    let scene = harness.frame();
+    let card = word_in(
+        &scene,
+        RectF::new(Vector2F::zero(), WINDOW),
+        "5 agents are still working",
+    );
+    // Below the card's first line, which is where the names are: the panel
+    // beside it names every tab as well.
+    let named: Vec<String> = text_lines(&scene, |at| at.y() > card.y() && at.x() >= card.x())
+        .into_iter()
+        .map(|(_, line)| line)
+        .filter(|line| line.starts_with("task number"))
+        .collect();
+    assert_eq!(named, ["task number 0", "task number 1", "task number 2"]);
+    assert!(says(&scene, "and 2 more."));
+}
+
+#[test]
+fn a_pane_that_closes_under_the_question_is_taken_off_it() {
+    // The way a pane goes by itself: its shell exited, which is the one
+    // close that never asks — there is nothing left in it to end. A third,
+    // idle tab keeps the strip from reaching its last one, which would be
+    // the window going rather than a pane.
+    let mut harness = Harness::new(3);
+    let panes = harness.pane_ids();
+    for pane in &panes[..2] {
+        harness.update_session(*pane, |session| session.status = AgentStatus::Running);
+    }
+    harness.dispatch_workspace_action(WindowAction::Close.into());
+    assert_eq!(harness.asking_about(), Some(panes[..2].to_vec()));
+
+    harness.workspace_update(|workspace, ctx| {
+        workspace.apply(TabAction::ClosePane(panes[0]), ctx);
+    });
+    assert_eq!(harness.asking_about(), Some(vec![panes[1]]));
+    assert!(says(&harness.frame(), "1 agent is still working"));
+
+    harness.workspace_update(|workspace, ctx| {
+        workspace.apply(TabAction::ClosePane(panes[1]), ctx);
+    });
+    assert_eq!(
+        harness.asking_about(),
+        None,
+        "a question about nobody stayed up"
+    );
+}
+
+#[test]
+fn with_the_question_turned_off_a_working_window_closes_at_once() {
+    let mut harness = Harness::new(2);
+    let tabs = harness.tab_ids();
+    for pane in harness.pane_ids() {
+        harness.update_session(pane, |session| session.status = AgentStatus::Running);
+    }
+    assert!(harness.general().ask_before_ending_agents, "on by default");
+
+    harness.dispatch_workspace_action(WorkspaceAction::Settings(
+        SettingsAction::ToggleAskBeforeEnding,
+    ));
+    assert!(!harness.general().ask_before_ending_agents);
+
+    harness.dispatch_action(TabAction::Close(tabs[0]));
+    assert_eq!(harness.tab_ids(), [tabs[1]], "a tab still asked");
+    harness.dispatch_workspace_action(WindowAction::Close.into());
+    assert_eq!(harness.quit_requests(), 1, "the window still asked");
+    assert_eq!(harness.asking_about(), None);
+}
+
+#[test]
+fn ending_every_agent_from_the_palette_quits_without_asking() {
+    let mut harness = Harness::new(2);
+    for pane in harness.pane_ids() {
+        harness.update_session(pane, |session| session.status = AgentStatus::Running);
+    }
+
+    harness.run_command("crook/window/end-agents-and-quit");
+
+    assert_eq!(harness.quit_requests(), 1);
+    assert_eq!(harness.asking_about(), None);
 }
 
 #[test]

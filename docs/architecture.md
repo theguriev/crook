@@ -1739,6 +1739,16 @@ redrew yesterday's output over a shell that had never run any of it would be lyi
 state of the machine. The settings section is left out too — it is something somebody opened to
 change a setting, not work in progress.
 
+Which is why a close asks before it ends anything still working. A process is exactly what does
+not come back, and every agent is a child of the window — a pane's pty hangs its child up when it
+goes — so the window's close, a tab's, a group's and a pane's stop when a pane they would take
+has an agent running or waiting on a person, or a shell running a command, and put a question up
+whose default is Cancel (`app/src/workspace/closing.rs`). The window's close includes the
+desktop's: winit's `CloseRequested` goes to the application through the window delegate rather
+than ending the event loop there. What cannot ask is anything that ends the process from outside
+— the same list that has no shutdown path above, plus macOS's Quit menu item and `cmd-q`, which
+winit turns into `applicationWillTerminate:` with no `applicationShouldTerminate:` to say no in.
+
 **Telemetry, crash reporting, autoupdate.** All absent. Worth noting that adding Sentry on
 macOS is not a `Cargo.toml` line: Warp's build script downloads an `xcframework` and its
 bundler wires an rpath for it, which is precisely the class of thing §3 was written to avoid.

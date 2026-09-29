@@ -172,6 +172,18 @@ Nineteen features, and the page that configures them:
   and shows the slot it will drop into, and a group whose last tab leaves it goes away by
   itself. A group is not a split screen — the tabs in it are still one at a time, and splitting
   a tab is still `cmd-d` (`ctrl-shift-d` off macOS), asked for on purpose.
+
+  **Closing asks first when it would end something still working.** The window's close — the
+  desktop's close button, `alt-f4`, the palette's Close the window — a row's ×, a group's and
+  `cmd-w` (`ctrl-shift-w`) on a pane all end whatever runs in the panes they take, so while an
+  agent in one of them is running or waiting on you, or its shell is running a command, a card
+  says how many, names up to three, and offers **End them and quit** (or **End them and close**)
+  beside **Cancel**. Cancel is the default: Enter and Escape both press it, and so does a click
+  anywhere off the card. A close with nothing working in it goes at once, as it always did.
+  **Ask before ending working agents**, on the Appearance page, turns the question off, and
+  **End all agents and quit** in the palette quits without it once. Nothing can ask when the
+  system ends Crook itself — a `SIGTERM`, a logout — and on macOS the Quit menu item and `cmd-q`
+  are that case too: AppKit ends the application before the window hears about either.
 - **The window's own title bar.** There is no strip of system chrome above Crook. The window is
   opened with the application's frame, so the header *is* the title bar: dragging its empty
   space moves the window and a double click maximises it. On macOS that surface carries

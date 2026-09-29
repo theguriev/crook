@@ -29,6 +29,9 @@ pub enum WorkspaceAction {
     Theme(ThemeAction),
     /// The header was used as what it is: the window's title bar.
     Window(WindowAction),
+    /// The question a close asks before it ends agents that are still
+    /// working was answered. See [`closing`](super::closing).
+    Ending(EndingAction),
     /// Something happened to the context menu a tab's secondary press opens.
     TabMenu(TabMenuAction),
     /// Something happened in the worktree menu, which is one entry of that one.
@@ -196,13 +199,41 @@ pub enum WindowAction {
     ToggleMaximized,
     /// Put the window wherever this desktop keeps minimised ones.
     Minimize,
-    /// Close it, which for a one-window application is to quit.
+    /// Close it, which for a one-window application is to quit — asking
+    /// first while anything in it is still working. See
+    /// [`closing`](super::closing).
     Close,
+    /// Quit without asking, whatever is still working.
+    ///
+    /// "End all agents and quit": the answer to the question [`Self::Close`]
+    /// asks, given before it is asked, for a person who already knows.
+    Quit,
 }
 
 impl From<WindowAction> for WorkspaceAction {
     fn from(action: WindowAction) -> Self {
         Self::Window(action)
+    }
+}
+
+/// What the question a close asks before it ends working agents was told.
+///
+/// Two answers, and the question itself is not one of them: it opens from
+/// the close that asked — [`WindowAction::Close`], or a tab, pane or group
+/// closing — and never from an action of its own, so there is no way to put
+/// it up with nothing to ask about. See [`closing`](super::closing).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum EndingAction {
+    /// Leave everything running and take the question down. Its Cancel, and
+    /// Enter, Escape and a press anywhere off it.
+    Cancel,
+    /// End them, and go on with the close that asked.
+    End,
+}
+
+impl From<EndingAction> for WorkspaceAction {
+    fn from(action: EndingAction) -> Self {
+        Self::Ending(action)
     }
 }
 
@@ -505,6 +536,9 @@ pub enum SettingsAction {
     /// where the answer is kept, and a chord sends it as well as the page —
     /// the same arrangement [`Self::SetFontSize`] has with the zoom chords.
     ToggleTabsPanel,
+    /// "Ask before ending working agents": whether a close that would end
+    /// something still working asks first.
+    ToggleAskBeforeEnding,
     /// Start recording a chord for this command, on the Keyboard Shortcuts
     /// page.
     ///

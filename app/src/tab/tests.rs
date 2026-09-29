@@ -270,6 +270,34 @@ fn a_derived_title_replaces_the_one_the_session_was_created_with() {
 }
 
 #[test]
+fn a_session_is_working_while_its_agent_runs_or_waits_or_its_shell_runs_a_command() {
+    let mut session = AgentSession::new("agent 1");
+    assert!(!session.is_working(), "a shell at its prompt");
+
+    for (status, working) in [
+        (AgentStatus::Running, true),
+        (AgentStatus::NeedsInput, true),
+        (AgentStatus::Failed, false),
+        (AgentStatus::Idle, false),
+    ] {
+        session.status = status;
+        assert_eq!(session.is_working(), working, "{status:?}");
+    }
+
+    // A command with no agent report behind it: a build, an ssh session, an
+    // agent started without the hooks.
+    session.running_command = Some("cargo build".to_owned());
+    assert!(session.is_working(), "a command the shell is running");
+    session.running_command = None;
+
+    // The bell makes the dot say "waiting", and the shell under it is still
+    // only a prompt.
+    session.attention = Some(Attention::Bell);
+    assert_eq!(session.shown_status(), AgentStatus::NeedsInput);
+    assert!(!session.is_working(), "a prompt that rang");
+}
+
+#[test]
 fn the_mru_list_holds_every_open_tab_once_with_the_active_one_at_its_head() {
     // The rule that closing the active tab returns you to the one you were on
     // before rests entirely on this: a duplicate entry, a missing tab or a

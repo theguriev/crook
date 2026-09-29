@@ -307,10 +307,17 @@ impl Plugin for Window {
             );
         }
 
-        // The three that are not bindings, because a window is not a view and
+        // The four that are not bindings, because a window is not a view and
         // there is no chord for them. Now that the title bar draws no buttons,
         // these commands and the desktop's own shortcuts are the whole of how
         // a window is minimised, maximised and closed by hand.
+        //
+        // Closing asks first while an agent is still working; the last of
+        // them is the same close with the answer given up front, for the
+        // person who knows what is running and wants it gone. It is a
+        // command rather than a switch on the question because it is a
+        // choice about this once, not about every close from now on — that
+        // is the setting's job.
         for (name, title, action_value) in [
             ("minimise", "Minimise the window", WindowAction::Minimize),
             (
@@ -319,6 +326,11 @@ impl Plugin for Window {
                 WindowAction::ToggleMaximized,
             ),
             ("close-window", "Close the window", WindowAction::Close),
+            (
+                "end-agents-and-quit",
+                "End all agents and quit",
+                WindowAction::Quit,
+            ),
         ] {
             host.register_command(
                 action(name),

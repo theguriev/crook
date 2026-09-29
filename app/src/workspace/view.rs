@@ -64,10 +64,12 @@ use crate::window_controls::WindowHandle;
 use crate::{Channel, WINDOW_CHROME};
 
 use super::action::{
-    BlockAction, BlockEdge, BlockPart, FindAction, OptionsAction, SearchAction, SettingsAction,
-    Subject, TabMenuAction, ThemeAction, WindowAction, WorkspaceAction, WorktreeAction,
+    BlockAction, BlockEdge, BlockPart, EndingAction, FindAction, OptionsAction, SearchAction,
+    SettingsAction, Subject, TabMenuAction, ThemeAction, WindowAction, WorkspaceAction,
+    WorktreeAction,
 };
 use super::block_list::block_text;
+use super::closing::{self, Close, Question};
 use super::settings_page::SettingsState;
 use super::tab_context_menu::TabContextMenuState;
 use super::tab_menu::{Contents, Going, Looked, Mode as WorktreeMode, Sweep, TabMenuState};
@@ -861,6 +863,14 @@ pub struct Workspace {
     /// which is invisible on the other two platforms and can only be looked at
     /// by asking for it.
     control_layout: ControlLayout,
+    /// The question a close is waiting on, while one is: something it would
+    /// end is still working. See [`closing`].
+    ///
+    /// Beside the menus rather than in one, because it is not about a place
+    /// in the window: the desktop can ask the window to close whatever is
+    /// showing in it, and a close from the palette, a chord or a row's × all
+    /// wait on the same card.
+    closing: Option<Question>,
 }
 
 impl Workspace {
@@ -1019,6 +1029,7 @@ impl Workspace {
             quit,
             window,
             control_layout: ControlLayout::host(),
+            closing: None,
         };
         workspace.sync_interactions();
         workspace.sync_git(ctx);
@@ -2054,13 +2065,82 @@ impl Workspace {
     /// the same thing — something is up over the window and the keyboard
     /// belongs to it — and leaving it out is how a picker with a field in it
     /// ends up sharing the letters somebody types with the program on the
-    /// alternate screen underneath.
+    /// alternate screen underneath. So does the question a close asks, for
+    /// the same reason and one more: the shell under it is one of the things
+    /// it is asking whether to end.
     pub(super) fn a_popup_is_open(&self) -> bool {
         self.menu.open
             || self.tab_menu.is_open()
             || self.tab_context_menu.is_open()
             || self.block_menu.is_open()
             || self.host.a_surface_is_up()
+            || self.closing.is_some()
+    }
+
+    /// The question a close is waiting on, if one is.
+    pub(super) fn closing_question(&self) -> Option<&Question> {
+        self.closing.as_ref()
+    }
+
+    /// Asks before `close` ends anything still working, and says whether it
+    /// asked.
+    ///
+    /// `false` is the ordinary answer — nothing it would end is working, or
+    /// the person turned the question off — and the caller goes on with the
+    /// close. `true` means the close is held by the question now, and goes or
+    /// does not with the answer. A second close while one is held asks
+    /// again, about itself: the latest thing a person asked for is the one
+    /// the card has to be about.
+    fn ask_before(&mut self, close: Close, ctx: &mut ViewContext<Self>) -> bool {
+        if !self.general().ask_before_ending_agents {
+            return false;
+        }
+        let Some(question) = Question::about(close, &self.tabs) else {
+            return false;
+        };
+
+        // Two popups are never up at once. A plugin's floating surface is the
+        // one this cannot take down — it is the plugin's to close — so the
+        // card is painted above it instead and claims its two keys first.
+        self.close_menu();
+        self.close_tab_context_menu(ctx);
+        self.close_tab_menu(ctx);
+        self.close_block_menu(ctx);
+        self.host.take_panels_down();
+
+        self.closing = Some(question);
+        self.sync_input_keys();
+        ctx.notify();
+        true
+    }
+
+    /// Does what a close asked for, with no question: quits, or applies the
+    /// strip's own close and quits if that took the last tab.
+    fn close_now(&mut self, close: Close, ctx: &mut ViewContext<Self>) {
+        match close {
+            Close::Window => (self.quit)(),
+            Close::Strip(action) => {
+                if self.apply(action, ctx) == TabEffect::CloseWindow {
+                    (self.quit)();
+                }
+            }
+        }
+    }
+
+    /// Answers the question a close is waiting on.
+    ///
+    /// The question is taken down *before* the close runs, so a close that
+    /// takes the last tab finds no card to keep in step on its way out, and a
+    /// Cancel is nothing but the card going.
+    fn answer_closing(&mut self, answer: EndingAction, ctx: &mut ViewContext<Self>) {
+        let Some(question) = self.closing.take() else {
+            return;
+        };
+        self.sync_input_keys();
+        ctx.notify();
+        if answer == EndingAction::End {
+            self.close_now(question.close, ctx);
+        }
     }
 
     /// The menu a block opens, which is about that block.
@@ -4546,22 +4626,27 @@ impl Workspace {
 
     /// Does what the header was asked to do as a title bar.
     ///
-    /// Nothing here notifies, and that is not an oversight: none of these
-    /// changes anything Crook draws. What they change is the *window*, and the
-    /// frame that has to follow — the room macOS's traffic lights give back in
-    /// fullscreen — comes back through `Shell`, which watches the window's own
-    /// state between frames. Repainting here would draw the state that was
-    /// asked for a moment before the window manager decided whether to give
-    /// it.
-    fn apply_window_action(&self, action: WindowAction) {
+    /// Nothing here notifies but the question a close asks, and that is not
+    /// an oversight: none of the rest changes anything Crook draws. What they
+    /// change is the *window*, and the frame that has to follow — the room
+    /// macOS's traffic lights give back in fullscreen — comes back through
+    /// `Shell`, which watches the window's own state between frames.
+    /// Repainting here would draw the state that was asked for a moment
+    /// before the window manager decided whether to give it.
+    fn apply_window_action(&mut self, action: WindowAction, ctx: &mut ViewContext<Self>) {
         match action {
             WindowAction::Drag => self.window.start_drag(),
             WindowAction::ToggleMaximized => self.window.toggle_maximized(),
             WindowAction::Minimize => self.window.minimize(),
             // The same request the last tab closing makes. There is one way to
             // end the process, and a title bar's close button is not a second
-            // one.
-            WindowAction::Close => (self.quit)(),
+            // one — which is also why it asks on the terms a tab's × does.
+            WindowAction::Close => {
+                if !self.ask_before(Close::Window, ctx) {
+                    (self.quit)();
+                }
+            }
+            WindowAction::Quit => self.close_now(Close::Window, ctx),
         }
     }
 
@@ -5506,6 +5591,15 @@ impl Workspace {
         before: Option<PaneId>,
         ctx: &mut ViewContext<Self>,
     ) -> TabEffect {
+        // A pane that went while the question was up — its shell exited — has
+        // nothing left to end, and a question left with nobody on it goes.
+        // See `Question::forget_closed`.
+        if let Some(question) = self.closing.as_mut()
+            && !question.forget_closed(&self.tabs)
+        {
+            self.closing = None;
+            self.sync_input_keys();
+        }
         self.sync_interactions();
         self.sync_git(ctx);
         self.sync_terminals(ctx);
@@ -5542,6 +5636,18 @@ impl Workspace {
     /// the sequence is concerned. The window delegate asks once, which is what
     /// this is for.
     pub fn action_for(&self, keystroke: &Keystroke) -> Option<WorkspaceAction> {
+        // **The question a close asks owns Escape and Enter, before even a
+        // recording.** It is the one thing that can come up over anything —
+        // the desktop asks a window to close whatever is showing in it — and
+        // it is modal: a key that reached the recorder, the palette or a
+        // field under it would be answered by something the person cannot
+        // see is still listening. Both keys are Cancel. See [`closing`].
+        if self.closing.is_some()
+            && let Some(action) = closing::action_for(keystroke)
+        {
+            return Some(action);
+        }
+
         // **A binding being recorded owns the keyboard, before everything
         // else.** Every key pressed while the recorder is up is being spelled
         // rather than pressed: it must not reach a pane, a panel, the search
@@ -6697,6 +6803,11 @@ impl Workspace {
                 let shown = !self.general().show_tabs_panel;
                 self.set_tabs_panel_shown(shown, ctx);
             }
+            SettingsAction::ToggleAskBeforeEnding => {
+                let mut general = self.general();
+                general.ask_before_ending_agents = !general.ask_before_ending_agents;
+                self.set_general(general, ctx);
+            }
             SettingsAction::RecordBinding(id) => {
                 let Some(command) = self.host.action_name(id).cloned() else {
                     return;
@@ -7240,7 +7351,7 @@ impl View for Workspace {
         // Asked even when there is nothing showing: a contribution that has
         // nothing to say answers `None`, which is no overlay at all, and the
         // alternative is the workspace knowing which plugin's surface is up.
-        let overlays: Vec<Box<dyn Element>> = self
+        let mut overlays: Vec<Box<dyn Element>> = self
             .host
             .slots()
             .map(crate::plugins::window::WINDOW_OVERLAY, |build| {
@@ -7249,6 +7360,13 @@ impl View for Workspace {
             .into_iter()
             .flatten()
             .collect();
+        // Last, so that it is painted over whatever a plugin floats: a
+        // palette that was open when the desktop asked the window to close
+        // is under the question, and under its modal underlay, rather than
+        // over them.
+        if let Some(question) = self.closing_question() {
+            overlays.push(closing::render(self, question));
+        }
         if overlays.is_empty() {
             return window;
         }
@@ -7339,6 +7457,15 @@ impl TypedActionView for Workspace {
                 if self.host.take_panels_down() {
                     self.sync_input_keys();
                 }
+                // A close that would end something still working waits for
+                // an answer. Here rather than in `apply`, which is how a
+                // shell that has exited closes its own pane — there is
+                // nothing left there to ask about.
+                if let Some(close) = Close::of(action)
+                    && self.ask_before(close, ctx)
+                {
+                    return;
+                }
                 if self.apply(action, ctx) == TabEffect::CloseWindow {
                     (self.quit)();
                 }
@@ -7362,7 +7489,8 @@ impl TypedActionView for Workspace {
             WorkspaceAction::Search(action) => self.apply_search(action, ctx),
             WorkspaceAction::Find { pane, action } => self.apply_find(pane, action, ctx),
             WorkspaceAction::Theme(action) => self.apply_theme_action(action, ctx),
-            WorkspaceAction::Window(action) => self.apply_window_action(action),
+            WorkspaceAction::Window(action) => self.apply_window_action(action, ctx),
+            WorkspaceAction::Ending(answer) => self.answer_closing(answer, ctx),
             WorkspaceAction::TabMenu(action) => self.apply_tab_menu(action, ctx),
             WorkspaceAction::Worktree(action) => self.apply_worktree(action, ctx),
             WorkspaceAction::Block(action) => self.apply_block(action, ctx),

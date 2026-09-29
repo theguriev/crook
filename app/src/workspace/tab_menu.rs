@@ -1293,14 +1293,26 @@ fn buttons(
             .with_child(
                 Expanded::new(
                     1.,
-                    button(state.control(Control::Cancel), cancel, false, cancels, ui),
+                    button(
+                        state.control(Control::Cancel),
+                        cancel,
+                        false,
+                        cancels.map(WorkspaceAction::Worktree),
+                        ui,
+                    ),
                 )
                 .finish(),
             )
             .with_child(
                 Expanded::new(
                     1.,
-                    button(state.control(Control::Confirm), label, true, action, ui),
+                    button(
+                        state.control(Control::Confirm),
+                        label,
+                        true,
+                        action.map(WorkspaceAction::Worktree),
+                        ui,
+                    ),
                 )
                 .finish(),
             )
@@ -1311,12 +1323,17 @@ fn buttons(
     .finish()
 }
 
-/// One of the two buttons.
-fn button(
+/// One of a question's two buttons.
+///
+/// Also the face of the question a close asks before it ends agents that
+/// are still working — see [`closing`](super::closing) — which is why it
+/// takes any action rather than the worktree menu's own: two questions that
+/// looked different would be two things a person has to learn to read.
+pub(super) fn button(
     state: MouseStateHandle,
     label: &str,
     primary: bool,
-    action: Option<WorktreeAction>,
+    action: Option<WorkspaceAction>,
     ui: FamilyId,
 ) -> Box<dyn Element> {
     let label = label.to_owned();
@@ -1360,7 +1377,7 @@ fn button(
     match action {
         Some(action) => control
             .on_click(move |_, ctx, _| {
-                ctx.dispatch_typed_action(WorkspaceAction::Worktree(action));
+                ctx.dispatch_typed_action(action);
             })
             .finish(),
         None => control.finish(),
@@ -1412,7 +1429,10 @@ fn branch_label(worktree: &Worktree) -> String {
 }
 
 /// The line at the top of whichever face the menu is showing.
-fn header(title: impl Into<std::borrow::Cow<'static, str>>, ui: FamilyId) -> Box<dyn Element> {
+pub(super) fn header(
+    title: impl Into<std::borrow::Cow<'static, str>>,
+    ui: FamilyId,
+) -> Box<dyn Element> {
     Container::new(
         Text::new(title, ui, PATH_SIZE)
             .with_color(theme().text_muted)
@@ -1541,7 +1561,7 @@ fn pellet(color: Color) -> Box<dyn Element> {
 }
 
 /// A line of explanation, or of apology, wrapped to the popup's width.
-fn note(text: impl AsRef<str>, ui: FamilyId) -> Box<dyn Element> {
+pub(super) fn note(text: impl AsRef<str>, ui: FamilyId) -> Box<dyn Element> {
     Container::new(
         Paragraph::new(text.as_ref().to_owned(), ui, PATH_SIZE)
             .with_color(theme().text_muted)
@@ -1554,7 +1574,7 @@ fn note(text: impl AsRef<str>, ui: FamilyId) -> Box<dyn Element> {
 }
 
 /// The hairline between the worktrees and the way to another.
-fn divider() -> Box<dyn Element> {
+pub(super) fn divider() -> Box<dyn Element> {
     Container::new(
         ConstrainedBox::new(Empty::new().finish())
             .with_height(1.)

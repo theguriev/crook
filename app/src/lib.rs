@@ -107,7 +107,7 @@ use crate::settings::{Density, Granularity, Settings};
 use crate::tab::{AgentStatus, Direction, PaneId, Tab, TabAction};
 use crate::terminal_font::{CELL_FONT_SIZE, CellFont};
 use crate::window_controls::{Detached, WindowHandle, WindowState};
-use crate::workspace::{Fonts, Opening, QuitRequest, Workspace};
+use crate::workspace::{Fonts, Opening, QuitRequest, WindowAction, Workspace, WorkspaceAction};
 
 /// The window Crook opens, in logical pixels.
 const WINDOW_SIZE: Vector2F = vec2f(1024., 640.);
@@ -2384,8 +2384,9 @@ fn seed_snapshot_tabs(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace
 
 /// The application as the window sees it.
 ///
-/// Three methods, and each one is a translation: a size into a scene, an OS
-/// event into an action, a finished frame into either another one or an exit.
+/// Four methods, and each one is a translation: a size into a scene, an OS
+/// event into an action, a finished frame into either another one or an exit,
+/// and the desktop's close into the same close the title bar asks for.
 struct Shell {
     app: App,
     presenter: Presenter,
@@ -3364,6 +3365,31 @@ impl WindowDelegate for Shell {
         } else {
             self.proxy.request_redraw();
         }
+    }
+
+    /// The desktop asked the window to close: its close button, `alt-f4`,
+    /// a window manager's close.
+    ///
+    /// The title bar's own close, dispatched as if it had been pressed, so
+    /// that there is one close and it asks on one set of terms — a window
+    /// with an agent still working in it puts a question up and stays, and
+    /// one without quits through the workspace's `quit`, which is an `Exit`
+    /// on the proxy and the event loop's next turn.
+    ///
+    /// Except in a run with a frame budget, which nobody is sitting at: it
+    /// ends by its budget and was never going to wait for an answer, so a
+    /// close from outside ends it at once. See `workspace::closing`.
+    fn close_requested(&mut self) -> bool {
+        if self.frame_budget.is_some() {
+            return true;
+        }
+        let chain = [self.workspace.id()];
+        self.app.dispatch_typed_action(
+            self.window_id,
+            &chain,
+            &WorkspaceAction::Window(WindowAction::Close),
+        );
+        false
     }
 }
 
