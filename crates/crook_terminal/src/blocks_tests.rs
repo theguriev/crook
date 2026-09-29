@@ -1,5 +1,5 @@
 use super::*;
-use crate::emulator::Emulator;
+use crate::emulator::{Emulator, Fed, TerminalEvent};
 use crate::snapshot::{SnapshotCell, TerminalSize};
 
 /// OSC 133 prompt start.
@@ -164,6 +164,100 @@ fn test_a_command_that_finishes_without_starting_closes_the_block() {
     assert_eq!(None, block.exit);
     assert_eq!(None, block.started_at);
     assert_eq!("$", block.rows.to_text());
+}
+
+/// Whether each command end the emulator announced since it was last asked
+/// had a command behind it.
+fn announced_runs(emulator: &mut Emulator) -> Vec<bool> {
+    emulator
+        .take_events()
+        .into_iter()
+        .filter_map(|event| match event {
+            TerminalEvent::CommandFinished { ran, .. } => Some(ran),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn test_a_command_end_says_whether_anything_ran_behind_it() {
+    // A bare `D` ends a line that ran nothing — ctrl-c at the prompt, Enter
+    // on an empty one — and it is announced like any other, since the shell
+    // did say it. What acts on a command having run, like a restored pane
+    // letting go of the agent it came back with, has to tell the two apart.
+    let mut emulator = emulator();
+    emulator.advance(format!("{A}$ {B}^C\r\n\x1b]133;D\x07").as_bytes());
+    assert_eq!(vec![false], announced_runs(&mut emulator), "ctrl-c");
+
+    emulator.advance(format!("{A}$ {B}").as_bytes());
+    emulator.command_submitted("");
+    emulator.advance(b"\r\n\x1b]133;D\x07");
+    assert_eq!(vec![false], announced_runs(&mut emulator), "an empty line");
+
+    // A second `D` for the same end is not a second command.
+    emulator.advance(b"\x1b]133;D;0\x07");
+    assert_eq!(vec![false], announced_runs(&mut emulator), "a repeated D");
+
+    // bash 3.2 reports a bare `D` for a `( … )` line, which did run: the
+    // line that was sent is what says so, not the status.
+    emulator.advance(format!("{A}$ {B}").as_bytes());
+    emulator.command_submitted("(cd x)");
+    emulator.advance(b"(cd x)\r\n\x1b]133;D\x07");
+    assert_eq!(vec![true], announced_runs(&mut emulator), "a subshell line");
+
+    // And a command the shell said started, though no command line could be
+    // read off the screen for it: `C` with no `B` before it.
+    emulator.advance(format!("{A}$ ls\r\n{C}a  b\r\n\x1b]133;D;0\x07").as_bytes());
+    assert_eq!(vec![true], announced_runs(&mut emulator), "a C with no B");
+
+    emulator.advance(format!("{A}$ {B}echo hi\r\n{C}hi\r\n\x1b]133;D;0\x07").as_bytes());
+    assert_eq!(vec![true], announced_runs(&mut emulator), "a command");
+}
+
+#[test]
+fn test_an_empty_line_sent_from_the_field_starts_nothing() {
+    // Enter in an empty field submits an empty line, and the shell ends it
+    // with a bare `D` and nothing between: the block above, reached by the
+    // application's submit rather than by a keystroke the shell read. It ran
+    // nothing either, so it has no start to time from — a start is what says
+    // a command ran, to anything counting commands.
+    for line in ["", "   "] {
+        let mut emulator = emulator();
+        emulator.advance(format!("{A}$ {B}").as_bytes());
+        let _ = emulator.take_events();
+
+        emulator.command_submitted(line);
+        assert_eq!(None, emulator.live_block().started_at, "{line:?}");
+        emulator.advance(b"\r\n\x1b]133;D\x07");
+
+        let [block] = emulator.blocks() else {
+            panic!("{line:?} lost the block");
+        };
+        assert_eq!(
+            (None, None, None),
+            (block.command.as_deref(), block.exit, block.started_at),
+            "{line:?}"
+        );
+        assert_eq!(None, block.duration(), "{line:?}");
+        let events = emulator.take_events();
+        assert!(
+            matches!(
+                &events[..],
+                [TerminalEvent::CommandFinished {
+                    command: None,
+                    exit: None,
+                    took: None,
+                    ran: false,
+                }]
+            ),
+            "{line:?}: {events:?}"
+        );
+
+        // And the command sent after it is timed from its own submit.
+        emulator.advance(format!("{A}$ {B}").as_bytes());
+        emulator.command_submitted("true");
+        assert!(emulator.live_block().started_at.is_some(), "{line:?}");
+    }
 }
 
 #[test]
@@ -362,6 +456,246 @@ fn test_a_submitted_command_line_is_the_blocks_command() {
         block.command,
         "the echoed text overwrote what the application knows it wrote"
     );
+}
+
+/// Everything a block list is drawn from, down to the rows and where the
+/// output starts in them — all of it but the two instants, which no two runs
+/// share.
+fn everything(emulator: &mut Emulator) -> impl PartialEq + std::fmt::Debug + use<> {
+    let blocks = emulator
+        .blocks()
+        .iter()
+        .map(|block| {
+            (
+                block.id,
+                block.state,
+                block.command.clone(),
+                block.exit,
+                block.working_directory.clone(),
+                block.rows.clone(),
+                block.output_from,
+                block.started_at.is_some(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let live = emulator.live_block();
+    let live = (
+        live.id,
+        live.state,
+        live.command,
+        live.started_at.is_some(),
+        live.top_row,
+        live.bottom_row,
+        live.prompt_end,
+    );
+    (blocks, live, emulator.snapshot().text())
+}
+
+/// A pane that lived `stream` the way the application lives one: every read
+/// advanced, every submit made on the emulator directly.
+fn lived(stream: &[Fed]) -> Emulator {
+    let mut emulator = emulator();
+    for fed in stream {
+        match *fed {
+            Fed::Output(bytes) => emulator.advance(bytes),
+            Fed::Submitted(line) => emulator.command_submitted(line),
+        }
+    }
+    emulator
+}
+
+/// A mirror fed `stream` as a replay of it would be.
+fn mirrored(stream: &[Fed]) -> Emulator {
+    let mut emulator = emulator();
+    for fed in stream {
+        emulator.advance_mirrored(*fed);
+    }
+    emulator
+}
+
+#[test]
+fn test_a_submit_fed_to_a_mirror_makes_the_blocks_a_direct_one_does() {
+    // What a replayed stream has to be able to carry: the submit is the one
+    // boundary that never passes through the child's bytes, so an emulator
+    // rebuilt from them alone would have the echo and not the command. What
+    // was typed is not what was echoed: fish expands an abbreviation on
+    // Enter, and the echo is the expansion.
+    let prompt = format!("\x1b]7;file:///srv/app\x07{A}$ {B}");
+    let rest = format!("git checkout main\r\n{C}ok\r\n\x1b]133;D;0\x07{A}$ {B}");
+    let stream = [
+        Fed::Output(prompt.as_bytes()),
+        Fed::Submitted("gco main"),
+        Fed::Output(rest.as_bytes()),
+    ];
+
+    let mut direct = lived(&stream);
+    let [block] = direct.blocks() else {
+        panic!("one finished block, got {}", direct.blocks().len());
+    };
+    assert_eq!(Some("gco main".to_owned()), block.command);
+    assert_eq!(everything(&mut direct), everything(&mut mirrored(&stream)));
+}
+
+#[test]
+fn test_a_submit_fed_between_two_halves_of_a_sequence_leaves_the_sequence_whole() {
+    // Why a submit is an item of its own and not bytes in the stream. A pty
+    // read ends wherever it ends, inside an escape sequence or a character as
+    // readily as anywhere else, and a submit lands between two reads — a line
+    // typed ahead while a command is still printing does exactly that. The
+    // child's bytes on either side of it have to reach the parser as though
+    // it were not there.
+    let prompt = format!("{A}$ {B}");
+    let cut_before = format!("sleep 1\r\n{C}\x1b]13");
+    let cut_after = format!("3;D;0\x07{A}$ {B}");
+    let scenarios: [(&str, &[Fed]); 4] = [
+        (
+            "a colour cut after its first digit",
+            &[
+                Fed::Output(b"$ \x1b[3"),
+                Fed::Submitted("ls"),
+                Fed::Output(b"1mX"),
+            ],
+        ),
+        (
+            "an \u{e9} cut between its two bytes",
+            &[
+                Fed::Output(b"$ caf\xc3"),
+                Fed::Submitted("ls"),
+                Fed::Output(b"\xa9"),
+            ],
+        ),
+        (
+            "the shell's own D cut in two by a line typed ahead of it",
+            &[
+                Fed::Output(prompt.as_bytes()),
+                Fed::Submitted("sleep 1"),
+                Fed::Output(cut_before.as_bytes()),
+                Fed::Submitted("ls"),
+                Fed::Output(cut_after.as_bytes()),
+            ],
+        ),
+        (
+            // No mark between the two commands, so nothing but the submits
+            // cuts the stream; the second is typeahead the block keeps.
+            "two submits to a shell with no integration",
+            &[
+                Fed::Output(b"$ "),
+                Fed::Submitted("ls"),
+                Fed::Output(b"ls\r\na  b\r\n$ "),
+                Fed::Submitted("pwd"),
+                Fed::Output(b"pwd\r\n/srv\r\n$ "),
+            ],
+        ),
+    ];
+
+    for (scenario, stream) in scenarios {
+        assert_eq!(
+            everything(&mut lived(stream)),
+            everything(&mut mirrored(stream)),
+            "{scenario}"
+        );
+    }
+
+    assert_eq!("$ X", lived(scenarios[0].1).snapshot().text().trim_end());
+    let typed_ahead = lived(scenarios[2].1);
+    let [block] = typed_ahead.blocks() else {
+        panic!("the running command made one block");
+    };
+    assert_eq!(Some(0), block.exit, "the split D was read as a D");
+    assert_eq!("$ sleep 1", block.rows.to_text());
+}
+
+#[test]
+fn test_a_block_is_filed_under_the_directory_reported_before_it_however_the_reads_were_cut() {
+    // What bash's and zsh's integration print when a command is over: `D`,
+    // then the directory from the prompt hook, then the prompt's own `A`, back
+    // to back, so one read holding all three is the usual case rather than
+    // the odd one. The block that `A` opens has to be filed under the
+    // directory reported before it, or `pwd` after a `cd` is filed under the
+    // directory the `cd` left, and so is the next command, and the one after.
+    // Every cut of that read has to agree, and so does a mirror fed it.
+    let first = format!("\x1b]7;file:///a\x07{A}$ {B}");
+    let cd = format!("cd /b\r\n{C}\x1b]133;D;0\x07\x1b]7;file:///b\x07{A}$ {B}");
+    let pwd = format!("pwd\r\n{C}/b\r\n\x1b]133;D;0\x07{A}$ {B}");
+    let stream = [
+        Fed::Output(first.as_bytes()),
+        Fed::Submitted("cd /b"),
+        Fed::Output(cd.as_bytes()),
+        Fed::Submitted("pwd"),
+        Fed::Output(pwd.as_bytes()),
+    ];
+
+    let mut direct = lived(&stream);
+    let filed = direct
+        .blocks()
+        .iter()
+        .map(|block| (block.command.clone(), block.working_directory.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        vec![
+            (Some("cd /b".to_owned()), Some(PathBuf::from("/a"))),
+            (Some("pwd".to_owned()), Some(PathBuf::from("/b"))),
+        ],
+        filed
+    );
+    let expected = everything(&mut direct);
+    assert_eq!(expected, everything(&mut mirrored(&stream)));
+
+    for split in 0..=cd.len() {
+        let (before, after) = cd.as_bytes().split_at(split);
+        let cut = [
+            Fed::Output(first.as_bytes()),
+            Fed::Submitted("cd /b"),
+            Fed::Output(before),
+            Fed::Output(after),
+            Fed::Submitted("pwd"),
+            Fed::Output(pwd.as_bytes()),
+        ];
+        assert_eq!(
+            expected,
+            everything(&mut lived(&cut)),
+            "cut at byte {split}"
+        );
+    }
+}
+
+#[test]
+fn test_a_replay_that_runs_ahead_of_the_clock_harvests_a_block_without_the_update_it_held() {
+    // The clock is part of the stream as well as the reads. A synchronized
+    // update the child never ended — it was killed mid-frame — is let go by
+    // time, 150 ms after it opened, and only a feed or a paint looks. Fed at
+    // the pace the original arrived, a replay lets it go where the original
+    // did; fed ahead of it, the `D` is placed against a screen that has not
+    // drawn the update, and the block is harvested without it.
+    let prompt = format!("{A}$ {B}");
+    let make = format!("make\r\n{C}\x1b[?2026hbuilt\r\n");
+    let done = format!("\x1b]133;D;0\x07{A}$ {B}");
+    let stream = [
+        Fed::Output(prompt.as_bytes()),
+        Fed::Submitted("make"),
+        Fed::Output(make.as_bytes()),
+        Fed::Output(done.as_bytes()),
+    ];
+    let before = &stream[..3];
+
+    let mut direct = lived(before);
+    let mut paced = mirrored(before);
+    let mut hurried = mirrored(&stream);
+    std::thread::sleep(Duration::from_millis(200));
+    direct.advance(done.as_bytes());
+    paced.advance_mirrored(Fed::Output(done.as_bytes()));
+
+    let rows = |emulator: &Emulator| {
+        emulator
+            .blocks()
+            .iter()
+            .map(|block| block.rows.to_text())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(vec!["$ make\nbuilt"], rows(&direct));
+    assert_eq!(everything(&mut direct), everything(&mut paced));
+    assert_eq!(vec!["$ make"], rows(&hurried), "fed ahead of the clock");
+    assert_ne!(everything(&mut direct), everything(&mut hurried));
 }
 
 #[test]

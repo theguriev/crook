@@ -31,11 +31,13 @@ use crookui_core::geometry::{RectF, vec2f};
 use crookui_core::prelude::*;
 
 use crate::clipboard::Clipboard;
+use crate::control::watch::{self, Watches};
 use crate::editor::Selection;
 use crate::git::GitFacts;
 use crate::git_model::GitModel;
-use crate::input_keys::{Binding, Platform};
+use crate::input_keys::{Binding, Intent, Platform};
 use crate::keybindings::{Context, Keybindings, PendingSave, Recording, Resolution};
+use crate::notify::{Cooldown, LONG_COMMAND, Notice, Notifier, Occasion, Silent};
 use crate::pane_blocks::{PAGE_OVERLAP, PaneBlocks, ScrollCause};
 use crate::pane_find::PaneFind;
 use crate::pane_link::PaneLink;
@@ -70,6 +72,8 @@ use super::action::{
 };
 use super::block_list::block_text;
 use super::closing::{self, Close, Question};
+use super::held_locks::{HeldLock, HeldLocks};
+use super::row_content::row_name;
 use super::settings_page::SettingsState;
 use super::tab_context_menu::TabContextMenuState;
 use super::tab_menu::{Contents, Going, Looked, Mode as WorktreeMode, Sweep, TabMenuState};
@@ -593,6 +597,24 @@ pub struct Workspace {
     /// of its own, with its own undo stack and its own history, which is what
     /// makes two panes of the same tab two places to work rather than one.
     inputs: HashMap<PaneId, TextInput>,
+    /// The line each pane opened by `crook tab new` runs at its shell's first
+    /// prompt, while it waits for one. Already typed into that pane's field;
+    /// kept here to know it is still the line the field holds. See
+    /// [`Self::run_at_first_prompt`].
+    first_lines: HashMap<PaneId, String>,
+    /// What the control socket's `pane.wait` and `events.follow` are
+    /// watching, told here what happens to a pane as it is applied — see
+    /// [`Self::apply_terminal_update`] and [`Self::settle`]. Empty while
+    /// nobody watches, but for who opened the closed tabs `tab.new` opened.
+    watches: Watches,
+    /// The resume line a restore typed into each pane's field, while nothing
+    /// has run in that pane since.
+    ///
+    /// What makes "Resume every agent" send only what Crook put there: a
+    /// field whose text is no longer the line recorded here is one a person
+    /// has taken over, and it is theirs to send. See
+    /// [`Self::resume_every_agent`].
+    resume_offers: HashMap<PaneId, String>,
     /// The system clipboard every field copies to and pastes from. One for the
     /// window: see [`Clipboard`].
     clipboard: Clipboard,
@@ -666,6 +688,28 @@ pub struct Workspace {
     /// keeping a resolved theme here as well would be a second copy of an
     /// answer that already has one.
     system_is_dark: bool,
+    /// Whether the window has the desktop's keyboard focus, as of the last
+    /// thing the window said about it.
+    ///
+    /// Focused until told otherwise, which is what every window was before
+    /// this was recorded: a desktop that never says leaves the strip exactly
+    /// as it always behaved.
+    window_focused: bool,
+    /// The pane that had the keyboard when the window last went behind
+    /// something else, until the window comes back.
+    ///
+    /// What coming back is measured against: the same pane in front again is
+    /// a glance, and a pane the strip moved to while nobody was there is
+    /// arrived at. See [`Self::set_window_focused`].
+    looked_at_when_left: Option<PaneId>,
+    /// Where a desktop notification about a pane goes.
+    ///
+    /// [`Silent`] until the window that runs on a desktop says otherwise —
+    /// see [`Self::set_notifier`] — so a test and a snapshot post nothing.
+    notifier: Rc<dyn Notifier>,
+    /// Which panes have posted a notification lately, so that one which
+    /// flaps posts once. See [`crate::notify::QUIET`].
+    notified: Cooldown,
     interactions: HashMap<PaneId, PaneInteraction>,
     /// What the mouse is doing to each tab's chrome in the panel.
     ///
@@ -791,6 +835,9 @@ pub struct Workspace {
     /// with no data directory, where the creator has nowhere to put one and
     /// says so rather than guessing.
     worktrees_directory: Option<PathBuf>,
+    /// The locks this window took on the checkouts it made, until it takes
+    /// them off. See [`HeldLocks`].
+    held: HeldLocks,
     /// Makes the last settings save the one the file ends up holding.
     ///
     /// Browsing themes with the arrow keys asks for one save per keystroke,
@@ -901,10 +948,11 @@ impl Workspace {
 
         let terminals = ctx.add_model(TerminalModel::new);
         // Two channels, and they carry different things. The observation is
-        // "a grid changed, draw it again", which the model raises at most once
-        // per pane per frame interval. The subscription is the handful of
-        // things a shell does that the *strip* has to act on: rename itself,
-        // move, or finish.
+        // "every pane may look different": a theme's palette reached the
+        // shells, or one opened or failed to. The subscription is one pane at
+        // a time — the things a shell does that the *strip* has to act on,
+        // renaming itself, moving, finishing, and the most frequent of all,
+        // its grid changing, which is a frame only if the pane is on screen.
         ctx.observe(&terminals, |_, _, ctx| ctx.notify());
         ctx.subscribe_to_model(&terminals, |workspace, _, update, ctx| {
             workspace.apply_terminal_update(update, ctx);
@@ -979,6 +1027,9 @@ impl Workspace {
             git,
             terminals,
             inputs: HashMap::new(),
+            first_lines: HashMap::new(),
+            watches: Watches::default(),
+            resume_offers: HashMap::new(),
             clipboard: Clipboard::new(),
             divider_drag: DividerDrag::new(),
             session_saves: Arc::default(),
@@ -989,6 +1040,10 @@ impl Workspace {
             watching_keybindings: false,
             window_size: Rc::new(std::cell::Cell::new(Vector2F::zero())),
             system_is_dark: true,
+            window_focused: true,
+            looked_at_when_left: None,
+            notifier: Rc::new(Silent),
+            notified: Cooldown::default(),
             interactions: HashMap::new(),
             tab_chrome: HashMap::new(),
             group_chrome: HashMap::new(),
@@ -1015,6 +1070,7 @@ impl Workspace {
             theme_before_draft: None,
             themes_directory: crate::theme::user_themes_directory(),
             worktrees_directory: worktree_store(),
+            held: HeldLocks::default(),
             saves: Arc::default(),
             keybinding_saves: Arc::default(),
             settings_save_problem: None,
@@ -1151,6 +1207,95 @@ impl Workspace {
     /// said.
     pub fn system_is_dark(&self) -> bool {
         self.system_is_dark
+    }
+
+    /// Records whether the window has the desktop's keyboard focus, and
+    /// settles what that moves.
+    ///
+    /// Window focus is half of looking — see [`Self::looking_at`] — so a
+    /// window going behind another takes its focused pane out of sight with
+    /// it, and coming back is looking at whichever pane has the keyboard
+    /// then: the attention it asked for while nobody was there is answered,
+    /// as a tab switch answers it. Coming back is measured against the pane
+    /// that had the keyboard on leaving, which is `attend`'s rule for every
+    /// settle: when it is the same pane the strip did not move, this is not
+    /// *arriving* and a person's own mark on it stays; when the strip moved
+    /// while nobody was there — a shell exiting closed the pane, a plugin
+    /// switched tabs — the pane in front now is arrived at, mark and all. A
+    /// program in the pane that asked for focus reports hears the keyboard go
+    /// and come back.
+    pub fn set_window_focused(&mut self, focused: bool, ctx: &mut ViewContext<Self>) {
+        if self.window_focused == focused {
+            return;
+        }
+        let before = self.looking_at();
+        self.window_focused = focused;
+        self.report_focus(before, ctx);
+        if focused {
+            let left = self.looked_at_when_left.take();
+            self.attend(left, ctx);
+        } else {
+            self.looked_at_when_left = before;
+        }
+        // The count in the header changes with it even when no attention
+        // does: the focused pane's own question is on it only while the
+        // window is behind something else.
+        ctx.notify();
+    }
+
+    /// Whether the window has the desktop's keyboard focus, as of the last
+    /// thing the window said.
+    pub fn is_window_focused(&self) -> bool {
+        self.window_focused
+    }
+
+    /// Hands the workspace the notifier its desktop notifications go to.
+    ///
+    /// Told rather than found, for the reason the plugins directory is: a
+    /// workspace that picked the desktop's own notifier for itself would be
+    /// one every test posted a banner from. The window that runs on a
+    /// desktop passes [`crate::notify::for_this_desktop`]'s; a test passes a
+    /// list.
+    pub fn set_notifier(&mut self, notifier: Rc<dyn Notifier>) {
+        self.notifier = notifier;
+    }
+
+    /// The pane a person is looking at: the one with the keyboard, while the
+    /// window has the desktop's. `None` while the window is behind something
+    /// else.
+    ///
+    /// The one answer to "is anybody looking at this pane?" — the bell, the
+    /// agent's report, the count in the header and the title all ask it. The
+    /// pane with the keyboard alone was the answer once, and it made the
+    /// one-pane window the one that could never be waiting: its pane has the
+    /// keyboard the whole time somebody is in another application.
+    pub fn looking_at(&self) -> Option<PaneId> {
+        if !self.window_focused {
+            return None;
+        }
+        self.tabs.focused_pane_id()
+    }
+
+    /// Tells the programs that asked for focus reports that the keyboard
+    /// moved: the pane looked at `before` hears it leave, and the pane looked
+    /// at now hears it arrive.
+    ///
+    /// xterm's `?1004` is about the terminal's own window; a pane is that
+    /// window here, so a split or a tab switch inside a window in front is a
+    /// focus change for the two panes it moves between, exactly as the window
+    /// going behind another is for the one pane that had the keyboard. Out
+    /// before in, which is the order a program between two xterms would see.
+    fn report_focus(&self, before: Option<PaneId>, ctx: &ViewContext<Self>) {
+        let now = self.looking_at();
+        if before == now {
+            return;
+        }
+        let terminals = self.terminals.as_ref(ctx);
+        for (pane, focused) in [(before, false), (now, true)] {
+            if let Some(handle) = pane.and_then(|pane| terminals.handle(pane)) {
+                handle.send_focus(focused);
+            }
+        }
     }
 
     /// Turns following the desktop on or off.
@@ -2049,6 +2194,77 @@ impl Workspace {
             .panes()
             .filter_map(|(_, pane)| Some((pane.id(), pane.session().working_directory.clone()?)))
             .collect()
+    }
+
+    /// Whether any pane in the window is working in `checkout` or anywhere
+    /// under it.
+    ///
+    /// The one question asked before Crook takes its own lock off a checkout,
+    /// wherever that happens — a pane leaving one this window locked, a
+    /// removal, a sweep. A plain prefix rather than
+    /// [`tab_menu::holding`](super::tab_menu::holding)'s longest match,
+    /// because this needs no listing to answer and it errs the right way: a
+    /// pane in a checkout nested inside this one counts as being in this one
+    /// too, and all that costs is a lock left standing that the menu
+    /// recognises as Crook's own anyway.
+    pub(super) fn a_pane_is_in(&self, checkout: &Path) -> bool {
+        self.tabs.panes().any(|(_, pane)| {
+            pane.session()
+                .working_directory
+                .as_deref()
+                .is_some_and(|directory| directory.starts_with(checkout))
+        })
+    }
+
+    /// The locks this window has taken and not yet taken off.
+    ///
+    /// Handed out so that the window's delegate can take off the ones still
+    /// held as the event loop stops, which is a moment the workspace is never
+    /// told about: see [`HeldLocks::release_all`].
+    pub fn held_locks(&self) -> HeldLocks {
+        self.held.clone()
+    }
+
+    /// Takes the lock off each checkout this window made and locked that no
+    /// pane is working in any more.
+    ///
+    /// Asked after anything that can take a pane out of one — the strip
+    /// moving, which is every pane that closes, and a pane's directory
+    /// changing, which is a shell that `cd`ed out — and it costs nothing then
+    /// unless the window holds a lock, which it almost never does. Only the
+    /// locks this window took: a checkout another Crook window made is locked
+    /// with the same prefix, and its agent is still in there whatever this
+    /// window's panes do.
+    ///
+    /// Asked here, where the panes are, and answered on the background pool,
+    /// where [`release`](crate::git::worktree::release) reads whose the lock is
+    /// again rather than trusting that it is still this window's.
+    fn release_vacated(&mut self, ctx: &mut ViewContext<Self>) {
+        if self.held.is_empty() {
+            return;
+        }
+        let vacated = self.held.start_releasing(|lock| {
+            !lock
+                .spellings()
+                .into_iter()
+                .any(|checkout| self.a_pane_is_in(checkout))
+        });
+
+        for lock in vacated {
+            let releasing = ctx.background().spawn({
+                let lock = lock.clone();
+                async move { crate::git::worktree::release(&lock.repository, &lock.checkout) }
+            });
+            // Nothing on screen waits for this, so nothing is told but the
+            // list of what the window still holds.
+            ctx.spawn(releasing, move |workspace, released, _| {
+                if let Err(problem) = released {
+                    log::warn!("could not unlock {}: {problem}", lock.checkout.display());
+                }
+                workspace.held.released(&lock.checkout);
+            })
+            .detach();
+        }
     }
 
     /// Whether any popup is up.
@@ -3889,7 +4105,7 @@ impl Workspace {
     }
 
     /// One block's rows from `from` onwards, as a copy of them would read.
-    fn block_rows_text(
+    pub(crate) fn block_rows_text(
         &self,
         pane: PaneId,
         block: BlockId,
@@ -4034,6 +4250,54 @@ impl Workspace {
         }
     }
 
+    /// Sends every resume line a restore left in a composer that nobody has
+    /// touched since, as though Enter had been pressed in each.
+    ///
+    /// Only those. A field whose text is not the line the restore typed is
+    /// one a person has started editing — a flag added, the line cleared, a
+    /// different command — and a press meant for "the agents Crook brought
+    /// back" must not send what somebody is halfway through writing. A pane
+    /// whose shell has not opened yet keeps its line and its offer, for a
+    /// press once it has.
+    fn resume_every_agent(&mut self, ctx: &mut ViewContext<Self>) {
+        for pane in self.waiting_resumes() {
+            let Some((terminal, _)) = self.terminal(pane, ctx) else {
+                continue;
+            };
+            let Some(input) = self.inputs.get(&pane) else {
+                continue;
+            };
+            // The field's own Enter: the line leaves the field for the
+            // shell's history as well as the shell, which is where a person
+            // pressing Up afterwards expects to find it.
+            let Some(sent) = input.apply(crate::input_keys::Intent::Submit, &self.clipboard) else {
+                continue;
+            };
+            self.resume_offers.remove(&pane);
+            if terminal.submit(&sent)
+                && let Some(blocks) = self.pane_blocks(pane)
+            {
+                blocks.apply(ScrollCause::Submit);
+            }
+        }
+        ctx.notify();
+    }
+
+    /// The panes whose fields still hold their resume line exactly as a
+    /// restore typed it, in the strip's order.
+    fn waiting_resumes(&self) -> Vec<PaneId> {
+        self.tabs
+            .panes()
+            .map(|(_, pane)| pane.id())
+            .filter(|pane| {
+                self.resume_offers
+                    .get(pane)
+                    .zip(self.inputs.get(pane))
+                    .is_some_and(|(line, input)| input.editor().text() == line)
+            })
+            .collect()
+    }
+
     /// Makes the worktree the creator describes, and opens a pane in it.
     fn create_worktree(&mut self, ctx: &mut ViewContext<Self>) {
         if self.tab_menu.working {
@@ -4064,7 +4328,20 @@ impl Workspace {
         let opening = self.tab_menu.opening;
         let made = ctx.background().spawn({
             let path = path.clone();
-            async move { crate::git::worktree::add(&repository, &path, &branch, None) }
+            let held = self.held.clone();
+            async move {
+                crate::git::worktree::add(&repository, &path, &branch, None)?;
+                // Locked here, before the answer lands and the tab opens, so
+                // there is no moment in which an agent is working in a
+                // checkout nothing else has been told about. And handed in
+                // from here rather than with the answer, because the answer
+                // never lands in a window closed while git was busy: this
+                // task is then the one thing left to take the lock off.
+                if let Some(lock) = HeldLock::take(&repository, &path, &branch) {
+                    held.admit(lock);
+                }
+                Ok::<_, crate::git::worktree::Error>(())
+            }
         });
 
         ctx.spawn(made, move |workspace, made, ctx| {
@@ -4091,9 +4368,12 @@ impl Workspace {
                     // `open_tab_in_group_of` falls back out of if that tab has
                     // closed in the meantime.
                     match opened_on {
-                        Some(tab) => workspace.open_tab_in_group_of(tab, path, ctx),
-                        None => workspace.open_tab_in(path, ctx),
+                        Some(tab) => workspace.open_tab_in_group_of(tab, path.clone(), ctx),
+                        None => workspace.open_tab_in(path.clone(), ctx),
                     };
+                    // Held once its pane is in it, and from then on until no
+                    // pane in the window is.
+                    workspace.held.opened(&path);
                 }
                 Err(problem) => {
                     if answering {
@@ -4337,10 +4617,19 @@ impl Workspace {
             return;
         };
 
+        // Asked again at each step rather than once when the list was made: a
+        // pane that moved into one of these since is working in it now, and
+        // Crook's own lock is then what makes git leave it standing.
+        let release = !self.a_pane_is_in(&going.path);
         let removing = ctx.background().spawn({
             let repository = repository.clone();
             let path = going.path.clone();
-            async move { crate::git::worktree::remove(&repository, &path, false) }
+            async move {
+                if release {
+                    crate::git::worktree::release(&repository, &path)?;
+                }
+                crate::git::worktree::remove(&repository, &path, false)
+            }
         });
 
         ctx.spawn(removing, move |workspace, removed, ctx| {
@@ -4387,9 +4676,18 @@ impl Workspace {
         let asked_about = index;
         let opened_on = self.tab_menu.tab;
         let opening = self.tab_menu.opening;
+        // Decided here, where the panes are, rather than trusted to the × that
+        // led here: a removal dispatched at a checkout a pane is working in
+        // must meet Crook's own lock, which is what the lock is for.
+        let release = !self.a_pane_is_in(&path);
         let removed = ctx.background().spawn({
             let path = path.clone();
-            async move { crate::git::worktree::remove(&repository, &path, force) }
+            async move {
+                if release {
+                    crate::git::worktree::release(&repository, &path)?;
+                }
+                crate::git::worktree::remove(&repository, &path, force)
+            }
         });
 
         ctx.spawn(removed, move |workspace, removed, ctx| {
@@ -4804,6 +5102,15 @@ impl Workspace {
             .update(ctx, |model, _| model.set_shell(shell));
     }
 
+    /// Says where this window answers questions, for every shell opened from
+    /// now on to be told in `CROOK_SOCKET`. See [`crate::control`].
+    ///
+    /// Call before [`Self::start_terminals`], for the same reason again.
+    pub fn set_control_socket(&self, socket: Option<PathBuf>, ctx: &mut ViewContext<Self>) {
+        self.terminals
+            .update(ctx, |model, _| model.set_control_socket(socket));
+    }
+
     /// The shell the next pane runs and whether it gets the marks, read the
     /// way the launch reads them, and whether the shell was named rather
     /// than resolved. What the Shell page prints: a page that said "zsh"
@@ -4923,7 +5230,7 @@ impl Workspace {
     }
 
     /// The command line being composed in a pane.
-    pub(super) fn input(&self, pane: PaneId) -> Option<&TextInput> {
+    pub(crate) fn input(&self, pane: PaneId) -> Option<&TextInput> {
         self.inputs.get(&pane)
     }
 
@@ -4986,7 +5293,7 @@ impl Workspace {
     }
 
     /// The commands that have finished in a pane, oldest first.
-    pub(super) fn terminal_blocks(
+    pub(crate) fn terminal_blocks(
         &self,
         pane: PaneId,
         app: &AppContext,
@@ -5225,6 +5532,9 @@ impl Workspace {
         // row shows are looked up by directory — which is what makes the branch
         // chip follow a shell's `cd`.
         self.sync_git(ctx);
+        // And a `cd` out of a checkout this window locked may have been the
+        // last pane in it leaving.
+        self.release_vacated(ctx);
         ctx.notify();
         true
     }
@@ -5233,31 +5543,76 @@ impl Workspace {
     ///
     /// A bell is a program saying "look at me", so it becomes the one status
     /// that means exactly that — and only in a pane nobody is looking at. The
-    /// pane with the keyboard is already being looked at, and a shell that
-    /// rings on every ambiguous Tab completion would otherwise paint its own
-    /// row amber while somebody typed in it.
+    /// pane with the keyboard, in a window in front, is already being looked
+    /// at, and a shell that rings on every ambiguous Tab completion would
+    /// otherwise paint its own row amber while somebody typed in it.
     ///
-    /// It is cleared by looking: [`Self::attend`] runs on every focus change.
+    /// It is cleared by looking: [`Self::attend`] runs on every focus change,
+    /// the window's included.
     ///
     /// Plugins watching for a bell are told about *every* one, including the
-    /// focused pane's, because "focused" here means the pane the keyboard is
-    /// in and not a person's attention: an agent left running in the only
-    /// pane a window has is focused the whole time somebody is away from it,
-    /// and a bell suppressed on that ground would be the one bell that
+    /// looked-at pane's, because looking here means the keyboard and the
+    /// window's focus and not a person's attention: a window left in front
+    /// of an empty chair has its pane looked at the whole time nobody is
+    /// there, and a bell suppressed on that ground would be the one bell that
     /// mattered. What the strip does with a bell and what a plugin does with
     /// one are different questions, and this is where they part.
     fn ring(&mut self, pane: PaneId, while_running: bool, ctx: &mut ViewContext<Self>) -> bool {
         self.bell_rang(pane, while_running, ctx);
 
-        if self.tabs.focused_pane_id() == Some(pane) {
+        if self.looking_at() == Some(pane) {
             // Not "nothing to write into" — the pane is there and the bell was
             // heard. Reporting `true` is what keeps this out of the log line
             // that means a pane has gone.
             return true;
         }
-        self.update_session(pane, ctx, |session| {
-            session.attention = Some(Attention::Bell);
-        })
+        let was = self.shown_status(pane);
+        let reported = self.update_session(pane, ctx, |session| {
+            // A bell after a notification asks for the look the notification
+            // already asked for, and says less: Claude Code's
+            // `iterm2_with_bell` channel sends exactly that pair, and a bell
+            // that took the notification's place would take its words too.
+            if !matches!(session.attention, Some(Attention::Notification(_))) {
+                session.attention = Some(Attention::Bell);
+            }
+        });
+        self.tell_the_desktop(pane, was, ctx);
+        reported
+    }
+
+    /// Records that a program in a pane sent one of the notifications other
+    /// terminals show — OSC 9, 777 or 99.
+    ///
+    /// A bell with words: it asks for a look in a pane nobody is looking at,
+    /// is cleared by looking, and says on the row what it was about. It is
+    /// deliberately not a status. The program that sent it may be an agent
+    /// that has said it is running, and still is; or one on a machine with
+    /// no Crook binary, which has never said anything else, and whose row
+    /// is drawn as waiting the way a bell's is.
+    ///
+    /// The title and the body go on the row's one line together, the way
+    /// Claude Code joins them itself for OSC 9, which has room for only one.
+    fn notified(
+        &mut self,
+        pane: PaneId,
+        title: Option<&str>,
+        body: Option<&str>,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        let message = match (title, body) {
+            (Some(title), Some(body)) => format!("{title}: {body}"),
+            (Some(text), None) | (None, Some(text)) => text.to_owned(),
+            (None, None) => return self.tabs.pane(pane).is_some(),
+        };
+        if self.looking_at() == Some(pane) {
+            return true;
+        }
+        let was = self.shown_status(pane);
+        let reported = self.update_session(pane, ctx, |session| {
+            session.attention = Some(Attention::Notification(message));
+        });
+        self.tell_the_desktop(pane, was, ctx);
+        reported
     }
 
     /// Records what the program in a pane said it was doing — or, with a
@@ -5285,8 +5640,9 @@ impl Workspace {
         source: StatusSource,
         ctx: &mut ViewContext<Self>,
     ) -> bool {
-        let looking = self.tabs.focused_pane_id() == Some(pane);
-        self.update_session(pane, ctx, |session| {
+        let looking = self.looking_at() == Some(pane);
+        let was = self.shown_status(pane);
+        let reported = self.update_session(pane, ctx, |session| {
             if let Some(title) = title {
                 session.derived_title = Some(title);
             }
@@ -5299,7 +5655,97 @@ impl Workspace {
             } else if changed && !looking {
                 session.attention = Some(Attention::StatusChange);
             }
-        })
+        });
+        self.tell_the_desktop(pane, was, ctx);
+        reported
+    }
+
+    /// What a pane's row shows for its status, while the pane is open.
+    fn shown_status(&self, pane: PaneId) -> Option<AgentStatus> {
+        self.tabs.pane(pane).map(Pane::status)
+    }
+
+    /// Posts a desktop notification about a pane whose row just turned to
+    /// needs-input or to failed, if one is wanted: `was` is what the row
+    /// showed before.
+    ///
+    /// A *turn*, and it is the row's status rather than the agent's. The
+    /// agent saying needs-input again, with another word in its question, is
+    /// the same stop and not a new one. And the row turns amber for more than
+    /// the agent's needs-input: an agent that says it is done while nobody is
+    /// looking, and a bell in a pane with nothing else to say — which is how
+    /// an agent without Crook's hooks asks — are a pane waiting on a person
+    /// as surely. What decides whether it is posted is [`Self::notify`].
+    fn tell_the_desktop(
+        &mut self,
+        pane: PaneId,
+        was: Option<AgentStatus>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(open) = self.tabs.pane(pane) else {
+            return;
+        };
+        let now = open.status();
+        if was.is_none_or(|was| was == now) {
+            return;
+        }
+        let session = open.session();
+        let name = row_name(session, self.home());
+        let (occasion, notice) = match now {
+            AgentStatus::NeedsInput => (Occasion::NeedsInput, Notice::needs_input(&name, session)),
+            AgentStatus::Failed => (Occasion::Failed, Notice::failed(&name)),
+            AgentStatus::Idle | AgentStatus::Running => return,
+        };
+        self.notify(pane, occasion, notice, ctx);
+    }
+
+    /// Posts a desktop notification about a pane whose command ended, if it
+    /// ran for long enough to be one and one is wanted.
+    fn tell_the_desktop_a_command_ended(
+        &mut self,
+        pane: PaneId,
+        exit: Option<i32>,
+        took: Option<Duration>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        // A command the shell did not time is not known to have been long.
+        let Some(took) = took.filter(|took| *took >= LONG_COMMAND) else {
+            return;
+        };
+        let Some(open) = self.tabs.pane(pane) else {
+            return;
+        };
+        // What the pane was running is already gone by now — the model hears
+        // it stop before it hears it finish — so the name is the row's, which
+        // falls back to the directory rather than to `agent 1`.
+        let notice = Notice::finished(&row_name(open.session(), self.home()), exit, took);
+        self.notify(pane, Occasion::LongCommand, notice, ctx);
+    }
+
+    /// Posts `notice` about `pane` when everything that decides it says yes:
+    /// the window is behind another one, the person asked for `occasion`, the
+    /// Notifications plugin is on, and the pane has been quiet for
+    /// [`QUIET`](crate::notify::QUIET) or looked at since it last posted.
+    ///
+    /// Only while the window is behind another one, because a pane in front
+    /// of somebody already has their attention — the row, the chip and the
+    /// title are all saying it. The quiet is asked last, so that only a
+    /// notification that was really posted starts one.
+    fn notify(
+        &mut self,
+        pane: PaneId,
+        occasion: Occasion,
+        notice: Notice,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if self.window_focused
+            || !self.general().notifies_on(occasion)
+            || !crate::plugins::notifications::is_on(&self.host)
+            || !self.notified.admits(pane, Instant::now())
+        {
+            return;
+        }
+        self.notifier.post(notice, ctx.background());
     }
 
     /// Clears the attention a pane asked for, now that it has it.
@@ -5313,10 +5759,21 @@ impl Workspace {
     /// has it now. Every action settles through here, including the ones that
     /// move nothing, and "still looking at the tab I marked to come back to"
     /// is exactly the state the mark exists to survive.
+    ///
+    /// Nothing is attended while the window is behind something else: a pane
+    /// the strip moves to then is a pane nobody saw. Coming back to the
+    /// window runs this for whichever pane has the keyboard by then, with
+    /// the pane that had it on leaving as `before`.
+    ///
+    /// Looking also ends the pane's desktop-notification quiet, whether or
+    /// not it had asked for anything: the banner it posted has been answered
+    /// by the person coming to it, so what it says next is news however soon
+    /// it comes. See [`Cooldown::seen`].
     fn attend(&mut self, before: Option<PaneId>, ctx: &mut ViewContext<Self>) {
-        let Some(pane) = self.tabs.focused_pane_id() else {
+        let Some(pane) = self.looking_at() else {
             return;
         };
+        self.notified.seen(pane);
         let arrived = before != Some(pane);
         let asked = self
             .tabs
@@ -5372,12 +5829,33 @@ impl Workspace {
     /// which is the same path `cmd-w` takes: the pane goes, its tab goes with
     /// it if it was the last pane, and the window goes if that was the last
     /// tab. There is deliberately no second way to close anything.
-    pub(super) fn apply_terminal_update(
+    ///
+    /// A grid that changed is a frame only when [`Self::pane_is_on_screen`]
+    /// says so. Everything else here is applied whether or not anybody can see
+    /// the pane: it is about the session — what its row says, the clipboard,
+    /// the pane closing — and none of that can wait for the tab to be looked
+    /// at.
+    ///
+    /// Whatever is watched from the control socket is told here too, after
+    /// the session has taken it in — see [`Self::tell_watches`].
+    pub(crate) fn apply_terminal_update(
         &mut self,
         update: &TerminalUpdate,
         ctx: &mut ViewContext<Self>,
     ) {
+        let said = self.agent_said(update);
         let reported = match update {
+            // The one update that is about pixels, and the gate that keeps a
+            // tab nobody is looking at from rebuilding the window every time
+            // its shell prints. Nothing else is lost by skipping it: the grid
+            // is all it changed, and the frame that brings the pane back on
+            // screen reads the snapshot the model holds *now*.
+            TerminalUpdate::Repainted(pane) => {
+                if self.pane_is_on_screen(*pane) {
+                    ctx.notify();
+                }
+                self.tabs.pane(*pane).is_some()
+            }
             TerminalUpdate::Title(pane, title) => {
                 let title = title.clone();
                 self.update_session(*pane, ctx, |session| session.derived_title = title)
@@ -5397,10 +5875,26 @@ impl Workspace {
                 reported
             }
             TerminalUpdate::Running(pane, command) => {
+                let starts = command.is_some();
                 let command = command.clone();
-                self.update_session(*pane, ctx, |session| {
-                    session.running_command = command;
-                })
+                let mut changed_agent = false;
+                let reported = self.update_session(*pane, ctx, |session| {
+                    changed_agent = session.set_running_command(command);
+                });
+                // Whatever runs, the line a restore offered here is spent:
+                // it was sent, or the person did something else first.
+                if starts {
+                    self.resume_offers.remove(pane);
+                }
+                // The agent a pane runs is what the next window offers back,
+                // and every Crook update is a restart: an agent that started
+                // since the last save would not be in the file the restart
+                // reads. Only on a change of agent, though, and not on every
+                // command, which would be a write per `ls`.
+                if changed_agent {
+                    self.save_session(ctx);
+                }
+                reported
             }
             TerminalUpdate::Closed(pane) => {
                 if self.apply(TabAction::ClosePane(*pane), ctx) == TabEffect::CloseWindow {
@@ -5421,8 +5915,22 @@ impl Workspace {
                 pane,
                 while_running,
             } => self.ring(*pane, *while_running, ctx),
-            TerminalUpdate::CommandFinished { pane, exit, took } => {
+            TerminalUpdate::CommandFinished {
+                pane,
+                exit,
+                took,
+                ran,
+                ..
+            } => {
+                // Only a line that ran something: ctrl-c at the prompt and an
+                // empty Enter are marked too, and neither moves the pane on
+                // from what a restore brought back. The plugins hear both,
+                // since what they are told is that the shell said so.
+                if *ran {
+                    self.spend_restored_agent(*pane, ctx);
+                }
                 self.command_finished(*pane, *exit, *took, ctx);
+                self.tell_the_desktop_a_command_ended(*pane, *exit, *took, ctx);
                 true
             }
             TerminalUpdate::Completions(pane, serial, answer) => {
@@ -5458,12 +5966,128 @@ impl Workspace {
                 StatusSource::CommandEnded(Instant::now()),
                 ctx,
             ),
+            TerminalUpdate::Prompted(pane) => {
+                self.submit_first_line(*pane, ctx);
+                self.tabs.pane(*pane).is_some()
+            }
+            TerminalUpdate::Notification { pane, title, body } => {
+                self.notified(*pane, title.as_deref(), body.as_deref(), ctx)
+            }
         };
 
         if !reported {
             // The pane closed between the shell saying something and the main
             // thread hearing it. Nothing to write it into, and nothing wrong.
             log::debug!("a terminal reported {update:?} for a pane that has gone");
+        }
+        self.tell_watches(update, said);
+    }
+
+    /// What a pane's agent had said before `update`, when `update` is a report
+    /// that could change it and something is watching.
+    fn agent_said(&self, update: &TerminalUpdate) -> Option<(AgentStatus, Option<String>)> {
+        if self.watches.is_empty() {
+            return None;
+        }
+        let (TerminalUpdate::Agent { pane, .. } | TerminalUpdate::AgentSettled(pane)) = update
+        else {
+            return None;
+        };
+        let session = self.tabs.pane(*pane)?.session();
+        Some((session.status, session.message.clone()))
+    }
+
+    /// Tells what the control socket is watching about `update`, now that the
+    /// session has taken it in.
+    ///
+    /// A status is told only when it changed — an agent reports `running`
+    /// around every tool it calls, and a stream of the same word is noise —
+    /// and `before` is what it was. A command starting and a command finishing
+    /// are told as they come. A pane closing is not here: a pane closes by
+    /// more roads than its shell ending, and every one of them comes through
+    /// [`Self::settle`].
+    fn tell_watches(
+        &mut self,
+        update: &TerminalUpdate,
+        before: Option<(AgentStatus, Option<String>)>,
+    ) {
+        if self.watches.is_empty() {
+            return;
+        }
+        let (pane, heard) = match update {
+            TerminalUpdate::Agent { pane, .. } | TerminalUpdate::AgentSettled(pane) => {
+                let Some(session) = self.tabs.pane(*pane).map(Pane::session) else {
+                    return;
+                };
+                let now = (session.status, session.message.clone());
+                if before.as_ref() == Some(&now) {
+                    return;
+                }
+                (*pane, watch::Heard::Status)
+            }
+            TerminalUpdate::Running(pane, Some(command)) => (*pane, watch::Heard::Started(command)),
+            TerminalUpdate::CommandFinished {
+                pane,
+                command,
+                exit,
+                took,
+                ..
+            } => (
+                *pane,
+                watch::Heard::Finished {
+                    command: command.as_deref(),
+                    exit: *exit,
+                    took: *took,
+                },
+            ),
+            _ => return,
+        };
+        if let Some(session) = self.tabs.pane(pane).map(Pane::session) {
+            self.watches.heard(pane, session, heard);
+        }
+    }
+
+    /// Whether a frame draws `pane`'s output right now.
+    ///
+    /// The render's own answer, restated: `body::render` draws the active
+    /// tab's panes less the ones a zoom hides, and [`View::render`] draws no
+    /// body at all while a section of the sidebar is showing. Asked when a
+    /// repaint arrives rather than kept up to date beside the state it
+    /// follows, so there is no path — a tab switch, a split, a zoom, a close,
+    /// a restore, a plugin switched off under the section it was showing —
+    /// that can leave it saying a pane is hidden while the frame draws it.
+    pub(super) fn pane_is_on_screen(&self, pane: PaneId) -> bool {
+        self.showing_section().is_none()
+            && self
+                .tabs
+                .active()
+                .is_some_and(|tab| tab.panes().is_visible(pane))
+    }
+
+    /// Spends what a restore left in a pane once a command has finished
+    /// there: the offer of its resume line, and the agent's name.
+    ///
+    /// The `Running` update spends them too, but only for a command it saw
+    /// running, and it reads the pane at rest: `cd`, `ls` or `git status`
+    /// can start and end between two reads. The shell's end-of-command mark
+    /// arrives for every command, however quick, so this is what makes a
+    /// `cd` out of the directory end the agent's claim on the pane — which is
+    /// what keeps the file from naming the agent against a directory its
+    /// conversation was never had in. A pane whose agent changed is saved
+    /// straight away, for the reason the `Running` update saves one.
+    ///
+    /// Called only for a mark with a command behind it. The same mark ends a
+    /// line that ran nothing, and a person who pressed ctrl-c to clear the
+    /// offered line for now has not moved on from it.
+    fn spend_restored_agent(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        self.resume_offers.remove(&pane);
+        let forgotten = self
+            .tabs
+            .pane_mut(pane)
+            .is_some_and(|pane| pane.session_mut().command_finished());
+        if forgotten {
+            ctx.notify();
+            self.save_session(ctx);
         }
     }
 
@@ -5559,6 +6183,160 @@ impl Workspace {
         self.settle(effect, before, ctx)
     }
 
+    /// Opens a tab for `crook tab new` beside `beside`, and answers the tab and
+    /// the pane in it.
+    ///
+    /// In `beside`'s group when `grouped`, and never selected: see
+    /// [`TabAction::NewBeside`]. `directory` is written onto the new session
+    /// before the shells are synced, for the reason [`Self::open_tab_in`]
+    /// gives, and so is whatever `prepare` writes — the lineage, the title —
+    /// so the session the strip saves is the finished one. A group that had a
+    /// `heading` handed in is renamed to it, as the worktree menu renames the
+    /// group it opens into after the repository.
+    ///
+    /// A `beside` that closed while a worktree was being checked out for it
+    /// gets a tab of its own beside the active one: the checkout happened and
+    /// the tab is still what was asked for, as it is for the menu.
+    pub(crate) fn open_worker_tab(
+        &mut self,
+        beside: TabId,
+        grouped: bool,
+        directory: Option<PathBuf>,
+        heading: Option<String>,
+        ctx: &mut ViewContext<Self>,
+        prepare: impl FnOnce(&mut AgentSession),
+    ) -> Option<(TabId, PaneId)> {
+        let (anchor, grouped) = match self.tabs.get(beside) {
+            Some(_) => (beside, grouped),
+            None => (self.tabs.active_id(), false),
+        };
+        let before = self.tabs.focused_pane_id();
+        let existing: Vec<TabId> = self.tabs.iter().map(Tab::id).collect();
+        let effect = self.tabs.apply(TabAction::NewBeside {
+            tab: anchor,
+            grouped,
+        });
+        let opened = self
+            .tabs
+            .iter()
+            .find(|tab| !existing.contains(&tab.id()))
+            .map(|tab| (tab.id(), tab.panes().focused_id(), tab.group()));
+
+        if let Some((_, pane, group)) = opened {
+            if let Some(session) = self.tabs.pane_mut(pane).map(Pane::session_mut) {
+                if let Some(directory) = directory {
+                    session.working_directory = Some(directory);
+                }
+                prepare(session);
+            }
+            if let (Some(group), Some(heading)) = (group.filter(|_| grouped), heading) {
+                self.tabs.rename_group(group, heading);
+            }
+        }
+
+        self.settle(effect, before, ctx);
+        opened.map(|(tab, pane, _)| (tab, pane))
+    }
+
+    /// Types `line` into a pane's field, and runs it at the pane's first
+    /// prompt.
+    ///
+    /// Typed now, so the command a tab was opened for is on screen, in the
+    /// field, from the moment the tab is — and sent the way Enter sends a
+    /// line, once the shell says it is ready for one: see
+    /// [`TerminalUpdate::Prompted`]. The wait is the shell's own mark rather
+    /// than a clock, and a shell whose integration never marks a prompt keeps
+    /// the line in its field for a person to send.
+    pub(crate) fn run_at_first_prompt(
+        &mut self,
+        pane: PaneId,
+        line: String,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        self.type_into_input(pane, &line, ctx);
+        self.first_lines.insert(pane, line);
+    }
+
+    /// Sends the line [`Self::run_at_first_prompt`] typed, if it is still the
+    /// line in the field.
+    ///
+    /// Exactly what Enter does in the field — the editor's submit, then
+    /// [`TerminalHandle::submit`], then the list scrolled to the end — so the
+    /// line goes into the pane's history and its block like one a person
+    /// ran. A field somebody has typed into since is theirs: the line they
+    /// changed is not the one that was asked for, and sending theirs for them
+    /// would be sending something nobody pressed Enter on.
+    fn submit_first_line(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        let Some(line) = self.first_lines.remove(&pane) else {
+            return;
+        };
+        let Some(input) = self.inputs.get(&pane) else {
+            return;
+        };
+        if input.editor().text() != line {
+            log::info!("pane {pane:?}'s first line was changed before its prompt; not sending it");
+            return;
+        }
+        let Some((terminal, _)) = self.terminal(pane, ctx) else {
+            return;
+        };
+        let Some(line) = input.apply(Intent::Submit, &self.clipboard) else {
+            return;
+        };
+        if terminal.submit(&line)
+            && let Some(view) = self.pane_blocks(pane)
+        {
+            view.apply(ScrollCause::Submit);
+        }
+        ctx.notify();
+    }
+
+    /// The pane whose shell was handed `token` for the control socket, while
+    /// that shell runs. See [`crate::control`].
+    pub(crate) fn pane_with_token(&self, token: &str, app: &AppContext) -> Option<PaneId> {
+        self.terminals.as_ref(app).pane_with_token(token)
+    }
+
+    /// The token a pane's shell was handed, for a test that has to ask as it.
+    ///
+    /// Unix only, as the socket tests that ask are: a Windows test build
+    /// would find it unused.
+    #[cfg(all(test, unix))]
+    pub(crate) fn token_of(&self, pane: PaneId, app: &AppContext) -> Option<String> {
+        self.terminals.as_ref(app).token(pane).map(str::to_owned)
+    }
+
+    /// Where the worktrees Crook makes are checked out, when this machine has
+    /// anywhere to put them.
+    pub(crate) fn worktrees_directory(&self) -> Option<&Path> {
+        self.worktrees_directory.as_deref()
+    }
+
+    /// What the control socket is watching, and who opened the closed tabs
+    /// it remembers. See [`crate::control::watch`].
+    pub(crate) fn watches(&self) -> &Watches {
+        &self.watches
+    }
+
+    /// What the control socket is watching, to register a watch in. See
+    /// [`crate::control::watch`].
+    pub(crate) fn watches_mut(&mut self) -> &mut Watches {
+        &mut self.watches
+    }
+
+    /// Whether a pane opened by `crook tab new` still has its line waiting
+    /// for the shell's first prompt: the command it was opened for has not
+    /// been sent yet. See [`Self::run_at_first_prompt`].
+    pub(crate) fn waits_for_first_prompt(&self, pane: PaneId) -> bool {
+        self.first_lines.contains_key(&pane)
+    }
+
+    /// Whether a pane's shell reports command marks, or `None` when the pane
+    /// has no shell running.
+    pub(crate) fn shell_marks(&self, pane: PaneId, app: &AppContext) -> Option<bool> {
+        self.terminals.as_ref(app).marks(pane)
+    }
+
     /// Opens a tab whose shell starts in `directory`, in `tab`'s group.
     ///
     /// What the worktree menu opens into, and **it is a tab and not a pane**.
@@ -5639,13 +6417,26 @@ impl Workspace {
         self.sync_interactions();
         self.sync_git(ctx);
         self.sync_terminals(ctx);
+        // Every road a pane closes by, and every tab that opens, comes
+        // through here: what the control socket is watching hears of both,
+        // and a tab `tab.new` opened that closed is remembered for a wait
+        // asked after it.
+        self.watches.settled(&self.tabs);
         // After the strip has moved, so "which pane is being looked at" is the
         // answer for the state the frame is about to draw. Every action comes
         // through here, which is what makes looking at a pane the one and only
         // thing that quiets its bell — and what brings the row it selected
-        // into view whichever gesture selected it.
+        // into view whichever gesture selected it. The window's focus cannot
+        // change inside an action, so the pane looked at before is `before`
+        // whenever the window is in front and nothing when it is not.
+        self.report_focus(before.filter(|_| self.window_focused), ctx);
         self.attend(before, ctx);
         self.scroll_row_into_view();
+        // After the strip has moved, which is every way a pane closes: the
+        // last one working in a checkout this window locked may just have.
+        // A window closing with its last tab is not one of them — the strip
+        // keeps that tab — and its locks come off with the process instead.
+        self.release_vacated(ctx);
 
         // An action that changed nothing repaints nothing: holding down
         // cmd-alt-left on the leftmost tab must not put the window on a
@@ -6086,6 +6877,14 @@ impl Workspace {
                 self.block_target()?;
                 return Some(WorkspaceAction::Block(BlockAction::ScrollTo(edge)));
             }
+            // Declined with nothing to send, like every command here that
+            // has nothing to act on, so a chord bound to it reaches the shell.
+            Binding::ResumeAgents => {
+                if self.waiting_resumes().is_empty() {
+                    return None;
+                }
+                return Some(WorkspaceAction::ResumeAgents);
+            }
         };
 
         Some(WorkspaceAction::Tab(tab))
@@ -6305,7 +7104,7 @@ impl Workspace {
     /// Both or neither: an element that had a handle and no snapshot would have
     /// nothing to paint, and one that had a snapshot and no handle could not
     /// resize the pty it was measuring.
-    pub(super) fn terminal(
+    pub(crate) fn terminal(
         &self,
         pane: PaneId,
         app: &AppContext,
@@ -6433,6 +7232,10 @@ impl Workspace {
             self.inputs.entry(*id).or_insert_with(TextInput::for_pane);
         }
         self.interactions.retain(|id, _| open.contains(id));
+        // A line waiting for a prompt in a pane that closed first waits for
+        // nothing.
+        self.first_lines.retain(|id, _| open.contains(id));
+        self.resume_offers.retain(|id, _| open.contains(id));
         // A closed pane's half-written command line goes with it. Keeping it
         // would mean a later pane inheriting somebody else's history the first
         // time an id was reused.
@@ -6846,6 +7649,10 @@ impl Workspace {
             SettingsAction::ToggleAskBeforeEnding => {
                 let mut general = self.general();
                 general.ask_before_ending_agents = !general.ask_before_ending_agents;
+                self.set_general(general, ctx);
+            }
+            SettingsAction::ToggleNotification(occasion) => {
+                let general = self.general().toggled(occasion);
                 self.set_general(general, ctx);
             }
             SettingsAction::RecordBinding(id) => {
@@ -7299,9 +8106,49 @@ impl Workspace {
     pub fn restore(&mut self, strip: TabStrip, ctx: &mut ViewContext<Self>) {
         self.tabs = strip;
         self.sync_interactions();
+        self.offer_resumes(ctx);
         self.sync_git(ctx);
         self.sync_input_keys();
         ctx.notify();
+    }
+
+    /// Types each restored agent's resume line into its pane's field, unsent.
+    ///
+    /// Unsent because the process is gone and a new one is a thing a person
+    /// starts: a restore that ran `claude --continue` in every pane by itself
+    /// would be a window that spends somebody's budget on the way up, in
+    /// panes they have not looked at yet. What a restore can do is have the
+    /// line ready, the way "Run again" does for a block — Enter in one pane,
+    /// or "Resume every agent" for all of them. See
+    /// [`crate::session::resume_offers`] for which line each pane gets.
+    fn offer_resumes(&mut self, ctx: &mut ViewContext<Self>) {
+        let offers = crate::session::resume_offers(&self.tabs, |program, resume| {
+            self.settings.resume_line(program, resume)
+        });
+        for (pane, line) in offers {
+            self.type_into_input(pane, &line, ctx);
+            self.resume_offers.insert(pane, line);
+        }
+    }
+
+    /// Takes a restore's resume line back out of a pane's field, if the field
+    /// still holds it exactly as the restore typed it.
+    ///
+    /// For a launch that types into the pane itself — `--run`, `--type` —
+    /// and so needs the field empty: the line would otherwise be the front
+    /// half of whatever it typed. The agent stays named. A command the launch
+    /// runs spends it the way any command does, and a line it only types
+    /// leaves the pane what it was.
+    pub fn withdraw_resume_offer(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        let Some(line) = self.resume_offers.remove(&pane) else {
+            return;
+        };
+        if let Some(input) = self.inputs.get(&pane)
+            && input.editor().text() == line
+        {
+            input.abandon();
+            ctx.notify();
+        }
     }
 }
 
@@ -7537,6 +8384,7 @@ impl TypedActionView for Workspace {
             WorkspaceAction::HoverRow { pane, entered } => self.hover_row(pane, entered, ctx),
             WorkspaceAction::ReleaseSelection(pane) => self.release_selection(pane, ctx),
             WorkspaceAction::Complete(pane) => self.request_completions(pane, ctx),
+            WorkspaceAction::ResumeAgents => self.resume_every_agent(ctx),
             WorkspaceAction::Run(id) => self.run_action(id, ctx),
             WorkspaceAction::RunAbout(id, subject) => {
                 // Said, then run, which is the gesture a picker's row makes

@@ -30,6 +30,7 @@ mod body;
 mod closing;
 mod controls;
 mod header_toolbar;
+mod held_locks;
 mod input_element;
 mod pane_output;
 mod row_content;
@@ -59,6 +60,7 @@ pub use action::{
     WorktreeAction,
 };
 pub use block_list::BlockList;
+pub use held_locks::HeldLocks;
 pub use input_element::CommandInput;
 pub use pane_output::{Keys, Output};
 pub(crate) use settings_page::widgets::Category;

@@ -11,6 +11,7 @@
 
 use crook_terminal::BlockId;
 
+use crate::notify::Occasion;
 use crate::plugin::{ActionId, PageId, SectionId};
 use crate::settings::{Density, Granularity, PrimaryInfo, StatusMarks, Subtitle};
 use crate::tab::{PaneId, TabAction, TabId};
@@ -122,6 +123,9 @@ pub enum WorkspaceAction {
     /// and it is the model that knows where this session's scratch directory
     /// is. See [`crate::completion`].
     Complete(PaneId),
+    /// Send the resume lines a restore left in the composers, where nobody
+    /// has touched them. See `Workspace::resume_every_agent`.
+    ResumeAgents,
 }
 
 /// Something an action is about, as something `Copy`.
@@ -348,7 +352,7 @@ pub enum WorktreeAction {
         force: bool,
     },
     /// Ask about removing every checkout that is free: not the main one, not
-    /// locked, and nothing in the window working in it.
+    /// locked by anybody but Crook, and nothing in the window working in it.
     AskTidy,
     /// Remove those of them git lets go without being forced, and leave the
     /// rest standing. There is no second question: this one never forces.
@@ -574,6 +578,9 @@ pub enum SettingsAction {
     /// "Ask before ending working agents": whether a close that would end
     /// something still working asks first.
     ToggleAskBeforeEnding,
+    /// One of the Notifications page's switches: whether this occasion posts
+    /// a desktop notification while the window is behind another.
+    ToggleNotification(Occasion),
     /// Start recording a chord for this command, on the Keyboard Shortcuts
     /// page.
     ///

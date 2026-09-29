@@ -13,11 +13,11 @@
 //! open.
 //!
 //! So a snapshot is a separate shape, and it is deliberately thin: a title, a
-//! directory, a share of a split. Serialising the live types would mean
-//! deriving `Serialize` on everything they reach and then remembering, every
-//! time one of them grew a field, whether that field was a fact about the work
-//! or a fact about a pointer. Warp draws the line in the same place and for the
-//! same reason.
+//! directory, a share of a split, an agent's name. Serialising the live types
+//! would mean deriving `Serialize` on everything they reach and then
+//! remembering, every time one of them grew a field, whether that field was a
+//! fact about the work or a fact about a pointer. Warp draws the line in the
+//! same place and for the same reason.
 //!
 //! # What is not remembered, and why
 //!
@@ -26,6 +26,16 @@
 //! the directory the old one was in, which is the useful half and the only
 //! honest one — a window that redrew yesterday's output over a shell that had
 //! never run any of it would be lying about the state of the machine.
+//!
+//! **Not the process, and not its command line — but the agent's name.** A
+//! pane that was running a coding agent remembers which one, as the program
+//! name in [`crate::agent`]'s table and nothing after it: the rest of the
+//! line is where a prompt is typed, and this is a file anybody with the home
+//! directory can read. The conversation outlives the process, on disk and
+//! keyed by the directory it was had in, so the name is enough for the
+//! restored pane to offer the agent's resume line — typed into its composer,
+//! unsent, because starting a process is a person's press and not a
+//! restore's. See [`resume_offers`] for which line each pane is offered.
 //!
 //! **Not the settings pane.** It is a pane, so it *could* be, and it should not
 //! be: it is a thing somebody opened to change a setting, and a window that
@@ -51,6 +61,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context as _, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::agent::Resume;
 use crate::settings::{atomic_write, config_directory, ensure_directory};
 use crate::tab::{Pane, PaneGroup, SplitAxis, Tab, TabGroup, TabId, TabStrip};
 
@@ -178,6 +189,16 @@ pub struct PaneSnapshot {
     pub working_directory: Option<PathBuf>,
     /// The share of the split this pane took, from a dragged divider.
     pub flex: f32,
+    /// The coding agent the pane was running, by its program's name —
+    /// `claude`, `codex` — and nothing else of its command line.
+    ///
+    /// The one fact about a process the file keeps, and it is a name rather
+    /// than the process: see the module docs. A value that is not a string —
+    /// a hand edit, another build — reads as no agent rather than costing the
+    /// tab, since a pane that comes back without its resume line has lost
+    /// much less than one that does not come back.
+    #[serde(deserialize_with = "a_name_or_none")]
+    pub agent: Option<String>,
 }
 
 impl Session {
@@ -487,6 +508,7 @@ impl PaneSnapshot {
             custom_title: session.custom_title.clone(),
             working_directory: session.working_directory.clone(),
             flex: pane.flex(),
+            agent: session.agent().map(str::to_owned),
         }
     }
 
@@ -519,9 +541,70 @@ impl PaneSnapshot {
                 .is_some_and(|path| path.is_dir())
             {
                 pane.session_mut().working_directory = self.working_directory.clone();
+                // Only here, beside the directory: the conversation is kept
+                // by the directory it was had in, and offered anywhere else
+                // it would resume another directory's work, or none. By the
+                // table's name for it, so a hand-edited name that no agent
+                // answers to comes back as nothing.
+                pane.session_mut().restored_agent = self
+                    .agent
+                    .as_deref()
+                    .and_then(crate::agent::program_of)
+                    .map(str::to_owned);
             }
         }
     }
+}
+
+/// A string, or `None` for any other value — see [`PaneSnapshot::agent`].
+fn a_name_or_none<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<String>, D::Error> {
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_str().map(str::to_owned))
+}
+
+/// The line each restored agent is offered, by pane, in strip order.
+///
+/// Every pane that came back naming an agent — see
+/// [`AgentSession::restored_agent`](crate::tab::AgentSession::restored_agent)
+/// — is offered that agent's [`Resume::Last`] line, which goes back to the
+/// most recent conversation in the pane's directory. Two or more panes of
+/// one agent in one directory are each offered [`Resume::Pick`] instead,
+/// because the directory is the only key there is and it names one
+/// conversation where they had several. `line` answers what each form is
+/// spelled as, and a pane it has no answer for is offered nothing.
+pub fn resume_offers(
+    strip: &TabStrip,
+    line: impl Fn(&str, Resume) -> Option<String>,
+) -> Vec<(crate::tab::PaneId, String)> {
+    let restored: Vec<(crate::tab::PaneId, &str, Option<&Path>)> = strip
+        .panes()
+        .filter_map(|(_, pane)| {
+            let session = pane.session();
+            Some((
+                pane.id(),
+                session.restored_agent.as_deref()?,
+                session.working_directory.as_deref(),
+            ))
+        })
+        .collect();
+
+    restored
+        .iter()
+        .filter_map(|(pane, agent, directory)| {
+            let sharing = restored
+                .iter()
+                .filter(|(_, other, there)| other == agent && there == directory)
+                .count();
+            let resume = if sharing > 1 {
+                Resume::Pick
+            } else {
+                Resume::Last
+            };
+            Some((*pane, line(agent, resume)?))
+        })
+        .collect()
 }
 
 /// One key of a session file, or its default with a line in the log naming

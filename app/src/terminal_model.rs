@@ -4,7 +4,8 @@
 //! value with methods, and someone else has to decide which thread is allowed to
 //! block on a pty that may say nothing for hours. This is that someone, in the
 //! shape [`crate::git_model`] established — work off the UI thread, delivered
-//! on it, `ctx.notify` when something a viewer could see actually changed.
+//! on it, and a word to the window only when something it draws could have
+//! changed.
 //!
 //! # Why a thread and not the background pool
 //!
@@ -36,20 +37,38 @@
 //! window, and without someone to come back for it the final screenful of a
 //! `cat` would sit invisible until the shell next said something.
 //!
-//! There are two more filters behind that one. The reader publishes a snapshot
-//! the emulator only rebuilds when the drawn content differs, so an escape
-//! sequence that changed nothing visible hands back the same `Arc`; and
-//! [`TerminalModel::absorb`] compares that `Arc` by pointer before it notifies.
-//! A frame is only ever spent on a grid that actually changed.
+//! There are three more filters behind that one. The reader publishes a
+//! snapshot the emulator only rebuilds when the drawn content differs, so an
+//! escape sequence that changed nothing visible hands back the same `Arc`; and
+//! [`TerminalModel::absorb`] compares that `Arc` by pointer before it reports
+//! a [`TerminalUpdate::Repainted`]. A frame is only ever spent on a grid that
+//! actually changed — and only on one somebody can see, which is the third.
+//!
+//! # Only what is on screen
+//!
+//! A changed grid is reported rather than notified, and the workspace decides
+//! whether it is worth a frame. The model cannot: which panes a frame draws is
+//! the active tab's, less the one a zoom hides, less all of them while a
+//! section of the sidebar has the body — the workspace's state, which it
+//! reads at the moment the repaint arrives rather than having it pushed here
+//! from every place that state can change. A pane that is not on screen goes
+//! on being read, parsed and published exactly as before, and everything its
+//! *row* shows still arrives as it happens — a title, a bell, an agent's
+//! status, a command finishing — because those are the tab's facts and the
+//! tab is on screen. Only its grid stops costing frames, and the frame that
+//! puts it back on screen reads the latest snapshot, not the last one drawn.
 //!
 //! # The lock
 //!
 //! One mutex per terminal, and **it is never held across a frame**. The reader
 //! takes it to feed bytes, and again to build a snapshot, and publishes the
-//! `Arc` into a slot of its own; painting clones that `Arc` and walks owned
-//! data. Layout takes the lock only when the computed grid actually changed,
-//! which it establishes first with an atomic — so a window being dragged does
-//! not contend with a shell that is printing.
+//! `Arc` into a slot of its own before letting go; painting clones that `Arc`
+//! and walks owned data. The UI thread publishes too, after a keystroke or a
+//! resize, and doing it under the same lock is what stops either writer from
+//! putting an older snapshot back over the other's newer one — see
+//! `Shared::latest`. Layout takes the lock only when the computed grid
+//! actually changed, which it establishes first with an atomic — so a window
+//! being dragged does not contend with a shell that is printing.
 //!
 //! # What a closed pane costs
 //!
@@ -84,8 +103,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crook_terminal::{
-    Block, BlockId, BlockRows, Key, Modifiers, MouseButton, MouseEventKind, MouseModes, Palette,
-    Rgb, Snapshot, Terminal, TerminalEvent, TerminalOptions, TerminalSize,
+    Block, BlockId, BlockRows, BlockState, Key, Modifiers, MouseButton, MouseEventKind, MouseModes,
+    Palette, Rgb, Snapshot, Terminal, TerminalEvent, TerminalOptions, TerminalSize,
 };
 use crookui_core::geometry::{Color, Vector2F};
 use crookui_core::prelude::*;
@@ -206,12 +225,22 @@ impl Measured {
 
 /// Something one pane's shell did that the rest of the application cares about.
 ///
-/// Everything else a terminal reports — a repaint, a query already answered —
-/// is either handled here or is not the workspace's business. These five are:
-/// two of them rename or relocate a session, one closes a pane, and the last
-/// two are the child asking for something only the window can give it.
+/// Everything else a terminal reports — a query already answered, an exit
+/// that is about to show up as end-of-file — is either handled here or is not
+/// the workspace's business. What is here renames, relocates or closes a
+/// session, asks for something only the window can give, says what an agent
+/// is doing — or, most often by far, says a grid changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TerminalUpdate {
+    /// What the pane draws has changed: its grid did, or its command has run
+    /// long enough to take the composer's place.
+    ///
+    /// The one update that is about pixels rather than about the session,
+    /// and the most frequent — up to once per pane per paint interval while
+    /// a shell prints. Reported rather than answered with a notify because
+    /// whether it is worth a frame is not this pane's to know: see the
+    /// module docs, "Only what is on screen".
+    Repainted(PaneId),
     /// The shell set a window title, or reset it. This is what makes a tab of
     /// shells rename itself with no rename plumbing at all.
     Title(PaneId, Option<String>),
@@ -264,10 +293,16 @@ pub enum TerminalUpdate {
     CommandFinished {
         /// Which pane it ran in.
         pane: PaneId,
+        /// The command line, when there was one. Display-only: it came off
+        /// the screen, as [`crook_terminal::Block::command`] did.
+        command: Option<String>,
         /// The status the shell reported, or `None` when it reported none.
         exit: Option<i32>,
         /// How long it ran, timed from the submit.
         took: Option<Duration>,
+        /// Whether anything ran: `false` for the bare `D` of a line that ran
+        /// nothing, ctrl-c at the prompt or an empty Enter.
+        ran: bool,
     },
     /// The shell answered a completion request, and this is what it said.
     ///
@@ -296,6 +331,29 @@ pub enum TerminalUpdate {
     /// say which of the two happened: the agent finished, or something ended
     /// it before it could say so.
     AgentSettled(PaneId),
+    /// The shell has reached its first prompt, and a line sent now is a
+    /// command of its own. Once per shell.
+    ///
+    /// For a shell that reports marks that is the first `A`: a line submitted
+    /// into the block still open from before it is one the shell never
+    /// reports a boundary for. For one that reports none it is the first
+    /// thing it prints, which is the most a shell with no marks ever says
+    /// about being ready — the wait `--run` makes before it types.
+    Prompted(PaneId),
+    /// A program in the pane asked for a look, in a notification sequence
+    /// another terminal would have shown — OSC 9, 777 or 99.
+    ///
+    /// Carried up with its two texts apart rather than joined here, because
+    /// the row has one line for them and a desktop notification has a line
+    /// for each: how they are put together is the reader's to decide.
+    Notification {
+        /// Which pane it came from.
+        pane: PaneId,
+        /// What is asking, when the sequence named it.
+        title: Option<String>,
+        /// What it said.
+        body: Option<String>,
+    },
 }
 
 /// The finished blocks of one pane, as the surface holds them.
@@ -424,6 +482,13 @@ pub struct TerminalModel {
     /// could not be started is a state nothing else can reach on purpose.
     shell: Option<PathBuf>,
 
+    /// Where the window answers questions, for the shells to be told.
+    ///
+    /// `None` until the window has opened its socket, and for good on a
+    /// platform with none: every shell is then told `CROOK_SOCKET` is empty.
+    /// See [`crate::control`].
+    control_socket: Option<PathBuf>,
+
     /// The one thread that comes back for batches parsed too soon to draw.
     ///
     /// Shared by every pane and started with the first of them, so a model that
@@ -456,6 +521,15 @@ struct Session {
     directory: Option<PathBuf>,
     /// What it was last running, for the same reason again.
     running: Option<String>,
+    /// The secret this pane's shell was handed for the control socket, and
+    /// the whole of how the window tells which pane a request comes from.
+    /// Goes with the session, so a token outlives its pane by nothing.
+    token: Option<String>,
+    /// Whether the shell reports command marks, which decides what its first
+    /// prompt looks like from here: see [`TerminalUpdate::Prompted`].
+    marks: bool,
+    /// Whether [`TerminalUpdate::Prompted`] has been sent for this shell.
+    prompted: bool,
 }
 
 impl Entity for TerminalModel {
@@ -476,6 +550,7 @@ impl TerminalModel {
             shell_marks: true,
             shell_login: shell_integration::login_by_default(),
             shell: None,
+            control_socket: None,
             flusher: Arc::new(Flusher::default()),
             flushing: false,
         }
@@ -537,6 +612,16 @@ impl TerminalModel {
         self.shell_login = login;
     }
 
+    /// Says where the window's control socket is, for the shells opened from
+    /// now on.
+    ///
+    /// Only those, for the reason every setting here is: a shell's environment
+    /// is fixed when it starts. The window sets it before its first shell
+    /// opens, so no pane of a window with a socket goes without it.
+    pub fn set_control_socket(&mut self, socket: Option<PathBuf>) {
+        self.control_socket = socket;
+    }
+
     /// Whether the next shell opened will be a login shell.
     pub fn shell_login(&self) -> bool {
         self.shell_login
@@ -592,6 +677,37 @@ impl TerminalModel {
         }
     }
 
+    /// The pane whose shell was handed `token`, while that shell runs.
+    ///
+    /// A walk of the open sessions, which are a few dozen at most, asked once
+    /// per request that carries a token. An empty token is nobody's: it is
+    /// what a pane with none is told, and it must not match one either.
+    pub fn pane_with_token(&self, token: &str) -> Option<PaneId> {
+        if token.is_empty() {
+            return None;
+        }
+        self.sessions
+            .iter()
+            .find(|(_, session)| session.token.as_deref() == Some(token))
+            .map(|(pane, _)| *pane)
+    }
+
+    /// The token a pane's shell was handed, for a test that has to ask as it.
+    ///
+    /// Unix only, as the socket tests that ask are: a Windows test build
+    /// would find it unused.
+    #[cfg(all(test, unix))]
+    pub fn token(&self, pane: PaneId) -> Option<&str> {
+        self.sessions.get(&pane)?.token.as_deref()
+    }
+
+    /// Whether a pane's shell reports command marks, or `None` when the pane
+    /// has no shell running. A shell without them is one open block for the
+    /// whole session: nothing in it ever finishes.
+    pub fn marks(&self, pane: PaneId) -> Option<bool> {
+        self.sessions.get(&pane).map(|session| session.marks)
+    }
+
     /// The running terminal in a pane, for the element that draws it.
     pub fn handle(&self, pane: PaneId) -> Option<TerminalHandle> {
         self.sessions
@@ -640,18 +756,18 @@ impl TerminalModel {
         let Some(session) = self.sessions.get(&pane) else {
             return false;
         };
-        let Some(request) = session._integration.completion_request() else {
-            return false;
-        };
-
         // Written before the key is sent, and that ordering is the whole of the
         // handshake: the snippet reads the file the moment the key arrives.
-        if let Err(error) = std::fs::write(
-            &request,
-            completion::request_text(serial, line_to_caret).as_bytes(),
-        ) {
-            log::debug!("could not write a completion request: {error}");
-            return false;
+        match session
+            ._integration
+            .write_completion_request(&completion::request_text(serial, line_to_caret))
+        {
+            Some(Ok(())) => {}
+            None => return false,
+            Some(Err(error)) => {
+                log::debug!("could not write a completion request: {error}");
+                return false;
+            }
         }
 
         session.shared.request_completions()
@@ -710,6 +826,13 @@ impl TerminalModel {
             return;
         }
 
+        // Only for a window that has a socket to send it to: a token that
+        // could reach nothing would be a secret handed out for nothing.
+        let token = self
+            .control_socket
+            .is_some()
+            .then(crate::control::mint_token)
+            .flatten();
         // The integration writes its stub files before the shell is started
         // and removes them when this value is dropped, so it is moved into the
         // session below rather than left to fall out of scope here.
@@ -719,8 +842,11 @@ impl TerminalModel {
                 enabled: self.shell_marks,
                 login: self.shell_login,
                 shell: self.shell.clone(),
+                control_socket: self.control_socket.clone(),
+                control_token: token.clone(),
             },
         );
+        let marks = integration.marks();
         let mut options = TerminalOptions {
             size: self.measured.get(pane).unwrap_or(INITIAL_GRID),
             working_directory: directory,
@@ -728,7 +854,7 @@ impl TerminalModel {
             ..Default::default()
         };
         integration.apply(&mut options);
-        if !integration.marks() {
+        if !marks {
             log::debug!(
                 "pane {pane:?} is running {:?}, which Crook has no command marks for; \
                  its output will be one continuous block",
@@ -805,6 +931,9 @@ impl TerminalModel {
                 title: None,
                 directory: None,
                 running: None,
+                token,
+                marks,
+                prompted: false,
             },
         );
         self.watch(pane, ctx);
@@ -935,8 +1064,8 @@ impl TerminalModel {
         .detach();
     }
 
-    /// Takes what the reader posted, repaints if it changed anything, and waits
-    /// again.
+    /// Takes what the reader posted, reports a repaint if it changed the grid,
+    /// and waits again.
     fn absorb(&mut self, pane: PaneId, ctx: &mut ModelContext<Self>) {
         let Some(session) = self.sessions.get_mut(&pane) else {
             // The pane closed while the wait was outstanding. The chain ends
@@ -973,6 +1102,20 @@ impl TerminalModel {
             session.running = running.clone();
             updates.push(TerminalUpdate::Running(pane, running));
         }
+        // Read off the snapshot for the reason `running` is: what matters is
+        // where the shell has come to rest, not which marks it took to get
+        // there. Only until it has been said once, so the text of a grid is
+        // built for a shell with no marks until it prints and never after.
+        if !session.prompted {
+            let prompted = match session.marks {
+                true => session.snapshot.live_block.state == BlockState::AtPrompt,
+                false => !session.snapshot.text().trim().is_empty(),
+            };
+            if prompted {
+                session.prompted = true;
+                updates.push(TerminalUpdate::Prompted(pane));
+            }
+        }
         for event in events {
             match event {
                 TerminalEvent::Title(title) => {
@@ -998,8 +1141,19 @@ impl TerminalModel {
                     pane,
                     while_running: session.snapshot.live_block.state.is_running(),
                 }),
-                TerminalEvent::CommandFinished { exit, took } => {
-                    updates.push(TerminalUpdate::CommandFinished { pane, exit, took });
+                TerminalEvent::CommandFinished {
+                    command,
+                    exit,
+                    took,
+                    ran,
+                } => {
+                    updates.push(TerminalUpdate::CommandFinished {
+                        pane,
+                        command,
+                        exit,
+                        took,
+                        ran,
+                    });
                 }
                 // The escape sequence says only that an answer is ready; the
                 // answer itself is a file, in a directory this session owns.
@@ -1030,6 +1184,13 @@ impl TerminalModel {
                     message: reported.message,
                 }),
                 TerminalEvent::AgentSettled => updates.push(TerminalUpdate::AgentSettled(pane)),
+                TerminalEvent::Notification(notification) => {
+                    updates.push(TerminalUpdate::Notification {
+                        pane,
+                        title: notification.title,
+                        body: notification.body,
+                    });
+                }
                 // The enum is `#[non_exhaustive]`. A shell asking for something
                 // a later version of the emulator learned to report is not an
                 // error here; it is a line in the log and a feature to add.
@@ -1038,7 +1199,7 @@ impl TerminalModel {
         }
 
         if changed {
-            ctx.notify();
+            ctx.emit(TerminalUpdate::Repainted(pane));
         }
         self.schedule_long_running(pane, ctx);
         for update in updates {
@@ -1089,8 +1250,9 @@ impl TerminalModel {
             }
             // Unconditionally: the block may have finished while this waited,
             // in which case the frame this draws is the one with the finished
-            // block in the list.
-            ctx.notify();
+            // block in the list. A repaint like any other, so a pane nobody can
+            // see is not drawn for this either.
+            ctx.emit(TerminalUpdate::Repainted(pane));
         })
         .detach();
     }
@@ -1247,6 +1409,22 @@ impl TerminalHandle {
         })
     }
 
+    /// Tells the program in this pane that the keyboard arrived or left, if it
+    /// asked to be told, returning whether anything was sent.
+    ///
+    /// Not scrolled to the bottom, unlike a key: nobody typed anything, and a
+    /// person who scrolled back to read and then switched windows should come
+    /// back to what they were reading.
+    pub fn send_focus(&self, focused: bool) -> bool {
+        self.drive(|terminal| match terminal.send_focus(focused) {
+            Ok(sent) => sent,
+            Err(error) => {
+                log::debug!("could not tell a shell about the keyboard: {error}");
+                false
+            }
+        })
+    }
+
     /// Which mouse reports the program in this pane has asked for.
     ///
     /// The one question a pointer gesture asks before it does anything: with
@@ -1391,9 +1569,11 @@ impl TerminalHandle {
         let outcome = work(&mut terminal);
         let snapshot = terminal.snapshot();
         self.0.sync_blocks(&terminal);
-        drop(terminal);
-
+        // Installed before the terminal is let go, never after: the reader
+        // could otherwise publish a newer snapshot in between and have this
+        // older one put back over it. See `Shared::latest` for the lock order.
         *self.0.latest.lock().unwrap_or_else(PoisonError::into_inner) = snapshot;
+        drop(terminal);
         outcome
     }
 }
@@ -1415,6 +1595,24 @@ struct Shared {
 
     /// The most recent snapshot the reader built, so painting never waits on
     /// parsing.
+    ///
+    /// **Written only while `terminal` is locked**, by the same acquisition
+    /// that built the snapshot and synced the block list beside it. There are
+    /// two writers, the reader's `publish` and the UI thread's
+    /// [`TerminalHandle::drive`], and a writer that installed its snapshot
+    /// after letting go of the terminal could be overtaken in that gap: the
+    /// other one published a newer snapshot and block list, and the first then
+    /// put its older snapshot back beside the newer list. A command that
+    /// finished during a resize was painted twice, as its block and again in
+    /// the live viewport, and its tab stayed labelled running until the next
+    /// key press.
+    ///
+    /// So the lock order is `terminal`, then this, and it cannot deadlock
+    /// because nothing takes the two the other way round. [`Self::snapshot`] is
+    /// the one reader, and it holds this slot for a clone and takes nothing
+    /// else. Nothing is locked while it is held apart from `terminal`, either:
+    /// [`Self::sync_blocks`] has let go of the block list before this is taken,
+    /// and the snapshot it replaces is plain data whose drop takes no lock.
     latest: Mutex<Arc<Snapshot>>,
 
     /// The finished blocks, rebuilt beside every snapshot and for the same
@@ -1737,9 +1935,12 @@ impl Shared {
         let snapshot = terminal.snapshot();
         let events = terminal.take_events();
         self.sync_blocks(&terminal);
+        // Under the terminal's lock for the same reason `TerminalHandle::drive`
+        // is: a keystroke landing in the gap would otherwise be overwritten by
+        // this older snapshot. See `latest` for the lock order.
+        *self.latest.lock().unwrap_or_else(PoisonError::into_inner) = snapshot;
         drop(terminal);
 
-        *self.latest.lock().unwrap_or_else(PoisonError::into_inner) = snapshot;
         self.collect(events);
         self.wake.raise();
     }
@@ -1760,6 +1961,12 @@ impl Shared {
                     .any(|pending| matches!(pending, TerminalEvent::Bell))
             {
                 continue;
+            }
+            // The same for a notification, except that the newer one takes
+            // the older one's place: each carries words, and the ones worth
+            // a row are the last the program said.
+            if matches!(event, TerminalEvent::Notification(_)) {
+                pending.retain(|pending| !matches!(pending, TerminalEvent::Notification(_)));
             }
             pending.push(event);
         }

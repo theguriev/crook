@@ -58,7 +58,7 @@ pub const WINDOW_OVERLAY: SlotId = SlotId::new("window.overlay");
 ///
 /// The order is the order the shipped keybindings are written in, so a person
 /// reading one and the other is reading the same order twice.
-pub const COMMANDS: [(&str, &str, Binding); 51] = [
+pub const COMMANDS: [(&str, &str, Binding); 52] = [
     ("new-tab", "New agent tab", Binding::NewTab),
     ("close-pane", "Close the focused pane", Binding::ClosePane),
     ("split-right", "Split to the right", Binding::SplitRight),
@@ -262,6 +262,10 @@ pub const COMMANDS: [(&str, &str, Binding); 51] = [
     ("zoom-in", "Make the text bigger", Binding::ZoomIn),
     ("zoom-out", "Make the text smaller", Binding::ZoomOut),
     ("zoom-reset", "Reset the text size", Binding::ZoomReset),
+    // One press for every agent a restart ended, and only after a person has
+    // seen each line: a restore types them, and nothing but a press sends
+    // them. No chord, because it is pressed once per launch at most.
+    ("resume-agents", "Resume every agent", Binding::ResumeAgents),
 ];
 
 /// What one of the window's own commands does, by name.

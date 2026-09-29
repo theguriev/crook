@@ -46,6 +46,8 @@ use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+use crate::notify::Occasion;
+
 /// The directory Crook keeps its per-user files in, inside the platform's
 /// configuration directory.
 const CONFIG_DIRECTORY: &str = "crook";
@@ -64,6 +66,9 @@ const DISABLED_PLUGINS_KEY: &str = "disabled_plugins";
 
 /// The key the things a person has allowed a plugin to do are stored under.
 const PLUGIN_GRANTS_KEY: &str = "plugin_grants";
+
+/// The key the lines a person gave their agents' resumes are stored under.
+const RESUME_LINES_KEY: &str = "resume_lines";
 
 /// The keys the two halves of the desktop-following pair are stored under.
 const LIGHT_THEME_KEY: &str = "light_theme";
@@ -257,15 +262,15 @@ impl StatusMarks {
 
 /// Everything the settings page writes that is not about the tab strip.
 ///
-/// Five switches, and that is not an accident of scheduling. Crook has a
-/// window and a tab strip; every option that could be offered about the strip
-/// is already in [`TabOptions`], and what a plugin wants asked about itself
-/// belongs to that plugin rather than here. Warp's settings hold roughly eight
-/// hundred keys behind a schema system, a migration path and a cloud-sync
-/// policy —
-/// `docs/architecture.md` is explicit that a `serde` struct in a file is the
-/// right answer until there are ten of them, and this is the second struct,
-/// not the beginning of a schema.
+/// A type size and eight switches, and that is not an accident of
+/// scheduling. Crook has a window and a tab strip; every option that could be
+/// offered about the strip is already in [`TabOptions`], and what a plugin
+/// wants asked about itself belongs to that plugin rather than here. Warp's
+/// settings hold roughly eight hundred keys behind a schema system, a
+/// migration path and a cloud-sync policy — `docs/architecture.md` is
+/// explicit that a `serde` struct in a file is the right answer until there
+/// are ten of them, and this is the second struct, not the beginning of a
+/// schema.
 #[derive(Copy, Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GeneralOptions {
@@ -294,8 +299,9 @@ pub struct GeneralOptions {
     ///
     /// On, because it is what makes a terminal a place rather than a fresh
     /// start every morning, and because what comes back is only the *shape* —
-    /// tabs, splits and the directories their shells were in. No output is
-    /// restored and no process is: see [`crate::session`].
+    /// tabs, splits and the directories their shells were in, and the name of
+    /// an agent a pane was running, whose resume line is offered unsent. No
+    /// output is restored and no process is: see [`crate::session`].
     pub restore_session: bool,
     /// Whether a pane's shell is started as a *login* shell.
     ///
@@ -350,6 +356,27 @@ pub struct GeneralOptions {
     /// asked; "End all agents and quit" is the same answer given once, with
     /// this left on. See `workspace::closing`.
     pub ask_before_ending_agents: bool,
+    /// Whether a pane whose row turns to needs-input while the window is
+    /// behind another one posts a desktop notification.
+    ///
+    /// On, because it is the one notification a person away from the window
+    /// is waiting for: an agent that stopped to ask does nothing until
+    /// somebody answers. See [`crate::notify`] for when else one is posted
+    /// and how often.
+    pub notify_on_needs_input: bool,
+    /// Whether an agent saying it failed posts one.
+    ///
+    /// Off, because a failure is the agent's to report and many agents say
+    /// "failed" on the way to trying again; somebody who wants to hear it
+    /// turns it on.
+    pub notify_on_failed: bool,
+    /// Whether a command that ran for at least
+    /// [`LONG_COMMAND`](crate::notify::LONG_COMMAND) posts one when it ends.
+    ///
+    /// Off, for the reason every terminal that offers this has it off: a
+    /// banner at the end of every build is a banner a person learns to
+    /// ignore, and the one that mattered goes with the rest.
+    pub notify_on_long_command: bool,
 }
 
 impl Default for GeneralOptions {
@@ -364,6 +391,9 @@ impl Default for GeneralOptions {
             login_shell: crate::shell_integration::login_by_default(),
             show_tabs_panel: true,
             ask_before_ending_agents: true,
+            notify_on_needs_input: true,
+            notify_on_failed: false,
+            notify_on_long_command: false,
         }
     }
 }
@@ -405,6 +435,32 @@ impl GeneralOptions {
     /// negative step — and still within the bounds.
     pub fn zoomed(self, step: f32) -> f32 {
         (self.font_size() + step).clamp(MIN_FONT_SIZE, MAX_FONT_SIZE)
+    }
+
+    /// Whether a person asked to be notified of `occasion`.
+    pub fn notifies_on(self, occasion: Occasion) -> bool {
+        match occasion {
+            Occasion::NeedsInput => self.notify_on_needs_input,
+            Occasion::Failed => self.notify_on_failed,
+            Occasion::LongCommand => self.notify_on_long_command,
+        }
+    }
+
+    /// Whether a person asked to be notified of anything at all: one of the
+    /// switches [`Self::notifies_on`] reads is on.
+    pub fn notifies_on_any(self) -> bool {
+        self.notify_on_needs_input || self.notify_on_failed || self.notify_on_long_command
+    }
+
+    /// The same options, with `occasion`'s switch turned the other way.
+    pub fn toggled(mut self, occasion: Occasion) -> Self {
+        let switch = match occasion {
+            Occasion::NeedsInput => &mut self.notify_on_needs_input,
+            Occasion::Failed => &mut self.notify_on_failed,
+            Occasion::LongCommand => &mut self.notify_on_long_command,
+        };
+        *switch = !*switch;
+        self
     }
 }
 
@@ -529,6 +585,17 @@ pub struct Settings {
     /// know: it is a plugin that has been uninstalled, and forgetting the
     /// grant would mean asking again for something already answered.
     plugin_grants: BTreeMap<String, Vec<String>>,
+    /// The line each agent is resumed with in a restored pane, by the
+    /// agent's program name, where a person has said something other than
+    /// the built-in one.
+    ///
+    /// Only what a person wrote, never the built-in lines copied in: an
+    /// agent's flags drift from release to release, and a file that held
+    /// this build's spelling would go on offering it after the build that
+    /// knew better had shipped. An empty line is an agent a person wants
+    /// offered nothing for. Set in the file rather than on the page — see
+    /// [`Settings::resume_line`].
+    resume_lines: BTreeMap<String, String>,
     /// The name of the theme to open in.
     ///
     /// A name rather than the palette itself, and that is the whole design: a
@@ -573,6 +640,7 @@ impl Settings {
                 general: GeneralOptions::default(),
                 disabled_plugins: Vec::new(),
                 plugin_grants: BTreeMap::new(),
+                resume_lines: BTreeMap::new(),
                 theme: crate::theme::DEFAULT_NAME.to_owned(),
                 light_theme: crate::theme::DEFAULT_LIGHT_NAME.to_owned(),
                 dark_theme: crate::theme::DEFAULT_NAME.to_owned(),
@@ -596,6 +664,7 @@ impl Settings {
             general: GeneralOptions::default(),
             disabled_plugins: Vec::new(),
             plugin_grants: BTreeMap::new(),
+            resume_lines: BTreeMap::new(),
             theme: crate::theme::DEFAULT_NAME.to_owned(),
             light_theme: crate::theme::DEFAULT_LIGHT_NAME.to_owned(),
             dark_theme: crate::theme::DEFAULT_NAME.to_owned(),
@@ -685,6 +754,23 @@ impl Settings {
             })
             .unwrap_or_default();
 
+        // Read the way the grants are: one unusable entry costs that agent's
+        // line and not everybody's. Trimmed, because a line is typed into a
+        // shell and the space around it means nothing there — and an empty
+        // one is kept, because it is how a person says "offer nothing".
+        let resume_lines = document
+            .get(RESUME_LINES_KEY)
+            .and_then(Value::as_object)
+            .map(|agents| {
+                agents
+                    .iter()
+                    .filter_map(|(program, line)| {
+                        Some((program.trim().to_owned(), line.as_str()?.trim().to_owned()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
         let light_theme = named_theme(&document, LIGHT_THEME_KEY, crate::theme::DEFAULT_LIGHT_NAME);
         let dark_theme = named_theme(&document, DARK_THEME_KEY, crate::theme::DEFAULT_NAME);
 
@@ -695,6 +781,7 @@ impl Settings {
             general,
             disabled_plugins,
             plugin_grants,
+            resume_lines,
             theme,
             light_theme,
             dark_theme,
@@ -821,6 +908,23 @@ impl Settings {
         }
     }
 
+    /// The line a restored pane that was running `program` is offered, in
+    /// the `resume` form, or `None` when there is nothing to offer.
+    ///
+    /// A person's own line for the agent, from `resume_lines` in the file,
+    /// when there is one: it replaces the [`Resume::Last`] line, and an empty
+    /// one turns both off. Otherwise, and for the picker whatever the file
+    /// says, the agent's built-in line — see [`crate::agent::resume_line`].
+    ///
+    /// [`Resume::Last`]: crate::agent::Resume::Last
+    pub fn resume_line(&self, program: &str, resume: crate::agent::Resume) -> Option<String> {
+        match (self.resume_lines.get(program), resume) {
+            (Some(line), _) if line.is_empty() => None,
+            (Some(line), crate::agent::Resume::Last) => Some(line.clone()),
+            _ => crate::agent::resume_line(program, resume).map(str::to_owned),
+        }
+    }
+
     /// The options that are not the tab strip's.
     pub fn general(&self) -> GeneralOptions {
         self.general
@@ -921,6 +1025,22 @@ impl Settings {
                                 ),
                             )
                         })
+                        .collect(),
+                ),
+            );
+        }
+        // Written back only when a person has written one, for the reason
+        // the grants are — and so that a build's own lines are never frozen
+        // into the file: see `Settings::resume_lines`.
+        if self.resume_lines.is_empty() {
+            document.remove(RESUME_LINES_KEY);
+        } else {
+            document.insert(
+                RESUME_LINES_KEY.to_owned(),
+                Value::Object(
+                    self.resume_lines
+                        .iter()
+                        .map(|(program, line)| (program.clone(), Value::String(line.clone())))
                         .collect(),
                 ),
             );
@@ -1324,6 +1444,55 @@ mod tests {
         assert_eq!(StatusMarks::Dots, options.status_marks);
     }
 
+    #[test]
+    fn test_a_desktop_notification_is_on_for_a_question_and_off_for_the_rest() {
+        let general = GeneralOptions::default();
+
+        assert!(general.notifies_on(Occasion::NeedsInput));
+        assert!(!general.notifies_on(Occasion::Failed));
+        assert!(!general.notifies_on(Occasion::LongCommand));
+    }
+
+    #[test]
+    fn test_each_notification_switch_turns_only_itself() {
+        let general = GeneralOptions::default();
+        for occasion in [
+            Occasion::NeedsInput,
+            Occasion::Failed,
+            Occasion::LongCommand,
+        ] {
+            let toggled = general.toggled(occasion);
+            assert_ne!(
+                toggled.notifies_on(occasion),
+                general.notifies_on(occasion),
+                "{occasion:?} did not turn"
+            );
+            assert_eq!(
+                toggled.toggled(occasion),
+                general,
+                "{occasion:?} turned something else with it"
+            );
+        }
+    }
+
+    #[test]
+    fn test_the_notification_switches_survive_a_save_and_a_load() {
+        let scratch = ScratchDirectory::new("notifications");
+        let mut settings = Settings::load(scratch.settings_file());
+        settings.set_general(
+            settings
+                .general()
+                .toggled(Occasion::NeedsInput)
+                .toggled(Occasion::LongCommand),
+        );
+        settings.save_blocking().expect("the save should succeed");
+
+        let general = Settings::load(scratch.settings_file()).general();
+        assert!(!general.notifies_on(Occasion::NeedsInput));
+        assert!(!general.notifies_on(Occasion::Failed));
+        assert!(general.notifies_on(Occasion::LongCommand));
+    }
+
     // `/dev/full` answers every write with "no space left on device", which
     // is the way a save really fails; reached through a link, so what the
     // failed save removes is the link and never the device.
@@ -1568,6 +1737,11 @@ mod tests {
                 // Crook's own, and the one key here that changes what the
                 // shell itself is rather than what the window looks like.
                 "login_shell",
+                // Crook's own: which of a pane's stops post a desktop
+                // notification while the window is behind another.
+                "notify_on_failed",
+                "notify_on_long_command",
+                "notify_on_needs_input",
                 "primary_info",
                 "restore_session",
                 "show_details_on_hover",
@@ -1767,11 +1941,11 @@ mod tests {
         let written: Map<String, Value> =
             serde_json::from_str(&contents).expect("the file should be a JSON object");
 
-        // Nine tab options, six general ones and three theme names, and
+        // Nine tab options, nine general ones and three theme names, and
         // nothing else: the 8KB key the file started with is gone. The font
         // family is not among them — an absent key is what "no preference"
         // is, so a save writes no `font_family` unless one was chosen.
-        assert_eq!(18, written.len());
+        assert_eq!(21, written.len());
         assert!(!contents.contains("padding"));
         assert_eq!(
             everything_flipped(),
@@ -1938,6 +2112,85 @@ mod tests {
         // file they opened to read.
         let text = fs::read_to_string(scratch.settings_file()).expect("readable");
         assert!(!text.contains("disabled_plugins"), "{text}");
+    }
+
+    #[test]
+    fn test_an_agent_is_resumed_with_its_own_line_until_a_person_writes_another() {
+        use crate::agent::Resume;
+
+        let scratch = ScratchDirectory::new("resume-lines");
+        let settings = Settings::load(scratch.settings_file());
+        assert_eq!(
+            settings.resume_line("claude", Resume::Last).as_deref(),
+            Some("claude --continue")
+        );
+
+        fs::write(
+            scratch.settings_file(),
+            r#"{"resume_lines": {"claude": "  claude --continue --model opus ",
+                                 "codex": "", "opencode": "opencode --continue",
+                                 "gemini": 7}}"#,
+        )
+        .expect("the file should be writable");
+        let settings = Settings::load(scratch.settings_file());
+
+        assert_eq!(
+            settings.resume_line("claude", Resume::Last).as_deref(),
+            Some("claude --continue --model opus"),
+            "the person's line replaces the built-in one"
+        );
+        assert_eq!(
+            settings.resume_line("claude", Resume::Pick).as_deref(),
+            Some("claude --resume"),
+            "and the picker is still the agent's own"
+        );
+        assert_eq!(
+            settings.resume_line("codex", Resume::Last),
+            None,
+            "an empty line is an agent offered nothing"
+        );
+        assert_eq!(settings.resume_line("codex", Resume::Pick), None);
+        assert_eq!(
+            settings.resume_line("opencode", Resume::Last).as_deref(),
+            Some("opencode --continue"),
+            "an agent with no line of its own can be given one"
+        );
+        assert_eq!(
+            settings.resume_line("gemini", Resume::Last).as_deref(),
+            Some("gemini --resume latest"),
+            "a value that is not a line costs only itself"
+        );
+    }
+
+    #[test]
+    fn test_resume_lines_are_kept_through_a_save_and_never_written_unasked() {
+        use crate::agent::Resume;
+
+        let scratch = ScratchDirectory::new("resume-lines-save");
+        let mut settings = Settings::load(scratch.settings_file());
+        settings.set_theme("Midnight");
+        settings.save_blocking().expect("the save should succeed");
+        let text = fs::read_to_string(scratch.settings_file()).expect("readable");
+        assert!(
+            !text.contains(RESUME_LINES_KEY),
+            "the built-in lines were copied into the file, where the next build's \
+             corrections would never reach them: {text}"
+        );
+
+        fs::write(
+            scratch.settings_file(),
+            r#"{"resume_lines": {"claude": "claude --continue --model opus"}}"#,
+        )
+        .expect("the file should be writable");
+        let mut settings = Settings::load(scratch.settings_file());
+        settings.set_theme("Midnight");
+        settings.save_blocking().expect("the save should succeed");
+        assert_eq!(
+            Settings::load(scratch.settings_file())
+                .resume_line("claude", Resume::Last)
+                .as_deref(),
+            Some("claude --continue --model opus")
+        );
     }
 
     #[test]

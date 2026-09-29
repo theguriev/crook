@@ -41,17 +41,25 @@
 //! trick above the field: it drags a highlight across what the shell printed,
 //! which is the state a person is in the instant before they press copy and one
 //! nobody can hold a button down for in a headless run.
+//!
+//! # Answering from outside
+//!
+//! `crook pane …`, `crook tab new` and `crook events --follow` are not flags
+//! and open no window: they ask a window that is already open, over the socket
+//! [`control`] listens on, and print the answer.
 
 pub mod agent;
 pub mod browser;
 pub mod clipboard;
 pub mod completion;
+pub mod control;
 pub mod editor;
 pub mod filename;
 pub mod git;
 pub mod git_model;
 pub mod input_keys;
 pub mod keybindings;
+pub mod notify;
 pub mod order;
 pub mod pane_blocks;
 pub mod pane_find;
@@ -82,7 +90,7 @@ pub mod workspace;
 
 use std::fs::File;
 use std::io::BufWriter;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -463,6 +471,12 @@ impl Overrides {
             || self.block_menu.is_some()
             || self.scroll_blocks.is_some()
     }
+
+    /// Whether this run types into the focused pane's field: `--run`, which
+    /// sends what it types, and `--type`, which leaves it there.
+    fn types_into_the_field(&self) -> bool {
+        !self.run.is_empty() || self.type_text.is_some()
+    }
 }
 
 /// Runs Crook.
@@ -558,6 +572,28 @@ fn agent_arguments(
 
 fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<Startup> {
     let mut args = args.peekable();
+    // A noun and a verb rather than a flag, and only as the first word: it is
+    // a question for a window that is already open, and the rest of the line
+    // is its own — `--json` after it means what `pane list` says it means,
+    // and everything after `tab new`'s `--` is the command it runs.
+    if args.next_if(|word| word == "pane").is_some() {
+        let printed = control::cli::pane(args)?;
+        println!("{}", printed.text);
+        // Printed first: a wait that did not get there still says where the
+        // pane is, and the failure is what a script's `&&` reads.
+        if let Some(failure) = printed.failure {
+            bail!(failure);
+        }
+        return Ok(Startup::Answered);
+    }
+    if args.next_if(|word| word == "events").is_some() {
+        control::cli::events(args)?;
+        return Ok(Startup::Answered);
+    }
+    if args.next_if(|word| word == "tab").is_some() {
+        println!("{}", control::cli::tab(args)?);
+        return Ok(Startup::Answered);
+    }
     let mut frames = None;
     let mut snapshot = None;
     let mut plugins = false;
@@ -592,10 +628,11 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
             }
             "--title" => bail!("`--title` goes after `--agent <status>`"),
             "--message" => bail!("`--message` goes after `--agent <status>`"),
-            // Stdout is the fragment and stderr the note, so `> hooks.json`
-            // takes exactly the fragment; an agent with no hooks gets a
-            // sentence on stdout and no note, since the sentence is the
-            // whole answer.
+            // Stdout is the fragment and stderr the lead and the note, so
+            // `> hooks.json` takes exactly the fragment; an agent with no
+            // hooks gets a sentence on stdout and no note, since the sentence
+            // is the whole answer. The lead goes out first, because the
+            // plugin it names is the way that needs no merging.
             "--agent-hooks" => {
                 let agent = args.next().with_context(|| {
                     format!(
@@ -606,6 +643,9 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 let binary =
                     std::env::current_exe().context("could not find this binary's own path")?;
                 let hooks = agent::hooks_text(&agent, &binary)?;
+                if let Some(lead) = hooks.lead {
+                    eprintln!("{lead}");
+                }
                 println!("{}", hooks.text);
                 if let Some(note) = hooks.note {
                     eprintln!("{note}");
@@ -972,6 +1012,60 @@ fn help_text() -> String {
 
 USAGE:
     crook [OPTIONS]
+    crook pane list [--json]
+    crook pane wait <ID> --until <STATE> [--timeout <SECS>] [--json]
+    crook pane blocks <ID> [--last <N>] [--json]
+    crook tab new [--worktree <BRANCH>] [--in-my-group] [--title <TITLE>] [--json] -- <COMMAND>...
+    crook events --follow [--pane <ID>]
+
+COMMANDS:
+    pane list [--json] Ask the window this is run in which panes it has, over
+                       the local socket CROOK_SOCKET names, and print them: the
+                       number each pane's shell has in CROOK_PANE_ID (the
+                       focused one marked *), what its agent is doing, its
+                       title, group, branch and directory. --json prints the
+                       window's own JSON array instead. Outside a pane it asks
+                       the one Crook running, and refuses to pick among
+                       several. Not on Windows yet
+    pane wait <ID> --until <STATE> [--timeout <SECS>]
+                       Wait until pane ID's agent is idle or needs-input, its
+                       command has finished, or it has exited, and print where
+                       it got to; fail, having printed where it is, when the
+                       timeout (at most and by default 3600 seconds) passes
+                       first. `finished` is the last command closed by the
+                       shell's own mark, with its exit status; a tab that has
+                       already closed answers `exited`. --json prints the
+                       window's answer. Only your own pane and the tabs it
+                       opened with `tab new`; not on Windows yet
+    pane blocks <ID> [--last <N>]
+                       Print pane ID's newest finished commands: the command,
+                       what it printed (the end of it, when it is long), its
+                       exit status, how long it ran and where. A pane whose
+                       first command is still running, or that is drawing a
+                       full-screen program or an agent's TUI, says so rather
+                       than printing nothing. --json prints the window's
+                       answer. Your own pane and the tabs it opened; not on
+                       Windows yet
+    tab new [...] -- <COMMAND>...
+                       From inside a pane, open a tab beside it in the same
+                       window, without switching to it, and run the command
+                       there at the new shell's first prompt, every word of it
+                       as itself. --worktree makes a worktree on a new branch
+                       from this pane's HEAD and opens the tab in it;
+                       --in-my-group puts the tab in this tab's group; --title
+                       names it. Prints the new pane's number, or with --json
+                       the window's answer. The pane is known by the secret in
+                       its CROOK_TOKEN, and eight tabs may be open on behalf of
+                       one pane a person opened. sh, bash, zsh and fish only;
+                       not on Windows yet
+    events --follow [--pane <ID>]
+                       Print a line of JSON for every change of status, every
+                       command finished (with its command line), every command
+                       seen running and every pane opened or closed, in your
+                       own pane and the tabs it opened (or only pane ID), until
+                       the window ends it. A reader that falls behind is sent
+                       a `lagged` line counting what it missed. Not on Windows
+                       yet
 
 OPTIONS:
     --install-plugin <PATH>
@@ -1098,7 +1192,9 @@ OPTIONS:
                        Print the hooks that make an agent say all of that by
                        itself, to merge into its settings: `claude` (Claude
                        Code), `codex`, `gemini`, `copilot` or `opencode`;
-                       `aider` has none, and this says what to do instead
+                       `aider` has none, and this says what to do instead.
+                       `claude` leads with the two commands that install the
+                       same hooks as Crook's Claude Code plugin
     --skill            Print the skill file that teaches a coding agent what it
                        can do from inside a pane, to save as SKILL.md where
                        the agent loads its skills
@@ -1289,6 +1385,12 @@ THE INPUT FIELD:
 /// chain at most, a frame of `pirate::FRAME` at a time, and only while a git
 /// command is running for the menu.
 ///
+/// The control socket parks nothing here either. Its listener blocks in
+/// `accept` for as long as nobody connects, which is a thread's job and not a
+/// worker's — the pty reader's argument — so it and each connection it
+/// accepts are threads of their own, and the window's side of a question is a
+/// foreground task woken by one of them. See [`control`].
+///
 /// **The test at the bottom of this file cannot check this number.** It builds
 /// its scenario out of the constant itself, so it proves what
 /// [`background_pool`] does with whatever the number says and nothing at all
@@ -1346,6 +1448,40 @@ fn resolve_fonts(font_db: &CosmicFontDb, monospace: Option<&str>) -> Result<Font
                 .context("no usable monospace font")?,
         },
     })
+}
+
+/// Opens a window's strip on what the session file describes, and then on
+/// what the command line asked for on top of it.
+///
+/// One function rather than three steps in [`Shell::new`] because the order
+/// is the point, and a test can hold a function to it:
+///
+/// - The restore first. The overrides open a settings page in whatever strip
+///   is there, and a session that describes nothing leaves the strip a fresh
+///   window's, which is what every launch had before there was a file to
+///   read.
+/// - The overrides next. See [`apply_overrides`].
+/// - Last, for `--run` and `--type`, the focused pane's resume line taken back
+///   out of its field. Both type into that field as though it were empty, and
+///   a restore may have left an agent's resume line there: typed after it,
+///   `--run 'git status'` would send `claude --continuegit status`. After the
+///   overrides, because the pane they type into is the one focused once those
+///   have run; after the restore, because until then there is no line.
+fn restore_and_override(
+    workspace: &mut Workspace,
+    session: &crate::session::Session,
+    overrides: &Overrides,
+    ctx: &mut ViewContext<Workspace>,
+) {
+    if let Some(strip) = session.restore() {
+        workspace.restore(strip, ctx);
+    }
+    apply_overrides(workspace, overrides, ctx);
+    if overrides.types_into_the_field()
+        && let Some(pane) = workspace.tabs().focused_pane_id()
+    {
+        workspace.withdraw_resume_offer(pane, ctx);
+    }
 }
 
 /// Puts the workspace into the state the command line asked to start in.
@@ -1530,6 +1666,16 @@ fn open_window(channel: Channel, frames: Option<u32>, overrides: Overrides) -> R
         ))
     })
 }
+
+/// How long quitting waits for git to take Crook's locks off the checkouts
+/// the window made.
+///
+/// Each is a listing and an unlock, milliseconds on any disk. The bound is
+/// for a git that hangs — a repository on a network mount that went away —
+/// and it is short, because it is the time between a person closing the
+/// window and the process being gone. A lock not taken off by then is the
+/// one a crash leaves, which the worktree menu already knows what to do with.
+const RELEASE_PATIENCE: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Puts a theme in force before there is a window to repaint.
 ///
@@ -2150,6 +2296,194 @@ fn window_title(active: Option<&str>, waiting: usize, base: &str) -> String {
     title
 }
 
+/// When a window behind something else should ask the desktop for a look.
+///
+/// When the count of waiting panes *rises* while the window is unfocused, and
+/// not whenever it is above zero: the panes waiting as a person leaves are
+/// panes they just saw, and the pane they leave with a question on it joins
+/// the count at that moment without being news. So the first count seen
+/// with the window behind something else is the mark the count has to rise
+/// past — the moment of leaving, since the window's focus changing is itself
+/// a change to the workspace — and every count after it moves the mark to
+/// wherever the count is, which is what makes a pane that stops waiting and
+/// starts again ask again, and a count that holds still ask once.
+#[derive(Debug, Default)]
+struct Urgency {
+    /// The count as of the last look.
+    waiting: usize,
+    /// Whether the window was behind something else at the last look.
+    away: bool,
+}
+
+impl Urgency {
+    /// Whether `waiting` panes waiting, in a window that does or does not
+    /// have the focus, is one more than the person saw as they left.
+    fn asks(&mut self, waiting: usize, focused: bool) -> bool {
+        let rose = self.away && !focused && waiting > self.waiting;
+        self.waiting = waiting;
+        self.away = !focused;
+        rose
+    }
+}
+
+/// The window's name for the workspace as it stands: [`window_title`] of its
+/// active tab and of the panes waiting in it.
+fn window_title_of(workspace: &Workspace, base: &str) -> String {
+    window_title(
+        workspace.tabs().active().map(|tab| tab.title()),
+        crate::plugins::tabs::waiting_count(workspace),
+        base,
+    )
+}
+
+/// Where a [`Beacon`] says what it says: the window's event loop, or a
+/// test's notebook.
+trait Desktop {
+    /// Names the window.
+    fn set_title(&self, title: String);
+    /// Asks the desktop to point at the window.
+    fn request_attention(&self);
+    /// Puts the count of waiting panes on the application's icon, or takes
+    /// it off at zero.
+    fn set_badge(&self, waiting: usize);
+    /// Asks, where the icon's badge is drawn only with a person's leave, for
+    /// that leave, and sets the badge again once it is given.
+    fn ask_to_badge(&self);
+}
+
+impl Desktop for Proxy {
+    fn set_title(&self, title: String) {
+        Proxy::set_title(self, title);
+    }
+
+    fn request_attention(&self) {
+        Proxy::request_attention(self);
+    }
+
+    fn set_badge(&self, waiting: usize) {
+        Proxy::set_badge(self, waiting);
+    }
+
+    fn ask_to_badge(&self) {
+        let proxy = self.clone();
+        crate::notify::ask_to_badge(move || proxy.show_badge_again());
+    }
+}
+
+/// What the window tells the desktop about the workspace: its name, with the
+/// count of waiting panes in front, the same count on the application's icon,
+/// and when to point at it.
+///
+/// The name is the active tab's, the way every terminal names its window
+/// after the shell's title and Warp after the tab's, because it is what the
+/// taskbar, the dock and the switcher show: with an agent per tab, "bisect
+/// the flaky test — Crook" is the difference between finding the right Crook
+/// and opening each in turn. The badge is that count where a minimised
+/// window still shows it — the dock icon, on macOS — and it is the title's
+/// count exactly, so the two never disagree about who is waiting. Crook.app's
+/// is drawn only with the leave its notifications are posted with, which is
+/// asked for the first time there is a count to show while notifications are
+/// wanted — a pane can wait with the window in front, where nothing is posted
+/// to ask with. Not while they are not: that leave is asked for in macOS's
+/// words as leave to send notifications, and a person who turned them off
+/// has said no to those already.
+///
+/// Followed on every change to the window's views — the same invalidation
+/// that asks for a frame — rather than on the frame, because the window
+/// these are for is the one that may get no frames at all. A Wayland
+/// compositor sends no frame callback to a surface it is not showing, and
+/// winit holds every redraw back until the callback comes, so a window on
+/// another workspace builds nothing; macOS refuses to present to an
+/// occluded window.
+///
+/// Nothing the window did before it was watched goes unseen: registering the
+/// callback is an update like any other, and its flush runs the callback of
+/// every window holding changes no frame has taken yet — for a window that
+/// has drawn nothing, every view it opened with. So the window is named, and
+/// [`Urgency`] has the count its first rise is measured from, the moment the
+/// callback is registered. The frame does not follow the workspace as well:
+/// the title and the count read what the strip and the header's chip draw, so
+/// a change to them that invalidated no view would be missing from the
+/// window's own frame too, and that is where it would want fixing.
+struct Beacon<D> {
+    /// The application's own name for the window — "Crook", or the channel's
+    /// spelling of it — which the active tab's title goes in front of.
+    base_title: String,
+    /// The name the window was last given, so a change that did not move it
+    /// sends nothing: every window system takes a title as a message.
+    title: Option<String>,
+    /// When to ask the desktop to point at the window.
+    urgency: Urgency,
+    /// The count the icon's badge was last given, for the same reason as
+    /// `title`: the dock redraws the tile for every one. Zero until then,
+    /// which is the badge an application opens with — none.
+    badge: usize,
+    /// Whether the desktop has been asked for leave to badge the icon: once,
+    /// with the first count above zero that comes while notifications are
+    /// wanted, since after the first time the answer is the person's setting,
+    /// which the dock follows by itself.
+    asked_to_badge: bool,
+    desktop: D,
+}
+
+impl<D: Desktop> Beacon<D> {
+    fn new(base_title: String, desktop: D) -> Self {
+        Self {
+            base_title,
+            title: None,
+            urgency: Urgency::default(),
+            badge: 0,
+            asked_to_badge: false,
+            desktop,
+        }
+    }
+
+    /// Says whatever the workspace as it now stands changes: a new name, a
+    /// new count on the badge, and a request for a look when one more pane
+    /// has started waiting while the window is behind something else.
+    fn follow(&mut self, workspace: &Workspace) {
+        let title = window_title_of(workspace, &self.base_title);
+        if self.title.as_deref() != Some(title.as_str()) {
+            self.desktop.set_title(title.clone());
+            self.title = Some(title);
+        }
+
+        let waiting = crate::plugins::tabs::waiting_count(workspace);
+        if self.badge != waiting {
+            self.desktop.set_badge(waiting);
+            self.badge = waiting;
+        }
+        // Outside the badge's own change, so that notifications switched on
+        // with a pane already waiting ask then, and not with the next count.
+        if !self.asked_to_badge
+            && waiting > 0
+            && crate::plugins::notifications::are_wanted(workspace)
+        {
+            self.desktop.ask_to_badge();
+            self.asked_to_badge = true;
+        }
+        if self.urgency.asks(waiting, workspace.is_window_focused()) {
+            self.desktop.request_attention();
+        }
+    }
+}
+
+/// What runs on every change to the window's views: a frame is asked for, and
+/// the [`Beacon`] follows the workspace without waiting for that frame.
+///
+/// The callback owns the beacon outright: the frame does not follow the
+/// workspace too (see [`Beacon`]), so nothing else has a use for it.
+fn on_every_change<D: Desktop + 'static>(
+    mut beacon: Beacon<D>,
+    workspace: ViewHandle<Workspace>,
+    redraw: impl Fn() + 'static,
+) -> impl FnMut(WindowId, &mut AppContext) + 'static {
+    move |_, ctx| {
+        redraw();
+        workspace.read(&*ctx, |workspace, _| beacon.follow(workspace));
+    }
+}
+
 /// Presses one key on the window, exactly as the platform would.
 ///
 /// Crook's own bindings would be consumed before this in the delegate; none of
@@ -2411,11 +2745,6 @@ struct Shell {
     /// The rectangle the input method was last told the caret occupies, so a
     /// frame that did not move it sends no message.
     ime_area: Option<crookui_core::geometry::RectF>,
-    /// The application's own name for the window — "Crook", or the channel's
-    /// spelling of it — which the active tab's title goes in front of.
-    base_title: String,
-    /// The name the window was last given, for the same reason as `ime_area`.
-    window_title: Option<String>,
     /// Where the workspace reads the window's size from.
     ///
     /// The size is an argument to `build_scene` and reaches nothing in the
@@ -2434,6 +2763,10 @@ struct Shell {
     /// go too. Comparing it each frame is what turns a change nobody reported
     /// into a repaint.
     window_state: WindowState,
+    /// The socket the window answers `crook pane list` on, for as long as the
+    /// window is open; dropping it closes the socket and removes its file.
+    /// `None` where there is none — see [`control::Control::open`].
+    _control: Option<control::Control>,
 }
 
 /// The real window, behind the handle the workspace holds.
@@ -2972,6 +3305,7 @@ impl Shell {
             everything_installed()
         });
         let (withdrawn, heard) = registry_at_startup();
+        let control = control::Control::open();
         let (window_id, workspace) = app.add_window(|ctx| {
             Workspace::new(
                 fonts,
@@ -2993,21 +3327,23 @@ impl Shell {
         app.update(|ctx| {
             workspace.update(ctx, |workspace, ctx| {
                 // First of all, because everything below it works on whatever
-                // strip is there: the overrides open a settings page in it,
-                // the git poll reads its directories, and `start_terminals`
-                // opens a shell in every pane it holds.
-                //
-                // A session that describes nothing leaves the strip a fresh
-                // window's, which is what every launch had before there was a
-                // file to read.
-                if let Some(strip) = session.restore() {
-                    workspace.restore(strip, ctx);
+                // strip is there: the git poll reads its directories, and
+                // `start_terminals` opens a shell in every pane it holds. The
+                // overrides have to be in place by then as well:
+                // `start_git_poll` decides whether to pay for `git diff` from
+                // the density it finds, and a density the command line asked
+                // for that arrived later would leave the first cycle
+                // gathering the wrong half.
+                restore_and_override(workspace, &session, &launch.overrides, ctx);
+                // This window is on a desktop, which is the one place a
+                // notification is for: a snapshot and a test keep the silent
+                // one the workspace opens with.
+                workspace.set_notifier(crate::notify::for_this_desktop());
+                // Before the shells, which are told where it is.
+                if let Some(control) = &control {
+                    control.serve(ctx);
+                    workspace.set_control_socket(control.path().map(Path::to_path_buf), ctx);
                 }
-                // Before the polls, not after: `start_git_poll` decides
-                // whether to pay for `git diff` from the density it finds, and
-                // a density the command line asked for has to be in place by
-                // then or the first cycle gathers the wrong half.
-                apply_overrides(workspace, &launch.overrides, ctx);
                 workspace.start_git_poll(ctx);
                 workspace.start_caret_blink(ctx);
                 // Last, and not yet: the shells open after the first frame,
@@ -3019,8 +3355,19 @@ impl Shell {
         });
 
         // The only thing that makes a frame happen: a view said it changed.
+        // And, beside it, what tells the desktop the window's name and when
+        // to point at it, which cannot wait for a frame a hidden window may
+        // never be given. No frame has taken anything the window opened with
+        // or the update above changed, so this call already runs it once and
+        // names the window.
+        let beacon = Beacon::new(launch.channel.window_title(), proxy.clone());
         let redraw = proxy.clone();
-        app.on_window_invalidated(window_id, move |_, _| redraw.request_redraw());
+        app.on_window_invalidated(
+            window_id,
+            on_every_change(beacon, workspace.clone(), move || {
+                redraw.request_redraw();
+            }),
+        );
 
         // The windowed run types the commands one after another, so they are
         // queued rather than joined: two commands sent as one line would be
@@ -3049,11 +3396,10 @@ impl Shell {
             frame_budget: launch.frames,
             run,
             ime_area: None,
-            base_title: launch.channel.window_title(),
-            window_title: None,
             window_size,
             window,
             window_state: WindowState::default(),
+            _control: control,
         }
     }
 
@@ -3201,31 +3547,6 @@ impl Shell {
         log::info!("the shell printed:\n{}", printed.trim_end());
     }
 
-    /// Names the window after the tab it is showing, the way every terminal
-    /// names its window after the shell's title and Warp after the tab's.
-    ///
-    /// What the taskbar, the dock and the switcher show for a window: with an
-    /// agent per tab, "bisect the flaky test — Crook" is the difference
-    /// between finding the right Crook and opening each in turn. After the
-    /// frame, because the title is whatever the frame drew on the active row
-    /// — a rename, an agent's own name for its work — and sent only when it
-    /// changed, because every window system takes this as a message.
-    fn follow_the_active_tab_with_the_title(&mut self) {
-        let (active, waiting) = self.workspace.read(&self.app, |workspace, _| {
-            let strip = workspace.tabs();
-            (
-                strip.active().map(|tab| tab.title().to_owned()),
-                crate::plugins::tabs::waiting_count(strip),
-            )
-        });
-        let title = window_title(active.as_deref(), waiting, &self.base_title);
-        if self.window_title.as_deref() == Some(title.as_str()) {
-            return;
-        }
-        self.proxy.set_title(title.clone());
-        self.window_title = Some(title);
-    }
-
     /// Moves the rectangle an input method puts its candidate list beside, so
     /// that a half-composed word and the list of things it could become are in
     /// the same place on screen.
@@ -3275,6 +3596,20 @@ impl Shell {
 }
 
 impl WindowDelegate for Shell {
+    /// Takes off the locks the window still holds on the checkouts it made.
+    ///
+    /// Closing the window closes no pane — the strip keeps its last tab and
+    /// the window goes instead — so nothing working in a checkout Crook made
+    /// ever left it, and every agent in one ends with the process. Here
+    /// rather than wherever the window asks to quit, because the window
+    /// manager's close and macOS's Quit never ask.
+    fn exiting(&mut self) {
+        let held = self
+            .workspace
+            .read(&self.app, |workspace, _| workspace.held_locks());
+        held.release_all(RELEASE_PATIENCE);
+    }
+
     fn build_scene(&mut self, size: Vector2F, scale_factor: f32) -> Rc<Scene> {
         // Written down rather than dispatched: it costs nothing, it invalidates
         // nothing, and it is the only place the window's size is known. A size
@@ -3319,6 +3654,21 @@ impl WindowDelegate for Shell {
                 .read(|ctx| ctx.has_window_invalidations(self.window_id));
         }
 
+        // The same for the window's focus: it is about the window rather than
+        // anything in it, and it is half of what looking at a pane means,
+        // which is the workspace's to decide.
+        if let Event::WindowFocused(focused) = event {
+            let workspace = &self.workspace;
+            self.app.update(|ctx| {
+                workspace.update(ctx, |workspace, ctx| {
+                    workspace.set_window_focused(focused, ctx);
+                });
+            });
+            return self
+                .app
+                .read(|ctx| ctx.has_window_invalidations(self.window_id));
+        }
+
         if self.handle_keystroke(&event) {
             return true;
         }
@@ -3343,7 +3693,6 @@ impl WindowDelegate for Shell {
             self.proxy.request_redraw();
             return;
         }
-        self.follow_the_active_tab_with_the_title();
         self.follow_caret_with_the_input_method();
         self.type_pending_run();
         self.compose_pending_pane();
@@ -3487,6 +3836,44 @@ mod tests {
     }
 
     #[test]
+    fn tab_is_a_command_only_as_the_first_word() {
+        // First, it is `crook tab …`: the rest of the line reaches the
+        // command's parser, which asks for its verb.
+        let bare = parse(&["tab"]).expect_err("tab needs a verb").to_string();
+        assert!(bare.contains("needs a verb"), "{bare}");
+        let later = parse(&["--frames", "3", "tab", "new"])
+            .expect_err("not a flag")
+            .to_string();
+        assert!(later.contains("unrecognised argument tab"), "{later}");
+    }
+
+    #[test]
+    fn events_is_a_command_only_as_the_first_word() {
+        let bare = parse(&["events"])
+            .expect_err("events needs --follow")
+            .to_string();
+        assert!(bare.contains("needs --follow"), "{bare}");
+        let later = parse(&["--frames", "3", "events", "--follow"])
+            .expect_err("not a flag")
+            .to_string();
+        assert!(later.contains("unrecognised argument events"), "{later}");
+    }
+
+    #[test]
+    fn pane_is_a_command_only_as_the_first_word() {
+        // First, it is `crook pane …`, and the rest of the line is its own:
+        // it reaches the command's parser, which asks for its verb.
+        let bare = parse(&["pane"]).expect_err("pane needs a verb").to_string();
+        assert!(bare.contains("needs a verb"), "{bare}");
+        // Anywhere else it is a word no flag takes, which is what it was
+        // before it meant anything.
+        let later = parse(&["--frames", "3", "pane", "list"])
+            .expect_err("not a flag")
+            .to_string();
+        assert!(later.contains("unrecognised argument pane"), "{later}");
+    }
+
+    #[test]
     fn the_skill_has_front_matter_and_names_only_flags_the_parser_knows() {
         // Agent Skills format: a `---` block carrying a name and a one-line
         // description, then the body. A loader that finds no front matter
@@ -3548,6 +3935,71 @@ mod tests {
                 assert!(
                     agent::SKILL.contains(option),
                     "--help gives `--agent` {option}, which the skill never mentions"
+                );
+            }
+        }
+        // And the commands, which are words rather than flags: the skill
+        // teaches asking the window, and every `crook pane …` it names is
+        // one --help lists.
+        assert!(
+            agent::SKILL.contains("crook pane list"),
+            "the skill teaches asking the window what is open"
+        );
+        assert!(
+            agent::SKILL.contains("crook tab new"),
+            "the skill teaches opening a worker's tab"
+        );
+        for noun in ["pane", "tab"] {
+            let command = format!("crook {noun} ");
+            for (at, _) in agent::SKILL.match_indices(&command) {
+                let verb = agent::SKILL[at + command.len()..]
+                    .split(|character: char| !character.is_ascii_lowercase())
+                    .next()
+                    .unwrap_or_default();
+                assert!(
+                    help.contains(&format!("crook {noun} {verb}")),
+                    "the skill names `crook {noun} {verb}`, which --help does not list"
+                );
+            }
+        }
+        // The watching commands, each with every flag the skill gives it
+        // on the line of --help's usage that spells it.
+        for command in ["crook pane wait", "crook pane blocks", "crook events"] {
+            assert!(
+                agent::SKILL.contains(command),
+                "the skill teaches `{command}`"
+            );
+            let usage = help
+                .lines()
+                .map(str::trim_start)
+                .find(|line| line.starts_with(command))
+                .unwrap_or_else(|| panic!("--help's usage lists `{command}`"));
+            for (at, _) in agent::SKILL.match_indices(&format!("{command} ")) {
+                // To the end of the command: a `&&` or a comment starts
+                // another one, and a backtick ends one quoted in prose.
+                let line = agent::SKILL[at..].lines().next().unwrap_or_default();
+                let line = line.split(['&', '#', '`']).next().unwrap_or_default();
+                for flag in line.split(' ').filter(|word| word.starts_with("--")) {
+                    assert!(
+                        usage.contains(flag),
+                        "the skill gives `{command}` {flag}, which --help's `{usage}` does not"
+                    );
+                }
+            }
+        }
+        // Every flag of `tab new` the skill uses is one the command takes.
+        for (at, _) in agent::SKILL.match_indices("crook tab new ") {
+            let line = agent::SKILL[at..].lines().next().unwrap_or_default();
+            let flags = line
+                .split(" -- ")
+                .next()
+                .unwrap_or_default()
+                .split(' ')
+                .filter(|word| word.starts_with("--"));
+            for flag in flags {
+                assert!(
+                    help.contains(&format!("[{flag}")),
+                    "the skill gives `crook tab new` {flag}, which --help does not list"
                 );
             }
         }
@@ -3634,6 +4086,39 @@ mod tests {
         );
         assert_eq!(window_title(None, 3, "Crook"), "(3 waiting) Crook");
         assert_eq!(window_title(Some("x"), 0, "Crook"), "x — Crook");
+    }
+
+    #[test]
+    fn a_window_in_front_never_asks_the_desktop_for_a_look() {
+        // The person is at this window: a pane starting to wait is on the
+        // chip, and X11 would put its urgency hint on a focused window all
+        // the same, so nothing is asked here to be ignored further down.
+        let mut urgency = Urgency::default();
+        assert!(!urgency.asks(1, true));
+        assert!(!urgency.asks(3, true));
+    }
+
+    #[test]
+    fn leaving_with_a_question_on_screen_is_not_asked_about_and_the_next_one_is() {
+        // The person left with the focused pane waiting; the count that now
+        // includes it is what they saw, and a bounce as they switched away
+        // would be the desktop telling them what they were just looking at.
+        let mut urgency = Urgency::default();
+        assert!(!urgency.asks(0, true));
+        assert!(!urgency.asks(1, false), "the question they left with");
+
+        assert!(urgency.asks(2, false), "a second pane stopped to ask");
+        assert!(!urgency.asks(2, false), "and it asks once, not every look");
+
+        // A pane that went back to work and then stopped again is a new
+        // question, and asks again.
+        assert!(!urgency.asks(1, false));
+        assert!(urgency.asks(2, false));
+
+        // Coming back and leaving again is leaving with whatever is there.
+        assert!(!urgency.asks(2, true));
+        assert!(!urgency.asks(3, false), "the one they left with this time");
+        assert!(urgency.asks(4, false));
     }
 
     #[test]
@@ -4098,6 +4583,36 @@ mod tests {
                 ..Overrides::default()
             }
             .wants_shells()
+        );
+    }
+
+    #[test]
+    fn a_run_that_types_into_the_field_is_told_apart_from_one_that_does_not() {
+        // The two flags a restored resume line is taken out of the field
+        // for, because both type after whatever the field already holds.
+        assert!(!Overrides::default().types_into_the_field());
+        assert!(
+            Overrides {
+                run: vec!["git status".to_owned()],
+                ..Overrides::default()
+            }
+            .types_into_the_field()
+        );
+        assert!(
+            Overrides {
+                type_text: Some("x".to_owned()),
+                ..Overrides::default()
+            }
+            .types_into_the_field()
+        );
+        // Selecting output types nothing, and leaves the field's line alone.
+        assert!(
+            !Overrides {
+                select_output: Some("x".to_owned()),
+                find_output: Some("x".to_owned()),
+                ..Overrides::default()
+            }
+            .types_into_the_field()
         );
     }
 

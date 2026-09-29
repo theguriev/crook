@@ -1151,6 +1151,73 @@ mod groups {
     }
 
     #[test]
+    fn a_tab_opened_beside_another_takes_no_focus_and_goes_last_in_the_order_of_use() {
+        // What `crook tab new` opens: the person is looking at the third tab,
+        // the pane that asked is in the first, and the new tab goes beside
+        // the first without moving anybody's keyboard.
+        let (mut strip, ids) = strip(3);
+        strip.apply(TabAction::Select(ids[2]));
+        let used = strip.mru().to_vec();
+
+        assert_eq!(
+            TabEffect::Changed,
+            strip.apply(TabAction::NewBeside {
+                tab: ids[0],
+                grouped: false,
+            })
+        );
+        let now = order(&strip);
+        assert_eq!(now.len(), 4);
+        let opened = now[1];
+        assert!(!ids.contains(&opened), "beside the tab that asked: {now:?}");
+        assert_eq!(strip.get(opened).and_then(Tab::group), None);
+        assert_eq!(
+            strip.active_id(),
+            ids[2],
+            "the person's tab is still active"
+        );
+        assert_eq!(
+            strip.mru(),
+            [&used[..], &[opened]].concat(),
+            "nobody has used it, so it is the last tab to go back to"
+        );
+
+        // In a group, the same: it joins, and it is not selected.
+        strip.apply(TabAction::NewBeside {
+            tab: ids[0],
+            grouped: true,
+        });
+        let group = strip
+            .get(ids[0])
+            .and_then(Tab::group)
+            .expect("a group was made");
+        let members: Vec<TabId> = strip.members(group).map(Tab::id).collect();
+        assert_eq!(members.len(), 2, "{members:?}");
+        assert_eq!(members[0], ids[0]);
+        assert_eq!(
+            strip.active_id(),
+            ids[2],
+            "the person's tab is still active"
+        );
+        assert_eq!(strip.mru().last(), Some(&members[1]));
+        assert_eq!(
+            strip.mru().len(),
+            strip.len(),
+            "every tab is in the order of use"
+        );
+
+        // Beside a tab that has closed there is nowhere to put one.
+        strip.apply(TabAction::Close(ids[1]));
+        assert_eq!(
+            TabEffect::Unchanged,
+            strip.apply(TabAction::NewBeside {
+                tab: ids[1],
+                grouped: false,
+            })
+        );
+    }
+
+    #[test]
     fn the_group_is_named_after_the_tab_it_was_made_around() {
         let (strip, ids, group) = grouped(1);
 

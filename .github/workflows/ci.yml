@@ -182,3 +182,12 @@ jobs:
       - name: ./script/bundle --check-only
         shell: bash
         run: ./script/bundle --check-only
+
+  linux-binary:
+    name: Linux release binary
+    # The build release.yml publishes, from the same file, down to the check
+    # that holds it to glibc 2.31. The release-flags job type-checks with the
+    # release's features; only a real build and link says which glibc the
+    # binary needs, so this is the one place a branch can find out without a
+    # tag. Nothing is uploaded.
+    uses: ./.github/workflows/linux-binary.yml
