@@ -396,13 +396,23 @@ mod with_a_fake_gh {
             );
         }
 
-        // A path names one program, and is not looked for anywhere else.
-        let nowhere = std::env::temp_dir()
-            .join("crook-forge-no-such-directory")
-            .join(NAME);
-        assert_eq!(
-            Err(CheckError::Missing),
-            check_in(&nowhere.to_string_lossy(), &places, URL, TIMEOUT)
+        // A path names one program, and is not looked for anywhere else. Both
+        // of these name nothing from the directory the tests run in, and both
+        // would be found under `installed` if they were looked for there. An
+        // absolute path would prove nothing: joined onto a place, it is
+        // itself again, so it is refused whether or not anything checks.
+        std::fs::create_dir_all(installed.path().join("sub")).unwrap();
+        fake_named(
+            &installed,
+            &format!("sub/{NAME}"),
+            &format!("cat <<'EOF'\n{}\nEOF", printed("OPEN", "")),
         );
+        for path in [format!("./{NAME}"), format!("sub/{NAME}")] {
+            assert_eq!(
+                Err(CheckError::Missing),
+                check_in(&path, &places, URL, TIMEOUT),
+                "{path} was looked for where a bare name is"
+            );
+        }
     }
 }
