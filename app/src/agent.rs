@@ -47,10 +47,17 @@
 //! and what else the binary will do for it. A hook makes Claude Code report
 //! without knowing it is; the skill is for an agent a person has asked to
 //! know.
+//!
+//! The same table is what the worktree creator offers to start in a new
+//! checkout: which of these agents are installed — [`found_on`], a look in
+//! each directory of `PATH` for the program, which runs nothing — and the
+//! line that starts one on a prompt, [`launch_line`], with the prompt quoted
+//! by the host rather than pasted in. That line is typed into the new pane's
+//! composer and left there, unsent, unless the person pressed Start.
 
 use std::fs::OpenOptions;
 use std::io::{self, Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use crook_terminal::AgentReport;
@@ -284,6 +291,15 @@ struct Agent {
     program: &'static str,
     /// How the fragment is spelled, and where it goes.
     fragment: Fragment,
+    /// The option a first prompt goes after when the agent is started on one,
+    /// or `None` for an agent that takes it as its first word.
+    ///
+    /// The one that keeps the session open afterwards, never the one-shot
+    /// kind: a task is started so that somebody can go on talking to it.
+    /// Gemini CLI's and Copilot CLI's bare prompts are both one-shot, so the
+    /// option is their `-i`. aider has no way to open a chat on a prompt, and
+    /// its `--message` — do this one thing and exit — is the nearest.
+    prompt_flag: Option<&'static str>,
     /// The commands that install Crook's own plugin for this agent, which
     /// carries the fragment's hooks; empty when there is none.
     plugin: &'static [&'static str],
@@ -506,6 +522,7 @@ const AGENTS: &[Agent] = &[
             events: CLAUDE_EVENTS,
             missing: "",
         },
+        prompt_flag: None,
         plugin: CLAUDE_PLUGIN,
         last: Some("claude --continue"),
         pick: Some("claude --resume"),
@@ -519,6 +536,7 @@ const AGENTS: &[Agent] = &[
             missing: " Codex has no notification hook: the row says needs-input for a \
 permission, and a question the model asks ends its turn as idle.",
         },
+        prompt_flag: None,
         plugin: &[],
         last: Some("codex resume --last"),
         pick: Some("codex resume"),
@@ -532,6 +550,7 @@ permission, and a question the model asks ends its turn as idle.",
             missing: " Gemini CLI notifies for a tool permission only: a question the \
 model asks ends its turn as idle.",
         },
+        prompt_flag: Some("-i"),
         plugin: &[],
         last: Some("gemini --resume latest"),
         pick: None,
@@ -543,6 +562,7 @@ model asks ends its turn as idle.",
             file: "~/.copilot/hooks/crook.json, or a project's .github/hooks/crook.json",
             events: COPILOT_EVENTS,
         },
+        prompt_flag: Some("-i"),
         plugin: &[],
         last: Some("copilot --resume"),
         pick: Some("copilot --resume"),
@@ -554,6 +574,7 @@ model asks ends its turn as idle.",
             file: "~/.config/opencode/plugins/crook.ts, or a project's .opencode/plugins/crook.ts",
             source: OPENCODE_PLUGIN,
         },
+        prompt_flag: Some("--prompt"),
         plugin: &[],
         last: None,
         pick: None,
@@ -567,6 +588,7 @@ ends and it waits for you, so `aider --notifications --notifications-command \"B
 --agent idle\"` reports idle there and nothing else; for running, start it from a \
 wrapper script that runs `BINARY --agent running` first.",
         ),
+        prompt_flag: Some("--message"),
         plugin: &[],
         last: None,
         pick: None,
@@ -618,6 +640,113 @@ pub fn names_listed() -> String {
     let names: Vec<_> = AGENTS.iter().map(|agent| agent.name).collect();
     let (last, rest) = names.split_last().expect("there is at least one agent");
     format!("{} or {last}", rest.join(", "))
+}
+
+/// What the agent the command line calls `name` calls itself — `Claude Code`
+/// for `claude` — or `None` for a name the table does not know.
+pub fn program(name: &str) -> Option<&'static str> {
+    AGENTS
+        .iter()
+        .find(|agent| agent.name == name)
+        .map(|agent| agent.program)
+}
+
+/// The known agents installed in one of `directories`, in the table's order.
+///
+/// A look for each program's file and nothing more: no `which`, no
+/// `--version`, nothing started. An agent is a program a person runs, and
+/// asking one about itself — even for its help — can be the thing that
+/// installs it, logs it in or phones home. What is found is an executable
+/// file under the agent's own name; on Windows, one with an extension
+/// `PATHEXT` names, which is how that shell finds a program too.
+///
+/// It reads the disk, so it belongs on the background pool with the other
+/// reads the worktree menu makes when it opens — never on the frame.
+pub fn found_on(directories: &[PathBuf]) -> Vec<&'static str> {
+    AGENTS
+        .iter()
+        .map(|agent| agent.name)
+        .filter(|name| {
+            directories
+                .iter()
+                .any(|directory| runnable(directory, name))
+        })
+        .collect()
+}
+
+/// Where a running window looks for the agents: `PATH`, then the
+/// directories their installers put them in.
+///
+/// The second half is for macOS, where an application started from the
+/// Dock or the Finder has launchd's `PATH` — `/usr/bin:/bin:/usr/sbin:/sbin`
+/// — and every agent is somewhere else: Homebrew's prefix, `/usr/local/bin`,
+/// or `~/.local/bin`, which is where Claude Code's own installer puts it. The
+/// pane's login shell has those on its `PATH`, which is the one the line
+/// runs under; the window's own does not. Elsewhere they are usually on
+/// `PATH` already, and a directory that is not there is simply not looked in.
+pub fn search_path() -> Vec<PathBuf> {
+    let mut directories: Vec<PathBuf> = std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect())
+        .unwrap_or_default();
+    if cfg!(unix) {
+        if let Some(home) = dirs::home_dir() {
+            directories.push(home.join(".local").join("bin"));
+        }
+        directories.push(PathBuf::from("/opt/homebrew/bin"));
+        directories.push(PathBuf::from("/usr/local/bin"));
+    }
+    directories
+}
+
+/// Whether `directory` holds `name` as a program a shell would run.
+#[cfg(unix)]
+fn runnable(directory: &Path, name: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::metadata(directory.join(name))
+        .is_ok_and(|found| found.is_file() && found.permissions().mode() & 0o111 != 0)
+}
+
+/// See the other one. There is no execute bit here: a program is a file
+/// whose extension `PATHEXT` lists, and npm's are `.cmd` files.
+#[cfg(not(unix))]
+fn runnable(directory: &Path, name: &str) -> bool {
+    let extensions = std::env::var("PATHEXT")
+        .ok()
+        .filter(|extensions| !extensions.is_empty())
+        .unwrap_or_else(|| String::from(".COM;.EXE;.BAT;.CMD"));
+    extensions
+        .split(';')
+        .filter(|extension| !extension.is_empty())
+        .any(|extension| directory.join(format!("{name}{extension}")).is_file())
+}
+
+/// The command line that starts `agent` on `prompt`, or `None` for an agent
+/// the table does not know.
+///
+/// The prompt is one word of it, quoted by the host — the same quoting a
+/// plugin's typed argument gets, see [`crate::plugins::wasm::fill`] — and
+/// never spliced in as it was typed: a prompt is text somebody may have
+/// pasted out of an issue, and `$(…)`, a backtick or a quote in it has to
+/// arrive at the agent as characters rather than run in the shell. It is put
+/// on one line first, since a newline is what ends a command line, and loses
+/// any dashes it begins with, which the agent would otherwise read as an
+/// option of its own: `--dangerously-skip-permissions` is a prompt somebody
+/// can paste.
+///
+/// No prompt is the agent on its own, which starts it waiting for one.
+pub fn launch_line(agent: &str, prompt: &str) -> Option<String> {
+    let known = AGENTS.iter().find(|known| known.name == agent)?;
+    let prompt = one_line(prompt, usize::MAX).unwrap_or_default();
+    let prompt = prompt.trim_start_matches(['-', ' ']);
+    if prompt.is_empty() {
+        return Some(known.name.to_owned());
+    }
+    let template = match known.prompt_flag {
+        Some(flag) => format!("{} {flag} {{}}", known.name),
+        None => format!("{} {{}}", known.name),
+    };
+    crate::plugins::wasm::fill(&template, prompt)
 }
 
 /// The hooks that make `agent` report itself, as a fragment of its settings.
@@ -1360,5 +1489,232 @@ crook=${BIN_VARIABLE}; [ -x \"$crook\" ] || crook=$(command -v crook) || exit 0;
         let message = error.to_string();
         assert!(message.contains("sleeping"));
         assert!(message.contains("needs-input"));
+    }
+
+    /// A directory of the test's own, gone when it is dropped.
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new(label: &str) -> Self {
+            static SERIAL: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let serial = SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "crook-agents-{label}-{}-{serial}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&path).expect("a scratch directory");
+            Self(path)
+        }
+
+        /// A directory inside it, made.
+        fn dir(&self, name: &str) -> PathBuf {
+            let path = self.0.join(name);
+            std::fs::create_dir_all(&path).expect("a directory in the scratch");
+            path
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Writes `name` into `directory` as a program the shell would run, or —
+    /// `runnable` false — as a file it would not.
+    ///
+    /// The script prints how many arguments it was given and then the first
+    /// of them, one to a line: which is the whole of what a launch line has
+    /// to get right.
+    fn fake_agent(directory: &Path, name: &str, runnable: bool) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let path = directory.join(name);
+            std::fs::write(&path, "#!/bin/sh\nprintf '%s\\n' \"$#\" \"$1\"\n")
+                .expect("the fake agent is written");
+            let mode = if runnable { 0o755 } else { 0o644 };
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))
+                .expect("the fake agent's mode is set");
+        }
+        #[cfg(not(unix))]
+        {
+            let file = if runnable {
+                format!("{name}.cmd")
+            } else {
+                format!("{name}.txt")
+            };
+            std::fs::write(directory.join(file), "@echo %*\r\n").expect("the fake agent");
+        }
+    }
+
+    #[test]
+    fn an_agent_is_found_where_its_program_is_runnable_and_nowhere_else() {
+        let scratch = Scratch::new("found");
+        let first = scratch.dir("first");
+        let second = scratch.dir("second");
+        fake_agent(&first, "claude", true);
+        // There, but not something a shell would run.
+        fake_agent(&first, "codex", false);
+        // A directory with an agent's name is not the agent.
+        std::fs::create_dir_all(first.join("gemini")).expect("a directory");
+        fake_agent(&second, "opencode", true);
+        // Not an agent the table knows, however runnable.
+        fake_agent(&second, "cursor", true);
+
+        let directories = [first.clone(), scratch.0.join("not-there"), second.clone()];
+        assert_eq!(found_on(&directories), ["claude", "opencode"]);
+        // In the table's order rather than the directories'.
+        assert_eq!(
+            found_on(&[second.clone(), first.clone()]),
+            ["claude", "opencode"]
+        );
+        assert!(found_on(&[]).is_empty());
+        assert!(found_on(&[scratch.0.join("not-there")]).is_empty());
+    }
+
+    #[test]
+    fn a_launch_line_is_the_agent_with_its_prompt_as_one_word() {
+        assert_eq!(
+            launch_line("claude", "fix the login bug").as_deref(),
+            Some("claude 'fix the login bug'")
+        );
+        assert_eq!(
+            launch_line("codex", "fix it").as_deref(),
+            Some("codex 'fix it'")
+        );
+        // The agents whose bare prompt is one-shot are given it through the
+        // option that keeps the session open.
+        assert_eq!(
+            launch_line("gemini", "fix it").as_deref(),
+            Some("gemini -i 'fix it'")
+        );
+        assert_eq!(
+            launch_line("copilot", "fix it").as_deref(),
+            Some("copilot -i 'fix it'")
+        );
+        assert_eq!(
+            launch_line("opencode", "fix it").as_deref(),
+            Some("opencode --prompt 'fix it'")
+        );
+        assert_eq!(
+            launch_line("aider", "fix it").as_deref(),
+            Some("aider --message 'fix it'")
+        );
+        assert_eq!(launch_line("cursor", "fix it"), None);
+    }
+
+    #[test]
+    fn no_prompt_is_the_agent_on_its_own() {
+        assert_eq!(launch_line("claude", "").as_deref(), Some("claude"));
+        assert_eq!(launch_line("gemini", " \n\t ").as_deref(), Some("gemini"));
+    }
+
+    #[test]
+    fn a_prompt_is_one_line_and_never_one_of_the_agents_options() {
+        // A newline ends a command line, so a pasted paragraph is one line.
+        assert_eq!(
+            launch_line("claude", "fix\nthe\tlogin\r\nbug\n").as_deref(),
+            Some("claude 'fix the login bug'")
+        );
+        // Quoting keeps it one word, and a word beginning with a dash is
+        // still an option to the program that receives it.
+        assert_eq!(
+            launch_line("claude", "--dangerously-skip-permissions").as_deref(),
+            Some("claude 'dangerously-skip-permissions'")
+        );
+        assert_eq!(
+            launch_line("gemini", " - -yolo and more").as_deref(),
+            Some("gemini -i 'yolo and more'")
+        );
+        assert_eq!(launch_line("codex", "--").as_deref(), Some("codex"));
+    }
+
+    #[test]
+    fn the_quoting_is_trusted_only_in_the_shells_it_was_proven_in() {
+        for shell in [
+            "/bin/sh",
+            "/usr/bin/dash",
+            "bash",
+            "/usr/local/bin/zsh",
+            "fish",
+        ] {
+            assert_eq!(
+                crate::plugins::wasm::quoting_holds_in(Path::new(shell)),
+                !cfg!(windows),
+                "{shell}"
+            );
+        }
+        for shell in ["nu", "xonsh", "tcsh", "pwsh", "cmd.exe", "elvish", ""] {
+            assert!(
+                !crate::plugins::wasm::quoting_holds_in(Path::new(shell)),
+                "{shell}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_prompt_reaches_the_agent_as_one_inert_word_in_every_shell_it_is_trusted_in() {
+        // The proof the line is right rather than a line this file agrees
+        // with: each shell runs it, with a fake `claude` first on its `PATH`
+        // that says how many arguments it got and what the first was. Nothing
+        // in the prompt may be expanded, split or run — `pwned` would be made
+        // in the directory the shell runs in if any of it were.
+        let scratch = Scratch::new("inert");
+        let bin = scratch.dir("bin");
+        let cwd = scratch.dir("cwd");
+        fake_agent(&bin, "claude", true);
+        let path = std::env::join_paths(
+            std::iter::once(bin.clone()).chain(
+                std::env::var_os("PATH")
+                    .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+                    .unwrap_or_default(),
+            ),
+        )
+        .expect("a PATH");
+
+        let prompts = [
+            "it's here",
+            "$(touch pwned)",
+            "`touch pwned`",
+            "x'; touch pwned; echo '",
+            "x\\' ; touch pwned ; echo \\'",
+            "a; touch pwned & touch pwned | tee pwned > pwned",
+            "$HOME ~ * ?? {a,b} !! %s \\n",
+            "\"double\" 'single' \\ \\\\ trailing\\",
+        ];
+        let mut ran = 0;
+        for (shell, flags) in [
+            ("sh", &["-c"][..]),
+            ("bash", &["-c"][..]),
+            ("zsh", &["-f", "-c"][..]),
+            ("fish", &["--no-config", "-c"][..]),
+        ] {
+            assert!(crate::plugins::wasm::quoting_holds_in(Path::new(shell)));
+            for prompt in prompts {
+                let line = launch_line("claude", prompt).expect("a known agent");
+                let Ok(output) = crate::process::command(shell)
+                    .args(flags)
+                    .arg(&line)
+                    .env("PATH", &path)
+                    .current_dir(&cwd)
+                    .output()
+                else {
+                    // Not on this machine.
+                    break;
+                };
+                ran += 1;
+                assert_eq!(
+                    String::from_utf8_lossy(&output.stdout),
+                    format!("1\n{prompt}\n"),
+                    "{shell} ran {line:?}, and the agent was not handed the prompt as one word: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(!cwd.join("pwned").exists(), "{shell} ran part of {line:?}");
+            }
+        }
+        assert!(ran > 0, "not one shell could be run");
     }
 }

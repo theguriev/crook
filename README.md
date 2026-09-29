@@ -566,18 +566,34 @@ Nineteen features, and the page that configures them:
   where the checkout will go, and asks where the branch starts: this tab's own branch, already
   picked, the repository's default branch (`origin/HEAD`, else `init.defaultBranch`, else
   `main` or `master`) one arrow below it, and every other local branch after that. Then it
-  opens a tab in it — folded into a group with the tab that asked for it. A repository with a
-  [`.worktreeinclude`](https://code.claude.com/docs/en/worktrees) at the root of its main
-  checkout — Claude Code's file, in `.gitignore` syntax — gets the files it names copied in
-  before that tab's shell starts, so the `.env` an agent's first run needs is there: only files
-  git ignores (a tracked file is already in the checkout), and only where the new checkout
-  ignores it too, so an agent's `git add -A` cannot commit it; never into one of its submodules,
-  never through a symbolic link, never over a file already there, nothing at all past a thousand
-  files or 256 MB, and no single file over 64 MB. What did not arrive is said on the new tab's
-  worktree menu. A checkout made that way is locked (`crook: <branch>`) until no pane in the
-  window is working in it any more, or the window closes, so `git worktree remove`, `prune` and
-  other tools' tidy-ups leave it alone. Removal is offered only for a checkout that nobody else
-  has locked, not the main one, and not one a tab is working in; it says what it will
+  opens a tab in it — folded into a group with the tab that asked for it. Under all that it
+  offers **an agent to start there**: the coding agents it finds installed (`claude`, `codex`,
+  `gemini`, `copilot`, `opencode`, `aider` — looked for on `PATH`, never run to ask), with
+  `Shell only` first and picked, which makes exactly the worktree it always made. Pick one and a
+  prompt field appears; the branch is named after the prompt as you type it
+  (`worktree/fix-the-login-bug`) until you type a name of your own. Create, or Enter from either
+  field, opens the tab with the agent's line — `claude 'fix the login bug'`, the prompt quoted
+  as one word for the shell — **in the composer, unsent**, for you to read and send; `Start`
+  sends it for you. Tab moves the keyboard between the name and the agents, and the arrows walk
+  the list on whichever side has it, so every agent is a Tab and an arrow away from `Shell
+  only`. `New task…` in the palette (`crook/worktrees/new-task`) is the same creator with the
+  first agent found already picked and the keyboard in the prompt, so a task is a sentence and
+  Enter; it ships with no chord, and `{ "key": "cmd+shift+n", "command":
+  "crook/worktrees/new-task" }` (`ctrl+shift+n` off macOS) is one that nothing else takes. In a
+  shell whose quoting Crook has not proven — anything but sh, dash, bash, zsh and fish, and
+  every shell on Windows for now — the line is the agent's name alone and there is no prompt
+  field. A repository with a [`.worktreeinclude`](https://code.claude.com/docs/en/worktrees) at
+  the root of its main checkout — Claude Code's file, in `.gitignore` syntax — gets the files it
+  names copied in before that tab's shell starts, so the `.env` an agent's first run needs is
+  there: only files git ignores (a tracked file is already in the checkout), and only where the
+  new checkout ignores it too, so an agent's `git add -A` cannot commit it; never into one of
+  its submodules, never through a symbolic link, never over a file already there, nothing at all
+  past a thousand files or 256 MB, and no single file over 64 MB. What did not arrive is said on
+  the new tab's worktree menu. A checkout made that way is locked (`crook: <branch>`) until no
+  pane in the window is working in it any more, or the window closes, so `git worktree remove`,
+  `prune` and other tools' tidy-ups leave it alone. Removal is offered only for a checkout that
+  nobody else has locked, not the main one, and not one a tab is working in; it says what it
+  will
   delete first, and it never deletes the branch. One row down, `Remove 3 free checkouts…`
   does the same to all of them at once — it looks in each one first, names the branches that
   will actually go, and leaves anything with work in it exactly where it is. That row is there
@@ -659,9 +675,10 @@ Nineteen features, and the page that configures them:
   agents a restart ended — see Tabs), every entry of a tab's
   (`crook/tabs/pin-tab`, `close-tab`, `open-menu`, `view-options`,
   `toggle-group`, `close-group`, the seven colours), the worktree list (`crook/worktrees/menu`)
-  and every settings page (`crook/appearance/open-page` and its four neighbours). The block
-  entries act on the block the menu is up on, or — with no menu — on the one the keyboard has
-  selected, so each of them is a chord as well as a row.
+  and its task creator (`crook/worktrees/new-task`), and every settings page
+  (`crook/appearance/open-page` and its four neighbours). The block entries act on the block
+  the menu is up on, or — with no menu — on the one the keyboard has selected, so each of them
+  is a chord as well as a row.
 
 - **The menus can be walked.** A tab's context menu opens with `crook/tabs/open-menu`, the
   arrows move down it, Enter runs the row and Escape takes it down. The worktree list inside

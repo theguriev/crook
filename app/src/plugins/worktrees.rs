@@ -44,6 +44,10 @@ use super::tabs::TAB_MENU_ENTRIES;
 /// found by name the way an action is.
 pub const BRANCH_FIELD: &str = "crook/worktrees/branch";
 
+/// Where the prompt a new worktree's agent is started on is typed, found by
+/// name for the branch field's reason.
+pub const PROMPT_FIELD: &str = "crook/worktrees/prompt";
+
 /// The plugin that puts the worktree menu on a tab.
 pub struct Worktrees;
 
@@ -63,7 +67,12 @@ impl Plugin for Worktrees {
         // was the last field in the window that belonged to a feature rather
         // than to the window. It now goes out with this plugin when it is
         // switched off, like everything else it registers.
-        host.claim_field("branch", Workspace::worktree_menu_is_creating);
+        host.claim_field("branch", Workspace::worktree_branch_has_keys);
+        // The creator's second field, which is there once an agent is picked.
+        // At most one of the two has the keyboard, and the creator says which:
+        // a press on a field, or Tab. Neither does while the arrows walk the
+        // agents with no prompt to type into.
+        host.claim_field("prompt", Workspace::worktree_prompt_has_keys);
 
         // A command like every other entry, and it was not always: the
         // objection was that a palette row which opened a submenu would be
@@ -77,6 +86,22 @@ impl Plugin for Worktrees {
             };
             workspace.handle_action(
                 &WorkspaceAction::Worktree(WorktreeAction::OpenMenu(tab)),
+                ctx,
+            );
+        });
+
+        // The same creator, opened on the task rather than on the list: the
+        // first agent found picked and the keyboard in its prompt, so that a
+        // task is a sentence and Enter. On the tab the palette would act on,
+        // which is the one a person is looking at. No chord ships for it —
+        // a chord is a key taken from every shell — and the README suggests
+        // one for the people who start many.
+        host.register_command(action("new-task"), "New task…", |workspace, ctx| {
+            let Some((tab, _)) = workspace.menu_target() else {
+                return;
+            };
+            workspace.handle_action(
+                &WorkspaceAction::Worktree(WorktreeAction::NewTask(tab)),
                 ctx,
             );
         });

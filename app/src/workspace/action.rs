@@ -381,6 +381,53 @@ pub enum WorktreeAction {
     ShowSelected,
     /// Ask about removing the one the keyboard is standing on.
     AskRemoveSelected,
+    /// Open the menu on this tab and go straight into the creator, with the
+    /// first agent found already picked and the keyboard in the prompt: what
+    /// "New task…" in the palette dispatches.
+    ///
+    /// Straight in once the repository has been read, which is what the
+    /// creator is made from; until then the menu says it is reading. Not at
+    /// all over a menu already up on that tab that is waiting on git or
+    /// asking a question of its own: that face is somebody's, and the answer
+    /// it is waiting for would land on a creator that did not ask for it.
+    NewTask(TabId),
+    /// Start the agent at this index of the creator's list in the new
+    /// checkout — `0` is "Shell only", which starts nothing. What a press on
+    /// one of its rows dispatches.
+    PickAgent(usize),
+    /// Step the creator's agent by this many rows, "Shell only" included and
+    /// clamped at both ends: the arrows, while the agents have the keyboard.
+    MoveAgent(isize),
+    /// Give the keyboard to one half of the creator: what a press on one of
+    /// its fields dispatches.
+    Focus(CreatorField),
+    /// Give the keyboard to the creator's other half: Tab.
+    SwitchField,
+    /// The prompt was typed into, so a branch name nobody has typed follows
+    /// it.
+    PromptEdited,
+    /// Make it, and run the agent's line in the new tab rather than leaving it
+    /// in the composer. The Start button, and only the button: no key is
+    /// bound to it, so a line runs only because somebody pressed for it.
+    Start,
+}
+
+/// Which half of the worktree creator has the keyboard.
+///
+/// Each half is a field and a list that go together, though not the same way
+/// up: the name has the places to start from under it, and the agents have the
+/// prompt under them, since it is what the picked one is asked. The arrows
+/// walk the list while the letters go to the field. The agents' half has a
+/// field only while a prompt is asked for, and it is a stop of its own without
+/// one: otherwise the only way from "Shell only" to an agent would be the
+/// pointer.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum CreatorField {
+    /// The branch name and the places to start from. The one it opens in.
+    #[default]
+    Branch,
+    /// The agents, and what the picked one is asked to do.
+    Agent,
 }
 
 /// What the menu on a block does.
