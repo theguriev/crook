@@ -18961,9 +18961,6 @@ mod sandboxed {
             .into_iter()
             .next()
             .expect("the Plugins section has a field of its own");
-        // The name and the word after it are set in two sizes and can sit
-        // on two baselines, so the row is read by its y rather than as one
-        // line: everything in the column within a row's height of the name.
         let lines = text_lines(scene, |at| {
             at.x() >= column.min_x() && at.x() <= column.max_x()
         });
@@ -18971,12 +18968,36 @@ mod sandboxed {
             .iter()
             .find(|(_, line)| line.trim().starts_with("Probe"))
             .expect("the list has a row for the probe");
-        lines
-            .iter()
-            .filter(|(other, _)| (other.y() - at.y()).abs() < 8.)
-            .map(|(_, line)| line.trim())
-            .collect::<Vec<_>>()
-            .join(" ")
+        row_read_across(scene, column, at.y())
+    }
+
+    /// Everything in `column` within a row's height of `y`, read left to
+    /// right.
+    ///
+    /// A name and the word after it are set in two sizes and sit on two
+    /// baselines a fraction of a pixel apart, so grouping glyphs by rounded
+    /// baseline splits the row whenever the fraction straddles a half — which
+    /// is a matter of how far down the list the row happens to be, and moved
+    /// the day one more plugin row was listed above it. A row is read along
+    /// x, so that is how it is read here.
+    fn row_read_across(scene: &Scene, column: RectF, y: f32) -> String {
+        let mut glyphs: Vec<(f32, char)> = scene
+            .layers()
+            .flat_map(|layer| layer.glyphs.iter())
+            .filter(|glyph| {
+                glyph.position.x() >= column.min_x()
+                    && glyph.position.x() <= column.max_x()
+                    && (glyph.position.y() - y).abs() < 8.
+            })
+            .filter_map(|glyph| {
+                Some((
+                    glyph.position.x(),
+                    char::from_u32(glyph.glyph_key.glyph_id)?,
+                ))
+            })
+            .collect();
+        glyphs.sort_by(|left, right| left.0.total_cmp(&right.0));
+        glyphs.into_iter().map(|(_, character)| character).collect()
     }
 
     #[test]
@@ -19450,12 +19471,12 @@ mod sandboxed {
         let lines = text_lines(&scene, |at| {
             at.x() >= column.min_x() && at.x() <= column.max_x()
         });
-        // The name and its "not allowed" share a baseline, so they read as one
-        // line here — the gap between them is a margin, not a space.
+        // The name and its "not allowed" are read along the row as one line
+        // — the gap between them is a margin, not a space.
         let row = lines
             .iter()
             .find(|(_, line)| line.starts_with("A Plugin With A"))
-            .map(|(_, line)| line.clone())
+            .map(|(at, _)| row_read_across(&scene, column, at.y()))
             .unwrap_or_else(|| panic!("no row for the long name: {lines:?}"));
         assert!(
             row.contains('\u{2026}'),
