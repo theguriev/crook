@@ -245,7 +245,7 @@ fn a_directory_outside_a_repository_has_no_facts() {
 
     assert_eq!(discover(&inside), None);
     assert_eq!(current_branch(&inside), None);
-    assert_eq!(gather(&inside), GitFacts::default());
+    assert_eq!(gather(&inside, &mut Bases::default()), GitFacts::default());
 }
 
 #[test]
@@ -518,8 +518,8 @@ fn a_bare_repository_is_recognised_by_its_own_name() {
     assert_eq!(layout.work_tree, None);
     assert_eq!(layout.git_dir, mirror);
     // Nothing to diff without a working tree, and nothing spawned to find out.
-    assert_eq!(gather(&mirror).diff, None);
-    assert!(gather(&mirror).branch.is_some());
+    assert_eq!(gather(&mirror, &mut Bases::default()).diff, None);
+    assert!(gather(&mirror, &mut Bases::default()).branch.is_some());
 }
 
 // --- diff stats ----------------------------------------------------------------
@@ -536,7 +536,10 @@ fn a_clean_tree_reads_as_zero_changes_rather_than_as_no_reading() {
 
     assert!(stats.is_empty());
     assert_eq!(stats, DiffStats::default());
-    assert_eq!(gather(&repo).diff, Some(DiffStats::default()));
+    assert_eq!(
+        gather(&repo, &mut Bases::default()).diff,
+        Some(DiffStats::default())
+    );
 }
 
 #[test]
@@ -585,8 +588,8 @@ fn a_repository_with_no_commits_yet_has_no_stats_to_read() {
     // There is no HEAD to diff against, which is a missing number and not an
     // error the row has to render. The branch still reads, from the file.
     assert_eq!(diff_stats_blocking(&repo), None);
-    assert_eq!(gather(&repo).diff, None);
-    assert!(gather(&repo).branch.is_some());
+    assert_eq!(gather(&repo, &mut Bases::default()).diff, None);
+    assert!(gather(&repo, &mut Bases::default()).branch.is_some());
 }
 
 #[test]
@@ -597,6 +600,277 @@ fn a_directory_that_is_not_a_repository_has_no_stats_and_no_error() {
     let scratch = ScratchDir::new("stats-no-repo");
 
     assert_eq!(diff_stats_blocking(scratch.path()), None);
+}
+
+// --- work since the base ----------------------------------------------------------
+
+/// Writes `file` in `repo` and commits it on whatever is checked out.
+fn commit(repo: &Path, file: &str, contents: &str, message: &str) {
+    write(&repo.join(file), contents);
+    git(repo, &["add", file]);
+    git(repo, &["commit", "--no-verify", "-m", message]);
+}
+
+#[test]
+fn a_branch_two_commits_ahead_with_an_edit_counts_both_commits_and_every_line_since_main() {
+    if without_git(
+        "a_branch_two_commits_ahead_with_an_edit_counts_both_commits_and_every_line_since_main",
+    ) {
+        return;
+    }
+    let scratch = ScratchDir::new("ahead");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    git(&repo, &["switch", "-c", "agent/task"]);
+    commit(&repo, "tracked.txt", "one\ntwo\nthree\nfour\n", "add four");
+    commit(&repo, "notes.txt", "alpha\nbeta\n", "add notes");
+    // Not committed, on top of both: the count since the base takes it in.
+    write(&repo.join("tracked.txt"), "uno\ntwo\nthree\nfour\n");
+
+    let facts = gather(&repo, &mut Bases::default());
+
+    assert_eq!(
+        facts.since_base,
+        Some(SinceBase {
+            base: "main".to_owned(),
+            commits: 2,
+            // `one` became `uno` and `four` arrived in tracked.txt, and
+            // notes.txt is new: committed and uncommitted, as one number.
+            diff: DiffStats {
+                files_changed: 2,
+                lines_added: 4,
+                lines_removed: 1,
+            },
+        })
+    );
+    // The count against `HEAD` is what it always was: the edit alone.
+    assert_eq!(
+        facts.diff,
+        Some(DiffStats {
+            files_changed: 1,
+            lines_added: 1,
+            lines_removed: 1,
+        })
+    );
+}
+
+#[test]
+fn on_main_itself_the_count_is_the_plain_one_even_ahead_of_origin() {
+    // The sharp case of "the base itself": `base_of` prefers the
+    // remote-tracking branch, and a local `main` with a commit it has not
+    // pushed *is* one ahead of `origin/main` — but it is the base, not a
+    // branch that left it, and its row says what it always said.
+    if without_git("on_main_itself_the_count_is_the_plain_one_even_ahead_of_origin") {
+        return;
+    }
+    let scratch = ScratchDir::new("on-main");
+    let upstream = repo_with_a_commit(&scratch, "upstream");
+    let clone = scratch.path().join("clone");
+    git(
+        scratch.path(),
+        &["clone", "--quiet", &upstream.to_string_lossy(), "clone"],
+    );
+    commit(&clone, "tracked.txt", "one\ntwo\nthree\nfour\n", "unpushed");
+    write(&clone.join("tracked.txt"), "one\ntwo\nthree\nfour\nfive\n");
+    assert_eq!(
+        merged::base_of(&clone).as_deref(),
+        Some("refs/remotes/origin/main"),
+        "the clone's base is the remote-tracking branch, or this proves nothing"
+    );
+
+    let facts = gather(&clone, &mut Bases::default());
+
+    assert_eq!(facts.since_base, None);
+    assert_eq!(
+        facts.diff,
+        Some(DiffStats {
+            files_changed: 1,
+            lines_added: 1,
+            lines_removed: 0,
+        })
+    );
+}
+
+#[test]
+fn a_detached_head_keeps_the_plain_count() {
+    if without_git("a_detached_head_keeps_the_plain_count") {
+        return;
+    }
+    let scratch = ScratchDir::new("detached-ahead");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    git(&repo, &["switch", "-c", "agent/task"]);
+    commit(&repo, "tracked.txt", "one\ntwo\nthree\nfour\n", "add four");
+    // A commit ahead of `main`, checked out directly: on no branch, so there
+    // is no branch to have left anything.
+    git(&repo, &["switch", "--detach"]);
+    write(&repo.join("tracked.txt"), "one\ntwo\nthree\n");
+
+    let facts = gather(&repo, &mut Bases::default());
+
+    assert!(facts.branch.as_ref().is_some_and(Head::is_detached));
+    assert_eq!(facts.since_base, None);
+    assert_eq!(
+        facts.diff,
+        Some(DiffStats {
+            files_changed: 1,
+            lines_added: 0,
+            lines_removed: 1,
+        })
+    );
+}
+
+#[test]
+fn a_repository_with_no_base_keeps_the_plain_count() {
+    if without_git("a_repository_with_no_base_keeps_the_plain_count") {
+        return;
+    }
+    let scratch = ScratchDir::new("no-base");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    // No remote, no `main`, no `master`, and a default branch set here — over
+    // whatever the machine's own configuration says — that does not exist.
+    git(&repo, &["branch", "-m", "main", "trunk"]);
+    git(&repo, &["config", "init.defaultBranch", "nowhere"]);
+    git(&repo, &["switch", "-c", "agent/task"]);
+    commit(&repo, "tracked.txt", "one\ntwo\nthree\nfour\n", "add four");
+
+    let facts = gather(&repo, &mut Bases::default());
+
+    assert_eq!(facts.since_base, None);
+    assert_eq!(facts.diff, Some(DiffStats::default()));
+}
+
+#[test]
+fn a_branch_with_no_commit_yet_has_nothing_since_its_base() {
+    if without_git("a_branch_with_no_commit_yet_has_nothing_since_its_base") {
+        return;
+    }
+    let scratch = ScratchDir::new("unborn-branch");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    git(&repo, &["switch", "--orphan", "fresh"]);
+
+    let facts = gather(&repo, &mut Bases::default());
+
+    assert_eq!(facts.branch, Some(Head::Branch("fresh".to_owned())));
+    assert_eq!(facts.since_base, None);
+}
+
+#[test]
+fn a_repositorys_base_is_looked_up_once_across_refreshes_and_by_all_its_worktrees() {
+    // A base is up to three subprocesses and almost never changes. Asked
+    // every fifteen seconds for every row it would more than double what a
+    // refresh costs; asked once per repository, a refresh adds at most the
+    // two that count.
+    static LOOKUPS: AtomicU32 = AtomicU32::new(0);
+    fn counted(repository: &Path) -> Option<String> {
+        LOOKUPS.fetch_add(1, Ordering::Relaxed);
+        merged::base_of(repository)
+    }
+    if without_git("a_repositorys_base_is_looked_up_once_across_refreshes_and_by_all_its_worktrees")
+    {
+        return;
+    }
+    let scratch = ScratchDir::new("base-once");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    git(&repo, &["switch", "-c", "one"]);
+    commit(&repo, "one.txt", "one\n", "one");
+    let two = scratch.path().join("two");
+    git(
+        &repo,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "-b",
+            "two",
+            &two.to_string_lossy(),
+            "main",
+        ],
+    );
+    commit(&two, "two.txt", "two\n", "two");
+
+    let mut bases = Bases::looking_up_with(counted);
+    for refresh in 0..3 {
+        for directory in [&repo, &two] {
+            let facts = gather(directory, &mut bases);
+            assert_eq!(
+                facts.since_base.map(|since| (since.base, since.commits)),
+                Some(("main".to_owned(), 1)),
+                "refresh {refresh} of {} lost its count",
+                directory.display()
+            );
+        }
+        bases.forget_unasked();
+    }
+
+    assert_eq!(
+        LOOKUPS.load(Ordering::Relaxed),
+        1,
+        "two checkouts of one repository, three refreshes: one lookup"
+    );
+}
+
+#[test]
+fn a_repository_that_had_no_base_asks_again_from_a_branch_it_has_not_asked_from() {
+    // A repository made a minute ago has no `main` until its first commit.
+    // Keeping that first "none" for good would count nothing on any branch of
+    // it for as long as it stayed on screen.
+    static LOOKUPS: AtomicU32 = AtomicU32::new(0);
+    fn counted(repository: &Path) -> Option<String> {
+        LOOKUPS.fetch_add(1, Ordering::Relaxed);
+        merged::base_of(repository)
+    }
+    if without_git("a_repository_that_had_no_base_asks_again_from_a_branch_it_has_not_asked_from") {
+        return;
+    }
+    let scratch = ScratchDir::new("base-later");
+    let repo = scratch.dir("repo");
+    git(&repo, &["init"]);
+    let mut bases = Bases::looking_up_with(counted);
+
+    assert_eq!(gather(&repo, &mut bases).since_base, None);
+    assert_eq!(gather(&repo, &mut bases).since_base, None);
+    assert_eq!(
+        LOOKUPS.load(Ordering::Relaxed),
+        1,
+        "the same branch asked twice for a base it was told is not there"
+    );
+
+    commit(&repo, "tracked.txt", "one\n", "initial");
+    git(&repo, &["switch", "-c", "agent/task"]);
+    commit(&repo, "tracked.txt", "one\ntwo\n", "two");
+
+    let facts = gather(&repo, &mut bases);
+    assert_eq!(facts.since_base.map(|since| since.commits), Some(1));
+    gather(&repo, &mut bases);
+    assert_eq!(LOOKUPS.load(Ordering::Relaxed), 2);
+}
+
+#[test]
+fn a_repository_no_gather_asked_about_for_a_whole_cycle_is_looked_up_afresh() {
+    static LOOKUPS: AtomicU32 = AtomicU32::new(0);
+    fn counted(repository: &Path) -> Option<String> {
+        LOOKUPS.fetch_add(1, Ordering::Relaxed);
+        merged::base_of(repository)
+    }
+    if without_git("a_repository_no_gather_asked_about_for_a_whole_cycle_is_looked_up_afresh") {
+        return;
+    }
+    let scratch = ScratchDir::new("base-forgotten");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    git(&repo, &["switch", "-c", "agent/task"]);
+    commit(&repo, "tracked.txt", "one\ntwo\nthree\nfour\n", "add four");
+    let mut bases = Bases::looking_up_with(counted);
+
+    // Two cycles that asked: kept through both.
+    gather(&repo, &mut bases);
+    bases.forget_unasked();
+    gather(&repo, &mut bases);
+    bases.forget_unasked();
+    assert_eq!(LOOKUPS.load(Ordering::Relaxed), 1);
+
+    // A cycle in which no row was in this repository, and then one that is.
+    bases.forget_unasked();
+    gather(&repo, &mut bases);
+    assert_eq!(LOOKUPS.load(Ordering::Relaxed), 2);
 }
 
 // --- parsing and display -------------------------------------------------------
@@ -659,6 +933,18 @@ fn the_badge_omits_a_side_that_is_zero_and_says_zero_when_both_are() {
     assert_eq!(added.tokens(), ["+12"]);
     assert_eq!(removed.tokens(), ["-3"]);
     assert_eq!(DiffStats::default().tokens(), ["0"]);
+}
+
+#[test]
+fn a_base_is_called_by_the_name_a_person_calls_it() {
+    assert_eq!(diff::base_name("refs/heads/main"), "main");
+    assert_eq!(diff::base_name("refs/remotes/origin/main"), "main");
+    assert_eq!(diff::base_name("refs/heads/release/2.0"), "release/2.0");
+    assert_eq!(
+        diff::base_name("refs/remotes/origin/release/2.0"),
+        "release/2.0"
+    );
+    assert_eq!(diff::base_name("refs/tags/v1"), "refs/tags/v1");
 }
 
 #[test]

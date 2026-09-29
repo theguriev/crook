@@ -421,7 +421,8 @@ pub struct TabOptions {
     pub subtitle: Subtitle,
     /// "Show: PR link" — the chip linking to the pull request for the branch.
     pub show_pr_link: bool,
-    /// "Show: Diff stats" — the chip counting added and removed lines.
+    /// "Show: Diff stats" — the chip counting added and removed lines, and a
+    /// branch's commits since its base.
     pub show_diff_stats: bool,
     /// "Show details on hover" — whether hovering a row opens its detail card.
     /// One of the two options the menu shows in every state.
