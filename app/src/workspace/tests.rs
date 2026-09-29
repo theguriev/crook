@@ -5742,9 +5742,35 @@ fn only_start_sends_the_agents_line_and_enter_leaves_it_for_the_person() {
         .expect("a new pane");
     assert_eq!(harness.field_text(taken_back), "claude");
 
-    // And neither of those has been sent, long after the one Start made was.
+    // Start, Cancel, and the creator opened again from the list while git is
+    // still at it — which puts a creator back up, but not the one the press
+    // was made in, and not a press anybody made in this one.
+    harness.dispatch_worktree(WorktreeAction::NewTask(first));
+    harness.wait_for("the creator to open on the task", |harness| {
+        harness.worktree_menu_is_creating()
+    });
+    let before = harness.pane_ids();
+    harness.dispatch_worktree(WorktreeAction::Start);
+    harness.dispatch_worktree(WorktreeAction::Cancel);
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    assert!(harness.worktree_menu_is_creating());
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.pane_ids().len() > before.len()
+    });
+    let reopened = *harness
+        .pane_ids()
+        .iter()
+        .find(|pane| !before.contains(pane))
+        .expect("a new pane");
+    assert_eq!(
+        harness.field_text(reopened),
+        "claude",
+        "a Start taken back came back with the next creator"
+    );
+
+    // And none of those has been sent, long after the one Start made was.
     harness.settle(std::time::Duration::from_millis(300));
-    for pane in [created, taken_back] {
+    for pane in [created, taken_back, reopened] {
         assert!(
             !harness.terminal_text(pane).contains("claude"),
             "a line nobody pressed Start for reached the shell: {:?}",

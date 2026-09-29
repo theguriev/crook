@@ -4243,6 +4243,8 @@ impl Workspace {
 
         let opened_on = self.tab_menu.tab;
         let opening = self.tab_menu.opening;
+        // Which question the press was an answer to, for Start's sake below.
+        let pressed_in = self.tab_menu.epoch;
         let made = ctx.background().spawn({
             let path = path.clone();
             async move { crate::git::worktree::add(&repository, &path, &branch, base.as_deref()) }
@@ -4261,8 +4263,14 @@ impl Workspace {
             // Start's press stands only while the creator it was made in is
             // still up. A Cancel, or the menu going away, while git was
             // working is a person who changed their mind, and the line waits
-            // in the composer for them to decide.
-            let send = send && answering && workspace.tab_menu.mode == WorktreeMode::Creating;
+            // in the composer for them to decide. The epoch as well as the
+            // mode, because the mode cannot tell that creator from one opened
+            // after the Cancel — `n` on the list, or the row — which is the
+            // same face on a question the press was never made in.
+            let send = send
+                && answering
+                && workspace.tab_menu.epoch == pressed_in
+                && workspace.tab_menu.mode == WorktreeMode::Creating;
             if answering {
                 workspace.tab_menu.working = false;
             }

@@ -1008,7 +1008,8 @@ person reads a line before pressing Enter on it, and it reaches the shell only b
 pressed — Enter there, or the creator's Start, which is a press for exactly that. Enter in the
 creator is Create and never Start, since Enter is the key at the end of a sentence and not a
 decision to run a line nobody has read; and a Start followed by Cancel while git is still
-checking out leaves the line unsent.
+checking out leaves the line unsent, even when the creator is opened again before git answers
+— the press is tied to the question it was made in, and a second creator is a second question.
 
 **Removal asks, and asks about the right thing.** `git worktree remove` refuses over modified
 and untracked files — and, measured rather than assumed, *not* over ignored ones, which it
