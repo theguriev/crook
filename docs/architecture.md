@@ -1086,11 +1086,12 @@ no stage, no revert and no in-place edit, because the tree it shows is one an ag
 to: a revert that lands between the agent's read of a file and its write is one the agent
 silently undoes, and an edit made under it is an edit it did not read. "Revert this" is a thing
 to tell the agent. What the column offers instead is a way out to where the change can be made
-safely — "Open" in `$VISUAL` or `$EDITOR` at the first changed line, "Copy path", "Copy diff" —
-and "Open" only for an editor with a window of its own, since an editor that draws in the
-terminal it was started from has none when Crook starts it detached (Neovim, measured, waits for
-one for ever). No syntax highlighting: added and removed lines are the theme's `diff_added` and
-`diff_removed`.
+safely — "Open" in `$VISUAL` or `$EDITOR` at the first changed line (at the top of the file for
+an editor not known to take a line, since one that does not reads `+12` as a file to open),
+"Copy path", "Copy diff" — and "Open" only for an editor with a window of its own, since an
+editor that draws in the terminal it was started from has none when Crook starts it detached
+(Neovim, measured, waits for one for ever). No syntax highlighting: added and removed lines are
+the theme's `diff_added` and `diff_removed`.
 
 ### The agent says what it is doing
 

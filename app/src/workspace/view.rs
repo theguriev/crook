@@ -2275,6 +2275,7 @@ impl Workspace {
                 let Some(file) = overview.files.get(index) else {
                     return;
                 };
+                let listed = file.path.clone();
                 let path = overview.repository.join(&file.path);
                 // The first changed line once the diff has said which it is,
                 // and the top of the file until then.
@@ -2283,15 +2284,19 @@ impl Workspace {
                     .diff(&file.path)
                     .and_then(|diff| diff.first_line)
                     .unwrap_or(1);
-                if let Some(editor) = self.changes.editor()
-                    && let Err(error) = editor.open(&path, line)
-                {
+                let Some(editor) = self.changes.editor() else {
+                    return;
+                };
+                let started = editor.open(&path, line).map_err(|error| {
                     log::warn!(
                         "could not start {} on {}: {error}",
                         editor.name(),
                         path.display()
                     );
-                }
+                    format!("Could not start {}: {error}", editor.name())
+                });
+                self.changes.opened(&listed, started);
+                ctx.notify();
             }
             ChangesAction::CopyPath(index) => {
                 let path = self

@@ -209,6 +209,30 @@ fn a_nested_repository_is_shown_without_asking_git_for_a_diff() {
     );
 }
 
+#[test]
+fn an_editor_that_did_not_start_says_so_under_the_file() {
+    let mut state = showing(overview(&["a.rs", "b.rs"]));
+    let read = state.toggle(0).expect("asked");
+    state.land_hunks(Path::new("a.rs"), read.ticket, Ok(one_line()));
+
+    state.opened(
+        Path::new("a.rs"),
+        Err("Could not start code: program not found".to_owned()),
+    );
+    let said = Row::Note("Could not start code: program not found".to_owned());
+    assert_eq!(
+        state.rows()[3..5],
+        [Row::Actions(0), said.clone()],
+        "the failure is not under the file's buttons"
+    );
+
+    state.opened(Path::new("a.rs"), Ok(()));
+    assert!(
+        !state.rows().contains(&said),
+        "a later start that worked left the failure up"
+    );
+}
+
 // --- the rows ------------------------------------------------------------------
 
 #[test]
@@ -373,4 +397,33 @@ fn each_family_of_editor_is_told_the_line_its_own_way() {
             words(&["--remote-silent", "+42", "/work/repo/src/main.rs"])
         )
     );
+    assert_eq!(
+        spelled("notepad++"),
+        (
+            "notepad++".to_owned(),
+            words(&["-n42", "/work/repo/src/main.rs"])
+        )
+    );
+}
+
+#[test]
+fn an_editor_nobody_taught_this_the_line_for_is_handed_the_path_alone() {
+    // A wrapper — Omarchy's launcher starts VS Code — or an editor with a
+    // convention of its own reads `+42` as a second file to open. The top of
+    // the right file beats that.
+    for named in ["omarchy-launch-editor --inline", "open -t", "xdg-open"] {
+        let editor = Editor::from_variables(Some(named), None).expect("an editor");
+        let (_, arguments) = editor.command_line(Path::new("/work/repo/src/main.rs"), 42);
+        assert_eq!(
+            arguments.last(),
+            Some(&OsString::from("/work/repo/src/main.rs")),
+            "{named}"
+        );
+        assert!(
+            !arguments
+                .iter()
+                .any(|argument| argument.to_string_lossy().contains("42")),
+            "{named} was told a line it may not read: {arguments:?}"
+        );
+    }
 }

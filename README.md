@@ -464,9 +464,11 @@ Twenty features, and the page that configures them:
   base, the merge-base a pull request would compare from), the commits since then, newest
   first, and every file that differs — committed, staged, only saved, or never added. Press a
   file and its hunks open under it, in the theme's own added and removed colours; press it
-  again and they fold away. A shown file offers **Open** in your `$VISUAL` or `$EDITOR` at the
-  first line that changed — as Crook itself was started with them, which a launch from the
-  desktop may not share with your shell's rc file — **Copy path**, and **Copy diff**. It
+  again and they fold away. A shown file offers **Open** in your `$VISUAL` or `$EDITOR` — as
+  Crook itself was started with them, which a launch from the desktop may not share with your
+  shell's rc file — at the first line that changed for an editor Crook knows how to tell a line
+  (VS Code and its forks, Sublime Text, Zed, the JetBrains IDEs, Kate, gVim, Emacs, gedit…) and
+  at the top of the file for any other, **Copy path**, and **Copy diff**. It
   follows you from tab to tab, reads again whenever the tab rows' git facts do and on its
   **Refresh**, and never on a timer of its own. Every read is on the background pool under a
   deadline, with `--no-ext-diff` and `--no-textconv` so a repository's configuration cannot

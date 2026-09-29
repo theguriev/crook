@@ -9,7 +9,8 @@
 //! then every file that differs, committed or not, with the files nobody has
 //! added among them. Pressing a file shows its hunks under it, read then and
 //! not before, and a file's own row of actions: open it in `$VISUAL` or
-//! `$EDITOR` at the first line that changed, copy its path, copy its diff.
+//! `$EDITOR` — at the first line that changed, for an editor known to take a
+//! line — copy its path, copy its diff.
 //!
 //! # What it does not do
 //!
@@ -259,6 +260,10 @@ pub(super) struct ChangesPanelState {
     /// The editor "Open in …" starts, read from the environment when the
     /// column opens; `None` hides the button.
     editor: Option<Editor>,
+    /// The file "Open" last failed to start the editor on, and why — said
+    /// under that file's buttons, because a press that did nothing on screen
+    /// reads as a button that is broken rather than an editor that is.
+    launch_failure: Option<(PathBuf, String)>,
     /// One mouse state per control, made on the control's first frame.
     controls: RefCell<HashMap<Control, MouseStateHandle>>,
 }
@@ -329,6 +334,7 @@ impl ChangesPanelState {
         self.epoch = self.epoch.wrapping_add(1);
         self.expanded.clear();
         self.hunks.clear();
+        self.launch_failure = None;
         self.forget_hover_state();
         self.relayout();
     }
@@ -339,6 +345,7 @@ impl ChangesPanelState {
         self.reading = Reading::Nothing;
         self.expanded.clear();
         self.hunks.clear();
+        self.launch_failure = None;
         self.scroll.lock().scroll_to_top();
         self.forget_hover_state();
         self.epoch = self.epoch.wrapping_add(1);
@@ -447,6 +454,13 @@ impl ChangesPanelState {
         self.hunks.get(path)?.diff.as_ref()?.as_ref().ok()
     }
 
+    /// What pressing "Open" on the file at `path` came to: a failure is said
+    /// under that file, and anything else takes the last one away.
+    pub(super) fn opened(&mut self, path: &Path, result: Result<(), String>) {
+        self.launch_failure = result.err().map(|problem| (path.to_owned(), problem));
+        self.relayout();
+    }
+
     /// A read of `path`'s diff, minted with a fresh ticket.
     fn request(&mut self, path: &Path) -> Option<HunkRead> {
         let overview = self.overview()?;
@@ -527,6 +541,11 @@ impl ChangesPanelState {
                 continue;
             }
             rows.push(Row::Actions(index));
+            if let Some((path, problem)) = &self.launch_failure
+                && *path == file.path
+            {
+                rows.push(Row::Note(problem.clone()));
+            }
             if file.status == Status::Repository {
                 rows.push(Row::Note(
                     "A repository of its own: git does not look inside it.".to_owned(),
