@@ -10,7 +10,7 @@
 //! strip's gather chain every fifteen seconds, where a git that never came
 //! back would stop every row's branch and count from updating again.
 //!
-//! [`super::changes`] is the third, and the one that asked for
+//! [`super::changes`] is another, and the one that asked for
 //! [`run_capped`]: the diff of a single file is as long as the file is.
 //!
 //! The deadline bounds the *call*, not only git. Killing a process does not
