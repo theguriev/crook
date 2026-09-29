@@ -79,9 +79,15 @@ the same thing whenever they are rendered again and the find still counts three:
 curl -fsSL https://raw.githubusercontent.com/theguriev/crook/main/script/install | sh
 ```
 
-macOS on both architectures and Linux on x86_64. It reads the latest release, checks the archive
-against the `SHA256SUMS` published beside it, and puts the binary in `~/.local/bin`, or somewhere
-else with `--to`. Windows is a `.zip` on the [releases page](https://github.com/theguriev/crook/releases).
+macOS on both architectures, and Linux on x86_64 with glibc 2.31 or newer: Debian 11, Ubuntu
+20.04, RHEL 9 and anything since. It reads the latest release, checks the archive against the
+`SHA256SUMS` published beside it, and puts the binary in `~/.local/bin`, or somewhere else with
+`--to`. Windows is a `.zip` on the [releases page](https://github.com/theguriev/crook/releases).
+
+The Linux binary is built in a Debian 11 container so that it starts on all of those, and
+`script/glibc-floor` stops a release whose binary would need a newer glibc before it is
+published. v0.1.13 was built on Ubuntu 24.04 instead: it needs glibc 2.39, and on anything older
+it does not start, with ``version `GLIBC_2.39' not found``.
 
 ### macOS, from the browser
 
@@ -665,6 +671,12 @@ Build time: a C toolchain (rustc shells out to `cc` to link) and `pkg-config`.
 ```sh
 sudo apt-get install -y build-essential pkg-config
 ```
+
+A binary needs the glibc it was linked against, or a newer one, so what you build starts on your
+distribution and on the ones after it, not on older ones. That is why a release is built in a
+Debian 11 container (`.github/workflows/linux-binary.yml`) rather than on a current system.
+`./script/glibc-floor 2.31 dist/linux/crook` says whether a build of yours would start everywhere a
+release does.
 
 Run time: the X11, Wayland, EGL and mesa shared objects that `winit` and `wgpu` `dlopen` when
 the window is created. These are *not* build dependencies — the workspace compiles without
