@@ -25,6 +25,15 @@
 //! plugin its plugin directory loads instead; `aider` has no hooks, and gets
 //! the sentence that says so and what to do instead.
 //!
+//! `--pull-request <url>` beside any status says which pull request the work
+//! is, and the row links to it. A flag on the report rather than a report of
+//! its own, because the moment an agent has an address to give is a moment
+//! it is working — and because the hook that runs after every tool already
+//! reports `running`, so `--pull-request -` there finds the address a
+//! `gh pr create` printed without a second process after every command.
+//! Crook asks no forge for it: the agent just made the pull request, and
+//! knows.
+//!
 //! `--skill` prints [`SKILL`], the file that teaches an agent the rest of
 //! this: how it tells it is in a pane, what the four words do to the row,
 //! and what else the binary will do for it. A hook makes Claude Code report
@@ -75,16 +84,34 @@ const MESSAGE_CHARS: usize = 200;
 /// standard input the same way: a hook's JSON `message` when the input is
 /// one, else the input itself, so the same flag serves a hook that hands
 /// over JSON and a script that pipes a line.
-pub fn report(status: &str, title: Option<&str>, message: Option<&str>) -> Result<()> {
+///
+/// `pull_request` is the address of the pull request the work is, written
+/// beside the status on a channel of its own — see
+/// [`crook_terminal::agent`]. `Some("-")` looks for one in the hook input:
+/// the address `gh pr create` printed, when the tool that just ran was one,
+/// and nothing otherwise, so the hook after every tool can carry it.
+pub fn report(
+    status: &str,
+    title: Option<&str>,
+    message: Option<&str>,
+    pull_request: Option<&str>,
+) -> Result<()> {
     let status = AgentReport::parse(status).with_context(|| {
         let words: Vec<_> = AgentReport::ALL.iter().map(|word| word.word()).collect();
         format!("`--agent` takes one of {}, not {status}", words.join(", "))
     })?;
+    // Before stdin is read or the terminal opened: an address the row would
+    // never show is a mistake the person typing it should hear about, and
+    // not a status written without it as though all were well.
+    let given = match pull_request {
+        None | Some("-") => None,
+        Some(url) => Some(given_pull_request(url)?),
+    };
 
-    // Read once, whichever of the two asked for it: stdin has one reading in
+    // Read once, whichever of them asked for it: stdin has one reading in
     // it, and `--title - --message -` would otherwise hand the second an
     // empty string.
-    let input = if title == Some("-") || message == Some("-") {
+    let input = if [title, message, pull_request].contains(&Some("-")) {
         let mut input = String::new();
         io::stdin()
             .read_to_string(&mut input)
@@ -103,16 +130,158 @@ pub fn report(status: &str, title: Option<&str>, message: Option<&str>) -> Resul
         Some(text) => presentable_message(text),
         None => None,
     };
+    let pull_request = match pull_request {
+        Some("-") => pull_request_from_hook(input.as_deref().unwrap_or_default()),
+        _ => given,
+    };
 
     let mut terminal = terminal().context(
         "`--agent` writes to the terminal this was run in, and there is none: run it from a pane, or from a hook of a program in one",
     )?;
     terminal
         .write_all(
-            crook_terminal::agent::report(status, title.as_deref(), message.as_deref()).as_bytes(),
+            sequence(
+                status,
+                title.as_deref(),
+                message.as_deref(),
+                pull_request.as_deref(),
+            )
+            .as_bytes(),
         )
         .and_then(|()| terminal.flush())
         .context("could not write to the terminal")
+}
+
+/// Everything one `--agent` writes, in one piece: the status, and the pull
+/// request after it when there is one.
+///
+/// One write rather than two, so that a hook running beside another — Claude
+/// Code runs a moment's hooks in parallel — cannot put its own sequence
+/// between the two halves of this one.
+fn sequence(
+    status: AgentReport,
+    title: Option<&str>,
+    message: Option<&str>,
+    pull_request: Option<&str>,
+) -> String {
+    let mut written = crook_terminal::agent::report(status, title, message);
+    if let Some(pull_request) = pull_request.and_then(crook_terminal::agent::pull_request) {
+        written.push_str(&pull_request);
+    }
+    written
+}
+
+/// An address given on the command line, as the wire will take it.
+///
+/// Its ends trimmed — `--pull-request "$(gh pr create --fill)"` has a newline
+/// on it wherever the shell's substitution did not take it off — and nothing
+/// else done to it: an address with anything taken out of the middle is a
+/// different address, so one the wire would refuse is refused here, with the
+/// rule it broke.
+fn given_pull_request(url: &str) -> Result<String> {
+    let url = url.trim();
+    crook_terminal::agent::pull_request_url(url)
+        .map(str::to_owned)
+        .with_context(|| {
+            format!(
+                "`--pull-request` takes an https:// address of at most {} bytes, with no \
+spaces or control characters, not {url:?}",
+                crook_terminal::agent::PULL_REQUEST_BYTES
+            )
+        })
+}
+
+/// The pull request a hook's input says was just opened, or the address a
+/// script piped in.
+///
+/// A PostToolUse hook is handed the tool's input and what came back:
+/// Claude Code's `tool_response` is an object with `stdout` and `stderr`,
+/// Codex's is the text the model saw, and both put the shell command under
+/// `tool_input.command`. Only a command that ran `gh pr create` counts, and
+/// only an address that names a pull request by number — so `gh pr view`
+/// printing one it did not make is not news, and neither is `git push`
+/// printing GitHub's offer to make one at `/pull/new/<branch>`. gh prints
+/// one such address — on stdout when it made the pull request, on stderr
+/// when the branch already had one, and either is the branch's pull request
+/// — and the last found is taken. Input that is not JSON is gh's own output piped
+/// through — `gh pr create --fill | crook --agent running --pull-request -`
+/// — and its last https address is taken.
+fn pull_request_from_hook(input: &str) -> Option<String> {
+    let Ok(hook) = serde_json::from_str::<Value>(input) else {
+        return last_address(input, |_| true);
+    };
+    let command = hook.get("tool_input")?.get("command")?.as_str()?;
+    if !opens_a_pull_request(command) {
+        return None;
+    }
+    let mut said = Vec::new();
+    texts(hook.get("tool_response")?, &mut said);
+    last_address(&said.join("\n"), names_a_pull_request)
+}
+
+/// Whether a shell command runs `gh pr create`, or its alias `gh pr new`.
+///
+/// Read as words, split on white space and on what joins or quotes commands
+/// in a shell, so `git push && gh pr create --fill` is one and `gh` named by
+/// its path is still `gh`. A mention inside a quoted string counts too; the
+/// address in the output is the second thing that has to be there, and a
+/// command that only talked about opening a pull request printed none.
+fn opens_a_pull_request(command: &str) -> bool {
+    let words: Vec<&str> = command
+        .split(|character: char| {
+            character.is_whitespace()
+                || matches!(character, ';' | '&' | '|' | '(' | ')' | '`' | '"' | '\'')
+        })
+        .filter(|word| !word.is_empty())
+        .collect();
+    words.windows(3).any(|words| {
+        let program = words[0].rsplit(['/', '\\']).next().unwrap_or_default();
+        matches!(program, "gh" | "gh.exe")
+            && words[1] == "pr"
+            && matches!(words[2], "create" | "new")
+    })
+}
+
+/// Every string in `value`, however deep: Claude Code's response is an
+/// object of them and Codex's is one, and neither is promised to stay the
+/// shape it is.
+fn texts<'a>(value: &'a Value, into: &mut Vec<&'a str>) {
+    match value {
+        Value::String(text) => into.push(text),
+        Value::Array(items) => items.iter().for_each(|item| texts(item, into)),
+        Value::Object(fields) => fields.values().for_each(|field| texts(field, into)),
+        _ => {}
+    }
+}
+
+/// The last word of `text` that is an address the wire takes and that
+/// `keep` accepts.
+///
+/// A word loses the quotes and brackets prose puts round a link, and a full
+/// stop after one, before it is looked at.
+fn last_address(text: &str, keep: impl Fn(&str) -> bool) -> Option<String> {
+    text.split_whitespace()
+        .map(|word| {
+            word.trim_matches(|character: char| {
+                matches!(
+                    character,
+                    '"' | '\'' | '<' | '>' | '(' | ')' | '[' | ']' | ',' | '.'
+                )
+            })
+        })
+        .filter_map(crook_terminal::agent::pull_request_url)
+        .filter(|url| keep(url))
+        .last()
+        .map(str::to_owned)
+}
+
+/// Whether `url` names a pull request by number, the way every forge gh
+/// speaks to spells one: `/pull/<digits>`, then the end or a `/`, `?` or `#`.
+fn names_a_pull_request(url: &str) -> bool {
+    url.rsplit_once("/pull/").is_some_and(|(_, tail)| {
+        let number = tail.split(['/', '?', '#']).next().unwrap_or_default();
+        !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit())
+    })
 }
 
 /// The terminal this process is attached to, opened for writing.
@@ -280,10 +449,17 @@ enum Fragment {
 /// second says it was answered. Every notification Claude Code sends is one
 /// that wants a person — a permission to give, a question to answer, a long
 /// idle at its prompt — and its text says which, so the row says it.
+///
+/// The hook after a tool is also where a pull request is noticed: handed the
+/// tool's input, it finds the address a `gh pr create` printed and sends it
+/// beside the status — see [`pull_request_from_hook`] — and finds nothing
+/// after any other tool. That hook rather than a second one matched to
+/// `Bash`, because a second would be a second process after every shell
+/// command the agent runs, to report a `running` the first already had.
 const CLAUDE_EVENTS: &[(&str, &str)] = &[
     ("UserPromptSubmit", "running --title -"),
     ("PreToolUse", "running"),
-    ("PostToolUse", "running"),
+    ("PostToolUse", "running --pull-request -"),
     ("Notification", "needs-input --message -"),
     ("Stop", "idle"),
     ("SessionEnd", "idle"),
@@ -297,11 +473,14 @@ const CLAUDE_EVENTS: &[(&str, &str)] = &[
 /// — [`message_from_hook`] says "permission to use" the tool then. A
 /// question the model asks ends its turn, which is `Stop`. Its older
 /// `notify` setting runs a program with a JSON argument when a turn ends and
-/// nothing else, and is the legacy of these; the hooks say more.
+/// nothing else, and is the legacy of these; the hooks say more. Its
+/// `PostToolUse` names the shell tool `Bash` and puts the command under
+/// `tool_input.command` as Claude Code's does, with the output the model saw
+/// as `tool_response`, so the same hook finds a pull request there.
 const CODEX_EVENTS: &[(&str, &str)] = &[
     ("UserPromptSubmit", "running --title -"),
     ("PreToolUse", "running"),
-    ("PostToolUse", "running"),
+    ("PostToolUse", "running --pull-request -"),
     ("PermissionRequest", "needs-input --message -"),
     ("Stop", "idle"),
     ("SessionEnd", "idle"),
@@ -833,9 +1012,171 @@ mod tests {
         }
     }
 
+    const PR: &str = "https://github.com/theguriev/crook/pull/398";
+
+    /// A PostToolUse input as Claude Code hands one to a hook after a Bash
+    /// call: the command under `tool_input`, the output under
+    /// `tool_response` in an object of its own.
+    fn claude_post_tool_use(command: &str, stdout: &str, stderr: &str) -> String {
+        json!({
+            "session_id": "abc123",
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": { "command": command, "description": "Open the pull request" },
+            "tool_use_id": "toolu_01",
+            "tool_response": {
+                "stdout": stdout,
+                "stderr": stderr,
+                "interrupted": false,
+                "isImage": false,
+            },
+        })
+        .to_string()
+    }
+
+    #[test]
+    fn the_pull_request_rides_beside_the_status_on_its_own_channel() {
+        assert_eq!(
+            format!("\x1b]6340;running\x07\x1b]6342;pr;{PR}\x07"),
+            sequence(AgentReport::Running, None, None, Some(PR))
+        );
+        // Without one the report is exactly what it was.
+        assert_eq!(
+            "\x1b]6340;idle\x07",
+            sequence(AgentReport::Idle, None, None, None)
+        );
+    }
+
+    #[test]
+    fn an_address_that_is_not_https_is_refused_before_anything_is_written() {
+        // Refused, not dropped: a person who typed the flag wants to know
+        // the row will not show it. Checked before the terminal is opened,
+        // which is also why this test needs none.
+        for refused in [
+            "http://github.com/o/r/pull/1",
+            "file:///etc/passwd",
+            "https://github.com/o/r/pull/1\x07",
+            "not a link",
+        ] {
+            let error = report("running", None, None, Some(refused))
+                .expect_err("an address the wire refuses is an error")
+                .to_string();
+            assert!(error.contains("--pull-request"), "{error}");
+            assert!(error.contains("https://"), "{error}");
+        }
+        assert_eq!(
+            PR,
+            given_pull_request(&format!("  {PR}\n")).expect("the ends are trimmed")
+        );
+    }
+
+    #[test]
+    fn the_hook_finds_the_address_gh_pr_create_printed() {
+        let created = claude_post_tool_use(
+            "git push -u origin HEAD && gh pr create --fill --base main",
+            &format!("{PR}\n"),
+            "Creating pull request for feat/x into main in theguriev/crook\n",
+        );
+        assert_eq!(Some(PR.to_owned()), pull_request_from_hook(&created));
+
+        // Codex hands over the output the model saw, as one string.
+        let codex = json!({
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Bash",
+            "tool_input": { "command": "gh pr create --title 'x' --body 'y'" },
+            "tool_response": format!("Exit code: 0\nOutput:\n{PR}\n"),
+        })
+        .to_string();
+        assert_eq!(Some(PR.to_owned()), pull_request_from_hook(&codex));
+
+        // A pull request that already existed is still the branch's pull
+        // request, and gh names it on stderr.
+        let existed = claude_post_tool_use(
+            "gh pr create --fill",
+            "",
+            &format!(
+                "a pull request for branch \"x\" into branch \"main\" already exists:\n{PR}\n"
+            ),
+        );
+        assert_eq!(Some(PR.to_owned()), pull_request_from_hook(&existed));
+
+        // `gh pr new` is the same command, and a gh named by its path is gh.
+        let aliased = claude_post_tool_use("/usr/bin/gh pr new -f", PR, "");
+        assert_eq!(Some(PR.to_owned()), pull_request_from_hook(&aliased));
+
+        // A script with no JSON pipes gh's own output.
+        assert_eq!(
+            Some(PR.to_owned()),
+            pull_request_from_hook(&format!("{PR}\n"))
+        );
+    }
+
+    #[test]
+    fn the_hook_says_nothing_without_a_new_pull_request_in_it() {
+        // Every other command, including one that prints a pull request's
+        // address without making one.
+        for (command, stdout) in [
+            ("cargo test", "test result: ok"),
+            ("gh pr view 398 --json url -q .url", PR),
+            ("gh pr list", &format!("398\tfeat\t{PR}")[..]),
+            ("echo pr create", PR),
+        ] {
+            assert_eq!(
+                None,
+                pull_request_from_hook(&claude_post_tool_use(command, stdout, "")),
+                "{command}"
+            );
+        }
+        // `gh pr create` that failed, and printed no address.
+        assert_eq!(
+            None,
+            pull_request_from_hook(&claude_post_tool_use(
+                "gh pr create --fill",
+                "",
+                "pull request create failed: GraphQL: No commits between main and x\n",
+            ))
+        );
+        // `git push` in the same command prints GitHub's offer to make one,
+        // which is an address and not a pull request.
+        assert_eq!(
+            None,
+            pull_request_from_hook(&claude_post_tool_use(
+                "git push -u origin x && gh pr create --fill",
+                "",
+                "remote: Create a pull request for 'x' on GitHub by visiting:\nremote:      https://github.com/o/r/pull/new/x\n",
+            ))
+        );
+        // A hook input for something that is not a tool at all.
+        assert_eq!(None, pull_request_from_hook(r#"{"prompt": "open a PR"}"#));
+        assert_eq!(None, pull_request_from_hook(""));
+        // And a piped line that holds no https address.
+        assert_eq!(
+            None,
+            pull_request_from_hook("http://github.com/o/r/pull/1\n")
+        );
+    }
+
+    #[test]
+    fn the_hooks_look_for_a_pull_request_after_every_tool() {
+        // One hook after each tool, as there always was, now handed the
+        // tool's input on stdin: a second hook on Bash alone would be a
+        // second process for every command the agent runs.
+        for agent in ["claude", "codex"] {
+            let printed = hooks_text(agent, Path::new("/usr/bin/crook")).unwrap();
+            let parsed: Value = serde_json::from_str(&printed.text).unwrap();
+            assert_eq!(
+                "'/usr/bin/crook' --agent running --pull-request -",
+                parsed["hooks"]["PostToolUse"][0]["hooks"][0]["command"]
+                    .as_str()
+                    .unwrap(),
+                "{agent}"
+            );
+        }
+    }
+
     #[test]
     fn a_word_that_is_not_a_status_is_refused_with_the_words_that_are() {
-        let error = report("sleeping", None, None).unwrap_err();
+        let error = report("sleeping", None, None, None).unwrap_err();
         let message = error.to_string();
         assert!(message.contains("sleeping"));
         assert!(message.contains("needs-input"));

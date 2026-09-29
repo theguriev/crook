@@ -466,6 +466,35 @@ impl Plugin for Tabs {
             },
         );
 
+        // The two things a row's pull request can be asked for, and both about
+        // the row the menu is on — or, from the palette, the pane in front of
+        // the person. Opening is the chip's own press, here for the density
+        // that draws no chip; checking is the one place Crook asks the
+        // network about a pull request, through the person's own `gh`, and
+        // only when this is pressed. See `crate::forge`.
+        host.register_command(
+            action("open-pull-request"),
+            "Open pull request",
+            |workspace, ctx| {
+                let Some((pane, _)) = workspace.menu_pane_pull_request() else {
+                    return;
+                };
+                workspace.close_tab_context_menu(ctx);
+                workspace.open_pull_request(pane);
+            },
+        );
+        host.register_command(
+            action("check-pull-request"),
+            "Check pull request",
+            |workspace, ctx| {
+                let Some((pane, _)) = workspace.menu_pane_pull_request() else {
+                    return;
+                };
+                workspace.close_tab_context_menu(ctx);
+                workspace.check_pull_request(pane, ctx);
+            },
+        );
+
         host.register_command(
             action("copy-working-directory"),
             "Copy working directory",
@@ -729,6 +758,12 @@ impl Plugin for Tabs {
         contribute(host, "copy-git-branch", 202, |workspace, app| {
             workspace.menu_pane_branch(app).is_some()
         });
+        // Beside the branch it belongs to, and there only while there is a
+        // pull request: most panes never have one, and a pair of rows that
+        // could never be pressed on them would be the menu's longest dead
+        // end. The worktree entry is absent outside a repository by the same
+        // rule.
+        pull_request_entries(host, 203);
         rename_entry(host, "rename-tab", 300, Renaming::Tab, &self.rename, &field);
         rename_entry(
             host,
@@ -782,6 +817,58 @@ fn contribute(
             WorkspaceAction::Run(id),
         ))
     });
+}
+
+/// Contributes "Open pull request" and "Check pull request", at `order` and
+/// the one after it, on a row whose agent has said which pull request its
+/// work is.
+///
+/// Checking is inert while a check is out, and says so: a second `gh` asked
+/// the same question before the first has answered would come home to
+/// overwrite it with the same thing, and a live row that did nothing would
+/// be a press that looked lost.
+fn pull_request_entries(host: &mut Host, order: i32) {
+    let open = host.action(&action("open-pull-request"));
+    host.contribute(
+        TAB_MENU_ENTRIES,
+        "open-pull-request",
+        order,
+        move |workspace, _| {
+            workspace.menu_pane_pull_request()?;
+            let key = "crook/tabs/open-pull-request";
+            Some(match open {
+                Some(id) => entry(
+                    workspace,
+                    key,
+                    "Open pull request",
+                    WorkspaceAction::Run(id),
+                ),
+                None => inert_entry(workspace, key, "Open pull request"),
+            })
+        },
+    );
+
+    let check = host.action(&action("check-pull-request"));
+    host.contribute(
+        TAB_MENU_ENTRIES,
+        "check-pull-request",
+        order + 1,
+        move |workspace, _| {
+            let (_, pull_request) = workspace.menu_pane_pull_request()?;
+            let key = "crook/tabs/check-pull-request";
+            let asking = pull_request.check == Some(crate::tab::PullRequestCheck::Asking);
+            Some(match check.filter(|_| !asking) {
+                Some(id) => entry(
+                    workspace,
+                    key,
+                    "Check pull request",
+                    WorkspaceAction::Run(id),
+                ),
+                None if asking => inert_entry(workspace, key, "Checking pull request\u{2026}"),
+                None => inert_entry(workspace, key, "Check pull request"),
+            })
+        },
+    );
 }
 
 /// Contributes the entry that pins, which is the one entry whose *label*

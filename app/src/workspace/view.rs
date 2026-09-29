@@ -52,8 +52,8 @@ use crate::settings::{
 };
 use crate::shell_integration::Standing;
 use crate::tab::{
-    AgentSession, AgentStatus, Attention, Direction, GroupId, Pane, PaneId, StatusSource, Tab,
-    TabAction, TabEffect, TabGroup, TabId, TabStrip,
+    AgentSession, AgentStatus, Attention, Direction, GroupId, Pane, PaneId, PullRequest,
+    PullRequestCheck, StatusSource, Tab, TabAction, TabEffect, TabGroup, TabId, TabStrip,
 };
 use crate::terminal_font::CellFont;
 use crate::terminal_model::{BlockHistory, TerminalHandle, TerminalModel, TerminalUpdate};
@@ -121,6 +121,8 @@ pub(super) struct PaneInteraction {
     pub(super) chip: MouseStateHandle,
     /// That chip's close button.
     pub(super) close: MouseStateHandle,
+    /// The pull request chip on the pane's row, which is a link.
+    pub(super) pull_request: MouseStateHandle,
     /// The pane's panel in the body.
     pub(super) body: MouseStateHandle,
     /// The selection gesture in the pane's output. See [`PaneSelection`].
@@ -789,6 +791,13 @@ pub struct Workspace {
     /// with no data directory, where the creator has nowhere to put one and
     /// says so rather than guessing.
     worktrees_directory: Option<PathBuf>,
+    /// The program "Check pull request" asks: the person's own `gh`, found on
+    /// `PATH` when it runs.
+    ///
+    /// A field for the reason the two directories above are fields: a test
+    /// points it at a fake, and a check that asked the real one would assert
+    /// something about the network and the account of whoever ran the test.
+    gh: String,
     /// Makes the last settings save the one the file ends up holding.
     ///
     /// Browsing themes with the arrow keys asks for one save per keystroke,
@@ -886,8 +895,12 @@ impl Workspace {
         let git = ctx.add_model(GitModel::new);
         // A branch that arrives, or a diff count that changes, repaints the
         // strip that prints it — and only when it actually changed, because
-        // the model checks before it notifies.
-        ctx.observe(&git, |_, _, ctx| ctx.notify());
+        // the model checks before it notifies. A branch that changed is also
+        // what a pull request's link goes with.
+        ctx.observe(&git, |workspace, _, ctx| {
+            workspace.forget_moved_pull_requests();
+            ctx.notify();
+        });
 
         let terminals = ctx.add_model(TerminalModel::new);
         // Two channels, and they carry different things. The observation is
@@ -1005,6 +1018,7 @@ impl Workspace {
             theme_before_draft: None,
             themes_directory: crate::theme::user_themes_directory(),
             worktrees_directory: worktree_store(),
+            gh: "gh".to_owned(),
             saves: Arc::default(),
             keybinding_saves: Arc::default(),
             settings_save_problem: None,
@@ -1989,6 +2003,20 @@ impl Workspace {
         let (tab, pane) = self.menu_target()?;
         let title = self.tabs.get(tab)?.panes().get(pane)?.title();
         (!title.is_empty()).then(|| title.to_owned())
+    }
+
+    /// The pull request that pane's agent said its work is, if it has said.
+    pub(crate) fn menu_pane_pull_request(&self) -> Option<(PaneId, &PullRequest)> {
+        let (tab, pane) = self.menu_target()?;
+        let pull_request = self
+            .tabs
+            .get(tab)?
+            .panes()
+            .get(pane)?
+            .session()
+            .pull_request
+            .as_ref()?;
+        Some((pane, pull_request))
     }
 
     /// Where that pane's shell last said it was working.
@@ -5108,6 +5136,131 @@ impl Workspace {
         true
     }
 
+    /// Records the pull request a pane's agent said its work is.
+    ///
+    /// Against the branch the pane is on *now*, read from `HEAD` rather than
+    /// from the git facts a row prints, which are up to a poll old — see
+    /// [`PullRequest::branch`]. The same address said again keeps what the
+    /// last check found, since that answer is still about it; a new one
+    /// starts unchecked.
+    fn pull_request_reported(
+        &mut self,
+        pane: PaneId,
+        url: String,
+        ctx: &mut ViewContext<Self>,
+    ) -> bool {
+        let branch = self
+            .tabs
+            .pane(pane)
+            .and_then(|pane| pane.session().working_directory.as_deref())
+            .and_then(crate::git::current_branch);
+        self.update_session(pane, ctx, |session| match &mut session.pull_request {
+            Some(known) if known.url == url => known.branch = branch,
+            _ => session.pull_request = Some(PullRequest::new(url, branch)),
+        })
+    }
+
+    /// Drops every pull request whose pane is no longer on the branch it was
+    /// reported on.
+    ///
+    /// Asked of `HEAD` for exactly the panes that hold one — a few syscalls
+    /// each, and usually none at all — whenever the git model says a branch
+    /// or a count changed, and whenever a pane moves. Not on a clock: a branch
+    /// switch is what the git model's own gather notices, and this rides on
+    /// it.
+    fn forget_moved_pull_requests(&mut self) {
+        let moved: Vec<PaneId> = self
+            .tabs
+            .panes()
+            .filter(|(_, pane)| {
+                let session = pane.session();
+                session.pull_request.as_ref().is_some_and(|pull_request| {
+                    let now = session
+                        .working_directory
+                        .as_deref()
+                        .and_then(crate::git::current_branch);
+                    now != pull_request.branch
+                })
+            })
+            .map(|(_, pane)| pane.id())
+            .collect();
+        for pane in moved {
+            if let Some(pane) = self.tabs.pane_mut(pane) {
+                pane.session_mut().pull_request = None;
+            }
+        }
+    }
+
+    /// Opens the pull request a pane's agent reported, in the browser.
+    ///
+    /// Through [`crate::browser`], and so through its allow-list as well as
+    /// the wire's: an address that reached a session has already been held
+    /// to https, and the second check costs nothing and keeps the one place
+    /// that starts a browser the one place that decides what it may open.
+    pub(crate) fn open_pull_request(&self, pane: PaneId) {
+        let Some(pull_request) = self
+            .tabs
+            .pane(pane)
+            .and_then(|pane| pane.session().pull_request.as_ref())
+        else {
+            return;
+        };
+        crate::browser::open(&pull_request.url);
+    }
+
+    /// Asks the person's own `gh` how a pane's pull request stands, once.
+    ///
+    /// The one place Crook asks the network about a pull request, and only
+    /// on this press: see [`crate::forge`]. The answer lands on the session
+    /// and the card shows it until the next press. A press while one is
+    /// already asking does nothing — the menu draws the entry inert then —
+    /// and an answer that comes home to a pull request that has since gone,
+    /// or been replaced by another, is about nothing on screen and dropped.
+    pub(crate) fn check_pull_request(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
+        let Some(pull_request) = self
+            .tabs
+            .pane(pane)
+            .and_then(|pane| pane.session().pull_request.as_ref())
+        else {
+            return;
+        };
+        if pull_request.check == Some(PullRequestCheck::Asking) {
+            return;
+        }
+        let url = pull_request.url.clone();
+        self.update_session(pane, ctx, |session| {
+            if let Some(pull_request) = &mut session.pull_request {
+                pull_request.check = Some(PullRequestCheck::Asking);
+            }
+        });
+
+        let gh = self.gh.clone();
+        let asked = url.clone();
+        let asking = ctx
+            .background()
+            .spawn(async move { crate::forge::check(&gh, &asked, crate::forge::TIMEOUT) });
+        ctx.spawn(asking, move |workspace, answer, ctx| {
+            workspace.update_session(pane, ctx, |session| {
+                if let Some(pull_request) = &mut session.pull_request
+                    && pull_request.url == url
+                {
+                    pull_request.check = Some(match answer {
+                        Ok(found) => PullRequestCheck::Answered(found),
+                        Err(error) => PullRequestCheck::Failed(error),
+                    });
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Points "Check pull request" at another program than the person's own
+    /// `gh`, for a test that hands it a fake.
+    #[cfg(test)]
+    pub(crate) fn set_gh(&mut self, program: String) {
+        self.gh = program;
+    }
+
     /// Records that a pane's shell rang the bell.
     ///
     /// A bell is a program saying "look at me", so it becomes the one status
@@ -5272,6 +5425,10 @@ impl Workspace {
                 // until somebody used one.
                 if reported {
                     self.save_session(ctx);
+                    // Into a directory another pane already shows, the git
+                    // model has nothing new to read and says nothing; the
+                    // branch a pull request goes with is asked here instead.
+                    self.forget_moved_pull_requests();
                 }
                 reported
             }
@@ -5337,6 +5494,9 @@ impl Workspace {
                 StatusSource::CommandEnded(Instant::now()),
                 ctx,
             ),
+            TerminalUpdate::PullRequest { pane, url } => {
+                self.pull_request_reported(*pane, url.clone(), ctx)
+            }
         };
 
         if !reported {
@@ -6274,6 +6434,7 @@ impl Workspace {
                 .or_insert_with(|| PaneInteraction {
                     chip: MouseStateHandle::default(),
                     close: MouseStateHandle::default(),
+                    pull_request: MouseStateHandle::default(),
                     body: MouseStateHandle::default(),
                     selection: PaneSelection::new(),
                     find: PaneFind::new(),
@@ -7367,6 +7528,7 @@ impl TypedActionView for Workspace {
             WorkspaceAction::Worktree(action) => self.apply_worktree(action, ctx),
             WorkspaceAction::Block(action) => self.apply_block(action, ctx),
             WorkspaceAction::HoverRow { pane, entered } => self.hover_row(pane, entered, ctx),
+            WorkspaceAction::OpenPullRequest(pane) => self.open_pull_request(pane),
             WorkspaceAction::ReleaseSelection(pane) => self.release_selection(pane, ctx),
             WorkspaceAction::Complete(pane) => self.request_completions(pane, ctx),
             WorkspaceAction::Run(id) => self.run_action(id, ctx),

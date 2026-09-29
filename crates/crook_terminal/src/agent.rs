@@ -43,6 +43,32 @@
 //! title, `port the tab bar;;run rm -rf build?` — wrong on the row, and
 //! nothing worse than wrong, which is what makes the field safe to send to
 //! a pane whose Crook is not known.
+//!
+//! # The pull request, on a channel of its own
+//!
+//! An agent that has opened a pull request can say which, and the row links
+//! to it: `OSC 6342 ; pr ; <url> BEL`. Crook asks no forge for this — the
+//! agent knows the address because it just made it, and the terminal is how
+//! it says so, for every reason above.
+//!
+//! A sibling number rather than a third field on 6340, for three reasons.
+//! The tail of 6340 is already cut twice, on the `;` `vte` splits at and on
+//! the `;;` before a message, and a third cut would be a third rule a writer
+//! had to get right. A Crook older than the field would read the address
+//! into the title, where 6340's own tail has always been "wrong on the row
+//! and nothing worse"; a number it does not know is a link that is not
+//! there, which is better. And an address is not a status: it arrives once,
+//! when the pull request is made, and a report on 6340 would have to carry a
+//! word the agent did not mean to say again. `6341` is spoken for, by the
+//! question an agent that stopped to ask is waiting on.
+//!
+//! An address holds `:` and `/` always and `;` almost never, and `vte`
+//! splits on nothing but `;` — so the pieces after the word are joined back
+//! the way a title's are. What cannot be undone is the parser's limit: it
+//! keeps sixteen pieces and drops the rest without a word, and a cut address
+//! is a link to somewhere else. So the writer refuses an address that would
+//! fill the list, and the reader takes a list that is full as one that was
+//! cut. [`pull_request_url`] is the whole of what either end accepts.
 
 use std::str;
 
@@ -206,6 +232,95 @@ pub(crate) fn parse(parameters: &[&[u8]]) -> Option<Reported> {
     })
 }
 
+/// The OSC number a pull request arrives on — see the module docs for why
+/// it is not [`OSC`].
+pub const PULL_REQUEST_OSC: &str = "6342";
+
+/// The word a pull request's sequence carries after the number.
+///
+/// The one fact the channel knows today, named rather than implied, so that a
+/// second fact about the work can take the same number with a word of its own
+/// and a Crook that does not know that word ignores it.
+const PULL_REQUEST_WORD: &str = "pr";
+
+/// The longest pull request address either end accepts, in bytes.
+///
+/// Ten times the longest address a forge hands out for one — a GitHub
+/// Enterprise host, an owner, a repository and a number are well under a
+/// hundred — and half of the thousand-odd bytes a `vte` built without its
+/// standard library keeps of a whole OSC. Longer is not an address anybody
+/// made for a pull request, and it is refused rather than cut: a cut address
+/// is a link to somewhere else.
+pub const PULL_REQUEST_BYTES: usize = 512;
+
+/// `text` as a pull request's address, or `None` when it cannot be one.
+///
+/// The one rule both ends apply, so that nothing the writer sends is refused
+/// by the reader and nothing the reader keeps could not have been sent:
+///
+/// - `https://` and a host after it, the scheme case-blind the way
+///   `browser`'s allow-list reads one. The row opens this address, and a
+///   program's output is not trustworthy — a `curl` of somebody else's server
+///   can print an escape sequence as easily as a line — so what it can ask to
+///   have opened is one scheme, the one every forge serves pull requests on.
+/// - At most [`PULL_REQUEST_BYTES`].
+/// - No control character and no white space: an address has neither, and a
+///   text with either is not one.
+/// - Few enough `;` that the sequence never fills `vte`'s parameter list,
+///   which is how the reader can tell a whole address from one `vte` cut.
+pub fn pull_request_url(text: &str) -> Option<&str> {
+    const SCHEME: &str = "https://";
+    let scheme = text.get(..SCHEME.len())?;
+    let host = &text[SCHEME.len()..];
+    let fits = text.len() <= PULL_REQUEST_BYTES && pieces(text) <= MAX_PIECES - 3;
+    let clean = !text
+        .chars()
+        .any(|character| character.is_control() || character.is_whitespace());
+    (scheme.eq_ignore_ascii_case(SCHEME)
+        && !host.is_empty()
+        && !host.starts_with('/')
+        && fits
+        && clean)
+        .then_some(text)
+}
+
+/// The bytes a program writes to its terminal to say which pull request its
+/// work is, or `None` for an address [`pull_request_url`] refuses.
+///
+/// Refused rather than cleaned, unlike a title: a title with a tab in it is
+/// still a name once the tab is a space, and an address with anything taken
+/// out of it is a different address.
+pub fn pull_request(url: &str) -> Option<String> {
+    let url = pull_request_url(url)?;
+    Some(format!(
+        "\x1b]{PULL_REQUEST_OSC};{PULL_REQUEST_WORD};{url}\x07"
+    ))
+}
+
+/// Reads a pull request out of the parameters of an OSC sequence, or returns
+/// `None` when they are not one, or are one that fails [`pull_request_url`].
+///
+/// Everything after the word is the address, put back together on `;` the
+/// way a title is. A list as long as `vte` keeps is one it may have cut, and
+/// needs no check of its own here: the address it joins into has more pieces
+/// than [`pull_request_url`] lets a writer send, so it is refused as one.
+pub(crate) fn parse_pull_request(parameters: &[&[u8]]) -> Option<String> {
+    let [number, word, rest @ ..] = parameters else {
+        return None;
+    };
+    if *number != PULL_REQUEST_OSC.as_bytes() || *word != PULL_REQUEST_WORD.as_bytes() {
+        return None;
+    }
+    // Strictly: bytes that are not UTF-8 are not an address, and a lossy
+    // reading would hand the row one with a replacement character in it.
+    let pieces = rest
+        .iter()
+        .map(|piece| str::from_utf8(piece).ok())
+        .collect::<Option<Vec<_>>>()?;
+    let url = pieces.join(";");
+    pull_request_url(&url).map(str::to_owned)
+}
+
 /// `pieces` as the one text `vte` cut them out of, or `None` for no text.
 fn joined(pieces: &[&[u8]]) -> Option<String> {
     let text = pieces
@@ -366,5 +481,159 @@ mod tests {
         assert_eq!(None, parsed("\x1b]6340;sleeping\x07"));
         assert_eq!(None, parsed("\x1b]6341;running\x07"));
         assert_eq!(None, parse(&[b"6340"]));
+    }
+    /// What a pull request sequence reads as, through the same split `vte`
+    /// makes.
+    fn pull_request_read(sequence: &str) -> Option<String> {
+        let pieces = split(sequence);
+        let parameters: Vec<&[u8]> = pieces.iter().map(Vec::as_slice).collect();
+        parse_pull_request(&parameters)
+    }
+
+    const PR: &str = "https://github.com/theguriev/crook/pull/398";
+
+    #[test]
+    fn a_pull_request_travels_on_a_channel_of_its_own() {
+        let sequence = pull_request(PR).expect("an https address is one");
+        assert_eq!(format!("\x1b]6342;pr;{PR}\x07"), sequence);
+        assert_eq!(Some(PR.to_owned()), pull_request_read(&sequence));
+        // Neither channel reads the other's sequence: a status is not a pull
+        // request, and a pull request is not a status an older Crook could
+        // mistake for one.
+        assert_eq!(None, parsed(&sequence));
+        assert_eq!(
+            None,
+            pull_request_read(&report(AgentReport::Running, Some(PR), None))
+        );
+    }
+
+    #[test]
+    fn only_an_https_address_is_a_pull_request() {
+        // The row opens it, so the scheme is the first thing checked: a
+        // program's output is not trustworthy, and a link that reached the
+        // platform's opener as `file:` or an application's own scheme is the
+        // thing `browser`'s allow-list exists to stop.
+        for refused in [
+            "http://github.com/o/r/pull/1",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+            "ssh://github.com/o/r",
+            "github.com/o/r/pull/1",
+            "https://",
+            "https:///o/r/pull/1",
+            "",
+        ] {
+            assert_eq!(None, pull_request_url(refused), "{refused:?} was taken");
+            assert_eq!(None, pull_request(refused), "{refused:?} was written");
+            assert_eq!(
+                None,
+                pull_request_read(&format!("\x1b]6342;pr;{refused}\x07")),
+                "{refused:?} was read"
+            );
+        }
+        // A scheme is case-blind, as `browser` treats it.
+        assert_eq!(
+            Some("HTTPS://github.com/o/r/pull/1"),
+            pull_request_url("HTTPS://github.com/o/r/pull/1")
+        );
+    }
+
+    #[test]
+    fn a_control_character_or_a_space_is_no_part_of_an_address() {
+        // `vte` drops the C0 controls inside an OSC before this sees them, so
+        // the reader's check is for what it lets through — DEL, and the C1
+        // range in UTF-8 — and the writer's is for all of them.
+        for refused in [
+            "https://github.com/o/r/pull/1\x07",
+            "https://github.com/o/r/pull/1\x1b]0;x",
+            "https://github.com/o/r/pull/1\x7f",
+            "https://github.com/o/r/pull/1\u{9b}",
+            "https://github.com/o/r/pull/1 and more",
+            "https://github.com/o/r\n/pull/1",
+        ] {
+            assert_eq!(None, pull_request_url(refused), "{refused:?} was taken");
+            assert_eq!(None, pull_request(refused), "{refused:?} was written");
+        }
+        assert_eq!(
+            None,
+            parse_pull_request(&[
+                b"6342",
+                b"pr",
+                "https://github.com/o/r/pull/1\u{7f}".as_bytes()
+            ])
+        );
+        assert_eq!(
+            None,
+            parse_pull_request(&[
+                b"6342",
+                b"pr",
+                "https://github.com/o/r/\u{85}pull/1".as_bytes()
+            ])
+        );
+        // Bytes that are not UTF-8 are not an address, rather than one with a
+        // replacement character in the middle of it.
+        assert_eq!(
+            None,
+            parse_pull_request(&[b"6342", b"pr", b"https://github.com/o/r/pull/\xff1"])
+        );
+    }
+
+    #[test]
+    fn an_address_longer_than_the_cap_is_refused_not_cut() {
+        // Cut, it would be a different address — and a link to somewhere else
+        // is worse than none.
+        let base = "https://github.com/o/r/pull/1?";
+        let longest = format!("{base}{}", "a".repeat(PULL_REQUEST_BYTES - base.len()));
+        assert_eq!(PULL_REQUEST_BYTES, longest.len());
+        assert_eq!(Some(longest.as_str()), pull_request_url(&longest));
+        assert_eq!(
+            Some(longest.clone()),
+            pull_request_read(&pull_request(&longest).unwrap())
+        );
+
+        let over = format!("{longest}a");
+        assert_eq!(None, pull_request_url(&over));
+        assert_eq!(None, pull_request(&over));
+        assert_eq!(None, pull_request_read(&format!("\x1b]6342;pr;{over}\x07")));
+    }
+
+    #[test]
+    fn an_address_in_pieces_is_put_back_together_unless_vte_cut_it() {
+        // A `;` in an address is rare and legal — a matrix parameter — and
+        // `vte` splits on it like any other, so the pieces after the word are
+        // joined again the way a title's are.
+        let semicolons = "https://example.com/o/r/pull/1;a=1;b=2";
+        assert_eq!(
+            Some(semicolons.to_owned()),
+            pull_request_read(&pull_request(semicolons).unwrap())
+        );
+
+        // `vte` keeps sixteen parameters and drops the rest without a word, so
+        // a sequence that filled all sixteen may have lost its end. The
+        // writer never fills them, and the reader takes a full list as cut.
+        let most = format!("https://example.com/p{}", ";x".repeat(MAX_PIECES - 4));
+        assert_eq!(MAX_PIECES - 1, pieces(&format!("6342;pr;{most}")));
+        assert_eq!(
+            Some(most.clone()),
+            pull_request_read(&pull_request(&most).unwrap())
+        );
+        let too_many = format!("{most};x");
+        assert_eq!(None, pull_request_url(&too_many));
+        assert_eq!(None, pull_request(&too_many));
+        let mut cut: Vec<&[u8]> = vec![b"6342", b"pr", b"https://example.com/p"];
+        cut.extend(std::iter::repeat_n(b"x".as_slice(), MAX_PIECES - 3));
+        assert_eq!(MAX_PIECES, cut.len());
+        assert_eq!(None, parse_pull_request(&cut));
+    }
+
+    #[test]
+    fn a_pull_request_sequence_with_another_word_or_none_is_not_one() {
+        assert_eq!(
+            None,
+            pull_request_read(&format!("\x1b]6342;issue;{PR}\x07"))
+        );
+        assert_eq!(None, pull_request_read("\x1b]6342;pr\x07"));
+        assert_eq!(None, pull_request_read(&format!("\x1b]6343;pr;{PR}\x07")));
+        assert_eq!(None, parse_pull_request(&[b"6342"]));
     }
 }

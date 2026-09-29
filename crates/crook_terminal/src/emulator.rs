@@ -113,6 +113,14 @@ pub enum TerminalEvent {
     /// for an agent that was interrupted and never got to. The rule for
     /// which marks end which statuses is `Emulator::settle_agent`'s.
     AgentSettled,
+    /// A program in the pane said which pull request its work is, on the
+    /// channel [`crate::agent`] describes beside the status's own.
+    ///
+    /// The address has passed [`crate::agent::pull_request_url`]. Reported
+    /// every time it is said, not on change: whoever holds it may have let
+    /// it go since — the pane moved to another branch — and an agent saying
+    /// it again is putting it back.
+    PullRequest(String),
 }
 
 /// Collects `Term`'s events so they can be handled after parsing, rather than
@@ -161,6 +169,7 @@ struct OscWatcher {
     mark: Option<ShellMark>,
     completions: Option<u64>,
     agent: Option<Reported>,
+    pull_request: Option<String>,
     /// Whether the chunk erased the scrollback — `CSI 3 J`, the third thing
     /// `clear` prints.
     history_cleared: bool,
@@ -195,12 +204,15 @@ impl Perform for OscWatcher {
                     .ok()
                     .and_then(|serial| serial.parse().ok());
             }
-            // Position-independent like OSC 7: a status means the same thing
-            // wherever in the chunk the program wrote it. The last one in a
-            // chunk wins, which is the last thing the program said.
+            // Position-independent like OSC 7: a status, or the pull request
+            // beside it on 6342, means the same thing wherever in the chunk the
+            // program wrote it. The last one in a chunk wins, which is the last
+            // thing the program said.
             _ => {
                 if let Some(reported) = agent::parse(params) {
                     self.agent = Some(reported);
+                } else if let Some(url) = agent::parse_pull_request(params) {
+                    self.pull_request = Some(url);
                 }
             }
         }
@@ -763,6 +775,9 @@ impl Emulator {
         }
 
         self.apply_agent_report();
+        if let Some(url) = self.osc_watcher.pull_request.take() {
+            self.events.push(TerminalEvent::PullRequest(url));
+        }
 
         if let Some(directory) = self.osc_watcher.working_directory.take()
             && self.working_directory.as_deref() != Some(directory.as_path())

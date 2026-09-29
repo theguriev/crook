@@ -1063,6 +1063,37 @@ second line is the question rather than the branch or the directory, since "want
 `rm -rf build`" is what decides whether a person comes now, and which branch the pane is on is
 not. The header's count and the window title are unchanged by it.
 
+**The pull request is a second sequence.** `OSC 6342 ; pr ; <url> BEL`, read by the same watcher
+and written by `crook --agent <status> --pull-request <url>` in the same write as the status.
+A sibling number rather than a third field on 6340, because 6340's tail is already cut twice —
+on `vte`'s `;` and on the `;;` before a message — and an older Crook reads that tail as the
+title, where a number it does not know is simply a link that is not there; 6341 is the
+question an agent that stopped to ask is waiting on. An address holds `:` and `/` always and
+`;` almost never, so the pieces after the word are joined back as a title's are, and the one
+thing that cannot be undone — `vte` keeping sixteen pieces and dropping the rest without a
+word — is refused at both ends: the writer will not send an address that fills the list, and
+the reader takes a full list as cut. `crook_terminal::agent::pull_request_url` is the whole
+rule either end applies: `https://` with a host, at most 512 bytes, no control character and
+no white space. The row opens it through `app/src/browser.rs`, whose allow-list checks it a
+second time. `AgentSession::pull_request` records it against the branch the pane is on at the
+moment it arrives — read from `HEAD`, not from the row's git facts, which are up to a poll old
+and would record a branch made, pushed and opened inside one poll as the one it started on —
+and drops it when `HEAD` says otherwise, which is asked whenever the git model reports a
+change and whenever the pane moves, never on a clock. The hooks carry it with no second
+process: the Claude Code and Codex hook after every tool is `running --pull-request -`, which
+finds the `https://…/pull/<n>` a `gh pr create` in `tool_input.command` printed into
+`tool_response` and finds nothing after any other tool. The chip is on the row's metadata line
+in `Expanded`, under the "Show: PR link" toggle, and it is a link: the row's own press stands
+aside while it is hovered, as it does for the close button. The menu carries **Open pull
+request** for the density that draws no chip and **Check pull request**, which is the one
+place Crook asks the network about the work — the person's own `gh pr view <url> --json
+state,statusCheckRollup`, on the background pool under `git::worktree`'s deadline shape
+(`app/src/forge.rs`), once per press and never polled. `gh` holds the token and knows the
+host; Crook holds neither. The answer — open, merged or closed, and how many checks pass, fail
+or are pending — is written onto the session and printed on the hover card until the next
+press, or the reason there is none: `gh` not installed, not signed in, or unable to reach the
+forge.
+
 **Attention is a separate fact.** The bell used to write `NeedsInput` and looking used to
 clear it, and that was right for a bell and wrong for an agent: an agent waiting for an
 approval is still waiting after somebody glanced at its row. So `AgentSession` carries

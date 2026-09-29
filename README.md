@@ -282,6 +282,16 @@ Nineteen features, and the page that configures them:
   `codex`, `gemini` and `copilot` print the same for Codex CLI, Gemini CLI and GitHub
   Copilot CLI in each one's own hooks file, `opencode` prints the plugin OpenCode loads
   instead, and `aider`, which has no hooks, gets a sentence saying what to do instead.
+  `--pull-request <url>` beside any status says which pull request the work is, and the row
+  carries it as a chip that opens it — https only, capped, on a sequence of its own,
+  `OSC 6342` — until the pane's branch changes; the Claude Code and Codex hooks send the
+  address a `gh pr create` printed, with no second hook and no `jq`. Crook asks no forge to
+  find it.
+  **Check pull request** on the row's menu is the one place Crook asks the network about your
+  work: it runs your own `gh pr view <url> --json state,statusCheckRollup` once, on that
+  press, under a deadline — no token of Crook's, no timer, no poll — and the hover card says
+  open, merged or closed and how the checks stand until you press again, or that `gh` is not
+  installed, not signed in, or could not reach GitHub.
   `crook --skill` prints the skill file that teaches an agent the rest — how to tell it is in
   a pane, what the four words do, where the worktrees and the plugins are — to save as
   `~/.claude/skills/crook/SKILL.md`.

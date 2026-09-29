@@ -56,6 +56,18 @@ branch, since what you are asking is what decides whether the person comes now. 
 moment you report anything else. `--message -` reads it from standard input, for a hook
 that is handed a notification's text there.
 
+`--pull-request` says which pull request your work is, beside any status, once you have
+opened one:
+
+```sh
+crook --agent running --pull-request "https://github.com/owner/repo/pull/123"
+```
+
+The row links to it, and its menu can ask the person's own `gh` what state it is in. Only an
+`https://` address is taken. Say it once, when you open the pull request; the row drops it
+when the pane's branch changes. The hooks below already report the address `gh pr create`
+prints, so an agent running them need not.
+
 The report is one escape sequence (`OSC 6340`) written to the terminal the command runs in,
 not to standard output, so it works from a hook whose output belongs to someone else. There
 is no socket and no pane id: the terminal you have is the pane. The same sequence reaches the
@@ -64,7 +76,7 @@ status never taken back goes when the shell's own marks say the command ended.
 
 `crook --agent-hooks claude` prints the fragment of Claude Code's settings that reports all of
 this by itself: running when a prompt is sent and around every tool, needing input on every
-notification, idle on stop. Print it and let the person merge it into `~/.claude/settings.json`
+notification, idle on stop, and the pull request after a `gh pr create`. Print it and let the person merge it into `~/.claude/settings.json`
 or a project's `.claude/settings.json`. Do not write either file yourself. The same flag takes
 `codex`, `gemini`, `copilot` and `opencode`, and prints each one's own hooks file or plugin
 with a note on stderr saying where it goes; `aider` has no hooks, and it says what to do

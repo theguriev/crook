@@ -31,6 +31,8 @@ use std::time::Instant;
 
 use crook_terminal::AgentReport;
 
+use crate::forge::{CheckError, Found};
+use crate::git::Head;
 use crate::settings::Granularity;
 
 mod group;
@@ -146,6 +148,61 @@ pub enum StatusSource {
     CommandEnded(Instant),
 }
 
+/// The pull request a session's work belongs to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullRequest {
+    /// Its address, which passed `crook_terminal::agent::pull_request_url` on
+    /// the way in — https, and nothing in it a link opener could be tricked by.
+    pub url: String,
+    /// The branch the pane was on when the agent said it, read then.
+    ///
+    /// What the pull request is dropped against: a pane that has moved to
+    /// another branch is doing other work, and a link to the last branch's
+    /// pull request on its row would be a claim about the new one. Read from
+    /// `HEAD` at the moment of the report rather than taken from the row's
+    /// git facts, which are up to a poll old — an agent that makes a branch,
+    /// pushes it and opens its pull request inside one poll would otherwise
+    /// have it recorded against the branch it started on, and dropped the
+    /// moment the poll caught up.
+    pub branch: Option<Head>,
+    /// What the last "Check pull request" press found, until the next one.
+    pub check: Option<PullRequestCheck>,
+}
+
+impl PullRequest {
+    /// A pull request at `url`, reported while the pane was on `branch`,
+    /// not yet checked.
+    pub fn new(url: String, branch: Option<Head>) -> Self {
+        Self {
+            url,
+            branch,
+            check: None,
+        }
+    }
+}
+
+/// Where a press of "Check pull request" has got to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PullRequestCheck {
+    /// `gh` has been asked and has not answered.
+    Asking,
+    /// It answered.
+    Answered(Found),
+    /// It could not, and this is why.
+    Failed(CheckError),
+}
+
+impl PullRequestCheck {
+    /// The line the card prints for it.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Asking => "Checking\u{2026}".to_owned(),
+            Self::Answered(found) => found.summary(),
+            Self::Failed(error) => error.to_string(),
+        }
+    }
+}
+
 /// The agent session a pane is a window onto.
 ///
 /// Warp's tab points at a `ViewHandle<PaneGroup>` whose panes hold views,
@@ -233,17 +290,16 @@ pub struct AgentSession {
     /// a directory deleted out from under it — in which case a row falls back
     /// to the session title.
     pub working_directory: Option<PathBuf>,
-    /// The pull request this session's work belongs to, as a URL.
+    /// The pull request this session's work belongs to, as its agent said.
     ///
-    /// **Nothing populates this yet, and that is deliberate.** Warp's PR link
-    /// comes out of `gh pr view` — a subprocess with a five-second timeout, an
-    /// authentication state and a whole failure taxonomy — and Crook has no
-    /// forge integration to put behind it. The field exists so the row and the
-    /// "Show: PR link" toggle are written against real data rather than a
-    /// placeholder: the toggle governs whether the slot appears *when there is
-    /// a link*, and today there never is. The menu says so on screen rather
-    /// than leaving a dead chip to be discovered.
-    pub pull_request: Option<String>,
+    /// Written by the agent, over its own terminal — `crook --agent running
+    /// --pull-request <url>`, or the hook after a `gh pr create` — and by
+    /// nothing else. Warp's PR link comes out of `gh pr view` run for every
+    /// row on a timer; Crook asks no forge to find one, because the agent that
+    /// opened the pull request already knows which it is. It goes when the
+    /// pane's branch does — see [`PullRequest::branch`] — and the "Show: PR
+    /// link" toggle governs whether the row's chip shows it.
+    pub pull_request: Option<PullRequest>,
 
     /// The command the pane is running, or `None` at a prompt.
     ///
@@ -367,7 +423,7 @@ impl AgentSession {
     /// positive run of digits. Showing the URL when that fails beats showing
     /// nothing: a link nobody can label is still a link somebody can follow.
     pub fn pull_request_label(&self) -> Option<String> {
-        let url = self.pull_request.as_deref()?.trim();
+        let url = self.pull_request.as_ref()?.url.trim();
         if url.is_empty() {
             return None;
         }

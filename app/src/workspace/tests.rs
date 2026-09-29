@@ -35,7 +35,8 @@ use crate::settings::{
     Density, GeneralOptions, Granularity, PrimaryInfo, Settings, StatusMarks, Subtitle, TabOptions,
 };
 use crate::tab::{
-    AgentSession, AgentStatus, Attention, Direction, GroupId, Pane, PaneId, Tab, TabAction, TabId,
+    AgentSession, AgentStatus, Attention, Direction, GroupId, Pane, PaneId, PullRequest,
+    PullRequestCheck, Tab, TabAction, TabId,
 };
 use crate::terminal_font::{CELL_FONT_SIZE, CellFont};
 use crate::theme::theme;
@@ -2882,7 +2883,7 @@ fn the_show_toggles_add_and_remove_chips_without_resizing_the_row() {
     let mut harness = Harness::seeded();
     let pane = harness.pane_ids()[0];
     harness.update_session(pane, |session| {
-        session.pull_request = Some(PULL_REQUEST.to_owned());
+        session.pull_request = Some(PullRequest::new(PULL_REQUEST.to_owned(), None));
     });
     let options = TabOptions {
         density: Density::Expanded,
@@ -2916,6 +2917,284 @@ fn the_show_toggles_add_and_remove_chips_without_resizing_the_row() {
     // never reflows the strip.
     assert_eq!(tab_boxes(&one)[0].height(), full_height);
     assert_eq!(tab_boxes(&none)[0].height(), full_height);
+}
+
+/// What the pane's agent said its pull request is, as the terminal says it.
+fn report_pull_request(harness: &mut Harness, pane: PaneId, url: &str) {
+    let update = crate::terminal_model::TerminalUpdate::PullRequest {
+        pane,
+        url: url.to_owned(),
+    };
+    harness.workspace_update(|workspace, ctx| workspace.apply_terminal_update(&update, ctx));
+}
+
+/// The pull request a pane's session holds, if any.
+fn pull_request_of(harness: &Harness, pane: PaneId) -> Option<PullRequest> {
+    harness.workspace.read(&harness.app, |workspace, _| {
+        workspace
+            .tabs()
+            .pane(pane)
+            .and_then(|pane| pane.session().pull_request.clone())
+    })
+}
+
+#[test]
+fn a_reported_pull_request_is_a_chip_on_the_row_only_with_the_setting_on() {
+    let mut harness = Harness::seeded();
+    let pane = harness.pane_ids()[0];
+    let options = TabOptions {
+        density: Density::Expanded,
+        ..harness.options()
+    };
+    harness.set_options(options);
+    assert!(
+        !frame_text(&harness.frame()).contains("PR #"),
+        "a row showed a pull request nobody reported"
+    );
+
+    report_pull_request(&mut harness, pane, PULL_REQUEST);
+    assert!(frame_text(&harness.frame()).contains("PR #14876"));
+
+    harness.set_options(TabOptions {
+        show_pr_link: false,
+        ..options
+    });
+    assert!(
+        !frame_text(&harness.frame()).contains("PR #14876"),
+        "the chip stayed with the setting off"
+    );
+}
+
+#[test]
+fn pressing_the_chip_opens_the_pull_request_and_leaves_the_tabs_alone() {
+    // On a row that is not the active one: a press the row took for its own
+    // would make that tab active, which is the thing a link must not do.
+    crate::browser::record_opens();
+    let mut harness = Harness::new(2);
+    let [behind, active] = harness.tab_ids()[..] else {
+        panic!("two tabs");
+    };
+    let pane = harness.pane_ids()[0];
+    harness.seed(pane, Some(seeded_diff()));
+    harness.set_options(TabOptions {
+        density: Density::Expanded,
+        ..harness.options()
+    });
+    report_pull_request(&mut harness, pane, PULL_REQUEST);
+
+    // The diff chip first and the pull request after it, Warp's order.
+    let chips = chip_boxes(&harness.frame());
+    assert_eq!(chips.len(), 2, "{chips:?}");
+    harness.move_to(center(chips[1]));
+    harness.frame();
+    harness.click(center(chips[1]), MouseButton::Left);
+
+    assert_eq!(crate::browser::opened(), [PULL_REQUEST]);
+    assert_eq!(harness.active_id(), active);
+    assert_ne!(harness.active_id(), behind);
+
+    // And the diff chip is no link: a press there is the row's.
+    harness.move_to(center(chips[0]));
+    harness.frame();
+    harness.click(center(chips[0]), MouseButton::Left);
+    assert_eq!(crate::browser::opened(), [PULL_REQUEST]);
+    assert_eq!(harness.active_id(), behind);
+}
+
+#[test]
+fn a_chip_that_went_away_under_the_pointer_does_not_keep_the_rows_press() {
+    // The close button's trap: a chip that is no longer drawn never hears
+    // the pointer leave, and the row's guard would take the hover it last
+    // had for a press on it — every press, until the pointer happened to
+    // cross the spot again.
+    crate::browser::record_opens();
+    let mut harness = Harness::new(2);
+    let [behind, active] = harness.tab_ids()[..] else {
+        panic!("two tabs");
+    };
+    let pane = harness.pane_ids()[0];
+    harness.seed(pane, Some(seeded_diff()));
+    let options = TabOptions {
+        density: Density::Expanded,
+        ..harness.options()
+    };
+    harness.set_options(options);
+    report_pull_request(&mut harness, pane, PULL_REQUEST);
+
+    let chip = chip_boxes(&harness.frame())[1];
+    harness.move_to(center(chip));
+    harness.frame();
+    harness.set_options(TabOptions {
+        show_pr_link: false,
+        ..options
+    });
+    harness.frame();
+
+    harness.click(center(chip), MouseButton::Left);
+    assert_eq!(crate::browser::opened(), Vec::<String>::new());
+    assert_eq!(harness.active_id(), behind, "the row ignored a press on it");
+    assert_ne!(harness.active_id(), active);
+}
+
+#[test]
+fn the_pull_request_goes_when_the_panes_branch_changes() {
+    // A repository as far as the row's reader goes: a `.git` with a `HEAD`.
+    // The branch is read from the file when the pull request is reported and
+    // again whenever the git model says something changed — which a test
+    // says by recording facts, the way the gather chain would.
+    let scratch = Scratch::new();
+    let repository = scratch.path().join("repository");
+    fs::create_dir_all(repository.join(".git")).unwrap();
+    let head = repository.join(".git").join("HEAD");
+    fs::write(&head, "ref: refs/heads/feat/pr-on-the-row\n").unwrap();
+
+    let mut harness = Harness::new(1);
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    report_pull_request(&mut harness, pane, PULL_REQUEST);
+    assert_eq!(
+        pull_request_of(&harness, pane).and_then(|pull_request| pull_request.branch),
+        Some(Head::Branch("feat/pr-on-the-row".to_owned()))
+    );
+
+    // Something else changed — a count, another pane's branch — and this
+    // pane is where it was: the link stays.
+    harness.record_git(pane, "feat/pr-on-the-row", Some(seeded_diff()));
+    assert!(pull_request_of(&harness, pane).is_some());
+
+    fs::write(&head, "ref: refs/heads/main\n").unwrap();
+    harness.record_git(pane, "main", None);
+    assert_eq!(
+        pull_request_of(&harness, pane),
+        None,
+        "the row kept a link to the last branch's pull request"
+    );
+
+    // Said again on the new branch, it is that branch's.
+    report_pull_request(&mut harness, pane, PULL_REQUEST);
+    assert_eq!(
+        pull_request_of(&harness, pane).and_then(|pull_request| pull_request.branch),
+        Some(Head::Branch("main".to_owned()))
+    );
+}
+
+#[test]
+fn the_menu_offers_the_pull_request_only_on_a_row_that_has_one() {
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness.pane_ids()[0];
+
+    harness.open_tab_menu_on(tab, pane);
+    let text = frame_text(&harness.frame());
+    assert!(!text.contains("Open pull request"), "{text}");
+    assert!(!text.contains("Check pull request"), "{text}");
+    harness.dispatch_workspace_action(WorkspaceAction::TabMenu(TabMenuAction::Close));
+
+    report_pull_request(&mut harness, pane, PULL_REQUEST);
+    harness.open_tab_menu_on(tab, pane);
+    let text = frame_text(&harness.frame());
+    assert!(text.contains("Open pull request"), "{text}");
+    assert!(text.contains("Check pull request"), "{text}");
+
+    // From the menu, for the density that draws no chip.
+    crate::browser::record_opens();
+    harness.run_command("crook/tabs/open-pull-request");
+    assert_eq!(crate::browser::opened(), [PULL_REQUEST]);
+    assert_eq!(harness.tab_menu_row(), None, "the menu stayed up");
+}
+
+/// Presses "Check pull request" on the row and waits for gh's answer.
+fn check_pull_request(harness: &mut Harness, pane: PaneId) -> PullRequestCheck {
+    let tab = harness.active_id();
+    harness.open_tab_menu_on(tab, pane);
+    harness.run_command("crook/tabs/check-pull-request");
+    harness.wait_for("gh's answer never came home", |harness| {
+        pull_request_of(harness, pane)
+            .and_then(|pull_request| pull_request.check)
+            .is_some_and(|check| check != PullRequestCheck::Asking)
+    });
+    pull_request_of(harness, pane)
+        .and_then(|pull_request| pull_request.check)
+        .expect("waited for")
+}
+
+/// The card's text, with the pointer on the first row.
+fn card_text(harness: &mut Harness) -> String {
+    let row = tab_boxes(&harness.frame())[0];
+    harness.move_to(row.origin() + vec2f(40., row.height() / 2.));
+    let scene = harness.frame();
+    assert_eq!(detail_cards(&scene).len(), 1, "no card came up");
+    frame_text(&scene)
+}
+
+#[test]
+fn checking_with_no_gh_installed_says_so_on_the_card() {
+    let mut harness = Harness::seeded();
+    let pane = harness.pane_ids()[0];
+    report_pull_request(&mut harness, pane, PULL_REQUEST);
+    let nowhere = std::env::temp_dir()
+        .join("crook-no-such-directory")
+        .join("gh");
+    harness.workspace_update(|workspace, _| {
+        workspace.set_gh(nowhere.to_string_lossy().into_owned());
+    });
+
+    assert_eq!(
+        check_pull_request(&mut harness, pane),
+        PullRequestCheck::Failed(crate::forge::CheckError::Missing)
+    );
+    assert!(
+        card_text(&mut harness).contains("GitHub CLI (gh) is not installed"),
+        "the card does not say why there is no answer"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn checking_asks_gh_once_and_the_card_shows_what_it_said_until_the_next_press() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let scratch = Scratch::new();
+    let gh = scratch.path().join("gh");
+    let answer = scratch.path().join("answer.json");
+    let asked = scratch.path().join("asked");
+    fs::write(
+        &gh,
+        format!(
+            "#!/bin/sh\necho x >> '{}'\ncat '{}'\n",
+            asked.display(),
+            answer.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::write(
+        &answer,
+        r#"{"state":"OPEN","statusCheckRollup":[{"__typename":"CheckRun","status":"COMPLETED","conclusion":"FAILURE"},{"__typename":"CheckRun","status":"COMPLETED","conclusion":"SUCCESS"}]}"#,
+    )
+    .unwrap();
+
+    let mut harness = Harness::seeded();
+    let pane = harness.pane_ids()[0];
+    report_pull_request(&mut harness, pane, PULL_REQUEST);
+    harness.workspace_update(|workspace, _| workspace.set_gh(gh.to_string_lossy().into_owned()));
+    // Nothing asked yet: the pull request arriving is not a reason to.
+    assert!(!asked.exists(), "gh was asked before anybody pressed");
+
+    check_pull_request(&mut harness, pane);
+    assert!(card_text(&mut harness).contains("Open \u{b7} 1 of 2 checks failing"));
+
+    // The forge moved on; the card does not, until somebody asks again.
+    fs::write(&answer, r#"{"state":"MERGED","statusCheckRollup":[]}"#).unwrap();
+    harness.settle(std::time::Duration::from_millis(100));
+    assert!(card_text(&mut harness).contains("1 of 2 checks failing"));
+    assert_eq!(fs::read_to_string(&asked).unwrap().lines().count(), 1);
+
+    check_pull_request(&mut harness, pane);
+    assert!(card_text(&mut harness).contains("Merged \u{b7} no checks"));
+    assert_eq!(fs::read_to_string(&asked).unwrap().lines().count(), 2);
 }
 
 #[test]
@@ -4287,6 +4566,8 @@ fn a_tabs_menu_is_the_entries_its_plugins_put_in_it() {
             "crook/tabs/copy-pane-title",
             "crook/tabs/copy-working-directory",
             "crook/tabs/copy-git-branch",
+            "crook/tabs/open-pull-request",
+            "crook/tabs/check-pull-request",
             "crook/tabs/rename-tab",
             "crook/tabs/rename-pane",
             "crook/tabs/close-tab",
@@ -11718,6 +11999,40 @@ mod shells {
             status(harness) == Some(AgentStatus::Idle)
         });
         assert_eq!(message(&harness), None);
+    }
+
+    #[test]
+    fn a_program_in_a_shell_puts_its_pull_request_on_the_row() {
+        // The same chain for the sibling channel: the sequence
+        // `crook --agent --pull-request` writes, through the pty and the
+        // emulator into the session the row links from.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = marked_shell(&mut harness) else {
+            return;
+        };
+        await_prompt(&mut harness, pane);
+        let url = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace
+                    .tabs()
+                    .pane(pane)
+                    .and_then(|pane| pane.session().pull_request.clone())
+                    .map(|pull_request| pull_request.url)
+            })
+        };
+        assert_eq!(url(&harness), None);
+
+        harness.type_into(
+            pane,
+            "printf '\\033]6342;pr;https://github.com/theguriev/crook/pull/398\\007'\n",
+        );
+        harness.wait_for("the pull request never reached the session", |harness| {
+            url(harness).is_some()
+        });
+        assert_eq!(
+            url(&harness).as_deref(),
+            Some("https://github.com/theguriev/crook/pull/398")
+        );
     }
 
     #[test]
