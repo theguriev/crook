@@ -83,6 +83,38 @@ macOS on both architectures and Linux on x86_64. It reads the latest release, ch
 against the `SHA256SUMS` published beside it, and puts the binary in `~/.local/bin`, or somewhere
 else with `--to`. Windows is a `.zip` on the [releases page](https://github.com/theguriev/crook/releases).
 
+### Linux, in the launcher
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/theguriev/crook/main/script/install | sh -s -- --desktop
+```
+
+`--desktop` also installs Crook's desktop entry, its icons and its AppStream record under
+`~/.local/share`, which is what puts it in the application menu and lets `xdg-terminal-exec` —
+what a launcher's *Open in terminal* and a `Terminal=true` entry ask for — start it. The Linux
+archive carries all three under `share/`, laid out the way a package installs them. Nothing that
+is not Crook's is written: which terminal your desktop opens is yours to say, so
+`xdg-terminals.list` and `mimeapps.list` are left alone and the installer prints the one command
+that puts Crook first.
+
+A launcher starts Crook the way it starts any terminal, with the flags the entry advertises:
+
+```sh
+crook -e htop -d 10                     # a window whose one pane runs htop, and closes with it
+crook --working-directory ~/src/crook   # a window whose shells start there; --cwd is the same
+crook --title notes --app-id notes      # its name, and the app_id / WM_CLASS a window rule matches
+```
+
+Everything after `-e` is the command, as in xterm, and `crook -- htop -d 10` says the same. It is
+typed into the pane's shell as an `exec`, so it runs on the `PATH` your profile built and, when it
+exits, the pane closes the way it does when a shell exits. `-e` is not available on Windows, whose
+shells have no `exec`.
+
+**A window opened with `-e` or `--working-directory` is a launcher's.** It is a quick terminal
+beside your work rather than the work: it opens fresh instead of as the last window, and nothing it
+does is written to the session file, so closing it leaves the agent tabs your next ordinary launch
+comes back to exactly as they were. `--title` and `--app-id` alone open an ordinary window.
+
 ### macOS, from the browser
 
 `crook-v<version>-macos.dmg` on the [releases page](https://github.com/theguriev/crook/releases)

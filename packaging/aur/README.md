@@ -11,9 +11,11 @@ It installs the binary from the release page's Linux archive (checked against th
 a dock and a window rule all find it), the icon in four sizes, and both licences. Nothing is
 built from source: the release is the build.
 
-The files here are what the AUR repository holds — `PKGBUILD`, `.SRCINFO`, `crook.desktop` —
-and this directory is where they are edited, so a change to the package is a pull request like
-any other.
+The files here are what the AUR repository holds — `PKGBUILD`, `.SRCINFO` — and this directory
+is where they are edited, so a change to the package is a pull request like any other. The third,
+`crook.desktop`, is [`packaging/linux/crook.desktop`](../linux/crook.desktop): the one entry the
+release archive and `script/install --desktop` install too, which `script/aur` copies in beside
+the `PKGBUILD` when it builds and when it pushes.
 
 ## After a release
 
