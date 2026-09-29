@@ -1354,6 +1354,40 @@ fn resolve_fonts(font_db: &CosmicFontDb, monospace: Option<&str>) -> Result<Font
     })
 }
 
+/// Opens a window's strip on what the session file describes, and then on
+/// what the command line asked for on top of it.
+///
+/// One function rather than three steps in [`Shell::new`] because the order
+/// is the point, and a test can hold a function to it:
+///
+/// - The restore first. The overrides open a settings page in whatever strip
+///   is there, and a session that describes nothing leaves the strip a fresh
+///   window's, which is what every launch had before there was a file to
+///   read.
+/// - The overrides next. See [`apply_overrides`].
+/// - Last, for `--run` and `--type`, the focused pane's resume line taken back
+///   out of its field. Both type into that field as though it were empty, and
+///   a restore may have left an agent's resume line there: typed after it,
+///   `--run 'git status'` would send `claude --continuegit status`. After the
+///   overrides, because the pane they type into is the one focused once those
+///   have run; after the restore, because until then there is no line.
+fn restore_and_override(
+    workspace: &mut Workspace,
+    session: &crate::session::Session,
+    overrides: &Overrides,
+    ctx: &mut ViewContext<Workspace>,
+) {
+    if let Some(strip) = session.restore() {
+        workspace.restore(strip, ctx);
+    }
+    apply_overrides(workspace, overrides, ctx);
+    if overrides.types_into_the_field()
+        && let Some(pane) = workspace.tabs().focused_pane_id()
+    {
+        workspace.withdraw_resume_offer(pane, ctx);
+    }
+}
+
 /// Puts the workspace into the state the command line asked to start in.
 ///
 /// The options first, because the last two are read against them: the hover
@@ -2994,32 +3028,14 @@ impl Shell {
         app.update(|ctx| {
             workspace.update(ctx, |workspace, ctx| {
                 // First of all, because everything below it works on whatever
-                // strip is there: the overrides open a settings page in it,
-                // the git poll reads its directories, and `start_terminals`
-                // opens a shell in every pane it holds.
-                //
-                // A session that describes nothing leaves the strip a fresh
-                // window's, which is what every launch had before there was a
-                // file to read.
-                if let Some(strip) = session.restore() {
-                    workspace.restore(strip, ctx);
-                }
-                // Before the polls, not after: `start_git_poll` decides
-                // whether to pay for `git diff` from the density it finds, and
-                // a density the command line asked for has to be in place by
-                // then or the first cycle gathers the wrong half.
-                apply_overrides(workspace, &launch.overrides, ctx);
-                // `--run` and `--type` type into the focused pane's field as
-                // though it were empty, and a restore may have left an
-                // agent's resume line there: typed after it, `--run 'git
-                // status'` would send `claude --continuegit status`. After
-                // the overrides, because the pane they type into is the one
-                // focused once those have run.
-                if launch.overrides.types_into_the_field()
-                    && let Some(pane) = workspace.tabs().focused_pane_id()
-                {
-                    workspace.withdraw_resume_offer(pane, ctx);
-                }
+                // strip is there: the git poll reads its directories, and
+                // `start_terminals` opens a shell in every pane it holds. The
+                // overrides have to be in place by then as well:
+                // `start_git_poll` decides whether to pay for `git diff` from
+                // the density it finds, and a density the command line asked
+                // for that arrived later would leave the first cycle
+                // gathering the wrong half.
+                restore_and_override(workspace, &session, &launch.overrides, ctx);
                 workspace.start_git_poll(ctx);
                 workspace.start_caret_blink(ctx);
                 // Last, and not yet: the shells open after the first frame,

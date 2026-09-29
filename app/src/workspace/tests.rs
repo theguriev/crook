@@ -15314,6 +15314,45 @@ mod restoring {
         // an agent, and a window closed now should still say so.
         assert_eq!(named_agent(&harness, panes[0]).as_deref(), Some("claude"));
     }
+
+    #[test]
+    fn a_window_opened_to_run_or_type_a_line_opens_on_an_empty_field() {
+        // Through the function a window opens with, rather than by calling
+        // the withdrawal by hand: what makes `--run 'git status'` send `git
+        // status` is that the launch takes the line back out, after the
+        // restore typed it, and only for a launch that types.
+        let scratch = Scratch::new();
+        let session = remembered(&[(scratch.path(), Some("claude"))]);
+        let opened = |overrides: crate::Overrides| {
+            let mut harness = Harness::with_settings(1, Settings::ephemeral());
+            harness.workspace_update(|workspace, ctx| {
+                crate::restore_and_override(workspace, &session, &overrides, ctx);
+            });
+            harness.frame();
+            let pane = harness.focused_pane_id().expect("a focused pane");
+            harness.field_text(pane)
+        };
+
+        let run = crate::Overrides {
+            run: vec!["git status".to_owned()],
+            ..crate::Overrides::default()
+        };
+        assert_eq!(opened(run), "", "`--run` would type after the resume line");
+        let typed = crate::Overrides {
+            type_text: Some("x".to_owned()),
+            ..crate::Overrides::default()
+        };
+        assert_eq!(
+            opened(typed),
+            "",
+            "`--type` would type after the resume line"
+        );
+        assert_eq!(
+            opened(crate::Overrides::default()),
+            "claude --continue",
+            "a launch that types nothing took the offered line away"
+        );
+    }
 }
 
 /// Following the desktop's light or dark setting.
