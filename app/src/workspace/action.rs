@@ -271,8 +271,16 @@ pub enum WorktreeAction {
     Show(usize),
     /// Begin making one.
     StartCreating,
-    /// Make it, from what has been typed into the branch field.
+    /// Make it, from what has been typed into the branch field, starting where
+    /// the creator's pick says.
     Create,
+    /// Start the new branch from the place at this index of the creator's
+    /// list — an index for the reason a worktree is named by one. What a
+    /// press on one of its rows dispatches.
+    PickBase(usize),
+    /// Step the creator's place to start from by this many rows, clamped at
+    /// both ends: the arrows, while the name field keeps every other key.
+    MoveBase(isize),
     /// Ask about removing the worktree at this index.
     AskRemove(usize),
     /// Remove it. `force` is the second answer, offered only once git has

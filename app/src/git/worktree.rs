@@ -277,6 +277,13 @@ pub enum Error {
         /// The name that is taken.
         branch: String,
     },
+    /// The place a new branch was to start from is not one: git found no ref
+    /// or commit by that name, or it began with a dash and was refused before
+    /// git was asked. The way out is picking another.
+    InvalidBase {
+        /// The base, as it was handed to [`add`].
+        base: String,
+    },
     /// `path` is registered as a worktree and its directory is gone. `prune`,
     /// or a forced add over the top, is what clears it.
     MissingButRegistered {
@@ -336,6 +343,9 @@ impl std::fmt::Display for Error {
             }
             Self::BranchExists { branch } => {
                 write!(formatter, "A branch named {branch} already exists")
+            }
+            Self::InvalidBase { base } => {
+                write!(formatter, "{base} is not a branch to start from")
             }
             Self::MissingButRegistered { path } => write!(
                 formatter,
@@ -430,7 +440,8 @@ pub fn list(directory: &Path) -> Result<Vec<Worktree>, Error> {
 /// it can be read: [`remove`] deliberately never deletes a branch, so every
 /// checkout Crook has made and unmade has left its branch behind with nothing
 /// checked out on it. Those are exactly the names a listing of *worktrees*
-/// cannot see and `add` still refuses.
+/// cannot see and `add` still refuses. It is also the list a new worktree can
+/// be started from, and what [`default_branch`] checks its fallbacks against.
 pub fn branches(directory: &Path) -> Result<Vec<String>, Error> {
     let finished = run(
         directory,
@@ -462,6 +473,82 @@ pub fn branches(directory: &Path) -> Result<Vec<String>, Error> {
         .filter(|name| !name.is_empty())
         .map(str::to_owned)
         .collect())
+}
+
+/// The branch new work in the repository containing `directory` usually
+/// starts from, as a full ref name — `refs/remotes/origin/main`,
+/// `refs/heads/main` — or `None` when nothing names one.
+///
+/// **Blocking.** One subprocess, and a second only when the first has no
+/// answer; background executor only, like everything else here.
+///
+/// A full ref rather than the short name, because it is what [`add`] is
+/// handed and a short name is resolved against tags and local branches before
+/// remote ones: `origin/main` is a legal name for a *local* branch too, and a
+/// repository holding one would start the worktree somewhere nobody picked.
+///
+/// `branches` is [`branches`]'s answer, which every caller has just read on
+/// the same worker; reading it again here would be a third subprocess for a
+/// list already in hand. `choose_default`, below, is the order the answers
+/// are tried in.
+pub fn default_branch(directory: &Path, branches: &[String]) -> Option<String> {
+    let read = |args: &[&OsStr]| {
+        run(directory, args, Intent::Read)
+            .ok()
+            .filter(|finished| finished.success)
+            .map(|finished| String::from_utf8_lossy(&finished.stdout).trim().to_owned())
+            .filter(|answer| !answer.is_empty())
+    };
+
+    // `for-each-ref` rather than `symbolic-ref`, for what it leaves out: a
+    // remote HEAD that names a branch a `fetch --prune` has since deleted is
+    // skipped as broken, where `symbolic-ref` would read the dangling target
+    // back and `add` would then refuse it as an invalid reference.
+    let origin_head = read(&[
+        OsStr::new("for-each-ref"),
+        OsStr::new("--format=%(symref)"),
+        OsStr::new("refs/remotes/origin/HEAD"),
+    ]);
+    if origin_head.is_some() {
+        return choose_default(origin_head.as_deref(), None, branches);
+    }
+
+    let configured = read(&[
+        OsStr::new("config"),
+        OsStr::new("--get"),
+        OsStr::new("init.defaultBranch"),
+    ]);
+    choose_default(None, configured.as_deref(), branches)
+}
+
+/// Which of the answers [`default_branch`] read is the default branch.
+///
+/// In the order a person would look. What the remote says its default is
+/// comes first — `origin/HEAD`, which `clone` writes and
+/// `git remote set-head` refreshes — because it is the one answer about *this*
+/// repository rather than about the machine. Then `init.defaultBranch`, then
+/// `main`, then `master`, each only if the repository has a branch by that
+/// name: the configuration is the machine's, and says nothing about a
+/// repository that was cloned before it was set or made somewhere else.
+///
+/// Nothing that looks like a default is `None`, not a guess. A creator
+/// offering a branch that does not exist is offering a failure.
+///
+/// Pure, so the order can be tested without four repositories.
+fn choose_default(
+    origin_head: Option<&str>,
+    configured: Option<&str>,
+    branches: &[String],
+) -> Option<String> {
+    if let Some(head) = origin_head.filter(|head| !head.is_empty()) {
+        return Some(head.to_owned());
+    }
+    configured
+        .into_iter()
+        .chain(["main", "master"])
+        .filter(|name| !name.is_empty())
+        .find(|name| branches.iter().any(|branch| branch == name))
+        .map(|name| format!("refs/heads/{name}"))
 }
 
 /// What is loose in `worktree`: what a removal would refuse over, and what it
@@ -548,18 +635,43 @@ fn stranded(worktree: &Path) -> Result<usize, Error> {
 /// `git worktree add` will guess, and with no `-b` it can decide the path's
 /// basename names a *remote* branch and go and fetch it. An explicit `-b` and
 /// an explicit start point leave it nothing to guess with.
+///
+/// `base` is whatever git resolves — a full ref such as
+/// `refs/remotes/origin/main` is what [`default_branch`] hands out, and is the
+/// form that cannot be mistaken for a tag. It is refused as
+/// [`Error::InvalidBase`] without git being asked when it is empty or begins
+/// with a dash: `--` already keeps it from being read as an option, but past
+/// `--` git still reads a lone `-` as `@{-1}`, the branch checked out before
+/// this one, and a worktree started there is one nobody picked. No object
+/// name begins with a dash, `git branch` refuses to make a branch that does,
+/// and every base the creator offers is a full ref besides, so nothing real
+/// is turned away.
+///
+/// The new branch is made with no upstream, whatever it starts from. That is
+/// what a branch made from `HEAD` always had; made from `origin/main` git
+/// would otherwise set `origin/main` as its upstream, and a branch called
+/// `worktree/amber-anchor-0155` whose upstream is `origin/main` is one a
+/// plain `git push` refuses and a plain `git pull` merges `main` into.
 pub fn add(repository: &Path, path: &Path, branch: &str, base: Option<&str>) -> Result<(), Error> {
+    let base = base.unwrap_or("HEAD");
+    if base.is_empty() || base.starts_with('-') {
+        return Err(Error::InvalidBase {
+            base: base.to_owned(),
+        });
+    }
+
     let finished = run(
         repository,
         &[
             OsStr::new("worktree"),
             OsStr::new("add"),
+            OsStr::new("--no-track"),
             OsStr::new("-b"),
             OsStr::new(branch),
             // So a path beginning with a dash is a path.
             OsStr::new("--"),
             path.as_os_str(),
-            OsStr::new(base.unwrap_or("HEAD")),
+            OsStr::new(base),
         ],
         Intent::Write,
     )?;
@@ -973,6 +1085,13 @@ fn classify_line(line: &str) -> Option<Error> {
     {
         return Some(Error::BranchExists {
             branch: branch.to_owned(),
+        });
+    }
+    // Unquoted, unlike everything else here: the name runs to the end of the
+    // line.
+    if let Some((_, base)) = line.split_once("invalid reference:") {
+        return Some(Error::InvalidBase {
+            base: base.trim().to_owned(),
         });
     }
     if line.contains("is a missing but already registered worktree")

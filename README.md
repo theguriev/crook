@@ -444,8 +444,10 @@ Nineteen features, and the page that configures them:
   ones other tabs are in, and the rest. Choosing one opens a tab there — or brings forward the tab
   already in it, because two agents editing one checkout is exactly what a worktree exists to
   prevent. `New worktree…` asks for a branch name, fills one in that nothing is using, shows
-  where the checkout will go, and opens a tab in it — folded into a group with the tab that
-  asked for it. Removal is offered only for a checkout
+  where the checkout will go, and asks where the branch starts: this tab's own branch, already
+  picked, the repository's default branch (`origin/HEAD`, else `main` or `master`) one arrow
+  below it, and every other local branch after that. Then it opens a tab in it — folded into
+  a group with the tab that asked for it. Removal is offered only for a checkout
   that is not locked, not the main one, and not one a tab is working in; it says what it will
   delete first, and it never deletes the branch. One row down, `Remove 3 free checkouts…`
   does the same to all of them at once — it looks in each one first, names the branches that

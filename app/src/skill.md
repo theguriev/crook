@@ -79,9 +79,10 @@ opened from it — which is what says two checkouts are one piece of work.
 
 Worktrees are reached from a tab's own menu: right-click its row and, inside a repository,
 `Worktrees` lists that repository's checkouts. Choosing one opens a tab there, or brings
-forward the tab already in it; `New worktree…` asks for a branch name and opens a tab in a
-checkout under Crook's own store, folded into a group with the tab that asked. There is no
-command-line flag for any of this; tell the person where the menu is.
+forward the tab already in it; `New worktree…` asks for a branch name and where it starts —
+the tab's own branch unless the repository's default branch or another is picked — and opens
+a tab in a checkout under Crook's own store, folded into a group with the tab that asked.
+There is no command-line flag for any of this; tell the person where the menu is.
 
 ## Where things are
 
