@@ -303,15 +303,16 @@ Nineteen features, and the page that configures them:
   only.
   **And wait for it, and read what it did.** `crook pane wait 7 --until needs-input --timeout
   600` blocks until pane 7's agent stops for a person — or is `idle`, or its command has
-  `finished`, or the pane has `exited` — and prints where it got to, failing when the time runs
-  out first; `crook pane blocks 7 --last 1` prints its newest finished command with what it
-  printed, its exit status, how long it took and where, the end of a long output kept and marked
-  cut; `crook events --follow` is a line of JSON for every status, every command started and
-  finished and every tab opened and closed, and a reader that falls behind is told how many it
-  missed rather than held for. A pane may watch itself and the tabs it opened, and nothing a
-  person opened: that needs a grant Crook cannot ask for yet. An interactive agent is one live
-  screen with no finished command to read, and `pane blocks` says so; a worker whose answer is
-  meant to be read runs headless, `claude -p`.
+  `finished`, or the pane has `exited`, even before you asked — and prints where it got to,
+  failing when the time runs out first; `crook pane blocks 7 --last 1` prints its newest
+  finished command with what it printed, its exit status, how long it took and where, the end of
+  a long output kept and marked cut; `crook events --follow` is a line of JSON for every status,
+  every command finished (named, with its exit status) or seen running, and every tab opened and
+  closed, and a reader that falls behind is told how many it missed rather than held for. A
+  pane may watch itself and the tabs it opened, and nothing a person opened: that needs a grant
+  Crook cannot ask for yet. A command still running has not finished, and an interactive agent
+  is one live screen with no finished command to read: `pane blocks` says so rather than
+  printing nothing, and a worker whose answer is meant to be read runs headless, `claude -p`.
   A status the agent never took back goes when the shell's own marks say the command ended,
   and a failure stays on the row until the next command starts. Looking at a tab clears the
   *attention* it asked for and nothing else: an agent waiting for an approval is still waiting
