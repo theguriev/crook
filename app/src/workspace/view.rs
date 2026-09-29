@@ -1286,13 +1286,13 @@ impl Workspace {
     }
 
     /// Where the creator offers to start a branch from: what each row says,
-    /// and the ref it would hand git — `None` for the tab's own `HEAD`. For a
-    /// test.
-    pub fn worktree_bases(&self) -> Vec<(String, Option<String>)> {
+    /// the ref it would hand git — `None` for the tab's own `HEAD` — and the
+    /// badge on its right, which is what marks the default branch. For a test.
+    pub fn worktree_bases(&self) -> Vec<(String, Option<String>, Option<&'static str>)> {
         self.tab_menu
             .bases
             .iter()
-            .map(|base| (base.label.clone(), base.reference.clone()))
+            .map(|base| (base.label.clone(), base.reference.clone(), base.badge))
             .collect()
     }
 

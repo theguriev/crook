@@ -709,8 +709,9 @@ impl Harness {
     }
 
     /// Where the creator offers to start a branch from: what each row says,
-    /// and the ref it would hand git — `None` for the tab's own `HEAD`.
-    fn worktree_bases(&self) -> Vec<(String, Option<String>)> {
+    /// the ref it would hand git — `None` for the tab's own `HEAD` — and its
+    /// badge.
+    fn worktree_bases(&self) -> Vec<(String, Option<String>, Option<&'static str>)> {
         self.workspace
             .read(&self.app, |workspace, _| workspace.worktree_bases())
     }
@@ -5118,17 +5119,33 @@ fn the_creator_offers_the_tabs_own_head_and_the_default_branch_and_starts_from_t
     });
     harness.dispatch_worktree(WorktreeAction::StartCreating);
 
+    // In the creator's order and not git's: the default branch under the
+    // tab's own, and the branch that sorts before it after both.
     let bases = harness.worktree_bases();
     assert_eq!(
         bases.first(),
-        Some(&("feature".to_owned(), None)),
+        Some(&("feature".to_owned(), None, Some("this tab"))),
         "the tab's own HEAD is not the first place offered: {bases:?}"
     );
     assert_eq!(
         bases.get(1),
-        Some(&(first.clone(), Some(format!("refs/heads/{first}")))),
+        Some(&(
+            first.clone(),
+            Some(format!("refs/heads/{first}")),
+            Some("default")
+        )),
         "the default branch is not offered right under it: {bases:?}"
     );
+    assert_eq!(
+        bases.get(2),
+        Some(&(
+            SORTS_FIRST.to_owned(),
+            Some(format!("refs/heads/{SORTS_FIRST}")),
+            None
+        )),
+        "the other branches do not follow the two: {bases:?}"
+    );
+    assert_eq!(bases.len(), 3, "a place is offered twice: {bases:?}");
     assert_eq!(
         harness.worktree_base(),
         Some(0),
@@ -5187,6 +5204,17 @@ fn a_worktree_made_with_the_default_branch_picked_starts_there_and_not_at_the_ta
     });
     harness.dispatch_worktree(WorktreeAction::StartCreating);
 
+    // One arrow down is the default branch, and not whichever branch git
+    // happens to list first: the fixture has one that sorts before it.
+    assert_eq!(
+        harness
+            .worktree_bases()
+            .get(1)
+            .map(|(label, _, badge)| (label.clone(), *badge)),
+        Some((first.clone(), Some("default"))),
+        "the default branch is not one arrow down"
+    );
+
     // The arrows walk the bases while the name field keeps the letters, and
     // stop at the ends the way the list's arrows do.
     assert!(harness.press_key("down", Modifiers::default()));
@@ -5221,19 +5249,38 @@ fn a_worktree_made_with_the_default_branch_picked_starts_there_and_not_at_the_ta
         "the checkout did not start at the default branch"
     );
     assert_ne!(
-        Some(head),
+        Some(head.clone()),
         git_says(&repository, &["rev-parse", "feature"]),
         "the checkout started at the tab's own HEAD anyway"
     );
+    assert_ne!(
+        Some(head),
+        git_says(&repository, &["rev-parse", SORTS_FIRST]),
+        "the checkout started at the branch git lists first"
+    );
 }
+
+/// The branch [`repository_on_a_feature_branch`] adds so that git's own order
+/// and the creator's differ: it sorts before any name a first branch has, so
+/// in a plain list of branches it would be the row under the tab's own.
+const SORTS_FIRST: &str = "0-sorts-first";
 
 /// A [`scratch_repository`] with a `feature` branch one commit past its first
 /// one, and `feature` checked out — and the first branch's name, which is
-/// whatever this machine's git calls a new repository's first branch.
+/// whatever this machine's git calls a new repository's first branch, and so
+/// the repository's default branch however this machine answers that.
+///
+/// Beside them, [`SORTS_FIRST`], on a commit of its own. Without it the
+/// default branch would be the second row by alphabet alone, and a test that
+/// found it there would pass whether or not the creator put it there.
 fn repository_on_a_feature_branch(directory: &Path) -> Option<(PathBuf, String)> {
     let repository = scratch_repository(directory)?;
     let first = git_says(&repository, &["symbolic-ref", "--short", "HEAD"])?;
-    git_says(&repository, &["switch", "--quiet", "-c", "feature"])?;
+    git_says(&repository, &["switch", "--quiet", "-c", SORTS_FIRST])?;
+    fs::write(repository.join("ELSEWHERE"), "somewhere else\n").ok()?;
+    git_says(&repository, &["add", "-A"])?;
+    git_says(&repository, &["commit", "--quiet", "-m", "elsewhere"])?;
+    git_says(&repository, &["switch", "--quiet", "-c", "feature", &first])?;
     fs::write(repository.join("FEATURE"), "one commit ahead\n").ok()?;
     git_says(&repository, &["add", "-A"])?;
     git_says(&repository, &["commit", "--quiet", "-m", "two"])?;
