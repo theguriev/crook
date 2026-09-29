@@ -61,6 +61,15 @@ const DIRECTORY: &str = "crook-control";
 /// held by a client that connects and says nothing.
 pub const DEADLINE: Duration = Duration::from_secs(5);
 
+/// How much of a connection's time is kept back for its reply.
+///
+/// The window is asked to answer this long before the deadline rather than at
+/// it. Waited on until the deadline itself, a window that did not answer
+/// would be refused as `timeout` when the connection had no time left to
+/// write the refusal in, and the line would close on the client with nothing
+/// on it — a hang-up where the protocol promises a code.
+const REPLY_MARGIN: Duration = Duration::from_millis(250);
+
 /// How many connections are answered at once. The next is refused as `busy`.
 ///
 /// A thread each, and only this user can connect, so the cap is not a defence
@@ -403,8 +412,11 @@ pub fn converse(
         }
 
         if !line.iter().all(u8::is_ascii_whitespace) {
+            // Short of the deadline, so that a window which runs out of time
+            // still has some left to say so in: see `REPLY_MARGIN`.
+            let answer_by = deadline.checked_sub(REPLY_MARGIN).unwrap_or(deadline);
             let reply = match protocol::read(&line) {
-                (id, Ok(verb)) => match answer(verb, deadline) {
+                (id, Ok(verb)) => match answer(verb, answer_by) {
                     Ok(result) => Reply::answered(id, result),
                     Err(refusal) => Reply::refused(id, refusal),
                 },

@@ -1161,14 +1161,15 @@ keeps a sweep off a socket another Crook bound a moment ago and has not started 
 The socket is removed when the window closes. One OS thread accepts, because it blocks for as
 long as nobody connects — the reason a pty reader is a thread and not a pool worker — and each
 connection gets a short-lived thread of its own, eight at once and the ninth refused as `busy`.
-A connection has five seconds all told and a line 64 KiB; a longer line is refused as
-`too-long` and the connection closed, since nothing says where the next line starts. A question
-that needs the window is posted to it and answered on the main thread through the `ctx.spawn` a
-pty's output comes home by, while the connection's thread waits out the rest of its five
-seconds: the UI thread never blocks on a socket, and a client that stops reading costs its own
-thread and nothing more. **Windows has no socket yet**: nothing listens there, and the CLI says
-the command is not available on that platform. An owner-only named pipe with
-`PIPE_REJECT_REMOTE_CLIENTS` is the route when it comes.
+A connection has five seconds all told and a line 64 KiB; a longer line is refused as `too-long`
+and the connection closed, since nothing says where the next line starts. A question that needs
+the window is posted to it and answered on the main thread through the `ctx.spawn` a pty's
+output comes home by, while the connection's thread waits for the answer until a quarter of a
+second before its five are up — the quarter being what it writes `timeout` back in, so a window
+that could not answer says so rather than hanging up: the UI thread never blocks on a socket,
+and a client that stops reading costs its own thread and nothing more. **Windows has no socket
+yet**: nothing listens there, and the CLI says the command is not available on that platform. An
+owner-only named pipe with `PIPE_REJECT_REMOTE_CLIENTS` is the route when it comes.
 
 **The protocol.** Newline-delimited JSON, one object a line each way. A request is
 `{"v":1,"verb":"pane.list"}`, with an optional `id` of any JSON value the reply echoes and an

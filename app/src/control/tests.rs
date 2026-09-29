@@ -617,6 +617,40 @@ mod socket {
     }
 
     #[test]
+    fn a_question_the_window_does_not_get_to_is_refused_as_a_timeout_before_the_line_closes() {
+        // A real inbox that nothing serves: a window whose main thread is
+        // held the whole time, by a long frame or a blocked save.
+        let inbox = Arc::new(Inbox::default());
+        let asking = inbox.clone();
+        let (mut client, answering) = conversation(
+            Arc::new(move |verb, deadline| asking.ask(verb, deadline)),
+            Duration::from_millis(600),
+        );
+        client.send(&protocol::request_line(Verb::PaneList));
+        let reply = client
+            .reply()
+            .expect("the window says it ran out of time, rather than hanging up");
+        assert!(!reply.ok);
+        assert_eq!(reply.error.expect("a refusal").code, code::TIMEOUT);
+        answering.join().expect("the connection's thread");
+    }
+
+    #[test]
+    fn the_command_line_hears_timeout_from_a_window_that_never_answers() {
+        let root = TempDir::new();
+        // Opened and never served: every question goes unanswered until its
+        // time is up, and the command line has to wait long enough to be told.
+        let control = Control::open_in(&root.sockets()).expect("opens");
+        let path = control.path().expect("a socket").to_owned();
+        let refusal = cli::unix::listing(&path, true, None).expect_err("never answered");
+        let said = refusal.to_string();
+        assert!(
+            said.contains("did not answer in time") && said.contains("timeout"),
+            "{said}"
+        );
+    }
+
+    #[test]
     fn the_socket_is_this_users_alone() {
         let root = TempDir::new();
         let directory = root.sockets();
