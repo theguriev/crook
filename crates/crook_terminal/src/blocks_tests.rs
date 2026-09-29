@@ -566,6 +566,45 @@ fn test_a_block_is_filed_under_the_directory_reported_before_it_however_the_read
 }
 
 #[test]
+fn test_a_replay_that_runs_ahead_of_the_clock_harvests_a_block_without_the_update_it_held() {
+    // The clock is part of the stream as well as the reads. A synchronized
+    // update the child never ended — it was killed mid-frame — is let go by
+    // time, 150 ms after it opened, and only a feed or a paint looks. Fed at
+    // the pace the original arrived, a replay lets it go where the original
+    // did; fed ahead of it, the `D` is placed against a screen that has not
+    // drawn the update, and the block is harvested without it.
+    let prompt = format!("{A}$ {B}");
+    let make = format!("make\r\n{C}\x1b[?2026hbuilt\r\n");
+    let done = format!("\x1b]133;D;0\x07{A}$ {B}");
+    let stream = [
+        Fed::Output(prompt.as_bytes()),
+        Fed::Submitted("make"),
+        Fed::Output(make.as_bytes()),
+        Fed::Output(done.as_bytes()),
+    ];
+    let before = &stream[..3];
+
+    let mut direct = lived(before);
+    let mut paced = mirrored(before);
+    let mut hurried = mirrored(&stream);
+    std::thread::sleep(Duration::from_millis(200));
+    direct.advance(done.as_bytes());
+    paced.advance_mirrored(Fed::Output(done.as_bytes()));
+
+    let rows = |emulator: &Emulator| {
+        emulator
+            .blocks()
+            .iter()
+            .map(|block| block.rows.to_text())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(vec!["$ make\nbuilt"], rows(&direct));
+    assert_eq!(everything(&mut direct), everything(&mut paced));
+    assert_eq!(vec!["$ make"], rows(&hurried), "fed ahead of the clock");
+    assert_ne!(everything(&mut direct), everything(&mut hurried));
+}
+
+#[test]
 fn test_a_second_submission_while_one_is_running_is_ignored() {
     let mut emulator = emulator();
     emulator.advance(format!("{A}$ {B}").as_bytes());

@@ -715,10 +715,17 @@ answers again. And the stream it takes is made of `Fed` items, so that the one b
 `Terminal::submit` hands the emulator out of band can travel with the output as an item of
 its own. It is not spliced into the child's bytes, because a submit falls between two reads
 and a read can end inside an escape sequence: bytes spliced in there would end the sequence.
-The link is a trait object rather than a type parameter because no keystroke passes through
-it: a write goes through the writer the link handed out once and output through the reader
-it handed out once, both of them boxed trait objects before the link existed, so the box
-costs one indirect call per resize and per child poll.
+The items are not all a replay has to keep: it makes the blocks the stream's own emulator made
+only when each read is fed as the item it was, and at the pace the reads came. The pace,
+because a synchronized update the child never ended is let go by the clock, at the first feed
+or paint 150 ms after it opened, so a replay that runs ahead of that places the marks after it
+against a screen that has not drawn the update. The reads, because each one's arrival is a
+moment that clock is looked at, and the end of one is where the first row of a block is looked
+for again after `clear`. Those are the conditions known to matter, not a list proven complete.
+The link is a trait object rather than a type parameter because no keystroke passes through it:
+a write goes through the writer the link handed out once and output through the reader it
+handed out once, both of them boxed trait objects before the link existed, so the box costs one
+indirect call per resize and per child poll.
 
 ### Which shell, and how it is started
 

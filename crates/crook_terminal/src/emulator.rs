@@ -66,6 +66,20 @@ use crate::snapshot::{self, Palette, Snapshot, TerminalSize};
 /// point. Nothing a child prints can pass for one, either. Turning a stream of
 /// these into bytes is the writer's job, and framing them is how it keeps a
 /// submit apart from the output around it.
+///
+/// The items are not all a replay has to keep. An emulator of the same size
+/// fed the same items in the same order makes the blocks the stream's own
+/// emulator made only when each read is fed as the [`Fed::Output`] it was, and
+/// at the pace the reads arrived. The pace, because the clock is part of the
+/// stream: a synchronized update the child never ended is let go by time, at
+/// the first feed or paint 150 ms after it opened, and a replay that runs
+/// ahead of that places the marks after it against a screen that has not
+/// drawn the update, and harvests their block without it. The reads, because
+/// each one's arrival is a moment the emulator looks at that clock, and
+/// because the end of a read is where the first row of a block is looked for
+/// again after `clear` erased the history above it, so joining or cutting
+/// reads can change whether that block keeps the blank rows it began with.
+/// Those are the conditions known to matter, not a list proven complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Fed<'a> {
     /// Output from the child: one read's worth, exactly as it was read.
