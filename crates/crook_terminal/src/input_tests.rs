@@ -27,6 +27,17 @@ fn test_the_editing_keys_send_their_control_codes() {
 }
 
 #[test]
+fn test_focus_is_reported_only_to_a_program_that_asked() {
+    // A shell never asks, and would read the report as typing.
+    assert_eq!(None, focus(true, false));
+    assert_eq!(None, focus(false, false));
+
+    // `?1004h` set: xterm's two sequences, the keyboard arriving and leaving.
+    assert_eq!(Some(&b"\x1b[I"[..]), focus(true, true));
+    assert_eq!(Some(&b"\x1b[O"[..]), focus(false, true));
+}
+
+#[test]
 fn test_shift_tab_is_back_tab() {
     assert_eq!(b"\x1b[Z".to_vec(), held(Key::Tab, Modifiers::SHIFT));
 }

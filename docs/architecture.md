@@ -1129,6 +1129,33 @@ the panel is drawn and never ticked), the title and the question, which of the b
 status change set `attention` and whether `marked` is set, and what the shell is running —
 on a read-only panel that hangs off the menu's corner where the worktree list does.
 
+**Looking needs the window in front.** "Nobody was looking" meant "the pane without the
+keyboard", and that made the one-pane window the one that could never be waiting: its pane
+has the keyboard the whole time somebody is in another application, so an agent that stopped
+to ask there never reached the count, the title or the chip. crookui forwards winit's
+`WindowEvent::Focused` as `Event::WindowFocused`, the workspace keeps the bit, and
+`Workspace::looking_at` — the pane with the keyboard while the window has the desktop's
+focus, and nothing while it does not — is the one answer `ring`, `agent_reported`, `attend`
+and the tabs plugin's count, chord and group roll-up read. A window starts out focused, which
+is what every window was before the bit existed, so a desktop that never says changes nothing.
+`attend` does nothing while the window is behind another, because a pane the strip moves to
+then is a pane nobody saw. Coming back to the window runs it for the pane with the keyboard,
+with the pane that had it on leaving as `before`: the same pane is a glance, which answers the
+attention asked for while nobody was there and leaves a person's mark, since the strip did
+not move; a pane the strip moved to in the meantime — a shell that exited closed the one in
+front — is arrived at, and its mark goes as it would have on the move itself. The panel's
+rows keep asking only whether a row is the selected one: the selected row is painted as
+selected whether or not it is waiting, so the window's focus would change nothing on it.
+
+**Focus reports ride the same bit.** A program that sets `?1004` is sent xterm's `CSI I` and
+`CSI O` (`crook_terminal::input::focus`, read against the emulator's mode by
+`Terminal::send_focus`), and a pane stands in for xterm's window: the window going behind
+another and coming back is out and in for the looked-at pane, and a tab switch or a split's
+focus move inside a window in front is out for the pane left and in for the pane reached,
+in that order. `Workspace::report_focus` compares the looked-at pane before and after, from
+`set_window_focused` and from `settle`, so no gesture has a path of its own. Nothing is sent
+until a program asks, which is what keeps `[I` off a shell's command line.
+
 **The strip answers.** A waiting row is washed in the amber its dot shows, faintly, because a
 dot is nine pixels and a person scanning a long list wants the row to say it. A group folded
 away carries the worst of the rows it hides on its heading — the same wash when any member is
@@ -1143,6 +1170,27 @@ pane after the active tab in the panel's order and round the end of it, so the c
 three times visits three tabs rather than the same two in turn. Focusing it is what answers
 the request for a look; an agent's own question stays asked until the agent says otherwise,
 which is why the pane you just left can be waiting again the moment you leave it.
+
+**And outside the window.** The window's title carries the same count in front of the active
+tab's name, and when the count *rises* while the window is behind something else the shell
+asks the desktop to point at it through `Proxy::request_attention`, winit's
+`request_user_attention` with the informational kind: one dock bounce on macOS, the urgency
+hint on X11, an xdg-activation request on Wayland, a taskbar flash on Windows, all from winit
+and no dependency of Crook's own. A rise rather than a count above zero, because the panes
+waiting as a person leaves are panes they just saw — the pane they leave with a question on
+it joins the count at that moment without being news — so the count on leaving is the mark
+the next one has to pass (`Urgency` in `app/src/lib.rs`). crookui asks only while the window
+does not have the focus, checked when the request reaches the window rather than trusted to
+the platform, and takes the request back itself when the window next gains the focus, which
+only X11 needs: Windows stops its flash when the window comes to the front, macOS bounces
+once and a Wayland compositor clears its own. It is not a notification: it names only the
+window. Both the title and the request follow every change to the window's views — the
+invalidation callback that asks for a frame, through `Beacon` — and not the frame, because
+the window they are for may get no frames: a Wayland compositor sends no frame callback to a
+surface it is not showing and winit holds every redraw back until that callback comes, and
+wgpu refuses to present to an occluded window on macOS. That covers the window's opening
+too: registering the callback is itself an update, and its flush runs the callback for
+everything the window opened with, since no frame has taken any of it yet.
 
 What is deliberately not here is a plugin. `docs/plugins.md` planned this seam as an `Agent`
 service a plugin provides, and that is still the right shape for anything that *drives* an

@@ -665,6 +665,20 @@ pub struct Workspace {
     /// keeping a resolved theme here as well would be a second copy of an
     /// answer that already has one.
     system_is_dark: bool,
+    /// Whether the window has the desktop's keyboard focus, as of the last
+    /// thing the window said about it.
+    ///
+    /// Focused until told otherwise, which is what every window was before
+    /// this was recorded: a desktop that never says leaves the strip exactly
+    /// as it always behaved.
+    window_focused: bool,
+    /// The pane that had the keyboard when the window last went behind
+    /// something else, until the window comes back.
+    ///
+    /// What coming back is measured against: the same pane in front again is
+    /// a glance, and a pane the strip moved to while nobody was there is
+    /// arrived at. See [`Self::set_window_focused`].
+    looked_at_when_left: Option<PaneId>,
     interactions: HashMap<PaneId, PaneInteraction>,
     /// What the mouse is doing to each tab's chrome in the panel.
     ///
@@ -983,6 +997,8 @@ impl Workspace {
             watching_keybindings: false,
             window_size: Rc::new(std::cell::Cell::new(Vector2F::zero())),
             system_is_dark: true,
+            window_focused: true,
+            looked_at_when_left: None,
             interactions: HashMap::new(),
             tab_chrome: HashMap::new(),
             group_chrome: HashMap::new(),
@@ -1145,6 +1161,84 @@ impl Workspace {
     /// said.
     pub fn system_is_dark(&self) -> bool {
         self.system_is_dark
+    }
+
+    /// Records whether the window has the desktop's keyboard focus, and
+    /// settles what that moves.
+    ///
+    /// Window focus is half of looking — see [`Self::looking_at`] — so a
+    /// window going behind another takes its focused pane out of sight with
+    /// it, and coming back is looking at whichever pane has the keyboard
+    /// then: the attention it asked for while nobody was there is answered,
+    /// as a tab switch answers it. Coming back is measured against the pane
+    /// that had the keyboard on leaving, which is `attend`'s rule for every
+    /// settle: when it is the same pane the strip did not move, this is not
+    /// *arriving* and a person's own mark on it stays; when the strip moved
+    /// while nobody was there — a shell exiting closed the pane, a plugin
+    /// switched tabs — the pane in front now is arrived at, mark and all. A
+    /// program in the pane that asked for focus reports hears the keyboard go
+    /// and come back.
+    pub fn set_window_focused(&mut self, focused: bool, ctx: &mut ViewContext<Self>) {
+        if self.window_focused == focused {
+            return;
+        }
+        let before = self.looking_at();
+        self.window_focused = focused;
+        self.report_focus(before, ctx);
+        if focused {
+            let left = self.looked_at_when_left.take();
+            self.attend(left, ctx);
+        } else {
+            self.looked_at_when_left = before;
+        }
+        // The count in the header changes with it even when no attention
+        // does: the focused pane's own question is on it only while the
+        // window is behind something else.
+        ctx.notify();
+    }
+
+    /// Whether the window has the desktop's keyboard focus, as of the last
+    /// thing the window said.
+    pub fn is_window_focused(&self) -> bool {
+        self.window_focused
+    }
+
+    /// The pane a person is looking at: the one with the keyboard, while the
+    /// window has the desktop's. `None` while the window is behind something
+    /// else.
+    ///
+    /// The one answer to "is anybody looking at this pane?" — the bell, the
+    /// agent's report, the count in the header and the title all ask it. The
+    /// pane with the keyboard alone was the answer once, and it made the
+    /// one-pane window the one that could never be waiting: its pane has the
+    /// keyboard the whole time somebody is in another application.
+    pub fn looking_at(&self) -> Option<PaneId> {
+        if !self.window_focused {
+            return None;
+        }
+        self.tabs.focused_pane_id()
+    }
+
+    /// Tells the programs that asked for focus reports that the keyboard
+    /// moved: the pane looked at `before` hears it leave, and the pane looked
+    /// at now hears it arrive.
+    ///
+    /// xterm's `?1004` is about the terminal's own window; a pane is that
+    /// window here, so a split or a tab switch inside a window in front is a
+    /// focus change for the two panes it moves between, exactly as the window
+    /// going behind another is for the one pane that had the keyboard. Out
+    /// before in, which is the order a program between two xterms would see.
+    fn report_focus(&self, before: Option<PaneId>, ctx: &ViewContext<Self>) {
+        let now = self.looking_at();
+        if before == now {
+            return;
+        }
+        let terminals = self.terminals.as_ref(ctx);
+        for (pane, focused) in [(before, false), (now, true)] {
+            if let Some(handle) = pane.and_then(|pane| terminals.handle(pane)) {
+                handle.send_focus(focused);
+            }
+        }
     }
 
     /// Turns following the desktop on or off.
@@ -5225,23 +5319,24 @@ impl Workspace {
     ///
     /// A bell is a program saying "look at me", so it becomes the one status
     /// that means exactly that — and only in a pane nobody is looking at. The
-    /// pane with the keyboard is already being looked at, and a shell that
-    /// rings on every ambiguous Tab completion would otherwise paint its own
-    /// row amber while somebody typed in it.
+    /// pane with the keyboard, in a window in front, is already being looked
+    /// at, and a shell that rings on every ambiguous Tab completion would
+    /// otherwise paint its own row amber while somebody typed in it.
     ///
-    /// It is cleared by looking: [`Self::attend`] runs on every focus change.
+    /// It is cleared by looking: [`Self::attend`] runs on every focus change,
+    /// the window's included.
     ///
     /// Plugins watching for a bell are told about *every* one, including the
-    /// focused pane's, because "focused" here means the pane the keyboard is
-    /// in and not a person's attention: an agent left running in the only
-    /// pane a window has is focused the whole time somebody is away from it,
-    /// and a bell suppressed on that ground would be the one bell that
+    /// looked-at pane's, because looking here means the keyboard and the
+    /// window's focus and not a person's attention: a window left in front
+    /// of an empty chair has its pane looked at the whole time nobody is
+    /// there, and a bell suppressed on that ground would be the one bell that
     /// mattered. What the strip does with a bell and what a plugin does with
     /// one are different questions, and this is where they part.
     fn ring(&mut self, pane: PaneId, while_running: bool, ctx: &mut ViewContext<Self>) -> bool {
         self.bell_rang(pane, while_running, ctx);
 
-        if self.tabs.focused_pane_id() == Some(pane) {
+        if self.looking_at() == Some(pane) {
             // Not "nothing to write into" — the pane is there and the bell was
             // heard. Reporting `true` is what keeps this out of the log line
             // that means a pane has gone.
@@ -5277,7 +5372,7 @@ impl Workspace {
         source: StatusSource,
         ctx: &mut ViewContext<Self>,
     ) -> bool {
-        let looking = self.tabs.focused_pane_id() == Some(pane);
+        let looking = self.looking_at() == Some(pane);
         self.update_session(pane, ctx, |session| {
             if let Some(title) = title {
                 session.derived_title = Some(title);
@@ -5305,8 +5400,13 @@ impl Workspace {
     /// has it now. Every action settles through here, including the ones that
     /// move nothing, and "still looking at the tab I marked to come back to"
     /// is exactly the state the mark exists to survive.
+    ///
+    /// Nothing is attended while the window is behind something else: a pane
+    /// the strip moves to then is a pane nobody saw. Coming back to the
+    /// window runs this for whichever pane has the keyboard by then, with
+    /// the pane that had it on leaving as `before`.
     fn attend(&mut self, before: Option<PaneId>, ctx: &mut ViewContext<Self>) {
-        let Some(pane) = self.tabs.focused_pane_id() else {
+        let Some(pane) = self.looking_at() else {
             return;
         };
         let arrived = before != Some(pane);
@@ -5626,7 +5726,10 @@ impl Workspace {
         // answer for the state the frame is about to draw. Every action comes
         // through here, which is what makes looking at a pane the one and only
         // thing that quiets its bell — and what brings the row it selected
-        // into view whichever gesture selected it.
+        // into view whichever gesture selected it. The window's focus cannot
+        // change inside an action, so the pane looked at before is `before`
+        // whenever the window is in front and nothing when it is not.
+        self.report_focus(before.filter(|_| self.window_focused), ctx);
         self.attend(before, ctx);
         self.scroll_row_into_view();
         // After the strip has moved, which is every way a pane closes: the

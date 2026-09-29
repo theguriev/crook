@@ -1250,6 +1250,22 @@ impl TerminalHandle {
         })
     }
 
+    /// Tells the program in this pane that the keyboard arrived or left, if it
+    /// asked to be told, returning whether anything was sent.
+    ///
+    /// Not scrolled to the bottom, unlike a key: nobody typed anything, and a
+    /// person who scrolled back to read and then switched windows should come
+    /// back to what they were reading.
+    pub fn send_focus(&self, focused: bool) -> bool {
+        self.drive(|terminal| match terminal.send_focus(focused) {
+            Ok(sent) => sent,
+            Err(error) => {
+                log::debug!("could not tell a shell about the keyboard: {error}");
+                false
+            }
+        })
+    }
+
     /// Which mouse reports the program in this pane has asked for.
     ///
     /// The one question a pointer gesture asks before it does anything: with
