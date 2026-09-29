@@ -336,8 +336,11 @@ pub(super) fn refusal(workspace: &Workspace, plan: &Plan, discard: bool) -> Opti
 
     let checkout = plan.checkout();
     // Neither of the two ever overrides a lock, for the reason `remove`
-    // gives: somebody else's session is holding the checkout.
-    if let Some(reason) = &checkout.locked {
+    // gives: somebody else's session is holding the checkout. The lock this
+    // window took on a checkout it made is not somebody else's: it is there
+    // for the panes the press closes, and goes with them — see `carry_out`.
+    let ours = checkout.is_locked_by_crook() && workspace.held_locks().holds(&checkout.path);
+    if let Some(reason) = checkout.locked.as_ref().filter(|_| !ours) {
         return Some(if reason.is_empty() {
             "It is locked, and nothing here takes a lock.".to_owned()
         } else {
@@ -578,6 +581,16 @@ pub(super) fn carry_out(
         );
     }
     let checkout = plan.checkout();
+    // A checkout this window made is locked for as long as a pane works in
+    // it, and its panes have only just closed: the window lets the lock go on
+    // the same pool, and may not have got to it yet. Finishing the task is
+    // the person saying that work is over, so it is let go here too — only a
+    // lock Crook took, never anybody else's. Whichever of the two gets there
+    // second finds nothing to do, and a lock that would not come off is said
+    // by the removal it then stops.
+    if let Err(problem) = worktree::release(repository, &checkout.path) {
+        log::debug!("could not unlock {}: {problem}", checkout.path.display());
+    }
     if let Err(problem) = super::view::remove_checkout(repository, &checkout.path, discard, store) {
         return format!("The checkout of {} was kept: {problem}.", plan.label());
     }

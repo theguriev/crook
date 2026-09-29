@@ -465,7 +465,6 @@ impl Default for Pruning {
     }
 }
 
-
 /// One place the creator can start a new branch from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Base {

@@ -799,7 +799,6 @@ impl Harness {
         })
     }
 
-
     /// The agents the creator offers, by command name.
     fn worktree_agents(&self) -> Vec<&'static str> {
         self.workspace

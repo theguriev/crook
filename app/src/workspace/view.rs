@@ -1582,7 +1582,6 @@ impl Workspace {
         matches!(self.tab_menu.finishing, Finishing::Ready(_))
     }
 
-
     /// Where the creator offers to start a branch from: what each row says,
     /// the ref it would hand git — `None` for the tab's own `HEAD` — and the
     /// badge on its right, which is what marks the default branch. For a test.

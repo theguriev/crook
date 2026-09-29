@@ -1101,7 +1101,6 @@ fn force_delete(repository: &Path, branch: &str, tip: &str) -> Result<(), Error>
     Err(classify(&finished.stderr))
 }
 
-
 // MARK: - What a new checkout is given
 
 /// The file in a repository's main checkout that names the ignored files a new
