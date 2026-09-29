@@ -582,10 +582,18 @@ Nineteen features, and the page that configures them:
   "crook/worktrees/new-task" }` (`ctrl+shift+n` off macOS) is one that nothing else takes. In a
   shell whose quoting Crook has not proven — anything but sh, dash, bash, zsh and fish, and
   every shell on Windows for now — the line is the agent's name alone and there is no prompt
-  field. A checkout made that way is locked (`crook: <branch>`) until no pane in the window is
-  working in it any more, or the window closes, so `git worktree remove`, `prune` and other
-  tools' tidy-ups leave it alone. Removal is offered only for a checkout that nobody else has
-  locked, not the main one, and not one a tab is working in; it says what it will
+  field. A repository with a [`.worktreeinclude`](https://code.claude.com/docs/en/worktrees) at
+  the root of its main checkout — Claude Code's file, in `.gitignore` syntax — gets the files it
+  names copied in before that tab's shell starts, so the `.env` an agent's first run needs is
+  there: only files git ignores (a tracked file is already in the checkout), and only where the
+  new checkout ignores it too, so an agent's `git add -A` cannot commit it; never into one of
+  its submodules, never through a symbolic link, never over a file already there, nothing at all
+  past a thousand files or 256 MB, and no single file over 64 MB. What did not arrive is said on
+  the new tab's worktree menu. A checkout made that way is locked (`crook: <branch>`) until no
+  pane in the window is working in it any more, or the window closes, so `git worktree remove`,
+  `prune` and other tools' tidy-ups leave it alone. Removal is offered only for a checkout that
+  nobody else has locked, not the main one, and not one a tab is working in; it says what it
+  will
   delete first, and it never deletes the branch. One row down, `Remove 3 free checkouts…`
   does the same to all of them at once — it looks in each one first, names the branches that
   will actually go, and leaves anything with work in it exactly where it is. That row is there

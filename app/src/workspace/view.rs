@@ -4654,7 +4654,16 @@ impl Workspace {
                 if let Some(lock) = HeldLock::take(&repository, &path, &branch) {
                     held.admit(lock);
                 }
-                Ok::<_, crate::git::worktree::Error>(())
+                // On the same worker, before the tab opens rather than after
+                // it: a shell whose rc reads `.env` — `direnv`, or anything
+                // like it — reads it once, as it starts, and a copy landing a
+                // moment later is a file the agent's first run never saw. It
+                // cannot fail the checkout, which exists by now; what it has
+                // to say comes back beside it.
+                Ok::<_, crate::git::worktree::Error>(crate::git::worktree::copy_included(
+                    &repository,
+                    &path,
+                ))
             }
         });
 
@@ -4685,7 +4694,7 @@ impl Workspace {
             match made {
                 // Creating one opens it, which is the whole point: a worktree
                 // nobody is working in is a directory.
-                Ok(()) => {
+                Ok(included) => {
                     if answering {
                         workspace.close_tab_menu(ctx);
                     }
@@ -4706,6 +4715,13 @@ impl Workspace {
                     {
                         workspace.hand_line_to(pane, &line, send, ctx);
                     }
+                    // Only to somebody still waiting on the creator. A menu
+                    // popping up over whatever they have moved on to would be
+                    // an interruption about a question they have stopped
+                    // asking, and the log already has it.
+                    if answering && let Some(problem) = included.problem() {
+                        workspace.say_what_a_checkout_lacks(problem, ctx);
+                    }
                 }
                 Err(problem) => {
                     if answering {
@@ -4718,6 +4734,25 @@ impl Workspace {
             }
         })
         .detach();
+    }
+
+    /// Opens the worktree menu on the tab a checkout was just opened in, with
+    /// `problem` — what `.worktreeinclude` asked for and did not get — under
+    /// its list.
+    ///
+    /// The creator closes the moment its checkout is made, so the sentence
+    /// cannot go where the creator's own refusals go; it goes on the same menu
+    /// opened on the *new* tab, whose list marks that checkout as this tab's,
+    /// which is the closest place to the press that asked. Only for a problem:
+    /// the menu takes the keyboard, and one that came back after every
+    /// checkout to say the copy went fine would take it from the tab a person
+    /// had just asked for, every time, to tell them nothing.
+    fn say_what_a_checkout_lacks(&mut self, problem: String, ctx: &mut ViewContext<Self>) {
+        self.open_tab_menu(self.tabs.active_id(), ctx);
+        if self.tab_menu.is_open() {
+            self.tab_menu.problem = Some(problem);
+            ctx.notify();
+        }
     }
 
     /// Puts an agent's launch line in a new pane's composer, and sends it
