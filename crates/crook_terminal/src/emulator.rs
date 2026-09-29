@@ -4,8 +4,9 @@
 //! scrollback, the cursor, the alternate screen and the mode flags. This module
 //! supplies the three things `Term` does not: the event listener it reports
 //! through, a reader for the OSC sequences `vte` throws away — OSC 7 for the
-//! working directory and OSC 133 for command boundaries — and the translation
-//! of both into a [`Snapshot`] and a queue of [`TerminalEvent`]s.
+//! working directory, OSC 133 for command boundaries, the notifications other
+//! terminals show — and the translation of all of it into a [`Snapshot`] and
+//! a queue of [`TerminalEvent`]s.
 //!
 //! It owns no pty and no thread, so it is the whole emulator under test: feed
 //! it bytes with [`Emulator::advance`] and read [`Emulator::snapshot`]. The pty
@@ -44,6 +45,7 @@ use crate::harvest::{self, BlockRows};
 use crate::input::{InputModes, KeyboardModes};
 use crate::marks::ShellMark;
 use crate::mouse::MouseModes;
+use crate::notify::{self, Notification};
 use crate::pty::ChildExit;
 use crate::snapshot::{self, Palette, Snapshot, TerminalSize};
 
@@ -118,6 +120,18 @@ pub enum TerminalEvent {
     /// for an agent that was interrupted and never got to. The rule for
     /// which marks end which statuses is `Emulator::settle_agent`'s.
     AgentSettled,
+    /// A program in the pane asked for a look, in one of the notification
+    /// sequences other terminals read — OSC 9, 777 or 99; see
+    /// [`crate::notify`].
+    ///
+    /// Not a status, and it changes none: an agent that is running and
+    /// says "tests passed" is still running. Every one is news, so none is
+    /// dropped as a repeat; the last of a burst in a read stands for the
+    /// others, because it is the last thing the program said. It keeps its
+    /// place among the [`Self::Agent`] and [`Self::AgentSettled`] around it,
+    /// because a status after it answers it and one before it does not, so
+    /// a report between two notifications parts them into two.
+    Notification(Notification),
 }
 
 /// Collects `Term`'s events so they can be handled after parsing, rather than
@@ -148,6 +162,8 @@ impl EventListener for EventProxy {
 /// instead — a route that needs per-platform process introspection this crate
 /// deliberately does not have — and OSC 133 because `vte::ansi::Handler` has no
 /// hook for it at all, so no amount of implementing that trait can see one.
+/// The notifications other terminals read — OSC 9, 99 and 777 — reach no hook
+/// either, and are logged as unhandled.
 ///
 /// So the bytes get a second pass through `vte`'s own parser with a `Perform`
 /// that implements nothing but `osc_dispatch`. That costs one extra walk of the
@@ -159,13 +175,24 @@ impl EventListener for EventProxy {
 /// independent — it means the same thing wherever in the chunk it appeared — so
 /// it is simply collected. A command boundary means *the cursor is here, now*,
 /// so [`Self::terminated`] stops the watcher on one and [`Emulator::advance`]
-/// feeds the real parser only up to that point before reading the cursor.
+/// feeds the real parser only up to that point before reading the cursor. It
+/// also stops where an agent report and a notification meet, because each is
+/// kept as the last of its kind and the two are read against each other: one
+/// slot for the report cannot say which side of the notification it was on.
 #[derive(Default)]
 struct OscWatcher {
     working_directory: Option<PathBuf>,
     mark: Option<ShellMark>,
     completions: Option<u64>,
     agent: Option<Reported>,
+    /// Keeps a kitty notification that is arriving in chunks.
+    notifications: notify::Reader,
+    notification: Option<Notification>,
+    /// Whether [`Self::notification`] was written after [`Self::agent`],
+    /// which only means anything while both are waiting to be handed over —
+    /// at the stop [`Self::terminated`] makes when the second of them
+    /// arrives: [`Emulator::apply_reports`] hands them over in that order.
+    notified_last: bool,
     /// Whether the chunk erased the scrollback — `CSI 3 J`, the third thing
     /// `clear` prints.
     history_cleared: bool,
@@ -200,22 +227,40 @@ impl Perform for OscWatcher {
                     .ok()
                     .and_then(|serial| serial.parse().ok());
             }
-            // Position-independent like OSC 7: a status means the same thing
-            // wherever in the chunk the program wrote it. The last one in a
-            // chunk wins, which is the last thing the program said.
+            // The last one wins like a status below, until a status or a
+            // mark stops the watcher and it is handed over. Every one is
+            // read, even the ones that finish nothing: a kitty notification
+            // sent in chunks is put back together across them.
+            Some(&(b"9" | b"99" | b"777")) => {
+                if let Some(notification) = self.notifications.read(params) {
+                    self.notification = Some(notification);
+                    self.notified_last = true;
+                }
+            }
+            // A status means the same thing wherever in the chunk the program
+            // wrote it, so the last one wins, which is the last thing the
+            // program said — up to a mark or a notification, which it has to
+            // be handed over ahead of or behind.
             _ => {
                 if let Some(reported) = agent::parse(params) {
                     self.agent = Some(reported);
+                    self.notified_last = false;
                 }
             }
         }
     }
 
-    /// Stops the parser on a captured mark, and only on a mark: an OSC 133 in
-    /// a dialect this does not read leaves it running, so a stream full of them
-    /// costs nothing.
+    /// Stops the parser on a captured mark: an OSC 133 in a dialect this does
+    /// not read leaves it running, so a stream full of them costs nothing.
+    ///
+    /// And on the second of an agent report and a notification, so that
+    /// [`Emulator::advance`] hands both over before the rest of the read can
+    /// write another report over the first. Kept together, `needs-input`,
+    /// `9;done`, `running` went out as the notification and a `running` that
+    /// changed nothing. A burst of either with none of the other between
+    /// still collapses to its last one, and costs no stop.
     fn terminated(&self) -> bool {
-        self.mark.is_some()
+        self.mark.is_some() || (self.agent.is_some() && self.notification.is_some())
     }
 }
 
@@ -406,13 +451,20 @@ impl Emulator {
             {
                 self.blocks.history_cleared(&self.term);
             }
+            // Wherever the watcher stopped, what it holds was written before
+            // the stop and goes out now. A report earlier in this same read
+            // has to reach `self.agent` before a mark settles against it, or
+            // the same bytes settle differently depending on where a pty split
+            // them: `drain` alone applies the report after the loop, too late
+            // for a `D` that ends the very command the report was about. A
+            // notification was written before the mark too, and goes out ahead
+            // of what the mark settles. And a stop on a report and a
+            // notification together has to empty one of them, or the watcher
+            // stops again on the next byte having read nothing.
+            if self.osc_watcher.terminated() {
+                self.apply_reports();
+            }
             if let Some(mark) = self.osc_watcher.mark.take() {
-                // A report earlier in this same read has to reach `self.agent`
-                // before the mark settles against it, or the same bytes settle
-                // differently depending on where a pty split them: `drain`
-                // alone applies the report after the loop, too late for a `D`
-                // that ends the very command the report was about.
-                self.apply_agent_report();
                 self.settle_agent(mark);
                 let finished = self.blocks.mark(
                     mark,
@@ -671,6 +723,12 @@ impl Emulator {
         }
     }
 
+    /// Whether the child asked to be told when the keyboard arrives and
+    /// leaves — `?1004h`, xterm's focus reporting.
+    pub fn focus_reporting(&self) -> bool {
+        self.term.mode().contains(TermMode::FOCUS_IN_OUT)
+    }
+
     /// Whether the child asked for pasted text to be bracketed, so it can tell
     /// a paste from typing.
     pub fn bracketed_paste(&self) -> bool {
@@ -768,7 +826,7 @@ impl Emulator {
             self.events.push(TerminalEvent::Completions(serial));
         }
 
-        self.apply_agent_report();
+        self.apply_reports();
 
         if let Some(directory) = self.osc_watcher.working_directory.take()
             && self.working_directory.as_deref() != Some(directory.as_path())
@@ -781,6 +839,33 @@ impl Emulator {
         // on the way out belongs to the block that is still open.
         if let Some(exit) = exited {
             self.child_exited(exit);
+        }
+    }
+
+    /// Hands over the pending agent report and notification, in the order
+    /// the program wrote them.
+    ///
+    /// Each is the last of its kind since the watcher last stopped, and the
+    /// two are read against each other: a `running` takes away the look a
+    /// notification asked for, a notification after it asks again, and a
+    /// status change after one takes its place. Handing them over in a fixed
+    /// order would make the same bytes settle one way in one read and another
+    /// way split across two. Idempotent, like [`Self::apply_agent_report`].
+    fn apply_reports(&mut self) {
+        let notified_last = std::mem::take(&mut self.osc_watcher.notified_last);
+        if !notified_last {
+            self.apply_notification();
+        }
+        self.apply_agent_report();
+        if notified_last {
+            self.apply_notification();
+        }
+    }
+
+    /// Emits a pending notification. Idempotent: it takes it.
+    fn apply_notification(&mut self) {
+        if let Some(notification) = self.osc_watcher.notification.take() {
+            self.events.push(TerminalEvent::Notification(notification));
         }
     }
 

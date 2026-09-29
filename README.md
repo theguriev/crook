@@ -79,9 +79,15 @@ the same thing whenever they are rendered again and the find still counts three:
 curl -fsSL https://raw.githubusercontent.com/theguriev/crook/main/script/install | sh
 ```
 
-macOS on both architectures and Linux on x86_64. It reads the latest release, checks the archive
-against the `SHA256SUMS` published beside it, and puts the binary in `~/.local/bin`, or somewhere
-else with `--to`. Windows is a `.zip` on the [releases page](https://github.com/theguriev/crook/releases).
+macOS on both architectures, and Linux on x86_64 with glibc 2.31 or newer: Debian 11, Ubuntu
+20.04, RHEL 9 and anything since. It reads the latest release, checks the archive against the
+`SHA256SUMS` published beside it, and puts the binary in `~/.local/bin`, or somewhere else with
+`--to`. Windows is a `.zip` on the [releases page](https://github.com/theguriev/crook/releases).
+
+The Linux binary is built in a Debian 11 container so that it starts on all of those, and
+`script/glibc-floor` stops a release whose binary would need a newer glibc before it is
+published. v0.1.13 was built on Ubuntu 24.04 instead: it needs glibc 2.39, and on anything older
+it does not start, with ``version `GLIBC_2.39' not found``.
 
 ### macOS, from the browser
 
@@ -308,14 +314,41 @@ Nineteen features, and the page that configures them:
   `crook --skill` prints the skill file that teaches an agent the rest — how to tell it is in
   a pane, what the four words do, where the worktrees and the plugins are — to save as
   `~/.claude/skills/crook/SKILL.md`.
+  Crook also reads the notifications other terminals show — OSC 9, 777 and 99 — as the pane
+  asking for a look, with the notification's text on the row and the status left as it was, so
+  an agent on a remote box with its notification channel set to `iterm2`, `ghostty` or `kitty`
+  lights its row with no Crook binary there.
   A status the agent never took back goes when the shell's own marks say the command ended,
   and a failure stays on the row until the next command starts. Looking at a tab clears the
   *attention* it asked for and nothing else: an agent waiting for an approval is still waiting
-  after you glance at it. A row that is waiting for you is washed amber, the header counts them
-  in a chip that goes to the next one when pressed, and `cmd-j` (`ctrl-shift-j` off macOS) does
-  the same from the keyboard, round the list in the panel's order. The window is named after
-  the tab it shows, with that count in front — `(1 waiting) bisect the flaky test — Crook` —
-  so a switcher or a taskbar tells three Crooks apart and says which one stopped for you.
+  after you glance at it. Looking means the pane has the keyboard *and* the window is the one
+  in front: in a window behind another application even the pane with the keyboard is nobody's,
+  so the agent in the only pane you have is waiting like any other when it stops to ask, and
+  coming back to the window is the glance. A row that is waiting for you is washed amber, the
+  header counts them in a chip that goes to the next one when pressed, and `cmd-j`
+  (`ctrl-shift-j` off macOS) does the same from the keyboard, round the list in the panel's
+  order. The window is named after the tab it shows, with that count in front —
+  `(1 waiting) bisect the flaky test — Crook` — so a switcher or a taskbar tells three Crooks
+  apart and says which one stopped for you. When one more starts waiting while the window is
+  behind something else, Crook asks the desktop to point at it: the dock icon bounces once on
+  macOS, the urgency hint goes up on X11, an activation request goes to a Wayland compositor
+  that takes them and the taskbar button flashes on Windows — a request for a look, not a
+  notification, and it is taken back when the window comes to the front. On Linux, and on macOS
+  from Crook.app, a pane whose row turns amber while the window is behind something else — its
+  agent stops to ask or says it is done, or a program rings the bell — also posts a desktop
+  notification, titled `Crook — <tab>` with the agent's question under it, at most once every
+  thirty seconds for a pane nobody has come back to, through `notify-send` on the session bus or
+  a Mac's Notification Center (which asks you once, the first time a pane waits for you or
+  Crook has something to post) and nowhere else; the **Notifications** settings page turns it
+  off, the question included, and turns on the same for an agent that failed or a command that
+  ran ten seconds or more. A click on one does not bring the pane forward. Windows posts none
+  yet, and nor does a Mac binary outside Crook.app, since macOS delivers only to an app.
+  Crook.app also puts the waiting count on its dock icon as a badge, under the same permission
+  as the notifications and its Badges switch, so with notifications off there may be none; a Mac
+  binary outside Crook.app is given the count too, and whether the dock shows it is unverified.
+  A program that turns on focus reporting (`?1004`) is told `CSI I` and `CSI O` as the keyboard
+  reaches its pane and leaves it, the window's own focus included, so an agent can tell whether
+  anybody is watching.
 - **A shell in every pane.** A real pseudo-terminal and a real xterm-compatible emulator:
   colour, bold and italic faces, underline and strikeout, the alternate screen, ten thousand
   lines of scrollback, `SIGWINCH` on resize, and titles and working directories the shell
@@ -395,7 +428,10 @@ Nineteen features, and the page that configures them:
   OSC 133 marks that say where a prompt starts, where a command starts and how it ended. There
   is nothing to install and nothing to configure: Crook writes a scratch `ZDOTDIR`, `--rcfile`
   or `vendor_conf.d` stub, chains onto whatever hooks are already there, never touches
-  `~/.zshrc`, and removes the stub when the pane closes. Set `CROOK_NO_SHELL_INTEGRATION` to
+  `~/.zshrc`, and removes the stub when the pane closes. The stubs sit in a directory only you
+  can read — `$XDG_RUNTIME_DIR/crook`, or `crook-<uid>` in the temporary directory, and on
+  Windows `crook-shell-integration` in your own `%TEMP%` — and a pane whose directory is
+  someone else's runs without the marks rather than use it. Set `CROOK_NO_SHELL_INTEGRATION` to
   anything but `0` to turn it off. It reaches only shells Crook itself starts — not the far
   side of an `ssh`, not a container, and not a shell it has no snippet for (`pwsh`, `nu`,
   `ksh`, `tcsh`) — and on those machines `crook --shell-integration zsh` prints the same text
@@ -468,8 +504,10 @@ Nineteen features, and the page that configures them:
   already in it, because two agents editing one checkout is exactly what a worktree exists to
   prevent. `New worktree…` asks for a branch name, fills one in that nothing is using, shows
   where the checkout will go, and opens a tab in it — folded into a group with the tab that
-  asked for it. Removal is offered only for a checkout
-  that is not locked, not the main one, and not one a tab is working in; it says what it will
+  asked for it. A checkout made that way is locked (`crook: <branch>`) until no pane in the
+  window is working in it any more, or the window closes, so `git worktree remove`, `prune` and
+  other tools' tidy-ups leave it alone. Removal is offered only for a checkout
+  that nobody else has locked, not the main one, and not one a tab is working in; it says what it will
   delete first, and it never deletes the branch. One row down, `Remove 3 free checkouts…`
   does the same to all of them at once — it looks in each one first, names the branches that
   will actually go, and leaves anything with work in it exactly where it is. That row is there
@@ -480,14 +518,16 @@ Nineteen features, and the page that configures them:
 - **A settings page**, which opens the way a shell does: `cmd/ctrl-,` — or the View options
   menu's last entry — puts it in a **tab of its own**, listed beside the work it
   configures, splittable next to that work, and closed by the same × and the same close chord
-  (`cmd-w`, `ctrl-shift-w` off macOS) as any other pane. Four pages: Appearance, Shell,
-  Keyboard Shortcuts and About — and a plugin's page arrives on the same rail beside them.
+  (`cmd-w`, `ctrl-shift-w` off macOS) as any other pane. Five pages: Appearance, Shell,
+  Notifications, Keyboard Shortcuts and About — and a plugin's page arrives on the same rail
+  beside them.
   Every option on it is one the application actually reads; there is nothing there that does
   not do something. Changes apply on the click and are
   written to `<config>/crook/settings.json`, which is the same eight keys that menu writes, the
   status marks, the theme, the light and dark pair it follows the desktop between, the
-  terminal's type size, whether the tabs come back, and — set in the file rather than on the
-  page — its font family and the line each agent is resumed with.
+  terminal's type size, whether the tabs come back, which stops post a notification, and —
+  set in the file rather than on the page — its font family and the line each agent is resumed
+  with.
   The type size is also on `cmd/ctrl-plus`, `-minus` and `-0`, and every pane resizes with it:
   a pane's columns and rows are its box divided by a cell, so the ptys follow.
   It is the one pane with no shell under it and no field: every control on it is a click.
@@ -549,7 +589,7 @@ Nineteen features, and the page that configures them:
   agents a restart ended — see Tabs), every entry of a tab's
   (`crook/tabs/pin-tab`, `close-tab`, `open-menu`, `view-options`,
   `toggle-group`, `close-group`, the seven colours), the worktree list (`crook/worktrees/menu`)
-  and every settings page (`crook/appearance/open-page` and its three neighbours). The block
+  and every settings page (`crook/appearance/open-page` and its four neighbours). The block
   entries act on the block the menu is up on, or — with no menu — on the one the keyboard has
   selected, so each of them is a chord as well as a row.
 
@@ -689,6 +729,12 @@ Build time: a C toolchain (rustc shells out to `cc` to link) and `pkg-config`.
 ```sh
 sudo apt-get install -y build-essential pkg-config
 ```
+
+A binary needs the glibc it was linked against, or a newer one, so what you build starts on your
+distribution and on the ones after it, not on older ones. That is why a release is built in a
+Debian 11 container (`.github/workflows/linux-binary.yml`) rather than on a current system.
+`./script/glibc-floor 2.31 dist/linux/crook` says whether a build of yours would start everywhere a
+release does.
 
 Run time: the X11, Wayland, EGL and mesa shared objects that `winit` and `wgpu` `dlopen` when
 the window is created. These are *not* build dependencies — the workspace compiles without

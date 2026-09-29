@@ -235,6 +235,14 @@ impl Harness {
 
     /// A window opened with `opening` as it stands, store and all.
     fn opened(tabs: usize, opening: Opening) -> Self {
+        let mut harness = Self::undrawn(tabs, opening);
+        harness.frame();
+        harness
+    }
+
+    /// The same, before its first frame: the window `Shell::new` starts
+    /// watching, whose every view is still a change no frame has taken.
+    fn undrawn(tabs: usize, opening: Opening) -> Self {
         assert!(
             opening.plugins_directory.as_deref().is_none_or(
                 |directory| Some(directory) != crate::plugins::wasm::directory().as_deref()
@@ -286,7 +294,6 @@ impl Harness {
         for _ in 1..tabs {
             harness.dispatch_action(TabAction::New);
         }
-        harness.frame();
         harness
     }
 
@@ -846,30 +853,59 @@ impl Harness {
     ///
     /// By the text on the row, found where it was drawn: the list is filtered
     /// and reordered by what is registered, so its rows have no fixed places.
+    ///
+    /// Scrolled to first when the list's clip has it out of sight, the way a
+    /// person would reach it. A scene has no occlusion, so a row past the
+    /// bottom of the list still has its glyphs in the frame, and a press where
+    /// they are lands on whatever is drawn there instead. That is the footer
+    /// on macOS, where the traffic lights' strip moves the list down: with
+    /// `crook/notifications` in the box the probe is the last of sixteen rows,
+    /// its line fell under "1 update in the registry", and the press selected
+    /// nothing — the card stayed on the first built-in.
     fn click_plugin(&mut self, name: &str) {
-        let scene = self.frame();
-        // The column the list is in, taken from its own field: the card is to
-        // the right of it and shares baselines with it, so a line built from
-        // both columns is a line neither of them drew.
-        let column = settings_field_boxes(&scene)
-            .into_iter()
-            .next()
-            .expect("the Plugins section has a field of its own");
+        // Far more turns of the wheel than a list this long can need; running
+        // out of them is a row the scroll never brings back, not a slow one.
+        for _ in 0..64 {
+            let scene = self.frame();
+            // The column the list is in, taken from its own field: the card is
+            // to the right of it and shares baselines with it, so a line built
+            // from both columns is a line neither of them drew.
+            let column = settings_field_boxes(&scene)
+                .into_iter()
+                .next()
+                .expect("the Plugins section has a field of its own");
 
-        // The row's name, or the name with the word a row may end in — the
-        // version an update would bring, "installed" — run on after it: the
-        // two share a baseline, so they are one line to `text_lines`.
-        let lines = text_lines(&scene, |at| {
-            at.x() >= column.min_x() && at.x() <= column.max_x()
-        });
-        let row = lines
-            .iter()
-            .find(|(_, line)| line.trim() == name)
-            .or_else(|| lines.iter().find(|(_, line)| line.trim().starts_with(name)))
-            .unwrap_or_else(|| panic!("no row in the plugin list says {name:?}"));
+            // The row's name, or the name with the word a row may end in —
+            // the version an update would bring, "installed" — run on after
+            // it: the two share a baseline, so they are one line to
+            // `text_lines`.
+            let lines = text_lines(&scene, |at| {
+                at.x() >= column.min_x() && at.x() <= column.max_x()
+            });
+            let (at, _) = lines
+                .iter()
+                .find(|(_, line)| line.trim() == name)
+                .or_else(|| lines.iter().find(|(_, line)| line.trim().starts_with(name)))
+                .unwrap_or_else(|| panic!("no row in the plugin list says {name:?}"));
+            let press = *at + vec2f(4., 4.);
 
-        self.click(row.0 + vec2f(4., 4.), MouseButton::Left);
-        self.frame();
+            let Some(list) = clip_of_line_at(&scene, *at)
+                .filter(|list| !(list.contains_point(*at) && list.contains_point(press)))
+            else {
+                self.click(press, MouseButton::Left);
+                self.frame();
+                return;
+            };
+            // Negative is towards the user: the list moves up, and what was
+            // under its bottom edge comes into view.
+            let towards = if press.y() > list.max_y() { -1. } else { 1. };
+            self.dispatch(Event::ScrollWheel {
+                position: center(list),
+                delta: ScrollDelta::Lines(vec2f(0., towards)),
+                modifiers: Modifiers::default(),
+            });
+        }
+        panic!("scrolling the plugin list never brought {name:?}'s row into view");
     }
 
     /// Which plugin the store is downloading, straight from its model.
@@ -1536,6 +1572,23 @@ fn strip_text(scene: &Scene) -> String {
 /// Callers that care filter by position first.
 fn text_lines(scene: &Scene, keep: impl Fn(Vector2F) -> bool) -> Vec<(Vector2F, String)> {
     lines_of(scene.layers().flat_map(|layer| layer.glyphs.iter()), keep)
+}
+
+/// The scissor of the layer that drew the line [`text_lines`] placed at `at`,
+/// if that layer had one.
+///
+/// What says whether a line found there is on screen at all: `text_lines`
+/// reads every glyph the frame holds, and a scroll view's clip keeps the ones
+/// past its edge from being drawn, not from being in the scene.
+fn clip_of_line_at(scene: &Scene, at: Vector2F) -> Option<RectF> {
+    scene
+        .layers()
+        .find(|layer| {
+            layer.glyphs.iter().any(|glyph| {
+                (glyph.position.x() - at.x()).abs() < 0.5 && glyph.position.y().round() == at.y()
+            })
+        })
+        .and_then(|layer| layer.clip_bounds)
 }
 
 /// The text drawn on `ground` and over it, one line at a time.
@@ -4704,7 +4757,7 @@ fn clearing_waiting_takes_back_what_a_bell_asked_and_not_what_the_agent_said() {
             .pane(row)
             .expect("the row is open")
             .session();
-        (session.attention, session.marked, session.status)
+        (session.attention.clone(), session.marked, session.status)
     });
     assert_eq!(
         (None, false, AgentStatus::NeedsInput),
@@ -5850,6 +5903,565 @@ fn nothing_offers_to_tidy_a_checkout_a_tab_is_working_in() {
     assert!(
         worktree_menu_says(&harness.frame(), "1 free checkout"),
         "the checkout nothing is working in any more was not offered"
+    );
+}
+
+/// What `git worktree list` says the checkout at `path` is locked with, if it
+/// is.
+fn lock_on(repository: &Path, path: &Path) -> Option<String> {
+    crate::git::worktree::list(repository)
+        .expect("the repository lists")
+        .into_iter()
+        .find(|worktree| worktree.path == path)
+        .unwrap_or_else(|| panic!("{} is not a worktree of the repository", path.display()))
+        .locked
+}
+
+/// The worktree menu open over a scratch repository with one checkout per
+/// reason, each locked with it, on branches `held/1` … `held/N` — every lock
+/// taken by git directly, the way a Crook that crashed or another tool leaves
+/// one. The checkouts come back in the order of the reasons.
+fn menu_over_locked_checkouts(reasons: &[&str]) -> Option<(Scratch, Harness, Vec<PathBuf>)> {
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return None;
+    };
+    // `args` names the checkout last, and the checkout is a path rather than
+    // text.
+    let git = |args: &[&str], checkout: &Path| {
+        crate::process::command("git")
+            .args(args)
+            .arg(checkout)
+            .current_dir(&repository)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    };
+
+    let mut checkouts = Vec::new();
+    for (serial, reason) in reasons.iter().enumerate() {
+        let checkout = scratch.path().join(format!("held{}", serial + 1));
+        let branch = format!("held/{}", serial + 1);
+        assert!(
+            git(&["worktree", "add", "--quiet", "-b", &branch], &checkout),
+            "git would not add {}",
+            checkout.display()
+        );
+        assert!(
+            git(&["worktree", "lock", "--reason", reason], &checkout),
+            "git would not lock {}",
+            checkout.display()
+        );
+        checkouts.push(checkout);
+    }
+
+    let mut harness = Harness::seeded();
+    let tab = harness.active_id();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("every checkout to be read", |harness| {
+        harness.worktrees_listed() == Some(reasons.len() + 1)
+    });
+    Some((scratch, harness, checkouts))
+}
+
+/// A window with a checkout made through its own worktree menu, the way a
+/// person makes one, and open in a tab: the repository, the checkout as the
+/// pane that opened in it spells it, and that pane.
+fn window_with_a_checkout_it_made(
+    scratch: &Scratch,
+) -> Option<(Harness, PathBuf, PathBuf, PaneId)> {
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return None;
+    };
+
+    let mut harness = window_making_a_checkout(scratch, &repository);
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.pane_ids().len() > 1
+    });
+    let opened = harness
+        .focused_pane_id()
+        .expect("the checkout did not open a pane");
+    let checkout = harness
+        .working_directory(opened)
+        .expect("the pane that opened does not know where it is");
+    Some((harness, repository, checkout, opened))
+}
+
+/// A window that has just asked its worktree menu for a new checkout of
+/// `repository`, the way a person asks for one, and has not heard back yet.
+fn window_making_a_checkout(scratch: &Scratch, repository: &Path) -> Harness {
+    let store = scratch.path().join("store");
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| workspace.set_worktrees_directory(store.clone()));
+    let tab = harness.active_id();
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.to_owned());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    harness.dispatch_worktree(WorktreeAction::Create);
+    harness
+}
+
+/// Makes every checkout of `repository` slow to finish, the way a
+/// post-checkout hook that runs `npm ci` does: git runs the hook before
+/// `worktree add` returns, and this one writes `started` and then takes two
+/// seconds.
+fn slow_post_checkout(repository: &Path, started: &Path) {
+    let hooks = repository.join(".git").join("hooks");
+    fs::create_dir_all(&hooks).expect("the repository is writable");
+    let hook = hooks.join("post-checkout");
+    // Forward slashes, which the sh Git for Windows runs its hooks with reads
+    // as readily as any other.
+    let forward = |path: &Path| path.to_string_lossy().replace('\\', "/");
+    fs::write(
+        &hook,
+        format!("#!/bin/sh\n: > '{}'\nsleep 2\n", forward(started)),
+    )
+    .expect("the hook is writable");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755))
+            .expect("the hook can be made executable");
+    }
+
+    // Named in the repository's own config, so that a hooks directory set for
+    // the whole machine does not pass this one by.
+    let configured = crate::process::command("git")
+        .args(["config", "core.hooksPath", &forward(&hooks)])
+        .current_dir(repository)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    assert!(configured, "git would not point the repository at the hook");
+}
+
+/// The checkouts whose lock the window says it still holds.
+fn held_checkouts(harness: &Harness) -> Vec<PathBuf> {
+    harness.workspace.read(&harness.app, |workspace, _| {
+        workspace.held_locks().checkouts()
+    })
+}
+
+#[test]
+fn a_checkout_crook_makes_is_locked_until_the_last_pane_in_it_closes() {
+    // The lock is what tells everything else that touches the repository —
+    // `git worktree remove` typed by hand, `prune`, another tool's tidy-up —
+    // that an agent is working in this checkout. So it is taken before the
+    // tab opens, it outlives one of two panes in it, and it goes with the
+    // last of them, which is the moment nothing is working there any more.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, checkout, first)) = window_with_a_checkout_it_made(&scratch)
+    else {
+        return;
+    };
+
+    let branch = crate::git::worktree::list(&repository)
+        .expect("the repository lists")
+        .into_iter()
+        .find(|worktree| worktree.path == checkout)
+        .and_then(|worktree| worktree.branch)
+        .expect("the checkout is on the branch it was made with");
+    assert_eq!(
+        lock_on(&repository, &checkout),
+        Some(crate::git::worktree::lock_reason(&branch)),
+        "the checkout was opened without being locked"
+    );
+
+    // A second pane, further down the same checkout: it is still being
+    // worked in when the first one goes.
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let second = harness
+        .focused_pane_id()
+        .expect("the split focused its pane");
+    assert_ne!(second, first);
+    let deeper = checkout.join("deeper");
+    fs::create_dir_all(&deeper).expect("the checkout is writable");
+    harness.update_session(second, |session| {
+        session.working_directory = Some(deeper.clone());
+    });
+
+    harness.dispatch_action(TabAction::ClosePane(first));
+    // Long enough for a release to have gone through twice over: asking git
+    // is milliseconds.
+    harness.settle(std::time::Duration::from_secs(1));
+    assert!(
+        lock_on(&repository, &checkout).is_some(),
+        "the lock went while a pane was still working in the checkout"
+    );
+
+    harness.dispatch_action(TabAction::ClosePane(second));
+    harness.wait_for("the lock to go with the last pane", |_| {
+        lock_on(&repository, &checkout).is_none()
+    });
+    assert!(checkout.is_dir(), "closing the pane took the checkout too");
+    harness.wait_for("the window to stop counting it as held", |harness| {
+        held_checkouts(harness).is_empty()
+    });
+}
+
+#[test]
+fn a_lock_crook_left_behind_does_not_keep_its_checkout_from_being_removed() {
+    // A Crook that crashed, or was killed, never closed its tabs and never
+    // took its locks off. Nothing in this window is working in the checkout,
+    // and the lock says whose it was, so it is free: the × and the sweep offer
+    // it, and removing it takes Crook's own lock off first.
+    let Some((_scratch, mut harness, checkouts)) =
+        menu_over_locked_checkouts(&[&crate::git::worktree::lock_reason("held/1")])
+    else {
+        return;
+    };
+    let checkout = &checkouts[0];
+
+    let scene = harness.frame();
+    assert!(
+        worktree_menu_says(&scene, "1 free checkout"),
+        "a checkout only Crook's own old lock was holding was not offered"
+    );
+    assert!(
+        !worktree_menu_says(&scene, "locked"),
+        "the row still says the checkout is locked by somebody"
+    );
+
+    let index = harness
+        .worktree_index_under(checkout)
+        .expect("the checkout is not in the menu");
+    harness.dispatch_worktree(WorktreeAction::AskRemove(index));
+    harness.dispatch_worktree(WorktreeAction::Remove { force: false });
+    harness.wait_for("the checkout to go", |_| !checkout.exists());
+}
+
+#[test]
+fn a_sweep_takes_crooks_own_old_lock_off_and_leaves_anybody_elses() {
+    // The same two locks side by side. Crook's is a lock with nothing in the
+    // window behind it, and goes with its checkout; the other is somebody
+    // else's statement that they are working there, which Crook has no way to
+    // check and so never overrules.
+    let Some((scratch, mut harness, checkouts)) = menu_over_locked_checkouts(&[
+        &crate::git::worktree::lock_reason("held/1"),
+        "claude session held-2",
+    ]) else {
+        return;
+    };
+    let repository = scratch.path().join("repo");
+
+    assert!(
+        worktree_menu_says(&harness.frame(), "1 free checkout"),
+        "the sweep does not offer exactly the checkout Crook's own lock held"
+    );
+    harness.dispatch_worktree(WorktreeAction::AskTidy);
+    harness.wait_for("the checkouts to be looked in", |harness| {
+        harness.worktrees_going().is_some()
+    });
+    assert_eq!(harness.worktrees_going(), Some(1));
+
+    harness.dispatch_worktree(WorktreeAction::Tidy);
+    harness.wait_for("the list to be read again", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    assert!(
+        !checkouts[0].exists(),
+        "the checkout under Crook's own lock was not removed"
+    );
+    assert!(
+        checkouts[1].is_dir(),
+        "the checkout somebody else locked was removed"
+    );
+    assert_eq!(
+        lock_on(&repository, &checkouts[1]).as_deref(),
+        Some("claude session held-2"),
+        "somebody else's lock was taken off"
+    );
+}
+
+#[test]
+fn crooks_own_lock_holds_while_a_pane_is_working_in_the_checkout() {
+    // The case the lock exists for, asked the hard way: a removal dispatched
+    // at a checkout a pane is in, which no × would have offered. Crook takes
+    // its own lock off only when nothing in the window is working in the
+    // checkout, so git refuses and the checkout stays — locked, and whole.
+    let Some((scratch, mut harness, checkouts)) =
+        menu_over_locked_checkouts(&[&crate::git::worktree::lock_reason("held/1")])
+    else {
+        return;
+    };
+    let repository = scratch.path().join("repo");
+    let checkout = &checkouts[0];
+
+    let tab = harness.active_id();
+    harness.dispatch_worktree(WorktreeAction::CloseMenu);
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let working = harness
+        .focused_pane_id()
+        .expect("the split focused its pane");
+    harness.update_session(working, |session| {
+        session.working_directory = Some(checkout.clone());
+    });
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("both checkouts to be read", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    let index = harness
+        .worktree_index_under(checkout)
+        .expect("the checkout is not in the menu");
+    harness.dispatch_worktree(WorktreeAction::AskRemove(index));
+    harness.dispatch_worktree(WorktreeAction::Remove { force: true });
+    harness.wait_for("git to answer", |harness| !harness.worktree_menu_is_busy());
+
+    assert!(
+        frame_text(&harness.frame()).contains("locked"),
+        "the refusal was not shown"
+    );
+    assert!(checkout.is_dir(), "the checkout a pane is in was removed");
+    assert_eq!(
+        lock_on(&repository, checkout),
+        Some(crate::git::worktree::lock_reason("held/1")),
+        "the lock was taken off a checkout a pane is working in"
+    );
+}
+
+#[test]
+fn a_pane_that_leaves_the_checkout_crook_made_takes_its_lock_off_with_it() {
+    // The last pane in a checkout does not have to close for nothing to be
+    // working there any more: a shell that goes back to the main checkout to
+    // merge the branch has left it. The lock goes then, rather than staying
+    // for good because the pane that closes later was somewhere else by the
+    // time it did.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, checkout, pane)) = window_with_a_checkout_it_made(&scratch)
+    else {
+        return;
+    };
+    assert!(
+        lock_on(&repository, &checkout).is_some(),
+        "the checkout was opened without being locked"
+    );
+
+    // Reported the way a shell reports a `cd`, which is the only way a
+    // pane's directory changes under it.
+    let moved = |harness: &mut Harness, to: PathBuf| {
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(
+                &crate::terminal_model::TerminalUpdate::WorkingDirectory(pane, to),
+                ctx,
+            );
+        });
+    };
+
+    // One directory down is still in it.
+    let deeper = checkout.join("deeper");
+    fs::create_dir_all(&deeper).expect("the checkout is writable");
+    moved(&mut harness, deeper);
+    harness.settle(std::time::Duration::from_secs(1));
+    assert!(
+        lock_on(&repository, &checkout).is_some(),
+        "the lock went while the pane was still in the checkout, one directory down"
+    );
+
+    moved(&mut harness, repository.clone());
+    harness.wait_for("the lock to go with the pane that left", |_| {
+        lock_on(&repository, &checkout).is_none()
+    });
+    harness.wait_for("the window to stop counting it as held", |harness| {
+        held_checkouts(harness).is_empty()
+    });
+    assert!(
+        harness.pane_ids().contains(&pane),
+        "the pane that left was closed"
+    );
+}
+
+#[test]
+fn closing_a_pane_in_a_checkout_another_crook_locked_leaves_its_lock() {
+    // `crook: ` says a Crook took the lock and not which one. Another Crook
+    // window on the same repository made this checkout and its agent is in
+    // there; a pane of *this* window passing through and closing again is no
+    // reason to tell git and every other tool that nobody is.
+    let Some((scratch, mut harness, checkouts)) =
+        menu_over_locked_checkouts(&[&crate::git::worktree::lock_reason("held/1")])
+    else {
+        return;
+    };
+    let repository = scratch.path().join("repo");
+    let checkout = &checkouts[0];
+    harness.dispatch_worktree(WorktreeAction::CloseMenu);
+
+    harness.dispatch_action(TabAction::Split(Direction::Right));
+    let visiting = harness
+        .focused_pane_id()
+        .expect("the split focused its pane");
+    harness.update_session(visiting, |session| {
+        session.working_directory = Some(checkout.clone());
+    });
+    harness.dispatch_action(TabAction::ClosePane(visiting));
+    // Long enough for a release to have gone through twice over.
+    harness.settle(std::time::Duration::from_secs(1));
+
+    assert_eq!(
+        lock_on(&repository, checkout),
+        Some(crate::git::worktree::lock_reason("held/1")),
+        "closing a pane took off a lock this window never took"
+    );
+}
+
+#[test]
+fn release_all_takes_off_every_lock_the_window_still_holds() {
+    // Closing the window closes no pane — the strip keeps its last tab and
+    // the window goes instead — so nothing working in a checkout ever
+    // "leaves" it, and whatever the window still holds has to come off in
+    // one go: a lock left on would hold the checkout against a hand-typed
+    // `git worktree remove` for good, since a session brought back does not
+    // lock again, and with "Restore session" off nothing comes back to it at
+    // all.
+    //
+    // This is `release_all` alone, called the way the window's delegate calls
+    // it and in the order the process does things on the way out: the
+    // release, then the window and its background pool. The wiring that
+    // gets there — `Shell`'s `exiting`, and crookui's `App` handing winit's
+    // `exiting` to it — needs an event loop, and no test here has one.
+    let scratch = Scratch::new();
+    let Some((harness, repository, checkout, _)) = window_with_a_checkout_it_made(&scratch) else {
+        return;
+    };
+    assert!(
+        lock_on(&repository, &checkout).is_some(),
+        "the checkout was opened without being locked"
+    );
+    assert_eq!(held_checkouts(&harness), vec![checkout.clone()]);
+
+    let held = harness
+        .workspace
+        .read(&harness.app, |workspace, _| workspace.held_locks());
+    held.release_all(std::time::Duration::from_secs(30));
+    drop(harness);
+
+    assert_eq!(
+        lock_on(&repository, &checkout),
+        None,
+        "the lock outlived the window"
+    );
+    assert!(checkout.is_dir(), "releasing took the checkout too");
+}
+
+#[test]
+fn a_checkout_still_being_made_as_the_window_closes_takes_its_own_lock_off() {
+    // git can take a while over a checkout — a post-checkout hook running
+    // `npm ci` is why its write deadline is two minutes — and a window closed
+    // in that time holds nothing yet: the lock is taken once `add` returns,
+    // on the background pool. The process joins that pool on its way out
+    // *after* the window's delegate has taken off everything the window held,
+    // so the creation finishing then is the only thing left that can take its
+    // lock off. This runs in that order: the release, then the pool.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let started = scratch.path().join("hook-started");
+    slow_post_checkout(&repository, &started);
+
+    let mut harness = window_making_a_checkout(&scratch, &repository);
+    harness.wait_for("git to be running the post-checkout hook", |_| {
+        started.exists()
+    });
+    let held = harness
+        .workspace
+        .read(&harness.app, |workspace, _| workspace.held_locks());
+    held.release_all(std::time::Duration::from_secs(30));
+    // Dropping the window drops its background pool, and dropping the pool
+    // waits for the worker that is still making the checkout — which is
+    // what the process does as it ends.
+    drop(harness);
+
+    let checkout = crate::git::worktree::list(&repository)
+        .expect("the repository lists")
+        .into_iter()
+        .find(|worktree| !worktree.is_main)
+        .expect("the checkout was never made")
+        .path;
+    assert_eq!(
+        lock_on(&repository, &checkout),
+        None,
+        "a checkout finished after its window closed kept Crook's lock"
+    );
+    assert!(checkout.is_dir(), "releasing took the checkout too");
+}
+
+#[test]
+fn a_lock_handed_in_before_its_tab_opens_is_not_taken_for_one_nobody_is_in() {
+    // The creation hands its lock in from the background pool as soon as git
+    // has taken it, and the tab opens a moment later, on the main thread. A
+    // session report in between — any pane's shell saying anything — asks
+    // which held checkouts nothing is working in any more, and this one has
+    // no pane in it yet only because its tab has not opened.
+    let scratch = Scratch::new();
+    let Some(repository) = scratch_repository(&scratch.path().join("repo")) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let started = scratch.path().join("hook-started");
+    slow_post_checkout(&repository, &started);
+
+    let mut harness = window_making_a_checkout(&scratch, &repository);
+    harness.wait_for("git to be running the post-checkout hook", |_| {
+        started.exists()
+    });
+    // Without pumping the queue from here on, so the answer cannot land and
+    // the tab cannot open.
+    let deadline = std::time::Instant::now() + SHELL_TIMEOUT;
+    while held_checkouts(&harness).is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the creation never handed its lock in"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let checkout = held_checkouts(&harness)[0].clone();
+    assert_eq!(
+        harness.pane_ids().len(),
+        1,
+        "the tab opened before a report could come in between"
+    );
+
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |_| {});
+    // Long enough for a release to have gone through twice over.
+    harness.settle(std::time::Duration::from_secs(1));
+    assert!(
+        lock_on(&repository, &checkout).is_some(),
+        "the lock came off a checkout whose tab had not opened yet"
+    );
+
+    harness.wait_for("the checkout's tab to open", |harness| {
+        harness.pane_ids().len() > 1
+    });
+    assert_eq!(
+        held_checkouts(&harness),
+        vec![checkout],
+        "the window let go of the lock its new tab is working under"
     );
 }
 
@@ -9691,10 +10303,10 @@ fn the_rail_switches_pages_and_the_pane_shows_the_one_it_names() {
     harness.open_settings_page();
 
     let rail = settings_rail_boxes(&harness.frame());
-    assert_eq!(rail.len(), 4, "four pages in the rail");
+    assert_eq!(rail.len(), 5, "five pages in the rail");
 
-    // The third: Keyboard Shortcuts.
-    harness.click(center(rail[2]), MouseButton::Left);
+    // The fourth: Keyboard Shortcuts.
+    harness.click(center(rail[3]), MouseButton::Left);
     assert_eq!("Keyboard Shortcuts", harness.settings_section());
 
     let text = frame_text(&harness.frame());
@@ -9957,7 +10569,13 @@ fn no_settings_page_paints_a_rect_with_a_negative_side_in_a_small_window() {
     // squeeze every row, and not one rect the wrong way round.
     let mut harness = Harness::new(1);
     harness.open_settings_page();
-    for page in ["Appearance", "Shell", "Keyboard Shortcuts", "About"] {
+    for page in [
+        "Appearance",
+        "Shell",
+        "Notifications",
+        "Keyboard Shortcuts",
+        "About",
+    ] {
         harness.select_settings_section(page);
         let scene = harness.frame_sized(vec2f(480., 360.));
         assert_no_rect_the_wrong_way_round(&scene, page);
@@ -10902,6 +11520,67 @@ mod shells {
             harness.terminal_selection(pane),
             None,
             "clicking into the field left the output highlighted"
+        );
+    }
+
+    #[test]
+    fn a_program_that_asked_for_focus_reports_hears_the_keyboard_come_and_go() {
+        // xterm's `?1004`, with a pane standing in for xterm's window: the
+        // window going behind another and coming back is out and in for the
+        // pane with the keyboard, and moving the keyboard between two panes
+        // of a window in front is out for one and in for the other. `cat`,
+        // in a line discipline that echoes, shows what each pane was sent,
+        // with the escape spelled `^[` — the grid never holds an ESC.
+        let mut harness = Harness::panel(1);
+        let Some(first) = one_shell(&mut harness) else {
+            return;
+        };
+        harness.dispatch_action(TabAction::Split(Direction::Right));
+        harness.frame();
+        let second = harness.focused_pane_id().expect("the split focused a pane");
+        assert_ne!(first, second);
+
+        // Printed by pieces, so the echo of the typed line is not the marker.
+        for pane in [first, second] {
+            harness.type_into(pane, "printf '\\033[?1004h%s-%s\\n' focus asked; cat\n");
+        }
+        harness.wait_for("the programs never asked for focus reports", |harness| {
+            [first, second]
+                .iter()
+                .all(|pane| harness.terminal_text(*pane).contains("focus-asked"))
+        });
+
+        let window = |harness: &mut Harness, focused| {
+            harness.workspace_update(|workspace, ctx| workspace.set_window_focused(focused, ctx));
+        };
+        window(&mut harness, false);
+        harness.wait_for(
+            "the pane with the keyboard never heard it leave",
+            |harness| harness.terminal_text(second).contains("^[[O"),
+        );
+        window(&mut harness, true);
+        harness.wait_for(
+            "the pane with the keyboard never heard it come back",
+            |harness| harness.terminal_text(second).contains("^[[O^[[I"),
+        );
+
+        harness.dispatch_action(TabAction::FocusPane(first));
+        harness.wait_for("the pane the keyboard left never heard it go", |harness| {
+            harness.terminal_text(second).contains("^[[O^[[I^[[O")
+        });
+        harness.wait_for(
+            "the pane the keyboard reached never heard it arrive",
+            |harness| harness.terminal_text(first).contains("^[[I"),
+        );
+
+        // A pty keeps its order, so a report the first pane was never owed —
+        // the window's leaving and coming back — would have been echoed
+        // ahead of the one it was.
+        let heard = harness.terminal_text(first);
+        assert_eq!(
+            (heard.matches("^[[I").count(), heard.matches("^[[O").count()),
+            (1, 0),
+            "the pane without the keyboard heard about the window: {heard:?}"
         );
     }
 
@@ -15880,6 +16559,58 @@ mod the_bell {
     }
 
     #[test]
+    fn a_bell_in_the_pane_with_the_keyboard_of_a_window_behind_another_asks_for_a_look() {
+        // The keyboard alone is not somebody typing. With the window behind
+        // another application nobody is at the prompt to be interrupted, and
+        // the bell is a program asking for a person who is somewhere else.
+        let mut harness = Harness::new(1);
+        let focused = harness.focused_pane_id().expect("the window has a pane");
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+
+        report(
+            &mut harness,
+            TerminalUpdate::Bell {
+                pane: focused,
+                while_running: false,
+            },
+        );
+
+        assert_eq!(status_of(&harness, focused), Some(AgentStatus::NeedsInput));
+    }
+
+    #[test]
+    fn a_pane_the_strip_moves_to_behind_another_window_is_seen_when_the_window_is() {
+        // The strip can move while nobody is at the window — a plugin's
+        // command, a pane closing under the one with the keyboard. Arriving
+        // there then is arriving where nobody is looking, so the bell stays
+        // until the window is in front again, and then it goes.
+        let mut harness = Harness::new(2);
+        let ringing = background_of(&harness);
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+        report(
+            &mut harness,
+            TerminalUpdate::Bell {
+                pane: ringing,
+                while_running: false,
+            },
+        );
+
+        harness.dispatch_action(TabAction::FocusPane(ringing));
+        assert_eq!(
+            status_of(&harness, ringing),
+            Some(AgentStatus::NeedsInput),
+            "the keyboard reached the pane and nobody saw it"
+        );
+
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(true, ctx));
+        assert_eq!(
+            status_of(&harness, ringing),
+            Some(AgentStatus::Idle),
+            "the window coming back is the look the bell asked for"
+        );
+    }
+
+    #[test]
     fn looking_at_a_pane_is_what_quiets_it() {
         let mut harness = Harness::new(2);
         let ringing = background_of(&harness);
@@ -16006,6 +16737,402 @@ mod the_agent {
 
         report(&mut harness, pane, AgentStatus::NeedsInput, None);
         assert_eq!(AgentStatus::NeedsInput, session_of(&harness, pane).0);
+    }
+
+    #[test]
+    fn an_agent_that_stops_to_ask_in_a_window_behind_another_is_waiting() {
+        // The one-pane person's whole case. Their pane has the keyboard the
+        // entire time they are in another application, so while the pane
+        // with the keyboard counted as looked at, their agent's question
+        // never reached the count or the title — the one thing a window
+        // behind another says to a switcher and a taskbar.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+
+        report(
+            &mut harness,
+            pane,
+            AgentStatus::NeedsInput,
+            Some("port the tab bar"),
+        );
+
+        let (count, title) = harness.workspace.read(&harness.app, |workspace, _| {
+            (
+                crate::plugins::tabs::waiting_count(workspace),
+                crate::window_title_of(workspace, "Crook"),
+            )
+        });
+        assert_eq!(
+            1, count,
+            "the pane with the keyboard is nobody's to look at"
+        );
+        assert!(
+            title.starts_with("(1 waiting)"),
+            "the window's name has to say it: {title}"
+        );
+        assert!(
+            session_of(&harness, pane).1,
+            "and the stop asked for a look, which the person has not given it"
+        );
+    }
+
+    #[test]
+    fn coming_back_to_the_window_is_a_look_and_answers_only_what_a_look_answers() {
+        // The window's focus is the other half of looking, so regaining it is
+        // a glance at the pane with the keyboard: the attention the stop
+        // asked for goes, as a tab switch would take it. The agent's question
+        // stays, since looking answers no question; and so does the person's
+        // own mark, since the strip did not move and nobody arrived anywhere.
+        let mut harness = Harness::new(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        harness.run_command("crook/tabs/mark-waiting");
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+        report(&mut harness, pane, AgentStatus::NeedsInput, None);
+        assert_eq!(
+            (AgentStatus::NeedsInput, true, None),
+            session_of(&harness, pane)
+        );
+        assert!(frame_text(&harness.frame()).contains("1 waiting"));
+
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(true, ctx));
+
+        assert_eq!(
+            (AgentStatus::NeedsInput, false, None),
+            session_of(&harness, pane),
+            "coming back answered the look and nothing else"
+        );
+        assert!(
+            marked(&harness, pane),
+            "coming back to the window is not arriving at the pane"
+        );
+        assert!(
+            !frame_text(&harness.frame()).contains(" waiting"),
+            "the pane being looked at can wait for nobody"
+        );
+    }
+
+    #[test]
+    fn a_marked_pane_the_strip_moves_to_behind_another_window_is_arrived_at_when_the_window_is() {
+        // A shell that exits while nobody is at the window closes its pane,
+        // and the keyboard lands on the tab the person marked to come back
+        // to. Nobody arrived at it then. Coming back to the window with that
+        // tab in front of them is arriving, and the mark goes, as the move
+        // itself would have taken it in a window in front.
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let marked_pane = harness.panes_of(tabs[0])[0];
+        let exiting = harness.focused_pane_id().expect("the window has a pane");
+        harness.open_tab_menu_on(tabs[0], marked_pane);
+        harness.run_command("crook/tabs/mark-waiting");
+        assert!(marked(&harness, marked_pane));
+
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(&TerminalUpdate::Closed(exiting), ctx);
+        });
+        assert_eq!(harness.focused_pane_id(), Some(marked_pane));
+        assert!(
+            marked(&harness, marked_pane),
+            "the keyboard reached the pane and nobody was there to see it"
+        );
+
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(true, ctx));
+        assert!(
+            !marked(&harness, marked_pane),
+            "coming back to a pane the strip moved to is arriving at it"
+        );
+    }
+
+    /// What a window told the desktop, in order, standing in for the event
+    /// loop a real window says it through.
+    #[derive(Clone, Default)]
+    struct Notebook(Rc<RefCell<Vec<Said>>>);
+
+    #[derive(Clone, Debug, PartialEq)]
+    enum Said {
+        Title(String),
+        Look,
+        Badge(usize),
+        AskedToBadge,
+    }
+
+    impl crate::Desktop for Notebook {
+        fn set_title(&self, title: String) {
+            self.0.borrow_mut().push(Said::Title(title));
+        }
+
+        fn request_attention(&self) {
+            self.0.borrow_mut().push(Said::Look);
+        }
+
+        fn set_badge(&self, waiting: usize) {
+            self.0.borrow_mut().push(Said::Badge(waiting));
+        }
+
+        fn ask_to_badge(&self) {
+            self.0.borrow_mut().push(Said::AskedToBadge);
+        }
+    }
+
+    impl Notebook {
+        fn looks(&self) -> usize {
+            self.0
+                .borrow()
+                .iter()
+                .filter(|said| **said == Said::Look)
+                .count()
+        }
+
+        fn title(&self) -> Option<String> {
+            self.0.borrow().iter().rev().find_map(|said| match said {
+                Said::Title(title) => Some(title.clone()),
+                Said::Look | Said::Badge(_) | Said::AskedToBadge => None,
+            })
+        }
+
+        /// Every count the dock's badge was given, in order.
+        fn badges(&self) -> Vec<usize> {
+            self.0
+                .borrow()
+                .iter()
+                .filter_map(|said| match said {
+                    Said::Badge(waiting) => Some(*waiting),
+                    Said::Title(_) | Said::Look | Said::AskedToBadge => None,
+                })
+                .collect()
+        }
+
+        /// How many times the desktop was asked for leave to badge the icon.
+        fn asks_to_badge(&self) -> usize {
+            self.0
+                .borrow()
+                .iter()
+                .filter(|said| **said == Said::AskedToBadge)
+                .count()
+        }
+    }
+
+    /// Watches the window the way a real one is watched: every change to its
+    /// views runs the callback the shell registers, with a notebook where the
+    /// event loop would be.
+    fn watched(harness: &mut Harness) -> Notebook {
+        let notebook = Notebook::default();
+        let beacon = crate::Beacon::new("Crook".to_owned(), notebook.clone());
+        let callback = crate::on_every_change(beacon, harness.workspace.clone(), || {});
+        harness
+            .app
+            .on_window_invalidated(harness.window_id, callback);
+        notebook
+    }
+
+    #[test]
+    fn a_question_behind_another_window_reaches_the_desktop_without_a_frame() {
+        // A window nobody can see may be given no frames: a Wayland
+        // compositor sends no frame callback to a surface it is not showing,
+        // and winit holds every redraw back until one comes. So nothing below
+        // draws one, and the title and the request for a look still go out.
+        let mut harness = Harness::new(2);
+        let front = harness.focused_pane_id().expect("the window has a pane");
+        let behind = background_of(&harness);
+        let said = watched(&mut harness);
+
+        report(&mut harness, front, AgentStatus::NeedsInput, None);
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+        assert_eq!(
+            0,
+            said.looks(),
+            "the question on screen as the person left is one they saw"
+        );
+        assert!(
+            said.title()
+                .is_some_and(|title| title.starts_with("(1 waiting)")),
+            "the title counts it all the same: {:?}",
+            said.title()
+        );
+
+        report(&mut harness, behind, AgentStatus::NeedsInput, None);
+        assert_eq!(1, said.looks(), "a second question, with nobody there");
+        assert!(
+            said.title()
+                .is_some_and(|title| title.starts_with("(2 waiting)")),
+            "{:?}",
+            said.title()
+        );
+
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(true, ctx));
+        assert_eq!(1, said.looks(), "coming back asks for nothing");
+    }
+
+    #[test]
+    fn the_dock_badge_counts_what_the_title_counts_and_comes_off_at_none() {
+        // The badge is the title's number somewhere a minimised window still
+        // shows it, so it follows the same count on the same path — every
+        // change to the window's views, no frame drawn — and it is sent only
+        // when the count moves, since the dock redraws the tile for each.
+        let mut harness = Harness::new(2);
+        let front = harness.focused_pane_id().expect("the window has a pane");
+        let behind = background_of(&harness);
+        let said = watched(&mut harness);
+        assert_eq!(
+            said.badges(),
+            [0usize; 0],
+            "an icon with nothing waiting was never given a badge to take off"
+        );
+
+        report(&mut harness, behind, AgentStatus::NeedsInput, None);
+        report(&mut harness, behind, AgentStatus::NeedsInput, Some("again"));
+        assert_eq!(said.badges(), [1], "once, however often it is asked");
+
+        // The pane in front joins the count while the window is behind
+        // something else, and leaves it when the person is back: the title's
+        // rule, which the badge does not second-guess.
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+        report(&mut harness, front, AgentStatus::NeedsInput, None);
+        assert_eq!(said.badges(), [1, 2]);
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(true, ctx));
+        assert_eq!(said.badges(), [1, 2, 1]);
+
+        report(&mut harness, behind, AgentStatus::Running, None);
+        assert_eq!(
+            said.badges(),
+            [1, 2, 1, 0],
+            "and nothing waiting is no badge"
+        );
+        assert!(
+            said.title().is_some_and(|title| !title.contains("waiting")),
+            "{:?}",
+            said.title()
+        );
+    }
+
+    #[test]
+    fn leave_to_badge_is_asked_for_with_the_first_count_and_not_again() {
+        // Crook.app's badge is drawn only once the leave has been asked for,
+        // and a pane can wait with the window in front, where no banner is
+        // posted to ask with. So the first count there is to show asks — after
+        // the badge it is for, which the answer sets again — and nothing
+        // else does: not a window with nothing waiting, and not a later count,
+        // when the answer is already the person's setting.
+        let mut harness = Harness::new(2);
+        let front = harness.focused_pane_id().expect("the window has a pane");
+        let behind = background_of(&harness);
+        let said = watched(&mut harness);
+        assert_eq!(
+            0,
+            said.asks_to_badge(),
+            "nothing waiting, nothing to ask for"
+        );
+
+        report(&mut harness, behind, AgentStatus::NeedsInput, None);
+        assert_eq!(
+            said.0.borrow().iter().rev().take(2).collect::<Vec<_>>(),
+            [&Said::AskedToBadge, &Said::Badge(1)],
+            "asked with the window in front, right after the badge it is for"
+        );
+
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+        report(&mut harness, front, AgentStatus::NeedsInput, None);
+        report(&mut harness, behind, AgentStatus::Running, None);
+        report(&mut harness, front, AgentStatus::Running, None);
+        report(&mut harness, behind, AgentStatus::NeedsInput, None);
+        assert_eq!(said.badges(), [1, 2, 1, 0, 1]);
+        assert_eq!(
+            1,
+            said.asks_to_badge(),
+            "once, for as long as the window is open"
+        );
+    }
+
+    #[test]
+    fn leave_to_badge_is_not_asked_for_while_notifications_are_off() {
+        // macOS asks for the badge's leave as leave to send notifications, in
+        // those words, and a person who turned Crook's off has answered that
+        // already: with the plugin off, or with every switch on its page off,
+        // the badge is set and nothing is asked. Switching one back on with a
+        // pane still waiting asks then, not with the count's next move.
+        let mut harness = Harness::new(2);
+        let behind = background_of(&harness);
+        let plugin = crook_plugin::PluginId::parse("crook/notifications").expect("a literal");
+        let toggle = |harness: &mut Harness, occasion| {
+            harness.dispatch_workspace_action(WorkspaceAction::Settings(
+                SettingsAction::ToggleNotification(occasion),
+            ));
+        };
+        harness.workspace_update(|workspace, ctx| workspace.toggle_plugin(&plugin, ctx));
+        let said = watched(&mut harness);
+
+        report(&mut harness, behind, AgentStatus::NeedsInput, None);
+        assert_eq!(said.badges(), [1], "the badge is set all the same");
+        assert_eq!(0, said.asks_to_badge(), "not with the plugin off");
+
+        toggle(&mut harness, crate::notify::Occasion::NeedsInput);
+        harness.workspace_update(|workspace, ctx| workspace.toggle_plugin(&plugin, ctx));
+        assert!(
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace
+                    .host()
+                    .is_loaded(&plugin)),
+            "the plugin is back on"
+        );
+        assert_eq!(
+            0,
+            said.asks_to_badge(),
+            "nor with the plugin on and every switch off"
+        );
+
+        toggle(&mut harness, crate::notify::Occasion::LongCommand);
+        assert_eq!(said.badges(), [1], "the count has not moved");
+        assert_eq!(
+            1,
+            said.asks_to_badge(),
+            "one switch on is notifications wanted, and the pane is still waiting"
+        );
+    }
+
+    #[test]
+    fn a_window_is_named_as_it_is_watched_with_no_frame_drawn() {
+        // `Shell::new` opens the window, restores the session into it and
+        // only then starts watching it, all before a first frame, and no
+        // frame follows the workspace afterwards. So registering the callback
+        // is what names the window: its flush runs the callback for every
+        // change no frame has taken, which in a window that has drawn nothing
+        // is everything it opened with — the dock's badge included, for a
+        // session that comes back with a pane already waiting, and the ask
+        // for the leave the badge is drawn with, since the notifications the
+        // window opens with are on: the prompt can come at launch.
+        let mut harness = Harness::undrawn(
+            2,
+            Opening {
+                settings: Settings::ephemeral(),
+                channel: Channel::Dev,
+                plugins: vec![Box::new(crate::plugins::notifications::Notifications)],
+                withdrawn: Default::default(),
+                heard: Default::default(),
+                plugins_directory: None,
+            },
+        );
+        let front = harness.focused_pane_id().expect("the window has a pane");
+        let behind = background_of(&harness);
+        report(
+            &mut harness,
+            front,
+            AgentStatus::Running,
+            Some("bisect the flaky test"),
+        );
+        report(&mut harness, behind, AgentStatus::NeedsInput, None);
+
+        let said = watched(&mut harness);
+        assert_eq!(
+            [
+                Said::Title("(1 waiting) bisect the flaky test — Crook".to_owned()),
+                Said::Badge(1),
+                Said::AskedToBadge,
+            ],
+            said.0.borrow().as_slice(),
+            "named as it is watched, with nothing changed and nothing drawn since"
+        );
     }
 
     #[test]
@@ -16476,7 +17603,7 @@ mod the_agent {
         report(&mut harness, third, AgentStatus::NeedsInput, None);
         report(&mut harness, first, AgentStatus::Failed, None);
         let count = harness.workspace.read(&harness.app, |workspace, _| {
-            crate::plugins::tabs::waiting_count(workspace.tabs())
+            crate::plugins::tabs::waiting_count(workspace)
         });
         assert_eq!(2, count);
 
@@ -16548,6 +17675,688 @@ mod the_agent {
         });
 
         assert_eq!((true, false), waiting);
+    }
+
+    /// Applies a notification the way the model's subscription does.
+    fn notify(harness: &mut Harness, pane: PaneId, title: Option<&str>, body: Option<&str>) {
+        let update = TerminalUpdate::Notification {
+            pane,
+            title: title.map(str::to_owned),
+            body: body.map(str::to_owned),
+        };
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(&update, ctx);
+        });
+    }
+
+    /// What a pane's row prints on its second line in place of the table's.
+    fn row_message_of(harness: &Harness, pane: PaneId) -> Option<String> {
+        harness.workspace.read(&harness.app, |workspace, _| {
+            workspace
+                .tabs()
+                .pane(pane)
+                .expect("the pane is open")
+                .session()
+                .row_message()
+                .map(str::to_owned)
+        })
+    }
+
+    #[test]
+    fn a_notification_where_nobody_is_looking_asks_for_a_look_and_leaves_the_status() {
+        // An OSC 9 from an agent on a machine with no Crook binary on it:
+        // the row asks for a look and says what for, and the dot keeps
+        // saying what the agent last said.
+        let mut harness = Harness::new(2);
+        let away = background_of(&harness);
+        report(&mut harness, away, AgentStatus::Running, Some(TITLE));
+
+        notify(
+            &mut harness,
+            away,
+            None,
+            Some("Claude needs your permission to use Bash"),
+        );
+
+        assert_eq!(
+            (AgentStatus::Running, true, Some(TITLE.to_owned())),
+            session_of(&harness, away),
+            "a notification is not a status"
+        );
+        let shown = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tabs().pane(away).map(Pane::status)
+        });
+        assert_eq!(Some(AgentStatus::Running), shown);
+        assert_eq!(
+            Some("Claude needs your permission to use Bash".to_owned()),
+            row_message_of(&harness, away)
+        );
+        let scene = harness.frame();
+        assert!(frame_text(&scene).contains("1 waiting"));
+        // Cut to the row's width, from its end.
+        assert!(
+            strip_text(&scene).contains("Claude needs your permission"),
+            "the row did not say what the notification said: {}",
+            strip_text(&scene)
+        );
+
+        harness.dispatch_action(TabAction::FocusPane(away));
+        assert_eq!(
+            (AgentStatus::Running, false, Some(TITLE.to_owned())),
+            session_of(&harness, away),
+            "looking is what answers a notification"
+        );
+        assert_eq!(
+            None,
+            row_message_of(&harness, away),
+            "the message went on showing after the look it asked for"
+        );
+    }
+
+    #[test]
+    fn a_notification_in_the_pane_with_the_keyboard_is_not_an_interruption() {
+        let mut harness = Harness::new(1);
+        let here = harness.focused_pane_id().expect("the window has a pane");
+
+        notify(&mut harness, here, None, Some("tests passed"));
+
+        assert_eq!((AgentStatus::Idle, false, None), session_of(&harness, here));
+        assert_eq!(None, row_message_of(&harness, here));
+    }
+
+    #[test]
+    fn a_notifications_title_and_body_share_the_rows_line() {
+        // OSC 777 and kitty's OSC 99 name what is asking, and the row has
+        // one line for both. An idle pane that asked is drawn as waiting,
+        // the way a bell's is.
+        let mut harness = Harness::new(2);
+        let away = background_of(&harness);
+
+        notify(
+            &mut harness,
+            away,
+            Some("Claude Code"),
+            Some("Claude needs your permission to use Bash"),
+        );
+        assert_eq!(
+            Some("Claude Code: Claude needs your permission to use Bash".to_owned()),
+            row_message_of(&harness, away)
+        );
+        let shown = harness.workspace.read(&harness.app, |workspace, _| {
+            workspace.tabs().pane(away).map(Pane::status)
+        });
+        assert_eq!(Some(AgentStatus::NeedsInput), shown);
+
+        notify(&mut harness, away, Some("build"), None);
+        assert_eq!(Some("build".to_owned()), row_message_of(&harness, away));
+    }
+
+    #[test]
+    fn a_bell_after_a_notification_keeps_what_it_said() {
+        // Claude Code's `iterm2_with_bell` channel writes exactly this pair,
+        // and the bell asks for the look the notification already asked for.
+        let mut harness = Harness::new(2);
+        let away = background_of(&harness);
+
+        notify(
+            &mut harness,
+            away,
+            None,
+            Some("Claude is waiting for your input"),
+        );
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(
+                &TerminalUpdate::Bell {
+                    pane: away,
+                    while_running: true,
+                },
+                ctx,
+            );
+        });
+
+        assert_eq!(
+            Some("Claude is waiting for your input".to_owned()),
+            row_message_of(&harness, away)
+        );
+    }
+
+    #[test]
+    fn a_notification_beside_a_question_is_shown_until_it_is_seen() {
+        // The newest thing said is the one on the row; once it has been
+        // looked at, the agent's own question — still asked — comes back.
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        report_waiting_for(
+            &mut harness,
+            away,
+            AgentStatus::NeedsInput,
+            None,
+            Some("run rm -rf build?"),
+        );
+
+        notify(&mut harness, away, None, Some("still waiting"));
+        assert_eq!(
+            Some("still waiting".to_owned()),
+            row_message_of(&harness, away)
+        );
+
+        harness.dispatch_action(TabAction::Select(tabs[0]));
+        assert_eq!(
+            Some("run rm -rf build?".to_owned()),
+            row_message_of(&harness, away)
+        );
+    }
+
+    #[test]
+    fn why_this_status_says_what_the_notification_said() {
+        let mut harness = Harness::new(2);
+        let tabs = harness.tab_ids();
+        let away = harness.panes_of(tabs[0])[0];
+        report(&mut harness, away, AgentStatus::Running, None);
+        notify(&mut harness, away, None, Some("tests passed"));
+
+        let text = explanation_of(&mut harness, tabs[0], away);
+        assert!(text.contains("Status: running"), "{text}");
+        assert!(text.contains("notification"), "{text}");
+        assert!(text.contains("tests passed"), "{text}");
+        assert!(!text.contains("bell"), "{text}");
+    }
+}
+
+/// The desktop notification: posted when a pane's row turns to needs-input
+/// while the window is behind another one, and at no moment the switches did
+/// not ask for. The notifier is a list, so nothing reaches the desktop of
+/// whoever runs the suite.
+mod desktop_notifications {
+    use std::time::Duration;
+
+    use crook_plugin::PluginId;
+
+    use super::*;
+    use crate::notify::{LONG_COMMAND, Notice, Notifier, Occasion};
+    use crate::terminal_model::TerminalUpdate;
+
+    /// What the workspace posted, in order, where the desktop would be.
+    #[derive(Clone, Default)]
+    struct Posted(Rc<RefCell<Vec<Notice>>>);
+
+    impl Notifier for Posted {
+        fn post(&self, notice: Notice, _: &Background) {
+            self.0.borrow_mut().push(notice);
+        }
+    }
+
+    impl Posted {
+        fn all(&self) -> Vec<Notice> {
+            self.0.borrow().clone()
+        }
+
+        fn count(&self) -> usize {
+            self.0.borrow().len()
+        }
+    }
+
+    /// A window of `tabs` tabs whose notifications go to a list, and the list.
+    fn window(tabs: usize) -> (Harness, Posted) {
+        let mut harness = Harness::new(tabs);
+        let posted = Posted::default();
+        let notifier = Rc::new(posted.clone());
+        harness.workspace_update(|workspace, _| workspace.set_notifier(notifier));
+        (harness, posted)
+    }
+
+    /// The person goes to another application.
+    fn leave(harness: &mut Harness) {
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(false, ctx));
+    }
+
+    /// Applies one update the way the model's subscription does.
+    fn apply(harness: &mut Harness, update: TerminalUpdate) {
+        harness.workspace_update(|workspace, ctx| {
+            workspace.apply_terminal_update(&update, ctx);
+        });
+    }
+
+    fn report(harness: &mut Harness, pane: PaneId, status: AgentStatus, message: Option<&str>) {
+        apply(
+            harness,
+            TerminalUpdate::Agent {
+                pane,
+                status,
+                title: None,
+                message: message.map(str::to_owned),
+            },
+        );
+    }
+
+    fn name(harness: &mut Harness, pane: PaneId, name: &str) {
+        harness.workspace_update(|workspace, ctx| {
+            workspace.rename_pane(pane, Some(name.to_owned()), ctx);
+        });
+    }
+
+    fn switch(harness: &mut Harness, occasion: Occasion) {
+        harness.dispatch_workspace_action(WorkspaceAction::Settings(
+            SettingsAction::ToggleNotification(occasion),
+        ));
+    }
+
+    /// The pane of the tab that is *not* active.
+    fn background_of(harness: &Harness) -> PaneId {
+        let active = harness.focused_pane_id().expect("the window has a pane");
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| {
+                workspace
+                    .tabs()
+                    .panes()
+                    .map(|(_, pane)| pane.id())
+                    .find(|id| *id != active)
+            })
+            .expect("two tabs have two panes")
+    }
+
+    #[test]
+    fn an_agent_that_stops_to_ask_behind_another_window_posts_its_question() {
+        // The one-pane person's case, and the one this is for: their agent
+        // stopped while they were reading something else, and the banner
+        // says which tab and what it wants.
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        name(&mut harness, pane, "port the tab bar");
+        leave(&mut harness);
+
+        report(
+            &mut harness,
+            pane,
+            AgentStatus::NeedsInput,
+            Some("run rm -rf build?"),
+        );
+
+        assert_eq!(
+            posted.all(),
+            [Notice {
+                title: "Crook — port the tab bar".to_owned(),
+                body: "run rm -rf build?".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn an_agent_that_finishes_behind_another_window_posts_that_it_is_done() {
+        // Done while nobody was looking turns the row amber like a question
+        // does, and it is the stop a person who walked away from a long task
+        // is waiting to hear about.
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        name(&mut harness, pane, "bisect");
+        report(&mut harness, pane, AgentStatus::Running, None);
+        leave(&mut harness);
+
+        report(&mut harness, pane, AgentStatus::Idle, None);
+
+        assert_eq!(
+            posted.all(),
+            [Notice {
+                title: "Crook — bisect".to_owned(),
+                body: "Done, waiting for a prompt".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn nothing_is_posted_while_the_window_is_in_front() {
+        // A pane in another tab of a window somebody is at is an amber row
+        // and a count on the chip, both in front of them already.
+        let (mut harness, posted) = window(2);
+        let behind = background_of(&harness);
+
+        report(&mut harness, behind, AgentStatus::NeedsInput, Some("go?"));
+
+        assert_eq!(posted.count(), 0, "{:?}", posted.all());
+    }
+
+    #[test]
+    fn the_question_on_screen_as_the_person_leaves_is_not_posted() {
+        // They saw it; leaving is not news, and the agent saying it again —
+        // with another word in the question — is not a new stop either.
+        let (mut harness, posted) = window(2);
+        let behind = background_of(&harness);
+        report(&mut harness, behind, AgentStatus::NeedsInput, Some("go?"));
+        leave(&mut harness);
+
+        report(
+            &mut harness,
+            behind,
+            AgentStatus::NeedsInput,
+            Some("go now?"),
+        );
+
+        assert_eq!(posted.count(), 0, "{:?}", posted.all());
+    }
+
+    #[test]
+    fn a_pane_that_asks_twice_within_the_quiet_posts_once() {
+        // An agent whose hooks flap between running and needs-input would
+        // otherwise post a banner a flap.
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        leave(&mut harness);
+
+        report(&mut harness, pane, AgentStatus::NeedsInput, Some("first?"));
+        report(&mut harness, pane, AgentStatus::Running, None);
+        report(&mut harness, pane, AgentStatus::NeedsInput, Some("second?"));
+
+        assert_eq!(posted.count(), 1, "{:?}", posted.all());
+        assert_eq!(posted.all()[0].body, "first?");
+    }
+
+    #[test]
+    fn a_question_after_the_person_came_back_and_left_again_is_posted() {
+        // The permission rhythm: a banner, a switch over to approve, a switch
+        // back, and the agent's next question a few seconds later. The
+        // person answered the first one, so the second is news however soon
+        // it comes; the quiet is for a pane nobody has looked at since.
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        report(&mut harness, pane, AgentStatus::Running, None);
+        leave(&mut harness);
+        report(&mut harness, pane, AgentStatus::NeedsInput, Some("first?"));
+
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(true, ctx));
+        report(&mut harness, pane, AgentStatus::Running, None);
+        leave(&mut harness);
+        report(&mut harness, pane, AgentStatus::NeedsInput, Some("second?"));
+
+        let bodies: Vec<String> = posted.all().into_iter().map(|notice| notice.body).collect();
+        assert_eq!(bodies, ["first?", "second?"]);
+    }
+
+    #[test]
+    fn a_pane_the_person_did_not_look_at_stays_quiet_after_they_came_back() {
+        // Coming back to the window is looking at the pane in front, and only
+        // that one: a pane in another tab that posted is still unseen.
+        let (mut harness, posted) = window(2);
+        let behind = background_of(&harness);
+        report(&mut harness, behind, AgentStatus::Running, None);
+        leave(&mut harness);
+        report(
+            &mut harness,
+            behind,
+            AgentStatus::NeedsInput,
+            Some("first?"),
+        );
+
+        harness.workspace_update(|workspace, ctx| workspace.set_window_focused(true, ctx));
+        leave(&mut harness);
+        report(&mut harness, behind, AgentStatus::Running, None);
+        report(
+            &mut harness,
+            behind,
+            AgentStatus::NeedsInput,
+            Some("second?"),
+        );
+
+        assert_eq!(posted.count(), 1, "{:?}", posted.all());
+    }
+
+    #[test]
+    fn a_pane_with_no_name_is_posted_under_the_name_its_row_shows() {
+        // A shell at a prompt that set no title has no name of its own, and
+        // its row says the directory it is in; by the time its command's end
+        // is heard, what it was running is gone too. The banner names the row
+        // a person can find, not the `agent 1` it was born as.
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        switch(&mut harness, Occasion::LongCommand);
+        apply(
+            &mut harness,
+            TerminalUpdate::WorkingDirectory(pane, PathBuf::from("/work/crook/app")),
+        );
+        apply(
+            &mut harness,
+            TerminalUpdate::Running(pane, Some("cargo build".to_owned())),
+        );
+        leave(&mut harness);
+
+        apply(&mut harness, TerminalUpdate::Running(pane, None));
+        apply(
+            &mut harness,
+            TerminalUpdate::CommandFinished {
+                pane,
+                exit: Some(0),
+                took: Some(LONG_COMMAND * 6),
+            },
+        );
+
+        let titles: Vec<String> = posted
+            .all()
+            .into_iter()
+            .map(|notice| notice.title)
+            .collect();
+        assert_eq!(titles, ["Crook — app"]);
+    }
+
+    #[test]
+    fn a_pane_with_no_name_that_stops_is_posted_under_the_name_its_row_shows() {
+        // The same row reached through a turn to needs-input: an agent that
+        // never called its work anything, whose command ended while nobody
+        // was looking. The shell took its status back to idle, which turns
+        // the row amber, and what it was running went a moment before.
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        apply(
+            &mut harness,
+            TerminalUpdate::WorkingDirectory(pane, PathBuf::from("/work/crook/app")),
+        );
+        apply(
+            &mut harness,
+            TerminalUpdate::Running(pane, Some("claude".to_owned())),
+        );
+        report(&mut harness, pane, AgentStatus::Running, None);
+        leave(&mut harness);
+
+        apply(&mut harness, TerminalUpdate::Running(pane, None));
+        apply(&mut harness, TerminalUpdate::AgentSettled(pane));
+
+        let titles: Vec<String> = posted
+            .all()
+            .into_iter()
+            .map(|notice| notice.title)
+            .collect();
+        assert_eq!(titles, ["Crook — app"]);
+    }
+
+    #[test]
+    fn a_pane_with_no_name_that_fails_is_posted_under_the_name_its_row_shows() {
+        // An agent reporting over the wire from a shell whose integration
+        // says nothing of what it runs: no title, no command, only a
+        // directory, which is what its row shows.
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        switch(&mut harness, Occasion::Failed);
+        apply(
+            &mut harness,
+            TerminalUpdate::WorkingDirectory(pane, PathBuf::from("/work/crook/app")),
+        );
+        report(&mut harness, pane, AgentStatus::Running, None);
+        leave(&mut harness);
+
+        report(&mut harness, pane, AgentStatus::Failed, None);
+
+        let titles: Vec<String> = posted
+            .all()
+            .into_iter()
+            .map(|notice| notice.title)
+            .collect();
+        assert_eq!(titles, ["Crook — app"]);
+    }
+
+    #[test]
+    fn a_second_pane_asking_is_not_held_up_by_the_first() {
+        let (mut harness, posted) = window(2);
+        let front = harness.focused_pane_id().expect("the window has a pane");
+        let behind = background_of(&harness);
+        leave(&mut harness);
+
+        report(&mut harness, front, AgentStatus::NeedsInput, None);
+        report(&mut harness, behind, AgentStatus::NeedsInput, None);
+
+        assert_eq!(posted.count(), 2, "{:?}", posted.all());
+    }
+
+    #[test]
+    fn switched_off_a_question_posts_nothing() {
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        switch(&mut harness, Occasion::NeedsInput);
+        assert!(!harness.general().notify_on_needs_input);
+        leave(&mut harness);
+
+        report(&mut harness, pane, AgentStatus::NeedsInput, Some("go?"));
+
+        assert_eq!(posted.count(), 0, "{:?}", posted.all());
+        assert_eq!(
+            AgentStatus::NeedsInput,
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace
+                    .tabs()
+                    .pane(pane)
+                    .map(Pane::status))
+                .expect("the pane is open"),
+            "the row still says so: only the banner is off"
+        );
+    }
+
+    #[test]
+    fn a_failure_posts_nothing_until_somebody_asks_for_it() {
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        name(&mut harness, pane, "bisect");
+        leave(&mut harness);
+
+        report(&mut harness, pane, AgentStatus::Failed, None);
+        assert_eq!(posted.count(), 0, "failed is off out of the box");
+
+        switch(&mut harness, Occasion::Failed);
+        report(&mut harness, pane, AgentStatus::Running, None);
+        report(&mut harness, pane, AgentStatus::Failed, None);
+
+        assert_eq!(
+            posted.all(),
+            [Notice {
+                title: "Crook — bisect".to_owned(),
+                body: "Stopped: something went wrong".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_bell_behind_another_window_posts_that_it_rang() {
+        // A bell in a pane with nothing else to say turns its row to
+        // needs-input, and for an agent without Crook's hooks — Codex, in a
+        // terminal it does not recognise — it is how it asks.
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        leave(&mut harness);
+
+        apply(
+            &mut harness,
+            TerminalUpdate::Bell {
+                pane,
+                while_running: true,
+            },
+        );
+
+        assert_eq!(posted.count(), 1, "{:?}", posted.all());
+        assert_eq!(posted.all()[0].body, "Rang the bell");
+    }
+
+    #[test]
+    fn a_long_command_posts_when_it_ends_only_once_asked_to() {
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        leave(&mut harness);
+        let finished = |took: Duration| TerminalUpdate::CommandFinished {
+            pane,
+            exit: Some(2),
+            took: Some(took),
+        };
+
+        apply(&mut harness, finished(LONG_COMMAND * 3));
+        assert_eq!(posted.count(), 0, "a long command is off out of the box");
+
+        switch(&mut harness, Occasion::LongCommand);
+        apply(
+            &mut harness,
+            finished(LONG_COMMAND - Duration::from_secs(1)),
+        );
+        assert_eq!(posted.count(), 0, "a short one is not worth a banner");
+
+        apply(&mut harness, finished(LONG_COMMAND));
+        assert_eq!(posted.count(), 1, "{:?}", posted.all());
+        assert_eq!(
+            posted.all()[0].body,
+            format!("A command exited 2 after {}s", LONG_COMMAND.as_secs())
+        );
+    }
+
+    #[test]
+    fn with_the_notifications_plugin_off_nothing_is_posted() {
+        // The Plugins page's switch for it is a switch for the feature, not
+        // only for the page its settings are on.
+        let (mut harness, posted) = window(1);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+        let plugin = PluginId::parse("crook/notifications").expect("a literal");
+        harness.workspace_update(|workspace, ctx| workspace.toggle_plugin(&plugin, ctx));
+        leave(&mut harness);
+
+        report(&mut harness, pane, AgentStatus::NeedsInput, Some("go?"));
+
+        assert_eq!(posted.count(), 0, "{:?}", posted.all());
+    }
+
+    #[test]
+    fn the_notifications_page_has_a_switch_for_each_occasion() {
+        let mut harness = Harness::new(1);
+        harness.open_settings_page();
+        harness.select_settings_section("Notifications");
+        let scene = harness.frame();
+        let text = text_where(&scene, |position| {
+            settings_pane_box(&scene).contains_point(position)
+        });
+        for row in [
+            "When a pane needs you",
+            "When an agent fails",
+            "When a long command finishes",
+        ] {
+            assert!(text.contains(row), "no {row:?} on the page: {text:?}");
+        }
+
+        let switches = settings_switch_boxes(&scene);
+        assert_eq!(switches.len(), 3, "one switch an occasion");
+        harness.click(center(switches[0]), MouseButton::Left);
+
+        // Inert where this build posts nothing, the way every control with
+        // nothing to do is: see `notify::posts_here`.
+        assert_eq!(
+            harness.general().notify_on_needs_input,
+            !crate::notify::posts_here(),
+            "the first switch is the question's"
+        );
+    }
+
+    #[test]
+    fn the_palette_finds_the_notifications_page() {
+        let mut harness = Harness::new(1);
+        open_palette(&mut harness, "#notify");
+        harness.frame();
+        harness.press("enter", Modifiers::default(), "");
+        harness.frame();
+
+        assert_eq!("Notifications", harness.settings_section());
     }
 }
 
@@ -16786,7 +18595,7 @@ fn the_shortcuts_page_lists_what_a_plugin_registered_and_the_chord_that_reaches_
     harness.bind(r#"[{ "key": "shift+cmd+u", "command": "crook/window/new-tab" }]"#);
     harness.open_settings_page();
     let rail = settings_rail_boxes(&harness.frame());
-    harness.click(center(rail[2]), MouseButton::Left);
+    harness.click(center(rail[3]), MouseButton::Left);
     assert_eq!("Keyboard Shortcuts", harness.settings_section());
 
     let text = frame_text(&harness.frame());
@@ -18452,7 +20261,7 @@ fn the_settings_rail_lists_the_pages_the_plugins_contributed() {
     let scene = harness.frame();
 
     let rail = settings_rail_boxes(&scene);
-    assert_eq!(rail.len(), 4, "four pages in the rail");
+    assert_eq!(rail.len(), 5, "five pages in the rail");
     // Top to bottom, which is the `order` each plugin asked for.
     assert_eq!(harness.settings_section(), "Appearance");
 
@@ -18485,7 +20294,9 @@ mod sandboxed {
     use super::*;
     use crate::picture::tests::{header_only, icon_png, preview_png};
     use crate::plugins::wasm::tests::{
-        Scratch, install, manifest, wasm, wasm_asking, wasm_at, wasm_carrying, wasm_saying,
+        BURST, EVERY_ANSWER, FINISHED, Scratch, install, manifest, wasm, wasm_asking,
+        wasm_asking_where, wasm_asking_where_at_every_command, wasm_at, wasm_carrying,
+        wasm_running, wasm_saying,
     };
     use crate::workspace::settings_page::widgets;
     use crook_plugin_api::Capability;
@@ -19278,22 +21089,67 @@ mod sandboxed {
             .into_iter()
             .next()
             .expect("the Plugins section has a field of its own");
-        // The name and the word after it are set in two sizes and can sit
-        // on two baselines, so the row is read by its y rather than as one
-        // line: everything in the column within a row's height of the name.
         let lines = text_lines(scene, |at| {
             at.x() >= column.min_x() && at.x() <= column.max_x()
         });
+        row_named(&lines, "Probe")
+    }
+
+    /// The list's row whose name starts with `name`, read left to right:
+    /// every line within a row's height of the name, in the order they sit
+    /// across the row.
+    ///
+    /// By position rather than as one line of text, because the name and the
+    /// word after it are set in two sizes and sit on baselines a fraction of
+    /// a pixel apart. Which whole pixel each rounds to — one line or two —
+    /// depends on where the row lands in the list, and that moves whenever a
+    /// plugin joins the box: `crook/notifications` put the probe's name on
+    /// 491 and its word on 490, and the row read "not allowed Probe".
+    fn row_named(lines: &[(Vector2F, String)], name: &str) -> String {
         let (at, _) = lines
             .iter()
-            .find(|(_, line)| line.trim().starts_with("Probe"))
-            .expect("the list has a row for the probe");
-        lines
+            .find(|(_, line)| line.trim().starts_with(name))
+            .unwrap_or_else(|| panic!("the list has no row for {name:?}: {lines:?}"));
+        let mut pieces: Vec<&(Vector2F, String)> = lines
             .iter()
             .filter(|(other, _)| (other.y() - at.y()).abs() < 8.)
+            .collect();
+        pieces.sort_by(|left, right| left.0.x().total_cmp(&right.0.x()));
+        pieces
+            .iter()
             .map(|(_, line)| line.trim())
             .collect::<Vec<_>>()
-            .join(" ")
+            .concat()
+    }
+
+    #[test]
+    fn the_last_row_opens_its_card_under_the_traffic_lights_strip() {
+        // The frame every card test above is drawn in on macOS, and the one
+        // place it can be looked at from anywhere else. The strip over the
+        // list moves it down, the update footer takes the bottom of the
+        // column, and the probe — the last row — starts past the list's edge,
+        // under "1 update in the registry". Pressing where its glyphs are hit
+        // the footer and left the card on the first built-in; the row is
+        // reached by scrolling to it, and the card it opens is the probe's.
+        let scratch = Scratch::new("under-the-strip");
+        install(
+            scratch.path(),
+            "eugen.probe",
+            &wasm("eugen/probe", "header.right", 10),
+        );
+        let mut harness = Harness::with_opening(
+            1,
+            opening(&scratch, Default::default(), registry_offering("0.2.0")),
+        );
+        harness.override_controls(ControlLayout::MacOs);
+        harness.show_plugins();
+        harness.click_plugin("Probe");
+
+        let scene = harness.frame();
+        let text = frame_text(&scene);
+        assert!(says(&scene, "1 update in the registry"), "{text}");
+        assert!(says(&scene, "Update to 0.2.0"), "{text}");
+        assert!(!says(&scene, "crook/window"), "{text}");
     }
 
     #[test]
@@ -19767,13 +21623,9 @@ mod sandboxed {
         let lines = text_lines(&scene, |at| {
             at.x() >= column.min_x() && at.x() <= column.max_x()
         });
-        // The name and its "not allowed" share a baseline, so they read as one
-        // line here — the gap between them is a margin, not a space.
-        let row = lines
-            .iter()
-            .find(|(_, line)| line.starts_with("A Plugin With A"))
-            .map(|(_, line)| line.clone())
-            .unwrap_or_else(|| panic!("no row for the long name: {lines:?}"));
+        // The gap between the name and its "not allowed" is a margin, not a
+        // space, so the two read as one run of text.
+        let row = row_named(&lines, "A Plugin With A");
         assert!(
             row.contains('\u{2026}'),
             "the cut name has no mark: {row:?}"
@@ -20341,6 +22193,190 @@ mod sandboxed {
                 )),
             "the plugin was thrown away over one contribution"
         );
+    }
+
+    /// A window holding one plugin, `module`, allowed to see where the tabs
+    /// are working — which is the whole of what a guest needs to ask the window
+    /// something the window answers itself.
+    fn asking_where(scratch: &Scratch, module: &[u8]) -> Harness {
+        install(scratch.path(), "eugen.probe", module);
+        let mut opening = opening(scratch, Default::default(), Default::default());
+        opening
+            .settings
+            .set_granted("eugen/probe", vec![String::from("cwd.read")]);
+        Harness::with_opening(1, opening)
+    }
+
+    /// Pumps the queue, drawing after anything runs on it, until nothing has
+    /// for half a second — and says whether that happened within `patience`.
+    ///
+    /// Half a second is thirty times the pause the window takes between two
+    /// turns of one plugin's deeds, so a chain of those that is still going is
+    /// not mistaken for one that stopped.
+    fn falls_quiet(harness: &mut Harness, patience: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + patience;
+        let mut quiet_since = std::time::Instant::now();
+        while std::time::Instant::now() < deadline {
+            if harness.queue.run_until_parked() > 0 {
+                harness.frame();
+                quiet_since = std::time::Instant::now();
+            } else if quiet_since.elapsed() >= std::time::Duration::from_millis(500) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        false
+    }
+
+    #[test]
+    fn a_plugin_that_asks_again_from_every_answer_hands_the_window_back() {
+        // The freeze this is about. Where a pane is working is answered by the
+        // window itself, on the thread that draws, and the answer is delivered
+        // there too — so a guest that asks again from inside every answer kept
+        // the observer serving it for ever, and the window had to be killed
+        // over a plugin holding one ordinary grant.
+        //
+        // On a thread of its own, because what fails is a call that never
+        // returns: a test that hung would say nothing, and this one says which
+        // call it was.
+        let (said, heard) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let scratch = Scratch::new("asks-forever");
+            let mut harness =
+                asking_where(&scratch, &wasm_asking_where("eugen/probe", 1, 1, u32::MAX));
+            let _ = said.send("opened");
+            // And a loop that ends: past its allowance the plugin stops being
+            // served, and the window is left with nothing to do.
+            if falls_quiet(&mut harness, std::time::Duration::from_secs(20)) {
+                let _ = said.send("quiet");
+            }
+        });
+
+        assert_eq!(
+            heard.recv_timeout(std::time::Duration::from_secs(20)),
+            Ok("opened"),
+            "the window never came back from building a plugin that asks from every answer"
+        );
+        assert_eq!(
+            heard.recv_timeout(std::time::Duration::from_secs(30)),
+            Ok("quiet"),
+            "a plugin that never stops asking went on being served"
+        );
+    }
+
+    #[test]
+    fn two_plugins_that_run_each_other_hand_the_window_back() {
+        // The same loop through two plugins. Each is allowed to run the
+        // other's action and runs it from its own, so one press is a chain
+        // that never ends — and neither plugin ever has anything waiting when
+        // its own queue is looked at, because what it asked for is served at
+        // once and what that raised is waiting on the other one. A turn that
+        // ended whenever a plugin's queue was found empty never ended here.
+        let (said, heard) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let scratch = Scratch::new("run-each-other");
+            for (me, other) in [("ping", "pong"), ("pong", "ping")] {
+                install(
+                    scratch.path(),
+                    &format!("eugen.{me}"),
+                    &wasm_running(&format!("eugen/{me}"), &format!("eugen/{other}/poke")),
+                );
+            }
+            let mut opening = opening(&scratch, Default::default(), Default::default());
+            opening
+                .settings
+                .set_granted("eugen/ping", vec![String::from("run:eugen/pong/poke")]);
+            opening
+                .settings
+                .set_granted("eugen/pong", vec![String::from("run:eugen/ping/poke")]);
+            let mut harness = Harness::with_opening(1, opening);
+
+            harness.run_command("eugen/ping/poke");
+            let _ = said.send("pressed");
+            if falls_quiet(&mut harness, std::time::Duration::from_secs(20)) {
+                let _ = said.send("quiet");
+            }
+        });
+
+        assert_eq!(
+            heard.recv_timeout(std::time::Duration::from_secs(20)),
+            Ok("pressed"),
+            "the window never came back from a press that two plugins pass back and forth"
+        );
+        assert_eq!(
+            heard.recv_timeout(std::time::Duration::from_secs(30)),
+            Ok("quiet"),
+            "two plugins running each other went on being served"
+        );
+    }
+
+    #[test]
+    fn a_burst_bigger_than_a_turn_still_gets_every_answer() {
+        // The other half, and why the bound is a turn and not a ceiling: what
+        // one turn has no room for waits for the next rather than being
+        // dropped, because a ticket taken and not served is a guest waiting
+        // for the rest of the session. Three turns' worth — each answer in the
+        // first asking twice, so the second turn is handed half of what is
+        // waiting and has to leave the rest — lands every answer, and none of
+        // them twice, which the guest would draw instead.
+        let scratch = Scratch::new("asks-a-burst");
+        let mut harness =
+            asking_where(&scratch, &wasm_asking_where("eugen/probe", BURST, 2, BURST));
+
+        assert!(
+            falls_quiet(&mut harness, std::time::Duration::from_secs(20)),
+            "the window was still busy with the burst"
+        );
+
+        let text = frame_text(&harness.frame());
+        assert!(text.contains(EVERY_ANSWER), "{text}");
+    }
+
+    #[test]
+    fn a_burst_of_finished_commands_bigger_than_may_wait_still_gets_every_answer() {
+        // A plugin asking where the pane is from every command that finishes,
+        // and a pane that reports a run of them in one read — `cat` a
+        // transcript that holds the shell's marks, or the lines of a paste
+        // that each run in no time. Each is an event of its own in one update,
+        // and every one is delivered before the first thing they asked for is
+        // served: what serves them runs once, at the back of the update. So
+        // the plugin has as many waiting as there were commands before
+        // anything is served, which is the window's doing and not a queue the
+        // plugin is growing — and a ceiling on how many may wait stopped it
+        // past sixty-four, with every ticket it had waiting dropped unanswered.
+        let scratch = Scratch::new("asks-at-every-command");
+        install(
+            scratch.path(),
+            "eugen.probe",
+            &wasm_asking_where_at_every_command("eugen/probe", FINISHED),
+        );
+        let mut opening = opening(&scratch, Default::default(), Default::default());
+        opening.settings.set_granted(
+            "eugen/probe",
+            vec![String::from("cwd.read"), String::from("commands.watch")],
+        );
+        let mut harness = Harness::with_opening(1, opening);
+        let pane = harness.focused_pane_id().expect("the window has a pane");
+
+        harness.workspace_update(|workspace, ctx| {
+            for _ in 0..FINISHED {
+                workspace.apply_terminal_update(
+                    &crate::terminal_model::TerminalUpdate::CommandFinished {
+                        pane,
+                        exit: Some(0),
+                        took: None,
+                    },
+                    ctx,
+                );
+            }
+        });
+
+        assert!(
+            falls_quiet(&mut harness, std::time::Duration::from_secs(20)),
+            "the window was still busy with the commands"
+        );
+        let text = frame_text(&harness.frame());
+        assert!(text.contains(EVERY_ANSWER), "{text}");
     }
 
     /// The Store, opened on a scratch index: what its rows and its card say
