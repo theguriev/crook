@@ -1413,8 +1413,8 @@ fn source(main: &Path, relative: &Path, limits: Limits) -> Result<std::fs::Metad
     Ok(metadata)
 }
 
-/// Of `going`, the files `worktree` ignores as well; each of the rest goes to
-/// `skipped` with its reason.
+/// Of `going`, the files `worktree` ignores as well and has nothing in the
+/// way of; each of the rest goes to `skipped` with its reason.
 ///
 /// The main checkout's ignore rules decided which files qualify, and the new
 /// checkout's can differ: a branch picked as the base from before `.env` was
@@ -1425,32 +1425,46 @@ fn source(main: &Path, relative: &Path, limits: Limits) -> Result<std::fs::Metad
 /// ever leaves out a file Claude Code's rules would have copied, never adds
 /// one.
 ///
-/// One `git check-ignore --stdin` in the new checkout. A file it does not call
-/// ignored that is already there — one the branch tracks, which check-ignore
-/// never calls ignored — is [`Skip::Exists`], as the copy would have found
-/// it; the others are [`Skip::NotIgnored`].
+/// Each question is asked only of what the one before it left: a way through
+/// a link is [`Skip::Link`]; something already at the path — a file the
+/// branch tracks, or one a hook made — is [`Skip::Exists`], as the copy would
+/// have found it. What is left goes to one `git check-ignore --stdin` in the
+/// new checkout, and a file it does not call ignored is [`Skip::NotIgnored`].
+///
+/// check-ignore dies on the first path it cannot take, and every other file's
+/// answer goes with it. So links are asked about before it is, since it
+/// refuses a path "beyond a symbolic link"; it does not read the index, where
+/// a path in a submodule is "in submodule"; and every name goes to it behind
+/// `./`, since to it one that begins with a colon is pathspec magic.
 fn ignored_in(
     worktree: &Path,
     going: Vec<(PathBuf, std::fs::Metadata)>,
     skipped: &mut Vec<(PathBuf, Skip)>,
 ) -> Result<Vec<(PathBuf, std::fs::Metadata)>, Error> {
-    // Asked here as well as in `copy_one`, because check-ignore dies on the
-    // first path that goes through a link — "beyond a symbolic link" — and
-    // takes every other file's answer with it.
-    let (going, linked): (Vec<_>, Vec<_>) = going
-        .into_iter()
-        .partition(|(relative, _)| !through_a_link(worktree, relative));
-    skipped.extend(
-        linked
-            .into_iter()
-            .map(|(relative, _)| (relative, Skip::Link)),
-    );
-    if going.is_empty() {
-        return Ok(going);
+    let mut asking = Vec::with_capacity(going.len());
+    for (relative, metadata) in going {
+        // `copy_one` asks about links too; asked here as well, for
+        // check-ignore's sake.
+        if through_a_link(worktree, &relative) {
+            skipped.push((relative, Skip::Link));
+        } else if std::fs::symlink_metadata(worktree.join(&relative)).is_ok() {
+            skipped.push((relative, Skip::Exists));
+        } else {
+            asking.push((relative, metadata));
+        }
+    }
+
+    if asking.is_empty() {
+        return Ok(asking);
     }
 
     let mut input = Vec::new();
-    for (relative, _) in &going {
+    for (relative, _) in &asking {
+        // Behind `./`, so that a name beginning with a colon is a name. Bare,
+        // git reads it as pathspec magic: `:!x` is an exclude, which
+        // check-ignore refuses outright, and `:memory:` is the path `memory:`,
+        // whose answer is some other file's.
+        input.extend_from_slice(b"./");
         input.extend_from_slice(&bytes_of(relative));
         input.push(0);
     }
@@ -1458,6 +1472,13 @@ fn ignored_in(
         worktree,
         &[
             OsStr::new("check-ignore"),
+            // The ignore rules alone, without the index. With it, a path in
+            // a submodule is fatal, and a name with a glob character in it —
+            // `[ab].env` — is called not ignored whenever the glob matches a
+            // tracked file, `a.env`. All the index would add is "a tracked
+            // file is not ignored", and every tracked file the checkout has
+            // was `Exists` before this.
+            OsStr::new("--no-index"),
             OsStr::new("-z"),
             OsStr::new("--stdin"),
         ],
@@ -1468,22 +1489,22 @@ fn ignored_in(
     if !answered.success && answered.code != Some(1) {
         return Err(classify(&answered.stderr));
     }
+    // Each path comes back as it went in, `./` and all.
     let ignored: HashSet<&[u8]> = answered
         .stdout
         .split(|byte| *byte == 0)
         .filter(|path| !path.is_empty())
+        .map(|path| path.strip_prefix(b"./").unwrap_or(path))
         .collect();
 
-    let mut kept = Vec::with_capacity(going.len());
-    for (relative, metadata) in going {
-        if ignored.contains(bytes_of(&relative).as_slice()) {
-            kept.push((relative, metadata));
-        } else if std::fs::symlink_metadata(worktree.join(&relative)).is_ok() {
-            skipped.push((relative, Skip::Exists));
-        } else {
-            skipped.push((relative, Skip::NotIgnored));
-        }
-    }
+    let (kept, not_ignored): (Vec<_>, Vec<_>) = asking
+        .into_iter()
+        .partition(|(relative, _)| ignored.contains(bytes_of(relative).as_slice()));
+    skipped.extend(
+        not_ignored
+            .into_iter()
+            .map(|(relative, _)| (relative, Skip::NotIgnored)),
+    );
     Ok(kept)
 }
 

@@ -1671,6 +1671,69 @@ fn a_file_the_new_checkout_does_not_ignore_is_not_copied() {
 }
 
 #[test]
+fn a_file_whose_name_is_a_glob_is_asked_about_by_its_name() {
+    if without_git("a_file_whose_name_is_a_glob_is_asked_about_by_its_name") {
+        return;
+    }
+    // `[ab].env`, beside a tracked `a.env` that its name, read as a glob,
+    // matches. check-ignore reading the index found the tracked file under
+    // that name and called `[ab].env` not ignored, as it calls every tracked
+    // file.
+    let scratch = ScratchDir::new("include-glob-name");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    write(&repo.join(".gitignore"), "*.env\n");
+    write(&repo.join(INCLUDE_FILE), "*.env\n");
+    write(&repo.join("a.env"), "tracked anyway\n");
+    git(&repo, &["add", ".gitignore", INCLUDE_FILE]);
+    git(&repo, &["add", "--force", "a.env"]);
+    git(
+        &repo,
+        &["commit", "--no-verify", "-m", "ignore, include, force"],
+    );
+    write(&repo.join("[ab].env"), "SECRET=1\n");
+    let checkout = checkout_of(&repo, &scratch, "glob-name");
+
+    let included = copy_included(&repo, &checkout);
+
+    assert!(included.skipped.is_empty(), "{included:?}");
+    assert_eq!(included.copied, 1);
+    assert_eq!(
+        contents(&checkout.join("[ab].env")).as_deref(),
+        Some("SECRET=1\n")
+    );
+}
+
+// Not on Windows, where a file name may not have a colon in it.
+#[cfg(unix)]
+#[test]
+fn a_file_whose_name_begins_with_a_colon_is_asked_about_by_its_name() {
+    if without_git("a_file_whose_name_begins_with_a_colon_is_asked_about_by_its_name") {
+        return;
+    }
+    // git reads a path that begins with a colon as pathspec magic: `:!neg` is
+    // an exclude, which check-ignore refuses outright and every other file's
+    // answer goes with it, and `:memory:` is the path `memory:`, which nothing
+    // ignores.
+    let scratch = ScratchDir::new("include-colon-name");
+    let repo = repo_including(&scratch, ".env\n:*\n", Some(".env\n:*\n"));
+    write(&repo.join(".env"), "SECRET=1\n");
+    write(&repo.join(":!neg"), "one\n");
+    write(&repo.join(":memory:"), "two\n");
+    let checkout = checkout_of(&repo, &scratch, "colon-name");
+
+    let included = copy_included(&repo, &checkout);
+
+    assert!(included.refused.is_none(), "{included:?}");
+    assert!(included.skipped.is_empty(), "{included:?}");
+    assert_eq!(included.copied, 3);
+    assert_eq!(contents(&checkout.join(":!neg")).as_deref(), Some("one\n"));
+    assert_eq!(
+        contents(&checkout.join(":memory:")).as_deref(),
+        Some("two\n")
+    );
+}
+
+#[test]
 fn a_worktreeinclude_with_a_byte_order_mark_is_read_the_way_git_reads_it() {
     if without_git("a_worktreeinclude_with_a_byte_order_mark_is_read_the_way_git_reads_it") {
         return;
