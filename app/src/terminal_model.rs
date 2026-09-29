@@ -84,8 +84,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crook_terminal::{
-    Block, BlockId, BlockRows, Key, Modifiers, MouseButton, MouseEventKind, MouseModes, Palette,
-    Rgb, Snapshot, Terminal, TerminalEvent, TerminalOptions, TerminalSize,
+    Block, BlockId, BlockRows, Key, LiveBlock, Modifiers, MouseButton, MouseEventKind, MouseModes,
+    Palette, Rgb, Snapshot, Terminal, TerminalEvent, TerminalOptions, TerminalSize,
 };
 use crookui_core::geometry::{Color, Vector2F};
 use crookui_core::prelude::*;
@@ -961,14 +961,7 @@ impl TerminalModel {
         // matters here is the resting state after they have. `None` the moment
         // the block stops running, so a tab goes back to naming itself after
         // its directory rather than after the last thing it happened to run.
-        let running = session
-            .snapshot
-            .live_block
-            .state
-            .is_running()
-            .then(|| session.snapshot.live_block.command.clone())
-            .flatten()
-            .filter(|command| !command.trim().is_empty());
+        let running = running_command(&session.snapshot.live_block);
         if session.running != running {
             session.running = running.clone();
             updates.push(TerminalUpdate::Running(pane, running));
@@ -1970,6 +1963,24 @@ pub fn crook_palette() -> Palette {
         // does not use.
         dim_foreground: rgb(theme.text_muted),
     }
+}
+
+/// What a pane says it is running, for the tab's name and the status line:
+/// the open block's command while it runs, and `None` otherwise.
+///
+/// Trimmed here rather than where the block records it. The block keeps the
+/// line exactly as it was typed, so that Copy command and Run again hand
+/// back a leading space that keeps a line out of the shell's history — the
+/// `-e` line has one, and so does a line typed by somebody who set
+/// `HIST_IGNORE_SPACE` for that reason. A name is a different thing: a row
+/// titled ` exec htop` is drawn a cell to the right of every other row.
+fn running_command(block: &LiveBlock) -> Option<String> {
+    let command = block
+        .command
+        .as_deref()
+        .filter(|_| block.state.is_running())?
+        .trim();
+    (!command.is_empty()).then(|| command.to_owned())
 }
 
 /// A theme colour as the emulator spells one. Alpha is dropped: a terminal cell
