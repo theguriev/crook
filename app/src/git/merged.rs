@@ -38,8 +38,8 @@
 //! re-indents a line of Python or YAML, or puts a tab back in a Makefile,
 //! changes what the file means, and a squash of the commits before it is not
 //! that branch's work. So both sides are hashed `--verbatim`, which a git
-//! older than 2.39 does not have: there the pass fails, and nothing is proved
-//! by patch — only by ancestry.
+//! older than 2.39 does not have: there `patch-id` refuses the flag, and
+//! nothing is proved by patch — only by ancestry.
 //!
 //! Everything is read-only and runs through [`super::run`]'s deadline. The
 //! pass over the base's history is bounded twice, by [`PASS_COMMITS`] and
@@ -379,10 +379,11 @@ const DIFF_FLAGS: [&str; 5] = [
 ///
 /// Not plain `--stable`, which also takes the whitespace out of each line
 /// before hashing it: a branch whose change differs from a squash on the base
-/// only in indentation would be proved by it, and deleted on the strength of
-/// it, though in a Python file, a YAML file or a Makefile the indentation is
-/// the change. A git that predates the flag (2.39) fails the pipe, which
-/// proves nothing — the answer this module gives to every doubt.
+/// only in indentation would be proved by it — its checkout marked merged and
+/// offered for tidying, and, once branches are deleted on a proof, the branch
+/// deleted too — though in a Python file, a YAML file or a Makefile the
+/// indentation is the change. A git that predates the flag (2.39) fails the
+/// pipe, which proves nothing — the answer this module gives to every doubt.
 const PATCH_ID: [&str; 2] = ["patch-id", "--verbatim"];
 
 /// The patch-id of everything `reference` changed since `fork`, or `None`

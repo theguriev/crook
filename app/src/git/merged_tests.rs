@@ -494,8 +494,10 @@ fn a_branch_whose_commit_after_its_squash_only_changes_whitespace_is_not_proved(
     // The case plain `patch-id --stable` gets wrong: it hashes each line with
     // its whitespace taken out, so a follow-up that only re-indents a line
     // hashes the same as the squash before it. In YAML, Python or a Makefile
-    // the indentation is the change — here `b` moves under `a` — and a proof
-    // is what a branch is deleted on, so the follow-up has to count as work.
+    // the indentation is the change — here `b` moves under `a` — and a false
+    // proof offers somebody's checkout for tidying, and would cost their
+    // branch once deleting one is on the table, so the follow-up has to count
+    // as work.
     if without_git("a_branch_whose_commit_after_its_squash_only_changes_whitespace_is_not_proved") {
         return;
     }
