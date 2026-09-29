@@ -344,10 +344,13 @@ pub enum WorktreeAction {
 
 /// Which half of the worktree creator has the keyboard.
 ///
-/// Each half is a field and the list under it, and the arrows walk the list
-/// while the letters go to the field. The agents' half has a field only while
-/// a prompt is asked for, and it is a stop of its own without one: otherwise
-/// the only way from "Shell only" to an agent would be the pointer.
+/// Each half is a field and a list that go together, though not the same way
+/// up: the name has the places to start from under it, and the agents have the
+/// prompt under them, since it is what the picked one is asked. The arrows
+/// walk the list while the letters go to the field. The agents' half has a
+/// field only while a prompt is asked for, and it is a stop of its own without
+/// one: otherwise the only way from "Shell only" to an agent would be the
+/// pointer.
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub enum CreatorField {
     /// The branch name and the places to start from. The one it opens in.
