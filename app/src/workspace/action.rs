@@ -311,6 +311,42 @@ pub enum WorktreeAction {
     ShowSelected,
     /// Ask about removing the one the keyboard is standing on.
     AskRemoveSelected,
+    /// Open the menu on this tab and go straight into the creator, with the
+    /// first agent found already picked and the keyboard in the prompt: what
+    /// "New task…" in the palette dispatches.
+    ///
+    /// Straight in once the repository has been read, which is what the
+    /// creator is made from; until then the menu says it is reading.
+    NewTask(TabId),
+    /// Start the agent at this index of the creator's list in the new
+    /// checkout — `0` is "Shell only", which starts nothing. What a press on
+    /// one of its rows dispatches.
+    PickAgent(usize),
+    /// Step the creator's agent by this many rows, clamped at both ends: the
+    /// arrows, while the prompt field has the keyboard.
+    MoveAgent(isize),
+    /// Give the keyboard to one of the creator's fields: what a press on it
+    /// dispatches.
+    Focus(CreatorField),
+    /// Give the keyboard to the creator's other field: Tab.
+    SwitchField,
+    /// The prompt was typed into, so a branch name nobody has typed follows
+    /// it.
+    PromptEdited,
+    /// Make it, and run the agent's line in the new tab rather than leaving it
+    /// in the composer. The Start button, and only the button: no key is
+    /// bound to it, so a line runs only because somebody pressed for it.
+    Start,
+}
+
+/// Which of the worktree creator's two fields has the keyboard.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum CreatorField {
+    /// The branch name, which is the one it opens in.
+    #[default]
+    Branch,
+    /// What the agent is asked to do.
+    Prompt,
 }
 
 /// What the menu on a block does.

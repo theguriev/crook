@@ -94,6 +94,13 @@ pub struct TextField {
     /// `has_keys` on itself would be a field that could not take the keyboard
     /// away from the one that had it.
     focus: Option<WorkspaceAction>,
+    /// What to dispatch when a keystroke changed the text.
+    ///
+    /// For a holder that has to answer the text as it is typed rather than
+    /// read it when a button is pressed — the worktree creator's branch
+    /// follows its prompt. Said after the change, and only for one: a caret
+    /// moved or a selection made is not an edit.
+    edited: Option<WorkspaceAction>,
     /// The shaped text, kept from layout for paint and for hit testing.
     line: Option<Line>,
     /// Whether `line` is the placeholder rather than what was typed.
@@ -119,6 +126,7 @@ impl TextField {
             placeholder: placeholder.into(),
             icon: None,
             focus: None,
+            edited: None,
             line: None,
             showing_placeholder: false,
             size: None,
@@ -139,6 +147,12 @@ impl TextField {
     /// or has the keyboard by some other rule.
     pub fn with_focus(mut self, action: WorkspaceAction) -> Self {
         self.focus = Some(action);
+        self
+    }
+
+    /// What to dispatch when a keystroke changes what the field holds.
+    pub fn with_edit(mut self, action: WorkspaceAction) -> Self {
+        self.edited = Some(action);
         self
     }
 
@@ -173,6 +187,7 @@ impl TextField {
                 return false;
             }
             self.input.edit(Editor::clear);
+            self.say_edited(ctx);
             ctx.notify();
             return true;
         }
@@ -188,9 +203,26 @@ impl TextField {
             other => other,
         };
 
+        // Compared rather than inferred from the intent: a paste of nothing,
+        // a delete at the start and an undo with nothing to undo are all
+        // edits by kind and change nothing.
+        let before = self
+            .edited
+            .is_some()
+            .then(|| self.input.editor().text().to_owned());
         self.input.apply(intent, &self.clipboard);
+        if before.is_some_and(|before| before != self.input.editor().text()) {
+            self.say_edited(ctx);
+        }
         ctx.notify();
         true
+    }
+
+    /// Tells whoever asked that the text changed.
+    fn say_edited(&self, ctx: &mut EventContext) {
+        if let Some(action) = self.edited {
+            ctx.dispatch_typed_action(action);
+        }
     }
 
     /// The byte offset a press at `x` lands on.

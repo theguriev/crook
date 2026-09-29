@@ -1280,6 +1280,102 @@ fn a_suggested_branch_steps_over_the_branch_a_removed_worktree_left_behind() {
 }
 
 #[test]
+fn a_prompt_names_its_branch_in_lowercase_words_joined_by_dashes() {
+    assert_eq!(
+        branch_for_prompt("Fix the login bug", &[], &[]),
+        "worktree/fix-the-login-bug"
+    );
+    // Punctuation, and any run of it, is one dash between two words, and none
+    // is left at either end.
+    assert_eq!(
+        branch_for_prompt("  Fix the log-in bug!!  (again?) ", &[], &[]),
+        "worktree/fix-the-log-in-bug-again"
+    );
+    // What a shell would make something of is what a branch cannot carry.
+    assert_eq!(
+        branch_for_prompt("don't `rm` $(this) \"now\"; ~/x\\y", &[], &[]),
+        "worktree/don-t-rm-this-now-x-y"
+    );
+}
+
+#[test]
+fn a_prompt_in_another_script_keeps_only_its_ascii_words() {
+    // A letter outside ASCII is dropped from its word rather than splitting
+    // it, and a symbol is a gap between two: the name is ASCII either way,
+    // which every filesystem and every shell reads the same.
+    assert_eq!(
+        branch_for_prompt("Réparer le café — vite 🚀 please", &[], &[]),
+        "worktree/rparer-le-caf-vite-please"
+    );
+    assert_eq!(
+        branch_for_prompt("修复 login 页面", &[], &[]),
+        "worktree/login"
+    );
+}
+
+#[test]
+fn a_long_prompt_is_cut_to_whole_words_under_the_cap() {
+    let branch = branch_for_prompt(
+        "Refactor the terminal model so that the latest block never races the list again",
+        &[],
+        &[],
+    );
+    let words = branch.strip_prefix("worktree/").expect("the prefix");
+
+    assert_eq!(words, "refactor-the-terminal-model-so-that-the");
+    // A single word longer than the cap is cut inside it, since there is no
+    // boundary to cut at.
+    assert_eq!(
+        branch_for_prompt(&"a".repeat(90), &[], &[]),
+        format!("worktree/{}", "a".repeat(40))
+    );
+}
+
+#[test]
+fn a_prompt_with_no_words_in_it_falls_back_to_the_suggestion() {
+    let suggestion = suggested_branch(&[], &[]);
+    for prompt in ["", "   ", "?!… — ()", "修复登录页面", "🚀🚀"] {
+        assert_eq!(
+            branch_for_prompt(prompt, &[], &[]),
+            suggestion,
+            "{prompt:?} did not fall back"
+        );
+    }
+    // And the suggestion it falls back to still steps over what is taken.
+    let taken = [suggestion.clone()];
+    assert_eq!(
+        branch_for_prompt("", &[], &taken),
+        suggested_branch(&[], &taken)
+    );
+    assert_ne!(branch_for_prompt("", &[], &taken), suggestion);
+}
+
+#[test]
+fn a_prompt_branch_steps_over_a_name_that_is_taken() {
+    // `add` refuses a name that merely exists, so the same prompt twice has to
+    // make two names rather than one that works and one that never will.
+    let first = branch_for_prompt("fix it", &[], &[]);
+    assert_eq!(first, "worktree/fix-it");
+    let second = branch_for_prompt("fix it", &[worktree_on(&first)], &[]);
+    assert_eq!(second, "worktree/fix-it-2");
+    let third = branch_for_prompt("fix it", &[worktree_on(&first)], &[second]);
+    assert_eq!(third, "worktree/fix-it-3");
+}
+
+#[test]
+fn a_prompt_branch_is_a_name_git_will_accept() {
+    if without_git("a_prompt_branch_is_a_name_git_will_accept") {
+        return;
+    }
+    let scratch = ScratchDir::new("prompt-branch");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    let name = branch_for_prompt("Fix `the` bug: $(it's) *here*.lock", &[], &[]);
+
+    git(&repo, &["check-ref-format", &format!("refs/heads/{name}")]);
+    add(&repo, &scratch.spot("prompted"), &name, Some("main")).expect("the name is usable");
+}
+
+#[test]
 fn every_branch_is_listed_whether_or_not_it_is_checked_out() {
     if without_git("every_branch_is_listed_whether_or_not_it_is_checked_out") {
         return;

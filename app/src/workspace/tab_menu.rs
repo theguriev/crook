@@ -113,6 +113,34 @@
 //! list is short in practice, the two rows that matter lead it, and it scrolls
 //! past a few rows rather than growing the popup.
 //!
+//! # Starting an agent in it
+//!
+//! One agent, one worktree, and the creator is where the two meet: under the
+//! places to start from it lists the coding agents it found installed, with
+//! "Shell only" first and picked, and a prompt field that appears once an
+//! agent is picked. What it does with them is type one line — `claude 'fix
+//! the login bug'` — into the new tab's composer after the checkout opens,
+//! and leave it there. The line is quoted by the host, never spliced (see
+//! [`crate::agent::launch_line`]), and it is not sent: a line a person has
+//! not seen is a line nobody chose to run, and a pane's composer is where a
+//! person already reads a line before pressing Enter on it. The one way to
+//! have it run straight away is the Start button, which is a press for
+//! exactly that.
+//!
+//! The branch follows the prompt — `worktree/fix-the-login-bug` — for as long
+//! as the field still holds a name the creator put there; the first letter
+//! somebody types into it is the end of that. "New task…" in the palette is
+//! this same creator opened with the first agent found already picked and the
+//! keyboard in the prompt, which is what makes a task one sentence and a
+//! press; the tab's own "New worktree…" opens it on "Shell only", which makes
+//! exactly the worktree it always made and types nothing.
+//!
+//! Which agents are installed is a look for their programs on `PATH`, made on
+//! the background pool with the repository's reads when the menu opens —
+//! never a program started to ask, and never anything on the frame. A shell
+//! the host's quoting is not proven in gets the agent's bare name and no
+//! prompt field, rather than a line that means something else there.
+//!
 //! # The two keys
 //!
 //! Escape and Enter, claimed by
@@ -127,7 +155,10 @@
 //! * **Enter** is the button that face leads with: Create in the creator,
 //!   where the name is selected the moment it opens so making a worktree is a
 //!   name and a press, and Remove in the confirmation, which is a question
-//!   already asked once and answered with the pointer that opened it.
+//!   already asked once and answered with the pointer that opened it. Create
+//!   in the prompt field too, and never Start: Enter is the key a person
+//!   presses at the end of a sentence, and that is not the moment they chose
+//!   to run a line they have not read yet.
 //!
 //! Enter stops at the second question. When git refuses over local work the
 //! button becomes "Remove anyway", and that one stays a click: a person who
@@ -135,9 +166,11 @@
 //! it warns about by pressing the same key again.
 //!
 //! The creator claims the up and down arrows as well, and they move the check
-//! down the places to start from while the name field keeps every letter. In a
-//! one-line field those two only jump the caret to an end, which Home and End
-//! still do.
+//! down the list under the field that has the keyboard — the places to start
+//! from under the name, the agents under the prompt — while the field keeps
+//! every letter. In a one-line field those two only jump the caret to an end,
+//! which Home and End still do. Tab, while there are two fields, moves the
+//! keyboard to the other one.
 //!
 //! # Reading git off the frame
 //!
@@ -159,7 +192,7 @@ use crate::git::worktree::{Local, Worktree};
 use crate::tab::TabId;
 use crate::theme::theme;
 
-use super::action::{WorkspaceAction, WorktreeAction};
+use super::action::{CreatorField, WorkspaceAction, WorktreeAction};
 use super::view::Workspace;
 use super::window_room::WindowRoom;
 
@@ -191,6 +224,9 @@ const LABEL_GAP: f32 = 8.;
 
 /// What the branch field says before anything is typed into it.
 const BRANCH_PLACEHOLDER: &str = "branch";
+
+/// What the prompt field says before anything is typed into it.
+const PROMPT_PLACEHOLDER: &str = "what it should do";
 
 /// How many places to start from the creator shows before the list scrolls.
 ///
@@ -375,8 +411,15 @@ pub(super) enum Control {
     /// One of the creator's places to start from, by its index in
     /// [`TabMenuState::bases`].
     Base(usize),
+    /// One of the creator's agents, by its row: `0` is "Shell only".
+    Agent(usize),
+    /// The creator's prompt field.
+    Prompt,
     /// The creator's and the confirmation's "Cancel".
     Cancel,
+    /// The creator's "Start", which runs the agent's line rather than
+    /// leaving it in the composer.
+    Start,
     /// The button that does the thing.
     Confirm,
 }
@@ -423,6 +466,27 @@ pub(super) struct TabMenuState {
     /// How far the places to start from are scrolled, in a repository with
     /// more branches than [`BASE_ROWS`].
     pub(super) base_scroll: ScrollStateHandle,
+    /// The coding agents the creator can start, as of when the menu opened:
+    /// the ones [`crate::agent::found_on`] found installed, in its order.
+    pub(super) agents: Vec<&'static str>,
+    /// Which to start in the new checkout, as a row of the creator's list:
+    /// `0` is "Shell only", and every other row is one of [`Self::agents`].
+    pub(super) agent: usize,
+    /// Whether the window's shell reads a line with a quoted prompt in it the
+    /// way it was written — see [`crate::plugins::wasm::quoting_holds_in`].
+    /// Where it does not, the creator asks for no prompt.
+    pub(super) prompt_holds: bool,
+    /// Which of the creator's fields has the keyboard.
+    pub(super) field: CreatorField,
+    /// The branch name the creator itself last put in the field.
+    ///
+    /// While the field still says exactly this, nobody has typed a name of
+    /// their own, and the name goes on following the prompt; the moment it
+    /// says anything else, it is theirs and is left alone.
+    pub(super) branch_offered: Option<String>,
+    /// Whether the menu was opened to start a task, and goes into the
+    /// creator the moment the repository has been read.
+    pub(super) task: bool,
     /// What the repository is called: the name of its main checkout's
     /// directory, which is what a person calls it.
     pub(super) repository: Option<String>,
@@ -586,6 +650,29 @@ impl TabMenuState {
         if moved {
             scroll_into_view(&self.base_scroll, next, count);
         }
+        moved
+    }
+
+    /// The agent the creator would start, or `None` for "Shell only".
+    pub(super) fn picked_agent(&self) -> Option<&'static str> {
+        let index = self.agent.checked_sub(1)?;
+        self.agents.get(index).copied()
+    }
+
+    /// Whether the creator is asking for a prompt: an agent is picked, and
+    /// the shell reads the line a prompt would be put on.
+    pub(super) fn asks_for_a_prompt(&self) -> bool {
+        self.prompt_holds && self.picked_agent().is_some()
+    }
+
+    /// Steps the creator's agent `by` rows, "Shell only" included, and
+    /// reports whether it moved. Clamped, for [`Self::move_selection`]'s
+    /// reason.
+    pub(super) fn move_agent(&mut self, by: isize) -> bool {
+        let last = self.agents.len() as isize;
+        let next = (self.agent as isize + by).clamp(0, last) as usize;
+        let moved = self.agent != next;
+        self.agent = next;
         moved
     }
 
@@ -1092,15 +1179,17 @@ fn tidy_row(workspace: &Workspace, free: usize, ui: FamilyId) -> Box<dyn Element
     .finish()
 }
 
-/// Making one: a branch name, where it would go, and where it starts.
+/// Making one: a branch name, where it would go, where it starts, and which
+/// agent to start in it.
 ///
-/// One field, because there is one thing to type. herdr asks the same
-/// question and derives the directory rather than asking for it, which is
-/// right: a person choosing a branch name has said everything that
+/// One field for the worktree, because there is one thing to type. herdr asks
+/// the same question and derives the directory rather than asking for it,
+/// which is right: a person choosing a branch name has said everything that
 /// distinguishes one worktree from another, and a directory they have to
 /// invent as well is a second chance to get it wrong. Where the branch starts
 /// is a pick rather than a field — see the module's own account of it — and
-/// it is already made when the creator opens.
+/// it is already made when the creator opens. The second field is the agent's
+/// prompt, and it is there only once an agent is picked.
 fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
     let state = workspace.tab_menu();
 
@@ -1123,6 +1212,9 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
                     state.control(Control::Branch),
                     BRANCH_PLACEHOLDER,
                 )
+                .with_focus(WorkspaceAction::Worktree(WorktreeAction::Focus(
+                    CreatorField::Branch,
+                )))
                 .finish(),
             )
             .with_horizontal_padding(ROW_INSET)
@@ -1160,7 +1252,15 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
             .with_main_axis_size(MainAxisSize::Min)
             .with_cross_axis_alignment(CrossAxisAlignment::Stretch);
         for (index, base) in state.bases.iter().enumerate() {
-            rows.add_child(base_row(state, index, base, ui));
+            rows.add_child(check_row(
+                state,
+                Control::Base(index),
+                state.base == index,
+                &base.label,
+                base.badge,
+                WorktreeAction::PickBase(index),
+                ui,
+            ));
         }
         // Its own height up to a few rows, and scrolled past that: a scroll
         // is handed a bounded height here and measures its rows unbounded,
@@ -1176,6 +1276,67 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
         );
     }
 
+    // Absent where no agent was found, which leaves the creator exactly what
+    // it was before it could start one.
+    if !state.agents.is_empty() {
+        column.add_child(
+            Container::new(header("Agent", ui))
+                .with_margin_top(10.)
+                .finish(),
+        );
+        column.add_child(check_row(
+            state,
+            Control::Agent(0),
+            state.agent == 0,
+            "Shell only",
+            None,
+            WorktreeAction::PickAgent(0),
+            ui,
+        ));
+        for (index, agent) in state.agents.iter().enumerate() {
+            let row = index + 1;
+            // The program's own name, and the word that will be typed beside
+            // it, since that word is what the composer is about to say.
+            let program = crate::agent::program(agent).unwrap_or(agent);
+            column.add_child(check_row(
+                state,
+                Control::Agent(row),
+                state.agent == row,
+                program,
+                (program != *agent).then_some(*agent),
+                WorktreeAction::PickAgent(row),
+                ui,
+            ));
+        }
+    }
+
+    // Under the agents, because it is what the picked one is asked; and only
+    // once one is picked, since a prompt with nothing to hear it is a field
+    // that does nothing.
+    if state.asks_for_a_prompt()
+        && let Some(prompt) = workspace.worktree_prompt()
+    {
+        column.add_child(
+            Container::new(
+                super::text_field::TextField::new(
+                    prompt.clone(),
+                    workspace.clipboard().clone(),
+                    workspace.fonts(),
+                    state.control(Control::Prompt),
+                    PROMPT_PLACEHOLDER,
+                )
+                .with_focus(WorkspaceAction::Worktree(WorktreeAction::Focus(
+                    CreatorField::Prompt,
+                )))
+                .with_edit(WorkspaceAction::Worktree(WorktreeAction::PromptEdited))
+                .finish(),
+            )
+            .with_horizontal_padding(ROW_INSET)
+            .with_margin_top(6.)
+            .finish(),
+        );
+    }
+
     if let Some(problem) = &state.problem {
         column.add_child(note(problem.as_str(), ui));
     }
@@ -1187,8 +1348,15 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
         column.add_child(busy_line(state, "Checking it out…", None, ui));
     }
 
-    column.add_child(buttons(
+    // Start only where there is an agent to start. Create stays the button
+    // the face leads with — the one Enter presses — and leaves the agent's
+    // line in the composer for a person to read first.
+    let start = state
+        .picked_agent()
+        .map(|_| ("Start", Some(WorktreeAction::Start)));
+    column.add_child(button_row(
         workspace,
+        start,
         "Create",
         Some(WorktreeAction::Create),
         ui,
@@ -1196,8 +1364,9 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
     column.finish()
 }
 
-/// One place to start from: a check slot, the name, and a badge for the two
-/// rows that are more than a branch.
+/// One choice of several in the creator — a place to start from, or an
+/// agent: a check slot, the name, and a badge for a row that is more than its
+/// name.
 ///
 /// The options menu's check row, because it is the same control — one choice
 /// out of several, made by pressing it — and a person who has used one has
@@ -1205,12 +1374,18 @@ fn creator(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
 /// rest; the pointer lights whichever row it is over, as it does on every row
 /// in this menu. The badge sits where the list's rows put theirs, and says
 /// "this tab" for the same checkout the list says it about.
-fn base_row(state: &TabMenuState, index: usize, base: &Base, ui: FamilyId) -> Box<dyn Element> {
-    let picked = state.base == index;
-    let label = base.label.clone();
-    let badge = base.badge;
+fn check_row(
+    state: &TabMenuState,
+    control: Control,
+    picked: bool,
+    label: &str,
+    badge: Option<&'static str>,
+    action: WorktreeAction,
+    ui: FamilyId,
+) -> Box<dyn Element> {
+    let label = label.to_owned();
 
-    Hoverable::new(state.control(Control::Base(index)), move |mouse| {
+    Hoverable::new(state.control(control), move |mouse| {
         let check: Box<dyn Element> = if picked {
             Align::new(
                 Icon::new(Lucide::Check, CHECK_SIZE)
@@ -1275,7 +1450,7 @@ fn base_row(state: &TabMenuState, index: usize, base: &Base, ui: FamilyId) -> Bo
             .finish()
     })
     .on_click(move |_, ctx, _| {
-        ctx.dispatch_typed_action(WorkspaceAction::Worktree(WorktreeAction::PickBase(index)));
+        ctx.dispatch_typed_action(WorkspaceAction::Worktree(action));
     })
     .finish()
 }
@@ -1552,6 +1727,20 @@ fn buttons(
     action: Option<WorktreeAction>,
     ui: FamilyId,
 ) -> Box<dyn Element> {
+    button_row(workspace, None, label, action, ui)
+}
+
+/// [`buttons`], with a second way to do the thing between the two: the
+/// creator's Start, which is Create and then the agent's line run rather than
+/// left in the composer. A button of the quiet kind, since it is not the one
+/// Enter presses; inert while git is working, like the one beside it.
+fn button_row(
+    workspace: &Workspace,
+    middle: Option<(&str, Option<WorktreeAction>)>,
+    label: &str,
+    action: Option<WorktreeAction>,
+    ui: FamilyId,
+) -> Box<dyn Element> {
     let state = workspace.tab_menu();
 
     let (cancel, cancels) = match &state.sweep {
@@ -1565,33 +1754,42 @@ fn buttons(
     };
     let action = action.filter(|_| !state.working);
 
-    Container::new(
-        Flex::row()
-            .with_main_axis_size(MainAxisSize::Max)
-            .with_cross_axis_alignment(CrossAxisAlignment::Center)
-            .with_spacing(8.)
-            .with_child(
-                Expanded::new(
-                    1.,
-                    button(state.control(Control::Cancel), cancel, false, cancels, ui),
-                )
-                .finish(),
-            )
-            .with_child(
-                Expanded::new(
-                    1.,
-                    button(state.control(Control::Confirm), label, true, action, ui),
-                )
-                .finish(),
+    let mut row = Flex::row()
+        .with_main_axis_size(MainAxisSize::Max)
+        .with_cross_axis_alignment(CrossAxisAlignment::Center)
+        .with_spacing(8.)
+        .with_child(
+            Expanded::new(
+                1.,
+                button(state.control(Control::Cancel), cancel, false, cancels, ui),
             )
             .finish(),
-    )
-    .with_horizontal_padding(ROW_INSET)
-    .with_margin_top(10.)
-    .finish()
+        );
+    if let Some((middle, pressed)) = middle {
+        let pressed = pressed.filter(|_| !state.working);
+        row.add_child(
+            Expanded::new(
+                1.,
+                button(state.control(Control::Start), middle, false, pressed, ui),
+            )
+            .finish(),
+        );
+    }
+    row.add_child(
+        Expanded::new(
+            1.,
+            button(state.control(Control::Confirm), label, true, action, ui),
+        )
+        .finish(),
+    );
+
+    Container::new(row.finish())
+        .with_horizontal_padding(ROW_INSET)
+        .with_margin_top(10.)
+        .finish()
 }
 
-/// One of the two buttons.
+/// One of the buttons.
 fn button(
     state: MouseStateHandle,
     label: &str,

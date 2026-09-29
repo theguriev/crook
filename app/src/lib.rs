@@ -283,6 +283,9 @@ struct Overrides {
     worktrees: bool,
     /// Start with that menu making a worktree.
     creating_worktree: bool,
+    /// Start with that menu making a task: the creator with the first agent
+    /// it found picked, which is what "New task…" in the palette opens.
+    creating_task: bool,
     /// Start with that menu asking about removing every free checkout.
     ///
     /// Implies `worktrees`, and is the other half of `creating_worktree`: the
@@ -724,6 +727,10 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
                 overrides.worktrees = true;
                 overrides.creating_worktree = true;
             }
+            "--new-task" => {
+                overrides.worktrees = true;
+                overrides.creating_task = true;
+            }
             "--tidy-worktrees" => {
                 overrides.worktrees = true;
                 overrides.tidying_worktrees = true;
@@ -1045,6 +1052,8 @@ OPTIONS:
     --theme <NAME>     Start in this theme rather than the saved one
     --worktrees        Start with the active tab's worktree menu open
     --new-worktree     Start with that menu making a worktree
+    --new-task         Start with that menu making a task, the first agent it
+                       found picked
     --tidy-worktrees   Start with that menu asking about removing every checkout
                        nothing is working in
     --sweep-worktrees  Start with that menu part way through removing them, staged:
@@ -1444,6 +1453,9 @@ fn apply_overrides(
         workspace.open_tab_menu_for_snapshot(ctx);
         if overrides.creating_worktree {
             workspace.start_creating_worktree(ctx);
+        }
+        if overrides.creating_task {
+            workspace.start_new_task(ctx);
         }
         if overrides.tidying_worktrees {
             workspace.start_tidying_worktrees(ctx);

@@ -64,8 +64,9 @@ use crate::window_controls::WindowHandle;
 use crate::{Channel, WINDOW_CHROME};
 
 use super::action::{
-    BlockAction, BlockEdge, BlockPart, FindAction, OptionsAction, SearchAction, SettingsAction,
-    Subject, TabMenuAction, ThemeAction, WindowAction, WorkspaceAction, WorktreeAction,
+    BlockAction, BlockEdge, BlockPart, CreatorField, FindAction, OptionsAction, SearchAction,
+    SettingsAction, Subject, TabMenuAction, ThemeAction, WindowAction, WorkspaceAction,
+    WorktreeAction,
 };
 use super::block_list::block_text;
 use super::settings_page::SettingsState;
@@ -789,6 +790,10 @@ pub struct Workspace {
     /// with no data directory, where the creator has nowhere to put one and
     /// says so rather than guessing.
     worktrees_directory: Option<PathBuf>,
+    /// Where the worktree creator looks for the agents it offers, in place of
+    /// [`crate::agent::search_path`]. For a test, which must find the agent it
+    /// wrote and not whichever ones the machine running it has.
+    agent_directories: Option<Vec<PathBuf>>,
     /// Makes the last settings save the one the file ends up holding.
     ///
     /// Browsing themes with the arrow keys asks for one save per keystroke,
@@ -1005,6 +1010,7 @@ impl Workspace {
             theme_before_draft: None,
             themes_directory: crate::theme::user_themes_directory(),
             worktrees_directory: worktree_store(),
+            agent_directories: None,
             saves: Arc::default(),
             keybinding_saves: Arc::default(),
             settings_save_problem: None,
@@ -1358,12 +1364,38 @@ impl Workspace {
         matches!(self.tab_menu.mode, WorktreeMode::Removing { refused, .. } if refused)
     }
 
-    /// Whether the menu is making a worktree.
-    ///
-    /// For a test, and for `crook/worktrees` — it is what that plugin's branch
-    /// field answers "is the keyboard mine" with.
+    /// Whether the menu is making a worktree. For a test.
     pub fn worktree_menu_is_creating(&self) -> bool {
         self.tab_menu.mode == WorktreeMode::Creating
+    }
+
+    /// Whether the creator's branch field has the keyboard: what that field,
+    /// which `crook/worktrees` owns, answers "is the keyboard mine" with.
+    pub fn worktree_branch_has_keys(&self) -> bool {
+        self.worktree_menu_is_creating() && self.tab_menu.field == CreatorField::Branch
+    }
+
+    /// Whether the creator's prompt field has the keyboard, which it can only
+    /// have while it is drawn. The prompt field's answer, as the one above is
+    /// the branch field's.
+    pub fn worktree_prompt_has_keys(&self) -> bool {
+        self.worktree_menu_is_creating()
+            && self.tab_menu.field == CreatorField::Prompt
+            && self.tab_menu.asks_for_a_prompt()
+    }
+
+    /// The agents the creator offers, as their command names, in its order.
+    /// For a test.
+    pub fn worktree_agents(&self) -> Vec<&'static str> {
+        self.tab_menu.agents.clone()
+    }
+
+    /// Which of them is picked while the creator is up — `None` for "Shell
+    /// only", and for a creator that is not up. For a test.
+    pub fn worktree_agent(&self) -> Option<&'static str> {
+        self.worktree_menu_is_creating()
+            .then(|| self.tab_menu.picked_agent())
+            .flatten()
     }
 
     /// The field a new worktree's branch is typed into.
@@ -1373,6 +1405,12 @@ impl Workspace {
     /// can reach the popup that draws it.
     pub(super) fn worktree_branch(&self) -> Option<&TextInput> {
         self.host.field(crate::plugins::worktrees::BRANCH_FIELD)
+    }
+
+    /// The field the agent's prompt is typed into, which belongs to
+    /// `crook/worktrees` for the branch field's reason.
+    pub(super) fn worktree_prompt(&self) -> Option<&TextInput> {
+        self.host.field(crate::plugins::worktrees::PROMPT_FIELD)
     }
 
     /// The plugins, and the slots and actions they registered.
@@ -2164,6 +2202,12 @@ impl Workspace {
     /// would leave real repositories lying about on their machine.
     pub fn set_worktrees_directory(&mut self, directory: PathBuf) {
         self.worktrees_directory = Some(directory);
+    }
+
+    /// Makes the worktree creator look for agents in these directories and
+    /// nowhere else. A test's, for the reason the one above is.
+    pub fn set_agent_directories(&mut self, directories: Vec<PathBuf>) {
+        self.agent_directories = Some(directories);
     }
 
     pub fn set_themes_directory(&mut self, directory: PathBuf) {
@@ -3041,55 +3085,72 @@ impl Workspace {
                 }
             }
 
-            WorktreeAction::StartCreating => {
-                // Not until the repository has been read. The name offered has
-                // to be one no existing worktree is using, and where the
-                // checkout goes is derived from what the repository is called
-                // — both of which are answers the list carries. Opening the
-                // creator over a list that had not arrived would offer a name
-                // chosen against nothing and then refuse to use it.
-                if !matches!(self.tab_menu.contents, Contents::Ready(_)) {
+            WorktreeAction::StartCreating => self.start_creating(false, ctx),
+            WorktreeAction::Create => self.create_worktree(false, ctx),
+            WorktreeAction::Start => self.create_worktree(true, ctx),
+            WorktreeAction::NewTask(tab) => {
+                // Not a toggle, which is what opening the menu on the tab it
+                // is already up on would be: the palette asked for the
+                // creator, and a menu taken down is not that.
+                if self.tab_menu.tab != Some(tab) {
+                    self.open_tab_menu(tab, ctx);
+                }
+                if self.tab_menu.tab != Some(tab) {
                     return;
                 }
-
-                // Pre-filled with a name nothing is using, so the shortest way
-                // through is to press the button. herdr does the same, and the
-                // reason is that a person who has not decided on a name yet
-                // still wants the worktree.
-                //
-                // Both lists, because the branches are the half that decides:
-                // `remove` never deletes a branch, so a name offered against
-                // the worktrees alone comes back the moment its checkout goes
-                // and `add` refuses it every time after that.
-                let branch = crate::git::worktree::suggested_branch(
-                    self.tab_menu.worktrees(),
-                    &self.tab_menu.branches,
-                );
-                if let Some(field) = self.worktree_branch() {
-                    field.edit(|editor| {
-                        editor.set_text(&branch);
-                        editor.select_all();
-                    });
+                match self.tab_menu.contents {
+                    Contents::Ready(_) => self.start_creating(true, ctx),
+                    // Into the creator the moment the read lands; see
+                    // `open_tab_menu`.
+                    Contents::Reading => self.tab_menu.task = true,
+                    // The list says why, which is all there is to say.
+                    Contents::Failed(_) => {}
                 }
-                // Starting from the tab's own `HEAD`, every time the creator
-                // opens: a pick left over from the last worktree would start
-                // this one somewhere nobody chose for it.
-                self.tab_menu.bases = super::tab_menu::bases(
-                    self.tab_menu.worktrees(),
-                    self.tab_menu.pane_directory.as_deref(),
-                    &self.tab_menu.branches,
-                    self.tab_menu.default_branch.as_deref(),
-                );
-                self.tab_menu.base = 0;
-                self.tab_menu.base_scroll.lock().scroll_to_top();
-                self.tab_menu.problem = None;
-                self.tab_menu.mode = WorktreeMode::Creating;
-                self.tab_menu.forget_hover_state();
-                self.sync_input_keys();
-                ctx.notify();
             }
-
-            WorktreeAction::Create => self.create_worktree(ctx),
+            WorktreeAction::PickAgent(index) => {
+                if self.tab_menu.mode == WorktreeMode::Creating
+                    && index <= self.tab_menu.agents.len()
+                    && self.tab_menu.agent != index
+                {
+                    self.tab_menu.agent = index;
+                    self.agent_picked(ctx);
+                }
+            }
+            WorktreeAction::MoveAgent(by) => {
+                if self.tab_menu.mode == WorktreeMode::Creating && self.tab_menu.move_agent(by) {
+                    self.agent_picked(ctx);
+                }
+            }
+            WorktreeAction::Focus(field) => {
+                let field = match field {
+                    CreatorField::Prompt if !self.tab_menu.asks_for_a_prompt() => {
+                        CreatorField::Branch
+                    }
+                    field => field,
+                };
+                if self.tab_menu.mode == WorktreeMode::Creating && self.tab_menu.field != field {
+                    self.tab_menu.field = field;
+                    self.sync_input_keys();
+                    ctx.notify();
+                }
+            }
+            WorktreeAction::SwitchField => {
+                if self.tab_menu.mode == WorktreeMode::Creating && self.tab_menu.asks_for_a_prompt()
+                {
+                    self.tab_menu.field = match self.tab_menu.field {
+                        CreatorField::Branch => CreatorField::Prompt,
+                        CreatorField::Prompt => CreatorField::Branch,
+                    };
+                    self.sync_input_keys();
+                    ctx.notify();
+                }
+            }
+            WorktreeAction::PromptEdited => {
+                if self.tab_menu.mode == WorktreeMode::Creating {
+                    self.follow_prompt();
+                    ctx.notify();
+                }
+            }
             WorktreeAction::PickBase(index) => {
                 if self.tab_menu.mode == WorktreeMode::Creating
                     && index < self.tab_menu.bases.len()
@@ -3168,6 +3229,124 @@ impl Workspace {
         }
     }
 
+    /// Puts the menu into its creator: a name nothing is using, the tab's own
+    /// `HEAD` to start from, and — for a task — the first agent found, with the
+    /// keyboard in its prompt.
+    fn start_creating(&mut self, task: bool, ctx: &mut ViewContext<Self>) {
+        // Not until the repository has been read. The name offered has to be
+        // one no existing worktree is using, and where the checkout goes is
+        // derived from what the repository is called — both of which are
+        // answers the list carries. Opening the creator over a list that had
+        // not arrived would offer a name chosen against nothing and then
+        // refuse to use it.
+        if !matches!(self.tab_menu.contents, Contents::Ready(_)) {
+            return;
+        }
+
+        // "Shell only" from the tab's own entry, which is the creator it was
+        // before it could start anything; the first agent found from "New
+        // task…", which is a request for one. Never a pick left over from the
+        // last time, for the reason the base below is not one.
+        self.tab_menu.agent = usize::from(task && !self.tab_menu.agents.is_empty());
+        self.tab_menu.field = if self.tab_menu.asks_for_a_prompt() {
+            CreatorField::Prompt
+        } else {
+            CreatorField::Branch
+        };
+        // A prompt from the last task is somebody else's sentence now.
+        if let Some(prompt) = self.worktree_prompt() {
+            prompt.edit(|editor| editor.clear());
+        }
+
+        // Pre-filled with a name nothing is using, so the shortest way
+        // through is to press the button. herdr does the same, and the
+        // reason is that a person who has not decided on a name yet still
+        // wants the worktree.
+        //
+        // Both lists, because the branches are the half that decides:
+        // `remove` never deletes a branch, so a name offered against the
+        // worktrees alone comes back the moment its checkout goes and `add`
+        // refuses it every time after that.
+        let branch = crate::git::worktree::suggested_branch(
+            self.tab_menu.worktrees(),
+            &self.tab_menu.branches,
+        );
+        // Selected where the keyboard is in it, so that the first letter
+        // typed replaces it; not where the keyboard is in the prompt, whose
+        // first letter replaces it anyway, by way of the prompt.
+        let select = self.tab_menu.field == CreatorField::Branch;
+        if let Some(field) = self.worktree_branch() {
+            field.edit(|editor| {
+                editor.set_text(&branch);
+                if select {
+                    editor.select_all();
+                }
+            });
+        }
+        self.tab_menu.branch_offered = Some(branch);
+        // Starting from the tab's own `HEAD`, every time the creator opens: a
+        // pick left over from the last worktree would start this one somewhere
+        // nobody chose for it.
+        self.tab_menu.bases = super::tab_menu::bases(
+            self.tab_menu.worktrees(),
+            self.tab_menu.pane_directory.as_deref(),
+            &self.tab_menu.branches,
+            self.tab_menu.default_branch.as_deref(),
+        );
+        self.tab_menu.base = 0;
+        self.tab_menu.base_scroll.lock().scroll_to_top();
+        self.tab_menu.problem = None;
+        self.tab_menu.mode = WorktreeMode::Creating;
+        self.tab_menu.forget_hover_state();
+        self.sync_input_keys();
+        ctx.notify();
+    }
+
+    /// What picking another agent changes besides the check: the keyboard
+    /// goes to the prompt that has just appeared, or back to the name from the
+    /// one that has just gone, and the name follows whichever prompt is now
+    /// being asked for — none, for "Shell only".
+    fn agent_picked(&mut self, ctx: &mut ViewContext<Self>) {
+        self.tab_menu.field = if self.tab_menu.asks_for_a_prompt() {
+            CreatorField::Prompt
+        } else {
+            CreatorField::Branch
+        };
+        self.follow_prompt();
+        self.sync_input_keys();
+        ctx.notify();
+    }
+
+    /// Names the branch after the prompt, while the name is still one the
+    /// creator put there.
+    ///
+    /// A name somebody typed is theirs and is left alone. The test is the
+    /// field's own text against the last name offered, rather than a flag set
+    /// by a keystroke, because the field has more ways in than keystrokes — a
+    /// paste, a cut, an undo — and every one of them ends up as text.
+    fn follow_prompt(&mut self) {
+        let Some(branch) = self.worktree_branch().cloned() else {
+            return;
+        };
+        let untouched = self.tab_menu.branch_offered.as_deref() == Some(branch.editor().text());
+        if !untouched {
+            return;
+        }
+        let prompt = match self.worktree_prompt() {
+            Some(prompt) if self.tab_menu.asks_for_a_prompt() => prompt.editor().text().to_owned(),
+            _ => String::new(),
+        };
+        let name = crate::git::worktree::branch_for_prompt(
+            &prompt,
+            self.tab_menu.worktrees(),
+            &self.tab_menu.branches,
+        );
+        if branch.editor().text() != name {
+            branch.edit(|editor| editor.set_text(&name));
+        }
+        self.tab_menu.branch_offered = Some(name);
+    }
+
     /// Opens the menu on a tab, and reads the repository behind it.
     ///
     /// Pressing again on the tab whose menu is already up closes it, which is
@@ -3221,6 +3400,13 @@ impl Workspace {
         self.tab_menu.branches.clear();
         self.tab_menu.default_branch = None;
         self.tab_menu.bases.clear();
+        self.tab_menu.agents.clear();
+        self.tab_menu.agent = 0;
+        self.tab_menu.task = false;
+        // Asked of the shell a new pane is about to run, which is the one the
+        // line would be typed into; a window has one for all of its panes.
+        self.tab_menu.prompt_holds =
+            crate::plugins::wasm::quoting_holds_in(&self.terminals.as_ref(ctx).shell());
         self.tab_menu.problem = None;
         self.tab_menu.working = false;
         self.tab_menu.store = self.worktrees_directory.clone();
@@ -3229,7 +3415,14 @@ impl Workspace {
         self.start_chomping(ctx);
         ctx.notify();
 
+        let agent_directories = self.agent_directories.clone();
         let reading = ctx.background().spawn(async move {
+            // With the repository's reads, on the pool: a look in every
+            // directory of `PATH` is a few dozen `stat`s, which is nothing to
+            // a worker and a stall on the frame on a slow disk.
+            let agents = crate::agent::found_on(
+                &agent_directories.unwrap_or_else(crate::agent::search_path),
+            );
             let worktrees = crate::git::worktree::list(&directory)?;
             // Best effort, and second, because the two answers are not worth
             // the same. The listing *is* the menu, and failing to read it is a
@@ -3243,7 +3436,7 @@ impl Workspace {
             let default = crate::git::worktree::default_branch(&directory, &branches);
             // Named, because the branches are read with their own error
             // swallowed and nothing else in the block says what this one is.
-            Ok::<_, crate::git::worktree::Error>((worktrees, branches, default))
+            Ok::<_, crate::git::worktree::Error>((worktrees, branches, default, agents))
         });
 
         ctx.spawn(reading, move |workspace, listed, ctx| {
@@ -3254,17 +3447,23 @@ impl Workspace {
                 return;
             }
             workspace.tab_menu.contents = match listed {
-                Ok((worktrees, branches, default)) => {
+                Ok((worktrees, branches, default, agents)) => {
                     workspace.tab_menu.repository = worktrees
                         .first()
                         .and_then(|worktree| worktree.path.file_name())
                         .map(|name| name.to_string_lossy().into_owned());
                     workspace.tab_menu.branches = branches;
                     workspace.tab_menu.default_branch = default;
+                    workspace.tab_menu.agents = agents;
                     Contents::Ready(worktrees)
                 }
                 Err(problem) => Contents::Failed(problem.to_string()),
             };
+            // Opened by "New task…", which asked for the creator and not for
+            // the list the creator is made from.
+            if std::mem::take(&mut workspace.tab_menu.task) {
+                workspace.start_creating(true, ctx);
+            }
             ctx.notify();
         })
         .detach();
@@ -3325,6 +3524,12 @@ impl Workspace {
                     crate::git::worktree::branches(&directory).unwrap_or_default();
                 self.tab_menu.default_branch =
                     crate::git::worktree::default_branch(&directory, &self.tab_menu.branches);
+                self.tab_menu.agents = crate::agent::found_on(
+                    &self
+                        .agent_directories
+                        .clone()
+                        .unwrap_or_else(crate::agent::search_path),
+                );
                 Contents::Ready(worktrees)
             }
             Err(problem) => Contents::Failed(problem.to_string()),
@@ -3335,6 +3540,12 @@ impl Workspace {
     /// Puts the menu into its creator, for a run that was asked to start there.
     pub fn start_creating_worktree(&mut self, ctx: &mut ViewContext<Self>) {
         self.apply_worktree(WorktreeAction::StartCreating, ctx);
+    }
+
+    /// Puts it into its creator as "New task…" opens it, for a run that was
+    /// asked to start there.
+    pub fn start_new_task(&mut self, ctx: &mut ViewContext<Self>) {
+        self.start_creating(true, ctx);
     }
 
     /// Puts it into its sweep, for a run that was asked to start there.
@@ -3410,6 +3621,9 @@ impl Workspace {
         self.tab_menu.branches.clear();
         self.tab_menu.default_branch = None;
         self.tab_menu.bases.clear();
+        self.tab_menu.agents.clear();
+        self.tab_menu.agent = 0;
+        self.tab_menu.task = false;
         self.tab_menu.problem = None;
         self.tab_menu.working = false;
         self.tab_menu.chomp = 0;
@@ -3979,7 +4193,11 @@ impl Workspace {
     }
 
     /// Makes the worktree the creator describes, and opens a pane in it.
-    fn create_worktree(&mut self, ctx: &mut ViewContext<Self>) {
+    ///
+    /// With an agent picked, its line goes into that pane's composer once
+    /// the pane is there — and is sent only when `send`, which is the Start
+    /// button and nothing else.
+    fn create_worktree(&mut self, send: bool, ctx: &mut ViewContext<Self>) {
         if self.tab_menu.working {
             return;
         }
@@ -4005,6 +4223,18 @@ impl Workspace {
             .bases
             .get(self.tab_menu.base)
             .and_then(|base| base.reference.clone());
+        // Made now, from what the creator says now, rather than when the
+        // checkout lands: the fields are cleared by the next creator, and a
+        // line made later could be made from somebody else's prompt.
+        let launch = self.tab_menu.picked_agent().and_then(|agent| {
+            let prompt = match self.worktree_prompt() {
+                Some(prompt) if self.tab_menu.asks_for_a_prompt() => {
+                    prompt.editor().text().to_owned()
+                }
+                _ => String::new(),
+            };
+            crate::agent::launch_line(agent, &prompt)
+        });
 
         self.tab_menu.working = true;
         self.tab_menu.problem = None;
@@ -4028,6 +4258,11 @@ impl Workspace {
             // different one is writing into somebody else's question.
             let answering =
                 workspace.tab_menu.tab == opened_on && workspace.tab_menu.opening == opening;
+            // Start's press stands only while the creator it was made in is
+            // still up. A Cancel, or the menu going away, while git was
+            // working is a person who changed their mind, and the line waits
+            // in the composer for them to decide.
+            let send = send && answering && workspace.tab_menu.mode == WorktreeMode::Creating;
             if answering {
                 workspace.tab_menu.working = false;
             }
@@ -4045,6 +4280,13 @@ impl Workspace {
                         Some(tab) => workspace.open_tab_in_group_of(tab, path, ctx),
                         None => workspace.open_tab_in(path, ctx),
                     };
+                    // `open_tab_in…` makes the new tab's pane the focused
+                    // one, so that is the pane the line is for.
+                    if let Some(line) = launch
+                        && let Some(pane) = workspace.tabs.focused_pane_id()
+                    {
+                        workspace.hand_line_to(pane, &line, send, ctx);
+                    }
                 }
                 Err(problem) => {
                     if answering {
@@ -4057,6 +4299,37 @@ impl Workspace {
             }
         })
         .detach();
+    }
+
+    /// Puts an agent's launch line in a new pane's composer, and sends it
+    /// when `send`.
+    ///
+    /// Sending is what Enter on the composer does — the line taken out of
+    /// the field into its history, and handed to
+    /// [`TerminalHandle::submit`] — so a line started by Start is one the
+    /// shell's history, the block list and Up all see the way they see one a
+    /// person typed. A pane whose shell is not there to take it keeps the
+    /// line in the composer instead of losing it: the person pressed for the
+    /// agent to start, and it can still start on the next Enter.
+    fn hand_line_to(&mut self, pane: PaneId, line: &str, send: bool, ctx: &mut ViewContext<Self>) {
+        self.type_into_input(pane, line, ctx);
+        if !send {
+            return;
+        }
+        let Some((terminal, _)) = self.terminal(pane, ctx) else {
+            log::warn!("a new tab has no shell yet, so its agent's line is left in the composer");
+            return;
+        };
+        let Some(input) = self.inputs.get(&pane) else {
+            return;
+        };
+        let Some(sent) = input.apply(crate::input_keys::Intent::Submit, &self.clipboard) else {
+            return;
+        };
+        if !terminal.submit(&sent) {
+            input.edit(|editor| editor.insert(&sent));
+        }
+        ctx.notify();
     }
 
     /// Asks about removing one, and counts what is in it while it asks.
@@ -6117,12 +6390,28 @@ impl Workspace {
             // Creating it is a letter in a branch name, and this arm is not
             // reached there.
             ("n", WorktreeMode::Listing) => WorktreeAction::StartCreating,
+            // Create from either field, and never Start: Enter ends a
+            // sentence typed into the prompt, and that is not the moment
+            // somebody chose to run a line they have not read.
             ("enter", WorktreeMode::Creating) => WorktreeAction::Create,
-            // The creator's other list: where the branch starts. The field
-            // would spend these two on jumping its caret to an end, which
-            // Home and End still do, and every letter stays the name's.
-            ("up", WorktreeMode::Creating) => WorktreeAction::MoveBase(-1),
-            ("down", WorktreeMode::Creating) => WorktreeAction::MoveBase(1),
+            // The creator's lists, one under each field: the arrows walk the
+            // one under the field with the keyboard. The field would spend
+            // these two on jumping its caret to an end, which Home and End
+            // still do, and every letter stays the field's.
+            ("up" | "down", WorktreeMode::Creating) => {
+                let by = if keystroke.key == "up" { -1 } else { 1 };
+                match self.tab_menu.field {
+                    CreatorField::Prompt if self.tab_menu.asks_for_a_prompt() => {
+                        WorktreeAction::MoveAgent(by)
+                    }
+                    _ => WorktreeAction::MoveBase(by),
+                }
+            }
+            // To the other field, where there are two. Where there is one,
+            // Tab is the field's own, as it always was.
+            ("tab", WorktreeMode::Creating) if self.tab_menu.asks_for_a_prompt() => {
+                WorktreeAction::SwitchField
+            }
             ("enter", WorktreeMode::Removing { refused: false, .. }) => {
                 WorktreeAction::Remove { force: false }
             }

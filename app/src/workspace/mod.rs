@@ -53,8 +53,8 @@ mod tests;
 use crate::theme::theme;
 
 pub use action::{
-    BlockAction, BlockEdge, BlockPart, OptionsAction, SearchAction, SettingsAction, Subject,
-    TabMenuAction, ThemeAction, WindowAction, WorkspaceAction, WorktreeAction,
+    BlockAction, BlockEdge, BlockPart, CreatorField, OptionsAction, SearchAction, SettingsAction,
+    Subject, TabMenuAction, ThemeAction, WindowAction, WorkspaceAction, WorktreeAction,
 };
 pub use block_list::BlockList;
 pub use input_element::CommandInput;

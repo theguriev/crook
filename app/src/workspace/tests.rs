@@ -749,6 +749,52 @@ impl Harness {
             .read(&self.app, |workspace, _| workspace.worktrees_listed())
     }
 
+    /// The agents the creator offers, by command name.
+    fn worktree_agents(&self) -> Vec<&'static str> {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.worktree_agents())
+    }
+
+    /// The one it would start, or `None` for "Shell only".
+    fn worktree_agent(&self) -> Option<&'static str> {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.worktree_agent())
+    }
+
+    /// What is in one of `crook/worktrees`' fields — the branch or the prompt.
+    fn worktree_field(&self, name: &str) -> String {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace
+                .host()
+                .field(name)
+                .map(|field| field.editor().text().to_owned())
+                .expect("crook/worktrees claims the field")
+        })
+    }
+
+    /// Whether the creator's branch field has the keyboard.
+    fn worktree_branch_has_keys(&self) -> bool {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.worktree_branch_has_keys()
+        })
+    }
+
+    /// Whether its prompt field has.
+    fn worktree_prompt_has_keys(&self) -> bool {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.worktree_prompt_has_keys()
+        })
+    }
+
+    /// The pane opened in a checkout under `store`, once one has been.
+    fn pane_under(&self, store: &Path) -> Option<PaneId> {
+        self.workspace
+            .read(&self.app, |workspace, _| workspace.pane_directories())
+            .into_iter()
+            .find(|(_, directory)| directory.starts_with(store))
+            .map(|(pane, _)| pane)
+    }
+
     /// What one of the worktree menu's controls dispatches.
     fn dispatch_worktree(&mut self, action: WorktreeAction) {
         self.dispatch_workspace_action(WorkspaceAction::Worktree(action));
@@ -5363,6 +5409,349 @@ fn the_creator_refuses_a_blank_name_itself_and_a_dash_name_through_add() {
         harness.worktree_menu_is_creating(),
         "a refused name took the creator down, and the name with it"
     );
+}
+
+/// A window on a scratch repository, with the worktrees going to a store of
+/// the test's own and the creator finding exactly one agent — a `claude` of
+/// the test's own, which prints its arguments and nothing else — and the
+/// repository, the store and that agent's directory. `None` where there is no
+/// git to make the repository with.
+fn a_window_with_an_agent(scratch: &Scratch) -> Option<(Harness, PathBuf, PathBuf)> {
+    let repository = scratch_repository(&scratch.path().join("repo"))?;
+    let store = scratch.path().join("store");
+    let agents = scratch.path().join("agents");
+    fs::create_dir_all(&agents).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        let claude = agents.join("claude");
+        fs::write(&claude, "#!/bin/sh\nprintf '%s\\n' \"$@\"\n").ok()?;
+        fs::set_permissions(&claude, fs::Permissions::from_mode(0o755)).ok()?;
+    }
+    #[cfg(not(unix))]
+    fs::write(agents.join("claude.cmd"), "@echo %*\r\n").ok()?;
+
+    let mut harness = Harness::seeded();
+    harness.workspace_update(|workspace, _| {
+        workspace.set_worktrees_directory(store.clone());
+        workspace.set_agent_directories(vec![agents]);
+    });
+    let pane = harness.pane_ids()[0];
+    harness.update_session(pane, |session| {
+        session.working_directory = Some(repository.clone());
+    });
+    harness.record_git(pane, "main", None);
+    harness.frame();
+    Some((harness, repository, store))
+}
+
+#[test]
+fn shell_only_makes_the_worktree_it_always_made_and_types_nothing() {
+    // The tab's own "New worktree…" is the creator it was before it could
+    // start anything. An agent found on PATH is offered, and not picked; and
+    // picking it and then "Shell only" again puts back everything it changed.
+    let scratch = Scratch::new();
+    let Some((mut harness, _, store)) = a_window_with_an_agent(&scratch) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(harness.active_id()));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+
+    assert_eq!(harness.worktree_agents(), ["claude"]);
+    assert_eq!(
+        harness.worktree_agent(),
+        None,
+        "the tab's own entry picked an agent nobody asked for"
+    );
+    assert!(harness.worktree_branch_has_keys());
+    let suggested = harness.worktree_field(crate::plugins::worktrees::BRANCH_FIELD);
+    assert!(suggested.starts_with("worktree/"), "{suggested}");
+
+    let scene = harness.frame();
+    assert!(
+        worktree_menu_says(&scene, "Shell only") && worktree_menu_says(&scene, "Claude Code"),
+        "the creator does not offer the agent it found"
+    );
+    let menu = worktree_menu_box(&scene).expect("the menu is up");
+    let text = text_where(&scene, |position| menu.contains_point(position));
+    assert_eq!(
+        text.matches("Start").count(),
+        1,
+        "a Start button with no agent to start, beside \"Start from\": {text}"
+    );
+
+    harness.click(
+        center(worktree_row_saying(&scene, "Claude Code")),
+        MouseButton::Left,
+    );
+    assert_eq!(harness.worktree_agent(), Some("claude"));
+    let scene = harness.frame();
+    harness.click(
+        center(worktree_row_saying(&scene, "Shell only")),
+        MouseButton::Left,
+    );
+    assert_eq!(harness.worktree_agent(), None);
+    assert!(
+        harness.worktree_branch_has_keys(),
+        "going back to Shell only left the keyboard somewhere else"
+    );
+    assert_eq!(
+        harness.worktree_field(crate::plugins::worktrees::BRANCH_FIELD),
+        suggested
+    );
+
+    let before = harness.pane_ids().len();
+    assert!(harness.press_key("enter", Modifiers::default()));
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.pane_ids().len() > before
+    });
+    let opened = harness
+        .pane_under(&store)
+        .expect("no pane was opened in the new checkout");
+    assert_eq!(
+        harness.field_text(opened),
+        "",
+        "Shell only typed something into the new tab"
+    );
+    let directory = harness
+        .workspace
+        .read(&harness.app, |workspace, _| workspace.pane_directories())
+        .into_iter()
+        .find_map(|(pane, directory)| (pane == opened).then_some(directory))
+        .expect("the pane has a directory");
+    assert_eq!(
+        git_says(&directory, &["branch", "--show-current"]),
+        Some(suggested)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_new_task_leaves_the_agents_quoted_line_unsent_in_the_new_tabs_composer() {
+    // The whole gesture: the palette's "New task…", a sentence, Enter. The
+    // checkout is made on a branch named after the sentence, and the new
+    // tab's composer holds the line that starts the agent on it — with the
+    // sentence quoted as one word, since it has a quote, a `$(…)` and
+    // backticks in it — and nothing has been sent.
+    let scratch = Scratch::new();
+    let Some((mut harness, _, store)) = a_window_with_an_agent(&scratch) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    harness.workspace_update(|workspace, ctx| {
+        workspace.set_shell(Some(PathBuf::from("/bin/bash")), ctx);
+    });
+
+    harness.run_command("crook/worktrees/new-task");
+    harness.wait_for("the creator to open on the task", |harness| {
+        harness.worktree_menu_is_creating()
+    });
+    assert_eq!(
+        harness.worktree_agent(),
+        Some("claude"),
+        "New task… did not pick the agent it found"
+    );
+    assert!(
+        harness.worktree_prompt_has_keys(),
+        "the keyboard is not in the prompt"
+    );
+
+    harness.frame();
+    let prompt = "fix the login bug; don't $(rm) `it`";
+    harness.type_text(prompt);
+    assert_eq!(
+        harness.worktree_field(crate::plugins::worktrees::PROMPT_FIELD),
+        prompt
+    );
+    assert_eq!(
+        harness.worktree_field(crate::plugins::worktrees::BRANCH_FIELD),
+        "worktree/fix-the-login-bug-don-t-rm-it",
+        "the branch did not follow the prompt"
+    );
+
+    // Enter is Create, from the prompt as from the name, and never Start.
+    assert_eq!(
+        harness.action_for("enter", Modifiers::default()),
+        Some(WorkspaceAction::Worktree(WorktreeAction::Create))
+    );
+    let before = harness.pane_ids().len();
+    assert!(harness.press_key("enter", Modifiers::default()));
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.pane_ids().len() > before
+    });
+
+    let opened = harness
+        .pane_under(&store)
+        .expect("no pane was opened in the new checkout");
+    assert_eq!(
+        harness.field_text(opened),
+        r"claude 'fix the login bug; don'\''t $(rm) `it`'",
+        "the agent's line is not in the new tab's composer, quoted"
+    );
+    assert_eq!(
+        harness.focused_pane_id(),
+        Some(opened),
+        "the line is in a composer nobody is looking at"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn the_branch_follows_the_prompt_until_somebody_names_it() {
+    let scratch = Scratch::new();
+    let Some((mut harness, _, _)) = a_window_with_an_agent(&scratch) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    harness.workspace_update(|workspace, ctx| {
+        workspace.set_shell(Some(PathBuf::from("/bin/bash")), ctx);
+    });
+    let branch = crate::plugins::worktrees::BRANCH_FIELD;
+
+    harness.dispatch_worktree(WorktreeAction::NewTask(harness.active_id()));
+    harness.wait_for("the creator to open on the task", |harness| {
+        harness.worktree_menu_is_creating()
+    });
+    let suggested = harness.worktree_field(branch);
+    harness.frame();
+    harness.type_text("fix it");
+    assert_eq!(harness.worktree_field(branch), "worktree/fix-it");
+
+    // Shell only asks for no prompt, so the name is the suggestion again, and
+    // the prompt comes back with the agent.
+    harness.dispatch_worktree(WorktreeAction::PickAgent(0));
+    assert_eq!(harness.worktree_field(branch), suggested);
+    assert!(harness.worktree_branch_has_keys());
+    harness.dispatch_worktree(WorktreeAction::PickAgent(1));
+    assert!(harness.worktree_prompt_has_keys());
+    assert_eq!(harness.worktree_field(branch), "worktree/fix-it");
+
+    // Tab to the name, and a letter typed there makes it somebody's.
+    assert!(harness.press_key("tab", Modifiers::default()));
+    assert!(harness.worktree_branch_has_keys());
+    harness.frame();
+    harness.type_text("-now");
+    assert_eq!(harness.worktree_field(branch), "worktree/fix-it-now");
+
+    assert!(harness.press_key("tab", Modifiers::default()));
+    assert!(harness.worktree_prompt_has_keys());
+    harness.frame();
+    harness.type_text(" please");
+    assert_eq!(
+        harness.worktree_field(crate::plugins::worktrees::PROMPT_FIELD),
+        "fix it please"
+    );
+    assert_eq!(
+        harness.worktree_field(branch),
+        "worktree/fix-it-now",
+        "the prompt renamed a branch somebody had typed"
+    );
+    harness.dispatch_worktree(WorktreeAction::PickAgent(0));
+    assert_eq!(harness.worktree_field(branch), "worktree/fix-it-now");
+}
+
+#[cfg(unix)]
+#[test]
+fn only_start_sends_the_agents_line_and_enter_leaves_it_for_the_person() {
+    // The shell here is `cat`, which runs nothing: a line that reaches it is
+    // echoed back and that is all — so the proof that Start sent the line is
+    // on screen, and a `claude` on this machine is never started by a test.
+    // It is also a shell the host's quoting is not proven in, so the line is
+    // the agent's bare name, with no prompt field to type one into.
+    let scratch = Scratch::new();
+    let Some((mut harness, _, _)) = a_window_with_an_agent(&scratch) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    harness.workspace_update(|workspace, ctx| {
+        workspace.set_shell(Some(PathBuf::from("/bin/cat")), ctx);
+    });
+    if !harness.start_terminals() {
+        return;
+    }
+    let first = harness.active_id();
+
+    // Create, which is Enter: the line waits in the composer.
+    harness.dispatch_worktree(WorktreeAction::NewTask(first));
+    harness.wait_for("the creator to open on the task", |harness| {
+        harness.worktree_menu_is_creating()
+    });
+    assert!(
+        !harness.worktree_prompt_has_keys(),
+        "a prompt was asked for in a shell whose quoting nobody has proven"
+    );
+    let before = harness.pane_ids();
+    assert!(harness.press_key("enter", Modifiers::default()));
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.pane_ids().len() > before.len()
+    });
+    let created = *harness
+        .pane_ids()
+        .iter()
+        .find(|pane| !before.contains(pane))
+        .expect("a new pane");
+    assert_eq!(harness.field_text(created), "claude");
+
+    // Start: the same line, sent.
+    harness.dispatch_worktree(WorktreeAction::NewTask(first));
+    harness.wait_for("the creator to open on the task", |harness| {
+        harness.worktree_menu_is_creating()
+    });
+    let before = harness.pane_ids();
+    harness.dispatch_worktree(WorktreeAction::Start);
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.pane_ids().len() > before.len()
+    });
+    let started = *harness
+        .pane_ids()
+        .iter()
+        .find(|pane| !before.contains(pane))
+        .expect("a new pane");
+    harness.wait_for("the line to reach the shell", |harness| {
+        harness.terminal_text(started).contains("claude")
+    });
+    assert_eq!(
+        harness.field_text(started),
+        "",
+        "Start left the line in the composer as well as sending it"
+    );
+
+    // Start, then Cancel while git is still checking out: the checkout
+    // still opens, and the line waits rather than running for a person who
+    // took the press back.
+    harness.dispatch_worktree(WorktreeAction::NewTask(first));
+    harness.wait_for("the creator to open on the task", |harness| {
+        harness.worktree_menu_is_creating()
+    });
+    let before = harness.pane_ids();
+    harness.dispatch_worktree(WorktreeAction::Start);
+    harness.dispatch_worktree(WorktreeAction::Cancel);
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.pane_ids().len() > before.len()
+    });
+    let taken_back = *harness
+        .pane_ids()
+        .iter()
+        .find(|pane| !before.contains(pane))
+        .expect("a new pane");
+    assert_eq!(harness.field_text(taken_back), "claude");
+
+    // And neither of those has been sent, long after the one Start made was.
+    harness.settle(std::time::Duration::from_millis(300));
+    for pane in [created, taken_back] {
+        assert!(
+            !harness.terminal_text(pane).contains("claude"),
+            "a line nobody pressed Start for reached the shell: {:?}",
+            harness.terminal_text(pane)
+        );
+        assert_eq!(harness.field_text(pane), "claude");
+    }
 }
 
 /// The branch [`repository_on_a_feature_branch`] adds so that git's own order

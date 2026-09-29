@@ -745,12 +745,46 @@ fn serve(workspace: &mut Workspace, request: &Request, ctx: &mut ViewContext<Wor
 /// the character that ends a command line, a carriage return is what a shell's
 /// line editor does something else with entirely, and a directory whose name
 /// holds either is not worth the reasoning it would take to be sure.
-fn fill(template: &str, argument: &str) -> Option<String> {
+///
+/// The worktree creator's launch line goes through here as well — see
+/// [`crate::agent::launch_line`] — so a prompt gets exactly the quoting a
+/// plugin's argument gets, and there is one spelling to get right.
+pub(crate) fn fill(template: &str, argument: &str) -> Option<String> {
     if argument.chars().any(char::is_control) {
         return None;
     }
     let (before, after) = template.split_once("{}")?;
     Some(format!("{before}{}{after}", quote(argument)))
+}
+
+/// Whether a line [`fill`] made means, in `shell`, what it says: the hole one
+/// word, and nothing in it run.
+///
+/// The spelling is chosen by platform and not by shell, so this is the list of
+/// shells it has been proven against, by the shells themselves, rather than a
+/// rule: sh, dash, bash, zsh and fish. Anything else is no. nushell reads a
+/// single quote as the start of a string with no escapes in it, so the
+/// POSIX way of writing a quote inside one is a parse error there; tcsh
+/// expands `!` inside single quotes.
+///
+/// And no on Windows, whatever the shell. PowerShell's own reading of the
+/// spelling is right for a straight quote, but it also ends a single-quoted
+/// string at a curly one — `’`, the apostrophe a pasted sentence has — which
+/// the spelling leaves alone; and an agent installed by npm is a `.cmd` file,
+/// which PowerShell hands to cmd.exe with the argument re-quoted by rules
+/// cmd.exe does not share, so a `"` in it can end the quoting there. cmd.exe
+/// itself, the default shell, reads a single quote as a letter. A plugin's
+/// typed argument is a directory or a branch; a prompt is a paragraph
+/// somebody pasted, and it is the prompt this is asked about.
+pub(crate) fn quoting_holds_in(shell: &Path) -> bool {
+    if cfg!(windows) {
+        return false;
+    }
+    let name = shell
+        .file_stem()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or_default();
+    matches!(name, "sh" | "dash" | "bash" | "zsh" | "fish")
 }
 
 /// One argument, as a shell will read it as one word.
