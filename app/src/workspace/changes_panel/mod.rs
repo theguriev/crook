@@ -400,19 +400,23 @@ impl ChangesPanelState {
 
     /// Shows the file at `index`'s hunks, or stops showing them. Answers the
     /// diff to read, the first time and after a read that failed — and never
-    /// again after that: a file shown, hidden and shown again is read once.
+    /// again after that: a file shown, hidden and shown again is read once. A
+    /// nested repository is never read: there is no diff of one.
     pub(super) fn toggle(&mut self, index: usize) -> Option<HunkRead> {
-        let path = self.overview()?.files.get(index)?.path.clone();
+        let file = self.overview()?.files.get(index)?;
+        let path = file.path.clone();
+        let nested = file.status == Status::Repository;
         if self.expanded.remove(&path) {
             self.relayout();
             return None;
         }
         self.expanded.insert(path.clone());
 
-        let known = self
-            .hunks
-            .get(&path)
-            .is_some_and(|hunks| hunks.ticket.is_some() || matches!(hunks.diff, Some(Ok(_))));
+        let known = nested
+            || self
+                .hunks
+                .get(&path)
+                .is_some_and(|hunks| hunks.ticket.is_some() || matches!(hunks.diff, Some(Ok(_))));
         let read = if known { None } else { self.request(&path) };
         self.relayout();
         read
@@ -523,6 +527,12 @@ impl ChangesPanelState {
                 continue;
             }
             rows.push(Row::Actions(index));
+            if file.status == Status::Repository {
+                rows.push(Row::Note(
+                    "A repository of its own: git does not look inside it.".to_owned(),
+                ));
+                continue;
+            }
             let hunks = self.hunks.get(&file.path);
             match hunks.and_then(|hunks| hunks.diff.as_ref()) {
                 None => rows.push(Row::Note("Reading…".to_owned())),
@@ -859,9 +869,11 @@ fn status_color(status: Status) -> Color {
     match status {
         Status::Added | Status::Untracked | Status::Copied => theme().diff_added,
         Status::Deleted => theme().diff_removed,
-        Status::Modified | Status::Renamed | Status::TypeChanged | Status::Unmerged => {
-            theme().text_muted
-        }
+        Status::Modified
+        | Status::Renamed
+        | Status::TypeChanged
+        | Status::Unmerged
+        | Status::Repository => theme().text_muted,
     }
 }
 
@@ -951,8 +963,9 @@ fn file_row(
 }
 
 /// A shown file's buttons. Each is there only when it can do something: no
-/// "Open" for a file that is gone or with no editor named, no "Copy diff"
-/// until there is a whole one to copy.
+/// "Open" for a file that is gone, for a nested repository, which is a
+/// directory, or with no editor named; no "Copy diff" until there is a whole
+/// one to copy.
 ///
 /// "Open" and not "Open in code": an editor's name is whatever `$VISUAL`
 /// says, a launcher script's included, and a name long enough pushed the
@@ -968,7 +981,7 @@ fn actions_row(
         .with_main_axis_size(MainAxisSize::Max)
         .with_cross_axis_alignment(CrossAxisAlignment::Center);
 
-    if file.status != Status::Deleted && state.editor().is_some() {
+    if !matches!(file.status, Status::Deleted | Status::Repository) && state.editor().is_some() {
         row.add_child(
             Container::new(text_button(
                 state.control(Control::Open(index)),

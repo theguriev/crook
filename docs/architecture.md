@@ -1050,13 +1050,17 @@ switch.
 docks — composed once in `Workspace::render`, beside the work rather than over it — about the
 focused pane's repository. `app/src/git/changes.rs` reads it: the base (the merge-base of `HEAD`
 and `merged::base_of`'s branch, which is what a pull request compares from, so the base moving
-on is not shown as the task undoing it), `git log <merge-base>..HEAD`, `git diff --name-status
+on is not shown as the task undoing it), `git log <merge-base>..HEAD`, `git diff --raw --numstat
 <merge-base>` against the working tree plus `git ls-files --others --exclude-standard`, and one
-file's unified diff when somebody opens that file. Every call goes through `git/run.rs`'s
-deadline on the background pool, with `--no-ext-diff`, `--no-textconv` and `core.fsmonitor` off,
-because each of those is a program a repository's configuration names and git would run it for
-a column that only reads. A single file's diff goes through `run_capped`, which stops reading one
-byte past half a megabyte and drops the pipe so git ends there, and is cut again at three
+file's unified diff when somebody opens that file. The counts are there to leave out a file
+whose bytes are what they were but whose mtime moved — a formatter that changed nothing, `touch`
+— which `--raw` alone calls modified, because a read never refreshes the index. Every call goes
+through `git/run.rs`'s deadline on the background pool, with `--no-ext-diff`, `--no-textconv`
+and `core.fsmonitor` off, because each of those is a program a repository's configuration names
+and git would run it for a column that only reads; the `a/` and `b/` prefixes and the spelling
+of a blank context line are pinned too, so `diff.noprefix` cannot make "Copy diff" hand on a
+patch `git apply` refuses. A single file's diff goes through `run_capped`, which stops reading
+one byte past half a megabyte and drops the pipe so git ends there, and is cut again at three
 thousand lines — both say so on screen, and "Copy diff" is not offered for a diff that is not
 whole.
 
@@ -1072,7 +1076,10 @@ one entry of one flat list with a fixed height per kind and a running sum of hei
 rebuilt when what is listed changes. A frame binary-searches the scroll offset for the first row
 and builds rows until it passes the bottom of the box, with a spacer standing for the rest: the
 arithmetic `block_list.rs` draws a pane's output with. A diff is read once per file and kept
-while the file is folded away; a refresh reads again only the files that are open.
+while the file is folded away; a refresh reads again only the files that are open. A line of a
+diff is kept to 256 bytes for drawing, because a line is shaped whole on every frame
+before it is cut to the column, and one line of a minified bundle is milliseconds of that;
+"Copy diff" copies the patch with its lines whole.
 
 **It is read-only, and that is the design rather than the first slice of an editor.** There is
 no stage, no revert and no in-place edit, because the tree it shows is one an agent is writing

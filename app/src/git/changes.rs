@@ -25,11 +25,18 @@
 //! driver are programs named by configuration, and git runs them for every
 //! file it diffs, so without the two flags a column that only looks would
 //! start whatever a repository's `.git/config` named. `core.fsmonitor` is
-//! switched off for the same reason — it is a program too — and colour,
-//! `diff.relative` and a signature check on `log` are overridden so that
-//! nothing somebody set changes what the text says. What is left is git's
-//! own clean filter, which is how git reads a working tree at all (Git LFS is
-//! one) and which the agent's own `git status` runs in the same repository.
+//! switched off for the same reason — it is a program too. What is left is
+//! git's own clean filter, which is how git reads a working tree at all (Git
+//! LFS is one) and which the agent's own `git status` runs in the same
+//! repository.
+//!
+//! The settings that change the *text* this reads are pinned too: colour,
+//! `diff.relative`, the `a/` and `b/` a patch names its sides with, how a
+//! blank context line is spelled, and a signature check on `log`. Each of
+//! them either breaks what is parsed here or makes "Copy diff" hand on a
+//! patch `git apply` refuses — `diff.noprefix` is the second. Settings that
+//! change only which of several right answers git gives, `diff.algorithm`
+//! say, are left as the person set them.
 //!
 //! # Bounded
 //!
@@ -83,8 +90,32 @@ pub const MAX_DIFF_BYTES: usize = 512 * 1024;
 /// reaches this long before it reaches the byte cap.
 pub const MAX_DIFF_LINES: usize = 3_000;
 
+/// How many bytes of one line of a diff [`hunks`] keeps to draw.
+///
+/// The column is about fifty characters wide, and a line of text is shaped
+/// whole before it is cut to fit — glyph by glyph, and again on every frame
+/// the window draws while the line is on screen, which is every frame an
+/// agent prints anything. One line of a minified bundle, of a notebook's
+/// embedded picture or of a one-line JSON fixture is tens or hundreds of
+/// kilobytes, and shaping that is tens of milliseconds a frame spent on a
+/// column that shows its first fifty characters. Five times what fits still
+/// ends in an ellipsis at the edge, and the whole line is still in
+/// [`FileDiff::patch`], which is what "Copy diff" copies.
+pub const MAX_LINE_BYTES: usize = 256;
+
 /// The flags every diff here is taken with. See the module's own docs.
-const DIFF_FLAGS: [&str; 4] = ["--no-color", "--no-ext-diff", "--no-textconv", "-M"];
+///
+/// The prefixes are the ones `git apply` strips by default. Without them
+/// `diff.noprefix` would print `--- src/x.rs`, which `apply` reads as a file
+/// called `x.rs` in a directory called nothing.
+const DIFF_FLAGS: [&str; 6] = [
+    "--no-color",
+    "--no-ext-diff",
+    "--no-textconv",
+    "-M",
+    "--src-prefix=a/",
+    "--dst-prefix=b/",
+];
 
 /// What every call here puts before the command.
 ///
@@ -94,13 +125,17 @@ const DIFF_FLAGS: [&str; 4] = ["--no-color", "--no-ext-diff", "--no-textconv", "
 /// ask what changed; off, git looks for itself. `diff.relative` would narrow
 /// every diff to the directory it runs in, which is the top of the
 /// repository here, but a setting is not a promise and the paths have to be
-/// from the top.
-const GLOBAL: [&str; 5] = [
+/// from the top. `diff.suppressBlankEmpty` prints a blank context line as
+/// nothing at all rather than as one space, and a line that is neither added,
+/// removed nor context is one the count to the first changed line skips.
+const GLOBAL: [&str; 7] = [
     "--literal-pathspecs",
     "-c",
     "core.fsmonitor=false",
     "-c",
     "diff.relative=false",
+    "-c",
+    "diff.suppressBlankEmpty=false",
 ];
 
 /// Why a read could not answer.
@@ -202,6 +237,10 @@ pub enum Status {
     Unmerged,
     /// Nobody has added it yet.
     Untracked,
+    /// A directory nobody has added that is a repository of its own — a
+    /// clone, a worktree, a submodule never registered — which git lists
+    /// whole and does not look inside, so there is no diff of it to show.
+    Repository,
 }
 
 impl Status {
@@ -215,11 +254,11 @@ impl Status {
             Self::Copied => 'C',
             Self::TypeChanged => 'T',
             Self::Unmerged => 'U',
-            Self::Untracked => '?',
+            Self::Untracked | Self::Repository => '?',
         }
     }
 
-    /// The status for the letter `diff --name-status` begins a line with.
+    /// The status for the letter a `diff --raw` entry's header ends with.
     ///
     /// `X` and anything a later git invents read as modified, which is the
     /// one answer that is never wrong about there being a change.
@@ -261,9 +300,11 @@ pub struct Files {
 pub struct FileDiff {
     /// The patch as git printed it, headers and all, up to the caps: what
     /// "Copy diff" copies, and what `git apply` would take when it is whole.
+    /// Its lines are never shortened; [`Self::lines`]' are.
     pub patch: String,
-    /// The lines of it from the first hunk on — `@@` headers, context, and
-    /// the lines added and removed — which is what the column draws.
+    /// The lines of its hunks — `@@` headers, context, and the lines added
+    /// and removed — which is what the column draws, each cut to
+    /// [`MAX_LINE_BYTES`] and ended with an ellipsis where it was.
     pub lines: Vec<String>,
     /// Whether git called the file binary, in which case there are no lines.
     pub binary: bool,
@@ -419,13 +460,24 @@ pub fn commits(repository: &Path, base: &Base) -> Result<Commits, Error> {
 /// The diff is `base` against the working tree, so what was committed, what
 /// is staged and what is merely saved all appear, once each. Untracked files
 /// are listed as git lists them for `status`: one per file, and none that an
-/// ignore file covers.
+/// ignore file covers — and a repository inside this one as itself, since
+/// git does not look into one.
+///
+/// A file is listed when its contents or its mode differ, and not when only
+/// its stat data does. Reads here never refresh the index (see
+/// [`super::run`]), so a file rewritten with the bytes it already held —
+/// `touch`, a `sed -i` that matched nothing, a formatter or a generator that
+/// changed nothing, `npm install` writing the same lockfile — still has the
+/// old mtime in the index, and `--raw` alone lists it as modified until
+/// something outside Crook refreshes the index. `--numstat`, asked in the
+/// same call, reads what such a file holds and leaves it out, which is what
+/// `git diff` itself shows once it has refreshed.
 pub fn files(repository: &Path, base: &Base) -> Result<Files, Error> {
-    let mut args = vec!["diff", "--name-status", "-z"];
+    let mut args = vec!["diff", "--raw", "--numstat", "-z"];
     args.extend(DIFF_FLAGS);
     args.extend([base.fork.as_str(), "--"]);
     let listed = read(repository, &args)?;
-    let mut files = name_status(&listed);
+    let mut files = changed_files(&listed);
 
     let untracked = read(
         repository,
@@ -436,13 +488,18 @@ pub fn files(repository: &Path, base: &Base) -> Result<Files, Error> {
         untracked
             .split(|byte| *byte == 0)
             .filter(|path| !path.is_empty())
-            .map(path_from)
-            .filter(|path| !tracked.contains(path))
             .map(|path| FileChange {
-                status: Status::Untracked,
-                path,
+                // `ls-files` names a nested repository as a directory, with
+                // the slash on the end, and never the files in it.
+                status: if path.ends_with(b"/") {
+                    Status::Repository
+                } else {
+                    Status::Untracked
+                },
+                path: path_from(path),
                 from: None,
-            }),
+            })
+            .filter(|file| !tracked.contains(&file.path)),
     );
 
     files.sort_by(|left, right| left.path.cmp(&right.path));
@@ -451,17 +508,31 @@ pub fn files(repository: &Path, base: &Base) -> Result<Files, Error> {
     Ok(Files { files, more })
 }
 
-/// `diff --name-status -z`, read.
+/// `diff --raw --numstat -z`, read: every file `--raw` lists, less the ones
+/// it calls modified that `--numstat` found no difference in.
 ///
-/// A status and then a path, each ended by a NUL; a rename or a copy has two
-/// paths, where it was and where it is, and a score after its letter.
-fn name_status(bytes: &[u8]) -> Vec<FileChange> {
-    let mut fields = bytes
-        .split(|byte| *byte == 0)
-        .filter(|field| !field.is_empty());
+/// `--raw` comes first, one entry per file: a header — a colon, both modes,
+/// both ids, and the status letter with a rename's or a copy's score after
+/// it — then the path, or for a rename or a copy where it was and where it
+/// is, every one of them ended by a NUL. `--numstat` follows, one entry per
+/// file it counted: `added<TAB>deleted<TAB>path`, or for a rename or a copy
+/// `added<TAB>deleted<TAB>` with the two paths after, each ended by a NUL.
+/// The headers begin with a colon and the counts with a digit or a `-`, so
+/// where one list ends is never in doubt; a path, read by its place, is
+/// never asked what it begins with.
+///
+/// Only a modified file is ever dropped: a mode that changed is still
+/// counted, `0 0`, and every other status says something happened.
+fn changed_files(bytes: &[u8]) -> Vec<FileChange> {
+    let mut fields = bytes.split(|byte| *byte == 0).peekable();
     let mut files = Vec::new();
-    while let Some(status) = fields.next() {
-        let status = Status::from_letter(status.first().copied().unwrap_or(b'M'));
+    while let Some(header) = fields.next_if(|field| field.first() == Some(&b':')) {
+        let letter = header
+            .rsplit(|byte| *byte == b' ')
+            .next()
+            .and_then(|status| status.first().copied())
+            .unwrap_or(b'M');
+        let status = Status::from_letter(letter);
         let first = fields.next().map(path_from);
         let change = match status {
             Status::Renamed | Status::Copied => {
@@ -487,6 +558,27 @@ fn name_status(bytes: &[u8]) -> Vec<FileChange> {
         };
         files.push(change);
     }
+
+    let mut counted = HashSet::new();
+    while let Some(field) = fields.next() {
+        if field.is_empty() {
+            continue;
+        }
+        match field.splitn(3, |byte| *byte == b'\t').nth(2) {
+            Some(path) if !path.is_empty() => {
+                counted.insert(path_from(path));
+            }
+            // A rename or a copy: where it was, then where it is.
+            _ => {
+                fields.next();
+                if let Some(to) = fields.next() {
+                    counted.insert(path_from(to));
+                }
+            }
+        }
+    }
+
+    files.retain(|file| file.status != Status::Modified || counted.contains(&file.path));
     files
 }
 
@@ -497,11 +589,17 @@ fn name_status(bytes: &[u8]) -> Vec<FileChange> {
 /// the top of the working tree.
 ///
 /// A file nobody has added is diffed against nothing, which is every line of
-/// it added; a rename is diffed with both its names, so git can pair them.
+/// it added; a rename is diffed with both its names, so git can pair them. A
+/// nested repository has no diff here at all, and says so.
 pub fn hunks(repository: &Path, base: &Base, file: &FileChange) -> Result<FileDiff, Error> {
     let mut args: Vec<&OsStr> = ["diff", "-U3"].map(OsStr::new).to_vec();
     args.extend(DIFF_FLAGS.map(OsStr::new));
     match file.status {
+        Status::Repository => {
+            return Err(Error::Failed(
+                "A repository of its own, which git does not look inside".to_owned(),
+            ));
+        }
         // `/dev/null` is git's own name for nothing in a `--no-index` diff,
         // on every platform — Windows's `nul` is accepted too, and this
         // spelling is the one that means the same thing everywhere.
@@ -521,9 +619,18 @@ pub fn hunks(repository: &Path, base: &Base, file: &FileChange) -> Result<FileDi
     let mut full: Vec<&OsStr> = GLOBAL.map(OsStr::new).to_vec();
     full.extend(args);
     let read = run_capped(repository, &full, MAX_DIFF_BYTES)?;
-    // `--no-index` exits 1 to say there were differences, and a cut diff is
-    // one git was stopped from finishing on purpose.
-    let answered = read.cut || matches!(read.code, Some(0 | 1));
+    // A cut diff is one git was stopped from finishing on purpose.
+    // `--no-index` exits 1 to say there were differences — and exits 1 as
+    // well when it could not read the file at all, having printed nothing
+    // but its complaint: an untracked file deleted since the list was read.
+    // A new file always has a header to print, an empty one included, so an
+    // exit of 1 with nothing on stdout is the failure.
+    let answered = read.cut
+        || match read.code {
+            Some(0) => true,
+            Some(1) => !read.stdout.is_empty(),
+            _ => false,
+        };
     if !answered {
         return Err(failed(&read.stderr));
     }
@@ -552,6 +659,14 @@ fn parse_diff(bytes: &[u8], cut_by_bytes: bool) -> FileDiff {
     let mut offset = 0;
     for line in text.split_inclusive('\n') {
         let bare = line.trim_end_matches(['\n', '\r']);
+        // A file that became another kind of thing — a file replaced by a
+        // link — is two patches in one diff, its deletion and then its
+        // creation, and the second one's headers are no more changed lines
+        // than the first one's. A line of a hunk starts with a space, a `+`,
+        // a `-`, a `\` or `@@`, so this is only ever a header.
+        if bare.starts_with("diff --git ") {
+            in_hunks = false;
+        }
         if !in_hunks {
             if bare.starts_with("Binary files ") && bare.ends_with(" differ") {
                 binary = true;
@@ -564,7 +679,7 @@ fn parse_diff(bytes: &[u8], cut_by_bytes: bool) -> FileDiff {
                 patch_end = offset;
                 break;
             }
-            lines.push(bare.to_owned());
+            lines.push(drawn(bare));
         }
         offset += line.len();
     }
@@ -577,6 +692,20 @@ fn parse_diff(bytes: &[u8], cut_by_bytes: bool) -> FileDiff {
         binary,
         cut,
     }
+}
+
+/// One line of a hunk as the column keeps it: whole up to
+/// [`MAX_LINE_BYTES`], and past that its beginning and an ellipsis, cut
+/// where a character ends.
+fn drawn(line: &str) -> String {
+    if line.len() <= MAX_LINE_BYTES {
+        return line.to_owned();
+    }
+    let mut end = MAX_LINE_BYTES;
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\u{2026}", &line[..end])
 }
 
 /// The line an editor should open at: the first one added or removed,
@@ -595,7 +724,10 @@ fn first_changed_line(lines: &[String]) -> Option<u32> {
         let current = number?;
         match line.as_bytes().first() {
             Some(b'+' | b'-') => return Some(current.max(1)),
-            Some(b' ') => number = Some(current + 1),
+            // An empty line is a blank context line with its space dropped,
+            // which `diff.suppressBlankEmpty` does and [`GLOBAL`] undoes —
+            // counted either way, or the editor opens lines early.
+            Some(b' ') | None => number = Some(current + 1),
             _ => {}
         }
     }

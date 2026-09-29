@@ -184,6 +184,31 @@ fn a_refresh_reads_again_the_diffs_that_are_showing_and_forgets_the_rest() {
     );
 }
 
+#[test]
+fn a_nested_repository_is_shown_without_asking_git_for_a_diff() {
+    let mut listed = overview(&["src/a.rs"]);
+    listed.files.push(FileChange {
+        status: Status::Repository,
+        path: PathBuf::from("vendored/"),
+        from: None,
+    });
+    let mut state = showing(listed);
+
+    assert!(
+        state.toggle(1).is_none(),
+        "a diff was asked for a directory git does not look inside"
+    );
+    assert_eq!(state.hunk_reads(), 0);
+    assert!(
+        state
+            .rows()
+            .iter()
+            .any(|row| matches!(row, Row::Note(note) if note.contains("repository of its own"))),
+        "{:?}",
+        state.rows()
+    );
+}
+
 // --- the rows ------------------------------------------------------------------
 
 #[test]

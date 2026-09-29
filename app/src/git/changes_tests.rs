@@ -122,6 +122,36 @@ fn write(repo: &Path, file: &str, contents: impl AsRef<[u8]>) {
     std::fs::write(repo.join(file), contents).expect("the scratch directory is writable");
 }
 
+/// Dates `file` in `repo` an hour back, so the stat data the index holds for
+/// it — taken whenever this test happened to run — cannot match.
+fn backdate(repo: &Path, file: &str) {
+    let an_hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    std::fs::File::options()
+        .write(true)
+        .open(repo.join(file))
+        .and_then(|opened| opened.set_modified(an_hour_ago))
+        .expect("the scratch file can be dated");
+}
+
+/// Writes `patch` to a file beside `repo` and asks git whether it would take
+/// it back out of the working tree — which it does only if the patch is one
+/// `git apply` reads as the change that was made.
+fn applies_in_reverse(repo: &Path, patch: &str) -> bool {
+    let file = repo.with_extension("patch");
+    std::fs::write(&file, patch).expect("the scratch directory is writable");
+    command("git")
+        .args(["apply", "--check", "-R"])
+        .arg(&file)
+        .current_dir(repo)
+        .env("GIT_CONFIG_GLOBAL", repo.join("no-such-gitconfig"))
+        .env("GIT_CONFIG_SYSTEM", repo.join("no-such-gitconfig"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
 /// A repository on a branch `task` cut from `main`, which is what an agent is
 /// handed.
 fn task(scratch: &ScratchDir) -> PathBuf {
@@ -266,6 +296,104 @@ fn every_kind_of_change_is_in_the_file_list() {
 }
 
 #[test]
+fn a_file_rewritten_with_the_bytes_it_had_is_not_a_change() {
+    // A formatter that changed nothing, `touch`, a generator writing the
+    // same output: the contents are what they were and only the stat data
+    // moved. Crook's reads never refresh the index, so git's own list says
+    // "modified" for as long as nothing else refreshes it.
+    if without_git("a_file_rewritten_with_the_bytes_it_had_is_not_a_change") {
+        return;
+    }
+    let scratch = ScratchDir::new("same-bytes");
+    // On main, so that at the base they are what they are now.
+    let repo = repository(&scratch, "repo");
+    commit(&repo, "kept.txt", "the same\n", "a file the agent rewrites");
+    commit(
+        &repo,
+        "run.sh",
+        "echo hi\n",
+        "a file that becomes a program",
+    );
+    git(&repo, &["switch", "-c", "task"]);
+    write(&repo, "kept.txt", "the same\n");
+    backdate(&repo, "kept.txt");
+    write(&repo, "tracked.txt", "one\nTWO\nthree\n");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(repo.join("run.sh"), std::fs::Permissions::from_mode(0o755))
+            .expect("chmod");
+    }
+    // That this is the case being tested, and not one git already hides: the
+    // raw list, read the way `files` reads it, does name the file.
+    let raw = git(
+        &repo,
+        &[
+            "--no-optional-locks",
+            "-c",
+            "diff.autoRefreshIndex=false",
+            "diff",
+            "--raw",
+            "HEAD",
+        ],
+    );
+    assert!(raw.contains("kept.txt"), "git no longer lists it: {raw}");
+
+    let base = base(&repo).expect("the repository can be read");
+    let listed = files(&repo, &base).expect("the diff can be read");
+
+    assert!(
+        !listed
+            .files
+            .iter()
+            .any(|file| file.path == Path::new("kept.txt")),
+        "a file holding what it held was listed as changed: {:?}",
+        listed.files
+    );
+    assert_eq!(file(&listed.files, "tracked.txt").status, Status::Modified);
+    #[cfg(unix)]
+    assert_eq!(
+        file(&listed.files, "run.sh").status,
+        Status::Modified,
+        "a mode that changed is a change"
+    );
+}
+
+#[test]
+fn a_repository_inside_the_repository_is_listed_as_one() {
+    // An agent that clones something into its worktree, or a checkout under
+    // `.claude/worktrees/` in a repository that does not ignore it: git lists
+    // the directory and never looks inside, and there is no diff to read.
+    if without_git("a_repository_inside_the_repository_is_listed_as_one") {
+        return;
+    }
+    let scratch = ScratchDir::new("nested-repository");
+    let repo = task(&scratch);
+    let inner = repo.join("vendored");
+    std::fs::create_dir_all(&inner).expect("writable");
+    git(&inner, &["init"]);
+    write(&inner, "inside.txt", "not this repository's\n");
+
+    let base = base(&repo).expect("the repository can be read");
+    let listed = files(&repo, &base).expect("the diff can be read");
+
+    let nested = file(&listed.files, "vendored");
+    assert_eq!(nested.status, Status::Repository);
+    assert!(
+        !listed
+            .files
+            .iter()
+            .any(|file| file.path.starts_with("vendored/inside.txt")),
+        "a file inside the nested repository was listed: {:?}",
+        listed.files
+    );
+    assert!(
+        hunks(&repo, &base, nested).is_err(),
+        "a nested repository was read as a diff with nothing in it"
+    );
+}
+
+#[test]
 fn a_file_in_a_subdirectory_is_listed_from_the_top_of_the_repository() {
     // `ls-files` answers relative to where it runs, and a pane is very often
     // somewhere below the top: a path that meant something only from there
@@ -345,6 +473,161 @@ fn an_untracked_file_s_hunks_are_every_line_added() {
 }
 
 #[test]
+fn an_untracked_file_gone_before_it_was_read_is_a_failure_and_not_an_empty_diff() {
+    // `diff --no-index` exits 1 for "there were differences" and for "could
+    // not read that": the list was read, the agent deleted its scratch file,
+    // then somebody pressed it.
+    if without_git("an_untracked_file_gone_before_it_was_read_is_a_failure_and_not_an_empty_diff") {
+        return;
+    }
+    let scratch = ScratchDir::new("gone");
+    let repo = task(&scratch);
+    write(&repo, "scratch.txt", "for a moment\n");
+    write(&repo, "empty.txt", "");
+    let base = base(&repo).expect("the repository can be read");
+    let listed = files(&repo, &base).expect("the diff can be read");
+    std::fs::remove_file(repo.join("scratch.txt")).expect("removable");
+
+    let gone = hunks(&repo, &base, file(&listed.files, "scratch.txt"));
+    assert!(
+        matches!(&gone, Err(Error::Failed(message)) if message.contains("scratch.txt")),
+        "a file that could not be read came back as {gone:?}"
+    );
+
+    // And the one answer that has no lines and is not a failure: a new file
+    // with nothing in it, which git still prints a header for.
+    let empty = hunks(&repo, &base, file(&listed.files, "empty.txt")).expect("an empty file reads");
+    assert!(empty.lines.is_empty(), "{empty:?}");
+    assert!(!empty.patch.is_empty(), "{empty:?}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_file_that_became_a_link_draws_only_the_lines_of_its_two_hunks() {
+    // git prints a type change as a deletion and then a creation, each with
+    // headers of its own; the second one's `---` and `+++` are not a line
+    // anybody removed or added.
+    if without_git("a_file_that_became_a_link_draws_only_the_lines_of_its_two_hunks") {
+        return;
+    }
+    let scratch = ScratchDir::new("type-change");
+    let repo = task(&scratch);
+    // `tracked.txt` is on main, so at the base it is a file.
+    std::fs::remove_file(repo.join("tracked.txt")).expect("removable");
+    std::os::unix::fs::symlink("elsewhere.txt", repo.join("tracked.txt")).expect("a link");
+    let base = base(&repo).expect("the repository can be read");
+    let listed = files(&repo, &base).expect("the diff can be read");
+    let changed = file(&listed.files, "tracked.txt");
+    assert_eq!(changed.status, Status::TypeChanged);
+
+    let diff = hunks(&repo, &base, changed).expect("the diff reads");
+
+    let headers: Vec<&String> = diff
+        .lines
+        .iter()
+        .filter(|line| {
+            line.starts_with("---")
+                || line.starts_with("+++")
+                || line.starts_with("diff ")
+                || line.starts_with("new file")
+                || line.starts_with("index ")
+        })
+        .collect();
+    assert!(
+        headers.is_empty(),
+        "a patch's headers were drawn as its lines: {headers:?}"
+    );
+    assert!(diff.lines.iter().any(|line| line == "-two"), "{diff:?}");
+    assert!(
+        diff.lines.iter().any(|line| line == "+elsewhere.txt"),
+        "{diff:?}"
+    );
+}
+
+#[test]
+fn a_line_too_long_to_draw_is_cut_for_the_column_and_copied_whole() {
+    // One line of a minified bundle is shaped whole on every frame it is on
+    // screen, for a column that shows its first fifty characters.
+    if without_git("a_line_too_long_to_draw_is_cut_for_the_column_and_copied_whole") {
+        return;
+    }
+    let scratch = ScratchDir::new("long-line");
+    let repo = task(&scratch);
+    // Multi-byte, so the cut has to find where a character ends.
+    let long = "é".repeat(25_000);
+    write(&repo, "bundle.min.js", format!("{long}\n"));
+    let base = base(&repo).expect("the repository can be read");
+    let listed = files(&repo, &base).expect("the diff can be read");
+
+    let diff = hunks(&repo, &base, file(&listed.files, "bundle.min.js")).expect("the diff reads");
+
+    let added = diff
+        .lines
+        .iter()
+        .find(|line| line.starts_with('+'))
+        .expect("the line is there");
+    assert!(
+        added.len() <= MAX_LINE_BYTES + '\u{2026}'.len_utf8(),
+        "a {}-byte line was kept to draw",
+        added.len()
+    );
+    assert!(added.ends_with('\u{2026}'), "the cut does not say so");
+    assert!(!diff.cut, "the diff itself was not cut");
+    assert!(
+        diff.patch.contains(&format!("+{long}\n")),
+        "the patch Copy diff copies lost the line's end"
+    );
+}
+
+#[test]
+fn a_repository_s_diff_settings_change_neither_the_patch_nor_the_line_to_open() {
+    // Settings somebody may well have in their global config: without the
+    // prefixes pinned, `diff.noprefix` makes a patch `git apply` reads with
+    // the directory stripped off; `diff.suppressBlankEmpty` prints a blank
+    // context line as nothing, which the count to the first change skipped.
+    if without_git("a_repository_s_diff_settings_change_neither_the_patch_nor_the_line_to_open") {
+        return;
+    }
+    let scratch = ScratchDir::new("settings");
+    let repo = repository(&scratch, "repo");
+    std::fs::create_dir_all(repo.join("src")).expect("writable");
+    commit(&repo, "src/blank.txt", "a\n\n\n\nb\nc\n", "blank lines");
+    git(&repo, &["switch", "-c", "task"]);
+    git(&repo, &["config", "diff.noprefix", "true"]);
+    git(&repo, &["config", "diff.suppressBlankEmpty", "true"]);
+    write(&repo, "src/blank.txt", "a\n\n\n\nB\nc\n");
+    write(&repo, "src/fresh.txt", "new\n");
+    let base = base(&repo).expect("the repository can be read");
+    let listed = files(&repo, &base).expect("the diff can be read");
+
+    let diff = hunks(&repo, &base, file(&listed.files, "src/blank.txt")).expect("the diff reads");
+    assert_eq!(diff.first_line, Some(5), "{:?}", diff.lines);
+    assert!(
+        diff.patch
+            .contains("--- a/src/blank.txt\n+++ b/src/blank.txt\n"),
+        "{}",
+        diff.patch
+    );
+    assert!(
+        applies_in_reverse(&repo, &diff.patch),
+        "git apply refuses the patch:\n{}",
+        diff.patch
+    );
+
+    let fresh = hunks(&repo, &base, file(&listed.files, "src/fresh.txt")).expect("the diff reads");
+    assert!(
+        fresh.patch.contains("+++ b/src/fresh.txt\n"),
+        "{}",
+        fresh.patch
+    );
+    assert!(
+        applies_in_reverse(&repo, &fresh.patch),
+        "git apply refuses the patch:\n{}",
+        fresh.patch
+    );
+}
+
+#[test]
 fn a_binary_file_is_marked_binary_and_has_no_lines() {
     if without_git("a_binary_file_is_marked_binary_and_has_no_lines") {
         return;
@@ -376,10 +659,12 @@ fn a_diff_over_the_byte_cap_is_cut_and_says_so() {
     // Past the real cap rather than a test-sized one, so the constant the
     // column runs with is the one being held to it.
     // Long lines, so that the bytes run out well before the line cap does and
-    // it is the byte cap being held to account.
-    let line = format!("{}\n", "generated ".repeat(40));
+    // it is the byte cap being held to account — but short enough to be kept
+    // whole for drawing, so the last one says whether the cut fell mid-line.
+    let line = format!("{}\n", "generated ".repeat(20));
     let lines = MAX_DIFF_BYTES / line.len() + 100;
     assert!(lines < MAX_DIFF_LINES, "the line cap would cut this first");
+    assert!(line.len() < MAX_LINE_BYTES, "a line is cut for drawing");
     write(&repo, "generated.lock", line.repeat(lines));
     let base = base(&repo).expect("the repository can be read");
     let listed = files(&repo, &base).expect("the diff can be read");
