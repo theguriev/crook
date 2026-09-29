@@ -23837,6 +23837,73 @@ mod changes_column {
     }
 
     #[test]
+    fn a_comment_field_a_refresh_set_adrift_goes_back_under_its_line_with_what_was_typed() {
+        let scratch = Scratch::new();
+        let Some((repository, _)) = a_task(&scratch) else {
+            eprintln!("skipping: git is not installed");
+            return;
+        };
+        let mut harness = Harness::new(1);
+        let pane = harness.pane_ids()[0];
+        harness.update_session(pane, |session| {
+            session.working_directory = Some(repository.clone());
+        });
+        let adrift = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, _| {
+                workspace.changes_panel().adrift().is_some()
+            })
+        };
+        let refresh_until = |harness: &mut Harness, line: &str| {
+            harness.dispatch_workspace_action(WorkspaceAction::Changes(ChangesAction::Refresh));
+            harness.wait_for("the refresh never brought the line", |harness| {
+                frame_text(&harness.frame()).contains(line)
+            });
+        };
+        open_a_comment_on_the_added_line(&mut harness);
+        type_keys(&mut harness, "abc");
+
+        // The agent rewrites the line, and a refresh takes it away…
+        fs::write(
+            repository.join("README"),
+            "worktree test\nwhat the agent wrote instead\n",
+        )
+        .expect("writable");
+        refresh_until(&mut harness, "+what the agent wrote instead");
+        assert!(adrift(&harness), "the field stayed on a line that is gone");
+        type_keys(&mut harness, "def");
+
+        // …then writes it back, and the next refresh finds it: the field is
+        // under it again, with everything typed and the keyboard, and Enter
+        // there adds the comment.
+        fs::write(
+            repository.join("README"),
+            "worktree test\nwhat the agent added\n",
+        )
+        .expect("writable");
+        refresh_until(&mut harness, "+what the agent added");
+        assert!(
+            !adrift(&harness),
+            "a refresh that found the line left it adrift"
+        );
+        assert!(
+            comment_has_keys(&harness),
+            "coming back took the keyboard from the field"
+        );
+        type_keys(&mut harness, "ghi");
+        harness.press("enter", Modifiers::default(), "\r");
+        assert_eq!(
+            comment_count(&harness),
+            1,
+            "Enter on the field back under its line added nothing: {:?}",
+            review_note(&harness)
+        );
+        assert!(
+            frame_text(&harness.frame()).contains("abcdefghi"),
+            "the comment is not what was typed into the field"
+        );
+    }
+
+    #[test]
     fn showing_a_section_or_pressing_its_field_takes_the_keyboard_from_a_comment() {
         let scratch = Scratch::new();
         let Some((repository, _)) = a_task(&scratch) else {

@@ -739,6 +739,106 @@ fn a_comment_being_typed_is_kept_when_its_file_goes_or_a_read_fails() {
     assert_eq!(typed(&state).as_deref(), Some("why"));
 }
 
+/// Whether the comment field is back under line `line` of the first file,
+/// with its words and the keyboard, and Enter there adds `text` on it.
+fn back_under(state: &mut ChangesPanelState, line: usize, text: &str) {
+    assert_eq!(
+        state.adrift(),
+        None,
+        "a read that found the line left it adrift"
+    );
+    assert!(
+        state.is_expanded(Path::new("a.rs")),
+        "the field's line is not showing"
+    );
+    let at = state
+        .rows()
+        .iter()
+        .position(|row| *row == Row::Line(0, line))
+        .unwrap_or_else(|| panic!("line {line} is not drawn: {:?}", state.rows()));
+    assert_eq!(
+        state.rows().get(at + 1),
+        Some(&Row::Draft(0)),
+        "the field is not under its line: {:?}",
+        state.rows()
+    );
+    assert_eq!(typed(state).as_deref(), Some(text));
+    assert!(state.draft_is_focused(), "coming back took the keyboard");
+    assert!(
+        state.add_comment(),
+        "Enter on a field back on its line added nothing"
+    );
+    assert_eq!(said(state), [(line, text.to_owned())]);
+}
+
+#[test]
+fn a_comment_being_typed_goes_back_under_its_line_when_a_read_finds_it_again() {
+    // A read of the diff failed, and the next one did not.
+    let mut state = showing_diff("a.rs", a_hunk());
+    typing(&mut state, 3, "why");
+    let epoch = state.refresh().expect("nothing is being read");
+    let again = state
+        .land(epoch, Ok(overview(&["a.rs"])))
+        .expect("the answer is current");
+    state.land_hunks(
+        Path::new("a.rs"),
+        again[0].ticket,
+        Err("git fell over".to_owned()),
+    );
+    assert_eq!(state.adrift(), Some(Adrift::Unread));
+    refresh_with(&mut state, &["a.rs"], a_hunk());
+    back_under(&mut state, 3, "why");
+
+    // A read of the list timed out, which folds every file, and the next
+    // one did not: the field's file is read again all the same.
+    let mut state = showing_diff("a.rs", a_hunk());
+    typing(&mut state, 3, "why");
+    let epoch = state.refresh().expect("nothing is being read");
+    state.land(epoch, Err(Error::TimedOut));
+    assert_eq!(state.adrift(), Some(Adrift::Unread));
+    assert!(!state.is_expanded(Path::new("a.rs")));
+    refresh_with(&mut state, &["a.rs"], a_hunk());
+    back_under(&mut state, 3, "why");
+
+    // The line was pushed past the cut, and then a whole read found it
+    // further down.
+    let mut state = showing_diff("a.rs", a_hunk());
+    typing(&mut state, 3, "why");
+    refresh_with(
+        &mut state,
+        &["a.rs"],
+        cut(diff_of(&[
+            "@@ -10,3 +10,4000 @@ fn main() {",
+            "     let a = 1;",
+            "+    let x = 0;",
+        ])),
+    );
+    assert_eq!(state.adrift(), Some(Adrift::PastCut));
+    refresh_with(
+        &mut state,
+        &["a.rs"],
+        diff_of(&[
+            "@@ -10,3 +10,5 @@ fn main() {",
+            "     let a = 1;",
+            "+    let x = 0;",
+            "-    let b = 2;",
+            "+    let b = 3;",
+            "+    let c = 4;",
+            "     done();",
+        ]),
+    );
+    back_under(&mut state, 4, "why");
+
+    // The file left the list, and came back with the line in it.
+    let mut state = showing_diff("a.rs", a_hunk());
+    typing(&mut state, 3, "why");
+    let epoch = state.refresh().expect("nothing is being read");
+    state.land(epoch, Ok(overview(&[])));
+    assert_eq!(state.adrift(), Some(Adrift::Gone));
+    refresh_with(&mut state, &["a.rs"], a_hunk());
+    back_under(&mut state, 3, "why");
+}
+
 /// `diff`, cut short where it ends.
 fn cut(mut diff: FileDiff) -> FileDiff {
     diff.cut = true;

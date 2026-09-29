@@ -1146,7 +1146,10 @@ Escape takes the keyboard back, and so does the column moving to another reposit
 which takes the field with it; a read coming home never does. A read that takes the field's
 line away — the line gone, pushed past the cut, or a read that failed — keeps the field, its
 words and the keyboard and moves it to the top of the column under the reason (`Adrift`); Enter
-there adds nothing. Dropped instead, the field would hand the keyboard back to the focused pane
+there adds nothing. Its file is read again on every refresh, folded or not, and a read that
+finds the line puts the field back under it and shows the file, since most of what sets a field
+adrift — one timed-out read, a line past the cut — says nothing about the line. Dropped
+instead, the field would hand the keyboard back to the focused pane
 — usually the agent being commented on — and the rest of the comment, and its Enter, would be
 typed into it. Against the agents themselves, a multi-line bracketed paste was checked to land
 in the prompt unsent in Claude Code 2.1.280 (as `[Pasted text #1 +3 lines]`) and OpenCode

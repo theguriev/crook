@@ -295,6 +295,13 @@ struct Draft {
 /// said over it. Were the field dropped instead, the keyboard would go back
 /// to the focused pane with nobody asking it to, and the rest of the comment
 /// and its Enter would be typed into the agent.
+///
+/// None of these is final. The field keeps the line it was on, and every
+/// refresh reads its file again, folded or not: a read that finds the line
+/// puts the field back under it, words and keyboard, and shows the file's
+/// lines for it to be among. Most of what sets a field adrift says nothing
+/// about the line — one read that timed out, a line past where a long diff
+/// is cut short — and an agent that rewrote a line can write it back.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(super) enum Adrift {
     /// The diff, or the list of files, was read again without the line.
@@ -310,16 +317,18 @@ impl Adrift {
     fn caption(self) -> &'static str {
         match self {
             Self::Gone => {
-                "The line this comment is on is no longer in the diff, so it cannot be added. \
-                 Enter or Escape closes it."
+                "The line this comment is on is no longer in the diff. It goes back under the \
+                 line if a refresh finds it again; Enter or Escape closes it."
             }
             Self::PastCut => {
-                "The line this comment is on has moved past where the diff is cut short, so it \
-                 cannot be added here. Enter or Escape closes it."
+                "The line this comment is on is not in the part of the diff that was read, which \
+                 is cut short. It goes back under the line when a refresh finds it; Enter or \
+                 Escape closes it."
             }
             Self::Unread => {
-                "The changes could not be read again, so this comment has no line to go on. \
-                 Enter or Escape closes it."
+                "The changes could not be read again, so this comment has no line to go on for \
+                 now. It goes back under the line when a refresh finds it; Enter or Escape \
+                 closes it."
             }
         }
     }
@@ -497,7 +506,7 @@ impl ChangesPanelState {
     /// An overview came home. Answers `None` when it is not the answer to
     /// the current read, and otherwise the diffs to read again: every file
     /// still showing its hunks, because what they said may have changed with
-    /// everything else.
+    /// everything else, and every file a comment or the comment field is on.
     pub(super) fn land(
         &mut self,
         epoch: u64,
@@ -533,18 +542,31 @@ impl ChangesPanelState {
         }
         // A field on a file this read took off the list, or on a list that
         // could not be read, has nothing to be drawn under — and is kept,
-        // words and keyboard, see [`Adrift`].
-        let failed = matches!(self.reading, Reading::Failed(_));
-        if let Some(draft) = self.draft.as_mut().filter(|draft| draft.adrift.is_none()) {
-            if failed {
-                draft.adrift = Some(Adrift::Unread);
-            } else if !self.expanded.contains(&draft.anchor.path) {
-                draft.adrift = Some(Adrift::Gone);
+        // words and keyboard, see [`Adrift`]. One on a file still listed
+        // waits for its diff, which says where its line is now.
+        if let Some(draft) = self.draft.as_mut() {
+            match &self.reading {
+                Reading::Failed(_) => {
+                    draft.adrift.get_or_insert(Adrift::Unread);
+                }
+                Reading::Ready(overview)
+                    if !overview
+                        .files
+                        .iter()
+                        .any(|file| file.path == draft.anchor.path) =>
+                {
+                    draft.adrift = Some(Adrift::Gone);
+                }
+                Reading::Ready(_) | Reading::Nothing => {}
             }
         }
 
+        // The field's file too, folded or not: a field set adrift comes back
+        // only through a read that finds its line, and a failed list read
+        // has folded every file.
         let mut again: Vec<PathBuf> = self.expanded.iter().cloned().collect();
         again.extend(self.commented());
+        again.extend(self.draft.as_ref().map(|draft| draft.anchor.path.clone()));
         again.sort();
         again.dedup();
         let reads = again.iter().filter_map(|path| self.request(path)).collect();
@@ -564,7 +586,9 @@ impl ChangesPanelState {
         let nested = file.status == Status::Repository;
         if self.expanded.remove(&path) {
             // A field nobody can see must not keep the keyboard. One adrift
-            // is drawn at the top rather than under the file, and stays.
+            // is drawn at the top rather than under the file, and stays —
+            // and a read that finds its line shows the file again, to put
+            // the field back under it.
             if self
                 .draft
                 .as_ref()
@@ -607,14 +631,26 @@ impl ChangesPanelState {
         // where its line is in what was just read. A read that failed moves
         // no comment: the diff is the same diff until git says otherwise. It
         // does take away the lines the field was drawn among, though.
-        match (&key, &read) {
-            (Some(key), Ok(diff)) => {
-                let dropped = follow_lines(path, diff, self.reviews.get_mut(key), &mut self.draft);
+        match &read {
+            Ok(diff) => {
+                let comments = key.as_ref().and_then(|key| self.reviews.get_mut(key));
+                let dropped = follow_lines(path, diff, comments, &mut self.draft);
                 if let Some(note) = review::dropped(&dropped) {
                     self.note = Some(note);
                 }
+                // A field this read found the line of is under that line,
+                // which has to be showing for the field to be seen: one that
+                // was adrift may be on a file a failed read, or a person,
+                // folded.
+                if self
+                    .draft
+                    .as_ref()
+                    .is_some_and(|draft| draft.anchor.path == path && draft.adrift.is_none())
+                {
+                    self.expanded.insert(path.to_owned());
+                }
             }
-            (_, Err(_)) => {
+            Err(_) => {
                 if let Some(draft) = self
                     .draft
                     .as_mut()
@@ -623,7 +659,6 @@ impl ChangesPanelState {
                     draft.adrift = Some(Adrift::Unread);
                 }
             }
-            (None, Ok(_)) => {}
         }
         hunks.diff = Some(read);
         self.relayout();
@@ -785,7 +820,8 @@ impl ChangesPanelState {
     /// Adds what was typed as a comment on the field's line, and takes the
     /// field down. Says whether a comment was added: Enter on an empty field
     /// is a field somebody changed their mind in, and it only goes away — and
-    /// so does Enter on a field whose line a read took away, which says so.
+    /// so does Enter on a field a read has left adrift with no line, which
+    /// says so.
     pub(super) fn add_comment(&mut self) -> bool {
         let Some(draft) = self.draft.take() else {
             return false;
@@ -794,9 +830,7 @@ impl ChangesPanelState {
         if draft.adrift.is_some() {
             if !text.is_empty() {
                 self.note = Some(
-                    "The comment was not added: the line it was on is not in the diff as read \
-                     now."
-                        .to_owned(),
+                    "The comment was not added: it had no line in the diff to go on.".to_owned(),
                 );
             }
             self.relayout();
@@ -1106,7 +1140,10 @@ impl ChangesPanelState {
 ///
 /// A diff cut short proves nothing about a line it stops before: a comment
 /// not found in one is kept and marked past the cut, and a draft is set
-/// adrift, as it is when its line is gone.
+/// adrift, as it is when its line is gone. A draft already adrift is looked
+/// for all the same, and put back under its line when it is found: it kept
+/// the line it was on, and what set it adrift — a read that failed, or was
+/// cut, or an agent that has since written the line back — may be over.
 ///
 /// Over the fields rather than the state, because the diff it reads is the
 /// state's own and is borrowed while this runs.
@@ -1145,16 +1182,14 @@ fn follow_lines(
             false
         });
     }
-    if let Some(draft) = draft
-        .as_mut()
-        .filter(|draft| draft.anchor.path == path && draft.adrift.is_none())
-        && !follow(&mut draft.anchor)
-    {
-        draft.adrift = Some(if diff.cut {
-            Adrift::PastCut
+    if let Some(draft) = draft.as_mut().filter(|draft| draft.anchor.path == path) {
+        draft.adrift = if follow(&mut draft.anchor) {
+            None
+        } else if diff.cut {
+            Some(Adrift::PastCut)
         } else {
-            Adrift::Gone
-        });
+            Some(Adrift::Gone)
+        };
     }
     dropped
 }
