@@ -1041,6 +1041,29 @@ is refused before git sees it, since past `--` git still reads a lone `-` as the
 checked out before this one; so is a branch name that does, since `git worktree add` hands
 the name to `git branch` where `-m` is an option and would rename the tab's own branch.
 
+The same creator starts the agent, which is the other half of "one agent, one worktree", and
+it is the creator rather than a dialog or a `Task` object of its own for the reason the session
+file keeps its groups on its tabs: a second list of the same tabs is a second answer that can
+disagree with the first. Under the places to start from it lists the coding agents it found —
+the table `crook --agent-hooks` already knows, each looked for as an executable file on `PATH`
+(and, for a window the Dock started with launchd's four directories, in Homebrew's prefix,
+`/usr/local/bin` and `~/.local/bin`), on the background pool with the repository's reads,
+never by running one — with "Shell only" first and picked. Picking an agent brings up a prompt
+field, and the branch is named after the prompt as it is typed — `worktree/fix-the-login-bug`,
+ASCII words cut to forty characters, the suggestion when there are none — for as long as the
+name field still says what the creator put in it. When the checkout has opened in its tab, the
+agent's line goes into that tab's composer: `claude 'fix the login bug'`, `gemini -i '…'`, the
+prompt put on one line, stripped of leading dashes the agent would read as its own options, and
+quoted by the host with the same function that quotes a plugin's typed argument, so a `$(…)`,
+a backtick or a quote in a pasted prompt arrives at the agent as characters. That quoting is
+trusted only in the shells it has been proven in — sh, dash, bash, zsh and fish — and nowhere
+on Windows yet, where a PowerShell single-quoted string also ends at a curly quote and an
+npm-installed agent is a `.cmd` file that cmd.exe reads again; there the line is the agent's
+name alone and no prompt is asked for. "New task…" in the palette, `crook/worktrees/new-task`,
+is this creator opened with the first agent picked and the keyboard in the prompt; the tab's
+own "New worktree…" opens it on "Shell only", which makes exactly what it made before and types
+nothing.
+
 It opened a *pane* first, splitting the tab, and that was the wrong claim made in the right
 place. Belonging together and being on screen together are two different statements: a split
 puts two agents in one rectangle, half a window each, which is what a person asks for when
@@ -1059,6 +1082,15 @@ involved: this is read once, on a gesture, and thrown away when the menu closes.
 its session *before* the shells are synced, because that is the moment a pty's cwd is decided
 and the only moment it can be. Nothing ever issues a `cd` into a running pty, and the session
 directory stops being authoritative the instant the shell reports a different one over OSC 7.
+The agent's line keeps the same rule: it is put in the new tab's *composer*, unsent, where a
+person reads a line before pressing Enter on it, and it reaches the shell only because somebody
+pressed — Enter there, or the creator's Start, which is a press for exactly that. Enter in the
+creator is Create and never Start, since Enter is the key at the end of a sentence and not a
+decision to run a line nobody has read; and a Start followed by Cancel while git is still
+checking out leaves the line unsent, even when the creator is opened again before git answers
+— the press is tied to the question it was made in, and a second creator is a second question.
+"New task…" does not open over a menu that is still waiting on git or asking something else,
+because the answer on its way would land on a creator that never asked for it.
 
 **Removal asks, and asks about the right thing.** `git worktree remove` refuses over modified
 and untracked files — and, measured rather than assumed, *not* over ignored ones, which it

@@ -943,16 +943,91 @@ pub fn release(repository: &Path, path: &Path) -> Result<bool, Error> {
 /// walked in order and the first free name wins, so collisions are avoided
 /// outright instead of being made unlikely.
 pub fn suggested_branch(worktrees: &[Worktree], branches: &[String]) -> String {
-    let taken: HashSet<&str> = worktrees
-        .iter()
-        .filter_map(|worktree| worktree.branch.as_deref())
-        .chain(branches.iter().map(String::as_str))
-        .collect();
+    let taken = taken(worktrees, branches);
 
     (0u32..)
         .map(candidate_branch)
         .find(|name| !taken.contains(name.as_str()))
         .expect("four billion candidate names cannot all be taken")
+}
+
+/// The branch a task started from `prompt` is made on: the prompt's words,
+/// under the prefix [`suggested_branch`] gives its names, or that suggestion
+/// itself when the prompt has no words to name a branch with.
+///
+/// `Fix the login bug!` is `worktree/fix-the-login-bug`. The words are ASCII
+/// letters and digits, lowercased; a letter outside ASCII is dropped from its
+/// word, and everything else — spaces, punctuation, a quote or a `$(` — is
+/// one dash between two words. The same bluntness [`checkout_path`] applies to
+/// a directory, and for its reason: a name every filesystem, shell and ref
+/// reads the same, rather than a guess at what `é` should become in each.
+///
+/// Cut to whole words under forty characters, because a prompt is a sentence
+/// and a tab row is not, and the first few words are the part that says which
+/// task this is. A name that is taken gets `-2`, `-3`… on the end,
+/// since [`add`] refuses a name that merely exists and the same prompt twice
+/// is two tasks.
+///
+/// Pure, like the suggestion: the creator calls it on every keystroke of the
+/// prompt, from the frame's own thread.
+pub fn branch_for_prompt(prompt: &str, worktrees: &[Worktree], branches: &[String]) -> String {
+    let words = prompt_words(prompt);
+    if words.is_empty() {
+        return suggested_branch(worktrees, branches);
+    }
+
+    let taken = taken(worktrees, branches);
+    let first = format!("{BRANCH_PREFIX}{words}");
+    std::iter::once(first.clone())
+        .chain((2u32..).map(|count| format!("{first}-{count}")))
+        .find(|name| !taken.contains(name.as_str()))
+        .expect("four billion numbered names cannot all be taken")
+}
+
+/// The prefix every branch Crook names begins with.
+const BRANCH_PREFIX: &str = "worktree/";
+
+/// How many characters of a prompt's words a branch is named with, at most.
+const PROMPT_WORDS: usize = 40;
+
+/// A prompt's words for a branch name: see [`branch_for_prompt`]. Empty when
+/// it has none.
+fn prompt_words(prompt: &str) -> String {
+    let mut words = String::new();
+    let mut gap = false;
+    for character in prompt.chars() {
+        if character.is_ascii_alphanumeric() {
+            if gap && !words.is_empty() {
+                words.push('-');
+            }
+            gap = false;
+            words.push(character.to_ascii_lowercase());
+        } else if !character.is_alphanumeric() {
+            gap = true;
+        }
+    }
+
+    if words.len() <= PROMPT_WORDS {
+        return words;
+    }
+    // At the last dash under the cap, so the name ends on a whole word; a
+    // first word longer than the cap has no dash to stop at and is cut in it.
+    let cut = &words[..PROMPT_WORDS];
+    let whole = if words.as_bytes()[PROMPT_WORDS] == b'-' {
+        cut
+    } else {
+        cut.rfind('-').map_or(cut, |dash| &cut[..dash])
+    };
+    whole.to_owned()
+}
+
+/// Every name that is spoken for: a branch, or one a checkout is on.
+fn taken<'a>(worktrees: &'a [Worktree], branches: &'a [String]) -> HashSet<&'a str> {
+    worktrees
+        .iter()
+        .filter_map(|worktree| worktree.branch.as_deref())
+        .chain(branches.iter().map(String::as_str))
+        .collect()
 }
 
 /// Where the checkout for `branch` of `repository_name` should live under
@@ -996,7 +1071,7 @@ fn candidate_branch(attempt: u32) -> String {
     let adjective = ADJECTIVES[index % ADJECTIVES.len()];
     let noun = NOUNS[(index / ADJECTIVES.len()) % NOUNS.len()];
     let tag = tag(adjective, noun, attempt);
-    format!("worktree/{adjective}-{noun}-{tag:04x}")
+    format!("{BRANCH_PREFIX}{adjective}-{noun}-{tag:04x}")
 }
 
 /// Four hex digits that depend on the whole candidate.
