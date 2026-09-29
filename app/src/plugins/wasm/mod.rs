@@ -339,8 +339,16 @@ impl Plugin for WasmPlugin {
         // things only a workspace can answer are answered. See
         // `runtime::Runtime::deeds`.
         ctx.observe(&runtime, |workspace, runtime, ctx| {
+            // Until nothing more is handed out, which is not until nothing is
+            // waiting: a plugin that asks again from every answer always has
+            // something waiting. What ends this is that a turn's worth is all
+            // `deeds` hands out — and the answers below notify this model, and
+            // may run another plugin's action that runs this one's, so the
+            // window's turn has to be what is spent: not this call, or the
+            // loop would only move out to the effects queue that runs this
+            // again. See `runtime::DEEDS_PER_TURN`.
             loop {
-                let deeds = runtime.update(ctx, |runtime, _| runtime.deeds());
+                let deeds = runtime.update(ctx, |runtime, ctx| runtime.deeds(ctx));
                 if deeds.is_empty() {
                     break;
                 }
@@ -768,8 +776,11 @@ fn fill(template: &str, argument: &str) -> Option<String> {
 /// `'\\'` — out of the quotes, one escaped backslash, back in — it is a
 /// backslash to all four, and nothing inside the quotes is ever a backslash
 /// for fish to read as an escape.
+///
+/// `crook tab new` types its command's words with this too — see
+/// [`crate::control::spawn`] — and only into those four shells.
 #[cfg(not(windows))]
-fn quote(argument: &str) -> String {
+pub(crate) fn quote(argument: &str) -> String {
     let mut quoted = String::with_capacity(argument.len() + 2);
     quoted.push('\'');
     for character in argument.chars() {
@@ -785,7 +796,7 @@ fn quote(argument: &str) -> String {
 
 /// See the other one.
 #[cfg(windows)]
-fn quote(argument: &str) -> String {
+pub(crate) fn quote(argument: &str) -> String {
     format!("'{}'", argument.replace('\'', "''"))
 }
 

@@ -616,7 +616,13 @@ fn the_settings_rail_is_what_the_plugins_put_in_it() {
 
         assert_eq!(
             titles,
-            ["Appearance", "Shell", "Keyboard Shortcuts", "About"]
+            [
+                "Appearance",
+                "Shell",
+                "Notifications",
+                "Keyboard Shortcuts",
+                "About"
+            ]
         );
     });
 }
@@ -642,7 +648,10 @@ fn disabling_a_plugin_takes_its_settings_page_off_the_rail() {
             .into_iter()
             .map(|(_, title)| title)
             .collect();
-        assert_eq!(titles, ["Appearance", "Keyboard Shortcuts", "About"]);
+        assert_eq!(
+            titles,
+            ["Appearance", "Notifications", "Keyboard Shortcuts", "About"]
+        );
     });
 }
 

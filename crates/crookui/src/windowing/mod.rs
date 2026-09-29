@@ -28,6 +28,7 @@
 
 mod app;
 mod chrome;
+mod dock;
 mod event;
 mod window;
 
