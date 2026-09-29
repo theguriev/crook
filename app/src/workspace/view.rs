@@ -5138,10 +5138,10 @@ impl Workspace {
 
     /// Records the pull request a pane's agent said its work is.
     ///
-    /// Against the branch the pane is on *now*, read from `HEAD` rather than
-    /// from the git facts a row prints, which are up to a poll old — see
-    /// [`PullRequest::branch`] — and read as the branch being rebased while a
-    /// rebase has `HEAD` detached. The same address said again keeps what the
+    /// Against the branch the pane is on *now*, and its repository, read from
+    /// `HEAD` rather than from the git facts a row prints, which are up to a
+    /// poll old — see [`PullRequest::branch`] — and read as the branch being
+    /// rebased while a rebase has `HEAD` detached. The same address said again keeps what the
     /// last check found, since that answer is still about it; a new one
     /// starts unchecked.
     fn pull_request_reported(
@@ -5169,7 +5169,8 @@ impl Workspace {
     /// or a count changed, and whenever a pane moves. Not on a clock: a branch
     /// switch is what the git model's own gather notices, and this rides on
     /// it. What counts as leaving is [`PullRequest::is_left_for`]'s: another
-    /// branch, or no repository — not a rebase, and not a detached `HEAD`.
+    /// branch, another repository or none — not a rebase, and not a detached
+    /// `HEAD` in the same repository.
     fn forget_moved_pull_requests(&mut self) {
         let moved: Vec<PaneId> = self
             .tabs

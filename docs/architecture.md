@@ -1081,14 +1081,19 @@ the sequence, so the chip reads `PR #<n>` only for github.com and names the host
 URL standard reads an https address: after any `user@`, and ended by a `\` as well as a `/`,
 so `https://attacker.example\@github.com/o/r/pull/12` is attacker.example's — cut at a fixed
 width from the start, and the hover card prints the whole address. `AgentSession::pull_request`
-records it against the branch the pane is on at the moment it arrives — read from `HEAD`, not from the row's git facts, which are up to a poll old
-and would record a branch made, pushed and opened inside one poll as the one it started on —
-and drops it when `HEAD` names another branch or the pane leaves the repository, which is
-asked whenever the git model reports a change and whenever the pane moves, never on a clock.
-A rebase detaches `HEAD` for as long as it runs, conflicts and all, so `git::branch_at_work`
-reads a detached `HEAD` with a `rebase-merge/head-name` or `rebase-apply/head-name` beside it
-as the branch being rebased, as `git status` does; any other detached `HEAD` names no other
-branch and keeps the link, since nothing would report it again when the branch came back. The hooks carry it with no second
+records it against the branch the pane is on at the moment it arrives and the repository that
+branch is in — its common git directory, which every worktree of it shares and a submodule
+does not — read from `HEAD`, not from the row's git facts, which are up to a poll old and
+would record a branch made, pushed and opened inside one poll as the one it started on. It is
+dropped when `HEAD` names another branch or the pane leaves the repository, for another one or
+for none, which is asked whenever the git model reports a change and whenever the pane moves,
+never on a clock. A rebase detaches `HEAD` for as long as it runs, conflicts and all, so
+`git::branch_at_work` reads a detached `HEAD` with a `rebase-merge/head-name` or
+`rebase-apply/head-name` beside it as the branch being rebased, as `git status` does; any other
+detached `HEAD` in the same repository names no other branch and keeps the link, since nothing
+would report it again when the branch came back. One in another repository — a submodule's, or
+a tag checked out — is that repository's, and a branch there of the same name is not this one.
+The hooks carry it with no second
 process: the Claude Code and Codex hook after every tool is `running --pull-request -`, which
 finds the `https://…/pull/<n>` a `gh pr create` in `tool_input.command` printed into
 `tool_response` and finds nothing after any other tool. The chip is on the row's metadata line

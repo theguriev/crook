@@ -6,6 +6,7 @@
 //! asked to move towards.
 
 use super::*;
+use crate::git::Head;
 
 /// A strip of `count` tabs, with the ids in bar order.
 fn strip(count: usize) -> (TabStrip, Vec<TabId>) {
@@ -1749,21 +1750,37 @@ fn an_address_dressed_as_github_is_labelled_with_the_host_it_opens() {
 
 #[test]
 fn a_pull_request_goes_with_another_branch_and_stays_through_a_detached_head() {
+    // Paths that name no directory, so that the repository is told apart by
+    // its path alone and never resolved.
+    let at = |repository: &str, head: Head| BranchAtWork {
+        repository: PathBuf::from(format!("/nowhere/crook-tab-tests/{repository}/.git")),
+        head,
+    };
     let feat = Head::Branch("feat".to_owned());
-    let pull_request = PullRequest::new(
-        "https://github.com/o/r/pull/1".to_owned(),
-        Some(feat.clone()),
-    );
     let detached = Head::Detached {
         short: "1a22cb9".to_owned(),
         full: "1a22cb92d4e5f60718293a4b5c6d7e8f90123456".to_owned(),
     };
+    let pull_request = PullRequest::new(
+        "https://github.com/o/r/pull/1".to_owned(),
+        Some(at("app", feat.clone())),
+    );
 
-    assert!(!pull_request.is_left_for(Some(&feat)));
-    assert!(pull_request.is_left_for(Some(&Head::Branch("main".to_owned()))));
+    assert!(!pull_request.is_left_for(Some(&at("app", feat.clone()))));
+    assert!(pull_request.is_left_for(Some(&at("app", Head::Branch("main".to_owned())))));
     // Out of the repository is no branch at all.
     assert!(pull_request.is_left_for(None));
     // A commit checked out to look at, or a bisect: no other branch named,
     // and nothing would report the pull request again when feat comes back.
-    assert!(!pull_request.is_left_for(Some(&detached)));
+    assert!(!pull_request.is_left_for(Some(&at("app", detached.clone()))));
+
+    // Another repository is other work whatever its `HEAD` says: a submodule
+    // checked out detached, or a branch that has the same name.
+    assert!(pull_request.is_left_for(Some(&at("lib", detached))));
+    assert!(pull_request.is_left_for(Some(&at("other", feat.clone()))));
+    // And a pull request reported outside any repository has gone once the
+    // pane is in one.
+    let nowhere = PullRequest::new("https://github.com/o/r/pull/1".to_owned(), None);
+    assert!(!nowhere.is_left_for(None));
+    assert!(nowhere.is_left_for(Some(&at("app", feat))));
 }

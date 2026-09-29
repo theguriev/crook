@@ -32,7 +32,7 @@ use std::time::Instant;
 use crook_terminal::AgentReport;
 
 use crate::forge::{CheckError, Found};
-use crate::git::Head;
+use crate::git::BranchAtWork;
 use crate::settings::Granularity;
 
 mod group;
@@ -155,18 +155,19 @@ pub struct PullRequest {
     /// the way in — https, and nothing in it a link opener could be tricked by.
     pub url: String,
     /// The branch the pane was on when the agent said it, read then — the
-    /// branch being rebased, when a rebase had `HEAD` detached.
+    /// branch being rebased, when a rebase had `HEAD` detached — and the
+    /// repository it is a branch of.
     ///
     /// What the pull request is dropped against: a pane that has moved to
-    /// another branch is doing other work, and a link to the last branch's
-    /// pull request on its row would be a claim about the new one — see
-    /// [`PullRequest::is_left_for`]. Read from
+    /// another branch, or into another repository, is doing other work, and a
+    /// link to the last branch's pull request on its row would be a claim
+    /// about the new one — see [`PullRequest::is_left_for`]. Read from
     /// `HEAD` at the moment of the report rather than taken from the row's
     /// git facts, which are up to a poll old — an agent that makes a branch,
     /// pushes it and opens its pull request inside one poll would otherwise
     /// have it recorded against the branch it started on, and dropped the
     /// moment the poll caught up.
-    pub branch: Option<Head>,
+    pub branch: Option<BranchAtWork>,
     /// What the last "Check pull request" press found, until the next one.
     pub check: Option<PullRequestCheck>,
 }
@@ -174,7 +175,7 @@ pub struct PullRequest {
 impl PullRequest {
     /// A pull request at `url`, reported while the pane was on `branch`,
     /// not yet checked.
-    pub fn new(url: String, branch: Option<Head>) -> Self {
+    pub fn new(url: String, branch: Option<BranchAtWork>) -> Self {
         Self {
             url,
             branch,
@@ -185,18 +186,24 @@ impl PullRequest {
     /// Whether a pane whose work is now on `now` has left the branch this
     /// pull request was reported on — and so whether it should go.
     ///
-    /// Another branch has, and so has leaving the repository, which is no
-    /// branch at all. A detached `HEAD` is not known to have: a checkout of a
-    /// commit to look at it, a bisect, names no other branch, and a pull
-    /// request dropped then is dropped for good, because nothing says it
-    /// again when the branch comes back — the hook reports the address `gh pr
-    /// create` printed, and a branch coming back runs no `gh pr create`. A
-    /// rebase's detached `HEAD` does not get here as one at all:
-    /// `git::branch_at_work` reads it as the branch being rebased.
-    pub fn is_left_for(&self, now: Option<&Head>) -> bool {
-        match now {
-            Some(Head::Detached { .. }) => false,
-            now => now != self.branch.as_ref(),
+    /// Another branch has. So has another repository, whatever its `HEAD`
+    /// says — a submodule, checked out detached as one usually is, or a
+    /// repository with a branch of the same name — and so has no repository
+    /// at all. A detached `HEAD` in the same repository is not known to have:
+    /// a checkout of a commit to look at it, a bisect, names no other branch,
+    /// and a pull request dropped then is dropped for good, because nothing
+    /// says it again when the branch comes back — the hook reports the
+    /// address `gh pr create` printed, and a branch coming back runs no `gh
+    /// pr create`. A rebase's detached `HEAD` does not get here as one at
+    /// all: [`crate::git::branch_at_work`] reads it as the branch being
+    /// rebased.
+    pub fn is_left_for(&self, now: Option<&BranchAtWork>) -> bool {
+        match (self.branch.as_ref(), now) {
+            (None, None) => false,
+            (Some(then), Some(now)) if then.is_same_repository(now) => {
+                !now.head.is_detached() && now.head != then.head
+            }
+            _ => true,
         }
     }
 }

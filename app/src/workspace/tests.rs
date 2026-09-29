@@ -3055,7 +3055,8 @@ fn the_pull_request_goes_when_the_panes_branch_changes() {
     });
     report_pull_request(&mut harness, pane, PULL_REQUEST);
     assert_eq!(
-        pull_request_of(&harness, pane).and_then(|pull_request| pull_request.branch),
+        pull_request_of(&harness, pane)
+            .and_then(|pull_request| pull_request.branch.map(|work| work.head)),
         Some(Head::Branch("feat/pr-on-the-row".to_owned()))
     );
 
@@ -3075,7 +3076,8 @@ fn the_pull_request_goes_when_the_panes_branch_changes() {
     // Said again on the new branch, it is that branch's.
     report_pull_request(&mut harness, pane, PULL_REQUEST);
     assert_eq!(
-        pull_request_of(&harness, pane).and_then(|pull_request| pull_request.branch),
+        pull_request_of(&harness, pane)
+            .and_then(|pull_request| pull_request.branch.map(|work| work.head)),
         Some(Head::Branch("main".to_owned()))
     );
 }
@@ -3118,7 +3120,8 @@ fn the_pull_request_stays_through_a_rebase_of_its_branch() {
     // Said again mid-rebase, it is still the branch's, not the commit's.
     report_pull_request(&mut harness, pane, PULL_REQUEST);
     assert_eq!(
-        pull_request_of(&harness, pane).and_then(|pull_request| pull_request.branch),
+        pull_request_of(&harness, pane)
+            .and_then(|pull_request| pull_request.branch.map(|work| work.head)),
         Some(Head::Branch("feat".to_owned()))
     );
 
@@ -3156,6 +3159,74 @@ fn the_pull_request_stays_through_a_rebase_of_its_branch() {
         None,
         "a rebase of another branch kept this one's pull request"
     );
+}
+
+/// The pane's shell said it is in `directory` now, the way OSC 7 does.
+fn move_pane(harness: &mut Harness, pane: PaneId, directory: &Path) {
+    let update =
+        crate::terminal_model::TerminalUpdate::WorkingDirectory(pane, directory.to_owned());
+    harness.workspace_update(|workspace, ctx| workspace.apply_terminal_update(&update, ctx));
+}
+
+#[test]
+fn the_pull_request_goes_when_the_pane_moves_to_another_repository() {
+    // Whatever `HEAD` says there. A submodule is checked out detached, and a
+    // detached `HEAD` in the pull request's own checkout keeps it — but a
+    // submodule is a repository of its own, and so is one whose branch
+    // happens to have the same name.
+    let scratch = Scratch::new();
+    let app = scratch.path().join("app");
+    fs::create_dir_all(app.join(".git")).unwrap();
+    fs::write(app.join(".git").join("HEAD"), "ref: refs/heads/feat\n").unwrap();
+    fs::create_dir_all(app.join("src")).unwrap();
+    // As `git submodule update` leaves one: a `.git` file pointing into the
+    // superproject's, and a bare object id in its `HEAD`.
+    let submodule = app.join("vendor").join("lib");
+    fs::create_dir_all(&submodule).unwrap();
+    fs::write(submodule.join(".git"), "gitdir: ../../.git/modules/lib\n").unwrap();
+    let modules = app.join(".git").join("modules").join("lib");
+    fs::create_dir_all(&modules).unwrap();
+    fs::write(
+        modules.join("HEAD"),
+        "1a22cb92d4e5f60718293a4b5c6d7e8f90123456\n",
+    )
+    .unwrap();
+    let namesake = scratch.path().join("namesake");
+    fs::create_dir_all(namesake.join(".git")).unwrap();
+    fs::write(namesake.join(".git").join("HEAD"), "ref: refs/heads/feat\n").unwrap();
+
+    let mut harness = Harness::new(1);
+    let pane = harness.pane_ids()[0];
+    for elsewhere in [&submodule, &namesake] {
+        move_pane(&mut harness, pane, &app);
+        report_pull_request(&mut harness, pane, PULL_REQUEST);
+        // Further into the same checkout is not leaving it.
+        move_pane(&mut harness, pane, &app.join("src"));
+        assert!(pull_request_of(&harness, pane).is_some());
+
+        move_pane(&mut harness, pane, elsewhere);
+        assert_eq!(
+            pull_request_of(&harness, pane),
+            None,
+            "{} kept the pull request made in {}",
+            elsewhere.display(),
+            app.display()
+        );
+    }
+
+    // The same checkout by another spelling is not another repository.
+    #[cfg(unix)]
+    {
+        let link = scratch.path().join("link");
+        std::os::unix::fs::symlink(&app, &link).unwrap();
+        move_pane(&mut harness, pane, &app);
+        report_pull_request(&mut harness, pane, PULL_REQUEST);
+        move_pane(&mut harness, pane, &link.join("src"));
+        assert!(
+            pull_request_of(&harness, pane).is_some(),
+            "a link to the checkout was taken for another repository"
+        );
+    }
 }
 
 #[test]

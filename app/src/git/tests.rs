@@ -363,7 +363,7 @@ fn a_rebase_in_progress_is_the_branch_it_is_rebasing() {
             "{backend}"
         );
         assert_eq!(
-            branch_at_work(&repo),
+            branch_at_work(&repo).map(|work| work.head),
             Some(Head::Branch("feat/pr-on-the-row".to_owned())),
             "{backend}"
         );
@@ -381,7 +381,7 @@ fn a_detached_head_with_no_branch_being_rebased_is_still_detached() {
         &git_dir.join("HEAD"),
         "1a22cb92d4e5f60718293a4b5c6d7e8f90123456\n",
     );
-    assert!(branch_at_work(&repo).is_some_and(|head| head.is_detached()));
+    assert!(branch_at_work(&repo).is_some_and(|work| work.head.is_detached()));
 
     // What git writes when the thing being rebased was a detached head.
     write(
@@ -389,7 +389,7 @@ fn a_detached_head_with_no_branch_being_rebased_is_still_detached() {
         "detached HEAD\n",
     );
     assert_eq!(branch::rebasing(&git_dir), None);
-    assert!(branch_at_work(&repo).is_some_and(|head| head.is_detached()));
+    assert!(branch_at_work(&repo).is_some_and(|work| work.head.is_detached()));
 
     // And a branch is itself, whatever a stale file says.
     write(&git_dir.join("HEAD"), "ref: refs/heads/main\n");
@@ -397,7 +397,10 @@ fn a_detached_head_with_no_branch_being_rebased_is_still_detached() {
         &git_dir.join("rebase-merge").join("head-name"),
         "refs/heads/feat\n",
     );
-    assert_eq!(branch_at_work(&repo), Some(Head::Branch("main".to_owned())));
+    assert_eq!(
+        branch_at_work(&repo).map(|work| work.head),
+        Some(Head::Branch("main".to_owned()))
+    );
 }
 
 #[test]
@@ -424,10 +427,19 @@ fn a_rebase_stopped_on_a_conflict_is_still_on_its_branch() {
         current_branch(&repo).is_some_and(|head| head.is_detached()),
         "git no longer detaches HEAD for a rebase, and this test proves nothing"
     );
-    assert_eq!(branch_at_work(&repo), Some(Head::Branch("feat".to_owned())));
+    assert_eq!(
+        branch_at_work(&repo),
+        Some(BranchAtWork {
+            repository: repo.join(".git"),
+            head: Head::Branch("feat".to_owned()),
+        })
+    );
 
     git(&repo, &["rebase", "--abort"]);
-    assert_eq!(branch_at_work(&repo), Some(Head::Branch("feat".to_owned())));
+    assert_eq!(
+        branch_at_work(&repo).map(|work| work.head),
+        Some(Head::Branch("feat".to_owned()))
+    );
 }
 
 #[test]
@@ -495,6 +507,13 @@ fn a_linked_worktree_finds_the_repository_it_was_added_from() {
     );
     assert_eq!(layout.common_dir, main.join(".git"));
     assert_eq!(current_branch(&side), Some(Head::Branch("side".to_owned())));
+
+    // Another checkout of the same repository, whose branches are its
+    // branches: what a pull request is a branch of is the one repository.
+    let in_side = branch_at_work(&side).expect("a worktree is in a repository");
+    let in_main = branch_at_work(&main).expect("so is the checkout it came from");
+    assert_eq!(in_side.repository, main.join(".git"));
+    assert!(in_side.is_same_repository(&in_main));
 }
 
 #[test]
