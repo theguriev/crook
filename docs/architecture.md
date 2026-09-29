@@ -1029,7 +1029,9 @@ them — the checks are what `-d` stood in for. Three gestures reach it:
 - `Delete N merged branches…`, under the worktree list, offers the proved branches no checkout
   has out — mostly the ones earlier removals left behind — and names each with its evidence:
   the commit on the base with its change and that commit's subject, or its own tip on the
-  base. One pass proves them all again, and a branch that moved is kept and named.
+  base. Six to a question, because the face does not scroll and a press deletes only what it
+  named; the rest are counted and offered again once those have gone. One pass proves them all
+  again, and a branch that moved is kept and named.
 - **Finish task**, on a tab in a checkout Crook made, is one confirmation that says what will
   happen: the panes working in the checkout close, the checkout is removed unforced, and the
   branch is deleted if it is proved, or kept with `kept feat/x: not on main yet`. The panes, not

@@ -81,7 +81,9 @@
 //! proof reached that no checkout has checked out, names each with what
 //! proved it — the commit on the base that has its work, or its own tip there
 //! — and deletes them through [`crate::git::worktree::delete_branches`], which
-//! proves each one again first and refuses any that moved. A branch the proof
+//! proves each one again first and refuses any that moved. Six to a question:
+//! every branch a press deletes is one the question named with its evidence,
+//! and the rest are counted and asked about once those have gone. A branch the proof
 //! cannot reach is never offered; Discard, on a tab's own menu, is the only
 //! way to delete one of those, and it says what goes — see
 //! [`super::finish`].
@@ -334,9 +336,17 @@ impl Sweep {
 /// What deleting the landed branches would take, and then that it is doing it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) enum Pruning {
-    /// The branches the button would delete, in name order, each with its
-    /// proof.
-    Ready(Vec<Landed>),
+    /// What the button would do.
+    Ready {
+        /// The branches it would delete, in name order, each with its proof:
+        /// at most [`NAMED`], because every branch this deletes is one the
+        /// question named with what proved it, and a face that names more
+        /// than that is a wall nobody reads — nor one this face scrolls.
+        going: Vec<Landed>,
+        /// How many more are proved and left for the question after this
+        /// one: the list offers them again once these have gone.
+        more: usize,
+    },
     /// The button has been pressed: the proofs are being made again and the
     /// branches deleted, all in one background task — the proof is one pass
     /// for all of them and each deletion is a moment, so there is no list of
@@ -347,9 +357,22 @@ pub(super) enum Pruning {
     },
 }
 
+impl Pruning {
+    /// The question about `deletable` — [`deletable_branches`]'s answer —
+    /// which asks about the first [`NAMED`] of them and counts the rest.
+    pub(super) fn of(mut deletable: Vec<Landed>) -> Self {
+        let more = deletable.len().saturating_sub(NAMED);
+        deletable.truncate(NAMED);
+        Self::Ready {
+            going: deletable,
+            more,
+        }
+    }
+}
+
 impl Default for Pruning {
     fn default() -> Self {
-        Self::Ready(Vec::new())
+        Self::of(Vec::new())
     }
 }
 
@@ -1428,11 +1451,15 @@ fn tidying(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
 /// go is its proof, and the menu already holds that. It is made again at
 /// the press, branch by branch, and a branch whose proof no longer holds is
 /// kept and said to be.
+///
+/// Every branch the button deletes is on the face with its evidence, which is
+/// why the button deletes at most [`NAMED`] of them: past that, the rest are
+/// counted and left for the next question, not deleted unseen.
 fn pruning(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
     let state = workspace.tab_menu();
-    let (going, of) = match &state.pruning {
-        Pruning::Ready(going) => (going.as_slice(), going.len()),
-        Pruning::Deleting { of } => (&[][..], *of),
+    let (going, more, of) = match &state.pruning {
+        Pruning::Ready { going, more } => (going.as_slice(), *more, going.len()),
+        Pruning::Deleting { of } => (&[][..], 0, *of),
     };
 
     let mut column = Flex::column()
@@ -1457,11 +1484,8 @@ fn pruning(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
         return column.finish();
     }
 
-    for landed in going.iter().take(NAMED) {
+    for landed in going {
         column.add_child(proved_row(landed, ui));
-    }
-    if going.len() > NAMED {
-        column.add_child(note(format!("and {} more.", going.len() - NAMED), ui));
     }
     column.add_child(divider());
 
@@ -1481,6 +1505,17 @@ fn pruning(workspace: &Workspace, ui: FamilyId) -> Box<dyn Element> {
         ui,
     ));
     column.add_child(note("No checkout is touched.", ui));
+    match more {
+        0 => {}
+        1 => column.add_child(note(
+            "1 more is proved too, and is asked about once these have gone.",
+            ui,
+        )),
+        more => column.add_child(note(
+            format!("{more} more are proved too, and are asked about once these have gone."),
+            ui,
+        )),
+    }
     if let Some(problem) = &state.problem {
         column.add_child(note(problem.as_str(), ui));
     }

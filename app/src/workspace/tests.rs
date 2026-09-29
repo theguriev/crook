@@ -720,10 +720,17 @@ impl Harness {
             .read(&self.app, |workspace, _| workspace.worktrees_landed())
     }
 
-    /// The branches "Delete N merged branches…" would delete.
+    /// The branches "Delete N merged branches…" counts.
     fn worktree_branches_deletable(&self) -> Vec<String> {
         self.workspace.read(&self.app, |workspace, _| {
             workspace.worktree_branches_deletable()
+        })
+    }
+
+    /// The branches the question it opens would delete.
+    fn worktree_branches_asked_about(&self) -> Vec<String> {
+        self.workspace.read(&self.app, |workspace, _| {
+            workspace.worktree_branches_asked_about()
         })
     }
 
@@ -6128,6 +6135,79 @@ fn deleting_merged_branches_names_each_with_what_proved_it_and_keeps_the_rest() 
         "the open branch went too"
     );
     assert!(worktree_menu_says(&harness.frame(), "Deleted 1 branch."));
+}
+
+#[test]
+fn a_press_deletes_only_the_branches_its_question_named() {
+    // Seven landed branches and a question that names six, each with its
+    // evidence. The seventh is counted, not deleted: nothing goes that the
+    // person was not shown with what proved it, and the list offers it again.
+    let scratch = Scratch::new();
+    let Some((mut harness, repository, _, tab)) = window_on_a_repository(&scratch) else {
+        return;
+    };
+    let base = git_in(&repository, &["rev-parse", "--abbrev-ref", "HEAD"]);
+    let mut tips = Vec::new();
+    for task in 1..=7 {
+        let branch = format!("done-{task}");
+        git_in(&repository, &["switch", "-c", &branch]);
+        let tip = commit_in(&repository, &format!("{branch}.txt"), &branch);
+        git_in(&repository, &["switch", &base]);
+        git_in(&repository, &["merge", "--ff-only", &branch]);
+        tips.push((branch, tip));
+    }
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("the proof to come back", |harness| {
+        harness.worktrees_landed().is_some()
+    });
+    assert_eq!(harness.worktree_branches_deletable().len(), 7);
+    assert!(worktree_menu_says(
+        &harness.frame(),
+        "Delete 7 merged branches"
+    ));
+
+    harness.dispatch_worktree(WorktreeAction::AskDeleteLanded);
+    let (named, left) = tips.split_at(6);
+    assert_eq!(
+        harness.worktree_branches_asked_about(),
+        named
+            .iter()
+            .map(|(branch, _)| branch.clone())
+            .collect::<Vec<_>>()
+    );
+    let scene = harness.frame();
+    for (branch, tip) in named {
+        assert!(
+            worktree_menu_says(&scene, branch) && worktree_menu_says(&scene, &tip[..7]),
+            "the question does not name {branch} with its evidence"
+        );
+    }
+    assert!(!worktree_menu_says(&scene, &left[0].0));
+    assert!(worktree_menu_reads(
+        &scene,
+        "1 more is proved too, and is asked about once these have gone."
+    ));
+    assert!(worktree_menu_says(&scene, "Delete 6"));
+
+    harness.dispatch_worktree(WorktreeAction::DeleteLanded);
+    harness.wait_for("the branches to be deleted", |harness| {
+        !harness.worktree_menu_is_pruning() && harness.worktrees_listed().is_some()
+    });
+
+    for (branch, _) in named {
+        assert!(!has_branch(&repository, branch), "{branch} is still there");
+    }
+    assert!(
+        has_branch(&repository, &left[0].0),
+        "a branch the question never named was deleted"
+    );
+    harness.wait_for("the proof to come back", |harness| {
+        harness.worktrees_landed().is_some()
+    });
+    let scene = harness.frame();
+    assert!(worktree_menu_says(&scene, "Deleted 6 branches."));
+    assert!(worktree_menu_says(&scene, "Delete 1 merged branch"));
 }
 
 #[test]

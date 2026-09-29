@@ -1296,13 +1296,27 @@ impl Workspace {
         Some(landed)
     }
 
-    /// The branches "Delete N merged branches…" would delete, in name order.
-    /// For a test.
+    /// The branches "Delete N merged branches…" counts, in name order. For a
+    /// test.
     pub fn worktree_branches_deletable(&self) -> Vec<String> {
         super::tab_menu::deletable_branches(&self.tab_menu)
             .iter()
             .map(|landed| landed.branch().to_owned())
             .collect()
+    }
+
+    /// The branches the question about deleting them would delete, in name
+    /// order — at most six of what [`Self::worktree_branches_deletable`]
+    /// answers — or nothing when that question is not being asked. For a
+    /// test.
+    pub fn worktree_branches_asked_about(&self) -> Vec<String> {
+        match &self.tab_menu.pruning {
+            Pruning::Ready { going, .. } if self.tab_menu.mode == WorktreeMode::Pruning => going
+                .iter()
+                .map(|landed| landed.branch().to_owned())
+                .collect(),
+            _ => Vec::new(),
+        }
     }
 
     /// Whether the menu is asking about deleting those, or deleting them.
@@ -3182,7 +3196,7 @@ impl Workspace {
                 }
                 self.tab_menu.next_epoch();
                 self.tab_menu.mode = WorktreeMode::Pruning;
-                self.tab_menu.pruning = Pruning::Ready(going);
+                self.tab_menu.pruning = Pruning::of(going);
                 self.tab_menu.problem = None;
                 self.tab_menu.forget_hover_state();
                 ctx.notify();
@@ -4539,7 +4553,7 @@ impl Workspace {
         if self.tab_menu.mode != WorktreeMode::Pruning {
             return;
         }
-        let Pruning::Ready(going) = &self.tab_menu.pruning else {
+        let Pruning::Ready { going, .. } = &self.tab_menu.pruning else {
             return;
         };
         if going.is_empty() {
