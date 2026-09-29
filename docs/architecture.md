@@ -785,7 +785,10 @@ and so does `CROOK_PANE_ID`, the pane's bare number — the same one a plugin is
 `shell_integration::Session` because the session is the one thing that is per pane where the
 launch planners are per shell. It is what `WEZTERM_PANE` and `KITTY_WINDOW_ID` are: a fact a
 script or an agent gates on or names a log after, not an address anything routes by — the agent
-status channel writes to its own tty and needs no pane id.
+status channel writes to its own tty and needs no pane id. The one address a pane is given is
+`CROOK_SOCKET`, where its window answers questions — see "The window answers" below — and it is
+set empty when the window has no socket, so a Crook started inside another Crook's pane does not
+hand its shells the outer one's.
 
 **The pty opens at the pane's size.** A shell prints its whole startup — a `~/.zprofile`
 banner, a greeting sized with `tput cols` — before any resize can reach it, and what it
@@ -1102,6 +1105,91 @@ service a plugin provides, and that is still the right shape for anything that *
 agent — spending its budget, reading its transcript. Saying what it is doing needed none of
 that: a word on a wire, written by the agent itself, which is why it reached the sidebar in a
 day and why a plugin that wants to do more starts from a status that is already true.
+
+### The window answers
+
+A status travels one way, from the program to the row. The other direction — a script or an
+agent asking a running Crook what is open — is a question whose answer has to come back, and
+it goes over a socket: `crook pane list` asks the window its pane is in and prints every pane
+that window has. It only reads, and it is the first verb of `docs/plugins.md`'s Phase 4. The
+code is `app/src/control/`.
+
+**Why control is a socket when status is an OSC.** The three reasons above are reasons against
+a socket *for reporting*. Control turns the third one round. A request written into the pane
+would be read off the stream the pane's output arrives on, and anything that can print can put
+anything there — `cat` of a file, a `git log`, an LLM streaming its answer, a host at the far
+end of `ssh`. A forged status paints a dot; a forged request is escape-sequence injection with
+the window's authority behind it, and the moment a verb opens a tab or types into a pane it is
+a path to running commands. Completion's OSC is safe only because Crook asks first and the
+shell's reply carries nothing but the request's number. So status stays on OSC 6340, unchanged,
+and the window answers on a socket, paying for it with the address — `CROOK_SOCKET`, in every
+pane's environment beside `TERM_PROGRAM` and `CROOK_PANE_ID` — and with the stop at this
+machine, which for control is the point.
+
+**Who can connect: this user, on this machine.** There is no TCP listener and there will not be
+one, which is what keeps the README's promise that nothing touches the network until asked. The
+socket is `<pid>.sock` in a directory of its own: `$XDG_RUNTIME_DIR/crook-control` when that
+variable names an absolute, real directory this user owns, and `crook-control-<uid>` in the
+temporary directory otherwise — the per-user `$TMPDIR` on macOS. The directory is made `0700`
+and the socket `0600`, and a directory that is already there is refused — no socket, a line in
+the log — when it is a link, not a directory, somebody else's, or open to anyone else, because
+whoever made it first could otherwise leave a socket in it that answers the CLI with lies. It is
+not a corner of the shell integration's scratch, which is swept of entries a week old, and a
+window can be open longer than a week. The listening socket and every accepted one are
+close-on-exec, so no shell a pane starts inherits them.
+
+**What it exposes, and what the later verbs will need.** What the panel shows, per pane: its
+number and its tab's, its title and its tab's, its group, whether it is the focused one, the
+agent's status and message, its directory and its branch — nothing a pane printed and nothing of
+its input. All of that is already on the screen, in the session file, and in the shells' own
+process entries, every one of them this user's to read, so a socket only this user can reach
+that only reads gives nobody anything new — and there is deliberately no token, since one that
+authorised nothing would be a promise with nothing behind it. The verbs after this one change
+what a program can do quietly, and they will carry authority by *lineage*: a caller names its
+pane with a per-pane token handed to that pane's environment (never the pane's number, which is
+not a secret), may act on its own pane and on the tabs it opened, and reading or typing into a
+pane a person opened is a grant that person answers on a card. An agent that reads one pane and
+types into another is a confused deputy waiting for a prompt injection, which is why that is
+never a default.
+
+**The transport.** One socket per process, because every `crook` launch is its own process with
+one window. At startup the name is probed: a socket there that refuses a connection was left by
+a Crook that crashed, and is removed and taken; one that answers belongs to somebody alive —
+another PID namespace sharing the directory — and the next name, `<pid>-1.sock`, is tried. Other
+refusing sockets in the directory are swept once they are a minute old, the minute being what
+keeps a sweep off a socket another Crook bound a moment ago and has not started listening on.
+The socket is removed when the window closes. One OS thread accepts, because it blocks for as
+long as nobody connects — the reason a pty reader is a thread and not a pool worker — and each
+connection gets a short-lived thread of its own, eight at once and the ninth refused as `busy`.
+A connection has five seconds all told and a line 64 KiB; a longer line is refused as
+`too-long` and the connection closed, since nothing says where the next line starts. A question
+that needs the window is posted to it and answered on the main thread through the `ctx.spawn` a
+pty's output comes home by, while the connection's thread waits out the rest of its five
+seconds: the UI thread never blocks on a socket, and a client that stops reading costs its own
+thread and nothing more. **Windows has no socket yet**: nothing listens there, and the CLI says
+the command is not available on that platform. An owner-only named pipe with
+`PIPE_REJECT_REMOTE_CLIENTS` is the route when it comes.
+
+**The protocol.** Newline-delimited JSON, one object a line each way. A request is
+`{"v":1,"verb":"pane.list"}`, with an optional `id` of any JSON value the reply echoes and an
+optional `min_version`; a reply is `{"v":1,"ok":true,"result":…}` or
+`{"v":1,"ok":false,"error":{"code":…,"message":…}}`. Every reply carries `v`, the version the
+window speaks. A request's `v` is the version it was written against: a window refuses, as
+`version`, one older than the oldest it still answers — 1 today — and one whose `min_version` is
+newer than the window, so a script written against a later verb is told to update Crook rather
+than handed a half-understood answer. A verb is a promise that is hard to take back, so within a
+version verbs and fields are only ever added, and a field that changes meaning is a new version.
+The codes are `bad-request`, `too-long`, `unknown-verb`, `version`, `busy`, `timeout` and
+`gone`.
+
+**The CLI is the other end.** `crook pane list` prints a table, and `--json` prints the window's
+own array with every field in it, so a field a newer window adds reaches a script through an
+older CLI. It asks `$CROOK_SOCKET`. An empty one means the pane's Crook could not open its
+socket, and a `CROOK_PANE_ID` with no `CROOK_SOCKET` beside it means a Crook from before there
+was one; both are refused rather than looked around, since either way the window the pane is in
+cannot be asked. Outside every pane it takes the one live socket in this user's directory when
+there is exactly one, and refuses when there are several, naming them: each window is its own
+process, and choosing the newest would be a guess that hands a script another window's panes.
 
 ### The command line is an input field
 
