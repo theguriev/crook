@@ -85,6 +85,7 @@ pub mod input;
 mod link;
 mod marks;
 pub mod mouse;
+pub mod notify;
 mod pty;
 mod rows;
 pub mod selection;
@@ -106,6 +107,7 @@ pub use crate::input::{InputModes, Key, KeyboardModes, KeypadKey, Modifiers};
 pub use crate::link::PtyLink;
 pub use crate::marks::{PromptKind, ShellMark};
 pub use crate::mouse::{MouseButton, MouseEventKind, MouseModes};
+pub use crate::notify::Notification;
 pub use crate::pty::{ChildExit, Program, Pty, PtyReader, default_shell, login_arguments};
 pub use crate::rows::Rows;
 pub use crate::selection::{CellSide, SelectionKind};
@@ -386,6 +388,21 @@ impl Terminal {
         self.write(COMPLETION_REQUEST)
     }
 
+    /// Tells the child its terminal gained or lost the keyboard, if it has
+    /// asked to be told.
+    ///
+    /// Returns whether anything was sent. Nothing is until the child has set
+    /// `?1004`, which is what keeps `CSI I` off a shell's command line; see
+    /// [`input::focus`]. Which terminal *has* the keyboard — the window's, and
+    /// within it one pane's — is the caller's to know and to say.
+    pub fn send_focus(&mut self, focused: bool) -> io::Result<bool> {
+        let Some(bytes) = input::focus(focused, self.emulator.focus_reporting()) else {
+            return Ok(false);
+        };
+        self.write(bytes)?;
+        Ok(true)
+    }
+
     /// Sends pasted text, the way [`input::paste`] spells it: bracketed when
     /// the child asked for that, with the bytes that could end the bracket
     /// taken out, and with newlines as the Enter key sends them otherwise.
@@ -467,7 +484,8 @@ impl Terminal {
     }
 
     /// Everything the child has asked for since the last call: bells, titles,
-    /// working directories, a clipboard write, the child finishing.
+    /// working directories, a clipboard write, a notification, the child
+    /// finishing.
     pub fn take_events(&mut self) -> Vec<TerminalEvent> {
         self.emulator.take_events()
     }

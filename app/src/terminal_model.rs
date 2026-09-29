@@ -4,7 +4,8 @@
 //! value with methods, and someone else has to decide which thread is allowed to
 //! block on a pty that may say nothing for hours. This is that someone, in the
 //! shape [`crate::git_model`] established — work off the UI thread, delivered
-//! on it, `ctx.notify` when something a viewer could see actually changed.
+//! on it, and a word to the window only when something it draws could have
+//! changed.
 //!
 //! # Why a thread and not the background pool
 //!
@@ -36,20 +37,38 @@
 //! window, and without someone to come back for it the final screenful of a
 //! `cat` would sit invisible until the shell next said something.
 //!
-//! There are two more filters behind that one. The reader publishes a snapshot
-//! the emulator only rebuilds when the drawn content differs, so an escape
-//! sequence that changed nothing visible hands back the same `Arc`; and
-//! [`TerminalModel::absorb`] compares that `Arc` by pointer before it notifies.
-//! A frame is only ever spent on a grid that actually changed.
+//! There are three more filters behind that one. The reader publishes a
+//! snapshot the emulator only rebuilds when the drawn content differs, so an
+//! escape sequence that changed nothing visible hands back the same `Arc`; and
+//! [`TerminalModel::absorb`] compares that `Arc` by pointer before it reports
+//! a [`TerminalUpdate::Repainted`]. A frame is only ever spent on a grid that
+//! actually changed — and only on one somebody can see, which is the third.
+//!
+//! # Only what is on screen
+//!
+//! A changed grid is reported rather than notified, and the workspace decides
+//! whether it is worth a frame. The model cannot: which panes a frame draws is
+//! the active tab's, less the one a zoom hides, less all of them while a
+//! section of the sidebar has the body — the workspace's state, which it
+//! reads at the moment the repaint arrives rather than having it pushed here
+//! from every place that state can change. A pane that is not on screen goes
+//! on being read, parsed and published exactly as before, and everything its
+//! *row* shows still arrives as it happens — a title, a bell, an agent's
+//! status, a command finishing — because those are the tab's facts and the
+//! tab is on screen. Only its grid stops costing frames, and the frame that
+//! puts it back on screen reads the latest snapshot, not the last one drawn.
 //!
 //! # The lock
 //!
 //! One mutex per terminal, and **it is never held across a frame**. The reader
 //! takes it to feed bytes, and again to build a snapshot, and publishes the
-//! `Arc` into a slot of its own; painting clones that `Arc` and walks owned
-//! data. Layout takes the lock only when the computed grid actually changed,
-//! which it establishes first with an atomic — so a window being dragged does
-//! not contend with a shell that is printing.
+//! `Arc` into a slot of its own before letting go; painting clones that `Arc`
+//! and walks owned data. The UI thread publishes too, after a keystroke or a
+//! resize, and doing it under the same lock is what stops either writer from
+//! putting an older snapshot back over the other's newer one — see
+//! `Shared::latest`. Layout takes the lock only when the computed grid
+//! actually changed, which it establishes first with an atomic — so a window
+//! being dragged does not contend with a shell that is printing.
 //!
 //! # What a closed pane costs
 //!
@@ -206,12 +225,22 @@ impl Measured {
 
 /// Something one pane's shell did that the rest of the application cares about.
 ///
-/// Everything else a terminal reports — a repaint, a query already answered —
-/// is either handled here or is not the workspace's business. These five are:
-/// two of them rename or relocate a session, one closes a pane, and the last
-/// two are the child asking for something only the window can give it.
+/// Everything else a terminal reports — a query already answered, an exit
+/// that is about to show up as end-of-file — is either handled here or is not
+/// the workspace's business. What is here renames, relocates or closes a
+/// session, asks for something only the window can give, says what an agent
+/// is doing — or, most often by far, says a grid changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TerminalUpdate {
+    /// What the pane draws has changed: its grid did, or its command has run
+    /// long enough to take the composer's place.
+    ///
+    /// The one update that is about pixels rather than about the session,
+    /// and the most frequent — up to once per pane per paint interval while
+    /// a shell prints. Reported rather than answered with a notify because
+    /// whether it is worth a frame is not this pane's to know: see the
+    /// module docs, "Only what is on screen".
+    Repainted(PaneId),
     /// The shell set a window title, or reset it. This is what makes a tab of
     /// shells rename itself with no rename plumbing at all.
     Title(PaneId, Option<String>),
@@ -268,6 +297,9 @@ pub enum TerminalUpdate {
         exit: Option<i32>,
         /// How long it ran, timed from the submit.
         took: Option<Duration>,
+        /// Whether anything ran: `false` for the bare `D` of a line that ran
+        /// nothing, ctrl-c at the prompt or an empty Enter.
+        ran: bool,
     },
     /// The shell answered a completion request, and this is what it said.
     ///
@@ -296,6 +328,20 @@ pub enum TerminalUpdate {
     /// say which of the two happened: the agent finished, or something ended
     /// it before it could say so.
     AgentSettled(PaneId),
+    /// A program in the pane asked for a look, in a notification sequence
+    /// another terminal would have shown — OSC 9, 777 or 99.
+    ///
+    /// Carried up with its two texts apart rather than joined here, because
+    /// the row has one line for them and a desktop notification has a line
+    /// for each: how they are put together is the reader's to decide.
+    Notification {
+        /// Which pane it came from.
+        pane: PaneId,
+        /// What is asking, when the sequence named it.
+        title: Option<String>,
+        /// What it said.
+        body: Option<String>,
+    },
 }
 
 /// The finished blocks of one pane, as the surface holds them.
@@ -640,18 +686,18 @@ impl TerminalModel {
         let Some(session) = self.sessions.get(&pane) else {
             return false;
         };
-        let Some(request) = session._integration.completion_request() else {
-            return false;
-        };
-
         // Written before the key is sent, and that ordering is the whole of the
         // handshake: the snippet reads the file the moment the key arrives.
-        if let Err(error) = std::fs::write(
-            &request,
-            completion::request_text(serial, line_to_caret).as_bytes(),
-        ) {
-            log::debug!("could not write a completion request: {error}");
-            return false;
+        match session
+            ._integration
+            .write_completion_request(&completion::request_text(serial, line_to_caret))
+        {
+            Some(Ok(())) => {}
+            None => return false,
+            Some(Err(error)) => {
+                log::debug!("could not write a completion request: {error}");
+                return false;
+            }
         }
 
         session.shared.request_completions()
@@ -935,8 +981,8 @@ impl TerminalModel {
         .detach();
     }
 
-    /// Takes what the reader posted, repaints if it changed anything, and waits
-    /// again.
+    /// Takes what the reader posted, reports a repaint if it changed the grid,
+    /// and waits again.
     fn absorb(&mut self, pane: PaneId, ctx: &mut ModelContext<Self>) {
         let Some(session) = self.sessions.get_mut(&pane) else {
             // The pane closed while the wait was outstanding. The chain ends
@@ -998,8 +1044,13 @@ impl TerminalModel {
                     pane,
                     while_running: session.snapshot.live_block.state.is_running(),
                 }),
-                TerminalEvent::CommandFinished { exit, took } => {
-                    updates.push(TerminalUpdate::CommandFinished { pane, exit, took });
+                TerminalEvent::CommandFinished { exit, took, ran } => {
+                    updates.push(TerminalUpdate::CommandFinished {
+                        pane,
+                        exit,
+                        took,
+                        ran,
+                    });
                 }
                 // The escape sequence says only that an answer is ready; the
                 // answer itself is a file, in a directory this session owns.
@@ -1030,6 +1081,13 @@ impl TerminalModel {
                     message: reported.message,
                 }),
                 TerminalEvent::AgentSettled => updates.push(TerminalUpdate::AgentSettled(pane)),
+                TerminalEvent::Notification(notification) => {
+                    updates.push(TerminalUpdate::Notification {
+                        pane,
+                        title: notification.title,
+                        body: notification.body,
+                    });
+                }
                 // The enum is `#[non_exhaustive]`. A shell asking for something
                 // a later version of the emulator learned to report is not an
                 // error here; it is a line in the log and a feature to add.
@@ -1038,7 +1096,7 @@ impl TerminalModel {
         }
 
         if changed {
-            ctx.notify();
+            ctx.emit(TerminalUpdate::Repainted(pane));
         }
         self.schedule_long_running(pane, ctx);
         for update in updates {
@@ -1089,8 +1147,9 @@ impl TerminalModel {
             }
             // Unconditionally: the block may have finished while this waited,
             // in which case the frame this draws is the one with the finished
-            // block in the list.
-            ctx.notify();
+            // block in the list. A repaint like any other, so a pane nobody can
+            // see is not drawn for this either.
+            ctx.emit(TerminalUpdate::Repainted(pane));
         })
         .detach();
     }
@@ -1247,6 +1306,22 @@ impl TerminalHandle {
         })
     }
 
+    /// Tells the program in this pane that the keyboard arrived or left, if it
+    /// asked to be told, returning whether anything was sent.
+    ///
+    /// Not scrolled to the bottom, unlike a key: nobody typed anything, and a
+    /// person who scrolled back to read and then switched windows should come
+    /// back to what they were reading.
+    pub fn send_focus(&self, focused: bool) -> bool {
+        self.drive(|terminal| match terminal.send_focus(focused) {
+            Ok(sent) => sent,
+            Err(error) => {
+                log::debug!("could not tell a shell about the keyboard: {error}");
+                false
+            }
+        })
+    }
+
     /// Which mouse reports the program in this pane has asked for.
     ///
     /// The one question a pointer gesture asks before it does anything: with
@@ -1391,9 +1466,11 @@ impl TerminalHandle {
         let outcome = work(&mut terminal);
         let snapshot = terminal.snapshot();
         self.0.sync_blocks(&terminal);
-        drop(terminal);
-
+        // Installed before the terminal is let go, never after: the reader
+        // could otherwise publish a newer snapshot in between and have this
+        // older one put back over it. See `Shared::latest` for the lock order.
         *self.0.latest.lock().unwrap_or_else(PoisonError::into_inner) = snapshot;
+        drop(terminal);
         outcome
     }
 }
@@ -1415,6 +1492,24 @@ struct Shared {
 
     /// The most recent snapshot the reader built, so painting never waits on
     /// parsing.
+    ///
+    /// **Written only while `terminal` is locked**, by the same acquisition
+    /// that built the snapshot and synced the block list beside it. There are
+    /// two writers, the reader's `publish` and the UI thread's
+    /// [`TerminalHandle::drive`], and a writer that installed its snapshot
+    /// after letting go of the terminal could be overtaken in that gap: the
+    /// other one published a newer snapshot and block list, and the first then
+    /// put its older snapshot back beside the newer list. A command that
+    /// finished during a resize was painted twice, as its block and again in
+    /// the live viewport, and its tab stayed labelled running until the next
+    /// key press.
+    ///
+    /// So the lock order is `terminal`, then this, and it cannot deadlock
+    /// because nothing takes the two the other way round. [`Self::snapshot`] is
+    /// the one reader, and it holds this slot for a clone and takes nothing
+    /// else. Nothing is locked while it is held apart from `terminal`, either:
+    /// [`Self::sync_blocks`] has let go of the block list before this is taken,
+    /// and the snapshot it replaces is plain data whose drop takes no lock.
     latest: Mutex<Arc<Snapshot>>,
 
     /// The finished blocks, rebuilt beside every snapshot and for the same
@@ -1737,9 +1832,12 @@ impl Shared {
         let snapshot = terminal.snapshot();
         let events = terminal.take_events();
         self.sync_blocks(&terminal);
+        // Under the terminal's lock for the same reason `TerminalHandle::drive`
+        // is: a keystroke landing in the gap would otherwise be overwritten by
+        // this older snapshot. See `latest` for the lock order.
+        *self.latest.lock().unwrap_or_else(PoisonError::into_inner) = snapshot;
         drop(terminal);
 
-        *self.latest.lock().unwrap_or_else(PoisonError::into_inner) = snapshot;
         self.collect(events);
         self.wake.raise();
     }
@@ -1760,6 +1858,12 @@ impl Shared {
                     .any(|pending| matches!(pending, TerminalEvent::Bell))
             {
                 continue;
+            }
+            // The same for a notification, except that the newer one takes
+            // the older one's place: each carries words, and the ones worth
+            // a row are the last the program said.
+            if matches!(event, TerminalEvent::Notification(_)) {
+                pending.retain(|pending| !matches!(pending, TerminalEvent::Notification(_)));
             }
             pending.push(event);
         }

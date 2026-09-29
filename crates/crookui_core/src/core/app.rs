@@ -173,6 +173,8 @@ pub struct AppContext {
     pub(crate) pending_effects: VecDeque<Effect>,
     pending_flushes: usize,
     flushing_effects: bool,
+    /// How many times the effects queue has been drained. See [`Self::turns`].
+    turns: u64,
 
     singleton_models: FxHashMap<TypeId, AnyModelHandle>,
 
@@ -197,6 +199,7 @@ impl AppContext {
             pending_effects: VecDeque::new(),
             pending_flushes: 0,
             flushing_effects: false,
+            turns: 0,
             singleton_models: FxHashMap::default(),
             weak_self: rc::Weak::new(),
             foreground,
@@ -222,6 +225,20 @@ impl AppContext {
     /// How many nested updates are in flight. Effects run when this hits zero.
     pub fn pending_flushes(&self) -> usize {
         self.pending_flushes
+    }
+
+    /// How many turns the application has taken: how many times an outermost
+    /// update has finished, with every effect it caused.
+    ///
+    /// The same number from the start of an update to the end of the last
+    /// callback its effects run, and one more afterwards. That is the
+    /// difference between "since control last went back to the event loop"
+    /// and "since I was last asked", which inside one update are not the same
+    /// thing: an observer whose work notifies what it observes is run again
+    /// before the update ends, as often as it keeps doing that, and nothing it
+    /// can see about its own state says the window has had a turn in between.
+    pub fn turns(&self) -> u64 {
+        self.turns
     }
 
     // ---------------------------------------------------------------- windows
@@ -874,6 +891,7 @@ impl AppContext {
         }
 
         self.flushing_effects = false;
+        self.turns += 1;
         self.update_windows();
     }
 

@@ -10,6 +10,12 @@
 //! [`ChildView`](crate::elements::ChildView) is what proves it, and the batch
 //! of relationships found during layout is reported back to the app, which
 //! walks it for responder chains and focus propagation.
+//!
+//! And it is where the window's work is counted. [`FrameCounts`] says how many
+//! frames were built and how many times each view was rendered — counts, not
+//! times, so that a test can hold the window to a budget ("output streaming
+//! into a tab nobody can see renders nothing") and get the same answer on
+//! every machine and every platform.
 
 use std::rc::Rc;
 use std::sync::Arc;
@@ -29,6 +35,38 @@ pub struct Presenter {
     scene: Option<Rc<Scene>>,
     rendered_views: EntityIdMap<Box<dyn Element>>,
     text_layout: Arc<dyn TextLayoutSystem>,
+    counts: FrameCounts,
+}
+
+/// How much work a [`Presenter`] has done, counted from its creation.
+///
+/// Always on, because what it costs is a counter bumped beside work that
+/// builds a tree: a render builds a view's whole element tree and a frame
+/// lays out and paints every tree there is. A feature to turn it off would
+/// have the budgets checked against a build nobody ships, and `cfg(test)`
+/// cannot be the switch — the tests that want these numbers are the
+/// application's, which compile this crate without it.
+#[derive(Clone, Debug, Default)]
+pub struct FrameCounts {
+    frames: u64,
+    renders: EntityIdMap<u64>,
+}
+
+impl FrameCounts {
+    /// How many frames have been built: every [`Presenter::build_scene`],
+    /// whether or not any view was rendered for it.
+    pub fn frames(&self) -> u64 {
+        self.frames
+    }
+
+    /// How many times `view_id` has been rendered.
+    ///
+    /// Zero for a view that never was, and for one that has been removed:
+    /// its count goes with its tree, so the table does not keep an entry for
+    /// every view the window ever held.
+    pub fn renders(&self, view_id: EntityId) -> u64 {
+        self.renders.get(&view_id).copied().unwrap_or_default()
+    }
 }
 
 impl Presenter {
@@ -39,6 +77,7 @@ impl Presenter {
             scene: None,
             rendered_views: EntityIdMap::default(),
             text_layout,
+            counts: FrameCounts::default(),
         }
     }
 
@@ -52,6 +91,11 @@ impl Presenter {
         self.scene.as_ref()
     }
 
+    /// The frames built and the views rendered so far.
+    pub fn counts(&self) -> &FrameCounts {
+        &self.counts
+    }
+
     /// Re-renders the views that changed and forgets the ones that are gone.
     pub fn invalidate(&mut self, invalidation: WindowInvalidation, app: &AppContext) {
         // A view can be both updated and removed in one batch — it notified and
@@ -61,6 +105,7 @@ impl Presenter {
             match app.render_view(self.window_id, *view_id) {
                 Some(element) => {
                     self.rendered_views.insert(*view_id, element);
+                    *self.counts.renders.entry(*view_id).or_default() += 1;
                 }
                 None => log::warn!("view {view_id} could not be rendered and was skipped"),
             }
@@ -68,6 +113,7 @@ impl Presenter {
 
         for view_id in invalidation.removed {
             self.rendered_views.remove(&view_id);
+            self.counts.renders.remove(&view_id);
         }
     }
 
@@ -81,6 +127,7 @@ impl Presenter {
         scale_factor: f32,
         ctx: &mut AppContext,
     ) -> Rc<Scene> {
+        self.counts.frames += 1;
         let mut embeddings = EntityIdMap::default();
         if let Some(root_view_id) = ctx.root_view_id(self.window_id) {
             let mut layout_ctx = LayoutContext {

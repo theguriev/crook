@@ -294,6 +294,51 @@ fn test_a_paste_cannot_end_its_own_bracket() {
 }
 
 #[test]
+fn test_a_focus_change_reaches_a_child_that_asked_and_no_other() {
+    // The whole path — the mode read off the emulator, `Terminal::send_focus`,
+    // the pty — where a line discipline echoes what the child was sent, with
+    // the escape spelled `^[`. Not on Windows, for the reason the paste test
+    // is not: its console re-renders rather than echoes.
+    if cfg!(windows) {
+        return;
+    }
+    let Some(program) = shell_command("cat") else {
+        return;
+    };
+    let mut terminal = Terminal::spawn(TerminalOptions {
+        program,
+        ..TerminalOptions::default()
+    })
+    .expect("a shell should start on a pty");
+    let output = read_on_a_thread(
+        terminal
+            .take_reader()
+            .expect("a fresh terminal has its reader"),
+    );
+
+    assert!(
+        !terminal.send_focus(true).expect("a write"),
+        "nothing asked, so nothing is sent"
+    );
+
+    terminal
+        .feed(b"\x1b[?1004h")
+        .expect("the mode should reach the emulator");
+    assert!(terminal.send_focus(false).expect("a write"));
+
+    assert!(feed_until(&mut terminal, &output, "^[[O"));
+    // The pty keeps order, so a focus-in written before the mode was set
+    // would have been echoed ahead of the focus-out that has just arrived.
+    let echoed = terminal.snapshot().text();
+    assert!(
+        !echoed.contains("^[[I"),
+        "a focus-in reached a child that had not asked for one: {echoed:?}"
+    );
+
+    terminal.shutdown().expect("the child should be endable");
+}
+
+#[test]
 fn test_a_child_that_ignores_the_hangup_is_still_ended() {
     // `portable-pty`'s detachable killer sends `SIGHUP` and reports success.
     // A shell whose dotfiles trap it — or anything run under a wrapper that
