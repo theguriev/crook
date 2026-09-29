@@ -16,7 +16,9 @@
 //! is index 4?", "how big is the text area?", a device attributes request. The
 //! emulator answers those into [`Emulator::take_replies`], and it is the
 //! caller's job to put those bytes back on the pty; a caller that drops them
-//! will hang any program that waits for an answer.
+//! will hang any program that waits for an answer. The one caller that must
+//! not answer is a mirror — an emulator following a stream that another one
+//! is already answering — and [`Emulator::advance_mirrored`] is its feed.
 //!
 //! **Nothing here knows what the pointer has selected.** A pane's output is a
 //! list of blocks, and all but the last of them were harvested out of this
@@ -48,6 +50,46 @@ use crate::mouse::MouseModes;
 use crate::notify::{self, Notification};
 use crate::pty::ChildExit;
 use crate::snapshot::{self, Palette, Snapshot, TerminalSize};
+
+/// One item of a stream fed to a mirror, in the order it happened.
+///
+/// Almost everything an emulator knows arrives as bytes from the child. One
+/// thing does not: a submitted command line, which [`crate::Terminal::submit`]
+/// hands the emulator directly, before a byte leaves for the pty, and which
+/// nothing in the child's output announces — the echo is what the shell chose
+/// to print, not what was typed. A stream replayed into another emulator has
+/// to carry it, and carries it as an item of its own rather than as bytes
+/// spliced in among the child's. A read ends wherever it ends, inside an
+/// escape sequence or a character as readily as anywhere else, and a submit
+/// lands between two reads, so bytes spliced in there would reach the parser
+/// in the middle of the child's and end whatever it was reading. As an item it
+/// reaches no parser at all: [`Emulator::advance_mirrored`] makes the same
+/// [`Emulator::command_submitted`] call a direct submit makes, at the same
+/// point. Nothing a child prints can pass for one, either. Turning a stream of
+/// these into bytes is the writer's job, and framing them is how it keeps a
+/// submit apart from the output around it.
+///
+/// The items are not all a replay has to keep. An emulator of the same size
+/// fed the same items in the same order makes the blocks the stream's own
+/// emulator made only when each read is fed as the [`Fed::Output`] it was, and
+/// at the pace the reads arrived. The pace, because the clock is part of the
+/// stream: a synchronized update the child never ended is let go by time, at
+/// the first feed or paint 150 ms after it opened, and a replay that runs
+/// ahead of that places the marks after it against a screen that has not
+/// drawn the update, and harvests their block without it. The reads, because
+/// each one's arrival is a moment the emulator looks at that clock, and
+/// because the end of a read is where the first row of a block is looked for
+/// again after `clear` erased the history above it, so joining or cutting
+/// reads can change whether that block keeps the blank rows it began with.
+/// Those are the conditions known to matter, not a list proven complete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Fed<'a> {
+    /// Output from the child: one read's worth, exactly as it was read.
+    Output(&'a [u8]),
+    /// A command line submitted at this point in the stream, as it was
+    /// typed.
+    Submitted(&'a str),
+}
 
 /// Something the child process asked the surrounding application to do.
 ///
@@ -171,12 +213,13 @@ impl EventListener for EventProxy {
 /// an escape sequence, and it buys a correct OSC parser instead of a hand-
 /// rolled scanner that has to get chunk boundaries right.
 ///
-/// The two are not read the same way. A working directory is position-
-/// independent — it means the same thing wherever in the chunk it appeared — so
-/// it is simply collected. A command boundary means *the cursor is here, now*,
-/// so [`Self::terminated`] stops the watcher on one and [`Emulator::advance`]
-/// feeds the real parser only up to that point before reading the cursor. It
-/// also stops where an agent report and a notification meet, because each is
+/// The two are not read the same way. A working directory does not care where
+/// the cursor is, so it is simply collected, and applied before the next mark
+/// the watcher stops on: the block that mark opens is filed under it. A
+/// command boundary means *the cursor is here, now*, so [`Self::terminated`]
+/// stops the watcher on one and [`Emulator::advance`] feeds the real parser
+/// only up to that point before reading the cursor.
+/// It also stops where an agent report and a notification meet, because each is
 /// kept as the last of its kind and the two are read against each other: one
 /// slot for the report cannot say which side of the notification it was on.
 #[derive(Default)]
@@ -355,6 +398,9 @@ pub struct Emulator {
     agent: AgentReport,
     events: Vec<TerminalEvent>,
     replies: Vec<u8>,
+    /// Whether this has ever been fed through [`Self::advance_mirrored`],
+    /// which makes it an emulator that owes the child nothing for good.
+    mirrored: bool,
     snapshot: Arc<Snapshot>,
     /// Whether something has happened since the cached snapshot was built.
     ///
@@ -402,6 +448,7 @@ impl Emulator {
             agent: AgentReport::default(),
             events: Vec::new(),
             replies: Vec::new(),
+            mirrored: false,
             snapshot,
             dirty: false,
         }
@@ -414,7 +461,7 @@ impl Emulator {
     /// mark, the grid is advanced only as far as the watcher got, and the mark
     /// is then applied while the cursor still stands where the shell left it.
     /// Feeding the whole chunk first and looking for marks afterwards — which
-    /// is all OSC 7 needs — would put every boundary wherever the end of the
+    /// is all a title needs — would put every boundary wherever the end of the
     /// chunk happened to land, and a mark split across two calls to this method
     /// would land nowhere at all. `vte` keeps the state that spans the split, so
     /// a mark arriving one byte at a time works exactly as one arriving whole.
@@ -465,6 +512,12 @@ impl Emulator {
                 self.apply_reports();
             }
             if let Some(mark) = self.osc_watcher.mark.take() {
+                // A directory too, and for the same reason: bash and zsh print
+                // `D`, the directory and the next `A` back to back, and the
+                // block that `A` opens is filed under whatever directory it
+                // sees. Applied after the loop, it would file `pwd` after a
+                // `cd` under the directory the `cd` left.
+                self.apply_working_directory();
                 self.settle_agent(mark);
                 let finished = self.blocks.mark(
                     mark,
@@ -486,12 +539,40 @@ impl Emulator {
         self.drain();
     }
 
+    /// Feeds one item of a stream that another emulator is also being fed,
+    /// and answering.
+    ///
+    /// The grid, the blocks and the events come out exactly as the same calls
+    /// to [`Self::advance`] and [`Self::command_submitted`], in the same
+    /// order, would make them. What does not come out is a reply: the other
+    /// emulator has already answered every query in the stream, and a second
+    /// answer would reach the child as input it never asked for, typed into
+    /// whatever it is running. Feeding an emulator this way once makes it a
+    /// mirror for the rest of its life, so [`Self::take_replies`] is empty from
+    /// then on however it is fed — including of the answers to queries a
+    /// synchronized update was holding when a later [`Self::snapshot`] let it
+    /// go.
+    ///
+    /// Nothing in Crook feeds an emulator this way yet.
+    pub fn advance_mirrored(&mut self, fed: Fed<'_>) {
+        self.mirrored = true;
+        match fed {
+            Fed::Output(bytes) => self.advance(bytes),
+            Fed::Submitted(line) => self.command_submitted(line),
+        }
+    }
+
     /// Records that a command line has been handed to the shell, which is the
     /// one block boundary that needs no cooperation from it.
     ///
     /// The application knows what it wrote and when, so a block opened this way
     /// carries the command text exactly, where a shell-integrated one carries
     /// whatever was echoed on screen. Call it just before writing the line.
+    ///
+    /// A stream that has to carry this — one replayed into another emulator —
+    /// carries it as a [`Fed::Submitted`] of its own, which
+    /// [`Self::advance_mirrored`] turns back into a call to this at the same
+    /// point in the stream.
     pub fn command_submitted(&mut self, command: &str) {
         self.blocks.submitted(
             command,
@@ -670,7 +751,8 @@ impl Emulator {
     }
 
     /// The bytes owed back to the child, in answer to its queries. The caller
-    /// must write these to the pty.
+    /// must write these to the pty. Always empty on a mirror — see
+    /// [`Self::advance_mirrored`].
     pub fn take_replies(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.replies)
     }
@@ -826,14 +908,15 @@ impl Emulator {
             self.events.push(TerminalEvent::Completions(serial));
         }
 
-        self.apply_reports();
-
-        if let Some(directory) = self.osc_watcher.working_directory.take()
-            && self.working_directory.as_deref() != Some(directory.as_path())
-        {
-            self.working_directory = Some(directory.clone());
-            self.events.push(TerminalEvent::WorkingDirectory(directory));
+        // A mirror's stream is answered by the emulator it mirrors. Here and
+        // not at the end of a mirrored feed, because this is also where a
+        // synchronized update that a snapshot let go gets its answers.
+        if self.mirrored {
+            self.replies.clear();
         }
+
+        self.apply_reports();
+        self.apply_working_directory();
 
         // Last, because it closes the open block: a working directory reported
         // on the way out belongs to the block that is still open.
@@ -884,6 +967,23 @@ impl Emulator {
         {
             self.agent = reported.status;
             self.events.push(TerminalEvent::Agent(reported));
+        }
+    }
+
+    /// Moves a pending working directory onto `self.working_directory`,
+    /// emitting the change.
+    ///
+    /// Kept out of the OSC parser for the reason [`Self::apply_agent_report`]
+    /// is: a directory and the prompt mark after it can arrive in one read,
+    /// and the block the mark opens has to be filed under that directory.
+    /// Idempotent the same way — it takes the pending directory, so the call
+    /// from [`Self::drain`] after one from [`Self::advance`] finds nothing.
+    fn apply_working_directory(&mut self) {
+        if let Some(directory) = self.osc_watcher.working_directory.take()
+            && self.working_directory.as_deref() != Some(directory.as_path())
+        {
+            self.working_directory = Some(directory.clone());
+            self.events.push(TerminalEvent::WorkingDirectory(directory));
         }
     }
 

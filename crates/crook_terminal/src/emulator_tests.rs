@@ -303,6 +303,50 @@ fn test_a_query_from_the_child_is_answered() {
 }
 
 #[test]
+fn test_a_mirror_owes_the_child_no_replies() {
+    // What a mirror is for: the stream it follows is also being followed by
+    // an emulator that answers, and a second answer would reach the child
+    // as input it never asked for.
+    let queries = b"\x1b[c\x1b[6n\x1b]11;?\x07\x1b[14t";
+
+    let mut answering = emulator();
+    answering.advance(queries);
+    assert!(!answering.take_replies().is_empty());
+
+    let mut mirror = emulator();
+    mirror.advance_mirrored(Fed::Output(queries));
+    assert_eq!(Vec::<u8>::new(), mirror.take_replies());
+}
+
+#[test]
+fn test_a_mirror_owes_nothing_for_an_update_that_expires_while_it_paints() {
+    // A synchronized update nobody ended is let go by painting as well as by
+    // the next feed, and the queries buffered inside it are answered then —
+    // after the mirrored call that fed them has returned.
+    let update = b"\x1b[?2026h\x1b[c\x1b[6n";
+
+    let mut answering = emulator();
+    answering.advance(update);
+    let mut mirror = emulator();
+    mirror.advance_mirrored(Fed::Output(update));
+    assert_eq!(Vec::<u8>::new(), answering.take_replies());
+    assert_eq!(Vec::<u8>::new(), mirror.take_replies());
+
+    std::thread::sleep(Duration::from_millis(200));
+    answering.snapshot();
+    mirror.snapshot();
+    assert!(
+        !answering.take_replies().is_empty(),
+        "the expired update's queries are answered when it is painted"
+    );
+    assert_eq!(Vec::<u8>::new(), mirror.take_replies());
+
+    // A mirror stays one, whichever way it is fed after.
+    mirror.advance(b"\x1b[c");
+    assert_eq!(Vec::<u8>::new(), mirror.take_replies());
+}
+
+#[test]
 fn test_the_revision_moves_only_when_something_changed() {
     let mut emulator = emulator();
     let first = emulator.snapshot();

@@ -52,6 +52,9 @@
 //! ## The pieces
 //!
 //! * [`Pty`] spawns the shell and owns both ends of the pseudo-terminal.
+//! * [`PtyLink`] is what a [`Terminal`] asks of the far end — [`Pty`] is the
+//!   local one — which is what lets a whole session be driven over something
+//!   that is not a process at all.
 //! * [`Emulator`] turns bytes into a grid. It works with no pty at all, which
 //!   is what makes this crate testable without a process.
 //! * [`Snapshot`] is what the renderer draws.
@@ -79,6 +82,7 @@ mod blocks;
 mod emulator;
 mod harvest;
 pub mod input;
+mod link;
 mod marks;
 pub mod mouse;
 pub mod notify;
@@ -97,9 +101,10 @@ use anyhow::Result;
 
 pub use crate::agent::{AgentReport, Reported};
 pub use crate::blocks::{Block, BlockId, BlockState, IgnoreReason, LiveBlock, PromptEnd};
-pub use crate::emulator::{Emulator, TerminalEvent};
+pub use crate::emulator::{Emulator, Fed, TerminalEvent};
 pub use crate::harvest::{BlockRows, RowCombining, StyleRun};
 pub use crate::input::{InputModes, Key, KeyboardModes, KeypadKey, Modifiers};
+pub use crate::link::PtyLink;
 pub use crate::marks::{PromptKind, ShellMark};
 pub use crate::mouse::{MouseButton, MouseEventKind, MouseModes};
 pub use crate::notify::Notification;
@@ -144,12 +149,13 @@ pub struct TerminalOptions {
 
 /// A running terminal session.
 ///
-/// Owns the pty, the child process and the emulator. Everything about how it is
-/// driven — the thread that reads, the frame that paints, the moment the child
-/// is reaped — belongs to the caller.
+/// Owns the emulator and the link to the child — a [`Pty`] of its own, for
+/// every terminal [`Self::spawn`] opens. Everything about how it is driven —
+/// the thread that reads, the frame that paints, the moment the child is
+/// reaped — belongs to the caller.
 pub struct Terminal {
     emulator: Emulator,
-    pty: Pty,
+    link: Box<dyn PtyLink>,
     writer: Box<dyn Write + Send>,
     exit: Option<ChildExit>,
 }
@@ -158,7 +164,7 @@ impl fmt::Debug for Terminal {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Terminal")
-            .field("pty", &self.pty)
+            .field("link", &self.link)
             .field("size", &self.size())
             .field("title", &self.title())
             .finish_non_exhaustive()
@@ -179,26 +185,37 @@ impl Terminal {
         } = options;
 
         let pty = Pty::spawn(&program, size, working_directory.as_deref(), &environment)?;
-        let writer = pty.writer()?;
         let emulator = Emulator::new(
             size,
             scrollback_lines.unwrap_or(DEFAULT_SCROLLBACK_LINES),
             palette,
         );
+        Self::with_link(Box::new(pty), emulator)
+    }
 
+    /// A terminal whose child is on the far end of `link`, drawn by
+    /// `emulator`.
+    ///
+    /// The two are expected to agree on the size: the link's child was
+    /// started at one, and the emulator's grid is the one the terminal reports
+    /// and resizes from.
+    pub fn with_link(link: Box<dyn PtyLink>, emulator: Emulator) -> Result<Self> {
+        // Taken once and kept, which is what keeps every keystroke off the
+        // link: a write goes straight to this.
+        let writer = link.writer()?;
         Ok(Self {
             emulator,
-            pty,
+            link,
             writer,
             exit: None,
         })
     }
 
-    /// The readable half of the pty, once. Move it to a thread and read until
-    /// it returns zero bytes or errors, feeding what it reads to [`Self::feed`]
-    /// on the thread that owns this terminal.
+    /// The readable half of the link, once. Move it to a thread and read
+    /// until it returns zero bytes or errors, feeding what it reads to
+    /// [`Self::feed`] on the thread that owns this terminal.
     pub fn take_reader(&mut self) -> Option<PtyReader> {
-        self.pty.take_reader()
+        self.link.take_reader()
     }
 
     /// Consumes output from the child.
@@ -214,6 +231,21 @@ impl Terminal {
             return Ok(());
         }
         self.write(&replies)
+    }
+
+    /// Consumes one item of a stream that some other emulator is also
+    /// consuming and answering: draws it, and writes nothing back.
+    ///
+    /// [`Self::feed`] owes the child an answer to every question in its
+    /// output. A terminal following a stream whose own emulator already
+    /// answered does not: a second answer would reach the child as input it
+    /// never asked for, typed into whatever it is running. The stream carries
+    /// the lines submitted into it as items of their own — see [`Fed`] — and
+    /// a terminal fed this way once is a mirror for good, as
+    /// [`Emulator::advance_mirrored`] says. Nothing in Crook feeds a terminal
+    /// this way yet.
+    pub fn feed_mirrored(&mut self, fed: Fed<'_>) {
+        self.emulator.advance_mirrored(fed);
     }
 
     /// The visible grid. Cheap to call every frame: the same `Arc`, carrying
@@ -384,7 +416,7 @@ impl Terminal {
     /// full-screen program that never gets it keeps drawing at the old size.
     pub fn resize(&mut self, size: TerminalSize) -> Result<()> {
         self.emulator.resize(size);
-        self.pty.resize(size)
+        self.link.resize(size)
     }
 
     /// The size the grid was last set to.
@@ -466,7 +498,7 @@ impl Terminal {
 
     /// The child's process id, on the platforms that have one.
     pub fn process_id(&self) -> Option<u32> {
-        self.pty.process_id()
+        self.link.process_id()
     }
 
     /// How the child finished, or `None` while it is still running.
@@ -478,7 +510,7 @@ impl Terminal {
         if self.exit.is_some() {
             return Ok(self.exit.clone());
         }
-        let Some(exit) = self.pty.try_wait()? else {
+        let Some(exit) = self.link.try_wait()? else {
             return Ok(None);
         };
         self.exit = Some(exit.clone());
@@ -498,7 +530,7 @@ impl Terminal {
     /// [`Self::shutdown`] does would be a stall a person can see. The kill
     /// escalates, so "without waiting" is not "without dying".
     pub fn kill(&mut self) -> Result<()> {
-        self.pty.kill()
+        self.link.kill()
     }
 
     /// Ends the session: kills the child if it is still running and waits for
@@ -507,8 +539,8 @@ impl Terminal {
     /// Dropping a terminal does the same thing without the waiting, so this is
     /// only needed when the caller wants the exit status.
     pub fn shutdown(&mut self) -> Result<ChildExit> {
-        self.pty.kill()?;
-        let exit = self.pty.wait()?;
+        self.link.kill()?;
+        let exit = self.link.wait()?;
         if self.exit.is_none() {
             self.exit = Some(exit.clone());
             self.emulator.child_exited(exit.clone());

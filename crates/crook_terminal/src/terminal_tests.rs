@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::io::Read as _;
+use std::sync::Mutex;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -478,5 +479,313 @@ fn test_a_child_with_no_working_directory_starts_where_a_new_window_would() {
         feed_until(&mut terminal, &output, &started_at(&home)),
         "a pane with no directory of its own should open at $HOME, got: {:?}",
         terminal.snapshot().text()
+    );
+}
+
+/// Everything the far end of a [`FakeLink`] has been told, and how its child
+/// is doing — shared with the test, since the link itself is moved into the
+/// terminal.
+#[derive(Debug, Default)]
+struct FarEnd {
+    /// Every byte the terminal wrote, in order.
+    received: Vec<u8>,
+    /// Every size the terminal passed on.
+    sizes: Vec<TerminalSize>,
+    exit: Option<ChildExit>,
+    killed: bool,
+}
+
+/// A link with no process behind it: the child's output is whatever the test
+/// says through [`FakeChild`], and everything sent to the child is kept.
+///
+/// The point of [`PtyLink`] — a whole session, driven through the same
+/// methods the application drives a real one through, with nothing spawned.
+#[derive(Debug)]
+struct FakeLink {
+    reader: Option<PtyReader>,
+    far_end: Arc<Mutex<FarEnd>>,
+}
+
+/// The test's side of a [`FakeLink`]: the child's voice, and its ears.
+struct FakeChild {
+    output: Option<mpsc::Sender<Vec<u8>>>,
+    far_end: Arc<Mutex<FarEnd>>,
+}
+
+/// The fake's process id, which is what proves [`Terminal::process_id`] asked
+/// the link rather than making one up.
+const FAKE_PID: u32 = 4242;
+
+impl FakeLink {
+    fn new() -> (Self, FakeChild) {
+        let (output, chunks) = mpsc::channel();
+        let far_end = Arc::new(Mutex::new(FarEnd::default()));
+        let link = Self {
+            reader: Some(PtyReader::new(Chunks {
+                chunks,
+                pending: Vec::new(),
+            })),
+            far_end: far_end.clone(),
+        };
+        let child = FakeChild {
+            output: Some(output),
+            far_end,
+        };
+        (link, child)
+    }
+}
+
+impl PtyLink for FakeLink {
+    fn take_reader(&mut self) -> Option<PtyReader> {
+        self.reader.take()
+    }
+
+    fn writer(&self) -> Result<Box<dyn Write + Send>> {
+        Ok(Box::new(Ears(self.far_end.clone())))
+    }
+
+    fn resize(&mut self, size: TerminalSize) -> Result<()> {
+        self.far_end.lock().unwrap().sizes.push(size);
+        Ok(())
+    }
+
+    fn process_id(&self) -> Option<u32> {
+        Some(FAKE_PID)
+    }
+
+    fn try_wait(&mut self) -> Result<Option<ChildExit>> {
+        Ok(self.far_end.lock().unwrap().exit.clone())
+    }
+
+    fn wait(&mut self) -> Result<ChildExit> {
+        self.far_end
+            .lock()
+            .unwrap()
+            .exit
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("the fake child cannot be waited for while it runs"))
+    }
+
+    fn kill(&mut self) -> Result<()> {
+        let mut far_end = self.far_end.lock().unwrap();
+        far_end.killed = true;
+        far_end.exit.get_or_insert(ChildExit {
+            code: 1,
+            signal: Some("Hangup".to_owned()),
+        });
+        Ok(())
+    }
+}
+
+impl FakeChild {
+    /// Prints `bytes`, as one read's worth.
+    fn say(&self, bytes: impl AsRef<[u8]>) {
+        self.output
+            .as_ref()
+            .expect("an exited child says nothing")
+            .send(bytes.as_ref().to_vec())
+            .expect("the reader is still there");
+    }
+
+    /// Exits with `code`, which also closes its end of the stream.
+    fn exit(&mut self, code: u32) {
+        self.far_end.lock().unwrap().exit = Some(ChildExit::from_code(code));
+        self.output = None;
+    }
+
+    fn received(&self) -> Vec<u8> {
+        self.far_end.lock().unwrap().received.clone()
+    }
+
+    fn sizes(&self) -> Vec<TerminalSize> {
+        self.far_end.lock().unwrap().sizes.clone()
+    }
+
+    fn killed(&self) -> bool {
+        self.far_end.lock().unwrap().killed
+    }
+}
+
+/// The fake's output, one [`FakeChild::say`] per read — which is what makes a
+/// scripted session deterministic: a read returns exactly what was said.
+struct Chunks {
+    chunks: Receiver<Vec<u8>>,
+    pending: Vec<u8>,
+}
+
+impl std::io::Read for Chunks {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.pending.is_empty() {
+            // The child exiting drops the sender, which is end-of-file.
+            let Ok(chunk) = self.chunks.recv() else {
+                return Ok(0);
+            };
+            self.pending = chunk;
+        }
+        let taken = self.pending.len().min(buffer.len());
+        buffer[..taken].copy_from_slice(&self.pending[..taken]);
+        self.pending.drain(..taken);
+        Ok(taken)
+    }
+}
+
+/// The fake's input: everything written lands in [`FarEnd::received`].
+struct Ears(Arc<Mutex<FarEnd>>);
+
+impl Write for Ears {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().received.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A terminal over a fresh fake link, at a small grid.
+fn over_a_fake_link() -> (Terminal, FakeChild) {
+    let (link, child) = FakeLink::new();
+    let emulator = Emulator::new(TerminalSize::new(30, 6), 100, Palette::default());
+    let terminal =
+        Terminal::with_link(Box::new(link), emulator).expect("a fake link hands out a writer");
+    (terminal, child)
+}
+
+/// Reads what the child said last and feeds it, the way the application's
+/// reader thread does with every read.
+fn hear(terminal: &mut Terminal, reader: &mut PtyReader) {
+    let mut buffer = [0; 4096];
+    let read = reader.read(&mut buffer).expect("the fake reads");
+    terminal
+        .feed(&buffer[..read])
+        .expect("the fake takes every reply");
+}
+
+#[test]
+fn test_a_terminal_over_an_in_memory_link_runs_a_scripted_session() {
+    let (mut terminal, mut child) = over_a_fake_link();
+    let mut reader = terminal
+        .take_reader()
+        .expect("the link hands its reader to the terminal's caller");
+    assert!(
+        terminal.take_reader().is_none(),
+        "the reader is handed out exactly once"
+    );
+    assert_eq!(Some(FAKE_PID), terminal.process_id());
+
+    // An integrated shell's first prompt: where it is, then the prompt
+    // between its two marks.
+    child.say("\x1b]7;file:///srv/app\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+    hear(&mut terminal, &mut reader);
+    assert_eq!(BlockState::AtPrompt, terminal.live_block().state);
+
+    terminal
+        .submit("echo hello")
+        .expect("the link takes a line");
+    assert_eq!(b"echo hello\r".to_vec(), child.received());
+    assert_eq!(BlockState::Submitted, terminal.live_block().state);
+
+    child.say(
+        "echo hello\r\n\x1b]133;C\x07hello\r\n\x1b]133;D;0\x07\
+         \x1b]133;A\x07$ \x1b]133;B\x07",
+    );
+    hear(&mut terminal, &mut reader);
+
+    let [block] = terminal.blocks() else {
+        panic!("one finished block, got {}", terminal.blocks().len());
+    };
+    assert_eq!(BlockState::Done, block.state);
+    assert_eq!(Some("echo hello".to_owned()), block.command);
+    assert_eq!(Some(0), block.exit);
+    assert_eq!("$ echo hello\nhello", block.rows.to_text());
+    assert_eq!(
+        Some(Path::new("/srv/app")),
+        block.working_directory.as_deref()
+    );
+    assert_eq!(Some(1), block.output_from);
+    assert_eq!("$", terminal.snapshot().text().trim());
+    assert!(
+        terminal
+            .take_events()
+            .iter()
+            .any(|event| matches!(event, TerminalEvent::CommandFinished { exit: Some(0), .. })),
+        "the shell's D reached the application as an event"
+    );
+
+    // A question goes back down the link: the cursor position report.
+    child.say("\x1b[6n");
+    hear(&mut terminal, &mut reader);
+    let received = child.received();
+    let reply = &received[b"echo hello\r".len()..];
+    assert!(
+        reply.starts_with(b"\x1b[") && reply.ends_with(b"R"),
+        "the cursor report did not reach the child: {reply:?}"
+    );
+
+    let size = TerminalSize::new(40, 8).with_cell_size(8, 16);
+    terminal.resize(size).expect("the link takes a size");
+    assert_eq!(vec![size], child.sizes());
+    assert_eq!(size, terminal.size());
+
+    assert_eq!(None, terminal.try_wait().expect("the fake answers"));
+    child.exit(0);
+    assert_eq!(
+        Some(ChildExit::from_code(0)),
+        terminal.try_wait().expect("the fake answers")
+    );
+    assert!(terminal.has_exited());
+    assert!(
+        terminal
+            .take_events()
+            .iter()
+            .any(|event| matches!(event, TerminalEvent::ChildExited(exit) if exit.success())),
+        "the exit the link reported reached the application"
+    );
+    assert_eq!(BlockState::Terminated, terminal.live_block().state);
+    assert_eq!(
+        0,
+        reader.read(&mut [0; 16]).expect("the fake reads"),
+        "a child that exited closes its end of the stream"
+    );
+}
+
+#[test]
+fn test_ending_a_terminal_ends_the_child_through_its_link() {
+    let (mut terminal, child) = over_a_fake_link();
+    assert!(!child.killed());
+
+    terminal.kill().expect("the link ends its child");
+    assert!(child.killed());
+    let exit = terminal.shutdown().expect("the link says how it ended");
+    assert_eq!(Some("Hangup"), exit.signal.as_deref());
+}
+
+#[test]
+fn test_a_mirrored_feed_answers_no_query_and_draws_the_same_grid() {
+    // A device attributes request, a cursor position report and the OSC 11
+    // background query: the three a program most often waits on.
+    const QUERIES: &[u8] = b"hi\x1b[c\x1b[6n\x1b]11;?\x07";
+
+    let (mut answering, answered) = over_a_fake_link();
+    answering.feed(QUERIES).expect("the fake takes every reply");
+    let replies = answered.received();
+    assert!(
+        replies.windows(3).any(|at| at == b"\x1b[?")
+            && replies.windows(8).any(|at| at == b"]11;rgb:"),
+        "a plain feed answers every query, got {replies:?}"
+    );
+
+    let (mut mirror, mirrored) = over_a_fake_link();
+    mirror.feed_mirrored(Fed::Output(QUERIES));
+    assert_eq!(
+        Vec::<u8>::new(),
+        mirrored.received(),
+        "a mirror answered a query the stream's own terminal already had"
+    );
+    assert_eq!(
+        answering.snapshot().text(),
+        mirror.snapshot().text(),
+        "a mirror draws what it is fed"
     );
 }
