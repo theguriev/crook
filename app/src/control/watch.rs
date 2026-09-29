@@ -18,9 +18,9 @@
 //! it can, the answer is no rather than yes, since a pane's output is what an
 //! agent reading it would take instructions from.
 //!
-//! A tab it opened that has closed is still its own to wait on, for as long
-//! as the window remembers who opened it — see [`REMEMBERED_CLOSED`] — and
-//! the answer is that it has closed.
+//! A tab it may watch that has closed — one it opened, or one of theirs — is
+//! still its own to wait on, for as long as the window remembers who opened
+//! it — see [`REMEMBERED_CLOSED`] — and the answer is that it has closed.
 //!
 //! # Where the waiting happens
 //!

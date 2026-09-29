@@ -1221,7 +1221,8 @@ saying that watching it needs a grant from the person who opened it, which this 
 ask for. The grant card belongs to the verb that types, and until it exists the answer is no.
 Refusals come in an order that tells a stranger nothing: no pane's token is `unauthorized`
 first, then a number no open pane has is `no-such-pane`, then `needs-grant`. A closed pane is
-`no-such-pane` to everyone, except to a `pane.wait` from the pane whose tab it was (below).
+`no-such-pane` to everyone, except to a `pane.wait` from a pane that may watch it — the one that
+opened it, or any pane up that chain (below).
 
 **`pane.wait`** answers when the pane gets to `until`: `idle` — its agent said so; the idle a
 pane starts in, before anything has reported, is not it, so a worker whose agent has not
