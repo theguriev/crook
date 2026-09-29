@@ -40,7 +40,7 @@ sha256sums=('79ac080bfc376af23a4b821917c61aa890eb16a54d3b1d70d6acbffb3706483d'
             '54264aa7ce6f975c9a74c09585a5caa6994b1104473169e32333f921b3a55ef4'
             'd9e8b30e5e6eeff61933343366a2b9ef9a1ee537c4ee250b17fb4148983e28dd'
             '80f130cd265aa887ec4b896f7be3fc310bbd1a586bc4826551260b5475d83486'
-            'e27aad219554e74efa6387a35be86863a4db3219a52401e19600ab55c16dbe8f')
+            'e6feae5e940af50f16157b853a90927415dc6620aa1c06a665d9f2a95d4f61ee')
 
 package() {
   install -Dm755 "${_archive}/crook" "${pkgdir}/usr/bin/crook"

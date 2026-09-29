@@ -38,8 +38,8 @@
 //! re-indents a line of Python or YAML, or puts a tab back in a Makefile,
 //! changes what the file means, and a squash of the commits before it is not
 //! that branch's work. So both sides are hashed `--verbatim`, which a git
-//! older than 2.39 does not have: there the pass fails, and nothing is proved
-//! by patch — only by ancestry.
+//! older than 2.39 does not have: there `patch-id` refuses the flag, and
+//! nothing is proved by patch — only by ancestry.
 //!
 //! Everything is read-only and runs through [`super::run`]'s deadline. The
 //! pass over the base's history is bounded twice, by [`PASS_COMMITS`] and

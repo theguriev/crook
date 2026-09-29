@@ -86,10 +86,12 @@ const SEGMENT_LABEL_SIZE: f32 = 14.;
 /// What the "PR link" toggle admits when hovered.
 ///
 /// Warp's info affordance says the GitHub CLI has to be installed and
-/// authenticated. Crook's reason is different and more basic, and saying it
-/// here is the alternative to rendering a chip that can never appear.
+/// authenticated, because Warp asks it for every row. Crook asks nothing to
+/// find a link — the agent that opened the pull request says which — and a
+/// person looking at a toggle for a chip no row shows yet wants to know
+/// where one would come from.
 pub(super) const PR_LINK_NOTE: &str =
-    "Crook has no forge integration yet, so no session has a link to show.";
+    "Shown when the agent in a pane says which pull request it opened.";
 
 /// The note's width, fixed rather than sized to its sentence.
 ///
@@ -491,12 +493,12 @@ fn density_icon(icon: Lucide) -> Box<dyn Element> {
         .finish()
 }
 
-/// An affordance that explains, on hover, why an option cannot do anything yet.
+/// An affordance that explains, on hover, where an option's data comes from.
 ///
 /// Warp's `ShowToggleInfoTooltip`, which it hangs off "PR link" when GitHub CLI
-/// validation is suppressed. Crook's reason is permanent rather than
-/// configuration-dependent, so the note is always attached while the toggle is
-/// on.
+/// validation is suppressed. Crook's answer does not depend on configuration —
+/// the link is the agent's to give — so the note is always attached while the
+/// toggle is on.
 struct InfoNote {
     state: MouseStateHandle,
     text: &'static str,

@@ -58,7 +58,7 @@ pub const WINDOW_OVERLAY: SlotId = SlotId::new("window.overlay");
 ///
 /// The order is the order the shipped keybindings are written in, so a person
 /// reading one and the other is reading the same order twice.
-pub const COMMANDS: [(&str, &str, Binding); 51] = [
+pub const COMMANDS: [(&str, &str, Binding); 52] = [
     ("new-tab", "New agent tab", Binding::NewTab),
     ("close-pane", "Close the focused pane", Binding::ClosePane),
     ("split-right", "Split to the right", Binding::SplitRight),
@@ -262,6 +262,10 @@ pub const COMMANDS: [(&str, &str, Binding); 51] = [
     ("zoom-in", "Make the text bigger", Binding::ZoomIn),
     ("zoom-out", "Make the text smaller", Binding::ZoomOut),
     ("zoom-reset", "Reset the text size", Binding::ZoomReset),
+    // One press for every agent a restart ended, and only after a person has
+    // seen each line: a restore types them, and nothing but a press sends
+    // them. No chord, because it is pressed once per launch at most.
+    ("resume-agents", "Resume every agent", Binding::ResumeAgents),
 ];
 
 /// What one of the window's own commands does, by name.
@@ -307,10 +311,17 @@ impl Plugin for Window {
             );
         }
 
-        // The three that are not bindings, because a window is not a view and
+        // The four that are not bindings, because a window is not a view and
         // there is no chord for them. Now that the title bar draws no buttons,
         // these commands and the desktop's own shortcuts are the whole of how
         // a window is minimised, maximised and closed by hand.
+        //
+        // Closing asks first while an agent is still working; the last of
+        // them is the same close with the answer given up front, for the
+        // person who knows what is running and wants it gone. It is a
+        // command rather than a switch on the question because it is a
+        // choice about this once, not about every close from now on — that
+        // is the setting's job.
         for (name, title, action_value) in [
             ("minimise", "Minimise the window", WindowAction::Minimize),
             (
@@ -319,6 +330,11 @@ impl Plugin for Window {
                 WindowAction::ToggleMaximized,
             ),
             ("close-window", "Close the window", WindowAction::Close),
+            (
+                "end-agents-and-quit",
+                "End all agents and quit",
+                WindowAction::Quit,
+            ),
         ] {
             host.register_command(
                 action(name),

@@ -6,6 +6,7 @@
 //! asked to move towards.
 
 use super::*;
+use crate::git::Head;
 
 /// A strip of `count` tabs, with the ids in bar order.
 fn strip(count: usize) -> (TabStrip, Vec<TabId>) {
@@ -267,6 +268,34 @@ fn a_derived_title_replaces_the_one_the_session_was_created_with() {
         .derived_title = Some("port the tab bar".to_owned());
 
     assert_eq!(strip.get(id).map(Tab::title), Some("port the tab bar"));
+}
+
+#[test]
+fn a_session_is_working_while_its_agent_runs_or_waits_or_its_shell_runs_a_command() {
+    let mut session = AgentSession::new("agent 1");
+    assert!(!session.is_working(), "a shell at its prompt");
+
+    for (status, working) in [
+        (AgentStatus::Running, true),
+        (AgentStatus::NeedsInput, true),
+        (AgentStatus::Failed, false),
+        (AgentStatus::Idle, false),
+    ] {
+        session.status = status;
+        assert_eq!(session.is_working(), working, "{status:?}");
+    }
+
+    // A command with no agent report behind it: a build, an ssh session, an
+    // agent started without the hooks.
+    session.running_command = Some("cargo build".to_owned());
+    assert!(session.is_working(), "a command the shell is running");
+    session.running_command = None;
+
+    // The bell makes the dot say "waiting", and the shell under it is still
+    // only a prompt.
+    session.attention = Some(Attention::Bell);
+    assert_eq!(session.shown_status(), AgentStatus::NeedsInput);
+    assert!(!session.is_working(), "a prompt that rang");
 }
 
 #[test]
@@ -1123,6 +1152,73 @@ mod groups {
     }
 
     #[test]
+    fn a_tab_opened_beside_another_takes_no_focus_and_goes_last_in_the_order_of_use() {
+        // What `crook tab new` opens: the person is looking at the third tab,
+        // the pane that asked is in the first, and the new tab goes beside
+        // the first without moving anybody's keyboard.
+        let (mut strip, ids) = strip(3);
+        strip.apply(TabAction::Select(ids[2]));
+        let used = strip.mru().to_vec();
+
+        assert_eq!(
+            TabEffect::Changed,
+            strip.apply(TabAction::NewBeside {
+                tab: ids[0],
+                grouped: false,
+            })
+        );
+        let now = order(&strip);
+        assert_eq!(now.len(), 4);
+        let opened = now[1];
+        assert!(!ids.contains(&opened), "beside the tab that asked: {now:?}");
+        assert_eq!(strip.get(opened).and_then(Tab::group), None);
+        assert_eq!(
+            strip.active_id(),
+            ids[2],
+            "the person's tab is still active"
+        );
+        assert_eq!(
+            strip.mru(),
+            [&used[..], &[opened]].concat(),
+            "nobody has used it, so it is the last tab to go back to"
+        );
+
+        // In a group, the same: it joins, and it is not selected.
+        strip.apply(TabAction::NewBeside {
+            tab: ids[0],
+            grouped: true,
+        });
+        let group = strip
+            .get(ids[0])
+            .and_then(Tab::group)
+            .expect("a group was made");
+        let members: Vec<TabId> = strip.members(group).map(Tab::id).collect();
+        assert_eq!(members.len(), 2, "{members:?}");
+        assert_eq!(members[0], ids[0]);
+        assert_eq!(
+            strip.active_id(),
+            ids[2],
+            "the person's tab is still active"
+        );
+        assert_eq!(strip.mru().last(), Some(&members[1]));
+        assert_eq!(
+            strip.mru().len(),
+            strip.len(),
+            "every tab is in the order of use"
+        );
+
+        // Beside a tab that has closed there is nowhere to put one.
+        strip.apply(TabAction::Close(ids[1]));
+        assert_eq!(
+            TabEffect::Unchanged,
+            strip.apply(TabAction::NewBeside {
+                tab: ids[1],
+                grouped: false,
+            })
+        );
+    }
+
+    #[test]
     fn the_group_is_named_after_the_tab_it_was_made_around() {
         let (strip, ids, group) = grouped(1);
 
@@ -1684,4 +1780,102 @@ fn a_lone_member_moved_within_its_own_group_cannot_split_another() {
         Some(own),
         "and `a` is still in its own"
     );
+}
+
+// --- a pull request's chip and branch ------------------------------------------
+
+#[test]
+fn a_pull_request_on_github_is_a_number_and_anywhere_else_names_its_host() {
+    let label = |url: &str| pull_request_label(url).expect("an address has a label");
+    assert_eq!(
+        label("https://github.com/theguriev/crook/pull/398"),
+        "PR #398"
+    );
+    assert_eq!(
+        label("https://GitHub.com/o/r/pull/7/files?diff=split#top"),
+        "PR #7"
+    );
+    // Another forge's spelling, and a host that is not github.com, say where
+    // they are: the chip is not the whole address, and it is not a lie.
+    assert_eq!(
+        label("https://gitlab.com/group/project/-/merge_requests/42"),
+        "gitlab.com #42"
+    );
+    assert_eq!(
+        label("https://github.example.com/o/r/pull/12"),
+        "github.example.com #12"
+    );
+    assert_eq!(
+        label("https://gitea.example.org/o/r/pulls"),
+        "gitea.example.org"
+    );
+    assert_eq!(pull_request_label("  "), None);
+}
+
+#[test]
+fn an_address_dressed_as_github_is_labelled_with_the_host_it_opens() {
+    // Any program's output can write the sequence, so a look-alike host and
+    // a `github.com@` in front of another one are the two ways a planted
+    // link would pass for the agent's: each is labelled with the host the
+    // browser would actually be sent to.
+    assert_eq!(
+        pull_request_label("https://github.com.attacker.example/o/r/pull/12").as_deref(),
+        Some("github.com.attacker.example #12")
+    );
+    assert_eq!(
+        pull_request_label("https://github.com@attacker.example/o/r/pull/12").as_deref(),
+        Some("attacker.example #12")
+    );
+    // A browser ends an https host at a `\` as it does at a `/`, so an
+    // `@github.com` after one is in the path, and the host is before it.
+    assert_eq!(
+        pull_request_label("https://attacker.example\\@github.com/o/r/pull/12").as_deref(),
+        Some("attacker.example #12")
+    );
+    assert_eq!(
+        pull_request_label("https://github.com\\@attacker.example/o/r/pull/12").as_deref(),
+        Some("PR #12")
+    );
+    // And `/pull/` in the query is not in the path.
+    assert_eq!(
+        pull_request_label("https://github.com/o/r/issues?q=/pull/12").as_deref(),
+        Some("github.com")
+    );
+}
+
+#[test]
+fn a_pull_request_goes_with_another_branch_and_stays_through_a_detached_head() {
+    // Paths that name no directory, so that the repository is told apart by
+    // its path alone and never resolved.
+    let at = |repository: &str, head: Head| BranchAtWork {
+        repository: PathBuf::from(format!("/nowhere/crook-tab-tests/{repository}/.git")),
+        head,
+    };
+    let feat = Head::Branch("feat".to_owned());
+    let detached = Head::Detached {
+        short: "1a22cb9".to_owned(),
+        full: "1a22cb92d4e5f60718293a4b5c6d7e8f90123456".to_owned(),
+    };
+    let pull_request = PullRequest::new(
+        "https://github.com/o/r/pull/1".to_owned(),
+        Some(at("app", feat.clone())),
+    );
+
+    assert!(!pull_request.is_left_for(Some(&at("app", feat.clone()))));
+    assert!(pull_request.is_left_for(Some(&at("app", Head::Branch("main".to_owned())))));
+    // Out of the repository is no branch at all.
+    assert!(pull_request.is_left_for(None));
+    // A commit checked out to look at, or a bisect: no other branch named,
+    // and nothing would report the pull request again when feat comes back.
+    assert!(!pull_request.is_left_for(Some(&at("app", detached.clone()))));
+
+    // Another repository is other work whatever its `HEAD` says: a submodule
+    // checked out detached, or a branch that has the same name.
+    assert!(pull_request.is_left_for(Some(&at("lib", detached))));
+    assert!(pull_request.is_left_for(Some(&at("other", feat.clone()))));
+    // And a pull request reported outside any repository has gone once the
+    // pane is in one.
+    let nowhere = PullRequest::new("https://github.com/o/r/pull/1".to_owned(), None);
+    assert!(!nowhere.is_left_for(None));
+    assert!(nowhere.is_left_for(Some(&at("app", feat))));
 }

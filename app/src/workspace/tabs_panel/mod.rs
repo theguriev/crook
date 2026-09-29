@@ -660,7 +660,7 @@ fn group_block(
     // reads when they are looking for the group rather than at it, and an
     // open group's own rows are eight of them. It was folded-only while the
     // mark was standing in for rows nobody could see.
-    let rollup = crate::plugins::tabs::group_rollup(workspace.tabs(), group);
+    let rollup = crate::plugins::tabs::group_rollup(workspace, group);
 
     // Counted off the strip, not off the rows under the heading: the rows are
     // the ones the search left, and the × on the heading closes the group.

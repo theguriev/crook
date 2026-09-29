@@ -27,9 +27,12 @@ mod action;
 mod block_list;
 pub(crate) mod block_menu;
 mod body;
+mod closing;
 mod controls;
+mod crash_note;
 mod finish;
 mod header_toolbar;
+mod held_locks;
 mod input_element;
 mod pane_output;
 mod row_content;
@@ -54,10 +57,12 @@ mod tests;
 use crate::theme::theme;
 
 pub use action::{
-    BlockAction, BlockEdge, BlockPart, OptionsAction, SearchAction, SettingsAction, Subject,
-    TabMenuAction, ThemeAction, WindowAction, WorkspaceAction, WorktreeAction,
+    BlockAction, BlockEdge, BlockPart, CrashNoteAction, CreatorField, EndingAction, EndingButton,
+    OptionsAction, SearchAction, SettingsAction, Subject, TabMenuAction, ThemeAction, WindowAction,
+    WorkspaceAction, WorktreeAction,
 };
 pub use block_list::BlockList;
+pub use held_locks::HeldLocks;
 pub use input_element::CommandInput;
 pub use pane_output::{Keys, Output};
 pub(crate) use settings_page::widgets::Category;
