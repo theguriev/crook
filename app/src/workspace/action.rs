@@ -54,6 +54,12 @@ pub enum WorkspaceAction {
         /// Whether it arrived, rather than left.
         entered: bool,
     },
+    /// Open the pull request a row links to, in the browser.
+    ///
+    /// The row's chip, pressed. It names the pane whose chip it is rather
+    /// than going through the menu's target, because the chip is on a row and
+    /// the row is the pane — the same reason the close button names its own.
+    OpenPullRequest(PaneId),
     /// Let go of what is selected in a pane's output.
     ///
     /// Carried as an action for a reason the grid could not solve on its own.

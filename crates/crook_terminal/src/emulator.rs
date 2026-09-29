@@ -165,6 +165,14 @@ pub enum TerminalEvent {
     /// for an agent that was interrupted and never got to. The rule for
     /// which marks end which statuses is `Emulator::settle_agent`'s.
     AgentSettled,
+    /// A program in the pane said which pull request its work is, on the
+    /// channel [`crate::agent`] describes beside the status's own.
+    ///
+    /// The address has passed [`crate::agent::pull_request_url`]. Reported
+    /// every time it is said, not on change: whoever holds it may have let
+    /// it go since — the pane moved to another branch — and an agent saying
+    /// it again is putting it back.
+    PullRequest(String),
     /// A program in the pane asked for a look, in one of the notification
     /// sequences other terminals read — OSC 9, 777 or 99; see
     /// [`crate::notify`].
@@ -231,6 +239,7 @@ struct OscWatcher {
     mark: Option<ShellMark>,
     completions: Option<u64>,
     agent: Option<Reported>,
+    pull_request: Option<String>,
     /// Keeps a kitty notification that is arriving in chunks.
     notifications: notify::Reader,
     notification: Option<Notification>,
@@ -291,6 +300,8 @@ impl Perform for OscWatcher {
                 if let Some(reported) = agent::parse(params) {
                     self.agent = Some(reported);
                     self.notified_last = false;
+                } else if let Some(url) = agent::parse_pull_request(params) {
+                    self.pull_request = Some(url);
                 }
             }
         }
@@ -920,6 +931,9 @@ impl Emulator {
         }
 
         self.apply_reports();
+        if let Some(url) = self.osc_watcher.pull_request.take() {
+            self.events.push(TerminalEvent::PullRequest(url));
+        }
         self.apply_working_directory();
 
         // Last, because it closes the open block: a working directory reported

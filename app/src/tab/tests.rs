@@ -6,6 +6,7 @@
 //! asked to move towards.
 
 use super::*;
+use crate::git::Head;
 
 /// A strip of `count` tabs, with the ids in bar order.
 fn strip(count: usize) -> (TabStrip, Vec<TabId>) {
@@ -1779,4 +1780,102 @@ fn a_lone_member_moved_within_its_own_group_cannot_split_another() {
         Some(own),
         "and `a` is still in its own"
     );
+}
+
+// --- a pull request's chip and branch ------------------------------------------
+
+#[test]
+fn a_pull_request_on_github_is_a_number_and_anywhere_else_names_its_host() {
+    let label = |url: &str| pull_request_label(url).expect("an address has a label");
+    assert_eq!(
+        label("https://github.com/theguriev/crook/pull/398"),
+        "PR #398"
+    );
+    assert_eq!(
+        label("https://GitHub.com/o/r/pull/7/files?diff=split#top"),
+        "PR #7"
+    );
+    // Another forge's spelling, and a host that is not github.com, say where
+    // they are: the chip is not the whole address, and it is not a lie.
+    assert_eq!(
+        label("https://gitlab.com/group/project/-/merge_requests/42"),
+        "gitlab.com #42"
+    );
+    assert_eq!(
+        label("https://github.example.com/o/r/pull/12"),
+        "github.example.com #12"
+    );
+    assert_eq!(
+        label("https://gitea.example.org/o/r/pulls"),
+        "gitea.example.org"
+    );
+    assert_eq!(pull_request_label("  "), None);
+}
+
+#[test]
+fn an_address_dressed_as_github_is_labelled_with_the_host_it_opens() {
+    // Any program's output can write the sequence, so a look-alike host and
+    // a `github.com@` in front of another one are the two ways a planted
+    // link would pass for the agent's: each is labelled with the host the
+    // browser would actually be sent to.
+    assert_eq!(
+        pull_request_label("https://github.com.attacker.example/o/r/pull/12").as_deref(),
+        Some("github.com.attacker.example #12")
+    );
+    assert_eq!(
+        pull_request_label("https://github.com@attacker.example/o/r/pull/12").as_deref(),
+        Some("attacker.example #12")
+    );
+    // A browser ends an https host at a `\` as it does at a `/`, so an
+    // `@github.com` after one is in the path, and the host is before it.
+    assert_eq!(
+        pull_request_label("https://attacker.example\\@github.com/o/r/pull/12").as_deref(),
+        Some("attacker.example #12")
+    );
+    assert_eq!(
+        pull_request_label("https://github.com\\@attacker.example/o/r/pull/12").as_deref(),
+        Some("PR #12")
+    );
+    // And `/pull/` in the query is not in the path.
+    assert_eq!(
+        pull_request_label("https://github.com/o/r/issues?q=/pull/12").as_deref(),
+        Some("github.com")
+    );
+}
+
+#[test]
+fn a_pull_request_goes_with_another_branch_and_stays_through_a_detached_head() {
+    // Paths that name no directory, so that the repository is told apart by
+    // its path alone and never resolved.
+    let at = |repository: &str, head: Head| BranchAtWork {
+        repository: PathBuf::from(format!("/nowhere/crook-tab-tests/{repository}/.git")),
+        head,
+    };
+    let feat = Head::Branch("feat".to_owned());
+    let detached = Head::Detached {
+        short: "1a22cb9".to_owned(),
+        full: "1a22cb92d4e5f60718293a4b5c6d7e8f90123456".to_owned(),
+    };
+    let pull_request = PullRequest::new(
+        "https://github.com/o/r/pull/1".to_owned(),
+        Some(at("app", feat.clone())),
+    );
+
+    assert!(!pull_request.is_left_for(Some(&at("app", feat.clone()))));
+    assert!(pull_request.is_left_for(Some(&at("app", Head::Branch("main".to_owned())))));
+    // Out of the repository is no branch at all.
+    assert!(pull_request.is_left_for(None));
+    // A commit checked out to look at, or a bisect: no other branch named,
+    // and nothing would report the pull request again when feat comes back.
+    assert!(!pull_request.is_left_for(Some(&at("app", detached.clone()))));
+
+    // Another repository is other work whatever its `HEAD` says: a submodule
+    // checked out detached, or a branch that has the same name.
+    assert!(pull_request.is_left_for(Some(&at("lib", detached))));
+    assert!(pull_request.is_left_for(Some(&at("other", feat.clone()))));
+    // And a pull request reported outside any repository has gone once the
+    // pane is in one.
+    let nowhere = PullRequest::new("https://github.com/o/r/pull/1".to_owned(), None);
+    assert!(!nowhere.is_left_for(None));
+    assert!(nowhere.is_left_for(Some(&at("app", feat))));
 }

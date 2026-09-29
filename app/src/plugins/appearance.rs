@@ -452,7 +452,8 @@ fn rows_category(workspace: &Workspace) -> Vec<Entry> {
     rows.push(widgets::row(
         Words::new("Show the PR link chip")
             .with_description(
-                "Crook has no forge integration yet, so no session has a link to show.",
+                "The pull request the agent in a pane said it opened, as a chip that opens \
+                 it. Crook asks no forge for it.",
             )
             .with_keywords(&["pull", "request", "github", "forge", "link", "chip"]),
         expanded,

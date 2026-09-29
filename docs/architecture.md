@@ -1271,6 +1271,56 @@ second line is the question rather than the branch or the directory, since "want
 `rm -rf build`" is what decides whether a person comes now, and which branch the pane is on is
 not. The header's count and the window title are unchanged by it.
 
+**The pull request is a second sequence.** `OSC 6342 ; pr ; <url> BEL`, read by the same watcher
+and written by `crook --agent <status> --pull-request <url>` in the same write as the status.
+A sibling number rather than a third field on 6340, because 6340's tail is already cut twice —
+on `vte`'s `;` and on the `;;` before a message — and an older Crook reads that tail as the
+title, where a number it does not know is simply a link that is not there; 6341 is the
+question an agent that stopped to ask is waiting on. An address holds `:` and `/` always and
+`;` almost never, so the pieces after the word are joined back as a title's are, and the one
+thing that cannot be undone — `vte` keeping sixteen pieces and dropping the rest without a
+word — is refused at both ends: the writer will not send an address that fills the list, and
+the reader takes a full list as cut. `crook_terminal::agent::pull_request_url` is the whole
+rule either end applies: `https://` with a host, at most 512 bytes, no control character and
+no white space. The row opens it through `app/src/browser.rs`, whose allow-list checks it a
+second time. The wire checks the scheme and nothing else, and any program's output can write
+the sequence, so the chip reads `PR #<n>` only for github.com and names the host anywhere else
+(`gitlab.com #42`, `github.com.example.net #12`) — the host a browser goes to, read the way the
+URL standard reads an https address: after any `user@`, and ended by a `\` as well as a `/`,
+so `https://attacker.example\@github.com/o/r/pull/12` is attacker.example's — cut at a fixed
+width from the start, and the hover card prints the whole address. `AgentSession::pull_request`
+records it against the branch the pane is on at the moment it arrives and the repository that
+branch is in — its common git directory, which every worktree of it shares and a submodule
+does not — read from `HEAD`, not from the row's git facts, which are up to a poll old and
+would record a branch made, pushed and opened inside one poll as the one it started on. It is
+dropped when `HEAD` names another branch or the pane leaves the repository, for another one or
+for none, which is asked whenever the git model reports a change and whenever the pane moves,
+never on a clock. A rebase detaches `HEAD` for as long as it runs, conflicts and all, so
+`git::branch_at_work` reads a detached `HEAD` with a `rebase-merge/head-name` or
+`rebase-apply/head-name` beside it as the branch being rebased, as `git status` does; any other
+detached `HEAD` in the same repository names no other branch and keeps the link, since nothing
+would report it again when the branch came back. One in another repository — a submodule's, or
+a tag checked out — is that repository's, and a branch there of the same name is not this one.
+The hooks carry it with no second
+process: the Claude Code and Codex hook after every tool is `running --pull-request -`, which
+finds the `https://…/pull/<n>` a `gh pr create` in `tool_input.command` printed into
+`tool_response` and finds nothing after any other tool. The chip is on the row's metadata line
+in `Expanded`, under the "Show: PR link" toggle, and it is a link: the row's own press stands
+aside while it is hovered, as it does for the close button. The menu carries **Open pull
+request** for the density that draws no chip and **Check pull request**, which is the one
+place Crook asks the network about the work — the person's own `gh pr view <url> --json
+state,statusCheckRollup`, on the background pool under `git::worktree`'s deadline shape
+(`app/src/forge.rs`), once per press and never polled. `gh` holds the token and knows the
+host; Crook holds neither. It is looked for on Crook's own `PATH` and then in
+`forge::usual_places` — Homebrew's prefixes, MacPorts', `/usr/local/bin`, `~/.local/bin` and
+a Nix profile — because a `Crook.app` opened from the Dock is handed launchd's
+`/usr/bin:/bin:/usr/sbin:/sbin`, which holds `git` and no `gh`, and Crook runs no login shell
+to learn the person's. The answer — open, merged or closed, and how many checks pass, fail
+or are pending — is written onto the session and printed on the hover card until the next
+press, or the reason there is none: `gh` not found, not signed in, or unable to reach the
+forge. The hook reads a PostToolUse input it cannot parse as saying nothing — only text that
+is not a JSON object is taken as `gh`'s own output piped in.
+
 **Attention is a separate fact.** The bell used to write `NeedsInput` and looking used to
 clear it, and that was right for a bell and wrong for an agent: an agent waiting for an
 approval is still waiting after somebody glanced at its row. So `AgentSession` carries

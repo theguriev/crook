@@ -56,6 +56,7 @@ pub mod control;
 pub mod diagnostics;
 pub mod editor;
 pub mod filename;
+pub mod forge;
 pub mod git;
 pub mod git_model;
 pub mod input_keys;
@@ -539,19 +540,34 @@ fn attach_to_parent_console() {
     }
 }
 
-/// What follows `--agent`: the status, and a title and a message if given.
+/// What follows `--agent`, as the command line spelled it.
+#[derive(Debug, PartialEq, Eq)]
+struct AgentArguments {
+    /// The status word, checked by [`agent::report`] rather than here.
+    status: String,
+    /// `--title`, when given.
+    title: Option<String>,
+    /// `--message`, when given.
+    message: Option<String>,
+    /// `--pull-request`, when given.
+    pull_request: Option<String>,
+}
+
+/// What follows `--agent`: the status, and a title, a message and a pull
+/// request if given.
 ///
 /// Apart from [`parse_args`] so that what it accepts can be tested without
 /// sending a report to whatever terminal the test runs in.
 fn agent_arguments(
     args: &mut std::iter::Peekable<impl Iterator<Item = String>>,
-) -> Result<(String, Option<String>, Option<String>)> {
+) -> Result<AgentArguments> {
     let status = args
         .next()
         .context("`--agent` needs a status: idle, running, needs-input or failed")?;
     let mut title = None;
     let mut message = None;
-    // In either order, each at most once: a hook that names the
+    let mut pull_request = None;
+    // In any order, each at most once: a hook that names the
     // work and says what it is waiting for spells both.
     while let Some(flag) = args.peek().map(String::as_str) {
         let (field, needs) = match flag {
@@ -559,6 +575,11 @@ fn agent_arguments(
             "--message" => (
                 &mut message,
                 "`--message` needs the message, or `-` to read it from stdin",
+            ),
+            "--pull-request" => (
+                &mut pull_request,
+                "`--pull-request` needs the pull request's address, or `-` to read a hook's \
+                 input from stdin",
             ),
             _ => break,
         };
@@ -578,10 +599,15 @@ fn agent_arguments(
     if let Some(extra) = args.peek().filter(|word| word.starts_with("--")) {
         bail!(
             "unrecognised argument {extra}; `--agent <status>` takes only \
-             --title and --message"
+             --title, --message and --pull-request"
         );
     }
-    Ok((status, title, message))
+    Ok(AgentArguments {
+        status,
+        title,
+        message,
+        pull_request,
+    })
 }
 
 fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<Startup> {
@@ -636,12 +662,18 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
             // about is already open, and this process is a program inside it
             // saying one thing to it.
             "--agent" => {
-                let (status, title, message) = agent_arguments(&mut args)?;
-                agent::report(&status, title.as_deref(), message.as_deref())?;
+                let arguments = agent_arguments(&mut args)?;
+                agent::report(
+                    &arguments.status,
+                    arguments.title.as_deref(),
+                    arguments.message.as_deref(),
+                    arguments.pull_request.as_deref(),
+                )?;
                 return Ok(Startup::Answered);
             }
             "--title" => bail!("`--title` goes after `--agent <status>`"),
             "--message" => bail!("`--message` goes after `--agent <status>`"),
+            "--pull-request" => bail!("`--pull-request` goes after `--agent <status>`"),
             // Stdout is the fragment and stderr the lead and the note, so
             // `> hooks.json` takes exactly the fragment; an agent with no
             // hooks gets a sentence on stdout and no note, since the sentence
@@ -1200,14 +1232,17 @@ OPTIONS:
                        Print the OSC 133 snippet for `zsh`, `bash` or `fish`,
                        to paste into that shell\'s own configuration on a machine
                        Crook cannot start the shell on — over ssh, in a container
-    --agent <STATUS> [--title <TEXT>] [--message <TEXT>]
+    --agent <STATUS> [--title <TEXT>] [--message <TEXT>] [--pull-request <URL>]
                        Tell the pane this is run in what the program in it is
                        doing: `idle`, `running`, `needs-input` or `failed`,
-                       what it calls its work, and with `needs-input` what it
-                       is waiting for. Written to the terminal, so it works
-                       from a hook, over ssh and in a container; `--title -`
-                       takes the prompt out of a Claude Code hook\'s input on
-                       stdin, and `--message -` the notification\'s text
+                       what it calls its work, with `needs-input` what it is
+                       waiting for, and the https address of the pull request
+                       it opened, which the row links to. Written to the
+                       terminal, so it works from a hook, over ssh and in a
+                       container; `--title -` takes the prompt out of a Claude
+                       Code hook\'s input on stdin, `--message -` the
+                       notification\'s text, and `--pull-request -` the address
+                       a `gh pr create` printed
     --agent-hooks <AGENT>
                        Print the hooks that make an agent say all of that by
                        itself, to merge into its settings: `claude` (Claude
@@ -4438,8 +4473,74 @@ mod tests {
             .peekable();
         assert_eq!(
             agent_arguments(&mut appended).expect("a payload an agent appends is let through"),
-            ("idle".to_owned(), None, None)
+            AgentArguments {
+                status: "idle".to_owned(),
+                title: None,
+                message: None,
+                pull_request: None,
+            }
         );
+    }
+
+    #[test]
+    fn a_pull_request_is_read_beside_any_status_and_nowhere_else() {
+        // Beside the other two, in any order, once — the shape `--title` and
+        // `--message` have, which is what a hook author already knows.
+        let mut given = [
+            "running",
+            "--pull-request",
+            "https://github.com/o/r/pull/7",
+            "--title",
+            "port the tab bar",
+        ]
+        .map(str::to_owned)
+        .into_iter()
+        .peekable();
+        assert_eq!(
+            agent_arguments(&mut given).expect("valid"),
+            AgentArguments {
+                status: "running".to_owned(),
+                title: Some("port the tab bar".to_owned()),
+                message: None,
+                pull_request: Some("https://github.com/o/r/pull/7".to_owned()),
+            }
+        );
+
+        for (args, complaint) in [
+            (
+                &["--agent", "running", "--pull-request"][..],
+                "`--pull-request` needs",
+            ),
+            (
+                &[
+                    "--agent",
+                    "running",
+                    "--pull-request",
+                    "-",
+                    "--pull-request",
+                    "-",
+                ][..],
+                "was given twice",
+            ),
+            (
+                &["--pull-request", "https://github.com/o/r/pull/7"][..],
+                "goes after `--agent <status>`",
+            ),
+            // Refused by the report before it opens a terminal, so this
+            // needs none either.
+            (
+                &[
+                    "--agent",
+                    "running",
+                    "--pull-request",
+                    "http://github.com/o/r/pull/7",
+                ][..],
+                "https://",
+            ),
+        ] {
+            let said = format!("{:#}", parse(args).expect_err("refused"));
+            assert!(said.contains(complaint), "{args:?}: {said}");
+        }
     }
 
     #[test]

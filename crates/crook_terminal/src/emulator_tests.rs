@@ -789,6 +789,51 @@ fn test_a_report_survives_a_split_between_two_reads() {
 }
 
 #[test]
+fn test_a_program_says_which_pull_request_its_work_is() {
+    // Beside a status, in the same read, and each reported on its own: the
+    // pull request is not a status and changes none.
+    let mut emulator = emulator();
+    emulator.advance(
+        b"\x1b]6340;running\x07\x1b]6342;pr;https://github.com/theguriev/crook/pull/398\x07",
+    );
+
+    assert_eq!(AgentReport::Running, emulator.agent());
+    let events = emulator.take_events();
+    assert!(
+        events.contains(&TerminalEvent::PullRequest(
+            "https://github.com/theguriev/crook/pull/398".to_owned()
+        )),
+        "{events:?}"
+    );
+
+    // Said again, it is said again: the row may have dropped it since — the
+    // pane changed branch — and an agent repeating it is putting it back.
+    emulator.advance(b"\x1b]6342;pr;https://github.com/theguriev/crook/pull/398\x07");
+    assert_eq!(1, emulator.take_events().len());
+}
+
+#[test]
+fn test_a_pull_request_survives_a_split_and_a_refused_one_says_nothing() {
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b]6342;pr;https://github.com/o/r/pu");
+    emulator.advance(b"ll/7\x07");
+    assert_eq!(
+        vec![TerminalEvent::PullRequest(
+            "https://github.com/o/r/pull/7".to_owned()
+        )],
+        emulator.take_events()
+    );
+
+    // Through the real parser, which drops what is past its sixteenth piece:
+    // an address long enough in `;` to have been cut is not read as the part
+    // of it that arrived.
+    let cut = format!("\x1b]6342;pr;https://example.com/p{}\x07", ";x".repeat(20));
+    emulator.advance(cut.as_bytes());
+    emulator.advance(b"\x1b]6342;pr;http://github.com/o/r/pull/7\x07");
+    assert!(emulator.take_events().is_empty());
+}
+
+#[test]
 fn test_the_command_ending_takes_a_running_status_with_it() {
     // An agent that was interrupted never says it stopped. The shell's `D`
     // says it instead.

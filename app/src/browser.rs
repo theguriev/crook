@@ -89,6 +89,18 @@ fn is_openable(url: &str) -> bool {
 
 /// Starts the platform's handler and does not wait for it.
 fn spawn(url: &OsStr) -> io::Result<()> {
+    #[cfg(test)]
+    if OPENED
+        .with_borrow_mut(|opened| {
+            opened
+                .as_mut()
+                .map(|opened| opened.push(url.to_string_lossy().into_owned()))
+        })
+        .is_some()
+    {
+        return Ok(());
+    }
+
     #[cfg(target_os = "macos")]
     let mut launcher = {
         let mut launcher = command("open");
@@ -125,6 +137,32 @@ fn spawn(url: &OsStr) -> io::Result<()> {
         .stderr(std::process::Stdio::null())
         .spawn()?;
     Ok(())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What this thread has asked to open, once [`record_opens`] asked for it
+    /// to be written down rather than handed to a browser.
+    static OPENED: std::cell::RefCell<Option<Vec<String>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// From now on, writes down what this thread opens instead of opening it.
+///
+/// For a test that presses a link: the thing it asserts is that the press
+/// reached here with the address it should have, and the thing it must not
+/// do is start the browser of whoever runs the suite. A thread's worth,
+/// because a press in the window's test harness is dispatched on the test's
+/// own thread and the suite runs its tests in parallel.
+#[cfg(test)]
+pub(crate) fn record_opens() {
+    OPENED.with_borrow_mut(|opened| *opened = Some(Vec::new()));
+}
+
+/// What this thread has opened since [`record_opens`].
+#[cfg(test)]
+pub(crate) fn opened() -> Vec<String> {
+    OPENED.with_borrow(|opened| opened.clone().unwrap_or_default())
 }
 
 #[cfg(test)]

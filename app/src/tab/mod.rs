@@ -31,6 +31,8 @@ use std::time::Instant;
 
 use crook_terminal::AgentReport;
 
+use crate::forge::{CheckError, Found};
+use crate::git::BranchAtWork;
 use crate::settings::Granularity;
 
 mod group;
@@ -154,6 +156,88 @@ pub enum StatusSource {
     CommandEnded(Instant),
 }
 
+/// The pull request a session's work belongs to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PullRequest {
+    /// Its address, which passed `crook_terminal::agent::pull_request_url` on
+    /// the way in — https, and nothing in it a link opener could be tricked by.
+    pub url: String,
+    /// The branch the pane was on when the agent said it, read then — the
+    /// branch being rebased, when a rebase had `HEAD` detached — and the
+    /// repository it is a branch of.
+    ///
+    /// What the pull request is dropped against: a pane that has moved to
+    /// another branch, or into another repository, is doing other work, and a
+    /// link to the last branch's pull request on its row would be a claim
+    /// about the new one — see [`PullRequest::is_left_for`]. Read from
+    /// `HEAD` at the moment of the report rather than taken from the row's
+    /// git facts, which are up to a poll old — an agent that makes a branch,
+    /// pushes it and opens its pull request inside one poll would otherwise
+    /// have it recorded against the branch it started on, and dropped the
+    /// moment the poll caught up.
+    pub branch: Option<BranchAtWork>,
+    /// What the last "Check pull request" press found, until the next one.
+    pub check: Option<PullRequestCheck>,
+}
+
+impl PullRequest {
+    /// A pull request at `url`, reported while the pane was on `branch`,
+    /// not yet checked.
+    pub fn new(url: String, branch: Option<BranchAtWork>) -> Self {
+        Self {
+            url,
+            branch,
+            check: None,
+        }
+    }
+
+    /// Whether a pane whose work is now on `now` has left the branch this
+    /// pull request was reported on — and so whether it should go.
+    ///
+    /// Another branch has. So has another repository, whatever its `HEAD`
+    /// says — a submodule, checked out detached as one usually is, or a
+    /// repository with a branch of the same name — and so has no repository
+    /// at all. A detached `HEAD` in the same repository is not known to have:
+    /// a checkout of a commit to look at it, a bisect, names no other branch,
+    /// and a pull request dropped then is dropped for good, because nothing
+    /// says it again when the branch comes back — the hook reports the
+    /// address `gh pr create` printed, and a branch coming back runs no `gh
+    /// pr create`. A rebase's detached `HEAD` does not get here as one at
+    /// all: [`crate::git::branch_at_work`] reads it as the branch being
+    /// rebased.
+    pub fn is_left_for(&self, now: Option<&BranchAtWork>) -> bool {
+        match (self.branch.as_ref(), now) {
+            (None, None) => false,
+            (Some(then), Some(now)) if then.is_same_repository(now) => {
+                !now.head.is_detached() && now.head != then.head
+            }
+            _ => true,
+        }
+    }
+}
+
+/// Where a press of "Check pull request" has got to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PullRequestCheck {
+    /// `gh` has been asked and has not answered.
+    Asking,
+    /// It answered.
+    Answered(Found),
+    /// It could not, and this is why.
+    Failed(CheckError),
+}
+
+impl PullRequestCheck {
+    /// The line the card prints for it.
+    pub fn summary(&self) -> String {
+        match self {
+            Self::Asking => "Checking\u{2026}".to_owned(),
+            Self::Answered(found) => found.summary(),
+            Self::Failed(error) => error.to_string(),
+        }
+    }
+}
+
 /// The agent session a pane is a window onto.
 ///
 /// Warp's tab points at a `ViewHandle<PaneGroup>` whose panes hold views,
@@ -241,17 +325,16 @@ pub struct AgentSession {
     /// a directory deleted out from under it — in which case a row falls back
     /// to the session title.
     pub working_directory: Option<PathBuf>,
-    /// The pull request this session's work belongs to, as a URL.
+    /// The pull request this session's work belongs to, as its agent said.
     ///
-    /// **Nothing populates this yet, and that is deliberate.** Warp's PR link
-    /// comes out of `gh pr view` — a subprocess with a five-second timeout, an
-    /// authentication state and a whole failure taxonomy — and Crook has no
-    /// forge integration to put behind it. The field exists so the row and the
-    /// "Show: PR link" toggle are written against real data rather than a
-    /// placeholder: the toggle governs whether the slot appears *when there is
-    /// a link*, and today there never is. The menu says so on screen rather
-    /// than leaving a dead chip to be discovered.
-    pub pull_request: Option<String>,
+    /// Written by the agent, over its own terminal — `crook --agent running
+    /// --pull-request <url>`, or the hook after a `gh pr create` — and by
+    /// nothing else. Warp's PR link comes out of `gh pr view` run for every
+    /// row on a timer; Crook asks no forge to find one, because the agent that
+    /// opened the pull request already knows which it is. It goes when the
+    /// pane's branch does — see [`PullRequest::branch`] — and the "Show: PR
+    /// link" toggle governs whether the row's chip shows it.
+    pub pull_request: Option<PullRequest>,
 
     /// The command the pane is running, or `None` at a prompt.
     ///
@@ -492,31 +575,72 @@ impl AgentSession {
             || self.running_command.is_some()
     }
 
-    /// What a pull-request chip says: `PR #123`, or the raw URL when the number
-    /// cannot be read out of it.
-    ///
-    /// Warp's `github_pr_display_text_from_url`, rule for rule — split on
-    /// `/pull/`, take everything up to the next delimiter, require it to be a
-    /// positive run of digits. Showing the URL when that fails beats showing
-    /// nothing: a link nobody can label is still a link somebody can follow.
+    /// What a pull-request chip says: `PR #123` for a pull request on
+    /// github.com, and the host with the number — `gitlab.com #42` — for
+    /// anything else. See [`pull_request_label`].
     pub fn pull_request_label(&self) -> Option<String> {
-        let url = self.pull_request.as_deref()?.trim();
-        if url.is_empty() {
-            return None;
-        }
-
-        let number = url
-            .rsplit_once("/pull/")
-            .map(|(_, tail)| tail.split(['/', '?', '#']).next().unwrap_or_default())
-            .filter(|number| !number.is_empty())
-            .filter(|number| number.bytes().all(|byte| byte.is_ascii_digit()))
-            .filter(|number| number.parse::<u64>().is_ok_and(|number| number > 0));
-
-        Some(match number {
-            Some(number) => format!("PR #{number}"),
-            None => url.to_owned(),
-        })
+        pull_request_label(&self.pull_request.as_ref()?.url)
     }
+}
+
+/// What a pull-request chip says for `url`, or `None` for an empty one.
+///
+/// The number is Warp's `github_pr_display_text_from_url` rule — split the
+/// path on `/pull/`, take everything up to the next `/`, require a positive
+/// run of digits — or, for a forge that spells a pull request otherwise
+/// (GitLab's `/-/merge_requests/42`, Bitbucket's `/pull-requests/42`), the
+/// path's last segment when that is one.
+///
+/// `PR #<n>` alone only for github.com. Anywhere else the chip names the
+/// host, because the address is whatever a program in the pane wrote to its
+/// terminal, and any program can write one: a bare `PR #12` for
+/// `https://github.com.example.net/o/r/pull/12` would be a link that reads
+/// as the agent's own and opens somebody else's server. The host is the one
+/// a browser goes to, read as the URL standard reads an https address: after
+/// any `user@`, and ended by a `\` as well as by a `/` — so
+/// `https://attacker.example\@github.com/o/r/pull/12` is attacker.example's,
+/// with `@github.com` the start of its path. Warp's fallback when it finds no
+/// number is the whole address; this is the host, since an address is wider
+/// than a row — the card prints the whole of it.
+pub fn pull_request_label(url: &str) -> Option<String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return None;
+    }
+    let after_scheme = url.split_once("://").map_or(url, |(_, rest)| rest);
+    let (authority, rest) = after_scheme.split_at(
+        after_scheme
+            .find(['/', '\\', '?', '#'])
+            .unwrap_or(after_scheme.len()),
+    );
+    let host = authority.rsplit('@').next().unwrap_or(authority);
+    let path = rest.split(['?', '#']).next().unwrap_or_default();
+
+    // Digits and nothing else: `parse` alone would take `+12`.
+    let positive = |number: &&str| {
+        number.bytes().all(|byte| byte.is_ascii_digit())
+            && number.parse::<u64>().is_ok_and(|number| number > 0)
+    };
+    let pull = path
+        .rsplit_once("/pull/")
+        .map(|(_, tail)| tail.split('/').next().unwrap_or_default())
+        .filter(positive);
+    let number = pull.or_else(|| {
+        path.trim_end_matches('/')
+            .rsplit('/')
+            .next()
+            .filter(positive)
+    });
+
+    Some(if host.is_empty() {
+        url.to_owned()
+    } else if let Some(number) = pull.filter(|_| host.eq_ignore_ascii_case("github.com")) {
+        format!("PR #{number}")
+    } else if let Some(number) = number {
+        format!("{host} #{number}")
+    } else {
+        host.to_owned()
+    })
 }
 
 /// One tab: an identity and the panes it shows.

@@ -354,6 +354,18 @@ pub enum TerminalUpdate {
         /// What it said.
         body: Option<String>,
     },
+    /// A program in the pane said which pull request its work is.
+    ///
+    /// The address has been checked on the wire — https, capped, nothing a
+    /// link opener could be tricked by — and is carried up rather than kept
+    /// here because what it is recorded against is the pane's branch, which
+    /// is the workspace's to know.
+    PullRequest {
+        /// Which pane it is in.
+        pane: PaneId,
+        /// The pull request's address.
+        url: String,
+    },
 }
 
 /// The finished blocks of one pane, as the surface holds them.
@@ -1190,6 +1202,9 @@ impl TerminalModel {
                         title: notification.title,
                         body: notification.body,
                     });
+                }
+                TerminalEvent::PullRequest(url) => {
+                    updates.push(TerminalUpdate::PullRequest { pane, url });
                 }
                 // The enum is `#[non_exhaustive]`. A shell asking for something
                 // a later version of the emulator learned to report is not an
