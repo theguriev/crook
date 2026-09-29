@@ -23281,8 +23281,29 @@ mod changes_column {
 
     /// Ends the stand-in's input — the rest of its line, then the end of the
     /// file — waits for it to exit, and answers everything it was given.
+    ///
+    /// A ^D hands `cat` a line typed so far without a newline, and on a line
+    /// with nothing in it is the end of the file: a review pasted without
+    /// Enter takes two, and nothing pasted takes one. Never more than it
+    /// takes, because a ^D left over reaches the shell at its prompt, and
+    /// bash 3.2 — macOS's — exits on it. So the second goes only once the
+    /// first has handed `cat` something and `cat` has written it.
     fn what_the_agent_received(harness: &mut Harness, agent: PaneId, received: &Path) -> String {
-        harness.type_into(agent, "\u{4}\u{4}");
+        let written = |path: &Path| fs::metadata(path).map_or(0, |metadata| metadata.len());
+        let before = written(received);
+        harness.type_into(agent, "\u{4}");
+        let mut exited = false;
+        harness.wait_for(
+            "the stand-in neither exited nor took the rest of its line",
+            |harness| {
+                exited =
+                    live_block_of(harness, agent).state == crook_terminal::BlockState::AtPrompt;
+                exited || written(received) > before
+            },
+        );
+        if !exited {
+            harness.type_into(agent, "\u{4}");
+        }
         await_prompt(harness, agent);
         fs::read_to_string(received).expect("the stand-in wrote its file")
     }
