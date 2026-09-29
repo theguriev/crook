@@ -46,11 +46,12 @@
 //! — because a branch cut from the wrong place, or a build directory nobody
 //! ignored, is thousands of entries a column has no use for.
 
+use std::borrow::Cow;
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-use super::run::{Failure, Intent, run, run_capped};
+use super::run::{Failure, Intent, run, run_capped, run_fed};
 use super::worktree::path_from;
 
 /// How many commits [`commits`] lists.
@@ -333,7 +334,7 @@ pub struct Overview {
 
 /// Everything about the repository `directory` is in, but the hunks.
 ///
-/// **Blocking**: about seven subprocesses. Background executor only.
+/// **Blocking**: about eight subprocesses. Background executor only.
 ///
 /// `directory` may be anywhere in the working tree; everything is asked from
 /// its top, because `ls-files` answers relative to where it runs and a path
@@ -454,8 +455,9 @@ pub fn commits(repository: &Path, base: &Base) -> Result<Commits, Error> {
 /// Every file in `repository` that differs from `base`, and every file
 /// nobody has added.
 ///
-/// **Blocking**: two subprocesses. Background executor only. `repository`
-/// is the top of the working tree: see [`overview`].
+/// **Blocking**: two subprocesses, and a third when a file's stat data has
+/// moved since the index last looked. Background executor only.
+/// `repository` is the top of the working tree: see [`overview`].
 ///
 /// The diff is `base` against the working tree, so what was committed, what
 /// is staged and what is merely saved all appear, once each. Untracked files
@@ -464,20 +466,35 @@ pub fn commits(repository: &Path, base: &Base) -> Result<Commits, Error> {
 /// git does not look into one.
 ///
 /// A file is listed when its contents or its mode differ, and not when only
-/// its stat data does. Reads here never refresh the index (see
-/// [`super::run`]), so a file rewritten with the bytes it already held —
-/// `touch`, a `sed -i` that matched nothing, a formatter or a generator that
-/// changed nothing, `npm install` writing the same lockfile — still has the
-/// old mtime in the index, and `--raw` alone lists it as modified until
-/// something outside Crook refreshes the index. `--numstat`, asked in the
-/// same call, reads what such a file holds and leaves it out, which is what
-/// `git diff` itself shows once it has refreshed.
+/// its stat data does, text or binary. Reads here never refresh the index
+/// (see [`super::run`]), so a file rewritten with the bytes it already held
+/// — `touch`, a `sed -i` that matched nothing, a formatter or a generator
+/// that changed nothing, `npm install` writing the same lockfile, a test run
+/// writing the same snapshot picture — still has the old mtime in the index,
+/// and `--raw` lists it as modified, with no id for what it holds now, until
+/// something outside Crook refreshes the index. Such a file is hashed
+/// (`unchanged`) and left out when it hashes to the id it had at the base,
+/// which is what `git diff` itself shows once it has refreshed.
+///
+/// Nothing here diffs a file. A diff costs what pairing the file's lines
+/// costs under whatever `diff.algorithm` somebody chose — twenty seconds for
+/// one data file under `histogram`, measured, past the read deadline
+/// — and it fails on a file it cannot read, so a list that waited on every
+/// changed file's diff was a list that one file could take away whole.
+/// Hashing reads each file once, and a file it cannot read stays listed.
 pub fn files(repository: &Path, base: &Base) -> Result<Files, Error> {
-    let mut args = vec!["diff", "--raw", "--numstat", "-z"];
+    let mut args = vec!["diff", "--raw", "--no-abbrev", "-z"];
     args.extend(DIFF_FLAGS);
     args.extend([base.fork.as_str(), "--"]);
-    let listed = read(repository, &args)?;
-    let mut files = changed_files(&listed);
+    let raw = read(repository, &args)?;
+    let listed = raw_entries(&raw);
+    let same = unchanged(repository, &listed);
+    let mut files: Vec<FileChange> = listed
+        .into_iter()
+        .enumerate()
+        .filter(|(index, _)| !same.contains(index))
+        .map(|(_, entry)| entry.change)
+        .collect();
 
     let untracked = read(
         repository,
@@ -508,78 +525,163 @@ pub fn files(repository: &Path, base: &Base) -> Result<Files, Error> {
     Ok(Files { files, more })
 }
 
-/// `diff --raw --numstat -z`, read: every file `--raw` lists, less the ones
-/// it calls modified that `--numstat` found no difference in.
+/// One entry of `diff --raw`.
+struct Listed<'a> {
+    /// The change it names.
+    change: FileChange,
+    /// For a file `--raw` calls modified without saying what it holds now:
+    /// what [`unchanged`] hashes it against.
+    unhashed: Option<Unhashed<'a>>,
+}
+
+/// A file whose stat data no longer matches the index, which git reports
+/// as modified without having read it.
+struct Unhashed<'a> {
+    /// Its id at the base, in full.
+    base_id: &'a [u8],
+    /// Its path, as git printed it.
+    path: &'a [u8],
+}
+
+/// `diff --raw --no-abbrev -z`, read.
 ///
-/// `--raw` comes first, one entry per file: a header — a colon, both modes,
-/// both ids, and the status letter with a rename's or a copy's score after
-/// it — then the path, or for a rename or a copy where it was and where it
-/// is, every one of them ended by a NUL. `--numstat` follows, one entry per
-/// file it counted: `added<TAB>deleted<TAB>path`, or for a rename or a copy
-/// `added<TAB>deleted<TAB>` with the two paths after, each ended by a NUL.
-/// The headers begin with a colon and the counts with a digit or a `-`, so
-/// where one list ends is never in doubt; a path, read by its place, is
-/// never asked what it begins with.
+/// One entry per file: a header — a colon, both modes, both ids, and the
+/// status letter with a rename's or a copy's score after it — then the path,
+/// or for a rename or a copy where it was and where it is, every one of them
+/// ended by a NUL. A path is read by its place and never asked what it
+/// begins with.
 ///
-/// Only a modified file is ever dropped: a mode that changed is still
-/// counted, `0 0`, and every other status says something happened.
-fn changed_files(bytes: &[u8]) -> Vec<FileChange> {
-    let mut fields = bytes.split(|byte| *byte == 0).peekable();
-    let mut files = Vec::new();
-    while let Some(header) = fields.next_if(|field| field.first() == Some(&b':')) {
-        let letter = header
-            .rsplit(|byte| *byte == b' ')
-            .next()
-            .and_then(|status| status.first().copied())
-            .unwrap_or(b'M');
-        let status = Status::from_letter(letter);
-        let first = fields.next().map(path_from);
-        let change = match status {
-            Status::Renamed | Status::Copied => {
-                let Some(to) = fields.next().map(path_from) else {
-                    break;
-                };
-                FileChange {
-                    status,
-                    path: to,
-                    from: first,
-                }
-            }
-            _ => {
-                let Some(path) = first else {
-                    break;
-                };
-                FileChange {
-                    status,
-                    path,
-                    from: None,
-                }
-            }
+/// The working tree's id is all zeros when git has not read the file, which
+/// against a commit is exactly when the index's stat data for it has gone
+/// stale: a file whose stat data matches is one git takes the index's id
+/// for. Only a modified regular file whose mode is what it was is left to be
+/// hashed. A mode that changed is a change whatever the bytes are, every other
+/// status says something happened, and `hash-object` reads what a link points
+/// at rather than the link, and cannot read a submodule at all.
+fn raw_entries(bytes: &[u8]) -> Vec<Listed<'_>> {
+    let mut fields = bytes.split(|byte| *byte == 0);
+    let mut listed = Vec::new();
+    while let Some(header) = fields.next().and_then(|field| field.strip_prefix(b":")) {
+        let parts: Vec<&[u8]> = header.split(|byte| *byte == b' ').collect();
+        let &[old_mode, new_mode, base_id, now_id, letters] = parts.as_slice() else {
+            break;
         };
-        files.push(change);
+        let letter = letters.first().copied().unwrap_or(b'M');
+        let status = Status::from_letter(letter);
+        let Some(first) = fields.next() else {
+            break;
+        };
+        let (path, from) = match status {
+            Status::Renamed | Status::Copied => {
+                let Some(to) = fields.next() else {
+                    break;
+                };
+                (to, Some(first))
+            }
+            _ => (first, None),
+        };
+        let unhashed = (letter == b'M'
+            && old_mode == new_mode
+            && matches!(old_mode, b"100644" | b"100755")
+            && now_id.iter().all(|byte| *byte == b'0'))
+        .then_some(Unhashed { base_id, path });
+        listed.push(Listed {
+            change: FileChange {
+                status,
+                path: path_from(path),
+                from: from.map(path_from),
+            },
+            unhashed,
+        });
+    }
+    listed
+}
+
+/// Which of `listed` hold in the working tree what they held at the base,
+/// by their place in it.
+///
+/// **Blocking**: one subprocess, or none when nothing needs hashing.
+///
+/// `hash-object --stdin-paths` hashes each file the way `add` would, through
+/// the repository's clean filter — so a checkout that converts line endings,
+/// or keeps its pictures in LFS, hashes to what was committed — and writes
+/// nothing. It answers in the order it was asked and stops at the first file
+/// it cannot open, so the answers it gave are the first files', and the file
+/// it stopped at and every one after are kept: a file nobody could read may
+/// well have changed. A git that fails outright or runs out of time
+/// confirms nothing, which lists every one of them, as `--raw` does.
+fn unchanged(repository: &Path, listed: &[Listed<'_>]) -> HashSet<usize> {
+    let asked: Vec<(usize, &Unhashed<'_>)> = listed
+        .iter()
+        .enumerate()
+        .filter_map(|(index, entry)| entry.unhashed.as_ref().map(|file| (index, file)))
+        .collect();
+    if asked.is_empty() {
+        return HashSet::new();
     }
 
-    let mut counted = HashSet::new();
-    while let Some(field) = fields.next() {
-        if field.is_empty() {
-            continue;
+    let mut input = Vec::new();
+    for (_, file) in &asked {
+        input.extend_from_slice(&quoted(file.path));
+        input.push(b'\n');
+    }
+    let mut full: Vec<&OsStr> = GLOBAL.map(OsStr::new).to_vec();
+    full.extend(["hash-object", "--stdin-paths"].map(OsStr::new));
+    let hashed = match run_fed(repository, &full, input) {
+        Ok(finished) => {
+            if !finished.success {
+                log::debug!(
+                    "hash-object stopped in {}: {}",
+                    repository.display(),
+                    finished.stderr.trim()
+                );
+            }
+            finished.stdout
         }
-        match field.splitn(3, |byte| *byte == b'\t').nth(2) {
-            Some(path) if !path.is_empty() => {
-                counted.insert(path_from(path));
-            }
-            // A rename or a copy: where it was, then where it is.
-            _ => {
-                fields.next();
-                if let Some(to) = fields.next() {
-                    counted.insert(path_from(to));
-                }
-            }
+        Err(failure) => {
+            log::debug!("hash-object in {}: {failure:?}", repository.display());
+            return HashSet::new();
+        }
+    };
+
+    hashed
+        .split(|byte| *byte == b'\n')
+        .zip(&asked)
+        .filter(|(id, (_, file))| id.strip_suffix(b"\r").unwrap_or(id) == file.base_id)
+        .map(|(_, (index, _))| *index)
+        .collect()
+}
+
+/// `path` the way git prints one: in double quotes with C's escapes when it
+/// holds a control character, a quote, a backslash or a byte past ASCII,
+/// and as it is otherwise.
+///
+/// Which is also the one way `hash-object --stdin-paths` takes a name with
+/// a newline in it, or one ending in a carriage return, as one line of its
+/// input.
+fn quoted(path: &[u8]) -> Cow<'_, [u8]> {
+    let escaped = |byte: u8| !(0x20..0x7f).contains(&byte) || byte == b'"' || byte == b'\\';
+    if !path.iter().any(|byte| escaped(*byte)) {
+        return Cow::Borrowed(path);
+    }
+    let mut out = Vec::with_capacity(path.len() + 8);
+    out.push(b'"');
+    for &byte in path {
+        match byte {
+            b'"' | b'\\' => out.extend([b'\\', byte]),
+            0x07 => out.extend(b"\\a"),
+            0x08 => out.extend(b"\\b"),
+            b'\t' => out.extend(b"\\t"),
+            b'\n' => out.extend(b"\\n"),
+            0x0b => out.extend(b"\\v"),
+            0x0c => out.extend(b"\\f"),
+            b'\r' => out.extend(b"\\r"),
+            _ if escaped(byte) => out.extend(format!("\\{byte:03o}").bytes()),
+            _ => out.push(byte),
         }
     }
-
-    files.retain(|file| file.status != Status::Modified || counted.contains(&file.path));
-    files
+    out.push(b'"');
+    Cow::Owned(out)
 }
 
 /// `file`'s diff against `base`, up to [`MAX_DIFF_BYTES`] and

@@ -188,6 +188,29 @@ pub(super) struct Finished {
 /// those can outlive git by as long as whatever a hook backgrounded cares to
 /// live — see `collect`.
 pub(super) fn run(directory: &Path, args: &[&OsStr], intent: Intent) -> Result<Finished, Failure> {
+    run_with(directory, args, intent, None)
+}
+
+/// [`run`], as a read, with `input` on git's stdin.
+///
+/// For a question too long for a command line: `hash-object --stdin-paths`
+/// is handed every file [`super::changes`] has to hash, and a few thousand
+/// paths is past what Windows lets one command line hold.
+pub(super) fn run_fed(
+    directory: &Path,
+    args: &[&OsStr],
+    input: Vec<u8>,
+) -> Result<Finished, Failure> {
+    run_with(directory, args, Intent::Read, Some(input))
+}
+
+/// [`run`] and [`run_fed`], which differ only in what git's stdin is.
+fn run_with(
+    directory: &Path,
+    args: &[&OsStr],
+    intent: Intent,
+    input: Option<Vec<u8>>,
+) -> Result<Finished, Failure> {
     if git_is_missing() {
         return Err(Failure::GitMissing);
     }
@@ -200,12 +223,32 @@ pub(super) fn run(directory: &Path, args: &[&OsStr], intent: Intent) -> Result<F
         return Err(Failure::NoDirectory);
     }
 
+    let stdin = if input.is_some() {
+        Stdio::piped()
+    } else {
+        Stdio::null()
+    };
     let mut child = start(
         directory,
         args,
         intent,
-        [Stdio::null(), Stdio::piped(), Stdio::piped()],
+        [stdin, Stdio::piped(), Stdio::piped()],
     )?;
+
+    // Written on a thread of its own and never joined, like the readers.
+    // git answers as it reads, so a write waiting here for git to take the
+    // rest would be waiting on a git blocked writing an answer nobody was
+    // reading yet. The pipe closes when the thread ends, which is the end of
+    // the input to git; and a git that stops reading — it failed, or the
+    // deadline killed it — ends the write with a broken pipe rather than
+    // leaving the thread blocked in it.
+    if let Some(input) = input
+        && let Some(mut pipe) = child.stdin.take()
+    {
+        std::thread::spawn(move || {
+            let _ = std::io::Write::write_all(&mut pipe, &input);
+        });
+    }
 
     // Both pipes are drained on their own threads. Polling `try_wait` with the
     // output left unread deadlocks the moment git writes more than a pipe

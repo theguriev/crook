@@ -305,9 +305,41 @@ fn a_file_rewritten_with_the_bytes_it_had_is_not_a_change() {
         return;
     }
     let scratch = ScratchDir::new("same-bytes");
-    // On main, so that at the base they are what they are now.
+    // On main, so that at the base they are what they are now. A picture,
+    // and a lockfile `.gitattributes` says not to diff, because git counts
+    // neither: a count of `-` is what it prints for both, changed or not.
+    // And names a line of `hash-object`'s input has to quote.
     let repo = repository(&scratch, "repo");
-    commit(&repo, "kept.txt", "the same\n", "a file the agent rewrites");
+    let picture: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0 the same picture";
+    let mut same: Vec<(&str, &[u8])> = vec![
+        ("kept.txt", b"the same\n".as_slice()),
+        ("snapshot.png", picture),
+        (
+            "package-lock.json",
+            b"{ \"lockfileVersion\": 3 }\n".as_slice(),
+        ),
+        (
+            "\u{e9}t\u{e9}.txt",
+            b"the same, named in UTF-8\n".as_slice(),
+        ),
+    ];
+    // Windows has no file of that name to make.
+    if cfg!(unix) {
+        same.push((
+            "two\nlines.txt",
+            b"a name with a newline in it\n".as_slice(),
+        ));
+    }
+    write(&repo, ".gitattributes", "package-lock.json -diff\n");
+    git(&repo, &["add", ".gitattributes"]);
+    for (path, contents) in &same {
+        write(&repo, path, contents);
+        git(&repo, &["add", "--", *path]);
+    }
+    git(
+        &repo,
+        &["commit", "--no-verify", "-m", "files the agent rewrites"],
+    );
     commit(
         &repo,
         "run.sh",
@@ -315,8 +347,10 @@ fn a_file_rewritten_with_the_bytes_it_had_is_not_a_change() {
         "a file that becomes a program",
     );
     git(&repo, &["switch", "-c", "task"]);
-    write(&repo, "kept.txt", "the same\n");
-    backdate(&repo, "kept.txt");
+    for (path, contents) in &same {
+        write(&repo, path, contents);
+        backdate(&repo, path);
+    }
     write(&repo, "tracked.txt", "one\nTWO\nthree\n");
     #[cfg(unix)]
     {
@@ -325,7 +359,7 @@ fn a_file_rewritten_with_the_bytes_it_had_is_not_a_change() {
             .expect("chmod");
     }
     // That this is the case being tested, and not one git already hides: the
-    // raw list, read the way `files` reads it, does name the file.
+    // raw list, read the way `files` reads it, does name every file.
     let raw = git(
         &repo,
         &[
@@ -334,28 +368,80 @@ fn a_file_rewritten_with_the_bytes_it_had_is_not_a_change() {
             "diff.autoRefreshIndex=false",
             "diff",
             "--raw",
+            "-z",
             "HEAD",
         ],
     );
-    assert!(raw.contains("kept.txt"), "git no longer lists it: {raw}");
+    for (path, _) in &same {
+        assert!(raw.contains(path), "git no longer lists {path:?}: {raw:?}");
+    }
 
     let base = base(&repo).expect("the repository can be read");
     let listed = files(&repo, &base).expect("the diff can be read");
 
-    assert!(
-        !listed
-            .files
-            .iter()
-            .any(|file| file.path == Path::new("kept.txt")),
-        "a file holding what it held was listed as changed: {:?}",
-        listed.files
-    );
+    for (path, _) in &same {
+        assert!(
+            !listed.files.iter().any(|file| file.path == Path::new(path)),
+            "{path:?}, holding what it held, was listed as changed: {:?}",
+            listed.files
+        );
+    }
     assert_eq!(file(&listed.files, "tracked.txt").status, Status::Modified);
     #[cfg(unix)]
     assert_eq!(
         file(&listed.files, "run.sh").status,
         Status::Modified,
         "a mode that changed is a change"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_file_nobody_can_read_is_listed_and_the_rest_of_the_list_with_it() {
+    // A file a container run left owned by root, or one an agent locked
+    // down. Diffing it fails, and so did the whole list when the list was
+    // read by diffing every changed file.
+    if without_git("a_file_nobody_can_read_is_listed_and_the_rest_of_the_list_with_it") {
+        return;
+    }
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let scratch = ScratchDir::new("unreadable");
+    let repo = repository(&scratch, "repo");
+    commit(
+        &repo,
+        "a-kept.txt",
+        "the same\n",
+        "a file the agent rewrites",
+    );
+    commit(&repo, "secret.txt", "hello\n", "a file the agent locks");
+    git(&repo, &["switch", "-c", "task"]);
+    write(&repo, "a-kept.txt", "the same\n");
+    backdate(&repo, "a-kept.txt");
+    write(&repo, "secret.txt", "changed\n");
+    std::fs::set_permissions(
+        repo.join("secret.txt"),
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .expect("chmod");
+    if std::fs::read(repo.join("secret.txt")).is_ok() {
+        eprintln!("skipping: this user reads a file with no permissions at all");
+        return;
+    }
+
+    let base = base(&repo).expect("the repository can be read");
+    let listed = files(&repo, &base).expect("one unreadable file took the whole list away");
+
+    assert_eq!(file(&listed.files, "secret.txt").status, Status::Modified);
+    // `hash-object` stops at the file it cannot open; what it hashed before
+    // that still counts.
+    assert!(
+        !listed
+            .files
+            .iter()
+            .any(|file| file.path == Path::new("a-kept.txt")),
+        "a file hashed before the unreadable one was listed: {:?}",
+        listed.files
     );
 }
 

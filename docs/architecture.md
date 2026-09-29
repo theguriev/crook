@@ -1050,11 +1050,16 @@ switch.
 docks — composed once in `Workspace::render`, beside the work rather than over it — about the
 focused pane's repository. `app/src/git/changes.rs` reads it: the base (the merge-base of `HEAD`
 and `merged::base_of`'s branch, which is what a pull request compares from, so the base moving
-on is not shown as the task undoing it), `git log <merge-base>..HEAD`, `git diff --raw --numstat
+on is not shown as the task undoing it), `git log <merge-base>..HEAD`, `git diff --raw
 <merge-base>` against the working tree plus `git ls-files --others --exclude-standard`, and one
-file's unified diff when somebody opens that file. The counts are there to leave out a file
-whose bytes are what they were but whose mtime moved — a formatter that changed nothing, `touch`
-— which `--raw` alone calls modified, because a read never refreshes the index. Every call goes
+file's unified diff when somebody opens that file. A read never refreshes the index, so a file
+whose bytes are what they were but whose mtime moved — a formatter that changed nothing, `touch`,
+a test run writing the same snapshot picture — is one `--raw` calls modified without having read
+it; those files, text or binary, go through one `git hash-object --stdin-paths`, and a file that
+hashes to the id it had at the base is left out. The list never diffs a file: a diff's cost is
+whatever `diff.algorithm` somebody chose makes of the file's lines (twenty seconds for one data
+file under `histogram`), and one file it cannot read fails it, where hashing reads each file once
+and keeps a file it cannot read. Every call goes
 through `git/run.rs`'s deadline on the background pool, with `--no-ext-diff`, `--no-textconv`
 and `core.fsmonitor` off, because each of those is a program a repository's configuration names
 and git would run it for a column that only reads; the `a/` and `b/` prefixes and the spelling
