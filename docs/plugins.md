@@ -1245,8 +1245,10 @@ somewhere to live.
 SDK, `--skill` output for an agent in a pane, supervised long-lived plugins with budgets. The
 socket's first slices are in: a per-process Unix socket that answers `crook pane list`, which
 only reads, and `crook tab new`, which a pane uses to open a worker's tab beside it — known by a
-per-pane token, under a spawn budget, with its lineage on the new row. See "The window answers"
-in `docs/architecture.md` for the threat model and what the verbs after these will need.
+per-pane token, under a spawn budget, with its lineage on the new row — and `crook pane wait`,
+`crook pane blocks` and `crook events --follow`, which let that pane watch the tabs it opened and
+read their finished commands, and nothing a person opened. See "The window answers" in
+`docs/architecture.md` for the threat model and what the verbs after these will need.
 Everything else in this phase is still to come.
 
 **Phase 5 — the agent seam: the status half is done, and it is not a plugin.**
