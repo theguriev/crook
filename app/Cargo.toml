@@ -61,6 +61,15 @@ sha2.workspace = true
 # opens a socket, it asks, and this is what does the asking on its behalf.
 ureq.workspace = true
 
+# A desktop notification on macOS goes to Notification Center, which has no
+# command to run the way `notify-send` is run on Linux. See the workspace
+# manifest for why these bindings.
+[target.'cfg(target_os = "macos")'.dependencies]
+block2.workspace = true
+objc2.workspace = true
+objc2-foundation.workspace = true
+objc2-user-notifications.workspace = true
+
 [dev-dependencies]
 # Test plugins are written in wasm's text format and assembled in the test, so
 # a wasm toolchain is not needed to run `cargo test`.

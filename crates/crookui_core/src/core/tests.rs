@@ -144,6 +144,53 @@ fn a_view_observing_a_model_sees_its_updates() {
 }
 
 #[test]
+fn an_update_and_everything_its_effects_cause_is_one_turn() {
+    // What `turns` is for: an observer whose work notifies what it observes
+    // runs again inside the same update, and has to be able to tell that from
+    // being run again after the event loop has had control back.
+    #[derive(Default)]
+    struct Model {
+        seen: Vec<u64>,
+        again: usize,
+    }
+
+    impl Entity for Model {
+        type Event = ();
+    }
+
+    App::test(|mut app| async move {
+        let app = &mut app;
+        let observer = app.add_model(|_| Model::default());
+        let observed = app.add_model(|_| Model::default());
+
+        observer.update(app, |_, ctx| {
+            ctx.observe(&observed, |model: &mut Model, observed, ctx| {
+                model.seen.push(ctx.turns());
+                observed.update(ctx, |observed, ctx| {
+                    if observed.again > 0 {
+                        observed.again -= 1;
+                        ctx.notify();
+                    }
+                });
+            });
+        });
+        let before = app.read(|ctx| ctx.turns());
+
+        observed.update(app, |observed, ctx| {
+            observed.again = 2;
+            ctx.notify();
+        });
+        observer.read(app, |model, _| assert_eq!(model.seen, [before; 3]));
+        assert_eq!(app.read(|ctx| ctx.turns()), before + 1);
+
+        observed.update(app, |_, ctx| ctx.notify());
+        observer.read(app, |model, _| {
+            assert_eq!(model.seen, [before, before, before, before + 1]);
+        });
+    })
+}
+
+#[test]
 fn dropping_the_last_handle_removes_the_view_and_its_subscriptions() {
     struct Tab {
         other: Option<ViewHandle<Tab>>,

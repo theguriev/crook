@@ -25,6 +25,12 @@
 //! plugin its plugin directory loads instead; `aider` has no hooks, and gets
 //! the sentence that says so and what to do instead.
 //!
+//! The same table is how a window knows an agent when it sees one:
+//! [`program_of`] reads a pane's command line for the program an agent is
+//! started as, which is the one word of a process the session file keeps, and
+//! [`resume_line`] is what a pane restored from that file is offered to bring
+//! the agent's conversation back.
+//!
 //! `--skill` prints [`SKILL`], the file that teaches an agent the rest of
 //! this: how it tells it is in a pane, what the four words do to the row,
 //! and what else the binary will do for it. A hook makes Claude Code report
@@ -227,12 +233,37 @@ pub struct Hooks {
 
 /// One coding agent `--agent-hooks` knows.
 struct Agent {
-    /// The word on the command line.
+    /// The word on the command line, which is also the program's own file
+    /// name — `claude` is both what `--agent-hooks` takes and what a person
+    /// types to start Claude Code, and [`program_of`] reads a pane's command
+    /// line by it.
     name: &'static str,
     /// What the program calls itself.
     program: &'static str,
     /// How the fragment is spelled, and where it goes.
     fragment: Fragment,
+    /// The line that goes back to the most recent conversation in the
+    /// directory it is run in, when the agent has one — see [`resume_line`].
+    last: Option<&'static str>,
+    /// The line that lists the agent's conversations for a person to choose
+    /// from, when the agent has one.
+    pick: Option<&'static str>,
+}
+
+/// Which of an agent's two resume lines a restored pane is offered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Resume {
+    /// The most recent conversation in the pane's directory: `claude
+    /// --continue`. What a pane is offered when it is the only one of its
+    /// agent in its directory, which Crook's one-agent-per-worktree makes the
+    /// ordinary case.
+    Last,
+    /// The agent's own list to choose from: `claude --resume`. What two panes
+    /// of one agent in one directory are offered instead, because "the most
+    /// recent conversation" is one conversation and they had two, and
+    /// guessing which pane had which would put one agent's work in the
+    /// other's pane.
+    Pick,
 }
 
 /// The shapes a fragment comes in.
@@ -391,6 +422,24 @@ export const CrookPlugin = async ({ $ }) => {
 "#;
 
 /// The agents, in the order the errors list them.
+///
+/// The resume lines are each CLI's own documented spelling, and only where
+/// the documentation says the line is about the directory it runs in: the
+/// directory is the whole of how a restored pane finds its conversation
+/// again. Claude Code's `--continue` is "the most recent conversation in the
+/// current directory" and its bare `--resume` a picker; Codex's `resume
+/// --last` is "the most recent chat from the current working directory" and
+/// its bare `resume` a picker of that directory's; Gemini CLI keeps its
+/// sessions per project path and `--resume latest` takes the newest, with no
+/// picker on the command line. Copilot's `--continue` is documented as the
+/// most recent session of the *repository*, which every worktree of a
+/// repository shares, so it gets its picker for both. OpenCode's `--continue`
+/// is the newest session across a repository's root-level worktrees — an
+/// open bug, anomalyco/opencode#41562 — and it has no picker flag, so it
+/// gets neither. Aider gets none by default either, though
+/// `aider --restore-chat-history`, which reloads its chat history file, is a
+/// line to give it. Any of them can be given a line in the settings; see
+/// [`Settings::resume_line`](crate::settings::Settings::resume_line).
 const AGENTS: &[Agent] = &[
     Agent {
         name: "claude",
@@ -400,6 +449,8 @@ const AGENTS: &[Agent] = &[
             events: CLAUDE_EVENTS,
             missing: "",
         },
+        last: Some("claude --continue"),
+        pick: Some("claude --resume"),
     },
     Agent {
         name: "codex",
@@ -410,6 +461,8 @@ const AGENTS: &[Agent] = &[
             missing: " Codex has no notification hook: the row says needs-input for a \
 permission, and a question the model asks ends its turn as idle.",
         },
+        last: Some("codex resume --last"),
+        pick: Some("codex resume"),
     },
     Agent {
         name: "gemini",
@@ -420,6 +473,8 @@ permission, and a question the model asks ends its turn as idle.",
             missing: " Gemini CLI notifies for a tool permission only: a question the \
 model asks ends its turn as idle.",
         },
+        last: Some("gemini --resume latest"),
+        pick: None,
     },
     Agent {
         name: "copilot",
@@ -428,6 +483,8 @@ model asks ends its turn as idle.",
             file: "~/.copilot/hooks/crook.json, or a project's .github/hooks/crook.json",
             events: COPILOT_EVENTS,
         },
+        last: Some("copilot --resume"),
+        pick: Some("copilot --resume"),
     },
     Agent {
         name: "opencode",
@@ -436,6 +493,8 @@ model asks ends its turn as idle.",
             file: "~/.config/opencode/plugins/crook.ts, or a project's .opencode/plugins/crook.ts",
             source: OPENCODE_PLUGIN,
         },
+        last: None,
+        pick: None,
     },
     Agent {
         name: "aider",
@@ -446,8 +505,49 @@ ends and it waits for you, so `aider --notifications --notifications-command \"B
 --agent idle\"` reports idle there and nothing else; for running, start it from a \
 wrapper script that runs `BINARY --agent running` first.",
         ),
+        last: None,
+        pick: None,
     },
 ];
+
+/// The known agent a command line starts, by its program's name, or `None`
+/// when the line starts something else.
+///
+/// The first word only, and only its file name: `claude "fix the login bug"`
+/// and `/opt/homebrew/bin/claude --model opus` are both `claude`. Nothing
+/// after the first word is ever handed on, because what comes after it is
+/// where a person types the prompt, and the answer to this is written into
+/// the session file. A word that names no agent this module knows — `cargo`,
+/// `vim`, a `claudette` — is `None`, so a file never holds the name of a
+/// program Crook would not know how to offer back.
+pub fn program_of(command: &str) -> Option<&'static str> {
+    let first = command.split_whitespace().next()?;
+    let file = first.rsplit(['/', '\\']).next().unwrap_or(first);
+    // Windows' own spellings of the same program: the binary, and the shim
+    // npm installs a Node CLI as.
+    let program = file
+        .strip_suffix(".exe")
+        .or_else(|| file.strip_suffix(".cmd"))
+        .unwrap_or(file);
+    AGENTS
+        .iter()
+        .find(|agent| agent.name == program)
+        .map(|agent| agent.name)
+}
+
+/// The line that resumes `program`'s conversation in the directory it is
+/// run in, in the `resume` form, or `None` when the agent has none.
+///
+/// Built in; a person's own lines are the settings' — see
+/// [`Settings::resume_line`](crate::settings::Settings::resume_line), which
+/// is what a restored pane actually asks.
+pub fn resume_line(program: &str, resume: Resume) -> Option<&'static str> {
+    let agent = AGENTS.iter().find(|agent| agent.name == program)?;
+    match resume {
+        Resume::Last => agent.last,
+        Resume::Pick => agent.pick,
+    }
+}
 
 /// The known names, listed the way an error lists them: "claude, codex, ...
 /// or aider".
@@ -830,6 +930,86 @@ mod tests {
         assert!(message.contains("cursor"));
         for agent in AGENTS {
             assert!(message.contains(agent.name), "{message}");
+        }
+    }
+
+    #[test]
+    fn a_command_line_names_its_agent_by_the_first_word_and_nothing_after_it() {
+        assert_eq!(Some("claude"), program_of("claude"));
+        // The prompt is the rest of the line, and none of it is the answer.
+        assert_eq!(Some("claude"), program_of("claude \"fix the bug\""));
+        assert_eq!(
+            Some("codex"),
+            program_of("  codex --model o4 'port the tab bar'")
+        );
+        // By the program's file name, wherever it was run from.
+        assert_eq!(
+            Some("claude"),
+            program_of("/opt/homebrew/bin/claude --model opus")
+        );
+        assert_eq!(
+            Some("copilot"),
+            program_of(r"C:\Users\me\AppData\Roaming\npm\copilot.cmd")
+        );
+        for agent in AGENTS {
+            assert_eq!(Some(agent.name), program_of(agent.name));
+        }
+    }
+
+    #[test]
+    fn a_command_line_that_starts_no_known_agent_names_nothing() {
+        for command in [
+            "",
+            "   ",
+            "cargo test",
+            "vim claude.md",
+            "claudette",
+            "echo claude",
+            "./claude-notes.sh",
+        ] {
+            assert_eq!(None, program_of(command), "{command:?}");
+        }
+    }
+
+    #[test]
+    fn each_agent_is_resumed_by_its_own_documented_line() {
+        assert_eq!(
+            Some("claude --continue"),
+            resume_line("claude", Resume::Last)
+        );
+        assert_eq!(Some("claude --resume"), resume_line("claude", Resume::Pick));
+        assert_eq!(
+            Some("codex resume --last"),
+            resume_line("codex", Resume::Last)
+        );
+        assert_eq!(Some("codex resume"), resume_line("codex", Resume::Pick));
+        assert_eq!(
+            Some("gemini --resume latest"),
+            resume_line("gemini", Resume::Last)
+        );
+        // No picker on Gemini's command line, and an offer of the newest
+        // conversation to two panes would be the same one twice.
+        assert_eq!(None, resume_line("gemini", Resume::Pick));
+        // Copilot's newest is the repository's, which a worktree shares.
+        assert_eq!(
+            Some("copilot --resume"),
+            resume_line("copilot", Resume::Last)
+        );
+        // OpenCode's newest is too, and it has no picker to fall back on.
+        assert_eq!(None, resume_line("opencode", Resume::Last));
+        assert_eq!(None, resume_line("aider", Resume::Last));
+        assert_eq!(None, resume_line("vim", Resume::Last));
+    }
+
+    #[test]
+    fn every_resume_line_starts_the_agent_it_resumes() {
+        // A line whose first word were another program's would be recorded,
+        // once it ran, as that program: the pane would come back next time
+        // offering the wrong agent.
+        for agent in AGENTS {
+            for line in [agent.last, agent.pick].into_iter().flatten() {
+                assert_eq!(Some(agent.name), program_of(line), "{line}");
+            }
         }
     }
 

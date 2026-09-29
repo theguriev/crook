@@ -1,14 +1,14 @@
 //! The panel that says why a row's dot is what it is.
 //!
 //! A row is amber, and nothing on it says whether the agent asked for an
-//! answer, the shell rang, a person marked it to come back to, or a command
-//! ended under an agent that never said it stopped. Every one of those is a
-//! fact the session already holds — see [`AgentSession`] — and this is the
-//! one place they are read out in words. herdr answers the same question with
-//! `herdr agent explain <target>`; Crook's socket lists the panes, opens tabs
-//! and lets a pane watch the tabs it opened, and explains no row's status
-//! yet — see [`crate::control`] — so the answer is an entry on the row's own
-//! menu, "Why this status",
+//! answer, the shell rang, a program sent a notification, a person marked it
+//! to come back to, or a command ended under an agent that never said it
+//! stopped. Every one of those is a fact the session already holds — see
+//! [`AgentSession`] — and this is the one place they are read out in words.
+//! herdr answers the same question with `herdr agent explain <target>`;
+//! Crook's socket lists the panes, opens tabs and lets a pane watch the tabs
+//! it opened, and explains no row's status yet — see [`crate::control`] — so
+//! the answer is an entry on the row's own menu, "Why this status",
 //! contributed by [`crook/tabs`](crate::plugins::tabs). A tab another pane
 //! opened says so here too, since who started the work is the first thing a
 //! person asks about a row they did not open.
@@ -116,13 +116,16 @@ pub(super) fn lines(session: &AgentSession, now: Instant) -> Vec<String> {
         lines.push(format!("It asks: {message}"));
     }
 
-    match session.attention {
+    match &session.attention {
         Some(Attention::Bell) => {
             lines.push("Attention: the bell rang while nobody was looking.".to_owned());
         }
         Some(Attention::StatusChange) => {
             lines.push("Attention: the status changed while nobody was looking.".to_owned());
         }
+        Some(Attention::Notification(message)) => lines.push(format!(
+            "Attention: a notification arrived while nobody was looking: {message}"
+        )),
         None => {}
     }
     if session.marked {

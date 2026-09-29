@@ -238,6 +238,22 @@ fn test_the_mouse_modes_are_the_ones_the_child_asked_for() {
 }
 
 #[test]
+fn test_focus_reporting_is_the_mode_the_child_asked_for() {
+    let mut emulator = emulator();
+    assert!(
+        !emulator.focus_reporting(),
+        "a fresh terminal reports no focus, which is what keeps `CSI I` off a \
+         shell's command line"
+    );
+
+    emulator.advance(b"\x1b[?1004h");
+    assert!(emulator.focus_reporting());
+
+    emulator.advance(b"\x1b[?1004l");
+    assert!(!emulator.focus_reporting());
+}
+
+#[test]
 fn test_alternate_scroll_is_reported_separately_from_the_mouse() {
     // A pager relies on this and never asks for the mouse. The two have to
     // stay apart: a drag across `less` must still select, and the wheel must
@@ -284,6 +300,50 @@ fn test_a_query_from_the_child_is_answered() {
         "the child's query should have been answered"
     );
     assert!(emulator.take_replies().is_empty());
+}
+
+#[test]
+fn test_a_mirror_owes_the_child_no_replies() {
+    // What a mirror is for: the stream it follows is also being followed by
+    // an emulator that answers, and a second answer would reach the child
+    // as input it never asked for.
+    let queries = b"\x1b[c\x1b[6n\x1b]11;?\x07\x1b[14t";
+
+    let mut answering = emulator();
+    answering.advance(queries);
+    assert!(!answering.take_replies().is_empty());
+
+    let mut mirror = emulator();
+    mirror.advance_mirrored(Fed::Output(queries));
+    assert_eq!(Vec::<u8>::new(), mirror.take_replies());
+}
+
+#[test]
+fn test_a_mirror_owes_nothing_for_an_update_that_expires_while_it_paints() {
+    // A synchronized update nobody ended is let go by painting as well as by
+    // the next feed, and the queries buffered inside it are answered then —
+    // after the mirrored call that fed them has returned.
+    let update = b"\x1b[?2026h\x1b[c\x1b[6n";
+
+    let mut answering = emulator();
+    answering.advance(update);
+    let mut mirror = emulator();
+    mirror.advance_mirrored(Fed::Output(update));
+    assert_eq!(Vec::<u8>::new(), answering.take_replies());
+    assert_eq!(Vec::<u8>::new(), mirror.take_replies());
+
+    std::thread::sleep(Duration::from_millis(200));
+    answering.snapshot();
+    mirror.snapshot();
+    assert!(
+        !answering.take_replies().is_empty(),
+        "the expired update's queries are answered when it is painted"
+    );
+    assert_eq!(Vec::<u8>::new(), mirror.take_replies());
+
+    // A mirror stays one, whichever way it is fed after.
+    mirror.advance(b"\x1b[c");
+    assert_eq!(Vec::<u8>::new(), mirror.take_replies());
 }
 
 #[test]
@@ -876,4 +936,402 @@ fn test_a_report_too_long_for_the_parser_says_where_it_was_cut() {
     // And a title with no message after it has the whole of the room.
     let (title, _) = arrived(Some(&commands(30)), None);
     assert_eq!(title, Some(format!("{}\u{2026}", commands(14))));
+}
+
+/// What `bytes` ask a fresh emulator for: the one notification they carry,
+/// or `None` when they carry none — and nothing else either.
+fn notified(bytes: &[u8]) -> Option<Notification> {
+    let mut emulator = emulator();
+    emulator.advance(bytes);
+    match emulator.take_events().as_slice() {
+        [] => None,
+        [TerminalEvent::Notification(notification)] => Some(notification.clone()),
+        other => panic!("one notification at most, and nothing else: {other:?}"),
+    }
+}
+
+/// A notification with a body and no title, which is all OSC 9 can carry.
+fn saying(body: &str) -> Option<Notification> {
+    Some(Notification {
+        title: None,
+        body: Some(body.to_owned()),
+    })
+}
+
+fn titled(title: &str, body: Option<&str>) -> Option<Notification> {
+    Some(Notification {
+        title: Some(title.to_owned()),
+        body: body.map(str::to_owned),
+    })
+}
+
+#[test]
+fn test_osc_nine_asks_for_a_look_with_its_message() {
+    // iTerm2's form, which Claude Code writes with its notification channel
+    // set to `iterm2`. The BEL is the sequence's terminator, not a bell.
+    assert_eq!(
+        saying("Claude needs your permission to use Bash"),
+        notified(b"\x1b]9;Claude needs your permission to use Bash\x07")
+    );
+    assert_eq!(saying("build done"), notified(b"\x1b]9;build done\x1b\\"));
+    assert_eq!(
+        None,
+        notified(b"\x1b]9;\x07"),
+        "an empty message says nothing"
+    );
+    assert_eq!(None, notified(b"\x1b]9;   \x07"));
+}
+
+#[test]
+fn test_a_notification_leaves_the_status_alone() {
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b]6340;running;port the tab bar\x07");
+    emulator.take_events();
+
+    emulator.advance(b"\x1b]9;tests passed\x07");
+
+    assert_eq!(AgentReport::Running, emulator.agent());
+    assert_eq!(
+        vec![TerminalEvent::Notification(
+            saying("tests passed").expect("a notification")
+        )],
+        emulator.take_events()
+    );
+}
+
+#[test]
+fn test_a_notification_with_semicolons_arrives_whole() {
+    // `vte` splits every OSC on `;`, so each of these arrives in pieces.
+    assert_eq!(
+        saying("cargo test; 3 failed; see the log"),
+        notified(b"\x1b]9;cargo test; 3 failed; see the log\x07")
+    );
+    assert_eq!(
+        titled("deploy", Some("staging; then prod?")),
+        notified(b"\x1b]777;notify;deploy;staging; then prod?\x07")
+    );
+    assert_eq!(
+        titled("fix a; then b", None),
+        notified(b"\x1b]99;;fix a; then b\x1b\\")
+    );
+}
+
+#[test]
+fn test_a_notification_too_long_for_the_parser_says_where_it_was_cut() {
+    // `vte` keeps sixteen pieces of an OSC and drops the rest without a
+    // word: the number, and fifteen of the message.
+    let steps = |count: usize| {
+        (1..=count)
+            .map(|at| format!("step {at}"))
+            .collect::<Vec<_>>()
+            .join(";")
+    };
+    let osc_nine = |message: &str| notified(format!("\x1b]9;{message}\x07").as_bytes());
+
+    assert_eq!(saying(&steps(14)), osc_nine(&steps(14)));
+    // Fifteen fill the parser exactly, and nothing says whether more were
+    // dropped, so it is marked as possibly cut rather than passed off as
+    // whole.
+    for count in [15, 16, 40] {
+        assert_eq!(
+            saying(&format!("{}\u{2026}", steps(15))),
+            osc_nine(&steps(count)),
+            "{count} pieces"
+        );
+    }
+    // The same for the other two, which spend pieces on fields of their own.
+    assert_eq!(
+        titled("deploy", Some(&format!("{}\u{2026}", steps(13)))),
+        notified(format!("\x1b]777;notify;deploy;{}\x07", steps(30)).as_bytes())
+    );
+    assert_eq!(
+        saying(&format!("{}\u{2026}", steps(14))),
+        notified(format!("\x1b]99;p=body;{}\x1b\\", steps(30)).as_bytes())
+    );
+}
+
+#[test]
+fn test_conemus_commands_on_osc_nine_are_not_notifications() {
+    for sequence in [
+        &b"\x1b]9;4;1;50\x07"[..],
+        b"\x1b]9;4;0\x07",
+        b"\x1b]9;4;3\x1b\\",
+        b"\x1b]9;9;/home/me\x07",
+        b"\x1b]9;1;500\x07",
+        b"\x1b]9;5\x07",
+        b"\x1b]9;12\x07",
+    ] {
+        assert_eq!(
+            None,
+            notified(sequence),
+            "{}",
+            String::from_utf8_lossy(sequence).escape_debug()
+        );
+    }
+    // A number ConEmu has no command for starts a message like any word.
+    assert_eq!(saying("13;done"), notified(b"\x1b]9;13;done\x07"));
+    assert_eq!(
+        saying("4 tests failed"),
+        notified(b"\x1b]9;4 tests failed\x07")
+    );
+}
+
+#[test]
+fn test_control_characters_are_taken_out_of_a_notification() {
+    // `vte` drops C0 inside an OSC itself. DEL and the C1 controls, written
+    // as UTF-8, reach the reader — and a C1 CSI is an escape sequence
+    // waiting for something to print it.
+    assert_eq!(
+        saying("one 31m two three"),
+        notified("\x1b]9;one\u{9b}31m\u{7f}two\u{85}three\x07".as_bytes())
+    );
+    assert_eq!(
+        titled("a b", Some("c d")),
+        notified("\x1b]777;notify;a\u{90}b;c\u{9c}d\x07".as_bytes())
+    );
+    assert_eq!(
+        titled("e f", None),
+        notified("\x1b]99;;e\u{7f}f\x1b\\".as_bytes())
+    );
+    // A text that is nothing but control characters is no text.
+    assert_eq!(None, notified("\x1b]9;\u{9b}\u{7f}\x07".as_bytes()));
+}
+
+#[test]
+fn test_an_over_long_notification_is_cut_to_one_line() {
+    let long = "y".repeat(notify::BODY_CHARS + 300);
+    let cut = format!("{}\u{2026}", "y".repeat(notify::BODY_CHARS));
+    assert_eq!(
+        saying(&cut),
+        notified(format!("\x1b]9;{long}\x07").as_bytes())
+    );
+
+    let title = "t".repeat(notify::TITLE_CHARS + 40);
+    assert_eq!(
+        titled(
+            &format!("{}\u{2026}", "t".repeat(notify::TITLE_CHARS)),
+            Some(&cut)
+        ),
+        notified(format!("\x1b]777;notify;{title};{long}\x07").as_bytes())
+    );
+    assert_eq!(
+        Some(Notification {
+            title: None,
+            body: Some(cut.clone()),
+        }),
+        notified(format!("\x1b]99;p=body;{long}\x1b\\").as_bytes())
+    );
+}
+
+#[test]
+fn test_osc_777_notify_carries_a_title_and_a_body() {
+    // rxvt-unicode's, which Ghostty reads and Claude Code writes with its
+    // channel set to `ghostty`.
+    assert_eq!(
+        titled(
+            "Claude Code",
+            Some("Claude needs your permission to use Bash")
+        ),
+        notified(b"\x1b]777;notify;Claude Code;Claude needs your permission to use Bash\x07")
+    );
+    assert_eq!(
+        titled("build", None),
+        notified(b"\x1b]777;notify;build\x07")
+    );
+    assert_eq!(
+        saying("no title"),
+        notified(b"\x1b]777;notify;;no title\x07")
+    );
+    assert_eq!(None, notified(b"\x1b]777;notify;;\x07"));
+    assert_eq!(None, notified(b"\x1b]777;notify\x07"));
+    // 777 is rxvt's number for all its extensions.
+    assert_eq!(None, notified(b"\x1b]777;preexec;ls\x07"));
+}
+
+#[test]
+fn test_kittys_osc_99_in_one_chunk() {
+    // kitty's own first example: no metadata, and the payload is the title.
+    assert_eq!(
+        titled("Hello world", None),
+        notified(b"\x1b]99;;Hello world\x1b\\")
+    );
+    assert_eq!(
+        saying("just a body"),
+        notified(b"\x1b]99;p=body;just a body\x1b\\")
+    );
+    // Keys that do not change the text are passed over, known or not.
+    assert_eq!(
+        titled("done", None),
+        notified(b"\x1b]99;i=7:d=1:a=focus:u=2:zz=9;done\x1b\\")
+    );
+    assert_eq!(None, notified(b"\x1b]99;;\x1b\\"));
+    assert_eq!(None, notified(b"\x1b]99\x1b\\"));
+}
+
+#[test]
+fn test_kittys_chunks_are_put_back_together() {
+    // Exactly what Claude Code writes with its channel set to `kitty`: the
+    // title in an unfinished chunk, the body in the chunk that finishes it,
+    // and a third, empty, that adds nothing.
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b]99;i=42:d=0:p=title;Claude Code\x1b\\");
+    assert!(
+        emulator.take_events().is_empty(),
+        "a notification was shown before its last chunk"
+    );
+    emulator.advance(b"\x1b]99;i=42:p=body;Claude needs your permission to use Bash\x1b\\");
+    emulator.advance(b"\x1b]99;i=42:d=1:a=focus;\x1b\\");
+    assert_eq!(
+        vec![TerminalEvent::Notification(
+            titled(
+                "Claude Code",
+                Some("Claude needs your permission to use Bash")
+            )
+            .expect("a notification")
+        )],
+        emulator.take_events()
+    );
+
+    // A body sent in two chunks is one body.
+    assert_eq!(
+        saying("first half, second half"),
+        notified(b"\x1b]99;i=a:d=0:p=body;first half, \x1b\\\x1b]99;i=a:p=body;second half\x1b\\")
+    );
+    // A chunk of another notification starts afresh: the unfinished one is
+    // dropped rather than mixed into it.
+    assert_eq!(
+        titled("second", None),
+        notified(b"\x1b]99;i=1:d=0;first\x1b\\\x1b]99;i=2;second\x1b\\")
+    );
+}
+
+#[test]
+fn test_kittys_encoded_payloads_and_other_kinds_are_not_shown() {
+    // Base64 is not decoded here, and shown as it arrived it is garbage.
+    assert_eq!(None, notified(b"\x1b]99;e=1;SGVsbG8=\x1b\\"));
+    assert_eq!(
+        titled("build", None),
+        notified(b"\x1b]99;i=2:d=0;build\x1b\\\x1b]99;i=2:p=body:e=1;ZG9uZQ==\x1b\\")
+    );
+    // Closing one, asking whether one is alive, asking what the terminal
+    // supports: none of them is a notification, and none of them disturbs
+    // one still arriving.
+    assert_eq!(None, notified(b"\x1b]99;i=1:p=close;\x1b\\"));
+    assert_eq!(None, notified(b"\x1b]99;i=1:p=?;\x1b\\"));
+    assert_eq!(
+        titled("build", Some("done")),
+        notified(
+            b"\x1b]99;i=3:d=0;build\x1b\\\x1b]99;i=9:p=alive;\x1b\\\x1b]99;i=3:p=body;done\x1b\\"
+        )
+    );
+    // An icon is part of a notification, and adds no text to it.
+    assert_eq!(
+        titled("build", None),
+        notified(b"\x1b]99;i=4:d=0;build\x1b\\\x1b]99;i=4:p=icon;AAAA\x1b\\")
+    );
+}
+
+#[test]
+fn test_a_notification_survives_a_split_between_two_reads() {
+    let mut emulator = emulator();
+    emulator.advance(b"\x1b]9;build ");
+    emulator.advance(b"done\x07");
+
+    assert_eq!(
+        vec![TerminalEvent::Notification(
+            saying("build done").expect("a notification")
+        )],
+        emulator.take_events()
+    );
+}
+
+#[test]
+fn test_the_last_notification_in_a_read_stands_for_the_others() {
+    assert_eq!(
+        saying("two"),
+        notified(b"\x1b]9;one\x07\x1b]777;notify;;two\x07")
+    );
+}
+
+#[test]
+fn test_a_notification_and_a_report_keep_their_order_in_one_read() {
+    // The workspace reads the two against each other: `running` takes away
+    // the look a notification asked for, a notification after it asks again,
+    // and a status change after one takes its place. So one read has to hand
+    // them over in the order they were written, as one read per sequence
+    // does, or the same bytes settle differently depending on where a pty
+    // split them.
+    //
+    // Two reports with a notification between them are two reports, not the
+    // last of them: kept in one slot, `needs-input` and `running` around a
+    // notification went out as the `running` alone, which from `running` is
+    // no change at all, and a `running` repeated after one went out behind
+    // the notification it was written before.
+    let running = b"\x1b]6340;running\x07".as_slice();
+    let needs_input = b"\x1b]6340;needs-input\x07".as_slice();
+    let idle = b"\x1b]6340;idle\x07".as_slice();
+    let done = b"\x1b]9;done\x07".as_slice();
+    // Ended by ST, the watcher stops on its ESC, and the `\` is the next
+    // piece's first byte.
+    let done_st = b"\x1b]9;done\x1b\\".as_slice();
+    let end = b"\x1b]133;D;0\x07".as_slice();
+    let started = |from: &[u8]| {
+        let mut emulator = emulator();
+        emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07claude\r\n\x1b]133;C\x07");
+        emulator.advance(from);
+        emulator.take_events();
+        emulator
+    };
+    // How long the command took is timed, and is no part of the order.
+    let events = |emulator: &mut Emulator| -> Vec<TerminalEvent> {
+        emulator
+            .take_events()
+            .into_iter()
+            .map(|event| match event {
+                TerminalEvent::CommandFinished { exit, ran, .. } => {
+                    TerminalEvent::CommandFinished {
+                        exit,
+                        took: None,
+                        ran,
+                    }
+                }
+                other => other,
+            })
+            .collect()
+    };
+
+    for (from, sequences) in [
+        (idle, [done, running].as_slice()),
+        (idle, &[running, done]),
+        (idle, &[done, end]),
+        (idle, &[running, done, end]),
+        (idle, &[done, running, end]),
+        (idle, &[running, end, done]),
+        (idle, &[running, done, running]),
+        (idle, &[running, done, idle]),
+        (idle, &[running, done, running, end]),
+        (running, &[idle, done, running]),
+        (running, &[needs_input, done, running]),
+        (running, &[needs_input, done, done, running]),
+        (running, &[done, needs_input, done, running]),
+        (running, &[needs_input, done_st, running]),
+    ] {
+        let mut split = started(from);
+        let mut whole = started(from);
+        for sequence in sequences {
+            split.advance(sequence);
+        }
+        whole.advance(&sequences.concat());
+
+        assert_eq!(
+            events(&mut split),
+            events(&mut whole),
+            "{:?} in one read, from {:?}",
+            sequences
+                .iter()
+                .map(|sequence| String::from_utf8_lossy(sequence))
+                .collect::<Vec<_>>(),
+            String::from_utf8_lossy(from),
+        );
+    }
 }
