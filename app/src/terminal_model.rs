@@ -104,8 +104,7 @@ use std::time::{Duration, Instant};
 
 use crook_terminal::{
     Block, BlockId, BlockRows, BlockState, Key, LiveBlock, Modifiers, MouseButton, MouseEventKind,
-    MouseModes,
-    Palette, Rgb, Snapshot, Terminal, TerminalEvent, TerminalOptions, TerminalSize,
+    MouseModes, Palette, Rgb, Snapshot, Terminal, TerminalEvent, TerminalOptions, TerminalSize,
 };
 use crookui_core::geometry::{Color, Vector2F};
 use crookui_core::prelude::*;
