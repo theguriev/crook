@@ -166,8 +166,8 @@ fn a_fast_forward_merged_branch_is_proved_by_ancestry() {
 fn a_branch_nobody_has_committed_on_is_not_called_merged() {
     // Its tip is on main, so git's own `branch --merged` lists it — and on the
     // row of a checkout an agent was handed a minute ago, "merged" is a
-    // sentence about work that does not exist. Its own reflog still says it
-    // is where it was made, and that is what keeps it out.
+    // sentence about work that does not exist. Its own reflog records no
+    // commit made on it, and that is what keeps it out.
     if without_git("a_branch_nobody_has_committed_on_is_not_called_merged") {
         return;
     }
@@ -183,8 +183,8 @@ fn a_branch_nobody_has_committed_on_is_not_called_merged() {
     assert_eq!(landed.get("fresh"), None);
     assert_eq!(landed.get("switched"), None);
 
-    // Committed on and merged into main, it has moved, and its tip being on
-    // main is its work having landed.
+    // Committed on and merged into main, it has work of its own, and its tip
+    // being on main is that work having landed.
     git(&repo, &["switch", "fresh"]);
     commit(&repo, "fresh.txt", "work\n", "work");
     git(&repo, &["switch", "main"]);
@@ -193,6 +193,76 @@ fn a_branch_nobody_has_committed_on_is_not_called_merged() {
         merged(&repo, MAIN, &names(&["fresh"])).get("fresh"),
         Some(&Proof::Ancestor)
     );
+}
+
+#[test]
+fn a_branch_only_brought_up_to_date_is_not_called_merged() {
+    // Handed to an agent whose first move was to catch up with main — a
+    // rebase, a pull, a fast-forward — before its first commit. The branch
+    // has moved since it was made, and its tip is on main, and it still holds
+    // no work of its own.
+    if without_git("a_branch_only_brought_up_to_date_is_not_called_merged") {
+        return;
+    }
+    let scratch = ScratchDir::new("synced");
+    let repo = repository(&scratch, "repo");
+    let synced = ["rebased", "pulled", "forwarded"];
+    for branch in synced {
+        git(&repo, &["branch", branch, "main"]);
+    }
+    commit(&repo, "later.txt", "main moves on\n", "later");
+    git(&repo, &["switch", "rebased"]);
+    git(&repo, &["rebase", "main"]);
+    git(&repo, &["switch", "pulled"]);
+    git(&repo, &["pull", "--ff-only", ".", "main"]);
+    git(&repo, &["switch", "forwarded"]);
+    git(&repo, &["merge", "--ff-only", "main"]);
+    git(&repo, &["switch", "main"]);
+    for branch in synced {
+        // Or this would be the case above over again.
+        let newest = git(
+            &repo,
+            &[
+                "log",
+                "-g",
+                "-1",
+                "--format=%gs",
+                &format!("refs/heads/{branch}"),
+            ],
+        );
+        assert!(
+            !newest.starts_with("branch: Created"),
+            "{branch} did not move: {newest}"
+        );
+    }
+
+    let landed = merged(&repo, MAIN, &names(&synced));
+
+    assert!(landed.is_empty(), "proved {landed:?}");
+}
+
+#[test]
+fn a_branch_cut_from_a_squashed_branch_is_not_called_merged() {
+    // A new checkout made from a tab still sitting in a finished one starts
+    // at that one's tip, so its diff since main is the finished branch's
+    // whole diff — the squash's patch, though nothing was done on it.
+    if without_git("a_branch_cut_from_a_squashed_branch_is_not_called_merged") {
+        return;
+    }
+    let scratch = ScratchDir::new("cut-from-squashed");
+    let repo = repository(&scratch, "repo");
+    git(&repo, &["switch", "-c", "feature"]);
+    commit(&repo, "feature.txt", "the work\n", "the work");
+    let squash = squash_onto_main(&repo, "feature");
+    git(&repo, &["branch", "fresh", "feature"]);
+
+    let landed = merged(&repo, MAIN, &names(&["feature", "fresh"]));
+
+    assert_eq!(
+        landed.get("feature"),
+        Some(&Proof::Patch { commit: squash })
+    );
+    assert_eq!(landed.get("fresh"), None);
 }
 
 #[test]

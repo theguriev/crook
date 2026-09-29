@@ -987,12 +987,14 @@ outside a repository.
 **Work that has landed is proved, never assumed.** A removal keeps the branch, and git cannot
 see a squash merge, so every finished task used to leave a branch `git branch --no-merged`
 lists for ever — this repository had eighteen, and every one had landed. `app/src/git/merged.rs`
-proves it from the repository alone, with no network: by ancestry (the tip is on the base and
-the branch has moved since it was made — a checkout nobody has committed in is not "merged",
-whatever `--merged` says), or by patch (the branch's whole diff since its merge-base has the
-`patch-id` of one commit on the base, which is what a squash is), found in one `git log -p |
-git patch-id --stable` pass capped at a thousand commits and ten seconds. The base is what
-`origin/HEAD` names, then `init.defaultBranch` if that branch exists, then `main`, then `master`.
+proves it from the repository alone, with no network: by ancestry (the tip is on the base), or
+by patch (the branch's whole diff since its merge-base has the `patch-id` of one commit that
+reached the base after the branch left it, which is what a squash is), found in one
+`git log -p | git patch-id --stable` pass capped at a thousand commits and ten seconds. Neither
+proof counts for a branch whose own reflog records no commit made on it: a checkout nobody has
+committed in — fresh, only brought up to date, or cut from the tip of a branch that was
+squashed — is not "merged", whatever `--merged` says. The base is what `origin/HEAD` names,
+then `init.defaultBranch` if that branch exists, then `main`, then `master`.
 Anything it cannot prove — a stack squashed in pieces, a branch reworked during review, a pass
 cut off by its cap — is simply unproved, because a miss costs a badge and a false proof would
 cost somebody's branch the day deleting one is on the table. The menu asks after the list is

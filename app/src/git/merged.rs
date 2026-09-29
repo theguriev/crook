@@ -11,15 +11,19 @@
 //! Crook does not otherwise need. Two local proofs answer most of it:
 //!
 //! * **Ancestry.** The branch's tip is on the base: it was merged or
-//!   fast-forwarded. Not a branch whose own reflog says it is still where it
-//!   was made, though `git branch --merged` lists that one too — its tip is on
-//!   the base because nobody has committed on it, and "merged" on the row of a
-//!   checkout an agent was handed a minute ago is a sentence about work that
-//!   does not exist.
+//!   fast-forwarded.
 //! * **The patch.** The branch's whole change since it left the base — `git
 //!   diff <merge-base> <branch>` — has the `patch-id` of one commit that
 //!   reached the base after the branch left it. A squash merge is exactly
 //!   that commit.
+//!
+//! Either proof is taken only for a branch somebody committed on. `git branch
+//! --merged` also lists a branch whose tip is on the base because nothing was
+//! ever made on it — a checkout an agent was handed a minute ago, or one it
+//! only brought up to date — and a branch cut from the tip of a squashed one
+//! carries that one's patch without a line of its own. "merged" on either row
+//! is a sentence about work that does not exist, so a branch whose own reflog
+//! records no commit made on it is proved by neither: see [`worked_on`].
 //!
 //! A branch neither proves is *unproved*, never "not merged": a stack squashed
 //! in pieces, a branch rebased or reworded during review, and a branch with a
@@ -65,7 +69,7 @@ const PASS_DEADLINE: Duration = READ_TIMEOUT;
 /// How a branch was shown to have landed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Proof {
-    /// Its tip is on the base, and it has moved since it was made: merged or
+    /// Its tip is on the base, and somebody committed on it: merged or
     /// fast-forwarded.
     Ancestor,
     /// Its whole change since it left the base is the change this commit made,
@@ -171,9 +175,9 @@ fn merged_within(
         // git goes and reads.
         let reference = format!("refs/heads/{branch}");
         if is_ancestor(repository, &reference, base) {
-            // Its diff since the fork is empty either way, so a branch that
-            // never moved has nothing for the patch to prove either.
-            if !never_moved(repository, &reference) {
+            // Its diff since the fork is empty either way, so a branch
+            // ancestry does not prove has nothing for the patch to prove.
+            if worked_on(repository, &reference) {
                 landed.insert(branch.clone(), Proof::Ancestor);
             }
             continue;
@@ -182,17 +186,20 @@ fn merged_within(
             continue;
         };
         if let Some(patch) = patch_since(repository, &fork, &reference) {
-            pending.push((branch, fork, patch));
+            pending.push((branch, reference, fork, patch));
         }
     }
     if pending.is_empty() {
         return landed;
     }
 
-    let forks: Vec<&str> = pending.iter().map(|(_, fork, _)| fork.as_str()).collect();
+    let forks: Vec<&str> = pending
+        .iter()
+        .map(|(_, _, fork, _)| fork.as_str())
+        .collect();
     let since = oldest(repository, &forks);
     let patches = patches_on(repository, base, since.as_deref(), commits, deadline);
-    for (branch, fork, patch) in pending {
+    for (branch, reference, fork, patch) in pending {
         let Some(candidates) = patches.get(&patch) else {
             continue;
         };
@@ -203,10 +210,13 @@ fn merged_within(
         // patch-id of the first of those, while the base no longer has the
         // change at all. Newest first, so a real squash of the same change
         // after the fork is the one found.
-        if let Some(commit) = candidates
+        let Some(commit) = candidates
             .iter()
             .find(|commit| after_fork(repository, commit, &fork))
-        {
+        else {
+            continue;
+        };
+        if worked_on(repository, &reference) {
             landed.insert(
                 branch.clone(),
                 Proof::Patch {
@@ -239,21 +249,53 @@ fn is_ancestor(repository: &Path, reference: &str, base: &str) -> bool {
     run(repository, &args, Intent::Read).is_ok_and(|finished| finished.success)
 }
 
-/// Whether `reference` is, by its own reflog, still where it was made.
+/// Whether `reference`'s own reflog records a commit made on it.
 ///
-/// Every way of making a branch — `branch`, `switch -c`, `checkout -b`,
-/// `worktree add -b` — writes `branch: Created from …` as its first entry,
-/// and every way of moving one writes something else after it, so a newest
-/// entry that is still the creation is a branch nobody has committed on,
-/// reset or renamed. The text is git's own and is not translated.
+/// What each proof is otherwise blind to is a branch that holds no work of its
+/// own. One just made from the base is on the base; one made there and then
+/// only brought up to date — `rebase`, `pull`, `merge --ff-only`, before its
+/// first commit — is on the base too; and one cut from the tip of a branch the
+/// forge squashed has that branch's whole diff. All three are what an agent is
+/// handed and has not started on yet, and "merged" on any of them is untrue.
 ///
-/// A branch with no reflog at all — made with `core.logAllRefUpdates` off, or
-/// whose entries have expired — is not known to be unmoved, and is left to
-/// the ancestry proof as git would leave it.
-fn never_moved(repository: &Path, reference: &str) -> bool {
-    answer(repository, &["log", "-g", "-1", "--format=%gs", reference])
-        .is_some_and(|newest| newest.starts_with("branch: Created from"))
+/// What they share is that nothing was ever committed on them. git's own
+/// ways of writing a commit onto the branch that is checked out record
+/// themselves in that branch's reflog under the names in [`WORK`], and
+/// nothing that only moves a branch does: creating one writes `branch:
+/// Created from …`, a fast-forward `merge …: Fast-forward` or `pull …:
+/// Fast-forward`, a rebase `rebase (finish): …`, a reset `reset: moving to
+/// …`. The names are git's own and are not translated.
+///
+/// Every doubt reads as "not worked on", which only ever takes a proof away:
+/// a reflog git could not read, and a branch whose only commits were written
+/// some other way — on a detached `HEAD` mid-rebase, or by a tool that moves
+/// the branch with a message of its own. The one exception is a branch with
+/// no reflog at all — made with `core.logAllRefUpdates` off, or whose entries
+/// have all expired — which is not known to be empty-handed and is left to
+/// the proofs as git would leave it.
+fn worked_on(repository: &Path, reference: &str) -> bool {
+    let args = ["log", "-g", "--format=%gs", reference].map(OsStr::new);
+    let Ok(finished) = run(repository, &args, Intent::Read) else {
+        return false;
+    };
+    if !finished.success {
+        return false;
+    }
+    let reflog = String::from_utf8_lossy(&finished.stdout);
+    let mut entries = reflog.lines().peekable();
+    entries.peek().is_none() || entries.any(|entry| WORK.iter().any(|work| entry.starts_with(work)))
 }
+
+/// How git's reflog begins the entry for each way of writing a commit onto the
+/// branch that is checked out: `commit`, with its `(initial)`, `(amend)` and
+/// `(merge)` forms; `cherry-pick`; `revert`; and `am`, which applies a mailed
+/// patch.
+///
+/// A merge git finishes by itself — `merge …: Merge made by …` — is left out
+/// on purpose: it records other work coming in, not work made here. One that
+/// somebody had to finish by hand is `commit (merge)`, and counts, because
+/// the resolution was.
+const WORK: [&str; 4] = ["commit", "cherry-pick:", "revert:", "am:"];
 
 /// Whether `commit` reached the base after `fork` did: it is neither `fork`
 /// nor one of the commits `fork` descends from.
