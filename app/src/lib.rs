@@ -450,8 +450,12 @@ struct Overrides {
     /// would, and the pane closes when it exits the way it does when a shell
     /// does. Empty for every other window.
     command: Vec<String>,
-    /// Where the window's shells start, as `cd DIR && crook` would have
-    /// started them.
+    /// Where the window's shells start, and every tab opened after them.
+    ///
+    /// As `cd DIR && crook` would have started them, but for the root of a
+    /// disk: that is where a Dock launch starts, so a plain `crook` in `/`
+    /// swaps it for the home directory, and a root this names is kept — see
+    /// [`tab::start_in`].
     ///
     /// Absolute, and a directory that was there when the command line was
     /// read: a file manager's "Open terminal here" that named a folder since
@@ -1289,8 +1293,9 @@ OPTIONS:
                        exits. Everything after -e is the command, as in xterm;
                        `crook -- PROGRAM ARGS` says the same. Not on Windows
     --working-directory <DIR>
-                       Open a window whose shells start in DIR, as
-                       `cd DIR && crook` would; `--cwd` is the same. A window
+                       Open a window whose shells start in DIR, and so do the
+                       tabs opened after them; `--cwd` is the same. DIR can be
+                       `/`, which `cd / && crook` swaps for your home. A window
                        opened with this or with -e is a launcher's: it neither
                        comes back as the last window nor replaces it
     --title <TITLE>    Call the window TITLE where it would say Crook; the
