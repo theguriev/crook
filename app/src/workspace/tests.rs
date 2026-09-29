@@ -11395,6 +11395,47 @@ fn a_rename_is_in_the_session_file_before_anything_else_saves_it() {
 }
 
 #[test]
+fn a_window_a_launcher_opened_leaves_the_last_session_file_alone() {
+    // `crook -e htop` from a desktop entry, or "Open terminal here" in a file
+    // manager: a quick window beside the work, and closing it must not
+    // replace the agent tabs the next ordinary launch comes back to.
+    let scratch = Scratch::new();
+    let path = crate::session::session_path_beside(&scratch.path().join("settings.json"));
+    let left_by_the_agents = "{ \"tabs\": [ { \"name\": \"the-agents\" } ] }\n";
+    fs::write(&path, left_by_the_agents).expect("writable scratch");
+
+    let mut harness = Harness::with_settings(1, scratch.settings());
+    let tab = harness.tab_ids()[0];
+    // What the window does with the command line it was opened with, so the
+    // line under test is the one that decides a launched window stops saving.
+    let launched = crate::Overrides {
+        command: vec!["htop".to_owned()],
+        ..crate::Overrides::default()
+    };
+    harness.workspace_update(|workspace, ctx| crate::apply_overrides(workspace, &launched, ctx));
+    // A gesture that saves at once in any other window: see
+    // `a_rename_is_in_the_session_file_before_anything_else_saves_it`.
+    harness.workspace_update(|workspace, ctx| {
+        workspace.rename_tab(tab, Some("the-launched-window".to_owned()), ctx);
+    });
+    harness.settle(std::time::Duration::from_millis(500));
+
+    assert_eq!(
+        fs::read_to_string(&path).expect("the file is still there"),
+        left_by_the_agents,
+        "the launched window wrote over the session the agents left"
+    );
+    assert!(
+        harness
+            .workspace
+            .read(&harness.app, |workspace, _| workspace
+                .session_problem()
+                .is_none()),
+        "a save nobody asked for is not a save that failed"
+    );
+}
+
+#[test]
 fn a_session_save_that_fails_says_so_under_the_tabs_until_one_lands() {
     // The file the next launch reads is written beside the settings, and a
     // write that failed was a line in the log: the window opened empty next
@@ -14905,6 +14946,29 @@ mod shells {
             String::new(),
             "the closed pane's terminal outlived the pane"
         );
+    }
+
+    #[test]
+    fn a_launched_command_runs_in_place_of_the_shell_and_closes_the_window_when_it_exits() {
+        // What `crook -e` types into the first pane, typed the way `--run`
+        // types it: through the field, a key at a time. The program replaces
+        // the shell, so when it exits there is no shell left for the pane to
+        // go back to — and the pane, and with it the window, closes the way it
+        // does when a shell exits.
+        let mut harness = Harness::panel(1);
+        let Some(pane) = marked_shell(&mut harness) else {
+            return;
+        };
+        harness.frame();
+        await_prompt(&mut harness, pane);
+
+        let command = ["sh", "-c", "sleep 0.2; exit 3"].map(str::to_owned);
+        type_line(&mut harness, &crate::exec_line(&command));
+        harness.press("enter", Modifiers::default(), "");
+
+        harness.wait_for("the command exited and its window stayed open", |harness| {
+            harness.quit_requests() > 0
+        });
     }
 
     #[test]

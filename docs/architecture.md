@@ -346,6 +346,9 @@ draws in it, and the compositor reports the size and position the application as
 thing was wrong and is fixed — the window had no `app_id`, so no window rule could match it, no
 dock could group it and no `.desktop` file could be tied to it. winit only sets that when asked
 and nothing asked; `crookui::windowing::chrome` asks now, and Hyprland reports `class: crook`.
+The id is `WindowOptions::app_id` — `crook` for every channel, or what `--app-id` named, which is
+how a launcher tells one Crook window apart from the rest — and `packaging/linux/crook.desktop`'s
+`StartupWMClass` is the same word, which a test holds it to.
 
 What is still unrun on Linux is what needs a pointer rather than a window: the resize edges, the
 drag that moves the window and the double click that maximises it. On **Windows**, none of it
@@ -661,6 +664,15 @@ matrix and produces `.tar.gz` / `.zip` / `.msi` / `.dmg` / `.deb` / `.rpm` from 
 a real macOS `.app` becomes necessary — it will, for the Dock icon and URL schemes —
 `cargo-bundle` handles that one artifact while `cargo-dist` keeps the rest. There is a `TODO`
 in `script/bundle` at the exact spot.
+
+The one thing it adds to the binary is a Linux desktop's: the Linux archive carries `share/`
+beside `crook` — `applications/crook.desktop`, `icons/hicolor/<size>/apps/crook.png` out of
+`assets/Crook.iconset`, and `metainfo/id.crook.Crook.metainfo.xml` — laid out the way a package
+installs them, from `packaging/linux/`, which is also where the AUR package takes its entry. The
+entry is a terminal's: it advertises `-e`, `--working-directory`, `--title` and `--app-id` as
+`X-TerminalArg*` keys, which is how `xdg-terminal-exec` learns to start one. `script/install
+--desktop` copies that tree under `~/.local/share`; the updater replaces `<stem>/crook` and reads
+nothing else out of the archive.
 
 What `--check-only` does today is the part that earns its keep immediately: it type-checks the
 workspace with the release profile and the release feature set. It is one of the five the

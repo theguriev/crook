@@ -68,6 +68,8 @@ impl Window {
                 options.min_size.y() as f64,
             ))
             .with_transparent(options.transparent);
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        let attributes = super::chrome::with_app_id(attributes, &options.app_id);
 
         let window = Arc::new(
             event_loop

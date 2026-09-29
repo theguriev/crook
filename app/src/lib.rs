@@ -453,6 +453,36 @@ struct Overrides {
     /// string would mean spelling out the prompt between them, which is
     /// whatever `PS1` was on the machine taking the picture.
     select_through: Option<String>,
+    /// The program `-e` asked the first pane to run, and its arguments.
+    ///
+    /// Words rather than a line, because that is what a launcher hands over:
+    /// `xdg-terminal-exec` and a desktop entry's `Terminal=true` both pass the
+    /// program and each argument separately, the way xterm has always taken
+    /// them. They are typed into the pane's shell as one `exec` — see
+    /// [`exec_line`] — so the program starts where a person's own command
+    /// would, and the pane closes when it exits the way it does when a shell
+    /// does. Empty for every other window.
+    command: Vec<String>,
+    /// Where the window's shells start, and every tab opened after them.
+    ///
+    /// As `cd DIR && crook` would have started them, but for the root of a
+    /// disk: that is where a Dock launch starts, so a plain `crook` in `/`
+    /// swaps it for the home directory, and a root this names is kept — see
+    /// [`tab::start_in`].
+    ///
+    /// Absolute, and a directory that was there when the command line was
+    /// read: a file manager's "Open terminal here" that named a folder since
+    /// deleted is a line on stderr rather than a window in the wrong place.
+    working_directory: Option<PathBuf>,
+    /// What the window is called where it would say "Crook".
+    window_title: Option<String>,
+    /// What a Linux desktop calls the window — the Wayland `app_id` and the
+    /// X11 `WM_CLASS` — when it is not `crook`.
+    ///
+    /// For a window rule or a dock that should tell one Crook window apart
+    /// from the rest, which is what `--app-id` means in every terminal a
+    /// launcher knows how to ask.
+    app_id: Option<String>,
 }
 
 impl Overrides {
@@ -477,11 +507,136 @@ impl Overrides {
             || self.scroll_blocks.is_some()
     }
 
+    /// Whether a launcher opened this window rather than a person opening
+    /// Crook.
+    ///
+    /// A window started with a command or a directory is a quick terminal
+    /// somebody asked for beside their work — a file manager's "Open terminal
+    /// here", a desktop entry that runs `htop` — and not the work itself. So it
+    /// opens fresh rather than as the last window, and it never writes the
+    /// session file: closing it must not replace the agent tabs the next
+    /// ordinary launch comes back to with one pane in `~/Downloads`.
+    fn launched(&self) -> bool {
+        !self.command.is_empty() || self.working_directory.is_some()
+    }
+
+    /// What the window is called where it would say "Crook": the title
+    /// `--title` asked for, or the channel's own name.
+    ///
+    /// Only that part of it. The active tab's title and the count of panes
+    /// waiting still go in front — see [`window_title`] — because they are
+    /// what tells two windows apart in a switcher, and a title that hid them
+    /// would be a window that could no longer say an agent is waiting in it.
+    fn window_name(&self, channel: Channel) -> String {
+        self.window_title
+            .clone()
+            .unwrap_or_else(|| channel.window_title())
+    }
+
+    /// What the first pane's shell is given to run, in order: every `--run`,
+    /// then the command `-e` named.
+    ///
+    /// Last, because the command replaces the shell, and a `--run` typed after
+    /// it would be typed into the program rather than the shell.
+    fn typed(&self) -> Vec<String> {
+        let mut typed = self.run.clone();
+        if !self.command.is_empty() {
+            typed.push(exec_line(&self.command));
+        }
+        typed
+    }
+
     /// Whether this run types into the focused pane's field: `--run`, which
     /// sends what it types, and `--type`, which leaves it there.
     fn types_into_the_field(&self) -> bool {
         !self.run.is_empty() || self.type_text.is_some()
     }
+}
+
+/// The line that runs `command` in place of the pane's shell.
+///
+/// `exec`, so that when the program exits the shell is already gone and the
+/// pane closes exactly as it does when a shell exits — which is what xterm's
+/// `-e` has always meant. Through the shell rather than instead of it, so the
+/// program is found on the `PATH` a person's own profile built and runs with
+/// the environment their own commands get; and typed into the field the way
+/// `--run` types, so it is a block like any other while it runs. Every word is
+/// quoted by [`shell_word`], since a launcher's arguments are words and a file
+/// called `my notes.txt` is one.
+///
+/// With a space in front, which fish, zsh's `HIST_IGNORE_SPACE` and bash's
+/// `HISTCONTROL=ignorespace` all read as "keep this out of the history". The
+/// line is Crook's rather than the person's, and the history file is where
+/// the field's suggestions come from — see [`crate::shell_history`] — so a
+/// launcher's `btop` would otherwise come back as an `exec btop` suggestion
+/// that closes whichever pane accepts it.
+fn exec_line(command: &[String]) -> String {
+    std::iter::once(" exec".to_owned())
+        .chain(command.iter().map(|word| shell_word(word)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// One word, spelled so that sh, bash, zsh and fish all read it back as
+/// exactly itself.
+///
+/// Single quotes, which all four take literally, with two exceptions that are
+/// the whole difficulty: none of them can hold a `'`, and fish alone reads
+/// `\\` and `\'` inside them as escapes. So both characters go *outside* the
+/// quotes, backslashed, which each of the four reads the same way — `it's`
+/// is `'it'\''s'` and `a\b` is `'a'\\'b'`. A word made only of characters no
+/// shell treats specially is left bare, so the line in the pane reads
+/// `exec htop` rather than `exec 'htop'`; a leading `=` is not one of them,
+/// since zsh reads `=cat` as the path to `cat`.
+fn shell_word(word: &str) -> String {
+    let bare = !word.is_empty()
+        && !word.starts_with('=')
+        && word
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || "-_./:,+@=".contains(character));
+    if bare {
+        return word.to_owned();
+    }
+    // Still a word, and the loop below would spell it as nothing at all.
+    if word.is_empty() {
+        return "''".to_owned();
+    }
+
+    let mut spelled = String::with_capacity(word.len() + 2);
+    let mut quoted = false;
+    for character in word.chars() {
+        if matches!(character, '\'' | '\\') {
+            if quoted {
+                spelled.push('\'');
+                quoted = false;
+            }
+            spelled.push('\\');
+        } else if !quoted {
+            spelled.push('\'');
+            quoted = true;
+        }
+        spelled.push(character);
+    }
+    if quoted {
+        spelled.push('\'');
+    }
+    spelled
+}
+
+/// What a window opens with: the tabs the last one had, or none.
+///
+/// None for a window a launcher opened — see [`Overrides::launched`] — and
+/// none when the setting is off. Read from beside the settings file, which is
+/// where the window writes it, so a window whose settings are somewhere else
+/// reads and writes one file rather than reading one and writing another.
+fn opening_session(settings: &Settings, overrides: &Overrides) -> crate::session::Session {
+    if overrides.launched() || !settings.general().restore_session {
+        return crate::session::Session::default();
+    }
+    settings
+        .path()
+        .map(|path| crate::session::Session::load(crate::session::session_path_beside(path)))
+        .unwrap_or_default()
 }
 
 /// Runs Crook.
@@ -492,7 +647,10 @@ pub fn run(channel: Channel) -> Result<()> {
     attach_to_parent_console();
     diagnostics::log_file::init();
 
-    match parse_args(channel, std::env::args().skip(1))? {
+    match parse_args(
+        channel,
+        command_line(std::env::args_os().skip(1))?.into_iter(),
+    )? {
         Startup::Answered => Ok(()),
         Startup::Snapshot { path, overrides } => write_snapshot(&path, overrides),
         Startup::Window { frames, overrides } => {
@@ -507,6 +665,24 @@ pub fn run(channel: Channel) -> Result<()> {
             })
         }
     }
+}
+
+/// The command line as text, or the word in it that is not.
+///
+/// `std::env::args` panics on a word that is not UTF-8, and on Linux a path
+/// is bytes rather than text: a file manager's "Open terminal here" on a
+/// folder named in Latin-1 would be a crash and no window. Every word Crook
+/// reads is text — `-e`'s are typed into a field, a key at a time — so such a
+/// word is a line on stderr that names it, like any other argument Crook
+/// cannot use.
+fn command_line(words: impl Iterator<Item = std::ffi::OsString>) -> Result<Vec<String>> {
+    words
+        .map(|word| {
+            word.into_string().map_err(|word| {
+                anyhow!("{word:?} is not UTF-8, and Crook reads its arguments as text")
+            })
+        })
+        .collect()
 }
 
 /// Reconnects this process's standard streams to the console it was started
@@ -662,6 +838,13 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
             // about is already open, and this process is a program inside it
             // saying one thing to it.
             "--agent" => {
+                // A `--title` in front of the status is the window's as far
+                // as the loop could tell, and almost always the report's put
+                // in the wrong place — which it was refused as before the
+                // window had a title of its own to take.
+                if overrides.window_title.is_some() {
+                    bail!("`--title` goes after `--agent <status>`");
+                }
                 let arguments = agent_arguments(&mut args)?;
                 agent::report(
                     &arguments.status,
@@ -671,8 +854,29 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
                 )?;
                 return Ok(Startup::Answered);
             }
-            "--title" => bail!("`--title` goes after `--agent <status>`"),
+            "--title" => {
+                let title = args.next().context("`--title` needs the window's title")?;
+                overrides.window_title = Some(title);
+            }
             "--message" => bail!("`--message` goes after `--agent <status>`"),
+            // Everything after it is the command, the way xterm has always
+            // read `-e`: a launcher hands over a program and its arguments,
+            // and an argument spelled like one of Crook's flags is the
+            // program's all the same.
+            "-e" | "--" => overrides.command = launched_command(&argument, args.by_ref())?,
+            "--working-directory" | "--cwd" => {
+                let named = args
+                    .next()
+                    .with_context(|| format!("`{argument}` needs a directory"))?;
+                overrides.working_directory = Some(working_directory(&named)?);
+            }
+            "--app-id" => {
+                let id = args.next().context("`--app-id` needs an id")?;
+                if id.trim().is_empty() {
+                    bail!("`--app-id` needs an id, and an empty one is none");
+                }
+                overrides.app_id = Some(id);
+            }
             "--pull-request" => bail!("`--pull-request` goes after `--agent <status>`"),
             // Stdout is the fragment and stderr the lead and the note, so
             // `> hooks.json` takes exactly the fragment; an agent with no
@@ -1007,10 +1211,118 @@ project's .claude/skills/crook/SKILL.md. Claude Code then knows what a pane can 
         overrides.settings = Some(None);
     }
 
+    // A picture has no launcher. Both of these are about how a window starts
+    // and what it leaves behind, and a snapshot that quietly drew its seeded
+    // tabs instead would be one that did not do what it was asked.
+    if snapshot.is_some() {
+        if !overrides.command.is_empty() {
+            bail!("`-e` opens a window, and `--snapshot` draws a picture instead; ask for one");
+        }
+        if overrides.working_directory.is_some() {
+            bail!(
+                "`--working-directory` opens a window, and `--snapshot` draws a picture \
+                 instead; ask for one"
+            );
+        }
+    }
+
+    // The window moves the whole process into the directory — see
+    // `open_window` — and a relative path typed beside the flag was typed
+    // relative to where Crook was started, so it is made whole while that is
+    // still where it is running. A shell named with no directory in it is a
+    // `PATH` lookup, and stays one.
+    if overrides.working_directory.is_some() {
+        let shell = overrides
+            .shell
+            .as_mut()
+            .filter(|shell| shell.components().count() > 1);
+        for path in [
+            overrides.dev_plugin.as_mut(),
+            overrides.fixture.as_mut(),
+            shell,
+        ]
+        .into_iter()
+        .flatten()
+        {
+            *path = std::path::absolute(&*path)
+                .with_context(|| format!("{} cannot be made absolute", path.display()))?;
+        }
+    }
+
     match snapshot {
         Some(path) => Ok(Startup::Snapshot { path, overrides }),
         None => Ok(Startup::Window { frames, overrides }),
     }
+}
+
+/// The words `-e` hands the first pane, or why they cannot be typed there.
+///
+/// Refused on Windows, whose shells have no `exec` to type — see
+/// [`exec_line`] — and for a word with a control character in it: the command
+/// is typed into the pane a key at a time, where a line break is Return and a
+/// tab asks for a completion, so `printf 'a<newline>b'` would be sent as half
+/// a quote with the shell left waiting for the rest. And for a line longer
+/// than a terminal holds before its shell is reading: see
+/// [`TYPED_LINE_LIMIT`].
+fn launched_command(flag: &str, words: impl Iterator<Item = String>) -> Result<Vec<String>> {
+    if cfg!(windows) {
+        bail!(
+            "`{flag}` types an `exec` into the pane's shell, and no Windows shell has one; \
+             open Crook and run the command there"
+        );
+    }
+    let command: Vec<String> = words.collect();
+    if command.is_empty() {
+        bail!("`{flag}` needs a program to run, with its arguments after it");
+    }
+    if let Some(word) = command
+        .iter()
+        .find(|word| word.chars().any(char::is_control))
+    {
+        bail!("`{flag}` cannot type {word:?} into a shell: it holds a control character");
+    }
+    let typed = exec_line(&command).len();
+    if typed > TYPED_LINE_LIMIT {
+        bail!(
+            "`{flag}` would type a line of {typed} bytes, and a terminal keeps at most \
+             {TYPED_LINE_LIMIT} bytes of a line typed before its shell is reading; name fewer \
+             or shorter arguments"
+        );
+    }
+    Ok(command)
+}
+
+/// The longest line `-e` can type, in bytes.
+///
+/// The line is typed on the frame after the shell starts, before the shell is
+/// reading, so it waits in the pty's line discipline — which keeps at most
+/// this much of one line, drops the rest and still takes the Return. What
+/// runs is then a command whose last argument was cut short, or a quote the
+/// shell waits to see closed. Linux keeps 4095 bytes, measured against a
+/// shell that had not started reading; macOS's `MAX_CANON` is 1024, and a
+/// round number under it leaves room for the few bytes its line discipline
+/// holds back.
+const TYPED_LINE_LIMIT: usize = if cfg!(target_os = "linux") {
+    4095
+} else {
+    1000
+};
+
+/// The directory `--working-directory` named, made absolute, when it is one.
+///
+/// Refused here rather than when the window opens, so the reason is a line
+/// where the flag was typed — and not a pane that quietly started in `$HOME`,
+/// which is what the pty does with a directory that is not there.
+fn working_directory(named: &str) -> Result<PathBuf> {
+    let path = std::path::absolute(named)
+        .with_context(|| format!("{named:?} is not a directory Crook can start in"))?;
+    if !path.is_dir() {
+        bail!(
+            "{} is not a directory; `--working-directory` needs one that is there",
+            path.display()
+        );
+    }
+    Ok(path)
 }
 
 /// The integration snippet for a shell, with the line that says where to put
@@ -1062,6 +1374,7 @@ fn help_text() -> String {
 
 USAGE:
     crook [OPTIONS]
+    crook [OPTIONS] -e <PROGRAM> [ARGS]...
     crook pane list [--json]
     crook pane wait <ID> --until <STATE> [--timeout <SECS>] [--json]
     crook pane blocks <ID> [--last <N>] [--json]
@@ -1118,6 +1431,22 @@ COMMANDS:
                        yet
 
 OPTIONS:
+    -e <PROGRAM> [ARGS]...
+                       Open a window whose one pane runs PROGRAM with these
+                       arguments in place of your shell, and closes when it
+                       exits. Everything after -e is the command, as in xterm;
+                       `crook -- PROGRAM ARGS` says the same. Not on Windows
+    --working-directory <DIR>
+                       Open a window whose shells start in DIR, and so do the
+                       tabs opened after them; `--cwd` is the same. DIR can be
+                       `/`, which `cd / && crook` swaps for your home. A window
+                       opened with this or with -e is a launcher's: it neither
+                       comes back as the last window nor replaces it
+    --title <TITLE>    Call the window TITLE where it would say Crook; the
+                       active tab's name still goes in front of it
+    --app-id <ID>      Open the window with this Wayland app_id and X11
+                       WM_CLASS rather than `crook`, for a window rule or a
+                       dock that should tell it apart. Linux only
     --install-plugin <PATH>
                        Copy a plugin's `.wasm` into the plugins directory and exit,
                        after checking it is one. What it may then do is nothing
@@ -1565,6 +1894,11 @@ fn apply_overrides(
     if let Some(shell) = overrides.shell.clone() {
         workspace.set_shell(Some(shell), ctx);
     }
+    // Before anything below can change the strip, since every change to it
+    // is a save. See `Overrides::launched`.
+    if overrides.launched() {
+        workspace.stop_saving_the_session();
+    }
     if overrides.menu {
         workspace.open_options_menu(ctx);
     }
@@ -1672,6 +2006,17 @@ fn open_window(
             .map_err(anyhow::Error::msg)
             .with_context(|| path.display().to_string())?;
     }
+    // The process rather than the first pane: every pane starts where Crook
+    // is — see `tab::starting_directory` — so the tab a person opens next in
+    // a window a file manager opened on a folder opens in that folder too.
+    // The paths the other flags named were made absolute when they were
+    // read. And named, so that a root directory is where the panes start too,
+    // rather than the home directory a Dock-launched Crook — or a plain
+    // `cd / && crook` — swaps it for.
+    if let Some(directory) = &launch.overrides.working_directory {
+        crate::tab::start_in(directory)
+            .with_context(|| format!("could not start in {}", directory.display()))?;
+    }
     let font_db = CosmicFontDb::new().context("no usable system fonts")?;
     // Blocking, and deliberately: one small file, read once, before there is a
     // window to stall. Before the fonts, because it names one of them.
@@ -1690,33 +2035,12 @@ fn open_window(
     apply_startup_theme(&settings, &launch.overrides);
 
     // Read here, before the window exists, because the window opens at the
-    // size it names. An empty one — a first run, an unreadable file, or the
-    // setting turned off — is the default window and one tab, which is exactly
-    // what every launch did before this file existed.
-    let session = if settings.general().restore_session {
-        crate::session::Session::for_user()
-    } else {
-        crate::session::Session::default()
-    };
-
-    // The flag first, the session's size second, the default last: a
-    // person asking for a window of a size is asking to look at that size,
-    // whatever the last window was.
-    let options = WindowOptions {
-        title: channel.window_title(),
-        size: launch
-            .overrides
-            .size
-            .map(|[width, height]| vec2f(width as f32, height as f32))
-            .or_else(|| {
-                session
-                    .window_size()
-                    .map(|[width, height]| vec2f(width, height))
-            })
-            .unwrap_or(WINDOW_SIZE),
-        chrome: WINDOW_CHROME,
-        ..Default::default()
-    };
+    // size it names. An empty one — a first run, an unreadable file, the
+    // setting turned off, or a window a launcher opened — is the default
+    // window and one tab, which is exactly what every launch did before this
+    // file existed.
+    let session = opening_session(&settings, &launch.overrides);
+    let options = window_options(channel, &launch.overrides, &session);
 
     crookui::run(options, Box::new(font_db), move |platform| {
         Box::new(Shell::new(
@@ -1729,6 +2053,34 @@ fn open_window(
             session.clone(),
         ))
     })
+}
+
+/// How the window is opened: its name, what a Linux desktop calls it, its
+/// size and who draws its frame.
+fn window_options(
+    channel: Channel,
+    overrides: &Overrides,
+    session: &crate::session::Session,
+) -> WindowOptions {
+    let defaults = WindowOptions::default();
+    // The flag first, the session's size second, the default last: a
+    // person asking for a window of a size is asking to look at that size,
+    // whatever the last window was.
+    WindowOptions {
+        title: overrides.window_name(channel),
+        app_id: overrides.app_id.clone().unwrap_or(defaults.app_id),
+        size: overrides
+            .size
+            .map(|[width, height]| vec2f(width as f32, height as f32))
+            .or_else(|| {
+                session
+                    .window_size()
+                    .map(|[width, height]| vec2f(width, height))
+            })
+            .unwrap_or(WINDOW_SIZE),
+        chrome: WINDOW_CHROME,
+        ..defaults
+    }
 }
 
 /// How long quitting waits for git to take Crook's locks off the checkouts
@@ -3431,7 +3783,7 @@ impl Shell {
         // never be given. No frame has taken anything the window opened with
         // or the update above changed, so this call already runs it once and
         // names the window.
-        let beacon = Beacon::new(launch.channel.window_title(), proxy.clone());
+        let beacon = Beacon::new(launch.overrides.window_name(launch.channel), proxy.clone());
         let redraw = proxy.clone();
         app.on_window_invalidated(
             window_id,
@@ -3444,13 +3796,14 @@ impl Shell {
         // queued rather than joined: two commands sent as one line would be
         // one block. Aimed at the focused pane now; its shell opens with the
         // rest after the first frame, and the first command is typed after
-        // that.
-        let run = (!launch.overrides.run.is_empty())
+        // that. `-e`'s command is the last of them, and the same machinery.
+        let typed = launch.overrides.typed();
+        let run = (!typed.is_empty())
             .then(|| workspace.read(&app, |workspace, _| workspace.tabs().focused_pane_id()))
             .flatten()
             .map(|pane| Run {
                 pane,
-                pending: launch.overrides.run.clone().into(),
+                pending: typed.into(),
                 deadline: Instant::now() + RUN_TIMEOUT,
                 printed: false,
             });
@@ -4425,6 +4778,11 @@ mod tests {
             "--agent-hooks",
             "--skill",
             "--json",
+            "-e",
+            "--working-directory",
+            "--cwd",
+            "--title",
+            "--app-id",
         ] {
             assert!(help.contains(flag), "{flag} is not in --help");
             // Either it parses, or it complains about the value it is missing.
@@ -4995,6 +5353,474 @@ mod tests {
             ["0.2.0"],
             "one probe, and it is the one being written"
         );
+    }
+
+    /// The overrides a command line opens its window with, or a panic naming
+    /// what it opened instead.
+    fn window_overrides(args: &[&str]) -> Overrides {
+        match parse(args) {
+            Ok(Startup::Window { overrides, .. }) => overrides,
+            other => panic!("{args:?} did not open a window: {other:?}"),
+        }
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn everything_after_dash_e_is_the_command_however_its_words_are_spelled() {
+        // xterm's rule, and alacritty's and foot's: a launcher hands over the
+        // program and its arguments as separate words, and a word that looks
+        // like one of Crook's own flags is the program's all the same. `--`
+        // says the same thing for a launcher that spells it that way.
+        for dash_e in ["-e", "--"] {
+            let overrides = window_overrides(&[
+                "--title",
+                "notes",
+                dash_e,
+                "vim",
+                "my notes.txt",
+                "--help",
+                "-R",
+            ]);
+            assert_eq!(
+                overrides.command,
+                ["vim", "my notes.txt", "--help", "-R"],
+                "{dash_e}"
+            );
+            assert_eq!(
+                overrides.window_title.as_deref(),
+                Some("notes"),
+                "the flags in front of {dash_e} are still Crook's"
+            );
+            assert!(overrides.launched(), "{dash_e} is a launcher's window");
+        }
+
+        for bare in ["-e", "--"] {
+            let complaint = format!("{:#}", parse(&[bare]).expect_err("a command is needed"));
+            assert!(complaint.contains("needs"), "{bare}: {complaint}");
+        }
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn a_word_with_a_line_break_in_it_is_refused_rather_than_typed_as_two_lines() {
+        // The command is typed into the pane a key at a time, and a line break
+        // is Return: `printf 'a` would be sent on its own and the shell left
+        // waiting for the rest of a quote. A tab is a completion request.
+        for word in ["two\nlines", "a\ttab"] {
+            let complaint = format!(
+                "{:#}",
+                parse(&["-e", "printf", word]).expect_err("a control character")
+            );
+            assert!(
+                complaint.contains("control character") && complaint.contains(&format!("{word:?}")),
+                "{complaint}"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn a_command_longer_than_a_terminal_line_is_refused_rather_than_cut_short() {
+        // Typed before the shell is reading, the line waits in the pty's line
+        // discipline, which keeps its first `TYPED_LINE_LIMIT` bytes and
+        // still takes the Return: `vim` would open a file whose name was cut
+        // off. What fits is typed.
+        let prefix = exec_line(&["vim".to_owned(), String::new()]).len() - "''".len();
+        let fits = "a".repeat(TYPED_LINE_LIMIT - prefix);
+        assert_eq!(
+            exec_line(&["vim".to_owned(), fits.clone()]).len(),
+            TYPED_LINE_LIMIT
+        );
+        assert_eq!(
+            window_overrides(&["-e", "vim", &fits]).command,
+            ["vim", fits.as_str()]
+        );
+
+        let over = format!("{fits}a");
+        let complaint = format!(
+            "{:#}",
+            parse(&["-e", "vim", &over]).expect_err("a line the terminal would cut")
+        );
+        assert!(
+            complaint.contains(&(TYPED_LINE_LIMIT + 1).to_string())
+                && complaint.contains(&TYPED_LINE_LIMIT.to_string()),
+            "{complaint}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_word_that_is_not_text_is_an_error_and_not_a_crash() {
+        // A folder name on Linux is bytes, and a file manager hands it over
+        // as it is: `std::env::args` panicked on this one.
+        use std::os::unix::ffi::OsStringExt;
+
+        let folder = std::ffi::OsString::from_vec(b"/tmp/caf\xe9".to_vec());
+        let complaint = format!(
+            "{:#}",
+            command_line(["--working-directory".into(), folder].into_iter())
+                .expect_err("a word that is not UTF-8")
+        );
+        assert!(
+            complaint.contains(r"caf\xE9") && complaint.contains("UTF-8"),
+            "{complaint}"
+        );
+
+        let words = ["--cwd", "/tmp/café", "-e", "htop"];
+        assert_eq!(
+            command_line(words.map(std::ffi::OsString::from).into_iter()).expect("all text"),
+            words
+        );
+    }
+
+    #[test]
+    fn the_command_is_typed_as_an_exec_after_every_run() {
+        // With a space in front, which keeps the line out of the history the
+        // field's suggestions are read from.
+        assert_eq!(exec_line(&["htop".to_owned()]), " exec htop");
+        assert_eq!(
+            exec_line(&["vim", "my notes.txt"].map(str::to_owned)),
+            " exec vim 'my notes.txt'"
+        );
+
+        // Last, since what comes after it is typed into the program.
+        let overrides = Overrides {
+            run: vec!["git status".to_owned()],
+            command: ["htop", "-d", "10"].map(str::to_owned).to_vec(),
+            ..Overrides::default()
+        };
+        assert_eq!(overrides.typed(), ["git status", " exec htop -d 10"]);
+        assert!(Overrides::default().typed().is_empty());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn every_shell_reads_a_typed_word_back_as_exactly_the_word_it_was() {
+        // The words a launcher hands over, through each shell a pane can be:
+        // POSIX sh (dash on Ubuntu), bash, zsh — whose `=word` is a path
+        // lookup — and fish, whose single quotes take a backslash escape
+        // where the others' do not. A shell this machine lacks is skipped;
+        // `sh` never is.
+        let words = [
+            "plain",
+            "two words",
+            "",
+            "it's",
+            r"back\slash",
+            r"\\",
+            r"\'",
+            "$HOME",
+            "`id`",
+            "$(id)",
+            "*",
+            "~",
+            "=cat",
+            "a'b\"c",
+            "--flag=value",
+            "semi;colon",
+            "#hash",
+            "{a,b}",
+            "%self",
+            "!!",
+            "(paren)",
+            "ünïcode",
+        ];
+        let line = words
+            .iter()
+            .map(|word| shell_word(word))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let mut heard = 0;
+        for shell in ["sh", "bash", "zsh", "fish"] {
+            let Ok(output) = crate::process::command(shell)
+                .arg("-c")
+                .arg(format!("printf '%s\\n' {line}"))
+                .output()
+            else {
+                assert_ne!(shell, "sh", "a Unix machine with no sh");
+                continue;
+            };
+            heard += 1;
+            let printed = String::from_utf8_lossy(&output.stdout);
+            let read_back: Vec<&str> = printed.lines().collect();
+            assert_eq!(
+                read_back,
+                words,
+                "{shell} read `{line}` back as something else (stderr: {})",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert!(heard > 0);
+    }
+
+    #[test]
+    fn a_working_directory_that_is_not_there_is_an_error_and_not_a_window() {
+        use crate::plugins::wasm::tests::Scratch;
+
+        let scratch = Scratch::new("working-directory");
+        let missing = scratch.path().join("deleted-since");
+        let complaint = format!(
+            "{:#}",
+            parse(&["--working-directory", &missing.display().to_string()])
+                .expect_err("a directory that is not there")
+        );
+        assert!(
+            complaint.contains("deleted-since"),
+            "the error does not name the directory: {complaint}"
+        );
+
+        let file = scratch.path().join("a-file");
+        std::fs::write(&file, "").expect("writable scratch");
+        assert!(
+            parse(&["--cwd", &file.display().to_string()]).is_err(),
+            "a file is not somewhere a shell can start"
+        );
+        assert!(parse(&["--working-directory"]).is_err());
+
+        // Compared as `absolute` spells it, which on Windows is the system's
+        // own spelling of a full path rather than whatever the scratch was
+        // joined as.
+        let spelled = std::path::absolute(scratch.path()).expect("a full path");
+        for flag in ["--working-directory", "--cwd"] {
+            let overrides = window_overrides(&[flag, &scratch.path().display().to_string()]);
+            assert_eq!(overrides.working_directory, Some(spelled.clone()), "{flag}");
+            assert!(overrides.launched(), "{flag} is a launcher's window");
+        }
+    }
+
+    #[test]
+    fn a_relative_path_beside_a_working_directory_is_read_from_where_crook_was_started() {
+        // The window moves the whole process into the directory, so a path
+        // typed relative to where Crook was started has to be made whole
+        // first or it would be read against the wrong one.
+        use crate::plugins::wasm::tests::Scratch;
+
+        let scratch = Scratch::new("anchored");
+        let overrides = window_overrides(&[
+            "--dev-plugin",
+            "build/probe.wasm",
+            "--working-directory",
+            &scratch.path().display().to_string(),
+            "--shell",
+            "./my-shell",
+        ]);
+        let here = |path| std::path::absolute(path).expect("a current directory");
+        assert_eq!(overrides.dev_plugin, Some(here("build/probe.wasm")));
+        assert_eq!(overrides.shell, Some(here("./my-shell")));
+
+        // A bare name is a `PATH` lookup, and stays one; and without a
+        // directory nothing moves, so nothing is rewritten.
+        let named = window_overrides(&[
+            "--cwd",
+            &scratch.path().display().to_string(),
+            "--shell",
+            "fish",
+        ]);
+        assert_eq!(named.shell, Some(PathBuf::from("fish")));
+        let unmoved = window_overrides(&["--dev-plugin", "build/probe.wasm"]);
+        assert_eq!(unmoved.dev_plugin, Some(PathBuf::from("build/probe.wasm")));
+    }
+
+    #[test]
+    fn title_names_the_window_where_it_would_say_crook() {
+        let overrides = window_overrides(&["--title", "scratch pad"]);
+        assert_eq!(overrides.window_name(Channel::Stable), "scratch pad");
+        // The tab still goes in front of it, the way it goes in front of
+        // "Crook": the title is the window's name, not a lid on it.
+        assert_eq!(
+            window_title(Some("vim"), 0, &overrides.window_name(Channel::Stable)),
+            "vim — scratch pad"
+        );
+        assert_eq!(Overrides::default().window_name(Channel::Stable), "Crook");
+        assert_eq!(
+            Overrides::default().window_name(Channel::Dev),
+            "Crook (dev)"
+        );
+        assert!(!overrides.launched(), "a title alone is an ordinary window");
+        assert!(parse(&["--title"]).is_err());
+
+        // In front of `--agent` it is still a status report's title put in
+        // the wrong place, and still refused rather than dropped.
+        let misplaced = parse(&["--title", "port", "--agent", "running"])
+            .expect_err("a title before the status it belongs to");
+        assert!(
+            format!("{misplaced:#}").contains("goes after `--agent"),
+            "{misplaced:#}"
+        );
+    }
+
+    #[test]
+    fn the_window_is_opened_with_the_title_and_the_app_id_the_command_line_named() {
+        let overrides = window_overrides(&["--title", "notes", "--app-id", "crook-notes"]);
+        let options = window_options(Channel::Stable, &overrides, &Default::default());
+        assert_eq!(options.title, "notes");
+        assert_eq!(options.app_id, "crook-notes");
+
+        let plain = window_options(Channel::Stable, &Overrides::default(), &Default::default());
+        assert_eq!(plain.title, "Crook");
+        assert_eq!(plain.app_id, "crook", "the id every window rule matches");
+
+        assert!(parse(&["--app-id", ""]).is_err(), "an empty id is no id");
+        assert!(parse(&["--app-id"]).is_err());
+    }
+
+    #[test]
+    fn a_window_a_launcher_opened_does_not_come_back_as_the_last_one() {
+        use crate::plugins::wasm::tests::Scratch;
+
+        let scratch = Scratch::new("launched-session");
+        std::fs::write(
+            scratch.path().join("session.json"),
+            r#"{ "tabs": [ { "name": "the agents", "panes": [ { "title": "agent 1" } ] } ] }"#,
+        )
+        .expect("writable scratch");
+        let settings = Settings::load(scratch.path().join("settings.json"));
+        assert!(
+            !opening_session(&settings, &Overrides::default()).is_empty(),
+            "an ordinary launch comes back as the last window"
+        );
+
+        for launched in [
+            Overrides {
+                command: vec!["htop".to_owned()],
+                ..Overrides::default()
+            },
+            Overrides {
+                working_directory: Some(scratch.path().to_owned()),
+                ..Overrides::default()
+            },
+        ] {
+            assert!(
+                opening_session(&settings, &launched).is_empty(),
+                "{launched:?} opened as the last window"
+            );
+        }
+    }
+
+    #[test]
+    fn a_launchers_flags_open_a_window_and_are_refused_beside_a_snapshot() {
+        use crate::plugins::wasm::tests::Scratch;
+
+        let scratch = Scratch::new("launched-snapshot");
+        let directory = scratch.path().display().to_string();
+        let mut asked = vec![["--working-directory", directory.as_str()]];
+        if cfg!(not(windows)) {
+            asked.push(["-e", "htop"]);
+        }
+        for [flag, value] in asked {
+            let complaint = format!(
+                "{:#}",
+                parse(&["--snapshot", "frame.png", flag, value])
+                    .expect_err("a picture has no launcher")
+            );
+            assert!(
+                complaint.contains("--snapshot") && complaint.contains(flag),
+                "{flag}: {complaint}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_desktop_entry_parses_and_hands_crook_only_flags_it_knows() {
+        // A line-based read of the file the archive, the AUR package and
+        // `script/install --desktop` all install: one group, `key=value`
+        // lines, no key twice. `desktop-file-validate` checks more, and is
+        // what was run by hand; this is what fails in `cargo test` when the
+        // entry and the binary drift apart.
+        const ENTRY: &str = include_str!("../../packaging/linux/crook.desktop");
+        const METAINFO: &str = include_str!("../../packaging/linux/id.crook.Crook.metainfo.xml");
+
+        let mut group = None;
+        let mut keys = std::collections::BTreeMap::new();
+        for (number, line) in ENTRY.lines().enumerate() {
+            let number = number + 1;
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some(name) = line
+                .strip_prefix('[')
+                .and_then(|rest| rest.strip_suffix(']'))
+            {
+                assert!(group.is_none(), "line {number}: a second group, {name}");
+                group = Some(name);
+                continue;
+            }
+            let (key, value) = line
+                .split_once('=')
+                .unwrap_or_else(|| panic!("line {number}: {line:?} is not key=value"));
+            assert_eq!(
+                group,
+                Some("Desktop Entry"),
+                "line {number}: {key} is outside the group"
+            );
+            assert!(
+                !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+                "line {number}: {key:?} is not a key"
+            );
+            assert!(
+                keys.insert(key, value).is_none(),
+                "line {number}: {key} twice"
+            );
+        }
+
+        assert_eq!(keys.get("Type"), Some(&"Application"));
+        assert_eq!(keys.get("Name"), Some(&"Crook"));
+        assert_eq!(keys.get("Exec"), Some(&"crook"));
+        assert_eq!(keys.get("TryExec"), Some(&"crook"));
+        assert_eq!(keys.get("Icon"), Some(&"crook"));
+        assert_eq!(keys.get("Terminal"), Some(&"false"));
+        let categories = keys
+            .get("Categories")
+            .expect("a launcher files it somewhere");
+        assert!(
+            categories.ends_with(';')
+                && categories.split(';').any(|name| name == "TerminalEmulator"),
+            "Categories={categories}"
+        );
+        assert_eq!(
+            keys.get("StartupWMClass").copied(),
+            Some(WindowOptions::default().app_id.as_str()),
+            "a dock ties the window to this entry by the id the window is opened with"
+        );
+
+        // What `xdg-terminal-exec --app-id=a --title=t --dir=d cmd arg` runs,
+        // built the way it builds it: each flag the entry names, then its
+        // value, in front of the command.
+        #[cfg(not(windows))]
+        {
+            use crate::plugins::wasm::tests::Scratch;
+
+            let scratch = Scratch::new("desktop-entry");
+            let directory = scratch.path().display().to_string();
+            let flag = |key: &str| {
+                *keys
+                    .get(key)
+                    .unwrap_or_else(|| panic!("the entry has no {key}"))
+            };
+            let overrides = window_overrides(&[
+                flag("X-TerminalArgAppId"),
+                "crook-scratch",
+                flag("X-TerminalArgTitle"),
+                "scratch",
+                flag("X-TerminalArgDir"),
+                &directory,
+                flag("X-TerminalArgExec"),
+                "htop",
+                "-d",
+                "10",
+            ]);
+            assert_eq!(overrides.app_id.as_deref(), Some("crook-scratch"));
+            assert_eq!(overrides.window_title.as_deref(), Some("scratch"));
+            assert_eq!(overrides.working_directory.as_deref(), Some(scratch.path()));
+            assert_eq!(overrides.command, ["htop", "-d", "10"]);
+        }
+
+        // And the AppStream file is about this entry and this binary.
+        assert!(
+            METAINFO.contains(r#"<launchable type="desktop-id">crook.desktop</launchable>"#),
+            "the metainfo does not name the desktop entry"
+        );
+        assert!(METAINFO.contains("<binary>crook</binary>"));
     }
 
     #[test]

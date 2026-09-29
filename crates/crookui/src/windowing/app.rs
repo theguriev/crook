@@ -52,6 +52,17 @@ pub struct WindowOptions {
     pub chrome: WindowChrome,
     /// Whether the window may be see-through where the scene is.
     pub transparent: bool,
+    /// What a Linux desktop calls the window: Wayland's `app_id` and X11's
+    /// `WM_CLASS`, which are the same fact under two names.
+    ///
+    /// It is what a window rule matches, what a dock groups by, and what a
+    /// `.desktop` file's `StartupWMClass` ties the window to, so the default
+    /// is one name for every channel: the dev build says it is the dev build
+    /// in its *title*, which is what a person reads, and a rule that stopped
+    /// matching because they ran a different build of the same application
+    /// would be a rule nobody could debug. macOS and Windows have no such
+    /// field and never read it.
+    pub app_id: String,
 }
 
 impl Default for WindowOptions {
@@ -62,6 +73,7 @@ impl Default for WindowOptions {
             min_size: vec2f(480., 192.),
             chrome: WindowChrome::default(),
             transparent: true,
+            app_id: "crook".to_owned(),
         }
     }
 }

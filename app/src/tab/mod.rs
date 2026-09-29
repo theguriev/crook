@@ -25,8 +25,8 @@
 //! hold one level down: the `pane` module is the strip's shape again, over
 //! panes.
 
-use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Instant;
 
 use crook_terminal::AgentReport;
@@ -396,18 +396,47 @@ pub struct Lineage {
 /// every other Mac terminal opens. The cost is that `cd / && crook` starts in
 /// `~` instead of `/`; the thing it buys is that a tab in a Dock-launched
 /// Crook no longer says it is working in the root of the disk.
+///
+/// Unless the directory was named: `--working-directory /` — a file
+/// manager's "Open terminal here" on the root of the disk — says in so many
+/// words where to start, and is no Dock launch. See [`start_in`].
 fn starting_directory() -> Option<PathBuf> {
-    resolve_starting_directory(std::env::current_dir().ok(), std::env::home_dir())
+    resolve_starting_directory(
+        std::env::current_dir().ok(),
+        std::env::home_dir(),
+        DIRECTORY_WAS_NAMED.load(Ordering::Relaxed),
+    )
 }
 
-/// The rule itself, with both of its inputs handed in so it can be tested.
+/// Whether the directory Crook runs in is one the command line named.
+static DIRECTORY_WAS_NAMED: AtomicBool = AtomicBool::new(false);
+
+/// Moves Crook into the directory the command line named, and says it was
+/// named, so every session starts in it even when it is the root of a disk.
+///
+/// One function rather than a move and a flag set beside it, so that the two
+/// cannot come apart: the move without the flag opens `--working-directory /`
+/// in the home directory, and nothing that opens a window is run by a test
+/// that would notice. Once, by the window a launcher opened with
+/// `--working-directory`, before its first pane starts.
+pub(crate) fn start_in(directory: &Path) -> std::io::Result<()> {
+    std::env::set_current_dir(directory)?;
+    DIRECTORY_WAS_NAMED.store(true, Ordering::Relaxed);
+    Ok(())
+}
+
+/// The rule itself, with its inputs handed in so it can be tested.
 ///
 /// A root directory has no parent, which is the whole of the test: `/` on Unix
 /// and `C:\` on Windows both answer `None` there, and neither is a place
-/// somebody meant to start working in.
-fn resolve_starting_directory(here: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+/// somebody meant to start working in — unless they `named` it.
+fn resolve_starting_directory(
+    here: Option<PathBuf>,
+    home: Option<PathBuf>,
+    named: bool,
+) -> Option<PathBuf> {
     let here = here?;
-    if here.parent().is_none() {
+    if here.parent().is_none() && !named {
         return home.or(Some(here));
     }
     Some(here)
@@ -2053,8 +2082,23 @@ mod starting_directory_tests {
             resolve_starting_directory(
                 Some(PathBuf::from("/")),
                 Some(PathBuf::from("/Users/eugen")),
+                false,
             ),
             Some(PathBuf::from("/Users/eugen")),
+        );
+    }
+
+    /// Unless somebody said so: `crook --working-directory /`, which is what
+    /// a file manager's "Open terminal here" runs on the root of the disk.
+    #[test]
+    fn the_root_of_the_disk_is_where_a_named_directory_starts() {
+        assert_eq!(
+            resolve_starting_directory(
+                Some(PathBuf::from("/")),
+                Some(PathBuf::from("/Users/eugen")),
+                true,
+            ),
+            Some(PathBuf::from("/")),
         );
     }
 
@@ -2063,10 +2107,16 @@ mod starting_directory_tests {
     #[test]
     fn a_real_directory_is_left_alone() {
         let here = PathBuf::from("/Users/eugen/work/connectly-frontend");
-        assert_eq!(
-            resolve_starting_directory(Some(here.clone()), Some(PathBuf::from("/Users/eugen"))),
-            Some(here),
-        );
+        for named in [false, true] {
+            assert_eq!(
+                resolve_starting_directory(
+                    Some(here.clone()),
+                    Some(PathBuf::from("/Users/eugen")),
+                    named,
+                ),
+                Some(here.clone()),
+            );
+        }
     }
 
     /// A machine with no readable home is not a reason to have no directory at
@@ -2074,10 +2124,30 @@ mod starting_directory_tests {
     #[test]
     fn the_root_survives_when_there_is_no_home() {
         assert_eq!(
-            resolve_starting_directory(Some(PathBuf::from("/")), None),
+            resolve_starting_directory(Some(PathBuf::from("/")), None, false),
             Some(PathBuf::from("/")),
         );
-        assert_eq!(resolve_starting_directory(None, None), None);
+        assert_eq!(resolve_starting_directory(None, None, false), None);
+    }
+
+    /// What `--working-directory` does, as `open_window` calls it: the move,
+    /// and the word that the root it moved to was meant. Into the directory
+    /// the tests already run in, because the working directory is the whole
+    /// test binary's; and the only test that calls it, so the flag is read
+    /// before anything else could have set it.
+    #[test]
+    fn a_named_directory_is_moved_into_and_remembered_as_named() {
+        let here = std::env::current_dir().expect("the tests run somewhere");
+
+        assert!(start_in(&here.join("not a directory anybody made")).is_err());
+        assert!(
+            !DIRECTORY_WAS_NAMED.load(Ordering::Relaxed),
+            "a move that failed said Crook was where it was sent"
+        );
+
+        start_in(&here).expect("the directory the tests run in");
+        assert_eq!(std::env::current_dir().ok(), Some(here));
+        assert!(DIRECTORY_WAS_NAMED.load(Ordering::Relaxed));
     }
 }
 

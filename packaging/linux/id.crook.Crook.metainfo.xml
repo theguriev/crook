@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- What a software centre shows for Crook. The Linux archive carries it as
+     share/metainfo/id.crook.Crook.metainfo.xml, and script/install copies it
+     from there when asked for the desktop files. Check it with
+     appstreamcli validate. (No double hyphen in here: XML forbids one in a
+     comment, and a flag name is exactly that.) -->
+<component type="desktop-application">
+  <id>id.crook.Crook</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT AND ISC</project_license>
+
+  <name>Crook</name>
+  <summary>A terminal whose unit of work is an agent</summary>
+  <developer id="id.crook">
+    <name>Eugen Guriev</name>
+  </developer>
+
+  <description>
+    <p>
+      Crook is a GPU-rendered terminal built around coding agents. Every tab is an agent
+      session, listed down the left edge with what it is running, the branch and worktree it
+      works in, and whether it is busy, done or waiting for you.
+    </p>
+    <ul>
+      <li>A pane's output is a list of commands, each one a block you can copy and search</li>
+      <li>Agents report their own status, so a tab says when one is waiting for an answer</li>
+      <li>A worktree per agent, opened from the tab it branches off</li>
+      <li>Plugins in a sandbox, allowed only what you grant them</li>
+    </ul>
+  </description>
+
+  <launchable type="desktop-id">crook.desktop</launchable>
+  <provides>
+    <binary>crook</binary>
+  </provides>
+
+  <url type="homepage">https://crook.id</url>
+  <url type="bugtracker">https://github.com/theguriev/crook/issues</url>
+  <url type="vcs-browser">https://github.com/theguriev/crook</url>
+
+  <categories>
+    <category>System</category>
+    <category>TerminalEmulator</category>
+  </categories>
+  <keywords>
+    <keyword>terminal</keyword>
+    <keyword>shell</keyword>
+    <keyword>agent</keyword>
+  </keywords>
+
+  <recommends>
+    <control>keyboard</control>
+  </recommends>
+  <supports>
+    <control>pointing</control>
+  </supports>
+
+  <content_rating type="oars-1.1"/>
+</component>

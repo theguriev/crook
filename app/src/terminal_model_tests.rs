@@ -496,6 +496,35 @@ fn a_scroll_shorter_than_a_line_is_carried_to_the_next_one() {
     assert_eq!((-1, 0.0), whole_lines(-0.5, -0.5));
 }
 
+#[test]
+fn a_line_typed_with_a_space_in_front_names_the_tab_without_it() {
+    // `crook -e htop` types ` exec htop`, the space keeping it out of the
+    // shell's history. The block keeps the line as it was typed, which is
+    // what Copy command and Run again hand back; the tab's name and the
+    // status line are read from here, and a row that began with a space was
+    // drawn a cell to the right of every other row.
+    let typed = crate::exec_line(&["htop".to_owned()]);
+    assert_eq!(" exec htop", typed);
+
+    let mut emulator =
+        crook_terminal::Emulator::new(TerminalSize::new(40, 5), 100, Palette::default());
+    emulator.advance(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+    emulator.command_submitted(&typed);
+    assert_eq!(
+        None,
+        running_command(&emulator.live_block()),
+        "a line the shell has not started is not running"
+    );
+
+    emulator.advance(format!("{typed}\r\n\x1b]133;C\x07").as_bytes());
+    let live = emulator.live_block();
+    assert_eq!(Some(typed.as_str()), live.command.as_deref());
+    assert_eq!(Some("exec htop"), running_command(&live).as_deref());
+
+    emulator.advance(b"\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+    assert_eq!(None, running_command(&emulator.live_block()));
+}
+
 /// How long a test watches for the terminal to come free while a writer is
 /// kept from installing the snapshot it built.
 ///

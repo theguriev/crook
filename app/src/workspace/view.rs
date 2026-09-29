@@ -635,6 +635,10 @@ pub struct Workspace {
     /// would learn that is the panel that lists them. Cleared by the next
     /// save that lands. The settings' own is `settings_save_problem`.
     session_problem: Option<String>,
+    /// Whether this window writes the session file at all, whatever the
+    /// setting says. False for a window a launcher opened: see
+    /// [`Self::stop_saving_the_session`].
+    saves_session: bool,
 
     /// How big the window was when it was last laid out, in logical pixels.
     ///
@@ -1063,6 +1067,7 @@ impl Workspace {
             divider_drag: DividerDrag::new(),
             session_saves: Arc::default(),
             session_problem: None,
+            saves_session: true,
             keybindings,
             pending_keys: std::cell::RefCell::new(Vec::new()),
             recording: std::cell::RefCell::new(None),
@@ -8679,6 +8684,20 @@ impl Workspace {
         ctx.spawn(written, Self::note_settings_save).detach();
     }
 
+    /// Never writes the session file again, for as long as this window is
+    /// open.
+    ///
+    /// For a window a launcher opened — `crook -e`, `--working-directory` —
+    /// which is a quick terminal beside somebody's work rather than the work,
+    /// and whose closing must not replace the tabs the next ordinary launch
+    /// comes back to. The file is left exactly as the last ordinary window
+    /// wrote it, and the setting is left alone too: it is a person's answer
+    /// about their own windows, and flipping it here would write `false` into
+    /// `settings.json` the next time anything saved the settings.
+    pub fn stop_saving_the_session(&mut self) {
+        self.saves_session = false;
+    }
+
     /// Writes what the window is showing, so the next one can come back to it.
     ///
     /// **On a change rather than on the way out**, because there is no reliable
@@ -8694,7 +8713,7 @@ impl Workspace {
     /// reason: two gestures a millisecond apart must not race each other to the
     /// file with the earlier one winning.
     fn save_session(&self, ctx: &mut ViewContext<Self>) {
-        if !self.general().restore_session {
+        if !self.saves_session || !self.general().restore_session {
             return;
         }
         // Beside the settings file, wherever that is. An ephemeral run — a
