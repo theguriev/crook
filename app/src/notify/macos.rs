@@ -22,20 +22,27 @@
 //! # Asking with the first banner, or the first badge
 //!
 //! macOS asks the person whether an application may post the first time the
-//! application asks for leave, and this asks with each notification rather
-//! than at launch: a person who never has a pane wait behind another window
-//! is never asked, and the one who is asked is asked with a reason on the
-//! screen. After the first time the answer comes from what the person chose,
-//! without a prompt, so asking every time also follows a change they make
-//! later in System Settings, and nothing is kept here to go stale. The answer
-//! arrives on a queue of the system's, and the banner is handed over from
-//! there. A refusal is said once, in the log.
+//! application asks for leave. Crook asks with each notification it posts,
+//! and the window asks once more, for the dock's badge, the first time a pane
+//! waits for the person — with the window in front or behind another one, and
+//! at launch when a restored session comes back with a pane already waiting.
+//! Neither while notifications are off: nothing is posted then, and the
+//! window asks only while the Notifications plugin is on and one of its
+//! switches is ([`crate::plugins::notifications::are_wanted`]). So the prompt
+//! can come with the first waiting pane or the first notification, whichever
+//! is first, with a reason on the screen; it never comes at launch for a
+//! window where nothing waits, nor to a person who turned notifications off.
+//! After the first time the answer comes from what the person chose, without
+//! a prompt, so asking every time also follows a change they make later in
+//! System Settings, and nothing is kept here to go stale. The answer arrives
+//! on a queue of the system's, and the banner is handed over from there. A
+//! refusal is said once, in the log.
 //!
 //! The same leave covers the dock icon's badge, which the dock draws for
 //! Crook.app only once it has been asked for, and a pane can wait with the
-//! window in front, where nothing is posted. So the window asks too, through
-//! [`super::ask_to_badge`], the first time there is a count to show, and is
-//! handed the yes so that the badge set before it is set again.
+//! window in front, where nothing is posted. That is why the window asks as
+//! well, through [`super::ask_to_badge`], and is handed the yes so that the
+//! badge set before it is set again.
 
 /// The identifier of the bundle this process was started from — Crook.app's
 /// — or `None` for a binary outside one.

@@ -9,7 +9,9 @@
 //!
 //! The feature is this plugin's as well as the page: the workspace posts only
 //! while it is loaded (see [`is_on`]), so the Plugins page's switch for it
-//! turns notifications off rather than only hiding their settings.
+//! turns notifications off rather than only hiding their settings. With it
+//! off, or every switch on the page off, Crook.app does not ask macOS whether
+//! it may post either, not even for the dock's badge (see [`are_wanted`]).
 
 use crookui_core::prelude::*;
 
@@ -50,6 +52,18 @@ impl Plugin for Notifications {
 /// feature, not the page it is configured on.
 pub fn is_on(host: &Host) -> bool {
     host.is_loaded(&manifest().id)
+}
+
+/// Whether the person wants any notification from `workspace` at all: this
+/// plugin is loaded and one of its page's switches is on.
+///
+/// What the window asks before it asks macOS, for the dock's badge, for the
+/// leave Crook.app posts with. macOS words that prompt as Crook wanting to
+/// send notifications, and a person who turned them off here should not be
+/// asked that — nor, having refused, find the notifications they turn on
+/// later refused with it.
+pub fn are_wanted(workspace: &Workspace) -> bool {
+    is_on(workspace.host()) && workspace.general().notifies_on_any()
 }
 
 /// Built once and leaked; see `header::manifest`.
@@ -177,9 +191,11 @@ fn how_it_works(service: Service) -> String {
         ),
         Service::NotificationCenter => format!(
             "{WHEN} It goes to Notification Center, on this Mac and nowhere else. macOS asks \
-             whether Crook may post the first time a pane waits for you, and System Settings \
-             → Notifications → Crook is where that answer changes. The same answer, and its \
-             Badges switch, decide whether the dock icon shows the count of waiting panes."
+             whether Crook may post the first time a pane waits for you or Crook has \
+             something to post, and System Settings → Notifications → Crook is where that \
+             answer changes. The same answer, and its Badges switch, decide whether the dock \
+             icon shows the count of waiting panes. With every switch here off the question \
+             is never put to you, and the dock may show no count."
         ),
         Service::OutsideTheApp => "This copy of Crook is not running from Crook.app, and \
              macOS posts notifications only for an app, so it posts none. The window's title \

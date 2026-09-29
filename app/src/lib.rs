@@ -2247,8 +2247,11 @@ impl Desktop for Proxy {
 /// window still shows it — the dock icon, on macOS — and it is the title's
 /// count exactly, so the two never disagree about who is waiting. Crook.app's
 /// is drawn only with the leave its notifications are posted with, which is
-/// asked for the first time there is a count to show — a pane can wait with
-/// the window in front, where nothing is posted to ask with.
+/// asked for the first time there is a count to show while notifications are
+/// wanted — a pane can wait with the window in front, where nothing is posted
+/// to ask with. Not while they are not: that leave is asked for in macOS's
+/// words as leave to send notifications, and a person who turned them off
+/// has said no to those already.
 ///
 /// Followed on every change to the window's views — the same invalidation
 /// that asks for a frame — rather than on the frame, because the window
@@ -2281,8 +2284,9 @@ struct Beacon<D> {
     /// which is the badge an application opens with — none.
     badge: usize,
     /// Whether the desktop has been asked for leave to badge the icon: once,
-    /// with the first count above zero, since after the first time the answer
-    /// is the person's setting, which the dock follows by itself.
+    /// with the first count above zero that comes while notifications are
+    /// wanted, since after the first time the answer is the person's setting,
+    /// which the dock follows by itself.
     asked_to_badge: bool,
     desktop: D,
 }
@@ -2313,10 +2317,15 @@ impl<D: Desktop> Beacon<D> {
         if self.badge != waiting {
             self.desktop.set_badge(waiting);
             self.badge = waiting;
-            if waiting > 0 && !self.asked_to_badge {
-                self.desktop.ask_to_badge();
-                self.asked_to_badge = true;
-            }
+        }
+        // Outside the badge's own change, so that notifications switched on
+        // with a pane already waiting ask then, and not with the next count.
+        if !self.asked_to_badge
+            && waiting > 0
+            && crate::plugins::notifications::are_wanted(workspace)
+        {
+            self.desktop.ask_to_badge();
+            self.asked_to_badge = true;
         }
         if self.urgency.asks(waiting, workspace.is_window_focused()) {
             self.desktop.request_attention();

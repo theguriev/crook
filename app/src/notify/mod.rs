@@ -365,8 +365,11 @@ impl Service {
 /// For the first count there is to show, since macOS, by the accounts of the
 /// applications that ran into it, drops a badge set before the application
 /// asked: the window's `Beacon` asks then, and `allowed` sets the badge again
-/// for the dock to draw. It is the same leave as a banner's,
-/// so this may be the prompt a person sees first, with a pane waiting.
+/// for the dock to draw. It is the same leave as a banner's, so this may be
+/// the prompt a person sees first, with a pane waiting — which is why the
+/// window asks only while notifications are wanted
+/// ([`crate::plugins::notifications::are_wanted`]), and not of a person who
+/// turned them off.
 pub fn ask_to_badge(allowed: impl Fn() + Send + 'static) {
     if !Service::here().badges_with_leave() {
         return;

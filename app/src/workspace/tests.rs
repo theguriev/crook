@@ -16556,6 +16556,53 @@ mod the_agent {
     }
 
     #[test]
+    fn leave_to_badge_is_not_asked_for_while_notifications_are_off() {
+        // macOS asks for the badge's leave as leave to send notifications, in
+        // those words, and a person who turned Crook's off has answered that
+        // already: with the plugin off, or with every switch on its page off,
+        // the badge is set and nothing is asked. Switching one back on with a
+        // pane still waiting asks then, not with the count's next move.
+        let mut harness = Harness::new(2);
+        let behind = background_of(&harness);
+        let plugin = crook_plugin::PluginId::parse("crook/notifications").expect("a literal");
+        let toggle = |harness: &mut Harness, occasion| {
+            harness.dispatch_workspace_action(WorkspaceAction::Settings(
+                SettingsAction::ToggleNotification(occasion),
+            ));
+        };
+        harness.workspace_update(|workspace, ctx| workspace.toggle_plugin(&plugin, ctx));
+        let said = watched(&mut harness);
+
+        report(&mut harness, behind, AgentStatus::NeedsInput, None);
+        assert_eq!(said.badges(), [1], "the badge is set all the same");
+        assert_eq!(0, said.asks_to_badge(), "not with the plugin off");
+
+        toggle(&mut harness, crate::notify::Occasion::NeedsInput);
+        harness.workspace_update(|workspace, ctx| workspace.toggle_plugin(&plugin, ctx));
+        assert!(
+            harness
+                .workspace
+                .read(&harness.app, |workspace, _| workspace
+                    .host()
+                    .is_loaded(&plugin)),
+            "the plugin is back on"
+        );
+        assert_eq!(
+            0,
+            said.asks_to_badge(),
+            "nor with the plugin on and every switch off"
+        );
+
+        toggle(&mut harness, crate::notify::Occasion::LongCommand);
+        assert_eq!(said.badges(), [1], "the count has not moved");
+        assert_eq!(
+            1,
+            said.asks_to_badge(),
+            "one switch on is notifications wanted, and the pane is still waiting"
+        );
+    }
+
+    #[test]
     fn a_window_is_named_as_it_is_watched_with_no_frame_drawn() {
         // `Shell::new` opens the window, restores the session into it and
         // only then starts watching it, all before a first frame, and no
@@ -16563,13 +16610,15 @@ mod the_agent {
         // is what names the window: its flush runs the callback for every
         // change no frame has taken, which in a window that has drawn nothing
         // is everything it opened with — the dock's badge included, for a
-        // session that comes back with a pane already waiting.
+        // session that comes back with a pane already waiting, and the ask
+        // for the leave the badge is drawn with, since the notifications the
+        // window opens with are on: the prompt can come at launch.
         let mut harness = Harness::undrawn(
             2,
             Opening {
                 settings: Settings::ephemeral(),
                 channel: Channel::Dev,
-                plugins: Vec::new(),
+                plugins: vec![Box::new(crate::plugins::notifications::Notifications)],
                 withdrawn: Default::default(),
                 heard: Default::default(),
                 plugins_directory: None,

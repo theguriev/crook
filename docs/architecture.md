@@ -1197,7 +1197,12 @@ Since macOS 12, by the reports of the apps that hit it, the dock draws a bundled
 only once the app has asked Notification Center for leave to badge, and then only as its
 Badges switch says, so with the first count above zero `Beacon` asks
 (`notify::ask_to_badge`) and a yes sets the badge again (`Proxy::show_badge_again`); whether
-the dock draws one for a binary outside Crook.app, which cannot ask, is unverified.
+the dock draws one for a binary outside Crook.app, which cannot ask, is unverified. `Beacon`
+asks only while notifications are wanted (`plugins::notifications::are_wanted`: the plugin
+loaded and one of its switches on), because macOS words that prompt as leave to send
+notifications, and a person who turned them off would be asked for what they had just refused
+— and, answering no, would find them refused when they turn them back on. The badge is set all
+the same.
 
 **And in words, on Linux and macOS.** When a pane's row turns to needs-input while the window
 is behind another one — its agent asking, its agent saying it is done while nobody is looking,
@@ -1231,9 +1236,10 @@ click: `--action` implies `--wait`, one process held for as long as each notific
 and a click heard could switch the pane but not bring the window forward — winit's
 `focus_window` does nothing on Wayland, with no way to hand it the activation token a server
 sends. On macOS it is `notify::macos::NotificationCenter`, `UNUserNotificationCenter` through
-the objc2 bindings, asking leave with each post and with the dock's first badge — macOS
-prompts the first time and answers from the setting after — and made only for a process with
-a bundle identifier (`notify::Service::of`), because asking for the center without one throws;
+the objc2 bindings, asking leave with each post and, while notifications are on, with the
+dock's first badge — macOS prompts the first time and answers from the setting after — and
+made only for a process with a bundle identifier (`notify::Service::of`), because asking for
+the center without one throws;
 a click brings Crook forward and not the pane. A binary outside Crook.app and Windows post nothing; the page
 says so and its switches have no handler there. The session bus is a socket on this machine
 and Notification Center a daemon on it, so nothing of this reaches a network.

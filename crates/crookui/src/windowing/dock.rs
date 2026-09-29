@@ -16,10 +16,12 @@
 //! Center for leave to badge, and from then on only while the Badges switch
 //! under System Settings → Notifications says so; until it has asked, a label
 //! it sets is dropped without an error. Asking is the application's: it knows
-//! whether there is a bundle to ask as, and this module only draws. So the
-//! application asks the first time it has a count to show, and once the
-//! answer is yes has [`show_again`] called, because a label set before the
-//! leave may not be drawn after it until it is set again.
+//! whether there is a bundle to ask as, and whether its person wants the
+//! notifications the same prompt asks about, and this module only draws. So
+//! the application asks when it has a count to show — Crook, the first time,
+//! if its notifications are on — and once the answer is yes has
+//! [`show_again`] called, because a label set before the leave may not be
+//! drawn after it until it is set again.
 //!
 //! A binary started from a shell has no bundle identifier and cannot ask.
 //! The badge is set for it all the same; whether the dock draws it is not

@@ -197,7 +197,8 @@ fn a_mac_binary_outside_an_app_bundle_posts_no_banner() {
     // `cargo run`'s binary and the one `script/install` puts on PATH: macOS
     // delivers notifications to an application bundle and nothing else, and
     // asking for its notification center without one throws rather than
-    // failing. Such a copy has the dock's bounce and badge instead.
+    // failing. Such a copy has the dock's bounce instead, and is given a
+    // badge the dock may or may not draw.
     assert_eq!(Service::of("macos", None), Service::OutsideTheApp);
     assert_eq!(Service::of("macos", Some("")), Service::OutsideTheApp);
     assert!(!Service::OutsideTheApp.posts());
