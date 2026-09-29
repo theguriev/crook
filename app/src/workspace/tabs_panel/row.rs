@@ -206,9 +206,17 @@ pub(super) fn render(
         // Warp's `render_compact_pane_row` never calls
         // `render_terminal_right_badges`, which is exactly why the menu hides
         // the two "Show" toggles in this density.
-        Density::Expanded => Chips::resolve(session, git, options),
+        Density::Expanded => {
+            Chips::resolve(session, git, options).linked(pane, interaction.pull_request.clone())
+        }
         Density::Compact => Chips::default(),
     };
+    if !chips.has_link() {
+        // The close button's trap, for the link: a chip that is not drawn
+        // this frame never hears the pointer leave, and the guard in the
+        // row's click handler would take its last hover for a press on it.
+        interaction.pull_request.lock().reset_interaction_state();
+    }
     let body = match options.density {
         Density::Compact => compact_column(&facts, number, options, ui),
         Density::Expanded => expanded_column(&facts, &chips, number, options, ui),
@@ -234,6 +242,7 @@ pub(super) fn render(
 
     let close_state = interaction.close.clone();
     let guard = interaction.close.clone();
+    let link = interaction.pull_request.clone();
     let color = tab_data.color();
 
     let element = Hoverable::new(interaction.chip.clone(), move |state| {
@@ -270,8 +279,10 @@ pub(super) fn render(
     .on_click(move |_, ctx, _| {
         // The close button is a descendant, so a release over it hit-tests
         // true for both. Focusing a pane that has just been closed is a no-op,
-        // but activating a row as it disappears still flickers.
-        if guard.lock().is_hovered() {
+        // but activating a row as it disappears still flickers. The pull
+        // request chip is one too, and a press on a link is a press on the
+        // link: the browser comes up, and the tab under it stays where it was.
+        if guard.lock().is_hovered() || link.lock().is_hovered() {
             return;
         }
         ctx.dispatch_typed_action(WorkspaceAction::Tab(TabAction::FocusPane(pane)));

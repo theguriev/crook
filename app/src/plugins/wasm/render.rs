@@ -30,7 +30,7 @@ use crookui_core::geometry::Color;
 use crookui_core::icons::Chomp;
 use crookui_core::prelude::*;
 
-use crook_plugin_api::{Gap, Node, Size, Tone};
+use crook_plugin_api::{Gap, MAX_DEPTH, Node, Size, Tone};
 
 use std::rc::Rc;
 
@@ -267,6 +267,12 @@ pub(super) struct Chrome<'a> {
     held: &'a Rc<Held>,
     /// What a field pastes from.
     clipboard: &'a Clipboard,
+    /// How many nodes the one being built is inside. See [`DEEPEST`].
+    ///
+    /// Carried here rather than as a parameter of its own because this is
+    /// the one value every level hands down, so a level cannot be added
+    /// without passing it on — and [`element_in`] counts it, once, at the top.
+    depth: usize,
 }
 
 impl<'a> Chrome<'a> {
@@ -284,6 +290,7 @@ impl<'a> Chrome<'a> {
             placement,
             held,
             clipboard,
+            depth: 0,
         }
     }
 }
@@ -368,6 +375,18 @@ const CHIP_RADIUS: f32 = 5.;
 /// See [`BOUNDED`].
 const UNBOUNDED: bool = false;
 
+/// How many nodes deep a tree is drawn, and what is below that is drawn as
+/// nothing.
+///
+/// The deepest tree a guest can send, and not a node less. A decode refuses
+/// anything past [`MAX_DEPTH`] levels and a node inside a node costs two of
+/// them — its variant, and the list or the fields holding it — so no answer
+/// that decoded reaches past half of it, and this never cuts short a tree a
+/// plugin drew. What it bounds is a tree built on this side of the wire, which
+/// is drawn by recursing once per node exactly as one is decoded, and which
+/// would otherwise be the one thing here with no floor under it.
+pub(super) const DEEPEST: usize = MAX_DEPTH / 2;
+
 /// Builds the element a node describes, knowing whether it has room to divide.
 fn element_in(
     node: &Node,
@@ -376,6 +395,14 @@ fn element_in(
     hovers: &Hovers,
     bounded: bool,
 ) -> Box<dyn Element> {
+    if chrome.depth >= DEEPEST {
+        return too_deep();
+    }
+    let chrome = Chrome {
+        depth: chrome.depth + 1,
+        ..chrome
+    };
+
     match node {
         Node::Empty => Empty::new().finish(),
         Node::Text { text, size, tone } => {
@@ -519,6 +546,21 @@ fn unbounded_share() -> Box<dyn Element> {
         log::warn!(
             "a plugin asked for a share of a width nothing gave it \
              \u{2014} a Fill or a Meter outside a panel draws nothing"
+        );
+    });
+    Empty::new().finish()
+}
+
+/// What a node deeper than [`DEEPEST`] comes to.
+///
+/// Nothing, and one line in the log, once, for the reason
+/// [`unbounded_share`] says only once: this is on the frame path.
+fn too_deep() -> Box<dyn Element> {
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| {
+        log::warn!(
+            "a plugin's tree is more than {DEEPEST} nodes deep \
+             \u{2014} what is below that draws nothing"
         );
     });
     Empty::new().finish()

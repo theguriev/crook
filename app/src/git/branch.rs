@@ -157,6 +157,24 @@ pub fn read_head(git_dir: &Path) -> Option<Head> {
     parse_head(&contents)
 }
 
+/// The branch a rebase in progress in `git_dir` is rebasing, if one is.
+///
+/// A rebase detaches `HEAD` for as long as it runs — through every conflict
+/// somebody stops to resolve — and puts the branch back when it finishes, so
+/// `HEAD` alone reads a branch being rebased as no branch at all. Git keeps
+/// the name meanwhile in `head-name` under `rebase-merge` (the backend every
+/// rebase has used by default since git 2.26) or `rebase-apply` (the older
+/// one, still `--apply`'s), as a full ref; it is what `git status` reads to
+/// say "You are currently rebasing branch 'feat'". A rebase of a detached
+/// head writes `detached HEAD` there instead, which names no branch.
+pub fn rebasing(git_dir: &Path) -> Option<String> {
+    ["rebase-merge", "rebase-apply"].iter().find_map(|backend| {
+        let name = std::fs::read_to_string(git_dir.join(backend).join("head-name")).ok()?;
+        let name = name.trim().strip_prefix("refs/heads/")?;
+        (!name.is_empty()).then(|| name.to_owned())
+    })
+}
+
 /// Parses the one line `HEAD` holds.
 fn parse_head(contents: &str) -> Option<Head> {
     let head = contents.trim();

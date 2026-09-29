@@ -466,6 +466,35 @@ impl Plugin for Tabs {
             },
         );
 
+        // The two things a row's pull request can be asked for, and both about
+        // the row the menu is on — or, from the palette, the pane in front of
+        // the person. Opening is the chip's own press, here for the density
+        // that draws no chip; checking is the one place Crook asks the
+        // network about a pull request, through the person's own `gh`, and
+        // only when this is pressed. See `crate::forge`.
+        host.register_command(
+            action("open-pull-request"),
+            "Open pull request",
+            |workspace, ctx| {
+                let Some((pane, _)) = workspace.menu_pane_pull_request() else {
+                    return;
+                };
+                workspace.close_tab_context_menu(ctx);
+                workspace.open_pull_request(pane);
+            },
+        );
+        host.register_command(
+            action("check-pull-request"),
+            "Check pull request",
+            |workspace, ctx| {
+                let Some((pane, _)) = workspace.menu_pane_pull_request() else {
+                    return;
+                };
+                workspace.close_tab_context_menu(ctx);
+                workspace.check_pull_request(pane, ctx);
+            },
+        );
+
         host.register_command(
             action("copy-working-directory"),
             "Copy working directory",
@@ -571,7 +600,7 @@ impl Plugin for Tabs {
         let next_waiting =
             host.register_command(action("next-waiting"), "Next tab waiting for you", {
                 |workspace, ctx| {
-                    let Some(pane) = next_waiting(workspace.tabs()) else {
+                    let Some(pane) = next_waiting(workspace) else {
                         return;
                     };
                     workspace.close_tab_context_menu(ctx);
@@ -729,6 +758,12 @@ impl Plugin for Tabs {
         contribute(host, "copy-git-branch", 202, |workspace, app| {
             workspace.menu_pane_branch(app).is_some()
         });
+        // Beside the branch it belongs to, and there only while there is a
+        // pull request: most panes never have one, and a pair of rows that
+        // could never be pressed on them would be the menu's longest dead
+        // end. The worktree entry is absent outside a repository by the same
+        // rule.
+        pull_request_entries(host, 203);
         rename_entry(host, "rename-tab", 300, Renaming::Tab, &self.rename, &field);
         rename_entry(
             host,
@@ -782,6 +817,58 @@ fn contribute(
             WorkspaceAction::Run(id),
         ))
     });
+}
+
+/// Contributes "Open pull request" and "Check pull request", at `order` and
+/// the one after it, on a row whose agent has said which pull request its
+/// work is.
+///
+/// Checking is inert while a check is out, and says so: a second `gh` asked
+/// the same question before the first has answered would come home to
+/// overwrite it with the same thing, and a live row that did nothing would
+/// be a press that looked lost.
+fn pull_request_entries(host: &mut Host, order: i32) {
+    let open = host.action(&action("open-pull-request"));
+    host.contribute(
+        TAB_MENU_ENTRIES,
+        "open-pull-request",
+        order,
+        move |workspace, _| {
+            workspace.menu_pane_pull_request()?;
+            let key = "crook/tabs/open-pull-request";
+            Some(match open {
+                Some(id) => entry(
+                    workspace,
+                    key,
+                    "Open pull request",
+                    WorkspaceAction::Run(id),
+                ),
+                None => inert_entry(workspace, key, "Open pull request"),
+            })
+        },
+    );
+
+    let check = host.action(&action("check-pull-request"));
+    host.contribute(
+        TAB_MENU_ENTRIES,
+        "check-pull-request",
+        order + 1,
+        move |workspace, _| {
+            let (_, pull_request) = workspace.menu_pane_pull_request()?;
+            let key = "crook/tabs/check-pull-request";
+            let asking = pull_request.check == Some(crate::tab::PullRequestCheck::Asking);
+            Some(match check.filter(|_| !asking) {
+                Some(id) => entry(
+                    workspace,
+                    key,
+                    "Check pull request",
+                    WorkspaceAction::Run(id),
+                ),
+                None if asking => inert_entry(workspace, key, "Checking pull request\u{2026}"),
+                None => inert_entry(workspace, key, "Check pull request"),
+            })
+        },
+    );
 }
 
 /// Contributes the entry that pins, which is the one entry whose *label*
@@ -948,12 +1035,14 @@ fn rename_entry(
 /// The panel's order rather than most-recent-first, because a person working
 /// down a list of agents wants the list's order back: the chord pressed
 /// three times visits three tabs and not the same two in turn.
-pub fn next_waiting(strip: &TabStrip) -> Option<PaneId> {
+pub fn next_waiting(workspace: &Workspace) -> Option<PaneId> {
+    let strip = workspace.tabs();
+    let looking = workspace.looking_at();
     let panes: Vec<(TabId, PaneId, bool)> = strip
         .panes()
         .map(|(tab, pane)| {
-            let active = strip.is_active(tab) && strip.focused_pane_id() == Some(pane.id());
-            (tab, pane.id(), pane.session().is_waiting(active))
+            let waiting = pane.session().is_waiting(looking == Some(pane.id()));
+            (tab, pane.id(), waiting)
         })
         .collect();
     let after_active = panes
@@ -969,14 +1058,19 @@ pub fn next_waiting(strip: &TabStrip) -> Option<PaneId> {
         .map(|(_, pane, _)| *pane)
 }
 
-/// How many panes are waiting for a person, which is the number on the chip.
-pub fn waiting_count(strip: &TabStrip) -> usize {
-    strip
+/// How many panes are waiting for a person, which is the number on the chip
+/// and in front of the window's title.
+///
+/// Off the workspace rather than the strip, because whether a pane is being
+/// looked at is not the strip's to know: the pane with the keyboard in a
+/// window behind another is waiting like any other. See
+/// [`Workspace::looking_at`].
+pub fn waiting_count(workspace: &Workspace) -> usize {
+    let looking = workspace.looking_at();
+    workspace
+        .tabs()
         .panes()
-        .filter(|(tab, pane)| {
-            let active = strip.is_active(*tab) && strip.focused_pane_id() == Some(pane.id());
-            pane.session().is_waiting(active)
-        })
+        .filter(|(_, pane)| pane.session().is_waiting(looking == Some(pane.id())))
         .count()
 }
 
@@ -1016,13 +1110,14 @@ fn severity(status: AgentStatus) -> u8 {
 /// running agent that rang keeps its play mark on its own row because the
 /// row is amber too, but a heading summarising it is answering "does anyone
 /// in here need me", and the honest one-word answer is yes.
-pub fn group_rollup(strip: &TabStrip, group: GroupId) -> Option<GroupRollup> {
-    strip
+pub fn group_rollup(workspace: &Workspace, group: GroupId) -> Option<GroupRollup> {
+    let looking = workspace.looking_at();
+    workspace
+        .tabs()
         .members(group)
-        .flat_map(|tab| tab.panes().iter().map(move |pane| (tab.id(), pane)))
-        .map(|(tab, pane)| {
-            let active = strip.is_active(tab) && strip.focused_pane_id() == Some(pane.id());
-            let waiting = pane.session().is_waiting(active);
+        .flat_map(|tab| tab.panes().iter())
+        .map(|pane| {
+            let waiting = pane.session().is_waiting(looking == Some(pane.id()));
             GroupRollup {
                 status: if waiting {
                     AgentStatus::NeedsInput
@@ -1046,7 +1141,7 @@ pub fn group_rollup(strip: &TabStrip, group: GroupId) -> Option<GroupRollup> {
 /// one when pressed — or nothing at all, which is what the header shows
 /// while nobody is waiting. A count of zero is not information.
 fn waiting_chip(workspace: &Workspace, hover: MouseStateHandle, go: ActionId) -> Box<dyn Element> {
-    let count = waiting_count(workspace.tabs());
+    let count = waiting_count(workspace);
     if count == 0 {
         return Empty::new().finish();
     }

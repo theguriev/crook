@@ -490,6 +490,43 @@ fn a_branch_with_a_commit_after_its_squash_is_not_proved() {
 }
 
 #[test]
+fn a_branch_whose_commit_after_its_squash_only_changes_whitespace_is_not_proved() {
+    // The case plain `patch-id --stable` gets wrong: it hashes each line with
+    // its whitespace taken out, so a follow-up that only re-indents a line
+    // hashes the same as the squash before it. In YAML, Python or a Makefile
+    // the indentation is the change — here `b` moves under `a` — and a false
+    // proof offers somebody's checkout for tidying, and would cost their
+    // branch once deleting one is on the table, so the follow-up has to count
+    // as work.
+    if without_git("a_branch_whose_commit_after_its_squash_only_changes_whitespace_is_not_proved") {
+        return;
+    }
+    let scratch = ScratchDir::new("whitespace");
+    let repo = repository(&scratch, "repo");
+    git(&repo, &["switch", "-c", "feature"]);
+    commit(&repo, "config.yml", "a:\nb: 1\n", "the config");
+    let squash = squash_onto_main(&repo, "feature");
+    assert_eq!(
+        merged(&repo, MAIN, &names(&["feature"])).get("feature"),
+        Some(&Proof::Patch { commit: squash }),
+        "the squash itself was not proved, so the rest proves nothing"
+    );
+
+    git(&repo, &["switch", "feature"]);
+    commit(&repo, "config.yml", "a:\n  b: 1\n", "b belongs under a");
+    assert_ne!(
+        git(&repo, &["diff", "main", "feature"]),
+        "",
+        "the follow-up changed nothing, and this is a test of nothing"
+    );
+
+    assert_eq!(
+        merged(&repo, MAIN, &names(&["feature"])).get("feature"),
+        None
+    );
+}
+
+#[test]
 fn a_patch_the_base_had_before_the_branch_left_it_proves_nothing() {
     // Main adds a file and takes it back; a branch then adds it again. The
     // branch's diff has the patch-id of main's first commit — and that commit
