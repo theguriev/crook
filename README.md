@@ -306,9 +306,16 @@ Nineteen features, and the page that configures them:
   behind something else, Crook asks the desktop to point at it: the dock icon bounces once on
   macOS, the urgency hint goes up on X11, an activation request goes to a Wayland compositor
   that takes them and the taskbar button flashes on Windows — a request for a look, not a
-  notification, and it is taken back when the window comes to the front. A program that turns
-  on focus reporting (`?1004`) is told `CSI I` and `CSI O` as the keyboard reaches its pane and
-  leaves it, the window's own focus included, so an agent can tell whether anybody is watching.
+  notification, and it is taken back when the window comes to the front. On Linux a pane whose
+  row turns amber while the window is behind something else — its agent stops to ask or says it
+  is done, or a program rings the bell — also posts a desktop notification, titled
+  `Crook — <tab>` with the agent's question under it, at most once every thirty seconds for a
+  pane nobody has come back to, through `notify-send` on the session bus and nowhere else; the
+  **Notifications** settings page turns it off, and turns on the same for an agent that failed
+  or a command that ran ten seconds or more. A click on one does not bring the pane forward,
+  and macOS and Windows post none yet. A program that turns on focus reporting (`?1004`) is
+  told `CSI I` and `CSI O` as the keyboard reaches its pane and leaves it, the window's own
+  focus included, so an agent can tell whether anybody is watching.
 - **A shell in every pane.** A real pseudo-terminal and a real xterm-compatible emulator:
   colour, bold and italic faces, underline and strikeout, the alternate screen, ten thousand
   lines of scrollback, `SIGWINCH` on resize, and titles and working directories the shell
@@ -478,14 +485,15 @@ Nineteen features, and the page that configures them:
 - **A settings page**, which opens the way a shell does: `cmd/ctrl-,` — or the View options
   menu's last entry — puts it in a **tab of its own**, listed beside the work it
   configures, splittable next to that work, and closed by the same × and the same close chord
-  (`cmd-w`, `ctrl-shift-w` off macOS) as any other pane. Four pages: Appearance, Shell,
-  Keyboard Shortcuts and About — and a plugin's page arrives on the same rail beside them.
+  (`cmd-w`, `ctrl-shift-w` off macOS) as any other pane. Five pages: Appearance, Shell,
+  Notifications, Keyboard Shortcuts and About — and a plugin's page arrives on the same rail
+  beside them.
   Every option on it is one the application actually reads; there is nothing there that does
   not do something. Changes apply on the click and are
   written to `<config>/crook/settings.json`, which is the same eight keys that menu writes, the
   status marks, the theme, the light and dark pair it follows the desktop between, the
-  terminal's type size, whether the tabs come back, and — set in the file rather than on the
-  page — its font family.
+  terminal's type size, whether the tabs come back, which stops post a notification, and —
+  set in the file rather than on the page — its font family.
   The type size is also on `cmd/ctrl-plus`, `-minus` and `-0`, and every pane resizes with it:
   a pane's columns and rows are its box divided by a cell, so the ptys follow.
   It is the one pane with no shell under it and no field: every control on it is a click.
@@ -546,7 +554,7 @@ Nineteen features, and the page that configures them:
   `rerun-block`, `scroll-to-block-top`, `scroll-to-block-bottom`), every entry of a tab's
   (`crook/tabs/pin-tab`, `close-tab`, `open-menu`, `view-options`,
   `toggle-group`, `close-group`, the seven colours), the worktree list (`crook/worktrees/menu`)
-  and every settings page (`crook/appearance/open-page` and its three neighbours). The block
+  and every settings page (`crook/appearance/open-page` and its four neighbours). The block
   entries act on the block the menu is up on, or — with no menu — on the one the keyboard has
   selected, so each of them is a chord as well as a row.
 

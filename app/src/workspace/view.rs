@@ -36,6 +36,7 @@ use crate::git::GitFacts;
 use crate::git_model::GitModel;
 use crate::input_keys::{Binding, Platform};
 use crate::keybindings::{Context, Keybindings, PendingSave, Recording, Resolution};
+use crate::notify::{Cooldown, LONG_COMMAND, Notice, Notifier, Occasion, Silent};
 use crate::pane_blocks::{PAGE_OVERLAP, PaneBlocks, ScrollCause};
 use crate::pane_find::PaneFind;
 use crate::pane_link::PaneLink;
@@ -69,6 +70,7 @@ use super::action::{
 };
 use super::block_list::block_text;
 use super::held_locks::{HeldLock, HeldLocks};
+use super::row_content::row_name;
 use super::settings_page::SettingsState;
 use super::tab_context_menu::TabContextMenuState;
 use super::tab_menu::{Contents, Going, Looked, Mode as WorktreeMode, Sweep, TabMenuState};
@@ -679,6 +681,14 @@ pub struct Workspace {
     /// a glance, and a pane the strip moved to while nobody was there is
     /// arrived at. See [`Self::set_window_focused`].
     looked_at_when_left: Option<PaneId>,
+    /// Where a desktop notification about a pane goes.
+    ///
+    /// [`Silent`] until the window that runs on a desktop says otherwise —
+    /// see [`Self::set_notifier`] — so a test and a snapshot post nothing.
+    notifier: Rc<dyn Notifier>,
+    /// Which panes have posted a notification lately, so that one which
+    /// flaps posts once. See [`crate::notify::QUIET`].
+    notified: Cooldown,
     interactions: HashMap<PaneId, PaneInteraction>,
     /// What the mouse is doing to each tab's chrome in the panel.
     ///
@@ -999,6 +1009,8 @@ impl Workspace {
             system_is_dark: true,
             window_focused: true,
             looked_at_when_left: None,
+            notifier: Rc::new(Silent),
+            notified: Cooldown::default(),
             interactions: HashMap::new(),
             tab_chrome: HashMap::new(),
             group_chrome: HashMap::new(),
@@ -1201,6 +1213,17 @@ impl Workspace {
     /// thing the window said.
     pub fn is_window_focused(&self) -> bool {
         self.window_focused
+    }
+
+    /// Hands the workspace the notifier its desktop notifications go to.
+    ///
+    /// Told rather than found, for the reason the plugins directory is: a
+    /// workspace that picked the desktop's own notifier for itself would be
+    /// one every test posted a banner from. The window that runs on a
+    /// desktop passes [`crate::notify::for_this_desktop`]'s; a test passes a
+    /// list.
+    pub fn set_notifier(&mut self, notifier: Rc<dyn Notifier>) {
+        self.notifier = notifier;
     }
 
     /// The pane a person is looking at: the one with the keyboard, while the
@@ -5342,9 +5365,12 @@ impl Workspace {
             // that means a pane has gone.
             return true;
         }
-        self.update_session(pane, ctx, |session| {
+        let was = self.shown_status(pane);
+        let reported = self.update_session(pane, ctx, |session| {
             session.attention = Some(Attention::Bell);
-        })
+        });
+        self.tell_the_desktop(pane, was, ctx);
+        reported
     }
 
     /// Records what the program in a pane said it was doing — or, with a
@@ -5373,7 +5399,8 @@ impl Workspace {
         ctx: &mut ViewContext<Self>,
     ) -> bool {
         let looking = self.looking_at() == Some(pane);
-        self.update_session(pane, ctx, |session| {
+        let was = self.shown_status(pane);
+        let reported = self.update_session(pane, ctx, |session| {
             if let Some(title) = title {
                 session.derived_title = Some(title);
             }
@@ -5386,7 +5413,97 @@ impl Workspace {
             } else if changed && !looking {
                 session.attention = Some(Attention::StatusChange);
             }
-        })
+        });
+        self.tell_the_desktop(pane, was, ctx);
+        reported
+    }
+
+    /// What a pane's row shows for its status, while the pane is open.
+    fn shown_status(&self, pane: PaneId) -> Option<AgentStatus> {
+        self.tabs.pane(pane).map(Pane::status)
+    }
+
+    /// Posts a desktop notification about a pane whose row just turned to
+    /// needs-input or to failed, if one is wanted: `was` is what the row
+    /// showed before.
+    ///
+    /// A *turn*, and it is the row's status rather than the agent's. The
+    /// agent saying needs-input again, with another word in its question, is
+    /// the same stop and not a new one. And the row turns amber for more than
+    /// the agent's needs-input: an agent that says it is done while nobody is
+    /// looking, and a bell in a pane with nothing else to say — which is how
+    /// an agent without Crook's hooks asks — are a pane waiting on a person
+    /// as surely. What decides whether it is posted is [`Self::notify`].
+    fn tell_the_desktop(
+        &mut self,
+        pane: PaneId,
+        was: Option<AgentStatus>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let Some(open) = self.tabs.pane(pane) else {
+            return;
+        };
+        let now = open.status();
+        if was.is_none_or(|was| was == now) {
+            return;
+        }
+        let session = open.session();
+        let name = row_name(session, self.home());
+        let (occasion, notice) = match now {
+            AgentStatus::NeedsInput => (Occasion::NeedsInput, Notice::needs_input(&name, session)),
+            AgentStatus::Failed => (Occasion::Failed, Notice::failed(&name)),
+            AgentStatus::Idle | AgentStatus::Running => return,
+        };
+        self.notify(pane, occasion, notice, ctx);
+    }
+
+    /// Posts a desktop notification about a pane whose command ended, if it
+    /// ran for long enough to be one and one is wanted.
+    fn tell_the_desktop_a_command_ended(
+        &mut self,
+        pane: PaneId,
+        exit: Option<i32>,
+        took: Option<Duration>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        // A command the shell did not time is not known to have been long.
+        let Some(took) = took.filter(|took| *took >= LONG_COMMAND) else {
+            return;
+        };
+        let Some(open) = self.tabs.pane(pane) else {
+            return;
+        };
+        // What the pane was running is already gone by now — the model hears
+        // it stop before it hears it finish — so the name is the row's, which
+        // falls back to the directory rather than to `agent 1`.
+        let notice = Notice::finished(&row_name(open.session(), self.home()), exit, took);
+        self.notify(pane, Occasion::LongCommand, notice, ctx);
+    }
+
+    /// Posts `notice` about `pane` when everything that decides it says yes:
+    /// the window is behind another one, the person asked for `occasion`, the
+    /// Notifications plugin is on, and the pane has been quiet for
+    /// [`QUIET`](crate::notify::QUIET) or looked at since it last posted.
+    ///
+    /// Only while the window is behind another one, because a pane in front
+    /// of somebody already has their attention — the row, the chip and the
+    /// title are all saying it. The quiet is asked last, so that only a
+    /// notification that was really posted starts one.
+    fn notify(
+        &mut self,
+        pane: PaneId,
+        occasion: Occasion,
+        notice: Notice,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        if self.window_focused
+            || !self.general().notifies_on(occasion)
+            || !crate::plugins::notifications::is_on(&self.host)
+            || !self.notified.admits(pane, Instant::now())
+        {
+            return;
+        }
+        self.notifier.post(notice, ctx.background());
     }
 
     /// Clears the attention a pane asked for, now that it has it.
@@ -5405,10 +5522,16 @@ impl Workspace {
     /// the strip moves to then is a pane nobody saw. Coming back to the
     /// window runs this for whichever pane has the keyboard by then, with
     /// the pane that had it on leaving as `before`.
+    ///
+    /// Looking also ends the pane's desktop-notification quiet, whether or
+    /// not it had asked for anything: the banner it posted has been answered
+    /// by the person coming to it, so what it says next is news however soon
+    /// it comes. See [`Cooldown::seen`].
     fn attend(&mut self, before: Option<PaneId>, ctx: &mut ViewContext<Self>) {
         let Some(pane) = self.looking_at() else {
             return;
         };
+        self.notified.seen(pane);
         let arrived = before != Some(pane);
         let asked = self
             .tabs
@@ -5515,6 +5638,7 @@ impl Workspace {
             } => self.ring(*pane, *while_running, ctx),
             TerminalUpdate::CommandFinished { pane, exit, took } => {
                 self.command_finished(*pane, *exit, *took, ctx);
+                self.tell_the_desktop_a_command_ended(*pane, *exit, *took, ctx);
                 true
             }
             TerminalUpdate::Completions(pane, serial, answer) => {
@@ -6917,6 +7041,10 @@ impl Workspace {
             SettingsAction::ToggleTabsPanel => {
                 let shown = !self.general().show_tabs_panel;
                 self.set_tabs_panel_shown(shown, ctx);
+            }
+            SettingsAction::ToggleNotification(occasion) => {
+                let general = self.general().toggled(occasion);
+                self.set_general(general, ctx);
             }
             SettingsAction::RecordBinding(id) => {
                 let Some(command) = self.host.action_name(id).cloned() else {
