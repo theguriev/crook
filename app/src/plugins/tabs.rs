@@ -600,7 +600,7 @@ impl Plugin for Tabs {
         let next_waiting =
             host.register_command(action("next-waiting"), "Next tab waiting for you", {
                 |workspace, ctx| {
-                    let Some(pane) = next_waiting(workspace.tabs()) else {
+                    let Some(pane) = next_waiting(workspace) else {
                         return;
                     };
                     workspace.close_tab_context_menu(ctx);
@@ -1035,12 +1035,14 @@ fn rename_entry(
 /// The panel's order rather than most-recent-first, because a person working
 /// down a list of agents wants the list's order back: the chord pressed
 /// three times visits three tabs and not the same two in turn.
-pub fn next_waiting(strip: &TabStrip) -> Option<PaneId> {
+pub fn next_waiting(workspace: &Workspace) -> Option<PaneId> {
+    let strip = workspace.tabs();
+    let looking = workspace.looking_at();
     let panes: Vec<(TabId, PaneId, bool)> = strip
         .panes()
         .map(|(tab, pane)| {
-            let active = strip.is_active(tab) && strip.focused_pane_id() == Some(pane.id());
-            (tab, pane.id(), pane.session().is_waiting(active))
+            let waiting = pane.session().is_waiting(looking == Some(pane.id()));
+            (tab, pane.id(), waiting)
         })
         .collect();
     let after_active = panes
@@ -1056,14 +1058,19 @@ pub fn next_waiting(strip: &TabStrip) -> Option<PaneId> {
         .map(|(_, pane, _)| *pane)
 }
 
-/// How many panes are waiting for a person, which is the number on the chip.
-pub fn waiting_count(strip: &TabStrip) -> usize {
-    strip
+/// How many panes are waiting for a person, which is the number on the chip
+/// and in front of the window's title.
+///
+/// Off the workspace rather than the strip, because whether a pane is being
+/// looked at is not the strip's to know: the pane with the keyboard in a
+/// window behind another is waiting like any other. See
+/// [`Workspace::looking_at`].
+pub fn waiting_count(workspace: &Workspace) -> usize {
+    let looking = workspace.looking_at();
+    workspace
+        .tabs()
         .panes()
-        .filter(|(tab, pane)| {
-            let active = strip.is_active(*tab) && strip.focused_pane_id() == Some(pane.id());
-            pane.session().is_waiting(active)
-        })
+        .filter(|(_, pane)| pane.session().is_waiting(looking == Some(pane.id())))
         .count()
 }
 
@@ -1103,13 +1110,14 @@ fn severity(status: AgentStatus) -> u8 {
 /// running agent that rang keeps its play mark on its own row because the
 /// row is amber too, but a heading summarising it is answering "does anyone
 /// in here need me", and the honest one-word answer is yes.
-pub fn group_rollup(strip: &TabStrip, group: GroupId) -> Option<GroupRollup> {
-    strip
+pub fn group_rollup(workspace: &Workspace, group: GroupId) -> Option<GroupRollup> {
+    let looking = workspace.looking_at();
+    workspace
+        .tabs()
         .members(group)
-        .flat_map(|tab| tab.panes().iter().map(move |pane| (tab.id(), pane)))
-        .map(|(tab, pane)| {
-            let active = strip.is_active(tab) && strip.focused_pane_id() == Some(pane.id());
-            let waiting = pane.session().is_waiting(active);
+        .flat_map(|tab| tab.panes().iter())
+        .map(|pane| {
+            let waiting = pane.session().is_waiting(looking == Some(pane.id()));
             GroupRollup {
                 status: if waiting {
                     AgentStatus::NeedsInput
@@ -1133,7 +1141,7 @@ pub fn group_rollup(strip: &TabStrip, group: GroupId) -> Option<GroupRollup> {
 /// one when pressed — or nothing at all, which is what the header shows
 /// while nobody is waiting. A count of zero is not information.
 fn waiting_chip(workspace: &Workspace, hover: MouseStateHandle, go: ActionId) -> Box<dyn Element> {
-    let count = waiting_count(workspace.tabs());
+    let count = waiting_count(workspace);
     if count == 0 {
         return Empty::new().finish();
     }

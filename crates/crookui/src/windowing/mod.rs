@@ -2,7 +2,8 @@
 //!
 //! Everything winit is confined to this module and never appears in a signature
 //! the application crate sees. What it sees instead is [`WindowDelegate`] —
-//! build a scene, handle an event, note that a frame was drawn — plus
+//! build a scene, handle an event, note that a frame was drawn, answer a
+//! request to close — plus
 //! [`Platform`], which hands it the main-thread executor and a handle for
 //! waking that thread from anywhere else.
 //!
@@ -16,7 +17,8 @@
 //! somewhere to spawn it, and a window that fails to open should not have
 //! required the application to be built first.
 //!
-//! [`run`] returns when the window closes.
+//! [`run`] returns when the application asks it to through [`Proxy::exit`],
+//! or when the window's close is asked for and the delegate lets it go.
 //!
 //! # A window the application decorates itself
 //!
@@ -28,6 +30,7 @@
 
 mod app;
 mod chrome;
+mod dock;
 mod event;
 mod window;
 

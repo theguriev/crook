@@ -49,7 +49,9 @@ struct Click {
 }
 
 impl InputState {
-    /// Converts one winit window event, or `None` when it is not input.
+    /// Converts one winit window event, or `None` when it is not input or one
+    /// of the two things the desktop says about the window — its theme and
+    /// whether it has the focus.
     ///
     /// `scale_factor` converts winit's physical coordinates to the logical ones
     /// the scene was laid out in, so it must be the window's *current* scale
@@ -123,6 +125,12 @@ impl InputState {
             // them, so the answer crosses this line as an event like any
             // other.
             WindowEvent::ThemeChanged(theme) => Some(Event::SystemTheme(system_theme(*theme))),
+
+            // The window came in front of the person or went behind another.
+            // Not input, strictly, but it crosses the line the way the theme
+            // does: it is the desktop saying something about the window, and
+            // only winit knows how each desktop says it.
+            WindowEvent::Focused(focused) => Some(Event::WindowFocused(*focused)),
 
             // An input method is composing. These arrive *instead of* the key
             // presses that belong to the composition, which is why a field
@@ -503,6 +511,20 @@ mod tests {
         assert!(matches!(
             down,
             Some(Event::MouseDown { click_count: 1, .. })
+        ));
+    }
+
+    #[test]
+    fn the_window_gaining_and_losing_focus_crosses_the_line() {
+        let mut input = InputState::default();
+
+        assert!(matches!(
+            input.convert(&WindowEvent::Focused(false), 1.),
+            Some(Event::WindowFocused(false))
+        ));
+        assert!(matches!(
+            input.convert(&WindowEvent::Focused(true), 1.),
+            Some(Event::WindowFocused(true))
         ));
     }
 

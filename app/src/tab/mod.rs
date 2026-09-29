@@ -120,13 +120,21 @@ impl AgentStatus {
 /// are answered differently by the person reading them — and so that the
 /// two can never disagree: attention that is set has a cause, and attention
 /// that is cleared has none.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Attention {
     /// The shell rang the bell in a pane without the keyboard.
     Bell,
     /// The agent's status changed to something other than running, in a
     /// pane without the keyboard.
     StatusChange,
+    /// A program in a pane without the keyboard sent one of the
+    /// notifications other terminals show — OSC 9, 777 or 99 — and this is
+    /// what it said, on one line.
+    ///
+    /// The words ride with the flag for the reason the cause does: they
+    /// are what the look is being asked for, so they go when the look is
+    /// given and never linger on a row somebody has already read.
+    Notification(String),
 }
 
 /// Where a session's status came from.
@@ -288,12 +296,12 @@ pub struct AgentSession {
     pub source: StatusSource,
     /// Whether something happened here while nobody was looking, and what.
     ///
-    /// The bell in a pane without the keyboard, or a status that changed
-    /// there to anything but running: a person who walked away from a tab
-    /// wants to know its agent stopped, whatever it stopped for. Cleared by
-    /// looking — every focus change runs `attend` — because attention is a
-    /// fact about the person and not about the work, which is the whole
-    /// reason it is not folded into [`Self::status`].
+    /// The bell in a pane without the keyboard, a notification sent there,
+    /// or a status that changed there to anything but running: a person who
+    /// walked away from a tab wants to know its agent stopped, whatever it
+    /// stopped for. Cleared by looking — every focus change runs `attend` —
+    /// because attention is a fact about the person and not about the work,
+    /// which is the whole reason it is not folded into [`Self::status`].
     pub attention: Option<Attention>,
     /// Whether a person asked to be brought back here.
     ///
@@ -332,7 +340,47 @@ pub struct AgentSession {
     ///
     /// Reported off the open block's OSC 133 marks. It is a *name*, not state:
     /// the dot already says whether something is running, and this says what.
+    /// Written through [`Self::set_running_command`].
     pub running_command: Option<String>,
+    /// The agent this pane was running when the window it came back from
+    /// was closed, by its program's name, until anything runs here.
+    ///
+    /// Set by a restore and by nothing else, and only for a pane whose
+    /// directory came back: the process is gone, but the conversation is
+    /// still on disk, keyed by that directory, and this is what lets the
+    /// pane offer it back. Kept until a command runs — the resume line, or
+    /// whatever a person runs instead, seen running or only seen finishing
+    /// (see [`Self::command_finished`]) — so that a window closed again before
+    /// anybody pressed Enter still remembers what it was offering, rather
+    /// than the first save after the restore writing the agent out of the
+    /// file.
+    pub restored_agent: Option<String>,
+
+    /// Which pane opened this one through `crook tab new`, when one did.
+    ///
+    /// `None` for every pane a person opened. It is what the row's card and
+    /// its "Why this status" say — a tab nobody in the room opened is one a
+    /// person should be able to trace — and what the spawn budget is counted
+    /// by: see [`crate::control::spawn`]. Not saved with the session: the
+    /// pane it names is gone when the window is, and the pane that comes back
+    /// in its place was opened by the restore.
+    pub spawned_by: Option<Lineage>,
+}
+
+/// Where a pane opened by `crook tab new` came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Lineage {
+    /// The pane that asked for it.
+    pub caller: PaneId,
+    /// The pane a person opened that the chain of asking began at: the
+    /// caller itself, or the root the caller's own lineage names. What the
+    /// budget is counted against, so that a worker opening workers spends its
+    /// root's tabs rather than a budget of its own.
+    pub root: PaneId,
+    /// What the caller's row was called when it asked, for the card. Kept
+    /// rather than looked up, because the caller can close and its worker is
+    /// still the one it opened.
+    pub title: String,
 }
 
 /// Where a session starts when nobody named a directory.
@@ -380,7 +428,56 @@ impl AgentSession {
             working_directory: starting_directory(),
             pull_request: None,
             running_command: None,
+            spawned_by: None,
+            restored_agent: None,
         }
+    }
+
+    /// The coding agent this pane is running, or was running when the window
+    /// it came back from was closed, by its program's name — `claude`, never
+    /// the prompt typed after it.
+    ///
+    /// What the session file remembers of a pane's process, and all it
+    /// remembers: see [`crate::session`].
+    pub fn agent(&self) -> Option<&str> {
+        self.running_command
+            .as_deref()
+            .and_then(crate::agent::program_of)
+            .or(self.restored_agent.as_deref())
+    }
+
+    /// Records what the pane is running, answering whether that changed the
+    /// agent it names — which is when the session file has something new to
+    /// say.
+    ///
+    /// Any command at all ends [`Self::restored_agent`]: the conversation it
+    /// named has been resumed, or the person has done something else with the
+    /// pane, and either way the pane is no longer offering it.
+    pub fn set_running_command(&mut self, command: Option<String>) -> bool {
+        let before = self.agent().map(str::to_owned);
+        if command.is_some() {
+            self.restored_agent = None;
+        }
+        self.running_command = command;
+        before.as_deref() != self.agent()
+    }
+
+    /// Ends [`Self::restored_agent`] because a command finished in the pane,
+    /// answering whether that changed the agent it names.
+    ///
+    /// [`Self::set_running_command`] alone is not enough. What a pane is
+    /// running is read off it at rest, so a command that starts and ends
+    /// between two reads — `cd`, `ls`, `git status` — is never seen running,
+    /// and a pane that ran only commands like those would go on naming the
+    /// agent, against whatever directory the `cd` left it in. The shell marks
+    /// the end of every command, however quick, and that mark is what calls
+    /// this — the mark of a command, that is: the one a shell sends for a line
+    /// that ran nothing, ctrl-c at the prompt or an empty Enter, does not. An
+    /// agent the pane is running now stays named.
+    pub fn command_finished(&mut self) -> bool {
+        let before = self.agent().map(str::to_owned);
+        self.restored_agent = None;
+        before.as_deref() != self.agent()
     }
 
     /// What the tab bar should print: what a person called it, else the
@@ -406,6 +503,21 @@ impl AgentSession {
             .as_deref()
             .or(self.derived_title.as_deref())
             .or(self.running_command.as_deref())
+    }
+
+    /// What the row says on its second line in place of the table's: what
+    /// a notification nobody has seen yet said, else what a waiting agent
+    /// is asking.
+    ///
+    /// The notification first, because it is the newer of the two — a
+    /// status change after it takes its place in [`Self::attention`] — and
+    /// because it is the one a look will take away: once somebody has read
+    /// it, the question the agent is still asking comes back.
+    pub fn row_message(&self) -> Option<&str> {
+        match &self.attention {
+            Some(Attention::Notification(message)) => Some(message),
+            _ => self.message.as_deref(),
+        }
     }
 
     /// Whether somebody should look here: the work asked, or the person did.
@@ -436,10 +548,31 @@ impl AgentSession {
     /// The count in the header and the tab the "next waiting" chord goes to:
     /// something happened here unseen, the person marked it to come back to,
     /// or the agent said it needs input and is still saying so. `active` is
-    /// whether the pane is the one being looked at, and a pane that is can
+    /// whether the pane is the one being looked at — the one with the
+    /// keyboard, in a window that has the desktop's — and a pane that is can
     /// wait for nobody.
     pub fn is_waiting(&self, active: bool) -> bool {
         !active && (self.asks_for_a_look() || self.status == AgentStatus::NeedsInput)
+    }
+
+    /// Whether closing this pane would end work somebody has not finished
+    /// with: the agent says it is running or waiting on a person, or the
+    /// shell has a command open.
+    ///
+    /// Both, because each misses what the other sees. An agent started
+    /// without `crook --agent-hooks` reports nothing and is still a command
+    /// running; an agent in a shell with no command marks — one Crook has no
+    /// snippet for, or one with the marks switched off — reports its status
+    /// and opens no block. A build or an `ssh` session is work too, for the
+    /// same reason a conversation is: the pane's pty ends it.
+    ///
+    /// [`Self::status`] and never [`Self::shown_status`], which turns a bell
+    /// in an idle shell into a waiting dot. A shell at its prompt that rang
+    /// is not something a close can take away from anyone. A failed agent has
+    /// stopped, and so has one that went idle.
+    pub fn is_working(&self) -> bool {
+        matches!(self.status, AgentStatus::Running | AgentStatus::NeedsInput)
+            || self.running_command.is_some()
     }
 
     /// What a pull-request chip says: `PR #123` for a pull request on
@@ -760,6 +893,21 @@ pub enum TabAction {
     /// agents in one rectangle, which is a different claim — that they are two
     /// halves of one screen — and it is the wrong one.
     NewInGroupOf(TabId),
+    /// Open a tab beside `tab` — at the end of its group, making a group of
+    /// the two when `grouped` and it has none, and after its block otherwise —
+    /// and leave the active tab as it is.
+    ///
+    /// What `crook tab new` opens. A tab an agent asked for is not one a
+    /// person switched to: selecting it would move the keyboard out from
+    /// under whoever is typing, and the rest of their line would land in the
+    /// worker's field. It goes last in the most-recently-used order, since
+    /// nobody has used it.
+    NewBeside {
+        /// The tab it opens beside.
+        tab: TabId,
+        /// Whether it joins that tab's group.
+        grouped: bool,
+    },
     /// Put a tab somewhere else in the list: into a group, out of one, or at
     /// another place among its neighbours.
     ///
@@ -1490,9 +1638,29 @@ impl TabStrip {
         TabEffect::Changed
     }
 
-    /// Opens a tab in `anchor`'s group, making one of the two when it has no
-    /// group yet.
-    fn new_in_group_of(&mut self, anchor: TabId) -> TabEffect {
+    /// Where a tab opened after the tab at `index` goes.
+    ///
+    /// Past the rest of that tab's group when it is in one, because a tab
+    /// that belongs to nothing cannot be dropped into the middle of tabs that
+    /// belong together — Warp's `clamp_to_unpinned_region` is the same move
+    /// for its own reason — and at the end when there is no such tab.
+    fn slot_after(&self, index: Option<usize>) -> usize {
+        let at = match index {
+            Some(index) => match self.tabs[index].group().and_then(|id| self.run_of(id)) {
+                Some(run) => run.end,
+                None => index + 1,
+            },
+            None => self.tabs.len(),
+        };
+        // And through the clamp every other move goes through, so that
+        // opening a tab from a pinned one puts it after the pins rather than
+        // among them.
+        self.slot_for(None, self.tabs.get(at).map(Tab::id), false)
+    }
+
+    /// Opens a tab at the end of `anchor`'s group, making one of the two when
+    /// it has none, and selects it when `select` says to.
+    fn new_in_group_of(&mut self, anchor: TabId, select: bool) -> TabEffect {
         let Some(index) = self.index_of(anchor) else {
             return TabEffect::Unchanged;
         };
@@ -1529,7 +1697,13 @@ impl TabStrip {
         // it in the middle of checkouts made before it.
         let at = self.run_of(group).map_or(index + 1, |run| run.end);
         self.tabs.insert(at, tab);
-        self.repair(Some(id));
+        if select {
+            self.repair(Some(id));
+        } else {
+            // Last in the order of use, for the reason `NewBeside` gives.
+            self.mru.push(id);
+            self.repair(None);
+        }
         TabEffect::Changed
     }
 
@@ -1584,28 +1758,33 @@ impl TabStrip {
                 let tab = Tab::new(format!("agent {}", self.opened));
                 let id = tab.id();
                 // After the active tab, which is where a person who just
-                // branched off what they were doing expects to find it — and
-                // past the rest of its group when it is in one, because a tab
-                // that belongs to nothing cannot be dropped into the middle of
-                // tabs that belong together. Warp's `clamp_to_unpinned_region`
-                // is the same move for its own reason.
-                let at = match self.index_of(self.active) {
-                    Some(index) => match self.tabs[index].group().and_then(|id| self.run_of(id)) {
-                        Some(run) => run.end,
-                        None => index + 1,
-                    },
-                    None => self.tabs.len(),
-                };
-                // And through the clamp every other move goes through, so that
-                // opening a tab from a pinned one puts it after the pins rather
-                // than among them.
-                let at = self.slot_for(None, self.tabs.get(at).map(Tab::id), false);
+                // branched off what they were doing expects to find it.
+                let at = self.slot_after(self.index_of(self.active));
                 self.tabs.insert(at, tab);
                 self.repair(Some(id));
                 TabEffect::Changed
             }
 
-            TabAction::NewInGroupOf(anchor) => self.new_in_group_of(anchor),
+            TabAction::NewInGroupOf(anchor) => self.new_in_group_of(anchor, true),
+
+            TabAction::NewBeside { tab, grouped: true } => self.new_in_group_of(tab, false),
+
+            TabAction::NewBeside {
+                tab: anchor,
+                grouped: false,
+            } => {
+                let Some(index) = self.index_of(anchor) else {
+                    return TabEffect::Unchanged;
+                };
+                self.opened += 1;
+                let tab = Tab::new(format!("agent {}", self.opened));
+                let id = tab.id();
+                let at = self.slot_after(Some(index));
+                self.tabs.insert(at, tab);
+                self.mru.push(id);
+                self.repair(None);
+                TabEffect::Changed
+            }
 
             TabAction::MoveTab { tab, group, before } => self.move_tab(tab, group, before),
 
