@@ -138,8 +138,8 @@ fn prefix(channel: Channel) -> String {
     format!("crook-{}-", channel.name())
 }
 
-/// Creates `<stem>.<extension>` in `directory`, or, when another file got
-/// that name in the same second, `<stem>_02.<extension>` and on.
+/// Creates `<stem>.<extension>` in `directory`, or, when a file of the same
+/// second is already there, `<stem>_02.<extension>` and on.
 ///
 /// Created rather than opened, so that two processes started together never
 /// write one file between them. The second file's mark is an underscore and
@@ -147,15 +147,23 @@ fn prefix(channel: Channel) -> String {
 /// name and `02` before `10`, so a later file of the same second is a newer
 /// one to [`prune`] and [`crash::unseen`] as well.
 ///
+/// That holds only if a later file never takes a lower mark than one that was
+/// there before it, so the marks start after the highest one in the folder
+/// ([`next_mark`]) rather than at the first free name. The first name is free
+/// again once the sixth file of its second has had it pruned, or once its
+/// report is marked seen; a file that took it back would sort as the oldest
+/// of its second and be pruned before the files it came after — or, as a
+/// report, be renamed over the seen one when it was marked in its turn.
+///
 /// The file is held for as long as it is open, so that no other launch's
 /// [`prune`] removes a log a window is still writing: on Windows by not
 /// sharing the right to delete it, and elsewhere by an advisory lock, which a
 /// person reading the file with anything else does not notice.
 fn fresh(directory: &Path, stem: &str, extension: &str) -> io::Result<(PathBuf, File)> {
-    /// A bound, so a folder that answers every name with "exists" is an
-    /// error rather than a loop — and under a hundred, so every mark is two
-    /// digits.
-    const ATTEMPTS: usize = 64;
+    /// The highest mark, so every mark is two digits — and a bound, so a
+    /// folder that answers every name with "exists" is an error rather than a
+    /// loop.
+    const MOST_MARK: usize = 99;
 
     let mut options = File::options();
     options.write(true).create_new(true);
@@ -168,11 +176,14 @@ fn fresh(directory: &Path, stem: &str, extension: &str) -> io::Result<(PathBuf, 
         options.share_mode(SHARED);
     }
 
+    // Still tried in turn from there, and each one created rather than
+    // assumed free: another launch can take a mark between the look and the
+    // creation.
     let mut taken = None;
-    for attempt in 1..=ATTEMPTS {
-        let name = match attempt {
+    for mark in next_mark(directory, stem)..=MOST_MARK {
+        let name = match mark {
             1 => format!("{stem}.{extension}"),
-            _ => format!("{stem}_{attempt:02}.{extension}"),
+            _ => format!("{stem}_{mark:02}.{extension}"),
         };
         let path = directory.join(name);
         match options.open(&path) {
@@ -188,6 +199,33 @@ fn fresh(directory: &Path, stem: &str, extension: &str) -> io::Result<(PathBuf, 
         }
     }
     Err(taken.unwrap_or_else(|| io::Error::other("no name was free")))
+}
+
+/// The mark after the highest one any file of `stem` in `directory` has —
+/// `1`, the bare `<stem>.<extension>`, when there is none.
+///
+/// Of any extension, so a report marked seen, `<stem>.seen.txt`, still holds
+/// the mark it was written with.
+fn next_mark(directory: &Path, stem: &str) -> usize {
+    named(directory, stem, "")
+        .iter()
+        .filter_map(|path| mark(path.file_name()?.to_str()?.strip_prefix(stem)?))
+        .max()
+        .map_or(1, |highest| highest + 1)
+}
+
+/// The mark of a file of a stem, from what follows the stem in its name: `1`
+/// for `.…`, and `NN` for `_NN.…`. `None` for a name that only starts the
+/// same way.
+fn mark(rest: &str) -> Option<usize> {
+    if rest.starts_with('.') {
+        return Some(1);
+    }
+    let (digits, _) = rest.strip_prefix('_')?.split_once('.')?;
+    if digits.len() != 2 || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
 }
 
 /// Removes every file in `directory` named `<prefix>…<suffix>` but the newest
@@ -278,7 +316,20 @@ impl Drop for Scratch {
 mod tests {
     use chrono::{FixedOffset, TimeZone as _};
 
-    use super::stamp;
+    use super::{mark, stamp};
+
+    #[test]
+    fn a_mark_is_read_only_from_a_name_fresh_could_have_made() {
+        assert_eq!(mark(".log"), Some(1));
+        assert_eq!(mark(".seen.txt"), Some(1));
+        assert_eq!(mark("_07.txt"), Some(7));
+        assert_eq!(mark("_07.seen.txt"), Some(7));
+        // Copies a file manager made beside a report, which say nothing about
+        // how many files their second wrote.
+        assert_eq!(mark(" copy.txt"), None);
+        assert_eq!(mark("_07 (1).txt"), None);
+        assert_eq!(mark("_7.txt"), None);
+    }
 
     #[test]
     fn a_later_moment_is_a_later_name_whatever_zone_the_clock_was_in() {

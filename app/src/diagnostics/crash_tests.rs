@@ -266,6 +266,64 @@ fn a_second_that_wrote_six_reports_keeps_the_last_five_it_wrote() {
     );
 }
 
+#[test]
+fn a_second_that_wrote_more_reports_than_are_kept_keeps_the_last_it_wrote() {
+    // Seven or more panics in one second — the reader threads of every pane
+    // tripping over the same bug. The sixth report's pruning frees the
+    // second's first name, and a seventh that took it again sorted before
+    // `_02`: offered as the oldest, and the next one pruned while earlier
+    // reports stayed.
+    let scratch = Scratch::new("eight");
+    for number in 1..=8 {
+        write(
+            scratch.path(),
+            Channel::Stable,
+            "20260929T081500Z",
+            &format!("report {number}"),
+        )
+        .expect("written");
+    }
+
+    let kept: Vec<String> = unseen(scratch.path(), Channel::Stable)
+        .iter()
+        .map(|report| fs::read_to_string(report).expect("reads"))
+        .collect();
+    assert_eq!(
+        kept,
+        ["report 4", "report 5", "report 6", "report 7", "report 8"]
+    );
+}
+
+#[test]
+fn a_report_of_the_same_second_as_a_seen_one_never_takes_its_name() {
+    // A report marked seen still holds its second's first mark. One written
+    // into that second afterwards — under a clock set back, say — that took
+    // the name back would be renamed over the first when it was marked seen
+    // in its turn, and the first report would be gone.
+    let scratch = Scratch::new("seen-second");
+    let first = write(scratch.path(), Channel::Stable, "20260929T081500Z", "first").expect("one");
+    let first = mark_seen(&first).expect("the first report is renamed");
+    let second = write(
+        scratch.path(),
+        Channel::Stable,
+        "20260929T081500Z",
+        "second",
+    )
+    .expect("two");
+    let second = mark_seen(&second).expect("the second report is renamed");
+
+    assert_ne!(first, second);
+    assert_eq!(
+        fs::read_to_string(&first).expect("the first report reads"),
+        "first",
+        "marking the second report seen wrote over the first"
+    );
+    assert_eq!(
+        fs::read_to_string(&second).expect("the second report reads"),
+        "second"
+    );
+}
+
 /// Where [`panics_with_the_hook_installed`] writes, set by the test that
 /// starts it.
 const CHILD_FOLDER: &str = "CROOK_TEST_CRASH_FOLDER";
