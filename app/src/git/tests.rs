@@ -757,8 +757,8 @@ fn a_branch_with_no_commit_yet_has_nothing_since_its_base() {
 fn a_repositorys_base_is_looked_up_once_across_refreshes_and_by_all_its_worktrees() {
     // A base is up to three subprocesses and almost never changes. Asked
     // every fifteen seconds for every row it would more than double what a
-    // refresh costs; asked once per repository, a refresh adds at most the
-    // two that count.
+    // refresh costs; asked once per repository, each directory a refresh
+    // gathers adds at most the two that count.
     static LOOKUPS: AtomicU32 = AtomicU32::new(0);
     fn counted(repository: &Path) -> Option<String> {
         LOOKUPS.fetch_add(1, Ordering::Relaxed);

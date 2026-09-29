@@ -1020,13 +1020,15 @@ adds `since main`. The row leaves the base's name out because its metadata line 
 did; the card, when a narrow window narrows it, gives up the base's name before the numbers.
 The base is `merged.rs`'s, found once per repository — by the common git directory, so every
 worktree of one shares it — and carried from cycle to cycle with the gather's ticket, so a
-refresh adds at most two subprocesses a checkout, and none while nothing shows the chip. A
-lookup that found no base is kept only for the branch that asked, because a repository made a
-minute ago has no `main` until its first commit, and one no gather has asked about for a whole
-cycle is forgotten. The base itself — a local `main` against `origin/main` as much as against
-`main` — a detached `HEAD`, an unborn branch and a repository with no base keep the plain count,
-and so does the plugin API's `Where`, whose `added` and `removed` are still what is not
-committed yet.
+refresh adds at most two subprocesses for each directory a pane sits in, and none while nothing
+shows the chip. Only the base is shared: the gather runs per directory, not per checkout, so
+two panes in different directories of one checkout each pay for the count, as they already did
+for the diff. A lookup that found no base is kept only for the branch that asked, because a
+repository made a minute ago has no `main` until its first commit, and one no gather has asked
+about for a whole cycle is forgotten. The base itself — a local `main` against `origin/main`
+as much as against `main` — a detached `HEAD`, an unborn branch and a repository with no base
+keep the plain count, and so does the plugin API's `Where`, whose `added` and `removed` are
+still what is not committed yet.
 
 **A removal takes its empty directories with it.** `git worktree remove` deletes the checkout
 and nothing above it, so the store kept a directory per repository after its last checkout
