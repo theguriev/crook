@@ -80,6 +80,12 @@
 //! pane, a split and a new tab all get it, because every shell Crook starts
 //! goes through [`Session::open`] and that is where it is set.
 //!
+//! [`SOCKET_VARIABLE`](crate::control::SOCKET_VARIABLE) — `CROOK_SOCKET` — is
+//! set in the same place, and it *is* an address: where the window answers
+//! `crook pane list`. Empty when the window has no socket, rather than left
+//! out, so that a Crook started inside another Crook's pane does not pass the
+//! outer window's on to its own shells.
+//!
 //! # What it costs when it does not work
 //!
 //! One pane's blocks, and nothing else. [`Session::open`] cannot fail: an
@@ -323,6 +329,10 @@ pub struct Options {
     pub login: bool,
     /// The shell to run, or the user's own when unset.
     pub shell: Option<PathBuf>,
+    /// Where the window answers questions, told to the shell in
+    /// [`SOCKET_VARIABLE`](crate::control::SOCKET_VARIABLE); `None` when the
+    /// window has no socket, which the shell is told as an empty value.
+    pub control_socket: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -333,6 +343,7 @@ impl Default for Options {
             enabled: true,
             login: login_by_default(),
             shell: None,
+            control_socket: None,
         }
     }
 }

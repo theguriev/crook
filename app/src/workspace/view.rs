@@ -4968,6 +4968,15 @@ impl Workspace {
             .update(ctx, |model, _| model.set_shell(shell));
     }
 
+    /// Says where this window answers questions, for every shell opened from
+    /// now on to be told in `CROOK_SOCKET`. See [`crate::control`].
+    ///
+    /// Call before [`Self::start_terminals`], for the same reason again.
+    pub fn set_control_socket(&self, socket: Option<PathBuf>, ctx: &mut ViewContext<Self>) {
+        self.terminals
+            .update(ctx, |model, _| model.set_control_socket(socket));
+    }
+
     /// The shell the next pane runs and whether it gets the marks, read the
     /// way the launch reads them, and whether the shell was named rather
     /// than resolved. What the Shell page prints: a page that said "zsh"

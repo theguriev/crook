@@ -7,8 +7,8 @@ description: Work inside Crook, a terminal whose unit of work is an agent. Use o
 
 Crook is a terminal whose unit of work is an agent: one tab per agent, a dot on the tab's row
 saying what the agent is doing, and a panel down the left edge that lists them all. The
-`crook` binary has flags for what an agent can do from inside a pane, and this file is the
-whole of them.
+`crook` binary has flags, and one command, for what an agent can do from inside a pane, and
+this file is the whole of them.
 
 ## Tell whether you are inside Crook
 
@@ -21,8 +21,10 @@ Every shell Crook starts has `TERM_PROGRAM=Crook` in its environment, with Crook
 
 `CROOK_PANE_ID` is there too: the number of the pane the shell runs in, the same for the life
 of the pane and different from every other pane in the window. It is for telling panes apart
-— a log file named after it, a lock keyed on it — and for nothing else: no command takes it,
-and reporting status needs no id at all, because the terminal you are in is the pane.
+— a log file named after it, a lock keyed on it, your own row in `crook pane list` — and for
+nothing else: no command takes it, and reporting status needs no id at all, because the
+terminal you are in is the pane. `CROOK_SOCKET` is where the window answers `crook pane list`
+(below), and it is empty when the window has none.
 
 Use this skill only when the user mentions Crook or the task is about Crook. In any other
 terminal, or for any other task, do nothing Crook-specific: the flags below write an escape
@@ -57,8 +59,8 @@ moment you report anything else. `--message -` reads it from standard input, for
 that is handed a notification's text there.
 
 The report is one escape sequence (`OSC 6340`) written to the terminal the command runs in,
-not to standard output, so it works from a hook whose output belongs to someone else. There
-is no socket and no pane id: the terminal you have is the pane. The same sequence reaches the
+not to standard output, so it works from a hook whose output belongs to someone else. The
+report needs no socket and no pane id: the terminal you have is the pane. The same sequence reaches the
 pane over `ssh` and from inside a container, and every other terminal drops it unread. A
 status never taken back goes when the shell's own marks say the command ended.
 
@@ -82,6 +84,21 @@ Worktrees are reached from a tab's own menu: right-click its row and, inside a r
 forward the tab already in it; `New worktree…` asks for a branch name and opens a tab in a
 checkout under Crook's own store, folded into a group with the tab that asked. There is no
 command-line flag for any of this; tell the person where the menu is.
+
+## See what is open
+
+```sh
+crook pane list          # every pane of this window: number, status, title, group, branch, directory
+crook pane list --json   # the same as a JSON array, for a script
+```
+
+It asks the window your shell runs in, over the local socket `CROOK_SOCKET` names, and only
+reads. Each entry has `pane_id` — the one equal to `$CROOK_PANE_ID` is your own — `tab_id`,
+`title`, `tab_title`, `group`, `focused`, `status` (one of the four words above), `message`,
+`cwd` and `branch`. Use it to see what the other agents in the window are doing — which one is
+waiting and on what, which branch each is on — rather than guessing. It works on this machine
+only: not from the far side of `ssh`, and not on Windows yet. When it says the window has no
+socket, or that it is older than the command, there is nothing to ask; say so and go on.
 
 ## After Crook restarts
 
@@ -126,8 +143,9 @@ built in and runs it again on every build; nothing is installed and nothing is l
 
 ## Rules
 
-- Never guess a pane id, a tab name or a worktree path. Crook hands an agent none of them and
-  needs none: the terminal it runs in is the pane.
+- Never guess a pane id, a tab name or a worktree path. Reporting status needs none of them —
+  the terminal it runs in is the pane — and `crook pane list` is where they are read when
+  something else does.
 - Never write `~/.claude/settings.json` or a project's `.claude/settings.json` yourself, nor
   another agent's hooks file. Print the hooks with `crook --agent-hooks <agent>` and let the
   person merge them.

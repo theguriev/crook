@@ -41,11 +41,17 @@
 //! trick above the field: it drags a highlight across what the shell printed,
 //! which is the state a person is in the instant before they press copy and one
 //! nobody can hold a button down for in a headless run.
+//!
+//! # Answering from outside
+//!
+//! `crook pane list` is not a flag and opens no window: it asks a window that is
+//! already open, over the socket [`control`] listens on, and prints the answer.
 
 pub mod agent;
 pub mod browser;
 pub mod clipboard;
 pub mod completion;
+pub mod control;
 pub mod editor;
 pub mod filename;
 pub mod git;
@@ -83,7 +89,7 @@ pub mod workspace;
 
 use std::fs::File;
 use std::io::BufWriter;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -565,6 +571,13 @@ fn agent_arguments(
 
 fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<Startup> {
     let mut args = args.peekable();
+    // A noun and a verb rather than a flag, and only as the first word: it is
+    // a question for a window that is already open, and the rest of the line
+    // is its own — `--json` after it means what `pane list` says it means.
+    if args.next_if(|word| word == "pane").is_some() {
+        println!("{}", control::cli::pane(args)?);
+        return Ok(Startup::Answered);
+    }
     let mut frames = None;
     let mut snapshot = None;
     let mut plugins = false;
@@ -979,6 +992,17 @@ fn help_text() -> String {
 
 USAGE:
     crook [OPTIONS]
+    crook pane list [--json]
+
+COMMANDS:
+    pane list [--json] Ask the window this is run in which panes it has, over
+                       the local socket CROOK_SOCKET names, and print them: the
+                       number each pane's shell has in CROOK_PANE_ID (the
+                       focused one marked *), what its agent is doing, its
+                       title, group, branch and directory. --json prints the
+                       window's own JSON array instead. Outside a pane it asks
+                       the one Crook running, and refuses to pick among
+                       several. Not on Windows yet
 
 OPTIONS:
     --install-plugin <PATH>
@@ -1295,6 +1319,12 @@ THE INPUT FIELD:
 /// waits on git — is the same shape and is left out for the same reason: one
 /// chain at most, a frame of `pirate::FRAME` at a time, and only while a git
 /// command is running for the menu.
+///
+/// The control socket parks nothing here either. Its listener blocks in
+/// `accept` for as long as nobody connects, which is a thread's job and not a
+/// worker's — the pty reader's argument — so it and each connection it
+/// accepts are threads of their own, and the window's side of a question is a
+/// foreground task woken by one of them. See [`control`].
 ///
 /// **The test at the bottom of this file cannot check this number.** It builds
 /// its scenario out of the constant itself, so it proves what
@@ -2667,6 +2697,10 @@ struct Shell {
     /// go too. Comparing it each frame is what turns a change nobody reported
     /// into a repaint.
     window_state: WindowState,
+    /// The socket the window answers `crook pane list` on, for as long as the
+    /// window is open; dropping it closes the socket and removes its file.
+    /// `None` where there is none — see [`control::Control::open`].
+    _control: Option<control::Control>,
 }
 
 /// The real window, behind the handle the workspace holds.
@@ -3201,6 +3235,7 @@ impl Shell {
             everything_installed()
         });
         let (withdrawn, heard) = registry_at_startup();
+        let control = control::Control::open();
         let (window_id, workspace) = app.add_window(|ctx| {
             Workspace::new(
                 fonts,
@@ -3234,6 +3269,11 @@ impl Shell {
                 // notification is for: a snapshot and a test keep the silent
                 // one the workspace opens with.
                 workspace.set_notifier(crate::notify::for_this_desktop());
+                // Before the shells, which are told where it is.
+                if let Some(control) = &control {
+                    control.serve(ctx);
+                    workspace.set_control_socket(control.path().map(Path::to_path_buf), ctx);
+                }
                 workspace.start_git_poll(ctx);
                 workspace.start_caret_blink(ctx);
                 // Last, and not yet: the shells open after the first frame,
@@ -3289,6 +3329,7 @@ impl Shell {
             window_size,
             window,
             window_state: WindowState::default(),
+            _control: control,
         }
     }
 
@@ -3691,6 +3732,20 @@ mod tests {
     }
 
     #[test]
+    fn pane_is_a_command_only_as_the_first_word() {
+        // First, it is `crook pane …`, and the rest of the line is its own:
+        // it reaches the command's parser, which asks for its verb.
+        let bare = parse(&["pane"]).expect_err("pane needs a verb").to_string();
+        assert!(bare.contains("needs a verb"), "{bare}");
+        // Anywhere else it is a word no flag takes, which is what it was
+        // before it meant anything.
+        let later = parse(&["--frames", "3", "pane", "list"])
+            .expect_err("not a flag")
+            .to_string();
+        assert!(later.contains("unrecognised argument pane"), "{later}");
+    }
+
+    #[test]
     fn the_skill_has_front_matter_and_names_only_flags_the_parser_knows() {
         // Agent Skills format: a `---` block carrying a name and a one-line
         // description, then the body. A loader that finds no front matter
@@ -3754,6 +3809,23 @@ mod tests {
                     "--help gives `--agent` {option}, which the skill never mentions"
                 );
             }
+        }
+        // And the commands, which are words rather than flags: the skill
+        // teaches asking the window, and every `crook pane …` it names is
+        // one --help lists.
+        assert!(
+            agent::SKILL.contains("crook pane list"),
+            "the skill teaches asking the window what is open"
+        );
+        for (at, _) in agent::SKILL.match_indices("crook pane ") {
+            let verb = agent::SKILL[at + "crook pane ".len()..]
+                .split(|character: char| !character.is_ascii_lowercase())
+                .next()
+                .unwrap_or_default();
+            assert!(
+                help.contains(&format!("crook pane {verb}")),
+                "the skill names `crook pane {verb}`, which --help does not list"
+            );
         }
         for flag in flags {
             assert!(

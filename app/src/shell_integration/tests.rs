@@ -612,6 +612,7 @@ fn test_a_session_writes_its_scratch_files_and_takes_them_with_it() {
         // The launch is decided from the name, not from what is on disk, so a
         // shell that is not installed still exercises the whole arrangement.
         shell: Some(PathBuf::from("/nowhere/zsh")),
+        control_socket: None,
     };
 
     let scratch = {
@@ -645,6 +646,7 @@ fn test_a_session_fills_in_the_terminals_options() {
             enabled: true,
             login: true,
             shell: Some(PathBuf::from("/nowhere/bash")),
+            control_socket: None,
         },
         host_at(&home),
     );
@@ -696,6 +698,7 @@ fn test_every_shell_is_told_which_pane_it_is_in_marks_or_no_marks() {
                 enabled,
                 login: true,
                 shell: Some(PathBuf::from(program)),
+                control_socket: None,
             },
             host_at(&home),
         );
@@ -721,6 +724,45 @@ fn test_every_shell_is_told_which_pane_it_is_in_marks_or_no_marks() {
 }
 
 #[test]
+fn test_every_shell_is_told_where_its_window_answers_and_told_so_when_it_does_not() {
+    // `crook pane list` asks the socket this names, and nothing else says
+    // which window a pane is in. Marks or no marks, like the pane's number.
+    let home = TempDir::new("home");
+    let socket = PathBuf::from("/run/user/1000/crook-control/4242.sock");
+    for (name, enabled, program) in [
+        ("marked zsh", true, "/nowhere/zsh"),
+        ("bash with the marks off", false, "/nowhere/bash"),
+        ("a shell with no integration", true, "/nowhere/nu"),
+    ] {
+        let session = Session::with_host(
+            PaneId::next(),
+            &Options {
+                enabled,
+                login: true,
+                shell: Some(PathBuf::from(program)),
+                control_socket: Some(socket.clone()),
+            },
+            host_at(&home),
+        );
+        assert_eq!(
+            session_variable(session.environment(), crate::control::SOCKET_VARIABLE),
+            socket.to_str(),
+            "{name} should be told where its window answers"
+        );
+    }
+
+    // Empty rather than left out: left out, the shell inherits whatever this
+    // process was started with, and a Crook opened inside another Crook's
+    // pane would send its shells to the outer window.
+    let without = Session::with_host(PaneId::next(), &Options::default(), host_at(&home));
+    assert_eq!(
+        session_variable(without.environment(), crate::control::SOCKET_VARIABLE),
+        Some(""),
+        "a window with no socket says so rather than passing an outer one on"
+    );
+}
+
+#[test]
 fn test_the_opt_out_leaves_the_shell_exactly_as_it_was() {
     let home = TempDir::new("home");
     let session = Session::with_host(
@@ -729,6 +771,7 @@ fn test_the_opt_out_leaves_the_shell_exactly_as_it_was() {
             enabled: false,
             login: true,
             shell: Some(PathBuf::from("/nowhere/zsh")),
+            control_socket: None,
         },
         host_at(&home),
     );
@@ -779,6 +822,7 @@ fn marked(program: &str) -> Options {
         enabled: true,
         login: true,
         shell: Some(PathBuf::from(program)),
+        control_socket: None,
     }
 }
 
@@ -1202,6 +1246,7 @@ impl RealShell<'_> {
                 enabled: true,
                 login: self.login,
                 shell: Some(program),
+                control_socket: None,
             },
             host_at(&home),
         );
