@@ -632,6 +632,76 @@ fn neither_the_main_worktree_nor_a_path_that_is_not_one_can_be_removed() {
     assert!(repo.join("tracked.txt").is_file());
 }
 
+// --- tidying the store after a removal -----------------------------------------
+
+#[test]
+fn removing_a_checkout_takes_the_empty_directories_above_it_up_to_the_store() {
+    if without_git("removing_a_checkout_takes_the_empty_directories_above_it_up_to_the_store") {
+        return;
+    }
+    let scratch = ScratchDir::new("prune-empty");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    let store = scratch.dir("store");
+    // Nested the way a checkout made by hand on `feat/x` is: two directories
+    // of the store's that only ever held it.
+    let checkout = store.join("repo").join("feat").join("x");
+    add(&repo, &checkout, "feat/x", Some("main")).expect("git added the worktree");
+    remove(&repo, &checkout, false).expect("nothing loose in it");
+    assert!(
+        store.join("repo").join("feat").is_dir(),
+        "git itself took the directories above the checkout, so there is nothing to prove"
+    );
+
+    let pruned = prune_empty_parents(&store, &checkout);
+
+    assert_eq!(pruned, 2);
+    assert!(!store.join("repo").exists());
+    // The store itself is Crook's to keep, empty or not.
+    assert!(store.is_dir());
+}
+
+#[test]
+fn a_directory_that_still_holds_another_checkout_is_left_standing() {
+    if without_git("a_directory_that_still_holds_another_checkout_is_left_standing") {
+        return;
+    }
+    let scratch = ScratchDir::new("prune-shared");
+    let repo = repo_with_a_commit(&scratch, "repo");
+    let store = scratch.dir("store");
+    let gone = checkout_path(&store, "repo", "gone");
+    let kept = checkout_path(&store, "repo", "kept");
+    add(&repo, &gone, "gone", Some("main")).expect("git added the worktree");
+    add(&repo, &kept, "kept", Some("main")).expect("git added the worktree");
+    remove(&repo, &gone, false).expect("nothing loose in it");
+
+    assert_eq!(prune_empty_parents(&store, &gone), 0);
+    assert!(kept.join("tracked.txt").is_file());
+}
+
+#[test]
+fn nothing_outside_the_store_is_pruned() {
+    let scratch = ScratchDir::new("prune-outside");
+    let store = scratch.dir("store");
+    let elsewhere = scratch.dir("elsewhere/empty");
+
+    // A checkout somebody made beside the repository rather than in the
+    // store: the directory it left is theirs, however empty.
+    assert_eq!(prune_empty_parents(&store, &elsewhere.join("gone")), 0);
+    assert!(elsewhere.is_dir());
+    // And a path that only starts with the store's name, by way of `..`,
+    // is not inside it.
+    let sneaky = store
+        .join("..")
+        .join("elsewhere")
+        .join("empty")
+        .join("gone");
+    assert_eq!(prune_empty_parents(&store, &sneaky), 0);
+    assert!(elsewhere.is_dir());
+    // Nor is the store itself something a removal inside it can take.
+    assert_eq!(prune_empty_parents(&store, &store.join("gone")), 0);
+    assert!(store.is_dir());
+}
+
 // --- what is loose in a worktree -----------------------------------------------
 
 #[test]

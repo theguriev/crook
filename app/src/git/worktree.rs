@@ -29,7 +29,7 @@
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use super::run::{Failure, Intent, run};
@@ -561,6 +561,47 @@ pub fn remove(repository: &Path, path: &Path, force: bool) -> Result<(), Error> 
         return Ok(());
     }
     Err(classify(&finished.stderr))
+}
+
+/// Deletes the directories `removed` sat in that are empty now, from the
+/// nearest up, stopping at the first that is not and never reaching `store`.
+/// Answers how many went.
+///
+/// `git worktree remove` deletes the checkout and nothing above it, so a
+/// store laid out as `<repository>/<branch>` is left holding a directory per
+/// repository that nothing is in once its last checkout goes — and a checkout
+/// made by hand at `<repository>/feat/x` leaves two. Nothing ever cleans
+/// them up, and a store that is mostly empty directories is one a person
+/// cannot read at a glance.
+///
+/// Two limits, and both are the point. Only inside `store`: a directory
+/// outside it belongs to whoever laid it out, however empty it is, and a path
+/// that climbs out through `..` is treated as outside whatever it starts
+/// with. And only empty: `remove_dir` refuses a directory with anything in
+/// it, so "is it empty?" and "delete it" are one question the filesystem
+/// answers at once, with no moment between them for a checkout to arrive.
+///
+/// Best effort. A directory that will not go — not empty, not permitted,
+/// already gone — ends the walk, and the removal it followed has already
+/// succeeded either way.
+pub fn prune_empty_parents(store: &Path, removed: &Path) -> usize {
+    let climbs = removed
+        .components()
+        .any(|part| matches!(part, Component::ParentDir | Component::CurDir));
+    if climbs || !removed.starts_with(store) {
+        return 0;
+    }
+
+    let mut pruned = 0;
+    let mut directory = removed.parent();
+    while let Some(parent) = directory {
+        if parent == store || !parent.starts_with(store) || std::fs::remove_dir(parent).is_err() {
+            break;
+        }
+        pruned += 1;
+        directory = parent.parent();
+    }
+    pruned
 }
 
 // MARK: - Naming the next one
