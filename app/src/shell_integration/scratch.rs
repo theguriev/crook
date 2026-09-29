@@ -175,7 +175,7 @@ impl Session {
                      the shell will run without command marks",
                     root.display()
                 );
-                return Self::unmarked(pane, shell, &program, options.login);
+                return Self::unmarked(pane, shell, &program, options);
             }
         };
         SWEPT.call_once(|| sweep(&root, &mine(), STALE_AFTER));
