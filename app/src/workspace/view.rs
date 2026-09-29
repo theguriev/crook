@@ -5373,8 +5373,19 @@ impl Workspace {
                 pane,
                 while_running,
             } => self.ring(*pane, *while_running, ctx),
-            TerminalUpdate::CommandFinished { pane, exit, took } => {
-                self.spend_restored_agent(*pane, ctx);
+            TerminalUpdate::CommandFinished {
+                pane,
+                exit,
+                took,
+                ran,
+            } => {
+                // Only a line that ran something: ctrl-c at the prompt and an
+                // empty Enter are marked too, and neither moves the pane on
+                // from what a restore brought back. The plugins hear both,
+                // since what they are told is that the shell said so.
+                if *ran {
+                    self.spend_restored_agent(*pane, ctx);
+                }
                 self.command_finished(*pane, *exit, *took, ctx);
                 true
             }
@@ -5431,6 +5442,10 @@ impl Workspace {
     /// what keeps the file from naming the agent against a directory its
     /// conversation was never had in. A pane whose agent changed is saved
     /// straight away, for the reason the `Running` update saves one.
+    ///
+    /// Called only for a mark with a command behind it. The same mark ends a
+    /// line that ran nothing, and a person who pressed ctrl-c to clear the
+    /// offered line for now has not moved on from it.
     fn spend_restored_agent(&mut self, pane: PaneId, ctx: &mut ViewContext<Self>) {
         self.resume_offers.remove(&pane);
         let forgotten = self

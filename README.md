@@ -184,7 +184,8 @@ Nineteen features, and the page that configures them:
   panes of one agent in one directory are offered its picker instead (`claude --resume`,
   `codex resume`), because the directory names one conversation and they had two; Gemini CLI
   has no picker on its command line, so two of its panes in one directory are offered nothing.
-  Any command that runs in a pane first, even a `cd`, ends the offer there. **Resume
+  Any command that runs in a pane first, even a `cd`, ends the offer there; clearing the line,
+  with ctrl-c or otherwise, does not, and the next restart offers it again. **Resume
   every agent** in the palette (`resume-agents`) sends every line a restore typed that you
   have not touched, in one press. What is remembered is the program's name and nothing after
   it, so a prompt typed on the command line never reaches the file, and it needs the shell

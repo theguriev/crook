@@ -353,7 +353,9 @@ impl AgentSession {
     /// and a pane that ran only commands like those would go on naming the
     /// agent, against whatever directory the `cd` left it in. The shell marks
     /// the end of every command, however quick, and that mark is what calls
-    /// this. An agent the pane is running now stays named.
+    /// this — the mark of a command, that is: the one a shell sends for a line
+    /// that ran nothing, ctrl-c at the prompt or an empty Enter, does not. An
+    /// agent the pane is running now stays named.
     pub fn command_finished(&mut self) -> bool {
         let before = self.agent().map(str::to_owned);
         self.restored_agent = None;

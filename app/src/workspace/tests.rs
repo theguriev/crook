@@ -15147,6 +15147,7 @@ mod restoring {
                 pane,
                 exit: Some(0),
                 took: None,
+                ran: true,
             },
         );
         assert_eq!(named_agent(&harness, pane), None);
@@ -15205,6 +15206,72 @@ mod restoring {
         assert_eq!(
             written.tabs[0].panes[0].agent, None,
             "the file would name the agent against the directory the cd went to"
+        );
+    }
+
+    #[test]
+    fn an_interrupt_or_an_empty_line_at_the_prompt_leaves_the_agent_named() {
+        // The shells mark the end of a line that ran nothing as well: ctrl-c
+        // at the prompt and Enter on an empty field each get a bare `D`. That
+        // mark closes a block like any other, and a pane that took it for a
+        // command would write the agent out of the file for a keystroke —
+        // the person who cleared the offered line to deal with it later
+        // would find nothing offered after the next restart.
+        let scratch = Scratch::new();
+        let mut harness = restored(
+            &remembered(&[(scratch.path(), Some("claude"))]),
+            Settings::ephemeral(),
+        );
+        let Some(pane) = super::shells::marked_shell(&mut harness) else {
+            return;
+        };
+        super::shells::await_prompt(&mut harness, pane);
+        assert_eq!(harness.field_text(pane), "claude --continue");
+
+        // The open block changes only when a mark closes it, and at a prompt
+        // the one mark that does is `D`: waiting for a new block is waiting
+        // for the shell to have said the line ended.
+        let open_block = |harness: &Harness| {
+            harness.workspace.read(&harness.app, |workspace, app| {
+                workspace
+                    .terminal(pane, app)
+                    .map(|(_, snapshot)| snapshot.live_block.id)
+            })
+        };
+        let ctrl = Modifiers {
+            ctrl: true,
+            ..Default::default()
+        };
+        let before = open_block(&harness);
+        harness.press("c", ctrl, "c");
+        assert_eq!(harness.field_text(pane), "", "ctrl-c kept the offered line");
+        harness.wait_for("the shell never marked the interrupted line", |harness| {
+            open_block(harness) != before
+        });
+        assert_eq!(
+            named_agent(&harness, pane).as_deref(),
+            Some("claude"),
+            "an interrupt at the prompt forgot the agent"
+        );
+
+        super::shells::await_prompt(&mut harness, pane);
+        let before = open_block(&harness);
+        harness.press("enter", Modifiers::default(), "\r");
+        harness.wait_for("the shell never marked the empty line", |harness| {
+            open_block(harness) != before
+        });
+        assert_eq!(
+            named_agent(&harness, pane).as_deref(),
+            Some("claude"),
+            "an empty line forgot the agent"
+        );
+        let written = harness.workspace.read(&harness.app, |workspace, _| {
+            Session::of(workspace.tabs(), None)
+        });
+        assert_eq!(
+            written.tabs[0].panes[0].agent.as_deref(),
+            Some("claude"),
+            "the file would offer nothing after the next restart"
         );
     }
 
