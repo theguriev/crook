@@ -6435,12 +6435,12 @@ impl Workspace {
             self.inputs.entry(*id).or_insert_with(TextInput::for_pane);
         }
         self.interactions.retain(|id, _| open.contains(id));
-        // A closed pane's half-written command line goes with it. Keeping it
-        // would mean a later pane inheriting somebody else's history the first
-        // time an id was reused.
         // A line waiting for a prompt in a pane that closed first waits for
         // nothing.
         self.first_lines.retain(|id, _| open.contains(id));
+        // A closed pane's half-written command line goes with it. Keeping it
+        // would mean a later pane inheriting somebody else's history the first
+        // time an id was reused.
         self.inputs.retain(|id, input| {
             // The element tree that drew this field is still holding a clone
             // of it, and a keystroke queued behind the close would land in an

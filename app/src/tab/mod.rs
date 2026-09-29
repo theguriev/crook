@@ -1408,8 +1408,6 @@ impl TabStrip {
         TabEffect::Changed
     }
 
-    /// Opens a tab in `anchor`'s group, making one of the two when it has no
-    /// group yet.
     /// Where a tab opened after the tab at `index` goes.
     ///
     /// Past the rest of that tab's group when it is in one, because a tab
