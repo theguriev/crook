@@ -6,13 +6,15 @@
 //! come back, and it cannot go the same way: anything that prints can write
 //! into a pane, so a request read off the pane's output could be forged by a
 //! `cat` of a file. So the window listens on a Unix socket only this user can
-//! reach, tells every pane where it is in [`SOCKET_VARIABLE`], and answers two
-//! verbs: `pane.list`, which only reads, and `tab.new`, which opens a tab
-//! beside the pane that asked and runs a command in it. "The window answers"
-//! in `docs/architecture.md` is the whole argument: the threat model, the
-//! protocol, and what the verbs after these will need.
+//! reach, tells every pane where it is in [`SOCKET_VARIABLE`], and answers:
+//! `pane.list`, which only reads; `tab.new`, which opens a tab beside the pane
+//! that asked and runs a command in it; and `pane.wait`, `pane.blocks` and
+//! `events.follow`, which watch the panes the asker may watch — itself, and
+//! the tabs it opened. "The window answers" in `docs/architecture.md` is the
+//! whole argument: the threat model, the protocol, and what the verbs after
+//! these will need.
 //!
-//! # Who may open a tab
+//! # Who may open a tab, and watch one
 //!
 //! Anything this user runs can connect, so connecting proves nothing about
 //! which pane is asking — and a tab opened for nobody is a tab with no budget
@@ -20,8 +22,9 @@
 //! [`TOKEN_VARIABLE`], minted from the operating system's random source by
 //! [`mint_token`] when the shell opens and forgotten when it ends; a request
 //! carries it, and the window reads the pane back out of it. A request with no
-//! token, or one no open pane holds, may still list the panes and may open
-//! nothing. See [`spawn`] for the rest of what `tab.new` checks.
+//! token, or one no open pane holds, may still list the panes and may open and
+//! watch nothing. See [`spawn`] for the rest of what `tab.new` checks, and
+//! [`watch`] for which panes a pane may watch: itself and the tabs it opened.
 //!
 //! # Layout
 //!
@@ -29,9 +32,14 @@
 //!   answer into a line. Nothing in it touches a socket.
 //! * `server` is the socket, on Unix: the private directory, the stale-socket
 //!   probe, the listener thread and one short-lived thread per connection.
-//! * [`cli`] is `crook pane list` and `crook tab new`, the other end.
+//! * [`cli`] is `crook pane …`, `crook tab new` and `crook events`, the
+//!   other end.
 //! * [`spawn`] is the window's side of `tab.new`: the token, the budget, the
 //!   worktree, and the command typed at the new pane's first prompt.
+//! * [`watch`] is the window's side of `pane.wait` and `events.follow`: who
+//!   may watch which pane, and the bounded feeds a kept connection waits on.
+//! * [`blocks`] is the window's side of `pane.blocks`: a pane's finished
+//!   commands and what they printed, capped.
 //! * This file is the window's side of the rest: the [`Inbox`] a connection
 //!   leaves its question in, the chain that answers it on the main thread,
 //!   and [`panes`], which is what `pane.list` says.
@@ -46,20 +54,25 @@
 //! two frames and nothing on the main thread ever blocks on a socket. A window
 //! that has closed says so rather than leaving the question to time out: see
 //! [`Inbox::close`]. The one answer that takes longer, a tab in a new
-//! worktree, does its git on the pool and answers when that comes home.
+//! worktree, does its git on the pool and answers when that comes home. A
+//! wait and a stream are answered at once too — with a [`watch::Feed`]
+//! registered, which the window pushes into later and the connection's thread
+//! is the one blocked on.
 //!
 //! # Windows
 //!
 //! Nothing listens there yet: [`Control::open`] is `None`, every pane is told
 //! so with an empty [`SOCKET_VARIABLE`] and an empty [`TOKEN_VARIABLE`], and
-//! `crook pane list` and `crook tab new` say the command is not available on
-//! this platform. An owner-only named pipe is the route when it comes.
+//! every command of [`cli`]'s says it is not available on this platform. An
+//! owner-only named pipe is the route when it comes.
 
+pub mod blocks;
 pub mod cli;
 pub mod protocol;
 #[cfg(unix)]
 pub mod server;
 pub mod spawn;
+pub mod watch;
 
 #[cfg(test)]
 mod tests;
@@ -84,6 +97,7 @@ use crate::workspace::Workspace;
 
 use self::protocol::{PaneEntry, Refusal, Request, Verb, code};
 use self::spawn::Spawns;
+use self::watch::Feed;
 
 /// The variable every pane's shell finds the window's socket in.
 ///
@@ -171,7 +185,7 @@ impl Control {
         let asking = inbox.clone();
         let socket = server::Socket::open_in(
             directory,
-            Arc::new(move |request, deadline| asking.ask(request, deadline)),
+            Arc::new(move |request, feed, deadline| asking.ask(request, feed, deadline)),
         )?;
         Ok(Self { socket, inbox })
     }
@@ -225,6 +239,9 @@ struct Asked {
 /// One question, and where its answer goes.
 struct Question {
     request: Request,
+    /// Where a kept connection waits for what the window says after its
+    /// answer: see [`watch`].
+    feed: Option<Arc<Feed>>,
     answer: Answering,
 }
 
@@ -251,11 +268,18 @@ impl Inbox {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Asks the window, and waits for its answer until `deadline`.
+    /// Asks the window, and waits for its answer until `deadline`. `feed` is
+    /// a kept connection's, for the window to answer into after it answers
+    /// this.
     ///
     /// Called on a connection's own thread, never on the window's: this
     /// blocks, and the window is what it is waiting for.
-    pub fn ask(&self, request: Request, deadline: Instant) -> Result<Value, Refusal> {
+    pub fn ask(
+        &self,
+        request: Request,
+        feed: Option<Arc<Feed>>,
+        deadline: Instant,
+    ) -> Result<Value, Refusal> {
         let (answer, answered) = mpsc::channel();
         let waker = {
             let mut asked = self.lock();
@@ -264,6 +288,7 @@ impl Inbox {
             }
             asked.questions.push(Question {
                 request,
+                feed,
                 answer: Answering(answer),
             });
             asked.waker.take()
@@ -354,19 +379,22 @@ fn answer(
     spawns: &Rc<RefCell<Spawns>>,
     ctx: &mut ViewContext<Workspace>,
 ) {
-    let Question { request, answer } = question;
+    let Question {
+        request,
+        feed,
+        answer,
+    } = question;
+    let token = request.token.as_deref();
     match request.verb {
         Verb::PaneList => answer.send(Ok(serde_json::to_value(panes(workspace, ctx))
             .expect("a pane entry is numbers, strings and booleans, which encode"))),
         Verb::TabNew(asked) => {
-            spawn::open(
-                workspace,
-                asked,
-                request.token.as_deref(),
-                spawns,
-                answer,
-                ctx,
-            );
+            spawn::open(workspace, asked, token, spawns, answer, ctx);
+        }
+        Verb::PaneWait(asked) => answer.send(watch::wait(workspace, &asked, token, feed, ctx)),
+        Verb::PaneBlocks(asked) => answer.send(blocks::read(workspace, &asked, token, ctx)),
+        Verb::EventsFollow(asked) => {
+            answer.send(watch::follow(workspace, &asked, token, feed, ctx));
         }
     }
 }
@@ -435,7 +463,7 @@ pub fn title(session: &AgentSession, home: Option<&Path>) -> String {
 
 /// The word for a status: the one `crook --agent` takes for it, from the one
 /// place those words are spelled.
-fn word(status: AgentStatus) -> &'static str {
+pub(crate) fn word(status: AgentStatus) -> &'static str {
     match status {
         AgentStatus::Idle => AgentReport::Idle,
         AgentStatus::Running => AgentReport::Running,

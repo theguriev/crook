@@ -652,6 +652,13 @@ impl TerminalModel {
         self.sessions.get(&pane)?.token.as_deref()
     }
 
+    /// Whether a pane's shell reports command marks, or `None` when the pane
+    /// has no shell running. A shell without them is one open block for the
+    /// whole session: nothing in it ever finishes.
+    pub fn marks(&self, pane: PaneId) -> Option<bool> {
+        self.sessions.get(&pane).map(|session| session.marks)
+    }
+
     /// The running terminal in a pane, for the element that draws it.
     pub fn handle(&self, pane: PaneId) -> Option<TerminalHandle> {
         self.sessions

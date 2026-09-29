@@ -44,9 +44,9 @@
 //!
 //! # Answering from outside
 //!
-//! `crook pane list` and `crook tab new` are not flags and open no window: they
-//! ask a window that is already open, over the socket [`control`] listens on,
-//! and print the answer.
+//! `crook pane …`, `crook tab new` and `crook events --follow` are not flags
+//! and open no window: they ask a window that is already open, over the socket
+//! [`control`] listens on, and print the answer.
 
 pub mod agent;
 pub mod browser;
@@ -570,7 +570,17 @@ fn parse_args(channel: Channel, args: impl Iterator<Item = String>) -> Result<St
     // is its own — `--json` after it means what `pane list` says it means,
     // and everything after `tab new`'s `--` is the command it runs.
     if args.next_if(|word| word == "pane").is_some() {
-        println!("{}", control::cli::pane(args)?);
+        let printed = control::cli::pane(args)?;
+        println!("{}", printed.text);
+        // Printed first: a wait that did not get there still says where the
+        // pane is, and the failure is what a script's `&&` reads.
+        if let Some(failure) = printed.failure {
+            bail!(failure);
+        }
+        return Ok(Startup::Answered);
+    }
+    if args.next_if(|word| word == "events").is_some() {
+        control::cli::events(args)?;
         return Ok(Startup::Answered);
     }
     if args.next_if(|word| word == "tab").is_some() {
@@ -992,7 +1002,10 @@ fn help_text() -> String {
 USAGE:
     crook [OPTIONS]
     crook pane list [--json]
+    crook pane wait <ID> --until <STATE> [--timeout <SECS>] [--json]
+    crook pane blocks <ID> [--last <N>] [--json]
     crook tab new [--worktree <BRANCH>] [--in-my-group] [--title <TITLE>] [--json] -- <COMMAND>...
+    crook events --follow [--pane <ID>]
 
 COMMANDS:
     pane list [--json] Ask the window this is run in which panes it has, over
@@ -1003,6 +1016,22 @@ COMMANDS:
                        window's own JSON array instead. Outside a pane it asks
                        the one Crook running, and refuses to pick among
                        several. Not on Windows yet
+    pane wait <ID> --until <STATE> [--timeout <SECS>]
+                       Wait until pane ID's agent is idle or needs-input, its
+                       command has finished, or it has exited, and print where
+                       it got to; fail, having printed where it is, when the
+                       timeout (at most and by default 3600 seconds) passes
+                       first. `finished` is the last command closed by the
+                       shell's own mark, with its exit status. --json prints
+                       the window's answer. Only your own pane and the tabs it
+                       opened with `tab new`; not on Windows yet
+    pane blocks <ID> [--last <N>]
+                       Print pane ID's newest finished commands: the command,
+                       what it printed (the end of it, when it is long), its
+                       exit status, how long it ran and where. A pane drawing
+                       a full-screen program or an agent's TUI with nothing
+                       finished says so. --json prints the window's answer.
+                       Your own pane and the tabs it opened; not on Windows yet
     tab new [...] -- <COMMAND>...
                        From inside a pane, open a tab beside it in the same
                        window, without switching to it, and run the command
@@ -1015,6 +1044,13 @@ COMMANDS:
                        its CROOK_TOKEN, and eight tabs may be open on behalf of
                        one pane a person opened. sh, bash, zsh and fish only;
                        not on Windows yet
+    events --follow [--pane <ID>]
+                       Print a line of JSON for every change of status, every
+                       command started or finished and every pane opened or
+                       closed, in your own pane and the tabs it opened (or
+                       only pane ID), until the window ends it. A reader that
+                       falls behind is sent a `lagged` line counting what it
+                       missed. Not on Windows yet
 
 OPTIONS:
     --install-plugin <PATH>
@@ -3520,6 +3556,18 @@ mod tests {
     }
 
     #[test]
+    fn events_is_a_command_only_as_the_first_word() {
+        let bare = parse(&["events"])
+            .expect_err("events needs --follow")
+            .to_string();
+        assert!(bare.contains("needs --follow"), "{bare}");
+        let later = parse(&["--frames", "3", "events", "--follow"])
+            .expect_err("not a flag")
+            .to_string();
+        assert!(later.contains("unrecognised argument events"), "{later}");
+    }
+
+    #[test]
     fn pane_is_a_command_only_as_the_first_word() {
         // First, it is `crook pane …`, and the rest of the line is its own:
         // it reaches the command's parser, which asks for its verb.
@@ -3620,6 +3668,31 @@ mod tests {
                     help.contains(&format!("crook {noun} {verb}")),
                     "the skill names `crook {noun} {verb}`, which --help does not list"
                 );
+            }
+        }
+        // The watching commands, each with every flag the skill gives it
+        // on the line of --help's usage that spells it.
+        for command in ["crook pane wait", "crook pane blocks", "crook events"] {
+            assert!(
+                agent::SKILL.contains(command),
+                "the skill teaches `{command}`"
+            );
+            let usage = help
+                .lines()
+                .map(str::trim_start)
+                .find(|line| line.starts_with(command))
+                .unwrap_or_else(|| panic!("--help's usage lists `{command}`"));
+            for (at, _) in agent::SKILL.match_indices(&format!("{command} ")) {
+                // To the end of the command: a `&&` or a comment starts
+                // another one, and a backtick ends one quoted in prose.
+                let line = agent::SKILL[at..].lines().next().unwrap_or_default();
+                let line = line.split(['&', '#', '`']).next().unwrap_or_default();
+                for flag in line.split(' ').filter(|word| word.starts_with("--")) {
+                    assert!(
+                        usage.contains(flag),
+                        "the skill gives `{command}` {flag}, which --help's `{usage}` does not"
+                    );
+                }
             }
         }
         // Every flag of `tab new` the skill uses is one the command takes.

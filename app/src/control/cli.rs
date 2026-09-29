@@ -1,11 +1,16 @@
-//! `crook pane list` and `crook tab new`: the command line's end of the
-//! socket.
+//! `crook pane …`, `crook tab new` and `crook events --follow`: the command
+//! line's end of the socket.
 //!
 //! The command line is the SDK: what a script or an agent can ask a window is
 //! what this prints, a table for a person and, with `--json`, the window's own
 //! answer with every field it sent — read as JSON rather than into
 //! [`PaneEntry`], so a field a newer window adds reaches a script through an
-//! older `crook`.
+//! older `crook`. `crook events --follow` prints the window's events as they
+//! come, one JSON object a line, since what reads a stream is a program.
+//!
+//! `crook pane wait` exits with a failure when the pane did not get where it
+//! was waited for, having printed where it is, so that `crook pane wait 7
+//! --until finished && …` reads the way it looks.
 //!
 //! # Which window
 //!
@@ -42,20 +47,83 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use super::protocol::{NewTab, PaneEntry};
+use super::protocol::{BlocksRead, Follow, NewTab, PaneEntry, ReadBlocks, Until, Wait, Waited};
 
 /// What `crook pane` takes after it, for the refusal that lists it.
-const VERBS: &str = "list";
+const VERBS: &str = "list, wait or blocks";
+
+/// How `crook pane wait` is spelled, for the refusals that show it.
+const PANE_WAIT: &str =
+    "crook pane wait <ID> --until idle|needs-input|exited|finished [--timeout <SECS>] [--json]";
+
+/// How `crook pane blocks` is spelled, for the refusals that show it.
+const PANE_BLOCKS: &str = "crook pane blocks <ID> [--last <N>] [--json]";
+
+/// How `crook events` is spelled, for the refusals that show it.
+const EVENTS: &str = "crook events --follow [--pane <ID>]";
 
 /// How `crook tab new` is spelled, for the refusals that show it.
 const TAB_NEW: &str =
     "crook tab new [--worktree <BRANCH>] [--in-my-group] [--title <TITLE>] [--json] -- <COMMAND>…";
 
+/// What a command prints, and whether it then fails.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Printed {
+    /// What goes to standard output.
+    pub text: String,
+    /// Why the command fails after printing it, when it does: a wait that
+    /// ran out, or a pane that closed first.
+    pub failure: Option<String>,
+}
+
+impl From<String> for Printed {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            failure: None,
+        }
+    }
+}
+
+/// What `crook pane …` was asked to do.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PaneCommand {
+    /// `list`, and whether as JSON.
+    List {
+        /// `--json`.
+        json: bool,
+    },
+    /// `wait`: the wait, and whether to print the answer as JSON.
+    Wait {
+        /// What is waited for.
+        asked: Wait,
+        /// `--json`.
+        json: bool,
+    },
+    /// `blocks`: which, and whether as JSON.
+    Blocks {
+        /// Which pane, and how many.
+        asked: ReadBlocks,
+        /// `--json`.
+        json: bool,
+    },
+}
+
 /// Answers `crook pane …`, given everything after `pane`, with the text to
 /// print.
-pub fn pane(args: impl Iterator<Item = String>) -> Result<String> {
-    let json = list_arguments(args)?;
-    listed(json)
+pub fn pane(args: impl Iterator<Item = String>) -> Result<Printed> {
+    match pane_arguments(args)? {
+        PaneCommand::List { json } => listed(json).map(Printed::from),
+        PaneCommand::Wait { asked, json } => waited(asked, json),
+        PaneCommand::Blocks { asked, json } => blocks(asked, json).map(Printed::from),
+    }
+}
+
+/// Follows `crook events …`, given everything after `events`, writing each
+/// event to standard output as it comes, until the window ends the stream.
+pub fn events(args: impl Iterator<Item = String>) -> Result<()> {
+    let asked = events_arguments(args)?;
+    followed(asked)
 }
 
 /// Answers `crook tab …`, given everything after `tab`, with the text to
@@ -107,32 +175,139 @@ pub fn tab_arguments(mut args: impl Iterator<Item = String>) -> Result<(NewTab, 
     Ok((asked, json))
 }
 
-/// The word after a flag that takes one.
+/// The word after a flag of `tab new`'s that takes one.
 fn value_of(args: &mut impl Iterator<Item = String>, flag: &str) -> Result<String> {
-    args.next()
-        .with_context(|| format!("`{flag}` needs a value: {TAB_NEW}"))
+    value_after(args, flag, TAB_NEW)
 }
 
-/// What follows `pane`: the verb, and whether `--json` was asked for.
+/// What follows `pane`: the verb, its pane, and its flags.
 ///
 /// Parsed the same on every platform, so that a line one platform refuses is
-/// refused on all of them for the same reason.
-pub fn list_arguments(mut args: impl Iterator<Item = String>) -> Result<bool> {
+/// refused on all of them for the same reason. The pane's number may go
+/// before its flags or among them; it is the one word that is not a flag or
+/// a flag's value.
+pub fn pane_arguments(mut args: impl Iterator<Item = String>) -> Result<PaneCommand> {
     let verb = args
         .next()
         .with_context(|| format!("`crook pane` needs a verb: {VERBS}"))?;
-    if verb != "list" {
-        bail!("`crook pane` takes {VERBS}, not {verb}");
+    match verb.as_str() {
+        "list" => {
+            let mut json = false;
+            for argument in args {
+                match argument.as_str() {
+                    "--json" if !json => json = true,
+                    "--json" => bail!("`--json` was given twice"),
+                    other => {
+                        bail!("unrecognised argument {other}; `crook pane list` takes only --json")
+                    }
+                }
+            }
+            Ok(PaneCommand::List { json })
+        }
+        "wait" => {
+            let (mut until, mut timeout, mut json, mut pane) = (None, None, false, None);
+            while let Some(argument) = args.next() {
+                match argument.as_str() {
+                    "--until" if until.is_none() => {
+                        let word = value_after(&mut args, "--until", PANE_WAIT)?;
+                        until = Some(Until::from_word(&word).with_context(|| {
+                            format!("`--until` takes {}, not {word}", Until::WORDS.join(", "))
+                        })?);
+                    }
+                    "--timeout" if timeout.is_none() => {
+                        let seconds = value_after(&mut args, "--timeout", PANE_WAIT)?;
+                        timeout = Some(seconds.parse::<u64>().with_context(|| {
+                            format!("`--timeout` is a whole number of seconds, not {seconds}")
+                        })?);
+                    }
+                    "--json" if !json => json = true,
+                    flag @ ("--until" | "--timeout" | "--json") => {
+                        bail!("`{flag}` was given twice")
+                    }
+                    other => pane = Some(pane_number(other, pane, PANE_WAIT)?),
+                }
+            }
+            let pane =
+                pane.with_context(|| format!("`crook pane wait` needs a pane: {PANE_WAIT}"))?;
+            let until = until.with_context(|| {
+                format!("`crook pane wait` needs what to wait --until: {PANE_WAIT}")
+            })?;
+            Ok(PaneCommand::Wait {
+                asked: Wait {
+                    pane,
+                    until,
+                    timeout,
+                },
+                json,
+            })
+        }
+        "blocks" => {
+            let (mut last, mut json, mut pane) = (None, false, None);
+            while let Some(argument) = args.next() {
+                match argument.as_str() {
+                    "--last" if last.is_none() => {
+                        let count = value_after(&mut args, "--last", PANE_BLOCKS)?;
+                        last = Some(count.parse::<usize>().with_context(|| {
+                            format!("`--last` is a whole number of blocks, not {count}")
+                        })?);
+                    }
+                    "--json" if !json => json = true,
+                    flag @ ("--last" | "--json") => bail!("`{flag}` was given twice"),
+                    other => pane = Some(pane_number(other, pane, PANE_BLOCKS)?),
+                }
+            }
+            let pane =
+                pane.with_context(|| format!("`crook pane blocks` needs a pane: {PANE_BLOCKS}"))?;
+            Ok(PaneCommand::Blocks {
+                asked: ReadBlocks { pane, last },
+                json,
+            })
+        }
+        verb => bail!("`crook pane` takes {VERBS}, not {verb}"),
     }
-    let mut json = false;
-    for argument in args {
+}
+
+/// What follows `events`: `--follow`, which is required — a stream is the only
+/// thing it prints — and the one pane, when one is named.
+pub fn events_arguments(mut args: impl Iterator<Item = String>) -> Result<Follow> {
+    let mut follow = false;
+    let mut asked = Follow::default();
+    while let Some(argument) = args.next() {
         match argument.as_str() {
-            "--json" if !json => json = true,
-            "--json" => bail!("`--json` was given twice"),
-            other => bail!("unrecognised argument {other}; `crook pane list` takes only --json"),
+            "--follow" if !follow => follow = true,
+            "--pane" if asked.pane.is_none() => {
+                let pane = value_after(&mut args, "--pane", EVENTS)?;
+                asked.pane = Some(pane_number(&pane, None, EVENTS)?);
+            }
+            flag @ ("--follow" | "--pane") => bail!("`{flag}` was given twice"),
+            other => bail!("unrecognised argument {other}: {EVENTS}"),
         }
     }
-    Ok(json)
+    if !follow {
+        bail!("`crook events` prints a stream, and needs --follow to say so: {EVENTS}");
+    }
+    Ok(asked)
+}
+
+/// A pane's number, from the word that should be one — refused when it is a
+/// flag nobody takes, is not a number, or is a second pane.
+fn pane_number(word: &str, already: Option<u64>, usage: &str) -> Result<u64> {
+    if word.starts_with('-') {
+        bail!("unrecognised argument {word}: {usage}");
+    }
+    let number = word.parse::<u64>().with_context(|| {
+        format!("a pane is its number, as `crook pane list` and CROOK_PANE_ID give it, not {word}")
+    })?;
+    if already.is_some() {
+        bail!("one pane at a time: {usage}");
+    }
+    Ok(number)
+}
+
+/// The word after a flag that takes one.
+fn value_after(args: &mut impl Iterator<Item = String>, flag: &str, usage: &str) -> Result<String> {
+    args.next()
+        .with_context(|| format!("`{flag}` needs a value: {usage}"))
 }
 
 #[cfg(not(unix))]
@@ -154,6 +329,39 @@ fn opened(asked: NewTab, json: bool) -> Result<String> {
     )
 }
 
+#[cfg(not(unix))]
+fn waited(asked: Wait, json: bool) -> Result<Printed> {
+    let flag = if json { " --json" } else { "" };
+    bail!(
+        "`crook pane wait {} --until {}{flag}` is not available on this platform yet: a window \
+         answers on a Unix socket, and the Windows named pipe is still to come",
+        asked.pane,
+        asked.until.word()
+    )
+}
+
+#[cfg(not(unix))]
+fn blocks(asked: ReadBlocks, json: bool) -> Result<String> {
+    let flag = if json { " --json" } else { "" };
+    bail!(
+        "`crook pane blocks {}{flag}` is not available on this platform yet: a window answers on \
+         a Unix socket, and the Windows named pipe is still to come",
+        asked.pane
+    )
+}
+
+#[cfg(not(unix))]
+fn followed(asked: Follow) -> Result<()> {
+    let pane = asked
+        .pane
+        .map(|pane| format!(" --pane {pane}"))
+        .unwrap_or_default();
+    bail!(
+        "`crook events --follow{pane}` is not available on this platform yet: a window answers \
+         on a Unix socket, and the Windows named pipe is still to come"
+    )
+}
+
 #[cfg(unix)]
 fn listed(json: bool) -> Result<String> {
     let socket = unix::socket_here()?;
@@ -169,6 +377,35 @@ fn listed(json: bool) -> Result<String> {
 fn opened(asked: NewTab, json: bool) -> Result<String> {
     let socket = unix::socket_here()?;
     unix::open_tab(&socket, unix::token_here().as_deref(), asked, json)
+}
+
+#[cfg(unix)]
+fn waited(asked: Wait, json: bool) -> Result<Printed> {
+    let socket = unix::socket_here()?;
+    unix::wait(&socket, unix::token_here().as_deref(), asked, json)
+}
+
+#[cfg(unix)]
+fn blocks(asked: ReadBlocks, json: bool) -> Result<String> {
+    let socket = unix::socket_here()?;
+    unix::read_blocks(
+        &socket,
+        unix::token_here().as_deref(),
+        asked,
+        json,
+        std::env::home_dir().as_deref(),
+    )
+}
+
+#[cfg(unix)]
+fn followed(asked: Follow) -> Result<()> {
+    let socket = unix::socket_here()?;
+    unix::follow(
+        &socket,
+        unix::token_here().as_deref(),
+        asked,
+        &mut std::io::stdout().lock(),
+    )
 }
 
 /// The table `crook pane list` prints: one row a pane, the focused one's
@@ -242,15 +479,111 @@ pub fn table(panes: &[PaneEntry], home: Option<&Path>) -> String {
 /// Written out rather than dropped, so that a person reading the table sees
 /// what a pane tried. See the module docs for why.
 fn printable(text: &str) -> String {
+    printable_keeping(text, None)
+}
+
+/// The same, keeping `keep` as itself: a newline, in the output of a block
+/// printed as the lines it was.
+fn printable_keeping(text: &str, keep: Option<char>) -> String {
     let mut printable = String::with_capacity(text.len());
     for character in text.chars() {
-        if character.is_control() {
+        if character.is_control() && Some(character) != keep {
             printable.extend(character.escape_default());
         } else {
             printable.push(character);
         }
     }
     printable
+}
+
+/// What `crook pane wait` prints for the window's answer: where the pane is,
+/// in a word — with what its agent is waiting for, or what its command
+/// exited with, after it — and, when it did not get where it was waited for,
+/// why the command fails.
+pub fn waited_text(waited: &Waited, waited_for: std::time::Duration) -> Printed {
+    let state = match (waited.closed, waited.until) {
+        (true, Until::Exited) => "exited".to_owned(),
+        (true, _) => "closed".to_owned(),
+        (false, Until::Finished) if waited.reached => match waited.exit {
+            Some(exit) => format!("finished: exit {exit}"),
+            None => "finished".to_owned(),
+        },
+        (false, _) => {
+            let status = waited.status.as_deref().map(printable).unwrap_or_default();
+            match &waited.message {
+                Some(message) => format!("{status}: {}", printable(message)),
+                None => status,
+            }
+        }
+    };
+    let failure = (!waited.reached).then(|| match waited.closed {
+        true => format!(
+            "pane {} closed before it was {}",
+            waited.pane_id,
+            waited.until.word()
+        ),
+        false => format!(
+            "pane {} was not {} within {} seconds; it is {}",
+            waited.pane_id,
+            waited.until.word(),
+            waited_for.as_secs(),
+            waited.status.as_deref().map(printable).unwrap_or_default()
+        ),
+    });
+    Printed {
+        text: state,
+        failure,
+    }
+}
+
+/// What `crook pane blocks` prints: each block as the command line after a
+/// `$`, what it printed, and a line of what is known about how it ended.
+pub fn blocks_text(read: &BlocksRead, home: Option<&Path>) -> String {
+    let mut lines = Vec::new();
+    for block in &read.blocks {
+        let command = block
+            .command
+            .as_deref()
+            .map(printable)
+            .unwrap_or_else(|| "(a command the shell did not echo)".to_owned());
+        lines.push(format!("$ {command}"));
+        if block.truncated {
+            lines.push("[… the start is cut; this is the end of what it printed]".to_owned());
+        }
+        if !block.output.is_empty() {
+            lines.push(printable_keeping(&block.output, Some('\n')));
+        }
+        let mut facts = Vec::new();
+        if let Some(exit) = block.exit {
+            facts.push(format!("exit {exit}"));
+        }
+        if let Some(duration) = block.duration_ms {
+            facts.push(format!("{:.1}s", duration as f64 / 1000.0));
+        }
+        if let Some(directory) = &block.cwd {
+            facts.push(printable(&crate::git::user_friendly_path(
+                Path::new(directory),
+                home,
+            )));
+        }
+        if !facts.is_empty() {
+            lines.push(format!("[{}]", facts.join(" · ")));
+        }
+    }
+    if read.blocks.is_empty() {
+        lines.push(format!(
+            "pane {} has not finished a command yet",
+            read.pane_id
+        ));
+    }
+    if read.grid {
+        lines.push(format!(
+            "(pane {} is drawing a full-screen program or an agent's TUI now, and what is on \
+             its screen is in none of these)",
+            read.pane_id
+        ));
+    }
+    lines.join("\n")
 }
 
 /// What `crook pane list --json` prints, from the window's `result`.
@@ -263,10 +596,19 @@ fn printable(text: &str) -> String {
 /// character. Outside a string, pretty JSON holds no control character but its
 /// newlines, so nothing else is touched.
 pub fn json(result: &serde_json::Value) -> String {
-    let pretty =
-        serde_json::to_string_pretty(result).expect("a value that was just parsed encodes");
-    let mut json = String::with_capacity(pretty.len());
-    for character in pretty.chars() {
+    escaped(serde_json::to_string_pretty(result).expect("a value that was just parsed encodes"))
+}
+
+/// The same on one line, for a stream: `crook events --follow`'s lines.
+pub fn json_line(event: &serde_json::Value) -> String {
+    escaped(serde_json::to_string(event).expect("a value that was just parsed encodes"))
+}
+
+/// Encoded JSON with every control character but its newlines escaped. See
+/// [`json`].
+fn escaped(encoded: String) -> String {
+    let mut json = String::with_capacity(encoded.len());
+    for character in encoded.chars() {
         if character.is_control() && character != '\n' {
             json.push_str(&format!("\\u{:04x}", u32::from(character)));
         } else {
@@ -290,9 +632,11 @@ pub mod unix {
     use anyhow::{Context, Result, anyhow, bail};
     use serde_json::Value;
 
-    use super::super::protocol::{self, NewTab, Opened, PaneEntry, Reply, Verb};
+    use super::super::protocol::{
+        self, BlocksRead, Follow, NewTab, Opened, PaneEntry, ReadBlocks, Reply, Verb, Wait, Waited,
+    };
     use super::super::{SOCKET_VARIABLE, TOKEN_VARIABLE, server};
-    use super::table;
+    use super::{Printed, table};
 
     /// How much longer than the window the command line waits.
     ///
@@ -427,24 +771,103 @@ pub mod unix {
         Ok(opened.pane_id.to_string())
     }
 
-    /// Asks the window at `socket` one verb, and hands back its answer.
-    fn ask(socket: &Path, verb: &Verb, token: Option<&str>) -> Result<Value> {
-        let stream = UnixStream::connect(socket).map_err(|error| match error.kind() {
+    /// What `crook pane wait` prints, having asked the window at `socket` to
+    /// wait: where the pane got to, and a failure when it is not where it was
+    /// waited for.
+    pub fn wait(socket: &Path, token: Option<&str>, asked: Wait, json: bool) -> Result<Printed> {
+        let waited_for = asked.timeout();
+        let result = ask(socket, &Verb::PaneWait(asked), token)?;
+        let waited: Waited = serde_json::from_value(result.clone())
+            .context("the window's answer is not a wait's")?;
+        let printed = super::waited_text(&waited, waited_for);
+        if json {
+            return Ok(Printed {
+                text: super::json(&result),
+                ..printed
+            });
+        }
+        Ok(printed)
+    }
+
+    /// What `crook pane blocks` prints, having asked the window at `socket`.
+    pub fn read_blocks(
+        socket: &Path,
+        token: Option<&str>,
+        asked: ReadBlocks,
+        json: bool,
+        home: Option<&Path>,
+    ) -> Result<String> {
+        let result = ask(socket, &Verb::PaneBlocks(asked), token)?;
+        if json {
+            return Ok(super::json(&result));
+        }
+        let read: BlocksRead =
+            serde_json::from_value(result).context("the window's answer is not blocks")?;
+        Ok(super::blocks_text(&read, home))
+    }
+
+    /// Follows the window at `socket`'s events, writing each to `out` as one
+    /// line of JSON as it comes, until the window ends the stream or `out`
+    /// stops taking lines.
+    pub fn follow(
+        socket: &Path,
+        token: Option<&str>,
+        asked: Follow,
+        out: &mut impl Write,
+    ) -> Result<()> {
+        let stream = connect(socket)?;
+        let mut replies = BufReader::new(&stream);
+        let verb = Verb::EventsFollow(asked);
+        request(&stream, &verb, token)?;
+        answer(&mut replies)?;
+        // The events come when they come: no timeout from here on, and the
+        // window ends the stream when there is nothing more to say.
+        stream.set_read_timeout(None)?;
+        loop {
+            let mut line = Vec::new();
+            (&mut replies)
+                .take(MAX_REPLY)
+                .read_until(b'\n', &mut line)
+                .context("the window's stream broke off")?;
+            if line.is_empty() {
+                return Ok(());
+            }
+            let event: Value = serde_json::from_slice(&line)
+                .context("what came down the stream is not an event")?;
+            // A reader of the output that has gone — `| head -1` — is the
+            // end of following, not a failure.
+            if writeln!(out, "{}", super::json_line(&event)).is_err() || out.flush().is_err() {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Connects to the window at `socket`.
+    fn connect(socket: &Path) -> Result<UnixStream> {
+        UnixStream::connect(socket).map_err(|error| match error.kind() {
             io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => anyhow!(
                 "nothing is answering on {}: the Crook that opened it has closed",
                 socket.display()
             ),
             _ => anyhow!(error).context(format!("could not connect to {}", socket.display())),
-        })?;
+        })
+    }
+
+    /// Sends one request, with time for the window to answer it.
+    fn request(stream: &UnixStream, verb: &Verb, token: Option<&str>) -> Result<()> {
         let wait = server::DEADLINE.max(verb.patience().unwrap_or_default()) + PAST_THE_WINDOW;
         stream.set_read_timeout(Some(wait))?;
         stream.set_write_timeout(Some(wait))?;
-        (&stream)
+        let mut stream = stream;
+        stream
             .write_all(protocol::request_line(verb, token).as_bytes())
-            .context("could not ask the window")?;
+            .context("could not ask the window")
+    }
 
+    /// Reads one reply, and hands back its answer or says its refusal.
+    fn answer(replies: &mut impl BufRead) -> Result<Value> {
         let mut line = Vec::new();
-        BufReader::new(&stream)
+        replies
             .take(MAX_REPLY)
             .read_until(b'\n', &mut line)
             .context("the window did not answer")?;
@@ -458,5 +881,12 @@ pub mod unix {
             (_, Some(refusal)) => bail!("{} ({})", refusal.message, refusal.code),
             _ => bail!("the window's reply carries neither an answer nor a refusal"),
         }
+    }
+
+    /// Asks the window at `socket` one verb, and hands back its answer.
+    fn ask(socket: &Path, verb: &Verb, token: Option<&str>) -> Result<Value> {
+        let stream = connect(socket)?;
+        request(&stream, verb, token)?;
+        answer(&mut BufReader::new(&stream))
     }
 }
