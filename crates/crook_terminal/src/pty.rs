@@ -20,6 +20,7 @@ use std::path::Path;
 use anyhow::{Context as _, Result};
 use portable_pty::{Child, CommandBuilder, MasterPty, PtySize, native_pty_system};
 
+use crate::link::PtyLink;
 use crate::snapshot::TerminalSize;
 
 /// The terminal type the child is told it is running on.
@@ -259,6 +260,14 @@ impl fmt::Display for ChildExit {
 /// both mean the same thing, and both mean it is time to stop reading.
 pub struct PtyReader(Box<dyn Read + Send>);
 
+impl PtyReader {
+    /// The readable half of a link whose far end is not a pty this process
+    /// opened — see [`PtyLink`].
+    pub fn new(reader: impl Read + Send + 'static) -> Self {
+        Self(Box::new(reader))
+    }
+}
+
 impl Read for PtyReader {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         self.0.read(buffer)
@@ -340,13 +349,16 @@ impl Pty {
             exit: None,
         })
     }
+}
 
+/// The local link: the child is this process's own, on a pty it opened.
+impl PtyLink for Pty {
     /// A writer for the child's standard input.
     ///
     /// Every call opens a new handle; dropping the last one sends end-of-file
     /// to the child, so a caller that wants the child to keep running must hold
     /// on to it.
-    pub fn writer(&self) -> Result<Box<dyn Write + Send>> {
+    fn writer(&self) -> Result<Box<dyn Write + Send>> {
         self.master
             .take_writer()
             .context("Failed to write to the pseudo-terminal")
@@ -355,26 +367,26 @@ impl Pty {
     /// The readable half, once. Subsequent calls return `None`, because the
     /// reads are a stream and splitting it across two owners would interleave
     /// escape sequences into nonsense.
-    pub fn take_reader(&mut self) -> Option<PtyReader> {
+    fn take_reader(&mut self) -> Option<PtyReader> {
         self.reader.take()
     }
 
     /// Tells the kernel the window changed size, which is what makes the child
     /// see `SIGWINCH` and re-lay-out.
-    pub fn resize(&self, size: TerminalSize) -> Result<()> {
+    fn resize(&mut self, size: TerminalSize) -> Result<()> {
         self.master
             .resize(pty_size(size))
             .context("Failed to resize the pseudo-terminal")
     }
 
     /// The child's process id, on the platforms that have one.
-    pub fn process_id(&self) -> Option<u32> {
+    fn process_id(&self) -> Option<u32> {
         self.child.process_id()
     }
 
     /// How the child finished, or `None` while it is still running. Does not
     /// block; the answer is remembered once it arrives.
-    pub fn try_wait(&mut self) -> Result<Option<ChildExit>> {
+    fn try_wait(&mut self) -> Result<Option<ChildExit>> {
         if self.exit.is_some() {
             return Ok(self.exit.clone());
         }
@@ -387,7 +399,7 @@ impl Pty {
     }
 
     /// Blocks until the child finishes.
-    pub fn wait(&mut self) -> Result<ChildExit> {
+    fn wait(&mut self) -> Result<ChildExit> {
         if let Some(exit) = &self.exit {
             return Ok(exit.clone());
         }
@@ -411,7 +423,7 @@ impl Pty {
     /// `HUP` — or any child running under a wrapper that does — survives the
     /// first and not the second, and anything that waits for a survivor waits
     /// forever.
-    pub fn kill(&mut self) -> Result<()> {
+    fn kill(&mut self) -> Result<()> {
         if self.exit.is_some() {
             return Ok(());
         }

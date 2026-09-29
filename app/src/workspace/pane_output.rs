@@ -32,14 +32,18 @@ use super::action::WorkspaceAction;
 /// What a pane's output does with the keys that reach the window.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Keys {
-    /// Nothing: some other pane is the focused one.
+    /// Nothing: another pane is the focused one, or the question a close asks
+    /// is up (see [`closing`](super::closing)).
     None,
     /// Only the keys that interrupt, end and suspend a command.
     ///
     /// What a focused pane still takes while a modal menu is open over the
     /// window. The menu freezes everything under it, and a `sleep 30` that
     /// could not be interrupted until somebody found the mouse would be the
-    /// menu taking away the one key a terminal must never lose.
+    /// menu taking away the one key a terminal must never lose. Except under
+    /// the question a close asks, which has an Escape and is asking whether
+    /// to end the program these keys would reach: there the pane gets
+    /// [`Keys::None`].
     Signals,
     /// Everything the routing rule gives the shell.
     All,

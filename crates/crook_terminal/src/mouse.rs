@@ -40,8 +40,10 @@
 //!
 //! ## What is not here
 //!
-//! Focus reporting (`?1004h`) and pixel-precision reporting (`?1016h`). Neither
-//! has a caller in Crook yet, and both are one variant and one branch away.
+//! Pixel-precision reporting (`?1016h`), which has no caller in Crook yet and
+//! is one variant and one branch away. Focus reporting (`?1004h`) is xterm's
+//! neighbour of these modes but is about the keyboard rather than the pointer,
+//! so it lives with the keys: see [`crate::input::focus`].
 
 use crate::input::Modifiers;
 
