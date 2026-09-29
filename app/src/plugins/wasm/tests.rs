@@ -1586,6 +1586,7 @@ fn a_row(worktree: bool) -> crate::git::GitFacts {
     crate::git::GitFacts {
         branch: Some(crate::git::Head::Branch("side".to_owned())),
         diff: None,
+        since_base: None,
         worktree,
     }
 }

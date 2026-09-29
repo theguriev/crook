@@ -6,6 +6,9 @@
 //! else wrote. [`super::merged`] needs the same promise for another reason —
 //! it reads a history, and a history's honest length has no bound the way a
 //! listing's does — so the runner lives here and both spawn git through it.
+//! So does [`super::diff`]'s count since the base, which runs on the tab
+//! strip's gather chain every fifteen seconds, where a git that never came
+//! back would stop every row's branch and count from updating again.
 //!
 //! The deadline bounds the *call*, not only git. Killing a process does not
 //! reach what it left behind: a hook that backgrounds a helper — `direnv

@@ -2998,6 +2998,9 @@ fn seed_snapshot_tabs(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace
         directory: &'static str,
         branch: &'static str,
         diff: Option<(u32, u32, u32)>,
+        /// Commits ahead of `main`, then the files, added and removed lines
+        /// since the branch left it.
+        ahead: Option<(u32, u32, u32, u32)>,
     }
 
     let seeded = [
@@ -3007,6 +3010,7 @@ fn seed_snapshot_tabs(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace
             directory: "app/src/workspace",
             branch: "eugen/tab-options",
             diff: Some((6, 214, 37)),
+            ahead: None,
         },
         Seeded {
             title: "sandbox the plugin host",
@@ -3014,6 +3018,7 @@ fn seed_snapshot_tabs(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace
             directory: "crates/crook_wasm/src",
             branch: "main",
             diff: Some((1, 12, 0)),
+            ahead: None,
         },
         Seeded {
             title: "bisect the flaky test",
@@ -3021,6 +3026,8 @@ fn seed_snapshot_tabs(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace
             directory: "crates/crookui/src/rendering",
             branch: "eugen/atlas-repro",
             diff: None,
+            // Everything committed, which is the row that used to go blank.
+            ahead: Some((3, 4, 57, 9)),
         },
         Seeded {
             title: "read the recon notes",
@@ -3028,6 +3035,7 @@ fn seed_snapshot_tabs(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace
             directory: "docs",
             branch: "main",
             diff: None,
+            ahead: None,
         },
     ];
 
@@ -3039,6 +3047,7 @@ fn seed_snapshot_tabs(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace
         directory: "docs",
         branch: "eugen/atlas-rewrite",
         diff: Some((3, 88, 12)),
+        ahead: None,
     };
 
     workspace.apply(TabAction::New, ctx);
@@ -3063,6 +3072,17 @@ fn seed_snapshot_tabs(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace
 
     for (id, seed) in panes.iter().zip(seeded) {
         let directory = root.join(seed.directory);
+        let since_base = seed
+            .ahead
+            .map(|(commits, files, added, removed)| git::SinceBase {
+                base: "main".to_owned(),
+                commits,
+                diff: git::DiffStats {
+                    files_changed: files,
+                    lines_added: added,
+                    lines_removed: removed,
+                },
+            });
         let facts = git::GitFacts {
             branch: Some(git::Head::Branch(seed.branch.to_owned())),
             diff: seed.diff.map(
@@ -3072,6 +3092,7 @@ fn seed_snapshot_tabs(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace
                     lines_removed,
                 },
             ),
+            since_base,
             worktree: false,
         };
 
@@ -3115,6 +3136,7 @@ fn seed_snapshot_tabs(workspace: &mut Workspace, ctx: &mut ViewContext<Workspace
                             lines_removed,
                         },
                     ),
+                since_base: None,
                 // The one seeded row that is one, which is what makes a
                 // plugin that marks worktrees visible in a demo window.
                 worktree: true,

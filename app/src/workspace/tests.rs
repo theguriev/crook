@@ -28,7 +28,7 @@ use crookui_core::{App, Presenter, WindowId};
 use crook_plugin::ActionName;
 
 use crate::Channel;
-use crate::git::{DiffStats, GitFacts, Head};
+use crate::git::{DiffStats, GitFacts, Head, SinceBase};
 use crate::keybindings::Recording;
 use crate::platform_insets::{ControlLayout, WindowChrome};
 use crate::settings::{
@@ -1120,6 +1120,19 @@ impl Harness {
         diff: Option<DiffStats>,
         worktree: bool,
     ) {
+        self.record_facts(
+            pane,
+            GitFacts {
+                branch: Some(Head::Branch(branch.to_owned())),
+                diff,
+                since_base: None,
+                worktree,
+            },
+        );
+    }
+
+    /// The same, whole: for a row that has committed work to count as well.
+    fn record_facts(&mut self, pane: PaneId, facts: GitFacts) {
         let directory = self.workspace.read(&self.app, |workspace, _| {
             workspace
                 .tabs()
@@ -1127,11 +1140,6 @@ impl Harness {
                 .and_then(|pane| pane.session().working_directory.clone())
                 .expect("every seeded session has a working directory")
         });
-        let facts = GitFacts {
-            branch: Some(Head::Branch(branch.to_owned())),
-            diff,
-            worktree,
-        };
 
         let workspace = &self.workspace;
         self.app.update(|ctx| {
@@ -4251,6 +4259,151 @@ fn the_hover_card_shows_the_chips_the_row_was_told_to_hide() {
         chip_boxes(&scene).len(),
         1,
         "the row kept its chip, or the card lost it"
+    );
+}
+
+/// A branch that committed everything it did: two commits, forty lines in and
+/// three out since `main`, and a clean tree on top — the row that used to have
+/// no chip at all.
+fn committed_work() -> GitFacts {
+    GitFacts {
+        branch: Some(Head::Branch(BRANCH.to_owned())),
+        diff: Some(DiffStats::default()),
+        since_base: Some(SinceBase {
+            base: "main".to_owned(),
+            commits: 2,
+            diff: DiffStats {
+                files_changed: 3,
+                lines_added: 40,
+                lines_removed: 3,
+            },
+        }),
+        worktree: false,
+    }
+}
+
+impl Harness {
+    /// A panel with one Expanded row whose branch has committed its work.
+    fn committed_panel() -> Self {
+        let mut harness = Self::panel(1);
+        let pane = harness.pane_ids()[0];
+        harness.seed(pane, None);
+        harness.record_facts(pane, committed_work());
+        harness.set_options(TabOptions {
+            density: Density::Expanded,
+            show_diff_stats: true,
+            show_details_on_hover: true,
+            // Which puts the branch on the chip's line.
+            primary_info: PrimaryInfo::Command,
+            ..harness.options()
+        });
+        harness
+    }
+}
+
+/// How wide the stub shaper draws a glyph of a chip's 10-point text.
+const CHIP_GLYPH: f32 = 5.;
+
+#[test]
+fn a_row_that_committed_its_work_counts_it_and_leaves_the_base_to_the_card() {
+    // `git diff --shortstat HEAD` is clean the moment an agent commits, so
+    // this row used to draw no chip at all.
+    let mut harness = Harness::committed_panel();
+
+    let scene = harness.frame();
+    let chips = chip_boxes(&scene);
+    assert_eq!(
+        chips.len(),
+        1,
+        "a branch with commits of its own drew no chip"
+    );
+    let chip = chips[0];
+    let said = text_lines(&scene, |position| chip.contains_point(position));
+    let [(baseline, said)] = said.as_slice() else {
+        panic!("the chip holds more than one line of text: {said:?}");
+    };
+    assert_eq!(said, "2 commits, +40 -3");
+    assert!(
+        !strip_text(&scene).contains("since"),
+        "the row spent its width on the base's name"
+    );
+
+    // Within the row's width: the chip ends before the close button's slot,
+    // whole, and the branch on its line is what gives way — cut, and ended
+    // before the chip starts rather than drawn underneath it.
+    let row = panel_rows(&scene)[0];
+    // The row's 8px padding, the close button's slot, and the 8px gap the
+    // text column keeps from it.
+    let column_end = row.max_x() - 8. - super::CLOSE_BUTTON_SIZE - 8.;
+    assert!(
+        chip.max_x() <= column_end + 0.5,
+        "the chip at {chip:?} runs into the close button's slot of {row:?}"
+    );
+    // Within two pixels of the chip's own text, which the pill's padding sets
+    // a pixel lower than the branch's: the line above is fourteen away.
+    let beside = text_lines(&scene, |position| {
+        row.contains_point(position)
+            && !chip.contains_point(position)
+            && (position.y() - baseline.y()).abs() < 2.
+    });
+    let [(start, branch)] = beside.as_slice() else {
+        panic!("the chip's line holds no branch, or two: {beside:?}");
+    };
+    assert!(
+        branch.starts_with("eugen/") && branch.ends_with('\u{2026}'),
+        "the branch beside the chip reads {branch:?}"
+    );
+    let branch_end = start.x() + branch.chars().count() as f32 * CHIP_GLYPH;
+    assert!(
+        branch_end <= chip.min_x(),
+        "the branch ends at {branch_end}, under a chip that starts at {}",
+        chip.min_x()
+    );
+}
+
+#[test]
+fn the_card_says_what_the_commits_are_counted_from_and_gives_the_name_up_first() {
+    let mut harness = Harness::committed_panel();
+    harness.hover_first_row();
+
+    let scene = harness.frame();
+    let card = detail_cards(&scene)[0];
+    let said: Vec<String> = text_lines_over(&scene, card)
+        .into_iter()
+        .map(|(_, line)| line)
+        .collect();
+    assert!(
+        said.iter()
+            .any(|line| line.ends_with("2 commits, +40 -3 since main")),
+        "the card does not say what the commits are counted from: {said:?}"
+    );
+
+    // A window with no room for the whole card narrows it, and the chip has
+    // to fit what is left beside the status. The base's name gives way, cut
+    // with a mark; the numbers do not.
+    let scene = harness.frame_sized(vec2f(480., 360.));
+    let card = detail_cards(&scene)[0];
+    let lines = text_lines_over(&scene, card);
+    let (start, footer) = lines
+        .iter()
+        .find(|(_, line)| line.contains("commit"))
+        .cloned()
+        .expect("the narrowed card has no chip");
+    assert!(
+        footer.contains("2 commits, +40 -3") && !footer.contains("since main"),
+        "the narrowed card's chip reads {footer:?}"
+    );
+    assert!(
+        footer.ends_with('\u{2026}'),
+        "{footer:?} was cut with no mark"
+    );
+    let chip = chip_boxes(&scene)
+        .into_iter()
+        .find(|chip| card.contains_point(center(*chip)))
+        .expect("the card has its chip");
+    assert!(
+        chip.max_x() <= card.max_x() && start.x() >= card.min_x(),
+        "the chip at {chip:?} runs off the card at {card:?}"
     );
 }
 

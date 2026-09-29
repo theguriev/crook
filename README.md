@@ -228,6 +228,12 @@ Nineteen features, and the page that configures them:
   secondary click, on the empty space the list leaves — says what a row of them shows: which
   fact it leads with, what its second line says, which chips it carries, whether hovering it
   opens a card, and the tab's number, which is the one `cmd-4` means once the tabs are named.
+  The diff chip counts what is not committed yet — `+12 -3` — until the branch has commits of
+  its own, and from then on counts from where the branch left its base: `2 commits, +40 -3`,
+  committed and uncommitted lines together, with `since main` added on the card, which has the
+  room to say what they are counted from. So a tab whose agent has just committed everything
+  still says what it did, rather than going blank at the moment there is most to look at. The
+  base itself and a detached checkout keep the plain count.
   One more row is the Appearance page's alone: **Status marks**, which turns the dot into a
   glyph per state in the same colour — a play mark, a bell, a crossed ring, a hollow one — for
   an eye the colour says nothing to, or a screenshot in greyscale.
