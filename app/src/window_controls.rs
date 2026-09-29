@@ -51,13 +51,18 @@ pub trait WindowControls {
     /// Sends the window wherever this desktop keeps minimised windows.
     fn minimize(&self);
 
-    /// Brings the window back from wherever the desktop put it and asks for
-    /// the keyboard, as far as this desktop lets an application do that.
+    /// Brings the window back from wherever the desktop put it, and asks the
+    /// desktop for the person's attention if the window does not have the
+    /// keyboard: a flashing taskbar button, a bouncing dock icon, the urgency
+    /// hint, or on Wayland an activation request the compositor may answer
+    /// by focusing it.
     ///
     /// What a close that asks does before it shows its question: the desktop
     /// can close a window that is minimised or behind others, and a question
     /// drawn in a window nobody can see is a close that seemed to do nothing.
-    /// See the workspace's `closing` module.
+    /// It asks rather than taking the keyboard, because the close may have
+    /// come while somebody was typing somewhere else. See the workspace's
+    /// `closing` module.
     fn bring_forward(&self);
 }
 
@@ -111,7 +116,7 @@ pub enum Request {
     ToggleMaximized,
     /// Minimise it.
     Minimize,
-    /// Restore it and give it the keyboard.
+    /// Restore it, and ask for attention if it has not got the keyboard.
     BringForward,
 }
 

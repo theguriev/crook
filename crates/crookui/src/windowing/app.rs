@@ -68,7 +68,7 @@ impl Default for WindowOptions {
 /// What the window asks of the application above it.
 ///
 /// This is the whole seam between the platform layer and the application:
-/// four methods, one of them with a default, no winit types, no wgpu types. A
+/// five methods, two of them with a default, no winit types, no wgpu types. A
 /// headless test double implements it in a dozen lines.
 pub trait WindowDelegate: 'static {
     /// Lays out and paints the frame to draw.
@@ -102,6 +102,16 @@ pub trait WindowDelegate: 'static {
     fn close_requested(&mut self) -> bool {
         true
     }
+
+    /// The window has just taken the keyboard: a click on it, the desktop's
+    /// switcher, or the desktop answering a request for attention by focusing
+    /// it.
+    ///
+    /// Not an [`Event`], because nothing in the element tree is under it and
+    /// nothing is drawn differently for it. What it is for is knowing that the
+    /// next few keys may have been typed at whatever had the keyboard before.
+    /// The default does nothing with that.
+    fn focused(&mut self) {}
 }
 
 /// A `Send + Sync` handle for reaching the main thread from anywhere.
@@ -378,6 +388,17 @@ impl ApplicationHandler<CrookEvent> for App {
             WindowEvent::CloseRequested => {
                 if self.delegate.close_requested() {
                     event_loop.exit();
+                }
+                return;
+            }
+
+            // Losing the keyboard is nothing to anyone here; taking it is the
+            // end of any attention the window asked for, and the moment the
+            // application's next keys stop being certainly its own.
+            WindowEvent::Focused(focused) => {
+                if focused {
+                    self.controls.focused();
+                    self.delegate.focused();
                 }
                 return;
             }

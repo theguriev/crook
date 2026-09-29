@@ -182,8 +182,10 @@ Nineteen features, and the page that configures them:
   anywhere off the card. Tab or the arrow keys move to the other button, and Enter or Space then
   presses whichever is filled. While the card is up the pane under it hears no keys at all, so a
   `ctrl-c` meant for the card cannot interrupt the agent it is asking about. A window close that
-  asks brings the window forward first, where the desktop allows it (Wayland does not). A close
-  with nothing working in it goes at once, as it always did.
+  asks restores a minimised window and, if the window is not the one being typed in, asks the
+  desktop for attention rather than taking the keyboard: a flashing taskbar button, a bouncing
+  dock icon, an urgent window, or on Wayland an activation request the compositor may answer by
+  focusing it. A close with nothing working in it goes at once, as it always did.
   **Ask before ending working agents**, on the Appearance page, turns the question off, and
   **End all agents and quit** in the palette quits without it once. Nothing can ask when the
   system ends Crook itself — a `SIGTERM`, a logout — and on macOS the Quit menu item and `cmd-q`
