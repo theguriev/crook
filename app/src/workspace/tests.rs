@@ -5780,6 +5780,64 @@ fn only_start_sends_the_agents_line_and_enter_leaves_it_for_the_person() {
     }
 }
 
+#[test]
+fn new_task_leaves_a_menu_that_is_working_or_asking_alone() {
+    // "New task…" is a way into the creator. Over a checkout that is still
+    // being made it would reset a creator that git is about to close, taking
+    // whatever was typed into it along; over the sweep's question it would
+    // put a creator where the question, and then its Stop, would have been.
+    let scratch = Scratch::new();
+    let Some((mut harness, _, _)) = a_window_with_an_agent(&scratch) else {
+        eprintln!("skipped: no git here to make a repository with");
+        return;
+    };
+    let tab = harness.active_id();
+    let branch = crate::plugins::worktrees::BRANCH_FIELD;
+
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed().is_some()
+    });
+    harness.dispatch_worktree(WorktreeAction::StartCreating);
+    let named = harness.worktree_field(branch);
+    let before = harness.pane_ids().len();
+    harness.dispatch_worktree(WorktreeAction::Create);
+    assert!(
+        harness.worktree_menu_is_busy(),
+        "git is not checking it out"
+    );
+
+    harness.dispatch_worktree(WorktreeAction::NewTask(tab));
+    assert_eq!(
+        harness.worktree_agent(),
+        None,
+        "New task… replaced a creator that was still checking out"
+    );
+    assert_eq!(harness.worktree_field(branch), named);
+
+    harness.wait_for("the worktree to be checked out", |harness| {
+        harness.pane_ids().len() > before
+    });
+    let opened = harness
+        .focused_pane_id()
+        .expect("the checkout opened a pane");
+    harness.dispatch_action(TabAction::ClosePane(opened));
+    harness.dispatch_action(TabAction::Select(tab));
+
+    // That checkout is free now, so the list offers to sweep it.
+    harness.dispatch_worktree(WorktreeAction::OpenMenu(tab));
+    harness.wait_for("the repository to be read", |harness| {
+        harness.worktrees_listed() == Some(2)
+    });
+    harness.dispatch_worktree(WorktreeAction::AskTidy);
+    assert!(harness.worktree_menu_is_tidying());
+    harness.dispatch_worktree(WorktreeAction::NewTask(tab));
+    assert!(
+        harness.worktree_menu_is_tidying() && !harness.worktree_menu_is_creating(),
+        "New task… put a creator over the sweep's question"
+    );
+}
+
 /// The branch [`repository_on_a_feature_branch`] adds so that git's own order
 /// and the creator's differ: it sorts before any name a first branch has, so
 /// in a plain list of branches it would be the row under the tab's own.

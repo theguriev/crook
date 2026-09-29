@@ -3098,6 +3098,20 @@ impl Workspace {
                 if self.tab_menu.tab != Some(tab) {
                     return;
                 }
+                // Not over a face that is waiting on git or asking something
+                // else. A checkout in flight closes whatever creator is up
+                // when it lands, and would take a task typed into this one
+                // with it; a removal's answer, a count or a sweep lands on
+                // the face that asked, and Escape on a sweep is its Stop. The
+                // palette is a way into the creator, not out of a question.
+                if self.tab_menu.working
+                    || !matches!(
+                        self.tab_menu.mode,
+                        WorktreeMode::Listing | WorktreeMode::Creating
+                    )
+                {
+                    return;
+                }
                 match self.tab_menu.contents {
                     Contents::Ready(_) => self.start_creating(true, ctx),
                     // Into the creator the moment the read lands; see

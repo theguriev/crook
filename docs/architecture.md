@@ -1010,6 +1010,8 @@ creator is Create and never Start, since Enter is the key at the end of a senten
 decision to run a line nobody has read; and a Start followed by Cancel while git is still
 checking out leaves the line unsent, even when the creator is opened again before git answers
 — the press is tied to the question it was made in, and a second creator is a second question.
+"New task…" does not open over a menu that is still waiting on git or asking something else,
+because the answer on its way would land on a creator that never asked for it.
 
 **Removal asks, and asks about the right thing.** `git worktree remove` refuses over modified
 and untracked files — and, measured rather than assumed, *not* over ignored ones, which it

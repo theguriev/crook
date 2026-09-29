@@ -316,7 +316,10 @@ pub enum WorktreeAction {
     /// "New task…" in the palette dispatches.
     ///
     /// Straight in once the repository has been read, which is what the
-    /// creator is made from; until then the menu says it is reading.
+    /// creator is made from; until then the menu says it is reading. Not at
+    /// all over a menu already up on that tab that is waiting on git or
+    /// asking a question of its own: that face is somebody's, and the answer
+    /// it is waiting for would land on a creator that did not ask for it.
     NewTask(TabId),
     /// Start the agent at this index of the creator's list in the new
     /// checkout — `0` is "Shell only", which starts nothing. What a press on
